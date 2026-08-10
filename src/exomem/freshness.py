@@ -106,6 +106,25 @@ class FreshnessCheckpoint(NamedTuple):
     triple: tuple[int, int, str] | None
 
 
+class RecallFreshnessCheckpoint(NamedTuple):
+    """Independent event stream for the policy-projected recall corpus."""
+
+    instance_id: str
+    generation: int
+    triple: tuple[int, int, str]
+    policy_version: str
+    access_policy_fingerprint: str
+
+
+class RecallDelta(NamedTuple):
+    from_: RecallFreshnessCheckpoint
+    to: RecallFreshnessCheckpoint
+    complete: bool
+    changed: frozenset[str]
+    deleted: frozenset[str]
+    target_signatures: tuple[tuple[str, FileSignature], ...] = ()
+
+
 class ConsumerDelta(NamedTuple):
     """The atomic, target-state-coalesced change set between two checkpoints.
 
@@ -156,6 +175,19 @@ _generations: dict[tuple[str, str], int] = {}
 # paths_touched); the chain is contiguous, so a checkpoint is bridgeable iff its
 # generation is >= the oldest retained event's `prev_gen`.
 _history: dict[tuple[str, str], list[tuple[int, int, frozenset[str]]]] = {}
+# Policy-projected recall membership.  It is separate from broad identity
+# freshness so raw Records edits do not churn ordinary-recall state.
+_recall_maps: dict[tuple[str, str], dict[str, FileSignature]] = {}
+_recall_triples: dict[tuple[str, str], tuple[int, int, str] | None] = {}
+_recall_generations: dict[tuple[str, str], int] = {}
+_recall_identities: dict[tuple[str, str], tuple[str, str]] = {}
+_recall_live: set[tuple[str, str]] = set()
+_recall_history: dict[tuple[str, str], list[tuple[int, int, frozenset[str]]]] = {}
+# Watchdog records an external event here before its debounce window. Graph
+# readers can then fail closed in O(1) until that exact queued generation has
+# been published through the event-maintained corpus fan-out.
+_external_pending_clock = 0
+_external_pending: dict[str, int] = {}
 
 
 def _next_gen() -> int:
@@ -179,6 +211,17 @@ def _record_event(key: tuple[str, str], paths: set[str]) -> None:
     overflow = len(hist) - DELTA_HISTORY_LIMIT
     if overflow > 0:
         del hist[:overflow]
+
+
+def _record_recall_event(key: tuple[str, str], paths: set[str]) -> None:
+    previous = _recall_generations.get(key, 0)
+    current = _next_gen()
+    _recall_generations[key] = current
+    history = _recall_history.setdefault(key, [])
+    history.append((previous, current, frozenset(paths)))
+    overflow = len(history) - DELTA_HISTORY_LIMIT
+    if overflow > 0:
+        del history[:overflow]
 
 
 def event_indexes_enabled() -> bool:
@@ -235,6 +278,289 @@ def triple_from_entries(
     return len(items), latest, h.hexdigest()
 
 
+def recall_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
+    """Freshness triple over recall-eligible pages only.
+
+    This deliberately does not use the generic event map: generic freshness
+    remains authoritative for stable identity and must observe direct edits to
+    structured Record sources.  Recall excludes those sources by policy.
+    """
+    from . import recall_policy
+
+    root = Path(vault_root)
+    key = _key(root, scope)
+    with _lock:
+        if event_indexes_enabled() and key in _recall_live:
+            cached = _recall_triples.get(key)
+            if cached is None:
+                cached = triple_from_entries(_recall_maps.get(key, {}).items())
+                _recall_triples[key] = cached
+            return cached
+    from . import find as find_module
+    if scope == "vault":
+        from .vault import walk_vault_md
+
+        walk = walk_vault_md(root)
+    else:
+        kb = root / kb_dirname()
+        walk = find_module._walk_md(kb) if kb.is_dir() else ()
+    entries: list[tuple[str, FileSignature]] = []
+    for path in recall_policy.iter_recall_markdown(root, walk):
+        try:
+            entries.append((str(path), stat_signature(path)))
+        except OSError:
+            continue
+    return triple_from_entries(entries)
+
+
+def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint:
+    """Return one coherent recall-projection and policy identity checkpoint."""
+    from . import recall_policy
+
+    root = Path(vault_root)
+    key = _key(root, scope)
+    while True:
+        policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
+        identity = (policy_version, access_fingerprint)
+        with _lock:
+            live = event_indexes_enabled() and key in _recall_live
+            if live and _recall_identities.get(key) == identity:
+                triple = _recall_triples.get(key)
+                if triple is None:
+                    triple = triple_from_entries(_recall_maps.get(key, {}).items())
+                    _recall_triples[key] = triple
+                generation = _recall_generations.get(key, 0)
+                return RecallFreshnessCheckpoint(
+                    _instance_id,
+                    generation,
+                    triple,
+                    policy_version,
+                    access_fingerprint,
+                )
+            if live:
+                broad_generation = _generations.get(key, 0)
+                broad_entries = dict(_maps.get(key, {}))
+
+        if not live:
+            # The policy shapes the cold walk.  Do not label its result with an
+            # identity that changed while candidates were being admitted.
+            triple = recall_triple(root, scope)
+            if recall_policy.recall_policy_identity(root) != identity:
+                continue
+            with _lock:
+                # A watcher may have become authoritative while the walk ran.
+                if event_indexes_enabled() and key in _recall_live:
+                    continue
+                instance_id = _instance_id
+                generation = _recall_generations.get(key, 0)
+            return RecallFreshnessCheckpoint(
+                instance_id,
+                generation,
+                triple,
+                policy_version,
+                access_fingerprint,
+            )
+
+        # Content reads are deliberately outside the global freshness lock.
+        projected = {
+            path: signature
+            for path, signature in broad_entries.items()
+            if recall_policy.is_recall_candidate(root, Path(path))
+        }
+        if recall_policy.recall_policy_identity(root) != identity:
+            continue
+        with _lock:
+            if _generations.get(key, 0) != broad_generation:
+                continue
+            if _recall_identities.get(key) == identity:
+                continue
+            previous = _recall_maps.get(key, {})
+            touched = {
+                path
+                for path in set(previous) | set(projected)
+                if previous.get(path) != projected.get(path)
+            }
+            _recall_maps[key] = projected
+            _recall_triples[key] = None
+            _recall_identities[key] = identity
+            # An access-policy transition is a real projected event even when
+            # no Markdown changed.  Retain its exact row delta so a live catalog
+            # can remove/re-add eligible pages without a request-path walk.
+            _record_recall_event(key, touched)
+            continue
+
+
+def recall_projection_snapshot(
+    vault_root: Path, scope: str
+) -> tuple[RecallFreshnessCheckpoint, dict[str, FileSignature]]:
+    """Return one checkpoint-bound projected path map.
+
+    Request-time semantic search needs both the projected freshness identity and
+    the exact parent-path allowlist used before top-k ranking.  Obtaining those
+    through ``recall_checkpoint()`` and a later walk both doubled cold-query
+    cost and allowed the two observations to describe different generations.
+    This function snapshots them together: live registries are copied under the
+    registry lock, while cold callers perform one policy-projected stat walk.
+    """
+    from . import recall_policy
+
+    root = Path(vault_root)
+    key = _key(root, scope)
+    while True:
+        with _lock:
+            live = event_indexes_enabled() and key in _recall_live
+        if live:
+            # Handles access-policy reprojection outside the registry lock.
+            checkpoint = recall_checkpoint(root, scope)
+            with _lock:
+                if not event_indexes_enabled() or key not in _recall_live:
+                    continue
+                cached = _recall_triples.get(key)
+                if cached is None:
+                    cached = triple_from_entries(_recall_maps.get(key, {}).items())
+                    _recall_triples[key] = cached
+                identity = _recall_identities.get(key)
+                current = RecallFreshnessCheckpoint(
+                    _instance_id,
+                    _recall_generations.get(key, 0),
+                    cached,
+                    identity[0] if identity is not None else "",
+                    identity[1] if identity is not None else "",
+                )
+                entries = dict(_recall_maps.get(key, {}))
+            if current != checkpoint:
+                continue
+            if recall_policy.recall_policy_identity(root) != (
+                current.policy_version,
+                current.access_policy_fingerprint,
+            ):
+                continue
+            return current, entries
+
+        identity = recall_policy.recall_policy_identity(root)
+        if scope == "vault":
+            from .vault import walk_vault_md
+
+            walk = walk_vault_md(root)
+        else:
+            from . import find as find_module
+
+            kb = root / kb_dirname()
+            walk = find_module._walk_md(kb) if kb.is_dir() else ()
+        entries: dict[str, FileSignature] = {}
+        for path in recall_policy.iter_recall_markdown(root, walk):
+            try:
+                entries[str(path)] = stat_signature(path)
+            except OSError:
+                continue
+        if recall_policy.recall_policy_identity(root) != identity:
+            continue
+        with _lock:
+            # A watcher may have become authoritative while the cold walk ran.
+            if event_indexes_enabled() and key in _recall_live:
+                continue
+            instance_id = _instance_id
+            generation = _recall_generations.get(key, 0)
+        return (
+            RecallFreshnessCheckpoint(
+                instance_id,
+                generation,
+                triple_from_entries(entries.items()),
+                identity[0],
+                identity[1],
+            ),
+            entries,
+        )
+
+
+def live_recall_entries(vault_root: Path, scope: str) -> dict[str, FileSignature] | None:
+    """Projected live rows for lexical repair; never exposes broad raw Records."""
+    # Refresh identity first: access-policy edits have no Markdown event.
+    recall_checkpoint(vault_root, scope)
+    with _lock:
+        key = _key(vault_root, scope)
+        if not event_indexes_enabled() or key not in _recall_live:
+            return None
+        return dict(_recall_maps.get(key, {}))
+
+
+def recall_is_live(vault_root: Path, scope: str) -> bool:
+    """Whether the projected recall stream is event-maintained (no walk)."""
+    if not event_indexes_enabled():
+        return False
+    with _lock:
+        return _key(vault_root, scope) in _recall_live
+
+
+def mark_external_pending(vault_root: Path) -> int:
+    """Mark an observed out-of-band event pending before watcher debounce."""
+    global _external_pending_clock
+    with _lock:
+        _external_pending_clock += 1
+        epoch = _external_pending_clock
+        _external_pending[_canon(vault_root)] = epoch
+        return epoch
+
+
+def clear_external_pending(vault_root: Path, *, through: int) -> None:
+    """Clear only the observed external generations a completed flush covered."""
+    with _lock:
+        root = _canon(vault_root)
+        current = _external_pending.get(root)
+        if current is not None and current <= through:
+            _external_pending.pop(root, None)
+
+
+def external_pending(vault_root: Path) -> bool:
+    """Whether watchdog has observed unpublished external vault changes."""
+    with _lock:
+        return _canon(vault_root) in _external_pending
+
+
+def external_pending_epoch(vault_root: Path) -> int | None:
+    """Return the latest observed unpublished generation for one vault."""
+    with _lock:
+        return _external_pending.get(_canon(vault_root))
+
+
+def recall_delta_since(
+    vault_root: Path, scope: str, checkpoint: RecallFreshnessCheckpoint
+) -> RecallDelta:
+    """Coalesced projected changes, refusing foreign/reprojected history."""
+    current = recall_checkpoint(vault_root, scope)
+    key = _key(vault_root, scope)
+    with _lock:
+        if checkpoint.instance_id != _instance_id or checkpoint.generation > current.generation:
+            return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
+        if checkpoint.generation == current.generation:
+            complete = checkpoint == current
+            return RecallDelta(checkpoint, current, complete, frozenset(), frozenset())
+        history = _recall_history.get(key, [])
+        if not history or checkpoint.generation < history[0][0]:
+            return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
+        changed: set[str] = set()
+        deleted: set[str] = set()
+        for _before, _after, paths in history:
+            if _after <= checkpoint.generation:
+                continue
+            for path in paths:
+                if path in _recall_maps.get(key, {}):
+                    changed.add(path)
+                    deleted.discard(path)
+                else:
+                    deleted.add(path)
+                    changed.discard(path)
+        signatures = _recall_maps.get(key, {})
+        return RecallDelta(
+            checkpoint,
+            current,
+            True,
+            frozenset(changed),
+            frozenset(deleted),
+            tuple(sorted((path, signatures[path]) for path in changed if path in signatures)),
+        )
+
+
 def scopes_for(vault_root: Path, path: Path) -> tuple[bool, bool]:
     """`(in_kb, in_vault)` — does `path` belong in each scope's freshness map?
 
@@ -282,6 +608,23 @@ def is_live(vault_root: Path, scope: str) -> bool:
         return _key(vault_root, scope) in _live
 
 
+def _project_recall_entries(
+    vault_root: Path, entries: Iterable[tuple[str, FileSignature]]
+) -> tuple[dict[str, FileSignature], tuple[str, str]]:
+    """Project entries against one stable recall-policy snapshot."""
+    from . import recall_policy
+
+    while True:
+        identity = recall_policy.recall_policy_identity(vault_root)
+        projected = {
+            sp: signature
+            for sp, signature in entries
+            if recall_policy.is_recall_candidate(vault_root, Path(sp))
+        }
+        if recall_policy.recall_policy_identity(vault_root) == identity:
+            return projected, identity
+
+
 def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLike]]) -> None:
     """Install the full `(path_str, signature)` set for a scope and mark it live.
 
@@ -289,15 +632,23 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLik
     periodic reconcile. Entries must be produced by the SAME walk the fallback
     uses, so the live triple equals the walk triple on an unchanged tree.
     """
+    raw_entries = [(sp, _normalize_signature(signature)) for sp, signature in entries]
+    recall_entries, recall_identity = _project_recall_entries(vault_root, raw_entries)
     key = _key(vault_root, scope)
     with _lock:
-        _maps[key] = {sp: _normalize_signature(signature) for sp, signature in entries}
+        _maps[key] = dict(raw_entries)
         _triples[key] = None
         _live.add(key)
         # A seed is a fresh registry baseline: no consumer can bridge across it,
         # so the retained history starts empty at a new generation.
         _generations[key] = _next_gen()
         _history[key] = []
+        _recall_maps[key] = recall_entries
+        _recall_triples[key] = None
+        _recall_generations[key] = _next_gen()
+        _recall_identities[key] = recall_identity
+        _recall_live.add(key)
+        _recall_history[key] = []
 
 
 def reconcile(
@@ -314,6 +665,7 @@ def reconcile(
     """
     key = _key(vault_root, scope)
     fresh = {sp: _normalize_signature(signature) for sp, signature in entries}
+    recall_fresh, recall_identity = _project_recall_entries(vault_root, fresh.items())
     with _lock:
         old = _maps.get(key)
         # The map swap and the drift generation/history transition happen in ONE
@@ -325,6 +677,15 @@ def reconcile(
         _maps[key] = fresh
         _triples[key] = None
         _live.add(key)
+        old_recall = _recall_maps.get(key)
+        old_identity = _recall_identities.get(key)
+        _recall_maps[key] = recall_fresh
+        _recall_triples[key] = None
+        _recall_identities[key] = recall_identity
+        if old_recall != recall_fresh or old_identity != recall_identity:
+            _recall_generations[key] = _next_gen()
+            _recall_history[key] = []
+        _recall_live.add(key)
         if old is None:
             # First initialization of this scope from a walk. Like `seed`, this is
             # a fresh registry baseline that NO prior checkpoint can bridge across:
@@ -537,7 +898,20 @@ def on_files_changed(
         in_kb, in_vault = scopes_for(vault_root, p)
         if in_kb or in_vault:
             del_items.append((str(p), in_kb, in_vault))
-    chg_items: list[tuple[str, FileSignature | None, bool, bool]] = []
+    from . import recall_policy
+
+    # Reproject policy-only changes before classifying an event; never merge
+    # event admission judged under a new access snapshot into an old projection.
+    # A non-live scope intentionally remains a polling/fallback caller: a
+    # watcher event must not turn into an unexpected request-path corpus walk.
+    with _lock:
+        projected_live = {
+            scope for scope in SCOPES if _key(vault_root, scope) in _recall_live
+        }
+    for _scope in projected_live:
+        recall_checkpoint(vault_root, _scope)
+
+    chg_items: list[tuple[str, FileSignature | None, bool, bool, bool]] = []
     for path in changed:
         p = _canonicalize_event_path(vault_root, vr, Path(path))
         in_kb, in_vault = scopes_for(vault_root, p)
@@ -547,7 +921,15 @@ def on_files_changed(
             signature: FileSignature | None = stat_signature(p)
         except OSError:
             signature = None  # created then gone before we could stat — treat as absent
-        chg_items.append((str(p), signature, in_kb, in_vault))
+        chg_items.append(
+            (
+                str(p),
+                signature,
+                in_kb,
+                in_vault,
+                signature is not None and recall_policy.is_recall_candidate(vault_root, p),
+            )
+        )
     if not (del_items or chg_items):
         return
 
@@ -559,6 +941,7 @@ def on_files_changed(
         # generation exactly once per scope and the retained event records the
         # target-state identities the delta will coalesce over.
         touched: dict[tuple[str, str], set[str]] = {}
+        recall_touched: dict[tuple[str, str], set[str]] = {}
         for sp, in_kb, in_vault in del_items:
             for scope, member in (("kb", in_kb), ("vault", in_vault)):
                 self_key = _key(vault_root, scope)
@@ -567,7 +950,11 @@ def on_files_changed(
                     if m is not None and m.pop(sp, None) is not None:
                         _triples[self_key] = None
                         touched.setdefault(self_key, set()).add(sp)
-        for sp, signature, in_kb, in_vault in chg_items:
+                    recall = _recall_maps.get(self_key)
+                    if recall is not None and recall.pop(sp, None) is not None:
+                        _recall_triples[self_key] = None
+                        recall_touched.setdefault(self_key, set()).add(sp)
+        for sp, signature, in_kb, in_vault, is_recall in chg_items:
             for scope, member in (("kb", in_kb), ("vault", in_vault)):
                 self_key = _key(vault_root, scope)
                 if not (member and self_key in _live):
@@ -581,8 +968,21 @@ def on_files_changed(
                     m[sp] = signature
                     _triples[self_key] = None
                     touched.setdefault(self_key, set()).add(sp)
+                recall = _recall_maps.setdefault(self_key, {})
+                previous = recall.get(sp)
+                if is_recall and signature is not None:
+                    if previous != signature:
+                        recall[sp] = signature
+                        _recall_triples[self_key] = None
+                        recall_touched.setdefault(self_key, set()).add(sp)
+                elif previous is not None:
+                    recall.pop(sp, None)
+                    _recall_triples[self_key] = None
+                    recall_touched.setdefault(self_key, set()).add(sp)
         for self_key, paths in touched.items():
             _record_event(self_key, paths)
+        for self_key, paths in recall_touched.items():
+            _record_recall_event(self_key, paths)
 
 
 def invalidate(vault_root: Path | None = None) -> None:
@@ -598,6 +998,13 @@ def invalidate(vault_root: Path | None = None) -> None:
             _live.clear()
             _generations.clear()
             _history.clear()
+            _recall_maps.clear()
+            _recall_triples.clear()
+            _recall_generations.clear()
+            _recall_identities.clear()
+            _recall_live.clear()
+            _recall_history.clear()
+            _external_pending.clear()
             return
         root = _canon(vault_root)
         for scope in SCOPES:
@@ -607,6 +1014,12 @@ def invalidate(vault_root: Path | None = None) -> None:
             _live.discard(key)
             _generations.pop(key, None)
             _history.pop(key, None)
+            _recall_maps.pop(key, None)
+            _recall_triples.pop(key, None)
+            _recall_generations.pop(key, None)
+            _recall_identities.pop(key, None)
+            _recall_live.discard(key)
+            _recall_history.pop(key, None)
 
 
 def rebaseline(vault_root: Path) -> dict[str, bool]:
@@ -651,6 +1064,7 @@ def snapshot() -> dict:
         return {
             "live": sorted(_live),
             "counts": {k: len(v) for k, v in _maps.items()},
+            "external_pending": sorted(_external_pending),
         }
 
 
@@ -660,7 +1074,8 @@ def clear() -> None:
     Mints a fresh process-instance id so any checkpoint held across the reset
     reads as foreign — the same signal a genuine process restart would give.
     """
-    global _instance_id
+    global _external_pending_clock, _instance_id
     invalidate(None)
     with _lock:
         _instance_id = uuid.uuid4().hex
+        _external_pending_clock = 0

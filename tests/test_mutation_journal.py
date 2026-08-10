@@ -85,6 +85,33 @@ def test_failed_mutation_is_journaled_with_error_code(
     assert records[0]["error_code"] == "MUTATION_BUSY"
 
 
+def test_record_replay_is_journaled_as_replayed(
+    tmp_path: Path, _journal_log_dir: Path
+) -> None:
+    manager = _standalone_manager(tmp_path / "state")
+    receipt = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 1,
+        "operation": "append",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": "22222222-2222-4222-8222-222222222222",
+        "before_item_hash": "a" * 64,
+        "after_item_hash": "a" * 64,
+        "before_container_hash": "b" * 64,
+        "after_container_hash": "b" * 64,
+        "affected_paths": ["Knowledge Base/Records/log.md"],
+        "payload_hash": "c" * 64,
+        "outcome": "replayed",
+        "audit_correlation": "d" * 24,
+    }
+    command = SimpleNamespace(name="record_memory", read_only=False, leaf=lambda: receipt)
+
+    result = manager.invoke(command, (), {}, mutation_request_id="req-replayed")
+
+    assert result["status"] == "replayed"
+    assert _read_journal(_journal_log_dir)[0]["outcome"] == "replayed"
+
+
 def test_hosted_journal_records_target_count_only(
     tmp_path: Path, _journal_log_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

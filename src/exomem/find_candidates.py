@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,18 +91,34 @@ def collapse_frame_children(
     page_of: PageOf,
     attribution: dict[str, tuple[str, float | None]],
     *aux_maps: dict,
+    recall_paths: AbstractSet[str] | None = None,
 ) -> list[str]:
     """Remap scene-frame sidecar candidates onto their parent video sidecar."""
     if not ranking:
         return ranking
     out: list[str] = []
     seen: set[str] = set()
+    from . import recall_policy
+
+    def admitted(rel: str) -> bool:
+        return (
+            rel in recall_paths
+            if recall_paths is not None
+            else recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+        )
+
     for rel in ranking:
+        if not admitted(rel):
+            continue
         page = page_of(rel)
         parent = page.parent_media if page is not None else None
         if parent:
             parent_sidecar = parent + ".md"
-            if (vault_root / parent_sidecar).exists():
+            if (
+                admitted(parent_sidecar)
+                and recall_policy.is_recall_candidate(vault_root, vault_root / parent_sidecar)
+                and (vault_root / parent_sidecar).exists()
+            ):
                 attribution.setdefault(parent_sidecar, (page.media_file or rel, page.frame_ts))
                 for m in aux_maps:
                     if rel in m:
@@ -139,6 +156,7 @@ def collect_candidates(
     record_degradation: Callable[[str], None],
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
+    recall_paths: AbstractSet[str],
     eligible_paths: set[str] | None = None,
     capture_trace: bool = False,
 ) -> CandidateBundle:
@@ -155,11 +173,16 @@ def collect_candidates(
         config.candidate_floor,
         len(eligible_paths) if eligible_paths is not None else 0,
     )
+    semantic_paths = (
+        recall_paths if eligible_paths is None else (recall_paths & eligible_paths)
+    )
 
     def _eligible(ranking: list[str]) -> list[str]:
-        if eligible_paths is None:
-            return ranking
-        return [path for path in ranking if path in eligible_paths]
+        return [
+            path
+            for path in ranking
+            if path in recall_paths and (eligible_paths is None or path in eligible_paths)
+        ]
     frame_attribution: dict[str, tuple[str, float | None]] = {}
     lane_statuses: dict[str, dict[str, Any]] = {}
 
@@ -191,14 +214,10 @@ def collect_candidates(
             with _span(timings, "vector"):
                 idx = embeddings.get_embedding_index(vault_root)
                 query_vec = embeddings.embed_texts([query], is_query=True)[0]
-                chunk_hits = (
-                    idx.search(query_vec, k=candidate_k * 3)
-                    if eligible_paths is None
-                    else idx.search(
-                        query_vec,
-                        k=candidate_k * 3,
-                        allowed_paths=eligible_paths,
-                    )
+                chunk_hits = idx.search(
+                    query_vec,
+                    k=candidate_k * 3,
+                    allowed_paths=semantic_paths,
                 )
                 best_per_file: dict[str, tuple[float, str]] = {}
                 for fp, _idx, ctext, score in chunk_hits:
@@ -232,7 +251,7 @@ def collect_candidates(
             log.info("vector search unavailable (%s); keyword/BM25-only ranking", e)
             if timings is not None:
                 timings.error("vector", e)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - vector search is best-effort
             if capture_trace:
                 lane_statuses["vector"] = {
                     "status": "failed",
@@ -252,6 +271,7 @@ def collect_candidates(
         frame_attribution,
         chunk_text_by_path,
         vector_score_by_path,
+        recall_paths=recall_paths,
     )
     vector_ranking = _eligible(vector_ranking)
 
@@ -274,23 +294,15 @@ def collect_candidates(
             with _span(timings, "clip"):
                 clip_idx = embeddings.get_clip_index(vault_root)
                 clip_qvec = embeddings.embed_clip_text(query)
-                allowed_images = (
-                    None
-                    if eligible_paths is None
-                    else {
-                        path.removesuffix(".md")
-                        for path in eligible_paths
-                        if path.endswith(".md")
-                    }
-                )
-                clip_hits = (
-                    clip_idx.search(clip_qvec, k=candidate_k * 8)
-                    if allowed_images is None
-                    else clip_idx.search(
-                        clip_qvec,
-                        k=candidate_k * 8,
-                        allowed_paths=allowed_images,
-                    )
+                allowed_images = {
+                    path.removesuffix(".md")
+                    for path in semantic_paths
+                    if path.endswith(".md")
+                }
+                clip_hits = clip_idx.search(
+                    clip_qvec,
+                    k=candidate_k * 8,
+                    allowed_paths=allowed_images,
                 )
                 for img_rel, frame_ts, score in clip_hits:
                     if len(clip_ranking) >= candidate_k:
@@ -353,6 +365,7 @@ def collect_candidates(
         frame_attribution,
         clip_score_by_path,
         clip_frame_ts_by_path,
+        recall_paths=recall_paths,
     )
     clip_ranking = _eligible(clip_ranking)
 
@@ -419,7 +432,7 @@ def collect_candidates(
             log.warning("BM25 unavailable (%s); using vector-only", e)
             if timings is not None:
                 timings.error("bm25", e)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - BM25 search is best-effort
             if capture_trace:
                 lane_statuses["bm25"] = {
                     "status": "failed",
@@ -429,7 +442,12 @@ def collect_candidates(
             if timings is not None:
                 timings.error("bm25", e)
         bm25_ranking = collapse_frame_children(
-            bm25_ranking, vault_root, page_of, frame_attribution, bm25_score_by_path
+            bm25_ranking,
+            vault_root,
+            page_of,
+            frame_attribution,
+            bm25_score_by_path,
+            recall_paths=recall_paths,
         )
         bm25_ranking = _eligible(bm25_ranking)
 
@@ -438,7 +456,11 @@ def collect_candidates(
                 vault_root, query_norm, scope, freshness=snapshot.for_scope(scope)
             )
         keyword_ranking = collapse_frame_children(
-            keyword_ranking, vault_root, page_of, frame_attribution
+            keyword_ranking,
+            vault_root,
+            page_of,
+            frame_attribution,
+            recall_paths=recall_paths,
         )
         keyword_ranking = _eligible(keyword_ranking)
         if capture_trace:
@@ -511,6 +533,8 @@ def collect_candidates(
             first_pos_for_target: dict[str, int] = {}
             for pos, neighbor in enumerate(neighbors):
                 target_rel = neighbor.other_rel
+                if target_rel not in recall_paths:
+                    continue
                 graph_in_degree_by_path[target_rel] = (
                     graph_in_degree_by_path.get(target_rel, 0) + 1
                 )
@@ -540,14 +564,21 @@ def collect_candidates(
 
             legacy_targets: list[str] = []
             if legacy_seeds:
-                resolver = get_query_resolver(vault_root, freshness=snapshot.vault())
+                resolver = get_query_resolver(
+                    vault_root, freshness=snapshot.projection_key("vault")
+                )
                 for seed_rel in legacy_seeds:
                     page = page_of(seed_rel)
                     if page is None:
                         continue
                     for target_rel in outbound_wikilink_paths(
-                        page, vault_root, resolver=resolver
+                        page,
+                        vault_root,
+                        resolver=resolver,
+                        allowed_paths=recall_paths,
                     ):
+                        if target_rel not in recall_paths:
+                            continue
                         graph_in_degree_by_path[target_rel] = (
                             graph_in_degree_by_path.get(target_rel, 0) + 1
                         )
@@ -582,7 +613,9 @@ def collect_candidates(
             # Fallback: the pre-existing 1-hop outbound-wikilink expansion,
             # byte-identical to the pre-change ordering. Do not refactor.
             resolver = (
-                get_query_resolver(vault_root, freshness=snapshot.vault())
+                get_query_resolver(
+                    vault_root, freshness=snapshot.projection_key("vault")
+                )
                 if graph_seeds else None
             )
             graph_t_resolver = time.perf_counter()
@@ -592,8 +625,13 @@ def collect_candidates(
                 if page is None:
                     continue
                 for target_rel in outbound_wikilink_paths(
-                    page, vault_root, resolver=resolver
+                    page,
+                    vault_root,
+                    resolver=resolver,
+                    allowed_paths=recall_paths,
                 ):
+                    if target_rel not in recall_paths:
+                        continue
                     graph_in_degree_by_path[target_rel] = (
                         graph_in_degree_by_path.get(target_rel, 0) + 1
                     )

@@ -1,0 +1,181 @@
+## Context
+
+Exomem currently has strong lower-level pieces but no collection product model. `query_data.py` reads and reduces CSV/TSV/JSON; `memory_refs.py` gives stable page identity; semantic units demonstrate anchored item identity and fingerprint-guarded mutation; `vault.py` provides guarded staged publication; `writer_lease.py` serializes same-vault mutations and supplies idempotent terminal responses; governance gates files/pages; and watchers/reconcile rebuild derived search, reference, semantic-unit, and graph state. None of those defines a collection manifest, row/block identity, collection schema, keyed mutation, per-item history, multi-representation adapter, or direct-edit reconciliation contract.
+
+The durable Planning work defines intended future state and explicitly leaves accepted software contracts to OpenSpec/repository truth. Records is the complementary observed-state layer. There is no committed Planning implementation to extend and no hidden Records branch. A separate `add-first-class-records` change is therefore the clean delivery boundary, but its mechanics must be profile-neutral so a later Planning change consumes the same collection substrate.
+
+The current X3 vault material is a newest-first `type: tracker` Markdown log with dated Push/Pull blocks, pipe-delimited movement rows, a separate undated archive, and ordinary Push/Pull templates. It must remain canonical and directly editable. The Knowledge Base is itself the active Obsidian vault: its `.obsidian/templates.json` points to `Templates`, which maps to the Exomem path `Knowledge Base/Templates/`. A separate parent-directory Obsidian configuration is outside this vault and does not change the X3 workflow. Exomem preserves the active configuration and never mutates `.obsidian`.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Introduce one human-owned structured-collection contract reusable by Records and future Planning.
+- Make Records first-class observed state with collection-scoped identities, minimal typed schemas, safe Markdown append/update, bounded query/reduction, reasons/audit receipts, provenance-bearing output, and immediate visibility of manual edits.
+- Support chronological Markdown logs, Markdown item files, and CSV/TSV/JSON without making any one shape universal.
+- Preserve `type: tracker`, the X3 log/archive/templates, and immediate manual/Obsidian editing without a forced migration.
+- Prove domain neutrality with vehicle maintenance and prove Planning integration with a reference/query contract, not a partial Planning product.
+- Apply governance before reductions and keep high-volume raw items out of ordinary semantic recall by default.
+- Expose one natural Records command through the existing generated MCP/REST/CLI registry.
+
+**Non-Goals:**
+
+- A complete Planning system, calendar, task executor, dashboard, board, spreadsheet, relational database, analytics suite, charting engine, form builder, TUI, Studio area, or Obsidian plugin.
+- Row-level governance inside one canonical log/dataset, arbitrary joins, formulas, recurrence engines, or automatic medical/performance interpretation.
+- A persistent required collection database or an automatic migration/promotion between canonical representations.
+- Dataset mutation, canonical representation migration, planned-versus-recorded comparison, or a new item-level history database.
+- Retrofitting explicit IDs into every historical tracker block during installation.
+
+## Decisions
+
+### 1. One neutral manifest, separate semantic profiles
+
+An explicit collection is described by an ordinary Markdown manifest, conventionally adjacent as `_collection.md`, with `type: collection`, the existing `exomem_id` UUID field, `semantic_profile`, collection/schema versions, title/domain/lifecycle, `storage`, `item_schema`, and optional `templates`, `views`, `governance`, and `links`. The body is human-facing context. Records conventionally live under `Knowledge Base/Records/`; a later Planning product can use `Knowledge Base/Planning/` while loading the same contract.
+
+`semantic_profile: records` activates observed-state constraints. `semantic_profile: planning` is parseable by the substrate but its domain operations remain unsupported until the Planning change. This prevents “universal database” semantics while avoiding two mechanical implementations.
+
+Direct inspection also recognizes an existing `type: record-index` or `type: tracker` as a legacy collection surface when the caller supplies its exact path. Without an explicit manifest it receives a clearly marked path-derived compatibility identity for collection-level inspection only; this delivery does not add a vault-wide legacy-tracker enumeration action. Item parsing, query, append, or update requires an adjacent manifest—or an equivalent explicit caller-supplied descriptor—with the complete bounded adapter grammar. This keeps the core generic: it never guesses whether a heading, legend, template fragment, or delimited line is a Record. Adding the manifest is the explicit route to move-stable collection identity and item operations, and it does not rewrite the tracker.
+
+Alternatives rejected:
+
+- A SQLite collection catalog: easier lookup, but it would hide the contract and make recovery/manual use depend on derived state.
+- Separate Records and Planning manifests: clearer naming at first, but guarantees schema/mutation/query drift.
+- Templates as manifests: couples entry convenience to binding schema and makes historical behavior implicit.
+
+### 2. Adapter protocol over three canonical shapes
+
+`structured_collections.py` owns manifest/schema/identity/query-neutral types. `record_formats.py` owns an adapter protocol and three adapters:
+
+- `markdown-log`: a declared section and fence-aware heading/block grammar plus optional delimited child rows. Child rows declare their destination `container_field`, which must be an array-of-objects field in the item schema. It parses current blocks without rewriting them, inserts at the declared newest/oldest edge, and returns exact source spans.
+- `markdown-items`: one file per item, with `type: record`, `record_id`, `collection_id`, schema version, domain fields, and optional body.
+- `dataset`: query-only CSV/TSV/JSON using shared `query_data` loading/coercion/evaluation. A declared stable-key column improves references and deterministic ordering, but append/update is deferred until a format-specific preservation contract exists.
+
+The Markdown-log grammar is declarative (heading level/fields, section, insertion direction, child delimiter/fields/container), so the generic core does not contain X3 conditionals. X3 fixture configuration maps dated headings and `movement | band | reps` rows. Raw notation such as `+`, blanks, `!`, or `?` remains data rather than being normalized into a judgment. Markdown-item reads accept one leading UTF-8 BOM for frontmatter parsing while preserving the complete original bytes for source hashes, spans, body behavior, and any later guarded rewrite.
+
+The X3 fixture supplies an adjacent manifest whose descriptor maps dated headings and `movement | band | reps` rows while leaving `Training Log.md` byte-identical before the first requested mutation. A third fixture proves bounded dataset querying without claiming byte-preserving dataset mutation.
+
+### 3. Collection-scoped identity, exact source versions, and replay hashes
+
+Collections reuse `memory_refs.new_id()`/UUID validation. An item identity is universally the tuple `(collection_uuid, canonical_item_key)`. New mutable Markdown items use a UUID key stored as `record_id`; a query-only dataset may use a manifest-declared bounded string key. Arbitrary dataset keys are not called `exomem_id` and do not collide across collections. The durable standalone form is `exomem://record/<collection-uuid>/<percent-encoded-key>`.
+
+New agent-authored log blocks include an unobtrusive ordinary Markdown HTML marker immediately after the heading:
+
+```markdown
+<!-- exomem-record-id: 01234567-89ab-4cde-8012-3456789abcde -->
+```
+
+The marker is human-owned, survives moves/reordering, and does not alter rendered Obsidian content. Manually inserted legacy blocks without markers get an inferred compatibility key only when the manifest-declared natural key is unique. Canonical natural-key serialization is canonical JSON over `[schema_version, [[field, value], ...]]` in declared field order: strings are Unicode NFC, dates/datetimes are schema-normalized ISO 8601, null is JSON `null`, and numbers/booleans keep their JSON scalar types. The compatibility key is UUIDv5 over that serialization and the collection UUID. It may change when a natural-key value is corrected, so it is explicitly not a durable substitute for an explicit marker. Duplicate natural keys remain readable with ambiguity metadata but cannot be targeted until the user disambiguates them. New IDs never depend only on date, because legitimate same-date events exist.
+
+`item_version` is SHA-256 over the exact source bytes for the Markdown block or complete item file. `collection_snapshot` covers the manifest and ordered canonical-source byte hashes. A separate canonical-payload hash supports append replay equality; it is never used as the stale-write token. Query-only datasets expose the source snapshot and a declared key where available, but no mutable item version. These hashes are concurrency tokens, not confidence or authority scores.
+
+### 4. Minimal schema and no meaningless universal fields
+
+The collection schema supports required/optional fields, primitive/date/datetime/enum/array/object types, units metadata, link fields, and a declared natural key for legacy resolution. Only collection ID, item ID, and schema version are substrate mechanics. Occurred/recorded time, status, provenance/capture, uncertainty, reconstruction, relations, units, and lifecycle appear only in domain schemas that use them.
+
+Inference samples bounded current items and returns an advisory proposal. It never rewrites a manifest or history. Schema versions are strict; unknown future versions refuse mutation.
+
+### 5. One thin `record_memory` front door
+
+Add a single generated product command with five top-level actions:
+
+- read-only: `inspect`, `query`;
+- mutating: `create`, `append`, `update`.
+
+`create` create-only publishes a manifest and, when requested, an empty Markdown log or item directory scaffold; it never adopts or rewrites an existing tracker implicitly. `inspect` resolves one collection and returns its contract plus report-only schema/identity/template issues. `query` covers list/history/render/export use through bounded filters, `include_agent_history`, a saved-view selector, and `output_format` (`json`, `markdown`, or derived `csv`); it never writes an export. `append` and `update` accept structured items/changes, a canonical item key, expected container hash/item version, and a required reason. Per-action required and forbidden arguments are validated explicitly. Storage strategy is resolved from the manifest and never appears as a family of public tools.
+
+MCP annotations remain command-level, so the mixed command is advertised conservatively as write-capable even though the selector registry routes `inspect` and `query` without writer authority. Unknown actions fail closed.
+
+This new command is justified despite registry blast radius: existing `remember` creates compiled conclusions, `observe_memory` mutates semantic units inside compiled pages, `manage_memory_file` is a Tier-2 raw file escape hatch, and `query_dataset` is read-only/tabular. None can safely express keyed collection append/update/query without leaking storage mechanics or collapsing Records into Notes.
+
+### 6. Bounded guarded mutations reuse the existing writer boundary
+
+Mutation flow:
+
+1. Resolve manifest/adapter and validate the requested structured payload outside the critical section where safe.
+2. Enter the existing command invocation/writer boundary.
+3. Re-read the manifest and canonical source with `read_guarded_text`; re-resolve exact ID/insertion target.
+4. Validate schema, duplicate identity, expected container hash, and expected item version.
+5. Render only the new/changed item span while preserving every untouched byte and newline style.
+6. Mint a transition ID before rendering; stage the canonical source, the marked manifest audit head, and one defined activity event through `plan_log_writes` and `batch_atomic_write` guarded publication.
+7. Return the common terminal mutation response plus collection/item before/after hashes and affected paths.
+
+Exact replay with one item key and canonical payload hash is idempotent; key reuse with different content is `RECORD_ID_CONFLICT`. Missing/duplicate targets refuse; there is no fuzzy fallback. Guard failures are `STALE_RECORD`. The manifest carries ordinary state `record_audit: {version: 1, head: <transition-id>}`. Every touched block/item carries exactly its latest visible, content-free transition ID; an update replaces its predecessor marker. Each activity entry has a strict versioned canonical-JSON event containing the transition and parent IDs (`baseline`/`absent` or an earlier transition), operation, collection/manifest/source/item paths and identity, before/after manifest, item, and container hashes, payload hash when relevant, and bounded rationale. A transition ID is opaque or binds its parent, operation, identities, before hashes, and payload; it is never derived only from final values.
+
+Markdown-log container hashes are SHA-256 over exact source bytes. Markdown-items container hashes are a bounded canonical snapshot of the marked manifest and the complete ordered recursive source inventory `(path, kind, exact-byte hash-or-null)`, including the source directory and nested empty directories; absent and empty sources differ and unexpected candidates are visible. Every represented directory receives a commit-bound census so an allowed deep target never exempts sibling drift in an ancestor subtree. Create is an `absent -> created` transition with null item key and meaningful marked-manifest/scaffold hashes. Existing writes publish canonical source first, manifest head second, then history; create uses an order which leaves the new manifest state inspectable at each replacement prefix. Before the first replacement, a simulated `BaseException` cleans tool-owned staging workspaces and newly created empty directories and is rethrown unchanged; after a replacement it may leave a reportable partial prefix. Caught ordinary failures roll canonical/head/history back together.
+
+Inspection is report-only and reconstructs the predecessor chain from `record_audit.head`, independent of archive filename or enumeration order. Every reachable event is checked against operation-specific collection, manifest, source, canonical-item path, and item-key rules; create uses a null item key and declared source, while append/update use a normalized UUID and a strategy-valid canonical path. Exact duplicate events dedupe; conflicting ID reuse, forks, wrong collection/path/item evidence, missing parents, discontinuity, old-head rollback, unmatched markers, and current-hash mismatch are gaps. It reports `baseline` only for an unmarked/headless collection after a complete bounded history scan finds no related event; `ok` only for a coherent chain to `baseline` or `absent`; `gap` for a positive mismatch; and `history_incomplete` when caps, unsafe/missing history, parsing failure, or drift prevents proof. Manifest, canonical marker, and archive reads are bounded, descriptor-bound regular-file reads under the expected root, tied to one inspected snapshot, and never follow symlinks, devices, or FIFOs. Canonical Records remain truth; inspection never repairs or invents history. This continuity diagnostic is not general tamper evidence: restoring both canonical bytes and the relevant audit history is the explicit exact-byte ABA limitation.
+
+The terminal outcome becomes committed only after every planned replacement completes. Existing batch publication provides per-file atomic replacement and caught-error rollback, not cross-file crash atomicity. Governance receipts, operational journals, activity history, and terminal receipts retain their distinct roles.
+
+Internal portable publication replaces the containing file atomically; “bounded mutation” means exact logical targeting, limited caller payload, byte preservation outside the span, validation/CAS, and no silent whole-document semantic rewrite—not an impossible in-place filesystem transaction claim.
+
+### 7. Live canonical query with bounded snapshot pagination
+
+Refactor the pure filter/sort/aggregate portions of `query_data.py` so adapters can feed rows without copying query semantics. Query supports field/relation/date filters, projection, deterministic sorting, positive hard-capped pagination, bounded aggregates/distinct/grouping, and a source snapshot token. `limit=0` no longer means unbounded. A continuation token binds to collection/query/snapshot and refuses when a direct edit changed the sources.
+
+Markdown-log adapters can return item rows and expanded child rows; X3 movement rows retain the parent session key/version. `query` can render bounded Markdown or CSV alongside structured provenance: collection ID, exact normalized query/view definition, source hashes, generation time, and `derived: true`. It returns content but does not write or promote it in this delivery.
+
+Queries parse current canonical files. There is no required collection index, so a valid direct editor/Obsidian change appears on the next fresh query. File/item/response caps make the scan-based first delivery honest; a future derived index can implement the same interface.
+
+### 8. Report-only inspection; maintenance owns repair
+
+`record_memory(action="inspect")` reparses canonical files and reports source hashes, schema violations, missing/duplicate IDs, ambiguous legacy keys, missing templates, audit-history gaps, and stale saved-view provenance. It never adds IDs, fixes values, rewrites templates, or promotes a representation automatically. Existing watcher and `maintain_memory(mode="reconcile", dry_run=false)` remain responsible for generic derived lexical/vector/graph/reference repair. Dataset-file watching beyond live query freshness is deferred unless a small extension is necessary for stale search-row cleanup.
+
+### 9. Governance runs before reductions at representation granularity
+
+Manifest discovery is bounded, symlink-safe, and limited to governed vault-relative roots. A path/ref resolves directly. UUID lookup enumerates candidate manifest paths under a separate content-free internal walk ceiling, authorizes each candidate at L6 without parsing identity-bearing contents, then applies public released-candidate caps and parses only fully releasable candidates; duplicate detection occurs only among those candidates, so withheld paths remain indistinguishable from absence. Any manifest index is derived lookup acceleration, never authorization truth. Structured Records reads require L6 rather than the release plane's ordinary L5 excerpt floor. Canonical sources and templates must resolve to governed vault-relative paths and are authorized before parsing or return.
+
+For file-per-item storage, authorization enters the adapter before a candidate affects public counts/caps, sort, parse, diagnostics, ambiguity, hashes, continuation snapshots, filter, total, pagination, group, aggregate, latest, profile, rendered view, or export-shaped output. Query snapshots cover only artifacts fully visible to that caller, so hidden-only edits do not leak through continuation invalidation. For a log/dataset, the canonical file is the first-delivery governance boundary; every contained row shares it. Mixed-sensitivity rows require separately governed files/collections until row policy is deliberately designed. Because Task 3's container CAS binds the complete canonical collection, a caller lacking L6 for any item cannot mutate a mixed-release collection rather than receiving an unsafe subset hash.
+
+Records egress uses default-deny typed envelopes, not a top-level `rows` allowlist. Ordinary schema values require L6, while declared links, Planning descriptors, template targets, provenance, identities, paths, hashes, history, conflicts, continuations, counts, and aggregates are recursively projected before reduction and rendering. Withheld collections use the existing indistinguishable-from-missing shape. Stale/conflict errors expose no current values. A precommit disclosure hook runs inside each guarded mutation after final target resolution and before publication; it can refuse without changing canonical/history state, and its receipt records authorization rather than claiming the later write committed. No fallible postcommit disclosure step may make a committed write appear refused. Governance receipts, activity events, operational journals, and terminal receipts remain separate.
+
+### 10. Collection-level recall, structured-only raw items
+
+For v1, a `records` manifest and every declared canonical source must resolve beneath exact `Knowledge Base/Records/` path segments; generic collection mechanics and future Planning placement remain independent. This makes one cheap two-stage recall policy complete instead of depending on convention or a manifest-derived exclusion catalog.
+
+The pure path policy admits only strictly valid `_collection.md` manifests under exact `Knowledge Base/Records/**`. Every other descendant—including `_summary.md`, raw item files, chronological logs, datasets, archives, and templates—is structured-only. On-demand `record_memory` JSON/Markdown/CSV responses are derived views and are never persisted or promoted automatically. Persisted summary recall is deferred until a governed materializer/attestation plus complete source-authorization closure exists; `source_snapshot` metadata alone is not proof.
+
+Semantic fanout separates identity/resolver updates for all Markdown, recall upserts for eligible pages, and semantic-only purges for raw Records. A suppressed upsert model-free deletes stale lexical/pages/units, vector/units, graph nodes/placeholders, claims, and deferred work before skipping insertion—even with embeddings disabled—without deleting canonical files, stable refs, resolver, or inbound identity. Full, incremental, move/delete, watcher, warmup, final candidate defenses, audit, and reconciliation share the policy. Reconcile recognizes present-but-policy-stale rows and prunes component state directly rather than routing a live raw path through generic identity deletion.
+
+Generic `kb`/`vault` freshness remains for resolver/inbound/stable-reference consumers. Recall uses projected freshness/checkpoint views and every persistent semantic sidecar includes static policy version plus the local access-policy fingerprint, so policy changes converge without file edits and raw-only edits do not churn recall caches. Background indexing applies local access-tier exclusion before reads; audience-specific release remains an egress responsibility because shared sidecars have no request principal. Collection-aware stable-reference and structured-query access remains available. Raw datasets already remain outside embeddings. A manifest-less legacy tracker remains available to explicit, direct-path Records inspection even when it is not an ordinary semantic candidate.
+
+No model is added. Parsing, validation, query, aggregation, and view rendering are deterministic measurement/transduction within the pure-substrate boundary.
+
+### 11. Templates and packs are suggestions, never hidden behavior
+
+Collection manifests reference ordinary template paths and default properties; schemas remain independent. Templates can be inserted manually in Obsidian or any editor. Template changes never rewrite history. Existing health/personal-records pack guidance and bootstrap teach Records use through their current validated extension surface; machine-readable collection blueprints and activation are deferred. Selecting a pack creates or migrates nothing silently. All shipped scaffold/pack examples remain generic.
+
+### 12. Planning integration is a reference/query contract only
+
+Manifest `links.plans` can carry an opaque Planning reference plus a bounded Records query descriptor. Records validates, stores, returns, and governance-projects that descriptor but does not resolve the Planning object, compare intent with observations, infer progress/completion, or mutate either side. Software initiatives may eventually link external OpenSpec/git/test/deployment outcomes, which remain execution truth. Planning-side `progress_evidence`, planned-versus-recorded comparison, and review cadence belong to the later Planning change.
+
+## Risks / Trade-offs
+
+- **[Declarative Markdown grammars can become too general]** → Ship one bounded heading/block/delimiter grammar that fits X3; refuse unsupported layouts and add adapters later rather than embedding a parser language.
+- **[Legacy deterministic IDs drift when users edit natural keys]** → Mark them inferred, keep them queryable, refuse ambiguous targeted mutation, and use explicit markers for all new agent-authored blocks.
+- **[Dataset serializers cannot preserve untouched bytes portably]** → Keep datasets query-only in this delivery and defer keyed mutation until format-specific preservation contracts exist.
+- **[Multi-file batch publication is not power-loss atomic to concurrent lock-free readers]** → Query canonical source directly and bind results to snapshots; keep derived history/view state non-authoritative and document the existing batch guarantee instead of strengthening it falsely.
+- **[Path-level policy cannot protect mixed-sensitivity rows in one file]** → Make governance granularity explicit and require file-per-item/separate collections for mixed sensitivity in v1.
+- **[Raw Markdown items pollute retrieval or stale indexes survive]** → Require v1 Records canonical paths beneath the Records layer, centralize two-stage structured-only suppression, split identity from recall fanout, and test full/current/incremental/reconcile paths with a high-cardinality fixture.
+- **[L5 excerpt authority is mistaken for full structured disclosure]** → Require L6 for Records rows, hashes, templates, mutation, and reductions; defer any Record-specific excerpt projection.
+- **[A mixed-release subset hash is mistaken for canonical CAS]** → Allow authorized-only query snapshots, but require full-collection L6 visibility before mutation.
+- **[One command has a broad schema]** → Keep finite actions, bounded shared arguments, strict cross-field validation, and generated schema/parity tests; do not split by adapter.
+- **[Pack metadata starts acting like migrations]** → Use existing guidance only; machine-readable blueprints and activation remain deferred, and collection creation stays explicit.
+- **[A fixture can accidentally prove only colocated templates]** → Keep X3 templates at `Knowledge Base/Templates/Records/Health/X3/`, bind the manifest to those vault-relative paths, and test ordinary expansion/insertion without editing `.obsidian`.
+- **[First delivery scan cost is finite]** → Cap files/items/bytes/results, return snapshot/pagination metadata, and defer an optional rebuildable collection index until measurements justify it.
+
+## Migration Plan
+
+1. Ship manifest/schema/adapter support without changing existing tracker behavior.
+2. Existing trackers remain directly inspectable by known path at collection level and keep their current `type`, body, archive, and templates. An adjacent explicit manifest is required for item query/mutation; vault-wide legacy-tracker enumeration is deferred.
+3. Explicit adoption adds an adjacent `_collection.md`; it does not rewrite the canonical tracker.
+4. New agent-authored log items receive explicit invisible markers. Historical items remain unmarked unless the user edits them explicitly.
+5. Raw Record paths are excluded from ordinary recall by a central derived-index predicate; older Exomem versions may index them, so rollback loses no canonical data.
+6. Rendered query views/exports are returned, not canonically published, and can always be regenerated. Removing the manifest returns a tracker to legacy manual use.
+7. Representation migration and canonical promotion remain future explicit changes.
+
+Rollback is code removal plus optional manifest removal. All canonical state remains ordinary Markdown/CSV/TSV/JSON and stays manually usable.
+
+## Open Questions
+
+No unresolved decision blocks the first delivery. Row-level policy, persistent collection indexes, richer migrations, materialized views/charts, forms/UI, and full Planning semantics are explicitly deferred rather than guessed.

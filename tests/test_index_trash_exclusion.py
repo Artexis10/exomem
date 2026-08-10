@@ -170,14 +170,19 @@ def test_index_sync_quiet_defers_semantic_upserts(
     good.write_text("# quiet\n", encoding="utf-8")
 
     try:
-        index_sync.upsert_after_write(vault, [good, good])
+        report = index_sync.upsert_after_write(vault, [good, good])
 
-        assert seen["lexstore"] == [[good, good]]
+        # Routing snapshots de-duplicate the internal semantic and resolver
+        # mutation set. The public report still retains requested-event shape.
+        assert seen["lexstore"] == [[good]]
+        assert report.requested_paths == (
+            "Knowledge Base/Notes/Insights/quiet-defers.md",
+            "Knowledge Base/Notes/Insights/quiet-defers.md",
+        )
         assert seen["embeddings"] == []
         assert seen["resolver"] == [
             (
                 [
-                    "Knowledge Base/Notes/Insights/quiet-defers.md",
                     "Knowledge Base/Notes/Insights/quiet-defers.md",
                 ],
                 [],

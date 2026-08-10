@@ -14,9 +14,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
-from exomem import audit, delete_directory, delete_file, recover_from_trash
+from exomem import audit, delete_directory, delete_file, embeddings, recover_from_trash
 from exomem import reconcile as reconcile_module
 from exomem.governance import egress, receipts, store
 
@@ -2476,14 +2477,11 @@ def test_scene_enabled_video_recovery_finalizes_after_exact_scene_rebuild(
     )
     assert any("remains tombstoned" in warning for warning in recovered.warnings)
 
-    clip = sqlite3.connect(vault / "Knowledge Base" / ".clip.sqlite")
-    clip.execute("DELETE FROM images WHERE file_path = ?", (rel,))
-    clip.execute(
-        "INSERT INTO images(file_path, frame_ts, vector, file_mtime) VALUES (?, ?, ?, ?)",
-        (rel, 5.0, b"vector", 0.0),
+    embeddings.ClipIndex(vault).upsert_frames(
+        rel,
+        [(5.0, np.zeros(embeddings.CLIP_DIM, dtype=np.float32))],
+        0.0,
     )
-    clip.commit()
-    clip.close()
     frame_dir = vault / f"{rel}.frames"
     frame_dir.mkdir(parents=True)
     frame = frame_dir / "scene-000-t5000ms.jpg"

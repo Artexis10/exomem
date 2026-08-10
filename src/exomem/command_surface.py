@@ -215,6 +215,7 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "observe_memory": ("content",),
     "replace_memory": ("content",),
     "manage_memory_file": ("content",),
+    "record_memory": ("manifest_text", "body"),
 }
 
 
@@ -250,6 +251,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "manage_memory_file",
         "maintain_memory",
         "schema_memory",
+        "record_memory",
         *({"govern_memory"} if governance_tool_is_destructive() else set()),
     }
 )

@@ -52,7 +52,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,6 +62,7 @@ from . import access, indexes, temporal
 from . import audit as audit_module
 from . import find as find_module
 from .vault import (
+    PathGuardError,
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
@@ -67,6 +70,7 @@ from .vault import (
     normalize_body_wikilinks,
     normalize_wikilink,
     parse_frontmatter,
+    read_guarded_text,
     render_wikilink_target,
 )
 
@@ -371,6 +375,35 @@ def _plan_sidecar_repairs(
     return writes
 
 
+def _compose_writes(*groups: list[PlannedWrite]) -> list[PlannedWrite]:
+    """Keep the final planned write for each exact destination.
+
+    Audit passes may independently transform the same index. Later passes are
+    explicitly composed over earlier text, so retaining their guarded final
+    write is safe. Distinct spellings that collide on a portable filesystem are
+    refused here rather than escaping separate ``<=100`` write batches.
+    """
+    ordered: list[PlannedWrite] = []
+    positions: dict[str, int] = {}
+    portable_destinations: dict[str, str] = {}
+    for write in (write for group in groups for write in group):
+        destination = os.path.abspath(write.path)
+        portable = "/".join(
+            unicodedata.normalize("NFC", part).casefold()
+            for part in Path(destination).parts
+        )
+        existing = portable_destinations.get(portable)
+        if existing is not None and existing != destination:
+            raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
+        portable_destinations[portable] = destination
+        if destination in positions:
+            ordered[positions[destination]] = write
+        else:
+            positions[destination] = len(ordered)
+            ordered.append(write)
+    return ordered
+
+
 def audit_fix(
     vault_root: Path,
     *,
@@ -411,7 +444,7 @@ def audit_fix(
             report.skipped_readonly += 1
             continue
         try:
-            original = md.read_text(encoding="utf-8")
+            original, original_guard = read_guarded_text(vault_root, md)
         except (OSError, UnicodeDecodeError):
             continue
         fm, body, fm_text = parse_frontmatter(original)
@@ -482,7 +515,7 @@ def audit_fix(
                     detail="non-canonical wikilink(s) in body or frontmatter",
                     action="rewrote to full vault-rooted canonical form",
                 ))
-            writes.append(PlannedWrite(path=md, content=new_text))
+            writes.append(PlannedWrite(path=md, content=new_text, guard=original_guard))
             pending_paths.append(rel)
             report.files_rewritten += 1
 
@@ -493,14 +526,36 @@ def audit_fix(
 
     # ---- Pass 3: sub-folder index refresh + top-index counts ----
     top_index_path = kb / "index.md"
-    top_text = top_index_path.read_text(encoding="utf-8") if top_index_path.exists() else None
+    planned_index_writes = {
+        write.path.resolve(): write
+        for write in writes
+        if write.path.resolve()
+        in {
+            top_index_path.resolve(),
+            (kb / "Sources" / "index.md").resolve(),
+            (kb / "Notes" / "index.md").resolve(),
+            (kb / "Entities" / "index.md").resolve(),
+        }
+    }
+    top_base_write = planned_index_writes.get(top_index_path.resolve())
+    top_guard = top_base_write.guard if top_base_write is not None else None
+    if top_base_write is not None:
+        top_base = top_base_write.content
+    elif top_index_path.exists():
+        top_base, top_guard = read_guarded_text(vault_root, top_index_path)
+    else:
+        top_base = None
     sub_writes, new_top = indexes.compute_subindex_writes(
-        vault_root, top_index_text=top_text
+        vault_root,
+        top_index_text=top_base,
+        base_writes=planned_index_writes,
     )
     refresh_writes: list[PlannedWrite] = list(sub_writes)
-    if new_top is not None and top_text is not None and new_top != top_text:
-        refresh_writes.append(PlannedWrite(path=top_index_path, content=new_top))
-    writes.extend(refresh_writes)
+    if new_top is not None and top_base is not None and new_top != top_base:
+        refresh_writes.append(
+            PlannedWrite(path=top_index_path, content=new_top, guard=top_guard)
+        )
+    writes = _compose_writes(writes, refresh_writes)
 
     # ---- Apply ----
     if writes and not dry_run:

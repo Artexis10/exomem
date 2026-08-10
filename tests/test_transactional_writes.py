@@ -189,7 +189,7 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     def register(_root: Path, paths: list[Path]) -> None:
         watcher_calls.append(tuple(paths))
 
-    def index(_root: Path, paths: list[Path]) -> object:
+    def index(_root: Path, paths: list[Path], **_kwargs) -> object:
         index_calls.append(tuple(paths))
         return report
 
@@ -201,9 +201,8 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
 
     replaced = vault_module.batch_atomic_write(
         [
-            vault_module.PlannedWrite(existing, "superseded"),
-            vault_module.PlannedWrite(created, "created\nexact"),
             vault_module.PlannedWrite(existing, "existing\nexact"),
+            vault_module.PlannedWrite(created, "created\nexact"),
         ],
         vault_root=tmp_path,
         index_reports=reports,
@@ -288,7 +287,9 @@ def test_batch_atomic_write_replaces_and_creates_on_windows(
     created = parent / "created.md"
     existing.write_text("old\n", encoding="utf-8")
     monkeypatch.setattr("exomem.file_watcher.register_self_write", lambda *_: None)
-    monkeypatch.setattr("exomem.index_sync.upsert_after_write", lambda *_: None)
+    monkeypatch.setattr(
+        "exomem.index_sync.upsert_after_write", lambda *_args, **_kwargs: None
+    )
 
     replaced = vault_module.batch_atomic_write(
         [
@@ -459,12 +460,13 @@ def test_batch_write_error_public_payload_and_pickle_are_sanitized(
     assert restored._diagnostics == ()
 
 
-def test_batch_cleanup_outcome_summarizes_deduped_commit_order(
+def test_batch_cleanup_outcome_summarizes_commit_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = tmp_path / "first.md"
     second = tmp_path / "second.md"
+    third = tmp_path / "third.md"
     raw = PermissionError("private workspace initialization failure")
 
     def fail_workspace_create(cls, parent: Path):
@@ -486,7 +488,7 @@ def test_batch_cleanup_outcome_summarizes_deduped_commit_order(
             [
                 vault_module.PlannedWrite(first, "first draft"),
                 vault_module.PlannedWrite(second, "second"),
-                vault_module.PlannedWrite(first, "first final"),
+                vault_module.PlannedWrite(third, "third"),
             ],
             vault_root=tmp_path,
         )
@@ -496,8 +498,8 @@ def test_batch_cleanup_outcome_summarizes_deduped_commit_order(
         "kind": "cleanup_incomplete",
         "committed": False,
         "incomplete": True,
-        "affected_count": 2,
-        "targets": ["first.md", "second.md"],
+        "affected_count": 3,
+        "targets": ["first.md", "second.md", "third.md"],
         "omitted_target_count": 0,
     }
     assert incomplete.value.__cause__ is raw
@@ -1088,7 +1090,7 @@ def test_batch_atomic_write_fans_out_once_before_committed_cleanup_error(
     def register(_root: Path, paths: list[Path]) -> None:
         watcher_calls.append(tuple(paths))
 
-    def index(_root: Path, paths: list[Path]) -> object:
+    def index(_root: Path, paths: list[Path], **_kwargs) -> object:
         index_calls.append(tuple(paths))
         return report
 
@@ -1921,6 +1923,38 @@ def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
     assert len(_workspaces(guarded)) == 64
     assert stale in _workspaces(guarded)
     assert (stale / "stage-0.tmp").read_bytes() == stale_bytes
+
+
+def test_batch_staging_keyboard_interrupt_cleans_created_parents_and_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-publication interrupt is neither normalized nor allowed to leave staging residue."""
+    target = tmp_path / "new" / "nested" / "target.md"
+    real_create_artifact = vault_module._BatchWorkspace.create_artifact
+    calls = 0
+
+    def interrupt_after_parent(self, name: str, content: bytes):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise KeyboardInterrupt("stop during staging")
+        return real_create_artifact(self, name, content)
+
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace, "create_artifact", interrupt_after_parent
+    )
+    with pytest.raises(KeyboardInterrupt, match="stop during staging"):
+        vault_module.batch_atomic_write([vault_module.PlannedWrite(target, "new")])
+    assert not target.exists()
+    assert not (tmp_path / "new").exists()
+    assert not list(tmp_path.rglob(".exomem-batch-*"))
+
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace, "create_artifact", real_create_artifact
+    )
+    assert vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(target, "new")]
+    ) == [target]
 
 
 @pytest.mark.parametrize("nested", [False, True])

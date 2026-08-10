@@ -25,7 +25,15 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
+from . import (
+    embeddings,
+    extract,
+    index_sync,
+    preserve,
+    recall_policy,
+    scene_frames,
+    semantic_segments,
+)
 from .kbdir import kb_dirname, kb_prefix
 from .vault import VAULT_SCAN_SKIP_DIRS
 
@@ -71,6 +79,19 @@ def _sidecar_for(binary: Path) -> Path:
     if name.lower().endswith(".md"):
         return binary.with_name(name[:-3] + "-notes.md")
     return binary.with_name(name + ".md")
+
+
+def _is_automatic_media_candidate(vault_root: Path, binary: Path) -> bool:
+    """Whether a media path may receive automatic recall-derived work."""
+    return not recall_policy.is_structured_only_path(vault_root, _sidecar_for(binary))
+
+
+def _purge_suppressed_clip(clip_index, vault_root: Path, binary: Path) -> None:
+    try:
+        sidecar = _sidecar_for(binary).relative_to(vault_root).as_posix()
+    except ValueError:
+        return
+    clip_index.purge_markdown_paths_if_present([sidecar])
 
 
 def _extracted_engine(sidecar: Path) -> str | None:
@@ -205,18 +226,48 @@ def backfill_media(
             embeddings.get_model()
         except Exception:  # noqa: BLE001 — warm-up is best-effort
             log.warning("embedding warm-up failed; re-embedding may be skipped this run")
-    clip_index = embeddings.get_clip_index(vault_root) if do_clip else None
     # Fast media first (image/pdf OCR is quick) so screenshots/docs are searchable in
     # minutes; slow A/V transcription (Whisper) runs last instead of starving the queue.
     _order = {"image": 0, "pdf": 1, "audio": 2, "video": 3}
-    files = sorted(
-        _iter_media_files(kb),
+    files: list[Path] = []
+    suppressed_sidecars: list[str] = []
+    for media in _iter_media_files(kb):
+        sidecar = _sidecar_for(media)
+        if not _is_automatic_media_candidate(vault_root, media):
+            try:
+                suppressed_sidecars.append(sidecar.relative_to(vault_root).as_posix())
+            except ValueError:
+                pass
+            continue
+        files.append(media)
+    # A policy transition must evict stale rows even when CLIP is disabled or
+    # unavailable. The model-free purge leaves an absent derived store absent.
+    clip_store = embeddings.get_clip_index(vault_root)
+    if suppressed_sidecars:
+        if dry_run:
+            log_fn(
+                "would purge CLIP rows for "
+                f"{len(suppressed_sidecars)} suppressed media file(s)"
+            )
+        else:
+            clip_store.purge_markdown_paths_if_present(suppressed_sidecars)
+    clip_index = clip_store if do_clip else None
+    files.sort(
         key=lambda p: (_order.get(extract.media_type_for(p), 9), p.as_posix()),
     )
     stats.scanned = len(files)
     log_fn(f"scanning {len(files)} media file(s) under {kb_prefix()} (dry_run={dry_run})")
 
     for i, f in enumerate(files, 1):
+        if not _is_automatic_media_candidate(vault_root, f):
+            if dry_run:
+                log_fn(
+                    f"  [{i}/{len(files)}] "
+                    f"{f.relative_to(vault_root).as_posix()} -> purge CLIP"
+                )
+            else:
+                _purge_suppressed_clip(clip_store, vault_root, f)
+            continue
         media_type = extract.media_type_for(f)
         try:
             rel = f.resolve().relative_to(vault_root.resolve()).as_posix()
@@ -268,11 +319,20 @@ def backfill_media(
             continue
 
         if need_sidecar:
+            if not _is_automatic_media_candidate(vault_root, f):
+                _purge_suppressed_clip(clip_store, vault_root, f)
+                continue
             sidecar, created = preserve.ensure_media_sidecar(vault_root, f)
             stats.sidecars_created += int(created)
         if need_ocr or need_rediarize or need_retime:
+            if not _is_automatic_media_candidate(vault_root, f):
+                _purge_suppressed_clip(clip_store, vault_root, f)
+                continue
             try:
                 res = extract.extract_text(f, media_type=media_type, vault_root=vault_root)
+                if not _is_automatic_media_candidate(vault_root, f):
+                    _purge_suppressed_clip(clip_store, vault_root, f)
+                    continue
                 # Each requested upgrade is judged by its engine marker (extract's
                 # soft-fail contract). A failed upgrade disables its pass for the rest
                 # (every further attempt would fail the same way); the sidecar is
@@ -314,26 +374,47 @@ def backfill_media(
                 log.exception("backfill: extraction failed for %s", f.name)
                 stats.extract_failed += 1
         if need_clip or need_scenes:
+            if not _is_automatic_media_candidate(vault_root, f):
+                _purge_suppressed_clip(clip_store, vault_root, f)
+                continue
             try:
                 mtime = f.stat().st_mtime
                 if media_type == "video" and need_scenes:
                     vectors, pairs = embeddings.embed_video_scenes(f)
+                    if not _is_automatic_media_candidate(vault_root, f):
+                        _purge_suppressed_clip(clip_store, vault_root, f)
+                        continue
                     clip_index.upsert_frames(rel, vectors, mtime)
+                    if not _is_automatic_media_candidate(vault_root, f):
+                        _purge_suppressed_clip(clip_store, vault_root, f)
+                        continue
                     if need_clip:
                         stats.clip_indexed += 1
                     written = scene_frames.write_scene_frames(vault_root, f, pairs)
                     stats.scene_frames_written += len(written)
                     if do_ocr and written:
                         do_ocr = _ocr_new_scene_frames(vault_root, written, stats, log_fn)
-                    if written and semantic_segments.semantic_segments_enabled():
+                    if (
+                        written
+                        and _is_automatic_media_candidate(vault_root, f)
+                        and semantic_segments.semantic_segments_enabled()
+                    ):
                         # Fold the fresh visual/OCR boundary events into the parent's
                         # semantic segments (mirrors the worker's trailing re-embed).
                         index_sync.upsert_after_write(vault_root, [sidecar])
                 elif media_type == "video":
-                    clip_index.upsert_frames(rel, embeddings.embed_video_frames(f), mtime)
+                    vectors = embeddings.embed_video_frames(f)
+                    if not _is_automatic_media_candidate(vault_root, f):
+                        _purge_suppressed_clip(clip_store, vault_root, f)
+                        continue
+                    clip_index.upsert_frames(rel, vectors, mtime)
                     stats.clip_indexed += 1
                 else:
-                    clip_index.upsert(rel, embeddings.embed_image(f), mtime)
+                    vector = embeddings.embed_image(f)
+                    if not _is_automatic_media_candidate(vault_root, f):
+                        _purge_suppressed_clip(clip_store, vault_root, f)
+                        continue
+                    clip_index.upsert(rel, vector, mtime)
                     stats.clip_indexed += 1
             except embeddings.ClipUnavailable as e:
                 log_fn(f"  ! CLIP unavailable ({e}); skipping CLIP for the rest")
@@ -358,8 +439,12 @@ def _ocr_new_scene_frames(
     unavailable, leaving the remaining sidecars `pending` for the live worker's
     restart scan to heal."""
     for jpg, frame_sidecar in written:
+        if not _is_automatic_media_candidate(vault_root, jpg):
+            continue
         try:
             res = extract.extract_text(jpg, media_type="image")
+            if not _is_automatic_media_candidate(vault_root, jpg):
+                continue
             preserve.update_sidecar_extraction(
                 vault_root, frame_sidecar,
                 text=res.text.strip() or "(no text detected)", engine=res.engine,

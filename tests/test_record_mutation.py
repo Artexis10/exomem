@@ -1,0 +1,629 @@
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import pytest
+from record_fixtures import copy_dataset_fixture, copy_vehicle_maintenance_fixture, copy_x3_fixture
+
+from exomem import record_formats
+from exomem import structured_collections as collections
+
+
+def _activity_log(vault: Path) -> None:
+    log = vault / "Knowledge Base/log.md"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("# Activity\n", encoding="utf-8")
+
+
+def _manifest(vault: Path, fixture: Path) -> collections.CollectionManifest:
+    return collections.load_manifest(vault, fixture / "_collection.md")
+
+
+def test_log_append_is_exact_splice_and_replay_is_idempotent(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    source = fixture / "Training Log.md"
+    before = source.read_bytes()
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    item = {
+        "occurred_on": "2026-08-03",
+        "title": "Pull",
+        "status": "completed",
+        "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}],
+    }
+    key = "11111111-1111-4111-8111-111111111111"
+
+    first = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=item,
+        item_key=key,
+        expected_container_hash=parsed.source_versions[-1].hash,
+        why="record a completed session",
+    )
+
+    after = source.read_bytes()
+    inserted = after.index(b"### 2026-08-03 \xc2\xb7 Pull")
+    appended = next(
+        record
+        for record in record_formats.load_adapter(tmp_path, manifest).read().records
+        if record.identity.key == key
+    )
+    assert after[:inserted] == before[: parsed.insertion_offset]
+    assert after[appended.span.end :] == before[parsed.insertion_offset :]
+    assert first["outcome"] == "committed"
+    assert first["after_item_hash"] == appended.source.hash
+
+    replay = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=item,
+        item_key=key,
+        expected_container_hash=first["after_container_hash"],
+        why="record a completed session",
+    )
+    assert replay["outcome"] == "replayed"
+    assert source.read_bytes() == after
+    with pytest.raises(collections.CollectionError, match="RECORD_ID_CONFLICT"):
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={**item, "title": "Push"},
+            item_key=key,
+            expected_container_hash=first["after_container_hash"],
+            why="record a changed session",
+        )
+
+
+def test_item_update_requires_both_guards_and_preserves_bom_and_body(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    record = next(item for item in parsed.records if item.identity.key.startswith("14d2bdca"))
+    path = tmp_path / record.source.path
+    before = path.read_bytes()
+
+    with pytest.raises(collections.CollectionError, match="STALE_RECORD"):
+        records.update_record(
+            tmp_path,
+            manifest.path,
+            item_key=record.identity.key,
+            changes={"status": "completed"},
+            expected_container_hash=parsed.snapshot,
+            expected_item_version="0" * 64,
+            why="correct the maintenance status",
+        )
+
+    result = records.update_record(
+        tmp_path,
+        manifest.path,
+        item_key=record.identity.key,
+        changes={"status": "completed"},
+        expected_container_hash=parsed.snapshot,
+        expected_item_version=record.source.hash,
+        why="correct the maintenance status",
+    )
+    after = path.read_bytes()
+    assert after.startswith(b"\xef\xbb\xbf")
+    assert after.endswith(b"BOM-bearing item body remains readable.\n")
+    assert b"status: completed" in after
+    assert result["affected_paths"] == [record.source.path]
+    assert before != after
+
+
+def test_dataset_mutation_refuses_without_writing(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_dataset_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    source = fixture / "readings.csv"
+    before = source.read_bytes()
+
+    with pytest.raises(collections.CollectionError, match="UNSUPPORTED_RECORD_MUTATION"):
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "reading_id": "r-999",
+                "occurred_on": "2026-01-01",
+                "category": "water",
+                "value": 1,
+            },
+            item_key="r-999",
+            expected_container_hash=hashlib.sha256(before).hexdigest(),
+            why="record a reading",
+        )
+    assert source.read_bytes() == before
+
+
+def test_item_append_creates_only_one_deterministic_file(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    before = record_formats.load_adapter(tmp_path, manifest).read()
+    key = "22222222-2222-4222-8222-222222222222"
+
+    result = records.append_record(
+        tmp_path,
+        manifest.path,
+        item={
+            "occurred_on": "2026-08-03",
+            "asset": "[[Assets/Vehicle]]",
+            "provider": "Northside Garage",
+            "services": ["oil change"],
+            "amount": 95.0,
+            "currency": "GBP",
+            "status": "completed",
+            "next_due_on": None,
+        },
+        item_key=key,
+        expected_container_hash=before.snapshot,
+        why="record completed maintenance",
+        body="Ordinary readable body.\n",
+    )
+
+    path = fixture / "Events" / f"{key}.md"
+    assert path.is_file()
+    assert result["affected_paths"] == [path.relative_to(tmp_path).as_posix()]
+    assert "Ordinary readable body." in path.read_text(encoding="utf-8")
+    assert len(record_formats.load_adapter(tmp_path, manifest).read().records) == 4
+
+
+def test_log_update_replaces_only_target_block_and_direct_edit_is_stale(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    source = fixture / "Training Log.md"
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    target = parsed.records[0]
+    before = source.read_bytes()
+    source.write_bytes(before.replace(b"2026-08-02", b"2026-08-04", 1))
+
+    with pytest.raises(collections.CollectionError, match="STALE_RECORD"):
+        records.update_record(
+            tmp_path,
+            manifest.path,
+            item_key=target.identity.key,
+            changes={"title": "Pull"},
+            expected_container_hash=parsed.source_versions[-1].hash,
+            expected_item_version=target.source.hash,
+            why="correct a session title",
+        )
+
+
+def test_log_update_replaces_the_exact_resolved_block(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    source = fixture / "Training Log.md"
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    target = parsed.records[0]
+    before = source.read_bytes()
+
+    result = records.update_record(
+        tmp_path,
+        manifest.path,
+        item_key=target.identity.key,
+        changes={"title": "Pull"},
+        expected_container_hash=parsed.source_versions[-1].hash,
+        expected_item_version=target.source.hash,
+        why="correct a session title",
+    )
+
+    after = source.read_bytes()
+    assert result["outcome"] == "committed"
+    assert after.startswith(before[: target.span.start])
+    assert after.endswith(before[target.span.end :])
+    assert b"### 2026-08-02 \xc2\xb7 Pull" in after
+
+
+def test_aborted_log_append_round_trips_note_and_refuses_heading_delimiters(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    item = {
+        "occurred_on": "2026-08-03",
+        "title": "Push",
+        "note": "Stopped, didn't feel like it, circadian and recovery",
+        "status": "aborted",
+        "movements": [{"movement": "Press", "band": "grey", "repetitions": ""}],
+    }
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=item,
+        item_key="55555555-5555-4555-8555-555555555555",
+        expected_container_hash=parsed.source_versions[-1].hash,
+        why="record an aborted session",
+    )
+    appended = next(
+        record
+        for record in record_formats.load_adapter(tmp_path, manifest).read().records
+        if record.identity.key == "55555555-5555-4555-8555-555555555555"
+    )
+    assert appended.values["status"] == "aborted"
+    assert appended.values["note"] == item["note"]
+
+    current = record_formats.load_adapter(tmp_path, manifest).read()
+    with pytest.raises(collections.CollectionError, match="UNREPRESENTABLE_RECORD_VALUE"):
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={**item, "title": "Push · Pull"},
+            item_key="66666666-6666-4666-8666-666666666666",
+            expected_container_hash=current.source_versions[-1].hash,
+            why="attempt an ambiguous heading",
+        )
+
+
+def test_audit_inspection_reports_direct_canonical_edit_gap(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    result = records.append_record(
+        tmp_path,
+        manifest.path,
+        item={
+            "occurred_on": "2026-08-03",
+            "title": "Pull",
+            "status": "completed",
+            "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}],
+        },
+        item_key="33333333-3333-4333-8333-333333333333",
+        expected_container_hash=parsed.source_versions[-1].hash,
+        why="record a session",
+    )
+    assert result["outcome"] == "committed"
+    assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "ok"
+    source = fixture / "Training Log.md"
+    source.write_bytes(source.read_bytes() + b"\nmanual edit\n")
+    assert records.inspect_audit_gap(tmp_path, manifest.path)["status"] == "gap"
+
+
+def test_create_collection_is_create_only_and_scaffolds_item_directory(tmp_path: Path) -> None:
+    from exomem import records
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    manifest = """---
+type: collection
+exomem_id: 44444444-4444-4444-8444-444444444444
+title: New records
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+---
+"""
+
+    result = records.create_collection(tmp_path, manifest_path, manifest, why="create a collection")
+
+    assert result["outcome"] == "committed"
+    assert (tmp_path / manifest_path).is_file()
+    source = tmp_path / "Knowledge Base/Records/New/Events"
+    assert source.is_dir()
+    assert records.inspect_audit_gap(tmp_path, manifest_path) == {"status": "ok", "gaps": []}
+    source.rmdir()
+    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == "gap"
+    with pytest.raises(collections.CollectionError, match="CREATE_ONLY_CONFLICT"):
+        records.create_collection(tmp_path, manifest_path, manifest, why="retry creation")
+
+
+def test_create_collection_without_scaffold_has_an_audited_absent_source_state(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/Manifest Only/_collection.md"
+    manifest = """---
+type: collection
+exomem_id: 55555555-5555-4555-8555-555555555555
+title: Manifest only records
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+---
+"""
+
+    result = records.create_collection(
+        tmp_path, manifest_path, manifest, why="create only the collection contract", scaffold=False
+    )
+
+    created = tmp_path / manifest_path
+    assert result["audit_correlation"] is not None
+    assert result["after_container_hash"] is not None
+    assert "record_audit:" in created.read_text(encoding="utf-8")
+    assert not (created.parent / "Events").exists()
+    assert records.inspect_audit_gap(tmp_path, manifest_path) == {"status": "ok", "gaps": []}
+    (created.parent / "Events").mkdir()
+    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == "gap"
+
+
+def test_create_unscaffolded_markdown_log_has_an_audited_absent_source_state(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = (
+        (fixture / "_collection.md")
+        .read_text(encoding="utf-8")
+        .replace("9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8", "56565656-5656-4565-8565-565656565656")
+    )
+    manifest_path = "Knowledge Base/Records/Log Only/_collection.md"
+
+    result = records.create_collection(
+        tmp_path, manifest_path, manifest, why="create only the log contract", scaffold=False
+    )
+
+    source = tmp_path / "Knowledge Base/Records/Log Only/Training Log.md"
+    assert result["audit_correlation"] is not None
+    assert result["after_container_hash"] is not None
+    assert not source.exists()
+    assert records.inspect_audit_gap(tmp_path, manifest_path) == {"status": "ok", "gaps": []}
+    source.write_text("manual source\n", encoding="utf-8")
+    assert records.inspect_audit_gap(tmp_path, manifest_path)["status"] == "gap"
+
+
+def test_append_preserves_committed_batch_publication_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records, vault
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    committed = vault.BatchWriteError(
+        "BATCH_CLEANUP_INCOMPLETE",
+        vault.BatchTargetSummary(affected_count=3, targets=("a.md",), omitted_target_count=2),
+        committed=True,
+    )
+    monkeypatch.setattr(
+        records.vault,
+        "batch_atomic_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(committed),
+    )
+
+    with pytest.raises(vault.BatchWriteError) as raised:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "title": "Pull",
+                "status": "completed",
+                "movements": [],
+            },
+            item_key="12121212-1212-4121-8121-121212121212",
+            expected_container_hash=parsed.source_versions[-1].hash,
+            why="preserve the committed batch outcome",
+        )
+
+    assert raised.value is committed
+    assert raised.value.committed is True
+
+
+def test_append_refuses_manual_equal_item_without_a_correlated_transition(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    manual = parsed.records[0]
+
+    with pytest.raises(collections.CollectionError) as raised:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=manual.values,
+            item_key=manual.identity.key,
+            expected_container_hash=parsed.snapshot,
+            why="do not label a manual item as replayed",
+            body=manual.body,
+        )
+
+    assert raised.value.code == "RECORD_ID_CONFLICT"
+
+
+def test_item_body_audit_shaped_prose_does_not_forge_an_audit_marker(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item={
+            "occurred_on": "2026-08-03",
+            "asset": "[[Assets/Vehicle]]",
+            "provider": "Northside Garage",
+            "services": ["oil change"],
+            "amount": 95.0,
+            "currency": "GBP",
+            "status": "completed",
+        },
+        item_key="13131313-1313-4131-8131-131313131313",
+        expected_container_hash=parsed.snapshot,
+        why="record a body marker example",
+        body="Example prose: exomem-record-audit: deadbeefdeadbeefdeadbeef",
+    )
+
+    assert records.inspect_audit_gap(tmp_path, manifest.path) == {"status": "ok", "gaps": []}
+
+
+def test_mutable_record_ids_are_normalized_uuids_and_dataset_stays_unsupported(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    with pytest.raises(collections.CollectionError, match="INVALID_RECORD_ID"):
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-08-03",
+                "title": "Push",
+                "status": "completed",
+                "movements": [],
+            },
+            item_key="not-a-uuid",
+            expected_container_hash=parsed.source_versions[-1].hash,
+            why="reject invalid identity",
+        )
+
+    dataset = copy_dataset_fixture(tmp_path / "dataset")
+    dataset_manifest = _manifest(tmp_path / "dataset", dataset)
+    with pytest.raises(collections.CollectionError, match="UNSUPPORTED_RECORD_MUTATION"):
+        records.append_record(
+            tmp_path / "dataset",
+            dataset_manifest.path,
+            item={"reading_id": "r-new", "occurred_on": "2026-01-01", "category": "x", "value": 1},
+            item_key="not-a-uuid",
+            expected_container_hash="not-a-hash",
+            why="dataset remains read only",
+        )
+
+
+def test_log_body_refuses_and_partial_status_is_declarative(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            '    - equals: "Stopped, didn\'t feel like it, circadian and recovery"\n      values:\n        status: aborted\n',
+            '    - equals: "Stopped, didn\'t feel like it, circadian and recovery"\n      values:\n        status: aborted\n    - equals: "Partial"\n      values:\n        status: partial\n',
+        ),
+        encoding="utf-8",
+    )
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    item = {
+        "occurred_on": "2026-08-03",
+        "title": "Pull",
+        "note": "Partial",
+        "status": "partial",
+        "movements": [],
+    }
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=item,
+        item_key="77777777-7777-4777-8777-777777777777",
+        expected_container_hash=parsed.source_versions[-1].hash,
+        why="record partial session",
+    )
+    with pytest.raises(collections.CollectionError, match="UNREPRESENTABLE_RECORD_BODY"):
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=item,
+            item_key="88888888-8888-4888-8888-888888888888",
+            expected_container_hash=record_formats.load_adapter(tmp_path, manifest)
+            .read()
+            .source_versions[-1]
+            .hash,
+            why="reject hidden log body",
+            body="cannot be represented",
+        )
+
+
+def test_item_container_hash_retries_after_append_and_manifest_object_drift_refuses(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    before = record_formats.load_adapter(tmp_path, manifest).read()
+    item = {
+        "occurred_on": "2026-08-03",
+        "asset": "[[Assets/Vehicle]]",
+        "provider": "Northside Garage",
+        "services": ["oil change"],
+        "amount": 95.0,
+        "currency": "GBP",
+        "status": "completed",
+    }
+    result = records.append_record(
+        tmp_path,
+        manifest,
+        item=item,
+        item_key="99999999-9999-4999-8999-999999999999",
+        expected_container_hash=before.snapshot,
+        why="record maintenance",
+    )
+    replay = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=item,
+        item_key="99999999-9999-4999-8999-999999999999",
+        expected_container_hash=result["after_container_hash"],
+        why="record maintenance",
+    )
+    assert replay["outcome"] == "replayed"
+
+    changed = fixture / "_collection.md"
+    changed.write_text(changed.read_text(encoding="utf-8") + "\nchanged\n", encoding="utf-8")
+    with pytest.raises(collections.CollectionError, match="STALE_COLLECTION_MANIFEST"):
+        records.append_record(
+            tmp_path,
+            manifest,
+            item=item,
+            item_key="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            expected_container_hash=result["after_container_hash"],
+            why="refuse stale contract",
+        )

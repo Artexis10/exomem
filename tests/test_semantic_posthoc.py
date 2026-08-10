@@ -476,7 +476,7 @@ def test_watcher_delete_skips_posthoc_parsing_and_keeps_cleanup(
     monkeypatch.setattr(
         index_sync,
         "delete_after_remove",
-        lambda _root, paths: calls.append(list(paths)),
+        lambda _root, paths, **_kwargs: calls.append(list(paths)),
     )
     watcher = file_watcher.FileWatcher(tmp_path)
 

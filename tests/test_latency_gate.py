@@ -243,6 +243,39 @@ def test_relation_filtered_recall_stays_bounded(dense_vault_2k: Path) -> None:
     )
 
 
+def test_warm_candidate_admission_reuses_checkpointed_projection(
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lane filtering uses the request's exact projection instead of re-statting
+    every ranked path.  One live check before page hydration remains allowed."""
+    from exomem import recall_policy
+
+    note_count = 200
+    vault = _build_dense_vault(tmp_path, note_count)
+    original = recall_policy.is_recall_candidate
+    calls = 0
+
+    def counted(root: Path, path: Path | str) -> bool:
+        nonlocal calls
+        calls += 1
+        return original(root, path)
+
+    monkeypatch.setattr(recall_policy, "is_recall_candidate", counted)
+
+    find_module.find(
+        vault,
+        query=_QUERIES[0],
+        limit=10,
+        mode="hybrid",
+        graph=True,
+    )
+
+    assert calls <= note_count + 100, (
+        f"candidate admission revalidated {calls} paths for {note_count} notes; "
+        "the checkpoint-bound projection should filter lanes before bounded live hydration"
+    )
+
+
 def test_warm_graph_lane_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
     """Warm graph median at 4x the corpus stays within CEIL_GRAPH_RATIO (plus an
     absolute ms-scale noise floor) — so a linear-in-N warm cost cannot return

@@ -24,7 +24,7 @@ wrappers as the outermost belt.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -34,6 +34,64 @@ log = logging.getLogger(__name__)
 
 _REPORT_PATH_LIMIT = 256
 _REPORT_PATH_BYTE_LIMIT = 1024
+
+
+def _withdraw_unbridgeable_corpus_consumers(vault_root: Path) -> None:
+    """Fail closed when an exact filesystem delta could not be published.
+
+    Incremental resolver, inbound, graph, and semantic-corpus projections may
+    advance only from one retained event suffix.  Once publication fails, the
+    suffix is unknowable: make the registry cold and evict the same-vault RAM
+    consumers so their next read derives directly from human-owned files.
+    Persisted graph readers also become unavailable because their old marker no
+    longer matches the cold disk projection.
+    """
+    from . import find, freshness, semantic_contract, vault
+
+    freshness.invalidate(vault_root)
+    semantic_contract.evict_corpus_context(vault_root)
+    find.evict_resolver_caches(vault_root)
+    vault.evict_inbound_index(vault_root)
+
+
+def publish_corpus_delta(
+    vault_root: Path,
+    *,
+    changed: tuple[Path, ...] | list[Path] = (),
+    deleted: tuple[Path | str, ...] | list[Path | str] = (),
+    attempts: int = 1,
+) -> bool:
+    """Publish one complete vault delta, retrying before any consumer fan-out.
+
+    A caller may retry the *same complete batch* once for a transient failure.
+    Persistent failure withdraws every checkpoint-consuming projection rather
+    than allowing a path-local callback to bless stale global state.
+    """
+    from . import semantic_contract
+
+    changed_values = tuple(Path(path) for path in changed)
+    deleted_values = tuple(deleted)
+    if not changed_values and not deleted_values:
+        return True
+    bounded_attempts = max(1, min(int(attempts), 2))
+    for attempt in range(1, bounded_attempts + 1):
+        try:
+            semantic_contract.publish_corpus_files_changed(
+                vault_root,
+                changed=changed_values,
+                deleted=deleted_values,
+            )
+        except Exception:  # noqa: BLE001 - canonical bytes already committed
+            log.warning(
+                "canonical corpus publication failed (attempt %d/%d)",
+                attempt,
+                bounded_attempts,
+                exc_info=True,
+            )
+        else:
+            return True
+    _withdraw_unbridgeable_corpus_consumers(vault_root)
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +111,8 @@ class IndexComponentOutcome:
             "embeddings",
             "watcher",
             "clip",
+            "claims",
+            "semantic_purge",
         }:
             raise ValueError("unsupported index component")
         if type(self.outcome) is not str or self.outcome not in {
@@ -98,11 +158,10 @@ class IndexSyncReport:
         ):
             raise ValueError("index sync paths exceed report bound")
         if any(
-            not _bounded_report_path(path)
-            for path in (*self.requested_paths, *self.eligible_paths)
+            not _bounded_report_path(path) for path in (*self.requested_paths, *self.eligible_paths)
         ):
             raise ValueError("index sync report contains an unsafe path")
-        if len(self.components) > 6:
+        if len(self.components) > 8:
             raise ValueError("index sync component count exceeds report bound")
         if len({item.component for item in self.components}) != len(self.components):
             raise ValueError("index sync report contains duplicate components")
@@ -151,9 +210,7 @@ def _bounded_paths(paths: list[str]) -> tuple[tuple[str, ...], bool]:
     )
 
 
-def with_component(
-    report: IndexSyncReport, outcome: IndexComponentOutcome
-) -> IndexSyncReport:
+def with_component(report: IndexSyncReport, outcome: IndexComponentOutcome) -> IndexSyncReport:
     """Return one bounded report with an independently observed outer leaf."""
     components = tuple(
         item for item in report.components if item.component != outcome.component
@@ -187,14 +244,33 @@ def failed_upsert_report(
     )
     if watcher is not None:
         components += (watcher,)
-    return IndexSyncReport(
-        "upsert", requested, requested, components, truncated
-    )
+    return IndexSyncReport("upsert", requested, requested, components, truncated)
 
 
-def unverified_upsert_report(
-    vault_root: Path, written_paths: list[Path]
+def _stale_batch_report(
+    vault_root: Path,
+    identity_rels: list[str],
+    requested: tuple[str, ...],
+    eligible: tuple[str, ...],
+    *,
+    truncated: bool,
 ) -> IndexSyncReport:
+    """Requeue a changed admission snapshot without publishing mixed state."""
+    deferred_index.add_full(vault_root, identity_rels)
+    components = tuple(
+        IndexComponentOutcome(component, "degraded", "batch_stale")
+        for component in (
+            "lexstore",
+            "memory_refs",
+            "resolver",
+            "epistemic_graph",
+            "embeddings",
+        )
+    )
+    return IndexSyncReport("upsert", requested, eligible, components, truncated)
+
+
+def unverified_upsert_report(vault_root: Path, written_paths: list[Path]) -> IndexSyncReport:
     """Represent a legacy outer upsert that returned no observable status."""
     requested, truncated = _bounded_paths(_rel_md_paths(vault_root, written_paths))
     components = tuple(
@@ -207,14 +283,10 @@ def unverified_upsert_report(
             "embeddings",
         )
     )
-    return IndexSyncReport(
-        "upsert", requested, requested, components, truncated
-    )
+    return IndexSyncReport("upsert", requested, requested, components, truncated)
 
 
-def observed_delete_report(
-    removed_paths: list[str], *, degraded: bool
-) -> IndexSyncReport:
+def observed_delete_report(removed_paths: list[str], *, degraded: bool) -> IndexSyncReport:
     """Bound a legacy or failed outer delete without inventing completion."""
     requested, truncated = _bounded_paths(
         [path for path in removed_paths if _safe_relative_path(path) is not None]
@@ -231,9 +303,7 @@ def observed_delete_report(
             "embeddings",
         )
     )
-    return IndexSyncReport(
-        "delete", requested, requested, components, truncated
-    )
+    return IndexSyncReport("delete", requested, requested, components, truncated)
 
 
 def _safe_relative_path(value: str) -> str | None:
@@ -321,10 +391,69 @@ def _record_deferred_semantic_upserts(
     return len(rels), deferred_index.add(vault_root, rels)
 
 
+def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
+    """Drop structured-only paths from semantic sidecars without touching identity.
+
+    This is intentionally model-free: cleanup must work while model features are
+    disabled, and a failure in one derivative must not keep the other semantic
+    indexes serving a raw Record.  Memory references and the wikilink resolver
+    are deliberately absent; they index stable page identity, not recall text.
+    """
+    rels = [
+        rel
+        for raw in rel_paths
+        if (rel := _safe_relative_path(raw)) is not None and rel.lower().endswith(".md")
+    ]
+    if not rels:
+        return True
+    # Keep the first event spelling/order but avoid redundant sqlite writes.
+    rels = list(dict.fromkeys(rels))
+    from . import claims, embedding_index, embeddings, epistemic_graph, index_paths, lexstore
+
+    def _purge(component: str, callback) -> bool:
+        try:
+            return callback() is not False
+        except Exception:  # noqa: BLE001 - every semantic sidecar heals independently
+            log.warning("%s semantic purge failed", component, exc_info=True)
+            return False
+
+    succeeded = True
+    if lexstore.lexical_path(vault_root).exists():
+        succeeded &= _purge(
+            "lexstore", lambda: lexstore.get_store(vault_root).delete_rel_paths(rels)
+        )
+    if index_paths.sidecar_path(vault_root).exists():
+        succeeded &= _purge(
+            "embeddings",
+            lambda: embedding_index.EmbeddingIndex(vault_root).purge_paths_if_present(rels),
+        )
+    if epistemic_graph.sidecar_path(vault_root).exists():
+        succeeded &= _purge(
+            "epistemic_graph",
+            lambda: epistemic_graph.EpistemicGraphIndex(vault_root).delete_paths(rels),
+        )
+    if claims.sidecar_path(vault_root).exists():
+        succeeded &= _purge(
+            "claims",
+            lambda: claims.delete_after_remove(vault_root, rels),
+        )
+    if index_paths.clip_sidecar_path(vault_root).exists():
+        succeeded &= _purge(
+            "clip",
+            lambda: embeddings.get_clip_index(vault_root).purge_markdown_paths_if_present(rels),
+        )
+    succeeded &= _purge(
+        "deferred_semantic", lambda: deferred_index.clear_semantic_receipts(vault_root, rels)
+    )
+    return bool(succeeded)
+
+
 def replay_deferred_embedding(
     vault_root: Path,
     paths: list[Path],
-    receipts: list[deferred_index.DeferredReceipt] | tuple[deferred_index.DeferredReceipt, ...] | None = None,
+    receipts: list[deferred_index.DeferredReceipt]
+    | tuple[deferred_index.DeferredReceipt, ...]
+    | None = None,
 ):
     """Replay one durable embedding batch and clear only its completed revisions."""
     from . import embeddings
@@ -332,13 +461,9 @@ def replay_deferred_embedding(
     if receipts is None:
         rels = set(_rel_md_paths(vault_root, paths))
         receipts = [
-            receipt
-            for receipt in deferred_index.snapshot(vault_root)
-            if receipt.rel_path in rels
+            receipt for receipt in deferred_index.snapshot(vault_root) if receipt.rel_path in rels
         ]
-    status = embeddings.upsert_after_write_status(
-        vault_root, paths, defer_during_warm=False
-    )
+    status = embeddings.upsert_after_write_status(vault_root, paths, defer_during_warm=False)
     if status.status == "completed":
         deferred_index.clear_receipts(vault_root, list(receipts))
     return status
@@ -419,12 +544,9 @@ def drain_deferred_work(
             log.warning("deferred full-index dispatch failed; work remains queued", exc_info=True)
         else:
             if dispatched is False or (
-                isinstance(dispatched, IndexSyncReport)
-                and dispatched.reconcile_required
+                isinstance(dispatched, IndexSyncReport) and dispatched.reconcile_required
             ):
-                log.warning(
-                    "deferred full-index dispatch incomplete; work remains queued"
-                )
+                log.warning("deferred full-index dispatch incomplete; work remains queued")
                 return processed
             processed += deferred_index.clear_full(vault_root, full_pending)
 
@@ -449,84 +571,93 @@ def drain_deferred_work(
 
 def _dispatch_upsert_components(
     vault_root: Path,
-    eligible: list[Path],
+    identity_paths: list[Path],
+    semantic_paths: list[Path],
+    suppressed_rels: list[str],
     *,
     defer_semantic: bool,
+    created_semantic_paths: list[Path],
 ) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
 
     components = [
         _legacy_component(
-            "lexstore", lambda: lexstore.upsert_after_write(vault_root, eligible)
-        ),
-        _legacy_component(
             "memory_refs",
-            lambda: memory_refs.upsert_after_write(vault_root, eligible),
+            lambda: memory_refs.upsert_after_write(vault_root, identity_paths),
         ),
     ]
-    rels = _rel_md_paths(vault_root, eligible)
+    rels = _rel_md_paths(vault_root, identity_paths)
     components.append(
         _resolver_component(
-            lambda: find.on_resolver_files_changed(vault_root, rels, [])
-            if rels
-            else None
+            lambda: find.on_resolver_files_changed(vault_root, rels, []) if rels else None
+        )
+    )
+    # Publish all raw-Record removals before any semantic insertion/defer. The
+    # identity fan-out above remains intentionally broad and has no recall body
+    # egress; a purge failure is isolated and cannot stop other sidecars.
+    purge_succeeded = purge_semantic_only(vault_root, suppressed_rels)
+    components.append(
+        IndexComponentOutcome(
+            "semantic_purge",
+            "completed" if purge_succeeded else "degraded",
+            "purge_completed" if purge_succeeded else "purge_failed",
         )
     )
     components.append(
         _legacy_component(
-            "epistemic_graph",
-            lambda: epistemic_graph.upsert_after_write(vault_root, eligible),
+            "lexstore", lambda: lexstore.upsert_after_write(vault_root, semantic_paths)
         )
     )
+    def graph_upsert() -> None:
+        if created_semantic_paths:
+            epistemic_graph.upsert_after_write(
+                vault_root,
+                semantic_paths,
+                created_paths=created_semantic_paths,
+            )
+        else:
+            epistemic_graph.upsert_after_write(vault_root, semantic_paths)
+
+    components.append(_legacy_component("epistemic_graph", graph_upsert))
     if defer_semantic or mode.defer_expensive_indexes():
         try:
             semantic_count, added = _record_deferred_semantic_upserts(
                 vault_root,
-                eligible,
+                semantic_paths,
                 omit_proven_current=defer_semantic,
             )
         except Exception:  # noqa: BLE001 - degradation is reported, other lanes landed
             log.warning("durable semantic defer failed", exc_info=True)
             components.append(
-                IndexComponentOutcome(
-                    "embeddings", "degraded", "durable_defer_failed"
-                )
+                IndexComponentOutcome("embeddings", "degraded", "durable_defer_failed")
             )
         else:
             if added:
                 log.info("deferred semantic indexing for %d markdown file(s)", added)
             if semantic_count:
                 components.append(
-                    IndexComponentOutcome(
-                        "embeddings", "deferred", "deferred_durable"
-                    )
+                    IndexComponentOutcome("embeddings", "deferred", "deferred_durable")
                 )
             else:
                 components.append(
-                    IndexComponentOutcome(
-                        "embeddings", "accepted", "no_eligible_paths"
-                    )
+                    IndexComponentOutcome("embeddings", "accepted", "no_eligible_paths")
                 )
     else:
         from . import embeddings
 
         try:
-            status = embeddings.upsert_after_write_status(vault_root, eligible)
+            status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
             component = _embedding_component(status)
         except Exception:  # noqa: BLE001 - derived index must not fail a writer
             log.warning("embeddings index dispatch failed", exc_info=True)
-            components.append(
-                IndexComponentOutcome("embeddings", "degraded", "dispatch_failed")
-            )
+            components.append(IndexComponentOutcome("embeddings", "degraded", "dispatch_failed"))
         else:
             components.append(component)
             if status.status != "completed" and status.code != "deferred_warmup":
                 try:
-                    _record_deferred_semantic_upserts(vault_root, eligible)
+                    _record_deferred_semantic_upserts(vault_root, semantic_paths)
                 except Exception:  # noqa: BLE001 - report remains the primary outcome
-                    log.warning(
-                        "durable semantic retry recording failed", exc_info=True
-                    )
+                    log.warning("durable semantic retry recording failed", exc_info=True)
     return components
 
 
@@ -536,6 +667,8 @@ def upsert_after_write(
     *,
     defer_semantic: bool = False,
     semantic_states: Mapping[str, semantic_index.SemanticParentIndexState] | None = None,
+    publish_corpus_change: bool = True,
+    created_paths: Iterable[Path] = (),
 ) -> IndexSyncReport:
     """Fan a writer's markdown change out to every index sidecar.
 
@@ -576,9 +709,65 @@ def upsert_after_write(
             (),
             requested_truncated or eligible_truncated,
         )
-    states = dict(semantic_states or {})
-    for path, rel in zip(eligible, eligible_rels, strict=True):
-        if path.suffix.lower() != ".md" or rel in states:
+    from . import recall_policy
+
+    batch = recall_policy.partition_markdown_paths(vault_root, eligible)
+    identity_paths = [item.path for item in batch.identity_paths]
+    semantic_paths = [item.path for item in batch.admitted_paths]
+    semantic_rels = [item.rel_path for item in batch.admitted_paths]
+    suppressed_rels = [item.rel_path for item in batch.suppressed_paths]
+    created_rels = {
+        rel
+        for path in created_paths
+        if (rel := _rel(Path(path))) is not None
+    }
+    created_semantic_paths = [
+        item.path for item in batch.admitted_paths if item.rel_path in created_rels
+    ]
+    if not identity_paths:
+        # Preserve the observable no-semantic-path fan-out contract for legacy
+        # non-Markdown notifications while keeping them out of every identity
+        # and semantic collection.
+        components = _dispatch_upsert_components(
+            vault_root,
+            [],
+            [],
+            [],
+            defer_semantic=defer_semantic,
+            created_semantic_paths=[],
+        )
+        return IndexSyncReport(
+            "upsert",
+            requested_report,
+            eligible_report,
+            tuple(components),
+            requested_truncated or eligible_truncated,
+        )
+    if not batch.revalidate(vault_root):
+        # A changed policy or source cannot be safely split across the identity
+        # and semantic fan-outs. Preserve a generic retry; the next replay takes
+        # a fresh snapshot rather than treating the path as suppression.
+        return _stale_batch_report(
+            vault_root,
+            [item.rel_path for item in batch.identity_paths],
+            requested_report,
+            eligible_report,
+            truncated=requested_truncated or eligible_truncated,
+        )
+    # Canonical writers publish their exact committed targets before any
+    # incremental cache fan-out. This gives consumers a bridgeable freshness
+    # delta instead of asking a path-local resolver patch to bless a global
+    # disk identity it cannot prove. The wrapper keeps the warm semantic
+    # corpus's freshness token in the same publication boundary; a watcher may
+    # later publish the identical event harmlessly.
+    publication_current = not publish_corpus_change or publish_corpus_delta(
+        vault_root,
+        changed=identity_paths,
+    )
+    admitted_rels = {item.rel_path for item in batch.admitted_paths}
+    states = {rel: state for rel, state in (semantic_states or {}).items() if rel in admitted_rels}
+    for path, rel in zip(semantic_paths, semantic_rels, strict=True):
+        if rel in states:
             continue
         active = semantic_index.parent_state_for_path(vault_root, path)
         if active is not None:
@@ -588,27 +777,62 @@ def upsert_after_write(
             states[rel] = semantic_index.build_parent_index_state(vault_root, path)
         except (OSError, UnicodeError, ValueError):
             continue
+    if not batch.revalidate(vault_root):
+        return _stale_batch_report(
+            vault_root,
+            [item.rel_path for item in batch.identity_paths],
+            requested_report,
+            eligible_report,
+            truncated=requested_truncated or eligible_truncated,
+        )
     token = semantic_index.set_parent_states(states)
     try:
         components = _dispatch_upsert_components(
-            vault_root, eligible, defer_semantic=defer_semantic
+            vault_root,
+            identity_paths,
+            semantic_paths,
+            suppressed_rels,
+            defer_semantic=defer_semantic,
+            created_semantic_paths=created_semantic_paths,
         )
     finally:
         semantic_index.reset_parent_states(token)
-    return IndexSyncReport(
+    if not batch.revalidate(vault_root):
+        return _stale_batch_report(
+            vault_root,
+            [item.rel_path for item in batch.identity_paths],
+            requested_report,
+            eligible_report,
+            truncated=requested_truncated or eligible_truncated,
+        )
+    report = IndexSyncReport(
         "upsert",
         requested_report,
         eligible_report,
         tuple(components),
         requested_truncated or eligible_truncated,
     )
+    if publication_current:
+        return report
+    try:
+        record_failed_refresh(vault_root, identity_paths)
+    except Exception:  # noqa: BLE001 - the degraded report remains authoritative
+        log.warning("durable full-index retry recording failed", exc_info=True)
+    return with_component(
+        report,
+        IndexComponentOutcome("epistemic_graph", "degraded", "publication_failed"),
+    )
 
 
 def delete_after_remove(
-    vault_root: Path, removed_rel_paths: list[str]
+    vault_root: Path,
+    removed_rel_paths: list[str],
+    *,
+    publish_corpus_change: bool = True,
 ) -> IndexSyncReport:
     """Fan a removal out to every index sidecar."""
     from . import (
+        claims,
         embeddings,
         epistemic_graph,
         find,
@@ -626,17 +850,29 @@ def delete_after_remove(
     requested_report, paths_truncated = _bounded_paths(safe_paths)
     if not safe_paths:
         return IndexSyncReport("delete", requested_report, requested_report, ())
+    md_rels = [rel for rel in safe_paths if rel.lower().endswith(".md")]
+    publication_current = not (md_rels and publish_corpus_change) or publish_corpus_delta(
+        vault_root,
+        deleted=[vault_root / rel for rel in md_rels],
+    )
     components = [
-        _legacy_component(
-            "lexstore", lambda: lexstore.delete_after_remove(vault_root, safe_paths)
-        ),
+        _legacy_component("lexstore", lambda: lexstore.delete_after_remove(vault_root, safe_paths)),
         _legacy_component(
             "memory_refs",
             lambda: memory_refs.delete_after_remove(vault_root, safe_paths),
         ),
         _legacy_component(
             "epistemic_graph",
-            lambda: epistemic_graph.delete_after_remove(vault_root, safe_paths),
+            # The exact deletion delta is already published above. Refreshing
+            # through that checkpoint removes the vanished file and repairs
+            # every affected source edge before marking the graph current.
+            lambda: (
+                epistemic_graph.upsert_after_write(
+                    vault_root, [vault_root / rel for rel in md_rels]
+                )
+                if md_rels
+                else epistemic_graph.delete_after_remove(vault_root, safe_paths)
+            ),
         ),
         _legacy_component(
             "clip",
@@ -648,17 +884,21 @@ def delete_after_remove(
         component = _embedding_component(status)
     except Exception:  # noqa: BLE001 - derived index must not stop resolver cleanup
         log.warning("embeddings index delete failed", exc_info=True)
-        components.append(
-            IndexComponentOutcome("embeddings", "degraded", "dispatch_failed")
-        )
+        components.append(IndexComponentOutcome("embeddings", "degraded", "dispatch_failed"))
     else:
         components.append(component)
-    md_rels = [rel for rel in safe_paths if rel.lower().endswith(".md")]
+    components.append(
+        _legacy_component("claims", lambda: claims.delete_after_remove(vault_root, md_rels))
+    )
+    components.append(
+        _legacy_component(
+            "semantic_purge",
+            lambda: deferred_index.clear_semantic_receipts(vault_root, md_rels),
+        )
+    )
     components.append(
         _resolver_component(
-            lambda: find.on_resolver_files_changed(vault_root, [], md_rels)
-            if md_rels
-            else None
+            lambda: find.on_resolver_files_changed(vault_root, [], md_rels) if md_rels else None
         )
     )
     # A removed video also drops its scene-frame derivatives: clear_scene_frames
@@ -673,10 +913,16 @@ def delete_after_remove(
             scene_frames.clear_scene_frames(vault_root, vault_root / rel)
         except Exception:  # noqa: BLE001 - frame cleanup is best-effort
             log.warning("scene-frame cleanup failed for %s", rel, exc_info=True)
-    return IndexSyncReport(
+    report = IndexSyncReport(
         "delete",
         requested_report,
         requested_report,
         tuple(components),
         paths_truncated,
+    )
+    if publication_current:
+        return report
+    return with_component(
+        report,
+        IndexComponentOutcome("epistemic_graph", "degraded", "publication_failed"),
     )

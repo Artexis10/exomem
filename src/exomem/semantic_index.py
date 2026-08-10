@@ -142,6 +142,13 @@ def validate_parent_record(
 ) -> SemanticIndexFreshness:
     """Validate one derived record against current canonical Markdown bytes."""
     root = Path(vault_root)
+    # This seam is ordinary semantic recall validation, not structured-record
+    # parsing.  Refuse raw Records before ``read_text`` can hydrate a stale
+    # vector/lexical parent into the semantic path.
+    from . import recall_policy
+
+    if not recall_policy.is_recall_candidate(root, root / parent_path):
+        return SemanticIndexFreshness(False, "recall_parent_not_admitted", parent_path)
     try:
         path = (root / parent_path).resolve()
         path.relative_to(root.resolve())
