@@ -248,6 +248,7 @@ class KubernetesProviderRegistry:
         metadata: OpaqueProviderMetadata,
         recovery_envelope: str,
         provision_mode: str,
+        helm_values: dict[str, Any],
     ) -> None:
         labels = dict(self._PSS_LABELS)
         labels.update(
@@ -260,6 +261,11 @@ class KubernetesProviderRegistry:
         annotations["exomem.io/recovery-envelope"] = recovery_envelope
         annotations.update(
             {
+                "exomem.io/vault-id": helm_values["vaultId"],
+                "exomem.io/expected-release": helm_values["expectedRelease"],
+                "exomem.io/worker-policy-digest": helm_values["workerPolicyDigest"],
+                "exomem.io/browser-origin": helm_values["browserOrigin"],
+                "exomem.io/transfer-hostname": helm_values["transferHostname"],
                 "helm.sh/resource-policy": "keep",
                 "meta.helm.sh/release-name": metadata.resource_name,
                 "meta.helm.sh/release-namespace": metadata.resource_name,
@@ -535,6 +541,7 @@ class LiveLifecyclePlane:
     ) -> None:
         reservation_class = await self._require_capacity_reservation(metadata, request)
         envelopes = self._recovery_envelopes[self._key(metadata)]
+        helm_values = _fixed_helm_values(self._owner(metadata), request, self._config)
         await self._registry.ensure_namespace(
             metadata,
             envelopes["namespace"],
@@ -543,6 +550,7 @@ class LiveLifecyclePlane:
                 if reservation_class is CapacityReservationClass.USER
                 else "restore-candidate"
             ),
+            helm_values,
         )
         self._owned[self._key(metadata)] = metadata
         await self._registry.record_operation(metadata, envelopes["providerOperationConfigMap"])
