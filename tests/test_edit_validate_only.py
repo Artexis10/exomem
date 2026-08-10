@@ -97,18 +97,19 @@ def test_validate_only_replace_all_lists_each_match(vault: Path) -> None:
     assert len(result.matches) == 2
 
 
-def test_validate_only_requires_surgical_mode(vault: Path) -> None:
+def test_validate_only_supports_whole_body_without_writing(vault: Path) -> None:
     rel = _make_page(vault, "# Scratch\n\nbody.\n")
-    with pytest.raises(edit_module.EditError) as exc:
-        edit_module.edit(
-            vault,
-            path=rel,
-            why="preview",
-            new_body="# Scratch\n\nwhole.\n",
-            validate_only=True,
-            today=TODAY,
-        )
-    assert exc.value.code == "INVALID_EDIT"
+    result = edit_module.edit(
+        vault,
+        path=rel,
+        why="preview",
+        new_body="# Scratch\n\nwhole.\n",
+        validate_only=True,
+        today=TODAY,
+    )
+    assert result.validate_only is True
+    assert result.mode == "body"
+    assert "body." in (vault / rel).read_text(encoding="utf-8")
 
 
 def test_validate_only_arg_guards_still_fire(vault: Path) -> None:

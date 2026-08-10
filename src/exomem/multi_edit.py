@@ -154,7 +154,10 @@ def multi_edit(
     edits = normalized_edits
 
     now = today or temporal.now()
-    date_iso = temporal.stamp(now)
+    date_iso = (
+        semantic_writes.reviewed_transition_stamp(semantic_transition_token, now)
+        or temporal.stamp(now)
+    )
 
     editable = load_editable(vault_root, path, expected_hash=expected_hash)
 
@@ -209,6 +212,8 @@ def multi_edit(
                     relation_disposition=relation_disposition,
                     relation_review_hash=relation_review_hash,
                     relation_review_reason=relation_review_reason,
+                    stamp=date_iso,
+                    validate_only=True,
                 ).as_dict()
         return MultiEditValidation(
             path=editable.rel_path,
