@@ -1846,6 +1846,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
             "--request-file",
             "/run/exomem/operator-requests/init.json",
         ]
+        assert container["env"] == [{"name": "EXOMEM_LOG_DIR", "value": "/dev"}]
     else:
         pod = workload["spec"]["template"]["spec"]
         assert pod["restartPolicy"] == "Always"
