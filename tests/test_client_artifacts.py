@@ -7,7 +7,6 @@ import http.client
 import json
 import shutil
 import socket
-import sys
 import tempfile
 import threading
 import time
@@ -850,7 +849,7 @@ def test_preserve_artifacts_keeps_append_only_collision_as_one_failed_outcome(
 def test_preserve_artifacts_marks_commit_before_media_reconciliation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import client_artifacts
+    from exomem import client_artifacts, media_processing
 
     staged = client_artifacts.StagedArtifact(
         file_id="file-media",
@@ -883,17 +882,8 @@ def test_preserve_artifacts_marks_commit_before_media_reconciliation(
         events.append("reconcile")
         raise RuntimeError("worker unavailable")
 
-    monkeypatch.setitem(
-        sys.modules,
-        "exomem.media_processing",
-        type(
-            "Media", (),
-            {
-                "classify_media": staticmethod(lambda _path: "image"),
-                "reconcile_media": staticmethod(reconcile_media),
-            },
-        ),
-    )
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: "image")
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile_media)
 
     result = commands.op_preserve_artifacts(
         tmp_path,
