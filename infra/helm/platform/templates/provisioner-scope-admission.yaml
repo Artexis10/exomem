@@ -149,7 +149,7 @@ spec:
         (variables.target.spec.accessModes == ['ReadWriteOnce'] &&
           variables.target.spec.volumeMode == 'Filesystem' &&
           variables.target.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
-          variables.target.spec.resources.requests.storage == quantity('10Gi'))
+          quantity(dyn(variables.target.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0)
       message: The hosted provisioner may manage only the exact encrypted 10 GiB tenant PVC.
     - expression: >-
         request.resource.resource != 'services' || request.operation == 'DELETE' ||
@@ -632,7 +632,7 @@ spec:
           variables.target.spec.accessModes == ['ReadWriteOnce'] &&
           variables.target.spec.volumeMode == 'Filesystem' &&
           variables.target.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
-          variables.target.spec.resources.requests.storage == quantity('10Gi'))
+          quantity(dyn(variables.target.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0)
       message: Durability actions may reconcile only the exact retained encrypted tenant PVC.
     - expression: >-
         request.resource.resource != 'serviceaccounts' ||
