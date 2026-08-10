@@ -1258,6 +1258,12 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
 
     action_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-durability-actions-scope")
     action_scope_text = json.dumps(action_scope)
+    exact_tenant_pvc_quantity = (
+        "quantity(dyn(variables.target.spec).resources.requests['storage'])"
+        ".compareTo(quantity('10Gi')) == 0"
+    )
+    assert exact_tenant_pvc_quantity in action_scope_text
+    assert "variables.target.spec.resources.requests.storage == quantity('10Gi')" not in action_scope_text
     for exact_guard in (
         "system:serviceaccount:exomem-platform:exomem-durability-actions",
         "^restore-[a-f0-9]{20}$",
@@ -1537,6 +1543,11 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "transfer",
     ):
         assert exact_guard in provisioner_scope_text
+    assert (
+        "quantity(dyn(variables.target.spec).resources.requests['storage'])"
+        ".compareTo(quantity('10Gi')) == 0"
+    ) in provisioner_scope_text
+    assert "variables.target.spec.resources.requests.storage == quantity('10Gi')" not in provisioner_scope_text
     assert "NetworkPolicy deletion is reserved for namespace destruction" in provisioner_scope_text
 
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
