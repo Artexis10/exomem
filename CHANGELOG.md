@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.0](https://github.com/Artexis10/exomem/compare/v0.41.0...v0.42.0) (2026-08-10)
+
+
+### Features
+
+* **memory:** preserve client artifacts ([#415](https://github.com/Artexis10/exomem/issues/415)) ([229df96](https://github.com/Artexis10/exomem/commit/229df9678e3e23d054bf82fe09e6ac6a0e4a04c7))
+
+
+### Bug Fixes
+
+* **memory:** repair existing edit review handshake ([#411](https://github.com/Artexis10/exomem/issues/411)) ([665d2f4](https://github.com/Artexis10/exomem/commit/665d2f4fd75ceca4b978017621fa248575238a67))
+* **release:** publish from the created tag ([#419](https://github.com/Artexis10/exomem/issues/419)) ([0a7e78e](https://github.com/Artexis10/exomem/commit/0a7e78e7d9d53619c74df0dd78e8754d4ebdde6d))
+
 ## [0.41.0](https://github.com/Artexis10/exomem/compare/v0.40.0...v0.41.0) (2026-08-10)
 
 
