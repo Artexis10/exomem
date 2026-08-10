@@ -220,8 +220,15 @@ def capacity_snapshot_from_documents(
     ):
         raise ReceiptCollectorError("configured HCloud server identity is invalid")
     server = hcloud_server.get("server") if isinstance(hcloud_server, dict) else None
-    datacenter = server.get("datacenter") if isinstance(server, dict) else None
-    location = datacenter.get("location") if isinstance(datacenter, dict) else None
+    # HCloud reports the location directly on the server and no longer returns a
+    # `datacenter` object from GET /v1/servers/{id}. Read the current shape first
+    # and keep the nested one as a fallback: taking only the nested path made the
+    # check fail closed on every run, because a missing `datacenter` reads as an
+    # identity mismatch rather than as the schema change it is.
+    location = server.get("location") if isinstance(server, dict) else None
+    if not isinstance(location, dict):
+        datacenter = server.get("datacenter") if isinstance(server, dict) else None
+        location = datacenter.get("location") if isinstance(datacenter, dict) else None
     if (
         not isinstance(server, dict)
         or not isinstance(server.get("id"), int)
