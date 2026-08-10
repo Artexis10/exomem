@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.0](https://github.com/Artexis10/exomem/compare/v0.40.0...v0.41.0) (2026-08-10)
+
+
+### Features
+
+* **hosted:** recompose deployment lock for 0.40.0 ([#408](https://github.com/Artexis10/exomem/issues/408)) ([89b73a7](https://github.com/Artexis10/exomem/commit/89b73a7a460672916a09c0bd4a6454805fa22b3a))
+
+
+### Bug Fixes
+
+* **hosted:** admit exact tenant PVC quantities ([8a2d4dd](https://github.com/Artexis10/exomem/commit/8a2d4dd0a2559830d2c14f733c908b2de15f4871))
+* **hosted:** admit legacy runtime images ([2d9f798](https://github.com/Artexis10/exomem/commit/2d9f798b44eda905458d15ea22d6e3c1367cee1c))
+* **hosted:** deploy credential Secret admission fix ([b391fea](https://github.com/Artexis10/exomem/commit/b391fea82fb2d999e0b0c5a0329dc6b27aa6b9c6))
+* **hosted:** keep operator logging off read-only roots ([#417](https://github.com/Artexis10/exomem/issues/417)) ([64eb719](https://github.com/Artexis10/exomem/commit/64eb7191c350eb56bc20d957ac6e5f0f401ff129))
+* **hosted:** label credential Secret for admission ([#410](https://github.com/Artexis10/exomem/issues/410)) ([55def93](https://github.com/Artexis10/exomem/commit/55def931966bfe9985bc449334971f3ac8245a10))
+* **records:** harden installed E2E and CI diagnostics ([916d5f1](https://github.com/Artexis10/exomem/commit/916d5f1b9cde23778669264c78aaf1dd2274b86b))
+
 ## [0.40.0](https://github.com/Artexis10/exomem/compare/v0.39.2...v0.40.0) (2026-08-10)
 
 
