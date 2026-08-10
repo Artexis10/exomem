@@ -3136,10 +3136,10 @@ def _disposition_finding(
         detail=_disposition_detail(page, disposition),
         remediation=(
             (
-                "Add a qualifying typed relation, or call validate_only=true, then "
-                "re-issue the same edit unchanged with transition_token=<returned "
-                "transition_token>, relation_disposition=\"reviewed_none\", "
-                "relation_review_hash=<returned relation_review_hash>, and "
+                "Add a qualifying typed relation, or validate_only=true; re-issue "
+                "the same edit with transition_token=<returned>, "
+                "relation_disposition=\"reviewed_none\", "
+                "relation_review_hash=<returned>, "
                 "relation_review_reason."
             )
             if existing

@@ -94,6 +94,9 @@ def test_existing_remediation_names_only_existing_edit_fields():
         assert token in text
     for token in ("draft_id", "draft_hash", "draft_token"):
         assert token not in text
+    assert "transition_token=<returned>" in text
+    assert "relation_review_hash=<returned>" in text
+    assert len(text.encode("utf-8")) <= 220
 
 
 def test_creation_remediation_keeps_the_creation_draft_fields():
