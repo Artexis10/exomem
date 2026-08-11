@@ -1,55 +1,24 @@
 ## Why
 
-A full epistemic graph rebuild runs inside the vault mutation boundary, so it
-blocks every other vault mutation for its entire duration. Measured on a
-maintainer workstation against synthetic vaults, on a single `upsert_after_write`
-with no usable sidecar:
+A full epistemic graph rebuild currently runs inside the vault mutation boundary, so one missing, corrupt, schema-mismatched, or registry-invalidated sidecar blocks every vault mutation for the full rebuild. Measured first-write cost is 7.7 seconds at 500 pages and 32.4 seconds at 2,000 pages; CI has observed a 172-second boundary hold at 8,000 pages. A client timeout does not cancel that server work, so the live boundary looks abandoned even while the origin thread is still rebuilding.
 
-| vault | first write | steady-state write | ratio |
-|---|---|---|---|
-| 500 pages | 7,728 ms | 315 ms | 24.6x |
-| 2,000 pages | 32,382 ms | 1,186 ms | 27.3x |
-
-CI's write-latency benchmark records the same shape at larger scale:
-`hold_ms=39092` over 2,000 pages and `hold_ms=172205` over 8,000.
-
-This is not an edge case. `_open_read_snapshot` treats the sidecar as unusable
-whenever `schema_version`, `core_registry_version`, or `extension_registry_hash`
-disagrees with the running build, so a full rebuild is triggered by:
-
-- any release that bumps `SCHEMA_VERSION` — at 7 today, bumped seven times;
-- any change to the relation registry, including a user adding or editing one
-  extension relation;
-- a sidecar that is missing, deleted, or corrupt.
-
-The first write after any of those stalls for tens of seconds on a
-maintainer-sized vault, and every concurrent writer is blocked behind it. A
-client that gives up meanwhile sees a timeout on a write that then lands.
-
-An earlier attempt (#346) removed the escalation so writes deferred to
-`reconcile`. That was wrong and CI rejected it:
-`test_refresh_missing_sidecar_routes_to_full_rebuild` requires a write against a
-missing sidecar to index the whole vault and leave the graph available. The
-rebuild has to happen; it must stop holding the boundary while it does.
+The graph must still be rebuilt across the complete vault before the triggering write returns. Removing that contract was attempted in #346 and correctly rejected. The missing protocol is a durable handoff: canonical bytes and an exact graph-sync checkpoint publish together, the mutation boundary releases, and only then may the request wait for derived graph work.
 
 ## What Changes
 
-- Build a full graph rebuild into a temporary database outside the vault
-  mutation boundary, then acquire the boundary only to swap it into place.
-- Make concurrent rebuild requests single-flight, so N blocked writers do not
-  each start their own full-vault rebuild.
-- Keep the existing stabilization contract: a rebuild that cannot observe a
-  stable vault still fails and marks the graph unavailable.
-- Preserve the write-path contract that a write against an unusable sidecar
-  leaves the graph built and available.
+- Publish one content-free graph-sync checkpoint in the same guarded canonical batch as every graph-relevant vault mutation.
+- Release the vault mutation boundary before starting or joining full graph work; a request may still wait off-boundary so its terminal preserves the existing graph-available contract.
+- Build a full graph into a temporary database, stabilize it against the exact durable checkpoint/current vault, then acquire the boundary only for the final checkpoint recheck and atomic sidecar swap.
+- Make concurrent rebuilds single-flight per vault. Later canonical batches can publish new checkpoints while callers join the same rebuild; the builder retries until it consumes the latest stable checkpoint.
+- Persist the consumed checkpoint identity in the graph sidecar and recover a current-but-unacknowledged checkpoint after crash/restart or reconcile.
+- Return a committed canonical terminal with explicit derived-graph failure when stabilization is exhausted, so retry cannot duplicate the canonical write and graph availability is never fabricated.
 - Sweep abandoned temporary rebuild databases during reconcile.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `graph-rebuild-availability`: A full epistemic graph rebuild does not block
-  unrelated vault mutations, and never exposes a partially rebuilt graph.
+- `graph-rebuild-availability`: durable canonical-to-graph handoff, off-boundary single-flight rebuild, crash recovery, and non-partial publication.
 
 ### Modified Capabilities
 
@@ -57,9 +26,6 @@ None.
 
 ## Impact
 
-Affected areas are `src/exomem/epistemic_graph.py`, `src/exomem/reconcile.py`
-(temp sweep), and the epistemic graph freshness, boundary, and semantic unit
-graph tests.
+Affected areas are canonical batch publication/post-commit handoff, `src/exomem/index_sync.py`, `src/exomem/deferred_index.py`, `src/exomem/epistemic_graph.py`, writer terminal coordination, reconcile/startup recovery, and graph freshness/boundary tests.
 
-No MCP tool schema, vault format, OAuth, or stdio behavior changes. The sidecar
-file format is unchanged; only how and where it is produced changes.
+No user-authored Markdown schema, MCP selector, OAuth flow, or graph query shape changes. The graph SQLite schema adds only derived checkpoint metadata. A hidden content-free checkpoint sidecar is operational state, not user knowledge or a semantic index candidate.

@@ -109,7 +109,7 @@ A production package SHALL contain only public product metadata, public document
 
 ### Requirement: Release Identity Detects Contract And Skill Drift
 
-Every package candidate SHALL have an immutable lock binding plugin ID/version, target platform/schema, Hosted MCP resource, profile ID, ordered command-surface fingerprint, full schema-contract digest, gateway OAuth discovery-overlay digest, canonical-definition digest, aggregate skill-content digest, and final artifact digest. Live evidence MUST NOT be included in this compatibility identity. Any mismatch MUST fail generation, validation, installation evidence recording, or promotion before distribution.
+Every package candidate SHALL have an immutable lock binding plugin ID/version, target platform/schema, Hosted MCP resource, profile ID, ordered command-surface fingerprint, full schema-contract digest, gateway OAuth discovery-overlay digest, canonical-definition digest, aggregate skill-content digest, final artifact digest, and the minimum Records reader contract required by the advertised surface. A candidate exposing `revise` or `rebaseline` SHALL record `minimum_records_reader_version: 2` in its package and deployment locks. Readiness, promotion, and rollback SHALL verify the active runtime meets that floor before serving the candidate. Live evidence MUST NOT be included in this compatibility identity. Any mismatch MUST fail generation, validation, installation evidence recording, readiness, or promotion before distribution.
 
 #### Scenario: Skill content changes without a release rebuild
 
@@ -126,6 +126,11 @@ Every package candidate SHALL have an immutable lock binding plugin ID/version, 
 
 - **WHEN** a development or staging endpoint differs from the production release input
 - **THEN** its artifact has a distinct non-production channel identity and cannot satisfy the production promotion record
+
+#### Scenario: Records lifecycle candidate requires reader version 2
+
+- **WHEN** a package advertises `revise` or `rebaseline` but its package lock, deployment lock, or active runtime omits Records reader version 2
+- **THEN** generation, readiness, promotion, or rollback refuses the candidate before it can serve the vault
 
 ### Requirement: Promotion Requires Real Content-Bearing Client Use
 
@@ -148,6 +153,8 @@ OpenAI promotion evidence SHALL additionally contain
 to the value in both the current OpenAI package lock and archive lock. Claude
 promotion evidence SHALL NOT contain this OpenAI-only field.
 
+When canonical surface-diff metadata proves that a candidate changes Records parsing, lifecycle actions, audit behavior, routing metadata, bootstrap placement, generated Records schemas, or connector promotion rules, the same operator-signed evidence SHALL additionally contain the exact closed Records acceptance object defined by `records-release-acceptance`. The verifier SHALL bind it to the deployment SHA, disposable reset, current command surface, graph-availability proof, exact client/model/system contracts, prompt-case hashes, action coverage, mutation request/receipt terminals, and independent readbacks. Missing, unsigned, stale, mismatched, extra-field, or incomplete Records proof SHALL refuse promotion. Exact byte-identical signed replay for an unchanged candidate SHALL return the existing result without a second acceptance or record mutation. A candidate proven not to change Records SHALL remain governed by the existing real-client journey without an unrelated Records rerun.
+
 #### Scenario: Shared Claude CIMD digest vector
 
 - **WHEN** the producer canonicalizes `{platform:"claude", admission_mode:"cimd", client_id:"https://claude.example.com/oauth/client", redirect_uris:["https://claude.example.com/oauth/return", "https://claude.example.com/oauth/callback"], token_endpoint_auth_method:"none"}`
@@ -165,6 +172,14 @@ promotion evidence SHALL NOT contain this OpenAI-only field.
 
 - **WHEN** the installed client can initialize, list tools, bootstrap, or read metadata but cannot return seeded note content
 - **THEN** the content-bearing gate fails and the artifact is not promoted
+
+#### Scenario: Records discovery works but lifecycle proof is missing
+- **WHEN** a Records-affecting candidate exposes the current tool schema but its signed evidence lacks complete disposable lifecycle and client-selection proof
+- **THEN** promotion remains pending even if ordinary recall/capture acceptance passed
+
+#### Scenario: Exact Records evidence replay is idempotent
+- **WHEN** byte-identical signed Records evidence is submitted again for the unchanged candidate
+- **THEN** promotion returns the existing result without recording a second acceptance
 
 #### Scenario: Full live journey succeeds
 

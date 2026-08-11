@@ -82,9 +82,10 @@ The immutable compatibility manifest contains the canonical definition and exact
 - full schema-contract digest;
 - canonical Hosted definition digest;
 - aggregate Hosted skill-content digest; and
+- minimum Records reader contract required by the advertised surface (`minimum_records_reader_version: 2` when lifecycle actions are exposed); and
 - artifact digest.
 
-The platform manifest contains only fields accepted by that platform; unsupported compatibility metadata lives in the package lock rather than being smuggled into manifests. Live evidence is deliberately excluded from the compatibility digest so promotion cannot form a dependency cycle. The build fails if the agent contract, skill content, endpoint, generated artifacts, or lock disagree. Any profile membership change requires a new profile identifier and a new plugin candidate; a silent profile change under an existing package is forbidden.
+The platform manifest contains only fields accepted by that platform; unsupported compatibility metadata lives in the package lock rather than being smuggled into manifests. Live evidence is deliberately excluded from the compatibility digest so promotion cannot form a dependency cycle. The build fails if the agent contract, skill content, endpoint, generated artifacts, reader floor, or lock disagree. Readiness and rollback additionally bind the deployment's active Records reader version and refuse a runtime below the candidate's floor. Any profile membership change requires a new profile identifier and a new plugin candidate; a silent profile change under an existing package is forbidden.
 
 The package never contains an access token, refresh token, invite token, user/tenant/cell identifier, private cell endpoint, service credential, vault path, `EXOMEM_VAULT_PATH`, or local executable command. OAuth state belongs to the client and Substrate, not the archive.
 
@@ -104,6 +105,8 @@ Promotion to `live` requires evidence from an actual clean installation in the s
 This deliberately treats discovery-only success as a failure. The existing personal ChatGPT connector demonstrated that bootstrap and metadata can work while content-bearing reads are blocked, and the Claude plugin history demonstrated that CI-valid manifests can still fail at real installation.
 
 A platform can be withheld independently when its live gate fails. The overall release may be described as cross-client ready only when both Claude and OpenAI records are live against the same compatibility identity.
+
+For a Records-affecting command-surface change, the existing operator-signed promotion envelope additionally carries the exact closed `records-release-acceptance` object. That object binds the deployed release/surface, disposable reset, client/model/system contracts, prompt hashes, complete lifecycle actions, mutation terminals/receipts, independent readbacks, and current graph-availability proof. Unsigned runner output cannot promote. Exact replay of byte-identical signed evidence for the unchanged candidate is an idempotent no-op returning the current promotion result; stale, mismatched, extra-field, or incomplete proof refuses. `src/exomem/hosted_plugins.py`, the platform promotion records, and the personal connector guardrail are the enforcement points.
 
 ### 6. Private friends-cohort distribution precedes directory submission
 

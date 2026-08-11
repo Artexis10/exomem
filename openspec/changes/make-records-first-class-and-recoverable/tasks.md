@@ -1,0 +1,37 @@
+## 1. Red-first contract coverage
+
+- [ ] 1.1 Add failing saved-view tests proving validate/create/inspect/query parity for omitted filters, early rejection of invalid views, and one diagnostic per invalid view.
+- [ ] 1.2 Add failing Records lifecycle tests for revision-mode validate, authorize-before-read behavior, hidden-manifest indistinguishability, mixed-release refusal, guarded `revise`, immutable representation fields, item-schema compatibility, diagnostic projection, closed v2 event/receipt validation, byte-identical stored committed receipts under replay, replay-only terminal status, and atomic audit publication.
+- [ ] 1.3 Add failing audit-recovery tests for exact-gap `rebaseline`, stable `acknowledged_gap` status, all three fixed digest vectors, independent transition identity, non-recursive fingerprints, permanent discontinuity reporting through inspect/query/history, revise/rebaseline followed by append/update and restart, mixed `v1 -> v2 -> v1` event chains with a persistent v2 manifest marker, stale acknowledgements, and refusal of invalid, hidden, mixed-release, or forked collections.
+- [ ] 1.4 Add failing command/bootstrap/scaffold tests proving the nine-action selector, action-specific arguments, first-class `record` vocabulary, inferred observed-state guidance, early Records position, and compact-size budget.
+- [ ] 1.5 Add failing release-acceptance tests proving the installed-wheel loop cannot pre-write a Records fixture and promotion refuses unsigned, missing, prose-only, stale, wrong-reset, wrong-client-contract, unverifiable-readback, stale-digest, extra-field, or incomplete Records evidence while exact signed replay is idempotent.
+
+## 2. Manifest acceptance and lifecycle
+
+- [ ] 2.1 Centralize eager saved-view normalization/validation and use it from manifest preflight, create, load, inspect, revision, and saved-view query while deduplicating diagnostics.
+- [ ] 2.2 Extend read-only `validate` with mutually exclusive create and existing-collection revision forms that return normalized contract plus current manifest/container guards without writer authority or mutation.
+- [ ] 2.3 Implement guarded `revise` with authorize-before-read selector resolution, full manifest/item/post-change release admission, exact re-read, immutable identity/profile/source/strategy checks, current-item validation, atomic manifest/audit v2 publication, closed v2 receipt/projection, and L6-projected content-safe diagnostics.
+- [ ] 2.4 Implement guarded `rebaseline` with the same governance ordering, exact current gaps/guards, full structural validation, no item rewrite, specified v2 event/receipt and digest domains, stable `acknowledged_gap`, and bounded permanent discontinuity in inspect/query/history.
+- [ ] 2.5 Preserve v1 parser/projector bytes and semantics; make exact v2 request replay return the byte-identical stored `outcome: committed` receipt inside a replay-only terminal without another event, preserve manifest audit version 2 through later append/update, and cover every caught/abrupt publication cut.
+
+## 3. Public Records routing and generated surfaces
+
+- [ ] 3.1 Register and dispatch `revise` and `rebaseline` through canonical MCP/REST/CLI action classification, writer leases, idempotency, projectors, error envelopes, schema fidelity, and every active profile that advertises Records, including the disposable hosted-cell surface.
+- [ ] 3.2 Add `record` to beginner and product-front-door catalogs, classify `record_memory` under it, and place the compact Records route before semantic-authoring detail with byte-position and total-size gates.
+- [ ] 3.3 Rewrite MCP-visible Records and parameter descriptions plus the generic scaffold so agents infer observed-state capture/query/update without magic verbs, proactively use one compatible collection, and propose rather than silently create a schema.
+- [ ] 3.4 Regenerate governed tool schemas and capability documentation, record the new surface digest as pending only, and keep current registered connector evidence unchanged until live acceptance.
+
+## 4. Installed and live acceptance tooling
+
+- [ ] 4.1 Rewrite the installed-wheel stdio Records loop to author its collection only through `describe -> validate -> create`, then exercise inspect, saved-view query, append, update, revise, direct-edit gap, rebaseline, restart, and parity assertions.
+- [ ] 4.2 Add a disposable HTTP/OAuth-capable Records acceptance runner with bounded timeouts, deterministic reset, content-free unsigned facts, deployment/release/surface bindings, run nonce, reset epoch, principal/audience HMACs, request/receipt correlation, and independent before/after readback.
+- [ ] 4.3 Add fixed Codex and Claude Code selection cases for implicit observed-state capture and no-collection proposal behavior, binding exact client/model/system-contract versions and prompt-case hashes without storing prompt data or vault contents in promotion evidence.
+- [ ] 4.4 Extend the active `add-hosted-client-plugins` promotion contract and personal-connector guardrail with exact Records acceptance fields, TTL/identity checks, byte-identical replay idempotency, complete current client/action/restart coverage, and coordinated graph-rebuild availability evidence.
+- [ ] 4.5 Add compatibility fixtures and deployment locks for Records reader v2; prove upgrade, atomic first-v2 marker, restart, preceding-binary fail-closed behavior, readiness downgrade refusal, and a rollback build with lifecycle mutations disabled.
+
+## 5. Verification
+
+- [ ] 5.1 Run focused Records, bootstrap, command-registry, writer-lease, connector-guardrail, and product-E2E tests with embeddings disabled.
+- [ ] 5.2 Run strict OpenSpec validation, scaffold leak checks, generated schema/capability gates, Ruff, targeted Mypy, and `git diff --check`.
+- [ ] 5.3 Build the wheel and run the complete installed-wheel stdio plus disposable local HTTP acceptance paths with bounded timeouts.
+- [ ] 5.4 Record green `graph-rebuild-availability` evidence proving boundary release and admission of a second canonical batch while responses may await one rebuild; leave deployed connector promotion pending until the combined release passes disposable live HTTP/OAuth, Codex, and Claude Code acceptance.

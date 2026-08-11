@@ -26,6 +26,9 @@
 - [x] 4.2 Implement the promotion record and maintainer commands that bind platform/client version, plugin version, endpoint, profile fingerprint, contract digest, test identity, timestamp, and redacted result hashes.
 - [x] 4.3 Add content-bearing smoke assertions for seeded recall and citation, ordinary-conversation durable capture, and recall from a later fresh conversation.
 - [x] 4.4 Make release/distribution metadata expose only live platform artifacts and prohibit the cross-client-ready label until both platforms pass against one compatibility identity.
+- [ ] 4.5 Add red-first promotion tests for Records-affecting surface detection and refusal of unsigned, stale, mismatched, extra-field, incomplete, or unverifiable-readback Records evidence.
+- [ ] 4.6 Extend the signed promotion verifier, platform records, and personal connector guardrail with the closed Records acceptance object and byte-identical replay idempotency.
+- [ ] 4.7 Add red-first package/deployment-lock and readiness tests for `minimum_records_reader_version: 2`, then enforce the floor for lifecycle-capable candidates and rollback builds.
 
 ## 5. Exercise The Paired Product Journey
 
@@ -35,6 +38,7 @@
 - [ ] 5.4 Install the pending OpenAI artifact in a clean ChatGPT/Codex account and record the same content-bearing journey rather than accepting connection or tool listing alone.
 - [ ] 5.5 Authorize the other client as the same identity and prove both see the same memory while Substrate reports no second tenant, entitlement, provision operation, cell, or volume.
 - [ ] 5.6 Run the paired duplicate/concurrent callback, invite expiry/replay, provisioning delay/failure, capacity, stale discovery, cell mismatch, refresh/revocation, suspension/deletion, and cross-tenant sentinel matrix within configured budgets.
+- [ ] 5.7 For each supported client, run the disposable Records lifecycle and fixed implicit-observation/no-collection cases against the exact deployed release and independently re-read every claimed mutation.
 
 ## 6. Document And Verify The Friends Release
 
