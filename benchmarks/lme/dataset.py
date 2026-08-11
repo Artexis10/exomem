@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
+import stat
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -227,19 +230,46 @@ def _question(raw: object, index: int) -> LmeQuestion:
     )
 
 
-def load_dataset(path: Path | str) -> LmeDataset:
+def load_dataset_bytes(raw: bytes) -> LmeDataset:
     """Load the official LongMemEval parallel-haystack JSON representation."""
 
-    source = Path(path)
     try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise DatasetValidationError(f"cannot load {source}: {exc}") from exc
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DatasetValidationError("cannot load dataset bytes") from exc
     if isinstance(payload, Mapping):
         payload = payload.get("questions")
     if not isinstance(payload, list):
         raise DatasetValidationError("dataset root must be a list or a questions object")
     return LmeDataset(tuple(_question(raw, index) for index, raw in enumerate(payload)))
+
+
+def stable_dataset_bytes(path: Path | str) -> bytes:
+    """Read a no-follow regular dataset once and reject path replacement races."""
+    source = Path(path)
+    try:
+        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise DatasetValidationError("dataset must be a no-follow regular file") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise DatasetValidationError("dataset must be a no-follow regular file")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            raw = stream.read()
+    finally:
+        os.close(descriptor)
+    try:
+        after = source.lstat()
+    except OSError as exc:
+        raise DatasetValidationError("dataset changed during stable read") from exc
+    if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
+        raise DatasetValidationError("dataset changed during stable read")
+    return raw
+
+
+def load_dataset(path: Path | str) -> LmeDataset:
+    return load_dataset_bytes(stable_dataset_bytes(path))
 
 
 def _question_dict(question: LmeQuestion) -> dict[str, object]:

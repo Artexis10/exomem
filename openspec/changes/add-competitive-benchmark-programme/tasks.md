@@ -88,9 +88,11 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 - [ ] 2.3-residual `basic_memory_direct.py` via sidecar +
       `supermemory_direct.py` (deferred by scope note until the sidecar and
       pinned local binary exist; null_direct + exomem-source-only landed)
-- [ ] 2.5-residual the REAL committed `lme-s-25.json` generates from the
+- [x] 2.5-residual the REAL committed `lme-s-25.json` generates from the
       pinned dataset at fetch time (W9); the selection algorithm + fixture
-      subsets are landed and tested
+      subsets are landed and tested (artifact
+      `benchmarks/equivalence/subsets/lme-s-25.json`, SHA-256
+      `7c46b689758901f73fe365d861d0998ecc64ec0435392df745d63d7da0ccc901`)
 
 ## 3. Guest lane: bm-bench (W4 — lane: codex + claude review)
 
@@ -331,7 +333,8 @@ them. Mission acceptance criteria (§14) close only from this ledger.
 ## 7. Runs (W9) — every metered step ⛳-gated
 
 - [ ] 7.1 Fixture tier across all lanes, zero spend
-- [ ] 7.2 LongMemEval-S fetched + sha pinned; direct stub pilot
+- [ ] 7.2 LongMemEval-S fetched + sha pinned; canonical selection artifact
+      committed (direct stub pilot remains open)
 - [ ] 7.3 Supermemory local binary installed (isolated data dir, version
       pinned per bm-bench's documented pin)
 - [ ] 7.4 ⛳ Metered 25-case tier under the recorded session cap (≤$25):

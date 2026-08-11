@@ -338,6 +338,28 @@
     consumes only this validated cohort, so report generation cannot bypass
     the gates.
 
+13. **LongMemEval-S comparative selection is a frozen source-derived artifact.**
+    The repository owns `benchmarks/equivalence/subsets/lme-s-25.json`, a
+    closed `lme-selection.v1` record generated only from
+    `xiaowu0162/longmemeval-cleaned` revision
+    `98d7416c24c778c2fee6e6f3006e7a073259d48f`, filename
+    `longmemeval_s_cleaned.json`, SHA-256
+    `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442`,
+    277383467 bytes, 500 rows, and its six-type census. It spells the ordered
+    type tuple `single-session-user`, `single-session-assistant`,
+    `single-session-preference`, `multi-session`, `temporal-reasoning`,
+    `knowledge-update`. Every raw row has a known type before routing;
+    abstention is precisely an ID ending `_abs`. The selector computes
+    SHA-256 of UTF-8 `question_id + dataset_sha256`, orders by
+    `(digest_hex, question_id)`, takes three non-abstentions per type in that
+    order, then seven abstentions. Missing strata, malformed identities,
+    duplicate/blank IDs, altered source facts, or a non-identical regeneration
+    refuse before reader or provider construction. Direct canonical mode and
+    MemoryBench's explicit 25-case plan each re-derive the repository artifact,
+    require exact ordered IDs, and persist its relative path, SHA-256, and
+    algorithm version in manifest evidence. Generic `--pilot 25` remains a
+    separate non-comparative selection and cannot substitute for this cohort.
+
 ## Execution
 
 fable-delegate discipline: Stage-0 packet → Codex/Claude implementer lanes in

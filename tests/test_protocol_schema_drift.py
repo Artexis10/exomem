@@ -20,6 +20,7 @@ def test_only_comparative_run_manifest_schema_moves_to_v2(tmp_path: Path) -> Non
     assert "run-manifest.v1.schema.json" not in names
     assert "case-trace.v1.schema.json" in names
     assert "memorybench-run-plan.v1.schema.json" in names
+    assert "lme-selection.v1.schema.json" in names
 
 
 def test_memorybench_contract_schemas_are_committed(tmp_path: Path) -> None:

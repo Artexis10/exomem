@@ -27,6 +27,9 @@ from protocol.models import (
     MemoryBenchRunPlan,
     RunManifest,
 )
+from equivalence.selection import CANONICAL_LME_S_SOURCE, load_frozen_lme_selection, select_lme_s_25
+from lme.fetch import file_sha256
+from protocol.models import LmeSelection
 
 try:
     from .setup import verify_checkout
@@ -278,6 +281,40 @@ def _native_dataset(plan: MemoryBenchRunPlan) -> tuple[bytes, list[dict[str, Any
     if selected is not None and (any(value not in set(ids) for value in selected)):
         raise ValueError("explicit selection is not a subset of the dataset")
     return raw, rows
+
+
+def _canonical_selection_pins(plan: MemoryBenchRunPlan, rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Bind only the frozen 25-case tier to its repository-owned artifact."""
+
+    selected = plan.selection.target_question_ids
+    if plan.selection.mode == "full" or selected is None:
+        return {}
+    if len(selected) != 25:
+        return {}
+    if (
+        plan.dataset.sha256 != CANONICAL_LME_S_SOURCE["sha256"]
+        or
+        plan.dataset.source != CANONICAL_LME_S_SOURCE["repository"]
+        or plan.dataset.revision != CANONICAL_LME_S_SOURCE["revision"]
+        or plan.dataset.case_count != CANONICAL_LME_S_SOURCE["row_count"]
+        or plan.selection.mode != "explicit"
+    ):
+        raise ValueError("25-case comparative tier requires canonical LongMemEval-S identity")
+    artifact_path = _ROOT / "benchmarks/equivalence/subsets/lme-s-25.json"
+    try:
+        artifact, raw = load_frozen_lme_selection()
+    except Exception as exc:
+        raise ValueError(f"canonical selection artifact is invalid: {exc}") from exc
+    regenerated = select_lme_s_25(rows, source=CANONICAL_LME_S_SOURCE)
+    if artifact != regenerated:
+        raise ValueError("canonical selection artifact differs from regenerated artifact")
+    if plan.selection.target_question_ids != artifact["target_question_ids"]:
+        raise ValueError("plan question IDs differ from canonical ordered cohort")
+    return {
+        "selection_artifact_path": "benchmarks/equivalence/subsets/lme-s-25.json",
+        "selection_artifact_sha256": hashlib.sha256(raw).hexdigest(),
+        "selection_algorithm_version": artifact["selection_algorithm_version"],
+    }
 
 
 def _verify_fresh_runtime(plan: MemoryBenchRunPlan) -> None:
@@ -1381,6 +1418,7 @@ def _started_manifest(
     plan: MemoryBenchRunPlan,
     started_at: str,
     preregistration_identity: PreregistrationIdentity,
+    selection_pins: dict[str, str],
 ) -> dict[str, Any]:
     return RunManifest.model_validate({
         "protocol_version": "1.0.0",
@@ -1396,6 +1434,7 @@ def _started_manifest(
             "memorybench_tree": plan.harness.tree,
             "provider_commit": plan.provider_checkout.commit,
             "provider_tree": plan.provider_checkout.tree,
+            **selection_pins,
         },
         "readiness": [],
         "leakage": {"scanned_cases": 0, "invalidated_cases": 0, "detectors_fired": {}},
@@ -1475,7 +1514,8 @@ def run_export(
             raise ValueError("MemoryBench checkout is not materialized")
         provider_checkout_verifier(plan.provider_checkout.model_dump(mode="json"))
         dataset_verifier(Path(plan.dataset_path), plan.dataset.model_dump(mode="json"))
-        _native_dataset(plan)
+        _, rows = _native_dataset(plan)
+        selection_pins = _canonical_selection_pins(plan, rows)
         _verify_fresh_runtime(plan)
     except Exception:
         return ExportResult("BLOCKED", 2)
@@ -1497,7 +1537,7 @@ def run_export(
     try:
         started_value = utc_now()
         started = _started_manifest(
-            plan, _utc_timestamp(started_value), preregistration_identity
+            plan, _utc_timestamp(started_value), preregistration_identity, selection_pins
         )
         write(manifest_path, _json_bytes(started), mode=0o600)
         write(output_root / "ledger.jsonl", b"", mode=0o600)

@@ -1,0 +1,189 @@
+{
+  "$defs": {
+    "LmeSelectionSource": {
+      "additionalProperties": false,
+      "properties": {
+        "abstention_count": {
+          "const": 30,
+          "title": "Abstention Count",
+          "type": "integer"
+        },
+        "byte_count": {
+          "const": 277383467,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "filename": {
+          "const": "longmemeval_s_cleaned.json",
+          "title": "Filename",
+          "type": "string"
+        },
+        "repository": {
+          "const": "xiaowu0162/longmemeval-cleaned",
+          "title": "Repository",
+          "type": "string"
+        },
+        "revision": {
+          "const": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+          "title": "Revision",
+          "type": "string"
+        },
+        "row_count": {
+          "const": 500,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "sha256": {
+          "const": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "type_census": {
+          "additionalProperties": false,
+          "properties": {
+            "knowledge-update": {
+              "const": 78
+            },
+            "multi-session": {
+              "const": 133
+            },
+            "single-session-assistant": {
+              "const": 56
+            },
+            "single-session-preference": {
+              "const": 30
+            },
+            "single-session-user": {
+              "const": 70
+            },
+            "temporal-reasoning": {
+              "const": 133
+            }
+          },
+          "required": [
+            "knowledge-update",
+            "multi-session",
+            "single-session-assistant",
+            "single-session-preference",
+            "single-session-user",
+            "temporal-reasoning"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "repository",
+        "revision",
+        "filename",
+        "sha256",
+        "byte_count",
+        "row_count",
+        "type_census",
+        "abstention_count"
+      ],
+      "title": "LmeSelectionSource",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifact_type": {
+      "const": "lme-selection.v1",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "question_type_order": {
+      "const": [
+        "single-session-user",
+        "single-session-assistant",
+        "single-session-preference",
+        "multi-session",
+        "temporal-reasoning",
+        "knowledge-update"
+      ]
+    },
+    "quotas": {
+      "additionalProperties": false,
+      "properties": {
+        "abstention": {
+          "const": 7
+        },
+        "knowledge-update": {
+          "const": 3
+        },
+        "multi-session": {
+          "const": 3
+        },
+        "single-session-assistant": {
+          "const": 3
+        },
+        "single-session-preference": {
+          "const": 3
+        },
+        "single-session-user": {
+          "const": 3
+        },
+        "temporal-reasoning": {
+          "const": 3
+        }
+      },
+      "required": [
+        "single-session-user",
+        "single-session-assistant",
+        "single-session-preference",
+        "multi-session",
+        "temporal-reasoning",
+        "knowledge-update",
+        "abstention"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "selection_algorithm": {
+      "const": "sha256(utf8(question_id + dataset_sha256)); sort (digest_hex, question_id)",
+      "title": "Selection Algorithm",
+      "type": "string"
+    },
+    "selection_algorithm_version": {
+      "const": "lme-s-25.sha256-v1",
+      "title": "Selection Algorithm Version",
+      "type": "string"
+    },
+    "source_identity": {
+      "$ref": "#/$defs/LmeSelectionSource"
+    },
+    "target_question_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 25,
+      "minItems": 25,
+      "title": "Target Question Ids",
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "protocol_version",
+    "schema_version",
+    "artifact_type",
+    "source_identity",
+    "selection_algorithm_version",
+    "selection_algorithm",
+    "question_type_order",
+    "quotas",
+    "target_question_ids"
+  ],
+  "title": "LmeSelection",
+  "type": "object"
+}

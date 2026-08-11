@@ -26,12 +26,14 @@ from protocol.trace import CaseTraceWriter
 
 from .adapter import LmeExomemAdapter, lme_profile
 from .bounds import BoundRun, Hypothesis, run_bounds
-from .dataset import LmeDataset, QUESTION_TYPES, dump_dataset, load_dataset
+from .dataset import LmeDataset, QUESTION_TYPES, dump_dataset, load_dataset, load_dataset_bytes, stable_dataset_bytes
 from .fetch import file_sha256, verify_sha256
 from .judge_io import _bound_ids, official_judge_commands
-from .reader import ABSTENTION, ApiReader, Reader, StubReader
+from .reader import ABSTENTION, ApiReader, Reader, StubReader, _require_approval
 from .report import manifest_banner, render_report
 from .normalize import ingest_field_groups, neutralize, render_neutral_session
+from equivalence.selection import CANONICAL_LME_S_SOURCE, load_frozen_lme_selection, select_lme_s_25
+from protocol.models import LmeSelection
 
 
 class LmeRunInvalid(RuntimeError):
@@ -53,6 +55,7 @@ class RunConfig:
     reader_name: str = "stub"
     run_id: str | None = None
     dataset_sha256: str | None = None
+    dataset_revision: str | None = None
     metered_approval: str | None = None
     pilot_evidence: Path | None = None
     full_run_approval: str | None = None
@@ -62,6 +65,7 @@ class RunConfig:
     claude_binary: str = "claude"
     top_k: int = 10
     pilot: int | None = None
+    canonical_selection: bool = False
     provider: str | None = None
     budget_cap_usd: float = 0.0
 
@@ -127,6 +131,8 @@ def _fixture_path(path: Path) -> bool:
 
 def _validate_checksum(config: RunConfig) -> str:
     if config.dataset_sha256:
+        if not _fixture_path(config.dataset) and not config.dataset_revision:
+            raise ValueError("real LongMemEval data requires --dataset-revision")
         return verify_sha256(config.dataset, config.dataset_sha256)
     if not _fixture_path(config.dataset):
         raise ValueError(
@@ -142,10 +148,11 @@ def validate_full_run_gate(
     pilot_evidence: Path | None,
     full_run_approval: str | None,
     is_pilot: bool,
+    is_canonical_selection: bool = False,
 ) -> dict[str, object] | None:
     """Refuse every declared full run until generated pilot evidence is approved."""
 
-    if is_pilot:
+    if is_pilot or is_canonical_selection:
         return None
     if pilot_evidence is None or not Path(pilot_evidence).is_file():
         raise FullRunApprovalRequired(
@@ -216,6 +223,37 @@ def _select_pilot(dataset: LmeDataset, size: int) -> LmeDataset:
         if not progressed:  # defensive: size was validated against total rows
             break
     return LmeDataset(tuple(selected))
+
+
+def _canonical_selection(dataset: LmeDataset, dataset_path: Path, config: RunConfig) -> tuple[LmeDataset, dict[str, str]]:
+    if config.pilot is not None:
+        raise ValueError("--pilot cannot substitute for canonical comparative selection")
+    if config.dataset_sha256 != CANONICAL_LME_S_SOURCE["sha256"]:
+        raise ValueError("canonical selection requires the frozen source SHA-256")
+    if config.dataset_revision != CANONICAL_LME_S_SOURCE["revision"]:
+        raise ValueError("canonical selection requires the frozen source revision")
+    artifact_path = Path(__file__).resolve().parents[1] / "equivalence/subsets/lme-s-25.json"
+    try:
+        artifact, raw = load_frozen_lme_selection()
+    except Exception as exc:
+        raise ValueError(f"canonical selection artifact is invalid: {exc}") from exc
+    if artifact["source_identity"] != CANONICAL_LME_S_SOURCE:
+        raise ValueError("canonical selection artifact source identity differs")
+    regenerated = select_lme_s_25(
+        [{"question_id": question.question_id, "question_type": question.question_type} for question in dataset.questions],
+        source=CANONICAL_LME_S_SOURCE,
+    )
+    if artifact["target_question_ids"] != regenerated["target_question_ids"]:
+        raise ValueError("canonical selection artifact does not match regenerated membership and order")
+    questions = {question.question_id: question for question in dataset.questions}
+    selected = artifact["target_question_ids"]
+    if any(question_id not in questions for question_id in selected):
+        raise ValueError("canonical selection artifact names a missing dataset question")
+    return LmeDataset(tuple(questions[question_id] for question_id in selected)), {
+        "selection_artifact_path": "benchmarks/equivalence/subsets/lme-s-25.json",
+        "selection_artifact_sha256": hashlib.sha256(raw).hexdigest(),
+        "selection_algorithm_version": artifact["selection_algorithm_version"],
+    }
 
 
 def _ingest_outcome(adapter: object) -> tuple[list[dict[str, object]], float]:
@@ -420,18 +458,27 @@ def execute_run(
     adapter_factory: Callable[[], object] = LmeExomemAdapter,
 ) -> RunResult:
     dataset_path = Path(config.dataset)
-    dataset_checksum = _validate_checksum(config)
-    parent_dataset = load_dataset(dataset_path)
-    dataset = (
-        _select_pilot(parent_dataset, config.pilot)
-        if config.pilot is not None
-        else parent_dataset
-    )
+    raw_dataset = stable_dataset_bytes(dataset_path)
+    dataset_checksum = hashlib.sha256(raw_dataset).hexdigest()
+    if config.dataset_sha256:
+        if not _fixture_path(dataset_path) and not config.dataset_revision:
+            raise ValueError("real LongMemEval data requires --dataset-revision")
+        if dataset_checksum != config.dataset_sha256:
+            raise ValueError("dataset SHA-256 differs from recorded source")
+    elif not _fixture_path(dataset_path):
+        raise ValueError("real LongMemEval data requires --dataset-sha256 recorded at first fetch")
+    parent_dataset = load_dataset_bytes(raw_dataset)
+    del raw_dataset
+    selection_pins: dict[str, str] = {}
+    if config.canonical_selection:
+        dataset, selection_pins = _canonical_selection(parent_dataset, dataset_path, config)
+    else:
+        dataset = _select_pilot(parent_dataset, config.pilot) if config.pilot is not None else parent_dataset
     dataset_identity = DatasetIdentity(
         id="longmemeval",
         variant="LongMemEval-S cleaned September 2025",
         source="xiaowu0162/longmemeval-cleaned",
-        revision=config.dataset_sha256 or "fixture-local",
+        revision=(CANONICAL_LME_S_SOURCE["revision"] if config.canonical_selection else config.dataset_revision or "fixture-local"),
         sha256=dataset_checksum,
         case_count=len(parent_dataset.questions),
     )
@@ -445,6 +492,22 @@ def execute_run(
     )
     run_id = config.run_id or _default_run_id()
     run_dir = Path(config.out) / run_id
+    # Reader approval and full-run evidence are preflight checks: a refusal
+    # must not leave an immutable-looking run directory behind.
+    pilot_evidence = (
+        None
+        if _fixture_path(dataset_path)
+        else validate_full_run_gate(
+            question_count=len(dataset.questions),
+            reader_name=config.reader_name,
+            pilot_evidence=config.pilot_evidence,
+            full_run_approval=config.full_run_approval,
+            is_pilot=config.pilot is not None,
+            is_canonical_selection=config.canonical_selection,
+        )
+    )
+    if reader is None and config.reader_name in {"openai", "claude"}:
+        _require_approval(config.metered_approval)
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError as exc:
@@ -456,22 +519,13 @@ def execute_run(
         started_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         provider_variant=provider_variant,
         namespaces={question.question_id: derive_namespace(run_id, question.question_id, provider_kind) for question in dataset.questions},
+        pins=selection_pins,
     )
 
-    # Provider and reader constructors may inspect credentials or initialize a
-    # backend, so the derived-identity manifest is durable before either runs.
     active_reader = reader or _reader(config, run_dir)
-    pilot_evidence = (
-        None
-        if _fixture_path(dataset_path)
-        else validate_full_run_gate(
-            question_count=len(dataset.questions),
-            reader_name=config.reader_name,
-            pilot_evidence=config.pilot_evidence,
-            full_run_approval=config.full_run_approval,
-            is_pilot=config.pilot is not None,
-        )
-    )
+
+    # Provider construction can initialize a backend, so it remains after the
+    # started manifest. Reader authorization was already checked in preflight.
     control_config_sha256 = None
     if config.provider:
         from .providers.registry import provider_factory
@@ -503,6 +557,9 @@ def execute_run(
         "full_run_approval": config.full_run_approval,
         "pilot_evidence": pilot_evidence,
         "pilot": pilot,
+        "canonical_selection": config.canonical_selection,
+        "selection_mode": "canonical" if config.canonical_selection else ("generic-pilot" if len(dataset.questions) == 25 else None),
+        "selection": selection_pins or None,
         "retrieval_clock": "question_date",
         "dataset_warnings": {
             question.question_id: list(question.validation_warnings)
@@ -760,6 +817,8 @@ def execute_run(
         "full_run_approval": config.full_run_approval,
         "pilot_evidence": pilot_evidence,
         "pilot": pilot,
+        "canonical_selection": config.canonical_selection,
+        "selection": selection_pins or None,
         "judge_model": "gpt-4o",
         "retrieval_clock": "question_date",
         "dataset_warnings": environment["lme"]["dataset_warnings"],

@@ -465,6 +465,42 @@ def test_secure_read_primitive_rejects_relative_symlink_wrong_owner_mode_and_wri
         tmp_path.chmod(0o700)
 
 
+def test_full_canonical_memorybench_plan_is_valid_and_unpinned(tmp_path: Path) -> None:
+    from equivalence.selection import CANONICAL_LME_S_SOURCE
+    from memorybench.export import _canonical_selection_pins
+    from protocol.models import MemoryBenchRunPlan
+
+    payload = _plan_payload(tmp_path)
+    payload["selection"] = {"mode": "full", "target_question_ids": None}
+    payload["dataset"] = {
+        "id": "longmemeval",
+        "variant": "LongMemEval-S cleaned September 2025",
+        "source": CANONICAL_LME_S_SOURCE["repository"],
+        "revision": CANONICAL_LME_S_SOURCE["revision"],
+        "sha256": CANONICAL_LME_S_SOURCE["sha256"],
+        "case_count": CANONICAL_LME_S_SOURCE["row_count"],
+    }
+    plan = MemoryBenchRunPlan.model_validate(payload)
+
+    assert _canonical_selection_pins(plan, []) == {}
+
+
+def test_noncanonical_explicit_twenty_five_case_memorybench_plan_is_refused(tmp_path: Path) -> None:
+    from memorybench.export import _canonical_selection_pins
+    from protocol.models import MemoryBenchRunPlan
+
+    payload = _plan_payload(tmp_path)
+    ids = [f"fixture-{index}" for index in range(25)]
+    payload["selection"] = {"mode": "explicit", "target_question_ids": ids}
+    plan = MemoryBenchRunPlan.model_validate(payload)
+
+    with pytest.raises(ValueError, match="25-case comparative tier"):
+        _canonical_selection_pins(
+            plan,
+            [{"question_id": question_id, "question_type": "multi-session"} for question_id in ids],
+        )
+
+
 def test_cli_has_strict_plan_only_surface_and_no_fixture_fault_switch(tmp_path: Path) -> None:
     from memorybench.export import main
 

@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Set
 import json
+import hashlib
 from pathlib import Path
 
 from protocol.offline import offline_guard
 
-from .dataset import LmeDataset, QUESTION_TYPES
+from .dataset import LmeDataset, QUESTION_TYPES, load_dataset
 
 
 ABSTENTION_ABILITY = "abstention"
@@ -142,6 +143,7 @@ def render_run_report(run_dir: Path | str, *, offline: bool = False) -> str:
         raise ValueError(str(exc)) from exc
 
     root = Path(run_dir)
+    validate_selection_evidence(root, manifest=manifest)
 
     def render() -> str:
         from .judge_io import render_from_artifacts
@@ -153,6 +155,53 @@ def render_run_report(run_dir: Path | str, *, offline: bool = False) -> str:
         with offline_guard():
             return render()
     return render()
+
+
+def validate_selection_evidence(run_dir: Path | str, *, manifest=None) -> None:
+    """Fail closed for every 25-row artifact, independent of mutable claims."""
+    from protocol.manifest import load_manifest
+
+    root = Path(run_dir)
+    manifest = manifest or load_manifest(root)
+    dataset = load_dataset(root / "dataset.json")
+    if len(dataset.questions) != 25:
+        return
+    environment_path = root / "environment.json"
+    environment = json.loads(environment_path.read_text(encoding="utf-8")) if environment_path.is_file() else {}
+    lme = environment.get("lme") if isinstance(environment, dict) else None
+    ids = [question.question_id for question in dataset.questions]
+    from equivalence.selection import load_frozen_lme_selection
+    artifact, raw = load_frozen_lme_selection()
+    canonical_set = set(artifact["target_question_ids"])
+    if set(ids) == canonical_set:
+        if lme.get("selection_mode") != "canonical":
+            raise ValueError("canonical selection cannot be downgraded")
+    elif lme.get("selection_mode") == "generic-pilot":
+        if lme.get("pilot", {}).get("size") != 25 or lme.get("pilot", {}).get("question_ids") != ids:
+            raise ValueError("generic selection evidence differs")
+        return
+    if not isinstance(lme, dict) or lme.get("selection_mode") not in {"canonical", "generic-pilot"}:
+        raise ValueError("25-question selection evidence is missing")
+    if lme.get("canonical_selection") is not True:
+        raise ValueError("canonical selection evidence mode differs")
+    from protocol.models import DatasetIdentity
+    from equivalence.selection import CANONICAL_LME_S_SOURCE
+    expected_identity = DatasetIdentity(
+        id="longmemeval", variant="LongMemEval-S cleaned September 2025",
+        source="xiaowu0162/longmemeval-cleaned", revision=CANONICAL_LME_S_SOURCE["revision"],
+        sha256=CANONICAL_LME_S_SOURCE["sha256"], case_count=CANONICAL_LME_S_SOURCE["row_count"],
+    ).model_dump(mode="json")
+    if manifest.dataset.model_dump(mode="json") != expected_identity:
+        raise ValueError("canonical selection manifest dataset identity differs")
+    expected = {
+        "selection_artifact_path": "benchmarks/equivalence/subsets/lme-s-25.json",
+        "selection_artifact_sha256": hashlib.sha256(raw).hexdigest(),
+        "selection_algorithm_version": artifact["selection_algorithm_version"],
+    }
+    if manifest.pins != expected or lme.get("selection") != expected:
+        raise ValueError("canonical selection evidence pins differ")
+    if ids != artifact["target_question_ids"]:
+        raise ValueError("canonical selection dataset IDs differ")
 
 
 render_run_report.offline_guard = offline_guard  # type: ignore[attr-defined]

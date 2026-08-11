@@ -20,6 +20,7 @@ from .version import (
     MEMORYBENCH_RUN_PLAN_SCHEMA_VERSION, MEMORYBENCH_EXPORT_SCHEMA_VERSION,
     MEMORYBENCH_PRIVATE_GOLD_SCHEMA_VERSION, GUEST_CLEANUP_PLAN_SCHEMA_VERSION,
     GUEST_CLEANUP_SCHEMA_VERSION,
+    LME_SELECTION_SCHEMA_VERSION,
 )
 
 
@@ -34,6 +35,63 @@ class DatasetIdentity(StrictModel):
     revision: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     case_count: int = Field(ge=0)
+
+
+class LmeSelectionSource(StrictModel):
+    repository: Literal["xiaowu0162/longmemeval-cleaned"]
+    revision: Literal["98d7416c24c778c2fee6e6f3006e7a073259d48f"]
+    filename: Literal["longmemeval_s_cleaned.json"]
+    sha256: Literal["d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"]
+    byte_count: Literal[277383467]
+    row_count: Literal[500]
+    type_census: dict[str, int]
+    abstention_count: Literal[30]
+
+    @field_validator("type_census")
+    @classmethod
+    def _frozen_census(cls, value: dict[str, int]) -> dict[str, int]:
+        expected = {
+            "knowledge-update": 78, "multi-session": 133,
+            "single-session-assistant": 56, "single-session-preference": 30,
+            "single-session-user": 70, "temporal-reasoning": 133,
+        }
+        if value != expected:
+            raise ValueError("type_census differs from frozen LongMemEval-S source")
+        return value
+
+    @model_validator(mode="after")
+    def _source_totals(self) -> "LmeSelectionSource":
+        if sum(self.type_census.values()) != self.row_count:
+            raise ValueError("type census must total row count")
+        return self
+
+
+class LmeSelection(StrictModel):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[LME_SELECTION_SCHEMA_VERSION]
+    artifact_type: Literal["lme-selection.v1"]
+    source_identity: LmeSelectionSource
+    selection_algorithm_version: Literal["lme-s-25.sha256-v1"]
+    selection_algorithm: Literal["sha256(utf8(question_id + dataset_sha256)); sort (digest_hex, question_id)"]
+    question_type_order: list[str]
+    quotas: dict[str, int]
+    target_question_ids: list[str]
+
+    @model_validator(mode="after")
+    def _closed_canonical_profile(self) -> "LmeSelection":
+        question_types = [
+            "single-session-user", "single-session-assistant", "single-session-preference",
+            "multi-session", "temporal-reasoning", "knowledge-update",
+        ]
+        if self.question_type_order != question_types:
+            raise ValueError("question_type_order differs from canonical selection profile")
+        if self.quotas != {**{question_type: 3 for question_type in question_types}, "abstention": 7}:
+            raise ValueError("quotas differ from canonical selection profile")
+        if len(self.target_question_ids) != 25 or len(set(self.target_question_ids)) != 25:
+            raise ValueError("target_question_ids must be 25 unique IDs")
+        if any(not value for value in self.target_question_ids):
+            raise ValueError("target_question_ids must not contain blanks")
+        return self
 
 
 class CaseHandle(StrictModel):
@@ -797,6 +855,7 @@ SCHEMA_EXPORTS: dict[str, type[BaseModel]] = {
     "budget-ledger": BudgetLedgerEntry, "equivalence-diff": EquivalenceDiff,
     "equivalence-exception": EquivalenceException, "gap-report": GapReport,
     "memorybench-run-plan": MemoryBenchRunPlan,
+    "lme-selection": LmeSelection,
     "memorybench-export": MemoryBenchExport,
     "memorybench-private-gold": MemoryBenchPrivateGold,
     "guest-cleanup-plan": GuestCleanupPlan,
@@ -1063,6 +1122,22 @@ def _enhance_memorybench_schema(name: str, schema: dict[str, Any]) -> dict[str, 
                 "type": "array", "minItems": 1, "uniqueItems": True,
             }}},
         })
+    elif name == "lme-selection":
+        source = defs["LmeSelectionSource"]
+        if "abstention_count" not in source["required"]:
+            source["required"].append("abstention_count")
+        source["properties"]["type_census"] = {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "knowledge-update": {"const": 78}, "multi-session": {"const": 133},
+                "single-session-assistant": {"const": 56}, "single-session-preference": {"const": 30},
+                "single-session-user": {"const": 70}, "temporal-reasoning": {"const": 133},
+            },
+            "required": ["knowledge-update", "multi-session", "single-session-assistant", "single-session-preference", "single-session-user", "temporal-reasoning"],
+        }
+        schema["properties"]["question_type_order"] = {"const": ["single-session-user", "single-session-assistant", "single-session-preference", "multi-session", "temporal-reasoning", "knowledge-update"]}
+        schema["properties"]["quotas"] = {"type": "object", "additionalProperties": False, "properties": {**{item: {"const": 3} for item in ("single-session-user", "single-session-assistant", "single-session-preference", "multi-session", "temporal-reasoning", "knowledge-update")}, "abstention": {"const": 7}}, "required": ["single-session-user", "single-session-assistant", "single-session-preference", "multi-session", "temporal-reasoning", "knowledge-update", "abstention"]}
+        schema["properties"]["target_question_ids"].update({"minItems": 25, "maxItems": 25, "uniqueItems": True, "items": {"type": "string", "minLength": 1}})
     elif name == "memorybench-export":
         schema["properties"]["executed_stages"]["const"] = ["ingest", "indexing", "search"]
         schema["properties"]["excluded_stages"]["const"] = ["answer", "evaluate", "report"]

@@ -55,6 +55,13 @@ def test_the_run_manifest_validates_against_its_committed_schema(emitted) -> Non
     _validator("run-manifest", 2).validate(json.loads((emitted["run"] / "manifest.json").read_text(encoding="utf-8")))
 
 
+def test_committed_lme_selection_validates_against_its_closed_schema() -> None:
+    validator = _validator("lme-selection")
+    payload = json.loads(Path("benchmarks/equivalence/subsets/lme-s-25.json").read_text(encoding="utf-8"))
+    validator.validate(payload)
+    assert len(payload["target_question_ids"]) == 25
+
+
 def test_every_trace_record_validates_against_the_case_trace_schema(emitted) -> None:
     validator = _validator("case-trace")
     traces = sorted((emitted["run"] / "traces").glob("*.jsonl"))

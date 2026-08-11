@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--out", required=True, type=Path, help="root for a new immutable run")
     run.add_argument("--run-id")
     run.add_argument("--dataset-sha256")
+    run.add_argument("--dataset-revision")
     run.add_argument("--metered-approval")
     run.add_argument("--pilot-evidence", type=Path)
     run.add_argument("--full-run-approval")
@@ -46,6 +47,10 @@ def _parser() -> argparse.ArgumentParser:
         "--pilot",
         type=int,
         help="run a deterministic per-ability round-robin pilot of N questions",
+    )
+    run.add_argument(
+        "--canonical-selection", action="store_true",
+        help="use the repository-owned frozen LongMemEval-S 25-case cohort",
     )
 
     labels = commands.add_parser(
@@ -76,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             reader_name=args.reader,
             run_id=args.run_id,
             dataset_sha256=args.dataset_sha256,
+            dataset_revision=args.dataset_revision,
             metered_approval=args.metered_approval,
             pilot_evidence=args.pilot_evidence,
             full_run_approval=args.full_run_approval,
@@ -85,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
             claude_binary=args.claude_binary,
             top_k=args.top_k,
             pilot=args.pilot,
+            canonical_selection=args.canonical_selection,
             provider=args.provider,
             budget_cap_usd=args.budget_cap_usd,
         )

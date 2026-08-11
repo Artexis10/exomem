@@ -116,6 +116,8 @@ def render_from_artifacts(run_dir: Path | str, *, invalid_reason: str | None, pr
     """
 
     run_dir = Path(run_dir)
+    from .report import validate_selection_evidence
+    validate_selection_evidence(run_dir)
     ceiling_labels_path = run_dir / LANE_FILES["ceiling"][1]
     floor_labels_path = run_dir / LANE_FILES["floor"][1]
     return render_report(
@@ -159,6 +161,8 @@ def ingest_judge_labels(run_dir: Path | str, labels: Path | str, *, lane: str = 
     if lane not in LANE_FILES:
         raise ValueError(f"unknown judge lane {lane!r}; choose from {sorted(LANE_FILES)}")
     run_dir = Path(run_dir)
+    from .report import validate_selection_evidence
+    validate_selection_evidence(run_dir)
     source = Path(labels)
     parsed = load_labels(source)
     dataset_ids = {

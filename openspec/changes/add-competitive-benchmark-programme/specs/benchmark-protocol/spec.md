@@ -573,6 +573,44 @@ unproved cleanup and returns 3 unless a caught signal has precedence.
   proof, and only then finalizes validity from export completeness and
   `all_absent`
 
+### Requirement: Canonical LongMemEval-S Selection Is Reproducible And Bound
+The 25-case comparative cohort SHALL be the closed `lme-selection.v1` artifact
+at `benchmarks/equivalence/subsets/lme-s-25.json`. It SHALL bind repository
+`xiaowu0162/longmemeval-cleaned`, revision
+`98d7416c24c778c2fee6e6f3006e7a073259d48f`, filename
+`longmemeval_s_cleaned.json`, SHA-256
+`d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442`,
+277383467 bytes, 500 rows, and canonical census knowledge-update 78,
+multi-session 133, single-session-assistant 56, single-session-preference 30,
+single-session-user 70, temporal-reasoning 133. The exact canonical type
+counts overlap the independently required abstention census of 30 and total
+500. The exact canonical type
+order is `single-session-user`, `single-session-assistant`,
+`single-session-preference`, `multi-session`, `temporal-reasoning`,
+`knowledge-update`. A row is abstention iff its ID ends `_abs`, but its type
+is still required and validated. The algorithm hashes UTF-8
+`question_id + dataset_sha256` without a delimiter, orders by
+`(digest_hex, question_id)`, selects three non-abstentions per canonical type
+then seven abstentions, and refuses blanks, duplicate IDs, unknown types,
+bad source facts, undersized strata, or a non-identical regeneration.
+
+Direct canonical mode and a frozen MemoryBench explicit tier SHALL load only
+the repository-owned artifact, revalidate source facts and regenerated ordered
+membership before reader/provider construction, and persist
+`selection_artifact_path`, `selection_artifact_sha256`, and
+`selection_algorithm_version` in started and terminal evidence. A generic
+`--pilot 25` SHALL be refused as a canonical/comparative substitute.
+
+#### Scenario: Altered plan IDs cannot select a same-cardinality cohort
+- **WHEN** a canonical MemoryBench plan omits, reorders, or replaces one of
+  the 25 committed IDs
+- **THEN** preflight is BLOCKED before any stage or provider construction
+
+#### Scenario: Direct canonical mode cannot use a substituted artifact
+- **WHEN** the repository artifact or its source identity differs from exact
+  regeneration of the verified dataset
+- **THEN** the direct runner refuses before reader/provider construction
+
 ### Requirement: Registration Overlay Is Exact And Reversible
 Materializing guest providers into the detached pinned MemoryBench checkout
 SHALL add only the eight lockfile-listed §4.4 provider/test files plus the
