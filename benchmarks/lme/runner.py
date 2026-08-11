@@ -959,6 +959,49 @@ def execute_run(
             }
         )
 
+    if control_flow is not None:
+        # Preserve the provider's exact control-flow object.  Local evidence
+        # writes are best-effort once it exists; none may replace it.
+        try:
+            bounds_dir = run_dir / "bounds"
+            bounds_dir.mkdir()
+            _write_jsonl(bounds_dir / "gold-evidence-ceiling.jsonl", [])
+            _write_jsonl(bounds_dir / "null-abstain-floor.jsonl", [])
+            _write_jsonl(run_dir / "failures.jsonl", failures)
+            _write_jsonl(run_dir / "question-outcomes.jsonl", outcomes)
+        except Exception as exc:
+            try:
+                control_flow.add_note(f"local artifact persistence failed: {exc}")
+            except AttributeError:
+                pass
+        if config.provider:
+            try:
+                _write_jsonl(run_dir / "isolation.jsonl", isolation_rows)
+                environment["lme"]["lifecycle_expected_instances"] = lifecycle_instances
+                _write_json(run_dir / "environment.json", environment)
+            except Exception as exc:
+                try:
+                    control_flow.add_note(f"lifecycle ledger persistence failed: {exc}")
+                except AttributeError:
+                    pass
+        try:
+            finalize_manifest(
+                run_dir,
+                status="INVALID",
+                finalized_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+                readiness=readiness_list,
+                leakage=LeakageSummary(scanned_cases=len(outcomes), invalidated_cases=len(failures)),
+                contamination="unverifiable",
+                budget=_budget_summary(ledger),
+                invalid_reason=invalid_reason,
+            )
+        except Exception as exc:
+            try:
+                control_flow.add_note(f"terminal manifest finalization failed: {exc}")
+            except AttributeError:
+                pass
+        raise control_flow
+
     bounds_dir = run_dir / "bounds"
     bounds_dir.mkdir()
     if invalid_reason is None:

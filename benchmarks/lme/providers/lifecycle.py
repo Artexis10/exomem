@@ -211,33 +211,10 @@ def _atomic_write(path: Path, content: bytes) -> None:
         os.close(root_fd)
 
 
-def _safe_regular_path(path: Path, evidence_root: Path | None = None) -> None:
-    if evidence_root is not None:
-        try:
-            relative = path.relative_to(evidence_root)
-        except ValueError as exc:
-            raise CleanupUnproved("cleanup evidence escapes evidence root") from exc
-        cursor = evidence_root
-        for part in relative.parts:
-            cursor = cursor / part
-            mode = os.lstat(cursor).st_mode
-            if stat.S_ISLNK(mode):
-                raise CleanupUnproved("cleanup evidence uses a symlink")
-    try:
-        mode = os.lstat(path).st_mode
-    except OSError as exc:
-        raise CleanupUnproved(f"cleanup evidence is missing: {exc}") from exc
-    if not stat.S_ISREG(mode):
+def _verify_cleanup_observation_descriptor(descriptor: int, digest: str) -> bytes:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
         raise CleanupUnproved("cleanup evidence is not a regular file")
-
-
-def verify_cleanup_observation(path: Path, digest: str, *, evidence_root: Path | None = None) -> bytes:
-    _safe_regular_path(path, evidence_root)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise CleanupUnproved(f"cleanup evidence cannot be opened no-follow: {exc}") from exc
     with os.fdopen(descriptor, "rb") as handle:
         payload = handle.read()
     actual = hashlib.sha256(payload).hexdigest()
@@ -250,6 +227,59 @@ def verify_cleanup_observation(path: Path, digest: str, *, evidence_root: Path |
     return payload
 
 
+def _verify_cleanup_observation_under_root(root_fd: int, relative: Path, digest: str) -> bytes:
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise CleanupUnproved("cleanup evidence escapes evidence root")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    parent_fd = root_fd
+    try:
+        for part in relative.parts[:-1]:
+            try:
+                descriptor = os.open(part, flags, dir_fd=parent_fd)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise CleanupUnproved("cleanup evidence uses a symlink") from exc
+                raise CleanupUnproved(f"cleanup evidence path cannot be opened no-follow: {exc}") from exc
+            descriptors.append(descriptor)
+            parent_fd = descriptor
+        try:
+            descriptor = os.open(
+                relative.parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd
+            )
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise CleanupUnproved("cleanup evidence uses a symlink") from exc
+            raise CleanupUnproved(f"cleanup evidence cannot be opened no-follow: {exc}") from exc
+        return _verify_cleanup_observation_descriptor(descriptor, digest)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def verify_cleanup_observation(path: Path, digest: str, *, evidence_root: Path | None = None) -> bytes:
+    if evidence_root is not None:
+        try:
+            relative = path.relative_to(evidence_root)
+        except ValueError as exc:
+            raise CleanupUnproved("cleanup evidence escapes evidence root") from exc
+        flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            root_fd = os.open(evidence_root, flags)
+        except OSError as exc:
+            raise CleanupUnproved(f"cleanup evidence root cannot be opened no-follow: {exc}") from exc
+        try:
+            return _verify_cleanup_observation_under_root(root_fd, relative, digest)
+        finally:
+            os.close(root_fd)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CleanupUnproved(f"cleanup evidence cannot be opened no-follow: {exc}") from exc
+    return _verify_cleanup_observation_descriptor(descriptor, digest)
+
+
 def _persist_observation(context: ProviderSessionContext, observation: ProviderCleanupObservation) -> tuple[Path, str]:
     payload = observation.model_dump_json(indent=2).encode() + b"\n"
     path = context.evidence_root / "provider-cleanup-observation.json"
@@ -260,22 +290,18 @@ def _persist_observation(context: ProviderSessionContext, observation: ProviderC
         raise CleanupUnproved(f"cleanup evidence root binding is unavailable: {exc}") from exc
     try:
         root_stat = os.fstat(root_fd)
+        _atomic_write(path, payload)
+        try:
+            current_root = os.lstat(context.evidence_root)
+        except OSError as exc:
+            raise CleanupUnproved(f"cleanup evidence root binding changed: {exc}") from exc
+        if (root_stat.st_dev, root_stat.st_ino) != (current_root.st_dev, current_root.st_ino):
+            raise CleanupUnproved("cleanup evidence root binding changed during persistence")
+        digest = hashlib.sha256(payload).hexdigest()
+        _verify_cleanup_observation_under_root(root_fd, Path(path.name), digest)
+        return path, digest
     finally:
         os.close(root_fd)
-    _atomic_write(path, payload)
-    try:
-        reopened_root = os.open(context.evidence_root, flags)
-    except OSError as exc:
-        raise CleanupUnproved(f"cleanup evidence root binding changed: {exc}") from exc
-    try:
-        reopened_stat = os.fstat(reopened_root)
-    finally:
-        os.close(reopened_root)
-    if (root_stat.st_dev, root_stat.st_ino) != (reopened_stat.st_dev, reopened_stat.st_ino):
-        raise CleanupUnproved("cleanup evidence root binding changed during persistence")
-    digest = hashlib.sha256(payload).hexdigest()
-    verify_cleanup_observation(path, digest, evidence_root=context.evidence_root)
-    return path, digest
 
 
 def run_provider_lifecycle(

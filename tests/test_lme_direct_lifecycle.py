@@ -1753,3 +1753,98 @@ def test_feedback2_trailing_separator_is_rejected_by_models_and_draft_schemas(
             observation_payload
         )
     )
+
+
+def test_feedback3_cleanup_verification_holds_the_owned_dirfd_chain_during_intermediate_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-named artifact substituted by path must not become verification input."""
+    import lme.providers.lifecycle as lifecycle
+    from lme.providers.lifecycle import verify_cleanup_observation
+    from protocol.models import ProviderCleanupObservation
+
+    evidence_root = tmp_path / "evidence"
+    original_dir = evidence_root / "owned" / "session"
+    original_dir.mkdir(parents=True)
+    path = original_dir / "provider-cleanup-observation.json"
+
+    def payload(session_id: str) -> bytes:
+        observation = ProviderCleanupObservation(
+            run_id="run-1", session_id=session_id, requested_provider="fixture",
+            provider_variant="observed", namespace="namespace-1", cleanup_called=True,
+            required_surface_ids=["provider-state"],
+            observations=[{"kind": "provider-state", "remaining_record_ids": [], "backend_active": False}],
+        )
+        return observation.model_dump_json().encode()
+
+    original = payload("original")
+    replacement = payload("replacement")
+    path.write_bytes(original)
+    expected_digest = hashlib.sha256(replacement).hexdigest()
+    real_open = lifecycle.os.open
+    swapped = False
+
+    def swap_before_leaf_open(name, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if name == "provider-cleanup-observation.json" and dir_fd is not None and not swapped:
+            swapped = True
+            displaced = evidence_root / "displaced"
+            (evidence_root / "owned").rename(displaced)
+            replacement_path = evidence_root / "owned" / "session" / "provider-cleanup-observation.json"
+            replacement_path.parent.mkdir(parents=True)
+            replacement_path.write_bytes(replacement)
+        return real_open(name, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(lifecycle.os, "open", swap_before_leaf_open)
+    with pytest.raises(ValueError, match="digest"):
+        verify_cleanup_observation(path, expected_digest, evidence_root=evidence_root)
+    assert swapped
+
+
+@pytest.mark.parametrize("terminalization_fails", (False, True))
+def test_feedback3_runner_preserves_control_flow_after_local_write_and_terminalization_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminalization_fails: bool
+) -> None:
+    from lme.providers import registry
+    import lme.runner as runner
+    from lme.reader import StubReader
+
+    class ProviderControl(BaseException):
+        pass
+
+    original = ProviderControl("provider control flow")
+
+    class InterruptingProvider(_Provider):
+        def setup(self, profile, context) -> None:
+            super().setup(profile, context)
+            raise original
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(InterruptingProvider))
+    real_write_jsonl = runner._write_jsonl
+
+    def fail_late_writer(path: Path, rows: list[dict[str, object]]) -> None:
+        if path.name == "gold-evidence-ceiling.jsonl":
+            raise RuntimeError("late local artifact write")
+        real_write_jsonl(path, rows)
+
+    monkeypatch.setattr(runner, "_write_jsonl", fail_late_writer)
+    terminalizations: list[str] = []
+    real_finalize = runner.finalize_manifest
+
+    def finalize_or_fail(*args, **kwargs):
+        terminalizations.append(str(kwargs["status"]))
+        if terminalization_fails:
+            raise RuntimeError("terminalization write")
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "finalize_manifest", finalize_or_fail)
+    run_id = f"feedback3-control-{terminalization_fails}"
+    with pytest.raises(ProviderControl) as raised:
+        runner.execute_run(_mini_config(tmp_path, 1, run_id, provider="fixture"), reader=StubReader())
+    assert raised.value is original
+    assert terminalizations == ["INVALID"]
+    if not terminalization_fails:
+        manifest = json.loads((tmp_path / run_id / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["status"] == "INVALID"
+        environment = json.loads((tmp_path / run_id / "environment.json").read_text(encoding="utf-8"))
+        assert [item["session_id"] for item in environment["lme"]["lifecycle_expected_instances"]] == ["__diagnostic__"]
