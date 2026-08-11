@@ -196,10 +196,14 @@ class KubernetesProviderRegistry:
             getattr(item, "type", None) == "Complete" and getattr(item, "status", None) == "True"
             for item in conditions
         )
-        init_failed = any(
-            getattr(item, "type", None) == "Failed" and getattr(item, "status", None) == "True"
-            for item in conditions
-        ) or bool(getattr(getattr(init_job, "status", None), "failed", 0))
+        init_failed = not init_complete and (
+            any(
+                getattr(item, "type", None) == "Failed"
+                and getattr(item, "status", None) == "True"
+                for item in conditions
+            )
+            or bool(getattr(getattr(init_job, "status", None), "failed", 0))
+        )
         stateful_set = await exists(
             self._apps.read_namespaced_stateful_set,
             current.resource_name,
