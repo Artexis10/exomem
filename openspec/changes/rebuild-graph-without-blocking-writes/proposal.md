@@ -6,12 +6,12 @@ The graph must still be rebuilt across the complete vault before the triggering 
 
 ## What Changes
 
-- Publish one content-free graph-sync checkpoint in the same guarded canonical batch as every graph-relevant vault mutation.
+- Publish one content-free graph-sync checkpoint plus an internal monotonic generation floor in the same guarded transition as every graph-relevant canonical write or trash move.
 - Release the vault mutation boundary before starting or joining full graph work; a request may still wait off-boundary so its terminal preserves the existing graph-available contract.
 - Build a full graph into a temporary database, stabilize it against the exact durable checkpoint/current vault, then acquire the boundary only for the final checkpoint recheck and atomic sidecar swap.
-- Make concurrent rebuilds single-flight per vault. Later canonical batches can publish new checkpoints while callers join the same rebuild; the builder retries until it consumes the latest stable checkpoint.
+- Make concurrent rebuilds single-flight per vault across threads and processes using a persistent OS lock. Later canonical batches can publish new checkpoints while callers join the same rebuild; the builder retries until it consumes the latest stable checkpoint.
 - Persist the consumed checkpoint identity in the graph sidecar and recover a current-but-unacknowledged checkpoint after crash/restart or reconcile.
-- Return a committed canonical terminal with explicit derived-graph failure when stabilization is exhausted, so retry cannot duplicate the canonical write and graph availability is never fabricated.
+- Persist a nonterminal `graph_pending` idempotency state after canonical commit, then return a completed canonical terminal with explicit derived-graph success/failure only after the graph phase resolves. A retry that observes durable `graph_pending` resumes graph-only work and never duplicates the canonical write; the earlier cross-store crash cut before that persistence returns committed-uncertain while checkpoint recovery handles graph convergence.
 - Sweep abandoned temporary rebuild databases during reconcile.
 
 ## Capabilities
@@ -22,7 +22,7 @@ The graph must still be rebuilt across the complete vault before the triggering 
 
 ### Modified Capabilities
 
-None.
+- `hosted-mutation-safety`: permit unreachable private graph construction and abandoned-temp cleanup under a dedicated cross-process rebuild lock while retaining the canonical vault boundary for checkpoint/floor publication and every live-sidecar replacement.
 
 ## Impact
 
