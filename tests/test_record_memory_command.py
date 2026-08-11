@@ -6,17 +6,21 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_record_memory_exposes_only_the_five_declared_actions() -> None:
+def test_record_memory_exposes_the_seven_declared_actions() -> None:
     from exomem import record_memory
 
-    assert record_memory.ACTIONS == frozenset({"inspect", "create", "query", "append", "update"})
+    assert record_memory.ACTIONS == frozenset(
+        {"describe", "validate", "inspect", "create", "query", "append", "update"}
+    )
 
 
 @pytest.mark.parametrize(
     ("kwargs", "code"),
     [
-        ({"action": "inspect"}, "INVALID_RECORD_ARGUMENTS"),
+        ({"action": "describe", "collection": "x"}, "INVALID_RECORD_ARGUMENTS"),
         ({"action": "inspect", "collection": "x", "limit": 1}, "INVALID_RECORD_ARGUMENTS"),
+        ({"action": "validate", "manifest_path": "a"}, "INVALID_RECORD_ARGUMENTS"),
+        ({"action": "validate", "manifest_path": "a", "manifest_text": "x", "why": "no"}, "INVALID_RECORD_ARGUMENTS"),
         ({"action": "create", "manifest_path": "a", "manifest_text": "x", "why": "because", "scaffold": False, "limit": 1}, "INVALID_RECORD_ARGUMENTS"),
         ({"action": "query", "collection": "x", "view": "recent", "descending": False}, "INVALID_RECORD_ARGUMENTS"),
         ({"action": "append", "collection": "x", "item": {}, "why": "because", "sort_by": "date"}, "INVALID_RECORD_ARGUMENTS"),
@@ -253,6 +257,8 @@ def test_record_memory_registry_is_selector_gated_and_conservatively_annotated()
     assert command.mcp_annotations.readOnlyHint is False
     assert command.mcp_annotations.destructiveHint is True
     assert invocation_is_read_only(command, {"action": "inspect", "collection": "x"}) is True
+    assert invocation_is_read_only(command, {"action": "describe"}) is True
+    assert invocation_is_read_only(command, {"action": "validate"}) is True
     assert invocation_is_read_only(command, {"action": "query", "collection": "x"}) is True
     assert invocation_is_read_only(command, {"action": "append", "collection": "x"}) is False
 

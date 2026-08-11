@@ -342,8 +342,26 @@ def op_bootstrap(
             "available": True,
             "route": {
                 "tool": "record_memory",
-                "actions": ["inspect", "create", "query", "append", "update"],
+                "actions": [
+                    "describe",
+                    "validate",
+                    "inspect",
+                    "create",
+                    "query",
+                    "append",
+                    "update",
+                ],
             },
+            "manifest": {
+                "filename": "_collection.md",
+                "collection_versions": [1],
+                "semantic_profiles": ["planning", "records"],
+            },
+            "contract_route": {
+                "tool": "record_memory",
+                "arguments": {"action": "describe"},
+            },
+            "agent_workflow": ["describe", "validate", "create", "inspect", "append"],
             "intent_boundary": {
                 "records": (
                     "observed events, measurements, transactions, sessions, and state changes"
@@ -383,7 +401,7 @@ def op_bootstrap(
             "unavailable_reason": "The active surface does not export the Records command.",
         }
     payload: dict = {
-        "contract_version": "2026-08-02.1",
+        "contract_version": "2026-08-11.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -5950,7 +5968,7 @@ def op_manage_memory_file(
 
 def op_record_memory(
     vault_root: Path,
-    action: Literal["inspect", "create", "query", "append", "update"],
+    action: Literal["describe", "validate", "inspect", "create", "query", "append", "update"],
     collection: str | None = None,
     manifest_path: str | None = None,
     manifest_text: str | None = None,
@@ -5977,13 +5995,13 @@ def op_record_memory(
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect, create, query, append, or update a governed Record collection.
+    """Describe, validate, inspect, create, query, append, or update Records.
 
     Args:
-        action: inspect, create, query, append, or update.
-        collection: Collection manifest reference for inspect, query, append, or update.
-        manifest_path: New manifest path for create.
-        manifest_text: Complete manifest text for create.
+        action: describe, validate, inspect, create, query, append, or update.
+        collection: Optional for inventory inspect; required for targeted reads/writes.
+        manifest_path: Proposed manifest path for validate or create.
+        manifest_text: Complete proposed manifest text for validate or create.
         why: Audit reason for create, append, or update.
         scaffold: Create the initial canonical source for create.
         view: Saved query view; cannot be combined with inline shaping.
