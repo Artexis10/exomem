@@ -6,7 +6,6 @@ loading — turn 3 (C3): guard narrowing + pre-warm + telemetry for `remember`.
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -72,34 +71,26 @@ def _reset_metrics_and_managers():
     writer_lease.reset_managers_for_tests()
 
 
-def test_remember_boundary_hold_stays_bounded_under_a_slow_validator(
+def test_remember_validation_observes_a_free_boundary_in_narrow_mode(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     kwargs = _validated_kwargs(vault)
 
     real_evaluate = relation_review._evaluate
+    observed_states: list[str] = []
 
-    def slow_evaluate(*args, **kw):
-        time.sleep(2.0)
+    def observe_boundary(*args, **kw):
+        observed_states.append(str(mutation_lock.active_mutation_snapshot()["state"]))
         return real_evaluate(*args, **kw)
 
-    monkeypatch.setattr(relation_review, "_evaluate", slow_evaluate)
+    monkeypatch.setattr(relation_review, "_evaluate", observe_boundary)
 
     manager = _standalone_manager(vault.parent / "state")
 
     result = _invoke_remember(vault, manager, **kwargs)
 
     assert (vault / result["path"]).is_file()
-    timing = mutation_lock.last_mutation_timing()
-    assert timing is not None
-    # The floor here is real disk I/O for the commit itself (batch_atomic_write
-    # writing the primary page + log + index auxiliaries), which correctly
-    # stays inside the boundary by design: ~700-750ms measured quiet on this
-    # box, with spikes above 1s under load. 1800ms leaves headroom over that
-    # floor while staying well under the 2000ms validator sleep this asserts
-    # is excluded from the hold — a wide margin either side of the two costs
-    # it must tell apart.
-    assert timing["hold_ms"] < 1800
+    assert observed_states and set(observed_states) == {"free"}
 
 
 def test_pre_boundary_validation_failure_never_acquires_the_boundary(
@@ -376,27 +367,25 @@ def test_commit_existing_revalidates_on_census_mismatch_and_surfaces_stale_write
 
     assert exc.value.code == "STALE_SEMANTIC_WRITE"
 
-def test_wide_boundary_kill_switch_restores_validation_inside_the_hold(
+def test_wide_boundary_kill_switch_observes_validation_inside_the_hold(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """EXOMEM_WIDE_MUTATION_BOUNDARY=1 must restore the wide boundary: the
-    full-leaf guard wraps validation again, so the slow validator's 2000ms
-    lands back INSIDE the measured hold."""
+    full-leaf guard wraps validation again."""
     monkeypatch.setenv("EXOMEM_WIDE_MUTATION_BOUNDARY", "1")
     kwargs = _validated_kwargs(vault)
 
     real_evaluate = relation_review._evaluate
+    observed_states: list[str] = []
 
-    def slow_evaluate(*args, **kw):
-        time.sleep(2.0)
+    def observe_boundary(*args, **kw):
+        observed_states.append(str(mutation_lock.active_mutation_snapshot()["state"]))
         return real_evaluate(*args, **kw)
 
-    monkeypatch.setattr(relation_review, "_evaluate", slow_evaluate)
+    monkeypatch.setattr(relation_review, "_evaluate", observe_boundary)
 
     manager = _standalone_manager(vault.parent / "state")
     result = _invoke_remember(vault, manager, **kwargs)
 
     assert (vault / result["path"]).is_file()
-    timing = mutation_lock.last_mutation_timing()
-    assert timing is not None
-    assert timing["hold_ms"] >= 2000
+    assert observed_states and set(observed_states) == {"held"}

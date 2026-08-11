@@ -447,7 +447,10 @@ class KubernetesCellAdapter:
                 "name": "exomem-cell-credentials",
                 "namespace": metadata.resource_name,
                 "annotations": annotations,
-                "labels": {"exomem.io/resource-name": metadata.resource_name},
+                "labels": {
+                    "exomem.io/cell": metadata.resource_name,
+                    "exomem.io/resource-name": metadata.resource_name,
+                },
             },
             "type": "Opaque",
             "immutable": False,

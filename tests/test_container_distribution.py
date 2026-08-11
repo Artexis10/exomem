@@ -139,6 +139,19 @@ def test_release_workflow_binds_automatic_and_manual_builds_to_the_tag_commit() 
     assert 'gh release view "$TAG" --json tagName --jq .tagName' in manual
 
 
+def test_release_publication_jobs_checkout_the_created_tag() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    jobs = (
+        _workflow_job(text, "build-artifacts", "sync-hosted-artifacts"),
+        _workflow_job(text, "publish-pypi", "publish-mcp-registry"),
+        _workflow_job(text, "publish-mcp-registry", "publish-image"),
+    )
+
+    for job in jobs:
+        assert "ref: ${{ needs.release-please.outputs.tag_name }}" in job
+        assert "ref: main" not in job
+
+
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:
     ml = _read("compose.ml.yaml")
     cuda = _read("compose.cuda.yaml")

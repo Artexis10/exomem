@@ -737,7 +737,10 @@ def test_limited_exact_unit_recall_advances_past_excluded_leading_windows(
 
     assert [hit.parent_path for hit in hits] == ["Knowledge Base/MM-Visible/visible.md"]
     assert len(opened) <= 17
-    assert query_windows == [(8, 0), (16, 0)]
+    # Access-policy reprojection removes excluded parents from the semantic
+    # catalog before candidate selection, so the first bounded window reaches
+    # the visible row without opening or paging past withheld entries.
+    assert query_windows == [(8, 0)]
 
 
 @needs_fts5

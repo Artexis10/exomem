@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.0](https://github.com/Artexis10/exomem/compare/v0.41.0...v0.42.0) (2026-08-10)
+
+
+### Features
+
+* **memory:** preserve client artifacts ([#415](https://github.com/Artexis10/exomem/issues/415)) ([229df96](https://github.com/Artexis10/exomem/commit/229df9678e3e23d054bf82fe09e6ac6a0e4a04c7))
+
+
+### Bug Fixes
+
+* **memory:** repair existing edit review handshake ([#411](https://github.com/Artexis10/exomem/issues/411)) ([665d2f4](https://github.com/Artexis10/exomem/commit/665d2f4fd75ceca4b978017621fa248575238a67))
+* **release:** publish from the created tag ([#419](https://github.com/Artexis10/exomem/issues/419)) ([0a7e78e](https://github.com/Artexis10/exomem/commit/0a7e78e7d9d53619c74df0dd78e8754d4ebdde6d))
+
+## [0.41.0](https://github.com/Artexis10/exomem/compare/v0.40.0...v0.41.0) (2026-08-10)
+
+
+### Features
+
+* **hosted:** recompose deployment lock for 0.40.0 ([#408](https://github.com/Artexis10/exomem/issues/408)) ([89b73a7](https://github.com/Artexis10/exomem/commit/89b73a7a460672916a09c0bd4a6454805fa22b3a))
+
+
+### Bug Fixes
+
+* **hosted:** admit exact tenant PVC quantities ([8a2d4dd](https://github.com/Artexis10/exomem/commit/8a2d4dd0a2559830d2c14f733c908b2de15f4871))
+* **hosted:** admit legacy runtime images ([2d9f798](https://github.com/Artexis10/exomem/commit/2d9f798b44eda905458d15ea22d6e3c1367cee1c))
+* **hosted:** deploy credential Secret admission fix ([b391fea](https://github.com/Artexis10/exomem/commit/b391fea82fb2d999e0b0c5a0329dc6b27aa6b9c6))
+* **hosted:** keep operator logging off read-only roots ([#417](https://github.com/Artexis10/exomem/issues/417)) ([64eb719](https://github.com/Artexis10/exomem/commit/64eb7191c350eb56bc20d957ac6e5f0f401ff129))
+* **hosted:** label credential Secret for admission ([#410](https://github.com/Artexis10/exomem/issues/410)) ([55def93](https://github.com/Artexis10/exomem/commit/55def931966bfe9985bc449334971f3ac8245a10))
+* **records:** harden installed E2E and CI diagnostics ([916d5f1](https://github.com/Artexis10/exomem/commit/916d5f1b9cde23778669264c78aaf1dd2274b86b))
+
+## [0.40.0](https://github.com/Artexis10/exomem/compare/v0.39.2...v0.40.0) (2026-08-10)
+
+
+### Features
+
+* **benchmarks:** memory-proof benchmark with compiled ingestion altitude ([#390](https://github.com/Artexis10/exomem/issues/390)) ([7a140a2](https://github.com/Artexis10/exomem/commit/7a140a23f5884d4ccd6a5c3ffb56d65ac8105a17))
+* **hosted:** admit 0.39.2 over the v1 provisioner protocol ([#401](https://github.com/Artexis10/exomem/issues/401)) ([68a2e62](https://github.com/Artexis10/exomem/commit/68a2e62332f485c91f015cd342aa9633967b9a22))
+* **hosted:** complete the active K3s ciphertext set for the platform install ([#391](https://github.com/Artexis10/exomem/issues/391)) ([b4f8868](https://github.com/Artexis10/exomem/commit/b4f88685213dce3af84e7eb147a77f9ac6116aaf))
+* **hosted:** recompose the deployment lock on 0.39.1 ([#383](https://github.com/Artexis10/exomem/issues/383)) ([157ec8b](https://github.com/Artexis10/exomem/commit/157ec8b92d6b6c132bbb0fd451a208705f9da0b0))
+* **hosted:** recompose the deployment lock on 0.39.2 ([#388](https://github.com/Artexis10/exomem/issues/388)) ([3222b4a](https://github.com/Artexis10/exomem/commit/3222b4a61aba8cd4e86b65a6018b10ef6ae33cea))
+* **marketplace:** add the missing directory evidence signer ([#399](https://github.com/Artexis10/exomem/issues/399)) ([77e3cb9](https://github.com/Artexis10/exomem/commit/77e3cb9f6811e27c471d84d2a08f83cfbd4cadae))
+* **marketplace:** carry listing identity and advertise public admission ([#398](https://github.com/Artexis10/exomem/issues/398)) ([abc9193](https://github.com/Artexis10/exomem/commit/abc919376e0fd818c9e23529d1faec711dff037b))
+* **memory:** add prominence levels for how much Exomem speaks up ([#389](https://github.com/Artexis10/exomem/issues/389)) ([d5204a8](https://github.com/Artexis10/exomem/commit/d5204a841b721a134c90e508cb0e79d05cdbebab))
+* **records:** add first-class mutable records ([#405](https://github.com/Artexis10/exomem/issues/405)) ([167b164](https://github.com/Artexis10/exomem/commit/167b164d37e181c98cdeda044ed0e9e5731f12f2))
+
+
+### Bug Fixes
+
+* **hosted:** let the provisioner API and the capacity workers actually start ([#394](https://github.com/Artexis10/exomem/issues/394)) ([ac7b2bb](https://github.com/Artexis10/exomem/commit/ac7b2bbb10e94d4c4037a2f9d5063e18e8117018))
+* **hosted:** let traefik carry the tunnel's forwarded scheme ([#400](https://github.com/Artexis10/exomem/issues/400)) ([2b3566a](https://github.com/Artexis10/exomem/commit/2b3566a9fe982560f1e3c5dc7aa21a412112d500))
+* **hosted:** mount the capacity contract as a regular file, not a symlink ([#395](https://github.com/Artexis10/exomem/issues/395)) ([55da085](https://github.com/Artexis10/exomem/commit/55da08592507929fff5576d0626d33823b96c611))
+* **hosted:** read the server location HCloud actually returns ([#404](https://github.com/Artexis10/exomem/issues/404)) ([75683ec](https://github.com/Artexis10/exomem/commit/75683ec3a8b00d8d8ea70611287092995ed06e93))
+* **hosted:** satisfy tenant namespace admission contract ([#407](https://github.com/Artexis10/exomem/issues/407)) ([08214f9](https://github.com/Artexis10/exomem/commit/08214f94a985dd56ad44ef38def10486117f6748))
+* **hosted:** stop the scheduler CronJob colliding with the durability one ([#393](https://github.com/Artexis10/exomem/issues/393)) ([fcb24a6](https://github.com/Artexis10/exomem/commit/fcb24a6945262a041bddd9d1ca08db27a9855c5f))
+* **hosted:** stop traefik asking for a load balancer the cluster cannot provide ([#396](https://github.com/Artexis10/exomem/issues/396)) ([6b3b5d1](https://github.com/Artexis10/exomem/commit/6b3b5d10fcb43df3c151eac5e5942f938067d470))
+* **memory:** make guarded writes and the compact bootstrap readable to clients ([#392](https://github.com/Artexis10/exomem/issues/392)) ([65758a2](https://github.com/Artexis10/exomem/commit/65758a224766dda1383f701901343c28945b0196))
+* **memory:** pin the reviewed instant so a validated edit survives a clock tick ([#402](https://github.com/Artexis10/exomem/issues/402)) ([9665d31](https://github.com/Artexis10/exomem/commit/9665d314af02756111e3803fe842cdf57bb06614))
+
 ## [0.39.2](https://github.com/Artexis10/exomem/compare/v0.39.1...v0.39.2) (2026-08-07)
 
 

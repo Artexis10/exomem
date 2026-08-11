@@ -38,6 +38,9 @@ spec:
             - "1"
             - --request-file
             - /run/exomem/operator-requests/init.json
+          env:
+            - name: EXOMEM_LOG_DIR
+              value: /dev
           resources:
             requests:
               cpu: 100m

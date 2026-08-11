@@ -269,7 +269,18 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
         identity_verifier=IDENTITY_CODEC.verifier(),
     )
 
-    await registry.ensure_namespace(metadata, envelopes["namespace"], "serve")
+    await registry.ensure_namespace(
+        metadata,
+        envelopes["namespace"],
+        "serve",
+        {
+            "vaultId": metadata.tenant_id,
+            "expectedRelease": "0.22.0",
+            "workerPolicyDigest": "a" * 64,
+            "browserOrigin": "https://substratesystems.io",
+            "transferHostname": "transfer.example.invalid",
+        },
+    )
     await registry.record_operation(metadata, envelopes["providerOperationConfigMap"])
 
     assert core.namespace.metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
@@ -282,6 +293,99 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
     }
     assert await registry.observed_fence("tenant-alpha") == 7
     assert core.namespace_selectors == ["exomem.io/tenant-cell=true"]
+
+
+@pytest.mark.asyncio
+async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations() -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    class Core:
+        namespace_body = None
+
+        def create_namespace(self, body):
+            self.namespace_body = body
+            self.namespace = SimpleNamespace(metadata=SimpleNamespace(**body["metadata"]))
+
+        def read_namespace(self, name):
+            return self.namespace
+
+        def create_namespaced_config_map(self, namespace, body):
+            self.config_map = SimpleNamespace(metadata=SimpleNamespace(**body["metadata"]))
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            raise _NotFound()
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            return SimpleNamespace(items=[])
+
+    class Missing:
+        def __getattr__(self, name):
+            def missing(*args, **kwargs):
+                raise _NotFound()
+
+            return missing
+
+    class Capacity:
+        async def require_active(self, **kwargs):
+            return None
+
+    core = Core()
+    registry = KubernetesProviderRegistry(
+        core_v1=core,
+        apps_v1=Missing(),
+        batch_v1=Missing(),
+        custom_objects=Missing(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=registry,
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=Capacity(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=SimpleNamespace(
+            image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+            browser_origin="https://substratesystems.io",
+            control_hostname="control.example.invalid",
+            transfer_hostname="transfer.example.invalid",
+            protocol_version="1",
+            release_version="0.22.0",
+        ),  # type: ignore[arg-type]
+    )
+    key = plane._key(metadata)
+    plane._operation_ids[key] = "internal-operation-alpha"
+    plane._recovery_envelopes[key] = envelopes
+
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+    }
+    await plane.ensure_namespace(metadata, request)
+
+    expected = {
+        "exomem.io/vault-id": "tenant-alpha",
+        "exomem.io/expected-release": "0.22.0",
+        "exomem.io/worker-policy-digest": hashlib.sha256(
+            b'{"media":false,"semantic":true,"workerCount":2}'
+        ).hexdigest(),
+        "exomem.io/browser-origin": "https://substratesystems.io",
+        "exomem.io/transfer-hostname": "transfer.example.invalid",
+    }
+    annotations = core.namespace_body["metadata"]["annotations"]
+    assert {key: annotations.get(key) for key in expected} == expected
 
 
 def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
@@ -536,7 +640,18 @@ async def test_registry_rejects_unowned_existing_namespace() -> None:
         identity_verifier=IDENTITY_CODEC.verifier(),
     )
     with pytest.raises(MetadataConflict):
-        await registry.ensure_namespace(metadata, "forged", "serve")
+        await registry.ensure_namespace(
+            metadata,
+            "forged",
+            "serve",
+            {
+                "vaultId": metadata.tenant_id,
+                "expectedRelease": "0.22.0",
+                "workerPolicyDigest": "a" * 64,
+                "browserOrigin": "https://substratesystems.io",
+                "transferHostname": "transfer.example.invalid",
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -616,7 +731,7 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
             calls.append(("capacity", identity))
 
     class Registry:
-        async def ensure_namespace(self, owner, envelope, mode):
+        async def ensure_namespace(self, owner, envelope, mode, helm_values):
             calls.append(("namespace", (owner, envelope, mode)))
 
         async def record_operation(self, owner, envelope):
@@ -644,7 +759,14 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
         maintenance=SimpleNamespace(),  # type: ignore[arg-type]
         capacity=capacity,  # type: ignore[arg-type]
         identity_verifier=IDENTITY_CODEC.verifier(),
-        config=SimpleNamespace(),  # type: ignore[arg-type]
+        config=SimpleNamespace(
+            image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+            browser_origin="https://substratesystems.io",
+            control_hostname="control.example.invalid",
+            transfer_hostname="transfer.example.invalid",
+            protocol_version="1",
+            release_version="0.22.0",
+        ),  # type: ignore[arg-type]
     )
     key = plane._key(metadata)
     plane._operation_ids[key] = "internal-operation-alpha"
@@ -653,7 +775,13 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
         "providerOperationConfigMap": "signed-operation",
     }
 
-    await plane.ensure_namespace(metadata, {"provisionMode": "serve"})
+    await plane.ensure_namespace(
+        metadata,
+        {
+            "provisionMode": "serve",
+            "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        },
+    )
 
     assert calls[0] == (
         "capacity",

@@ -5,7 +5,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import deferred_index, embeddings, index_sync, readiness
+from exomem import (
+    deferred_index,
+    embeddings,
+    epistemic_graph,
+    freshness,
+    index_sync,
+    readiness,
+    semantic_contract,
+)
 from exomem import find as find_module
 from exomem import vault as vault_module
 
@@ -207,7 +215,9 @@ def test_upsert_report_contains_failures_and_continues_single_fanout(
 
     report = index_sync.upsert_after_write(tmp_path, [target])
 
-    assert calls == ["lexstore", "memory_refs", "resolver", "epistemic_graph"]
+    # Identity maintenance runs before semantic leaves so a simultaneously
+    # suppressed Record can be purged before any semantic insertion.
+    assert calls == ["memory_refs", "resolver", "lexstore", "epistemic_graph"]
     assert report.requested_paths == ("Knowledge Base/Notes/item.md",)
     assert report.eligible_paths == report.requested_paths
     assert _outcome(report, "lexstore").outcome == "degraded"
@@ -244,9 +254,7 @@ def test_durable_defer_report_does_not_enter_embedding_warmup_queue(
         outcome = _outcome(report, "embeddings")
         assert outcome.outcome == "deferred"
         assert outcome.code == "deferred_durable"
-        assert deferred_index.status(tmp_path)["paths"] == [
-            "Knowledge Base/Notes/item.md"
-        ]
+        assert deferred_index.status(tmp_path)["paths"] == ["Knowledge Base/Notes/item.md"]
         assert readiness.snapshot()["deferred_counts"]["embeddings"] == 0
         assert report.reconcile_required is False
     finally:
@@ -309,9 +317,7 @@ def test_durable_defer_with_no_semantic_paths_reports_accepted_noop(
     )
     deferred_index.clear(tmp_path)
     try:
-        report = index_sync.upsert_after_write(
-            tmp_path, [target], defer_semantic=True
-        )
+        report = index_sync.upsert_after_write(tmp_path, [target], defer_semantic=True)
 
         outcome = _outcome(report, "embeddings")
         assert outcome.outcome == "accepted"
@@ -334,8 +340,11 @@ def test_batch_atomic_write_collector_observes_existing_fanout_once(
     )
     calls: list[list[Path]] = []
 
-    def _upsert(_root: Path, paths: list[Path]):
+    kwargs_seen: list[dict] = []
+
+    def _upsert(_root: Path, paths: list[Path], **kwargs):
         calls.append(list(paths))
+        kwargs_seen.append(kwargs)
         return report
 
     monkeypatch.setattr(index_sync, "upsert_after_write", _upsert)
@@ -350,6 +359,12 @@ def test_batch_atomic_write_collector_observes_existing_fanout_once(
 
     assert replaced == [target]
     assert calls == [[target]]
+    assert kwargs_seen == [
+        {
+            "created_paths": [target],
+            "publish_corpus_change": False,
+        }
+    ]
     assert collected == [report]
 
 
@@ -368,16 +383,12 @@ def test_graph_lock_error_reaches_index_sync_as_degraded(
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex,
         "refresh_paths",
-        lambda *_args: (_ for _ in ()).throw(
-            OpError("MUTATION_BUSY", "graph mutation is busy")
-        ),
+        lambda *_args: (_ for _ in ()).throw(OpError("MUTATION_BUSY", "graph mutation is busy")),
     )
     monkeypatch.setattr(
         embeddings,
         "upsert_after_write_status",
-        lambda *_args: embeddings.EmbeddingSyncStatus(
-            "completed", "embedding_upsert_completed", 1
-        ),
+        lambda *_args: embeddings.EmbeddingSyncStatus("completed", "embedding_upsert_completed", 1),
     )
 
     report = index_sync.upsert_after_write(tmp_path, [target])
@@ -386,6 +397,72 @@ def test_graph_lock_error_reaches_index_sync_as_degraded(
     assert graph.outcome == "degraded"
     assert graph.code == "dispatch_failed"
     assert report.reconcile_required is True
+
+
+def test_publication_failure_withdraws_stale_graph_and_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = tmp_path / "Knowledge Base" / "Notes" / "a.md"
+    b = tmp_path / "Knowledge Base" / "Notes" / "b.md"
+    a.parent.mkdir(parents=True)
+    a.write_text("# A\n\nLinks to [[Old B]].\n", encoding="utf-8")
+    b.write_text("---\ntitle: Old B\n---\n# B\n", encoding="utf-8")
+    freshness.rebaseline(tmp_path)
+    graph = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    graph.rebuild_all()
+    find_module._get_query_resolver(tmp_path)
+
+    a.write_text("# A\n\nLinks to [[New B]].\n", encoding="utf-8")
+    b.write_text("---\ntitle: New B\n---\n# B\n", encoding="utf-8")
+    monkeypatch.setattr(
+        semantic_contract,
+        "publish_corpus_files_changed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("publish failed")),
+    )
+
+    report = index_sync.upsert_after_write(tmp_path, [a, b])
+
+    assert report.reconcile_required is True
+    assert _outcome(report, "epistemic_graph").code == "publication_failed"
+    assert freshness.recall_is_live(tmp_path, "vault") is False
+    resolver = find_module.writer_resolver_snapshot(tmp_path)
+    resolved, warning = vault_module.normalize_wikilink(
+        "New B", tmp_path, resolver=resolver, strict=False
+    )
+    assert warning is None
+    assert resolved == "Knowledge Base/Notes/b"
+    assert graph.available() is True
+    assert graph.relation_participants(["links_to"]).paths == frozenset(
+        {"Knowledge Base/Notes/a.md", "Knowledge Base/Notes/b.md"}
+    )
+
+
+def test_delete_publication_failure_cannot_leave_graph_current_at_old_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = tmp_path / "Knowledge Base" / "Notes" / "a.md"
+    b = tmp_path / "Knowledge Base" / "Notes" / "b.md"
+    a.parent.mkdir(parents=True)
+    a.write_text("# A\n\nLinks to [[B]].\n", encoding="utf-8")
+    b.write_text("# B\n", encoding="utf-8")
+    freshness.rebaseline(tmp_path)
+    graph = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    graph.rebuild_all()
+    b.unlink()
+    monkeypatch.setattr(
+        semantic_contract,
+        "publish_corpus_files_changed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("publish failed")),
+    )
+
+    report = index_sync.delete_after_remove(tmp_path, ["Knowledge Base/Notes/b.md"])
+
+    assert report.reconcile_required is True
+    assert _outcome(report, "epistemic_graph").code == "publication_failed"
+    assert freshness.recall_is_live(tmp_path, "vault") is False
+    assert graph.available() is True
+    assert graph.nodes(path="Knowledge Base/Notes/b.md") == []
+    assert graph.relation_participants(["links_to"]).paths == frozenset()
 
 
 def test_delete_report_continues_after_observable_component_failure(
@@ -406,7 +483,7 @@ def test_delete_report_continues_after_observable_component_failure(
     )
     monkeypatch.setattr(
         epistemic_graph,
-        "delete_after_remove",
+        "upsert_after_write",
         lambda *_args: calls.append("epistemic_graph"),
     )
     monkeypatch.setattr(
@@ -422,9 +499,7 @@ def test_delete_report_continues_after_observable_component_failure(
         lambda *_args: calls.append("resolver"),
     )
 
-    report = index_sync.delete_after_remove(
-        tmp_path, ["Knowledge Base/Notes/item.md"]
-    )
+    report = index_sync.delete_after_remove(tmp_path, ["Knowledge Base/Notes/item.md"])
 
     assert calls == ["memory_refs", "epistemic_graph", "resolver"]
     assert _outcome(report, "lexstore").outcome == "degraded"

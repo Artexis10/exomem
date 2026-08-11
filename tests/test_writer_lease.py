@@ -66,6 +66,41 @@ def test_config_is_default_off_and_requires_identities() -> None:
         LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_URL": "https://lease.example"})
 
 
+def test_record_replay_receipt_has_a_noop_terminal(tmp_path: Path) -> None:
+    from exomem.command_surface import Command
+
+    receipt = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 1,
+        "operation": "append",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": "22222222-2222-4222-8222-222222222222",
+        "before_item_hash": "a" * 64,
+        "after_item_hash": "a" * 64,
+        "before_container_hash": "b" * 64,
+        "after_container_hash": "b" * 64,
+        "affected_paths": ["Knowledge Base/Records/log.md"],
+        "payload_hash": "c" * 64,
+        "outcome": "replayed",
+        "audit_correlation": "d" * 24,
+    }
+    command = Command(
+        name="record_memory",
+        leaf=lambda _root: receipt,
+        params=(),
+        surfaces=frozenset({"mcp"}),
+        cli_writes=True,
+    )
+
+    result = LeaseManager(
+        LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "state")})
+    ).invoke(command, (tmp_path,), {})
+
+    assert result["status"] == "replayed"
+    assert result["mutated"] is False
+    assert result["outcome"] == "replayed"
+
+
 def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
     """The boundary wait is a share of the edge budget, not a free parameter.
 

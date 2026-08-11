@@ -211,6 +211,10 @@ async def test_cell_adapter_creates_external_secret_then_reads_the_exact_bundle(
         def create_namespaced_secret(self, namespace, body):
             assert namespace == metadata.resource_name
             assert body["metadata"]["name"] == "exomem-cell-credentials"
+            assert body["metadata"]["labels"] == {
+                "exomem.io/cell": metadata.resource_name,
+                "exomem.io/resource-name": metadata.resource_name,
+            }
             self.patch_namespaced_secret = lambda name, namespace, update: setattr(
                 self,
                 "secret",

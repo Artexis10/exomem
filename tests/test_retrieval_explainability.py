@@ -245,7 +245,7 @@ def test_available_vector_lane_is_reported_only_on_hits_it_returned(
     class FakeIndex:
         def search(self, _query_vector, *, k: int, allowed_paths=None):
             assert k > 0
-            assert allowed_paths is None
+            assert allowed_paths == {vector_path, lexical_only_path}
             return [(vector_path, 0, "bounded chunk", 0.73)]
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
@@ -291,7 +291,7 @@ def test_available_hybrid_vector_reports_effective_mode_and_two_lane_fusion(
     class FakeIndex:
         def search(self, _query_vector, *, k: int, allowed_paths=None):
             assert k > 0
-            assert allowed_paths is None
+            assert allowed_paths == {path}
             return [(path, 0, "A regulator controls the system.", 0.731234567)]
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
@@ -335,7 +335,7 @@ def test_fusion_uses_raw_contributions_until_the_serialization_boundary(
     class FakeIndex:
         def search(self, _query_vector, *, k: int, allowed_paths=None):
             assert k > 0
-            assert allowed_paths is None
+            assert allowed_paths == {a_path, z_path}
             return [
                 (z_path, 0, "semantic z", 0.9),
                 (a_path, 0, "semantic a", 0.8),
@@ -561,7 +561,7 @@ def test_auto_widen_does_not_overwrite_primary_vector_evidence_for_duplicate(
     class FakeIndex:
         def search(self, _query_vector, *, k: int, allowed_paths=None):
             assert k > 0
-            assert allowed_paths is None
+            assert allowed_paths == {rel}
             return [(rel, 0, "duplicate widener", 0.91)]
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
@@ -607,9 +607,11 @@ def test_unit_vector_success_marks_lexical_non_applicable(
             *,
             k: int,
             allowed_unit_refs: set[str],
+            allowed_parent_paths: set[str],
             validate: bool,
         ):
             assert validate is False
+            assert allowed_parent_paths == {rel}
             return [
                 SemanticUnitVectorHit(
                     unit_ref,
@@ -671,9 +673,11 @@ def test_unit_hybrid_vector_only_is_single_lane_without_fabricated_fusion(
             *,
             k: int,
             allowed_unit_refs: set[str],
+            allowed_parent_paths: set[str],
             validate: bool,
         ):
             assert validate is False
+            assert allowed_parent_paths == {rel}
             return [
                 SemanticUnitVectorHit(
                     unit_ref,
@@ -1279,7 +1283,7 @@ def test_mixed_explanation_preserves_divergent_page_and_unit_plans(
     class FakeIndex:
         def search(self, _query_vector, *, k: int, allowed_paths=None):
             assert k > 0
-            assert allowed_paths is None
+            assert allowed_paths == {page_path}
             return [(page_path, 0, "Session lifetime is thirty days", 0.82)]
 
         def search_semantic_units(self, *_args, **_kwargs):

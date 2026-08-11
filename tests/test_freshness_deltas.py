@@ -26,6 +26,7 @@ RED until ``freshness.consumer_checkpoint`` / ``freshness.delta_since`` /
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -382,7 +383,7 @@ def test_sidecar_delta_apply_rolls_back_rows_and_checkpoint_together(
     )
     _touch_future(a)
     freshness.on_files_changed(tmp_path, changed=[a])
-    delta = freshness.delta_since(tmp_path, "kb", before_checkpoint)
+    delta = freshness.recall_delta_since(tmp_path, "kb", before_checkpoint)
     assert delta.complete is True
 
     def _failing_insert(*_args: Any, **_kwargs: Any) -> Any:
@@ -394,18 +395,12 @@ def test_sidecar_delta_apply_rolls_back_rows_and_checkpoint_together(
 
     # Neither the rows nor the checkpoint may advance on rollback.
     assert store.catalog_checkpoint("kb") == before_checkpoint
-    monkeypatch.undo()
-    # Inspect the rolled-back catalog snapshot itself. A normal live search is
-    # deliberately allowed to notice the edited Markdown and heal; using it
-    # here would test stale-serving behavior rather than transaction rollback.
-    still_original = lexstore.search_semantic_units(
-        tmp_path,
-        "original",
-        k=5,
-        categories=["config"],
-        scope="kb",
-        freshness=before_checkpoint.triple,
-        _validate_current=False,
-        repair=False,
-    )
-    assert still_original and still_original[0].content.strip().endswith("original")
+    # Inspect the rolled-back SQLite snapshot directly. A public live search is
+    # deliberately allowed to notice the edited Markdown and apply the now-valid
+    # projected delta; that would test healing, not transaction rollback.
+    with sqlite3.connect(store.path) as conn:
+        contents = {
+            row[0] for row in conn.execute("SELECT content FROM semantic_units")
+        }
+    assert any(content.strip().endswith("original") for content in contents)
+    assert not any("patched" in content for content in contents)

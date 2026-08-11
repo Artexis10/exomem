@@ -1282,7 +1282,7 @@
     }
   },
   "edit_memory": {
-    "description": "Edit an existing memory page with an auditable reason.\n\nUse for small corrections, section edits, batch string edits, opinion-row\nfills, or one frontmatter field. Substantial rewrites should use\n`replace_memory` so history stays explicit.\n\nSemantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
+    "description": "Edit an existing memory page with an auditable reason.\n\nUse for small corrections, section edits, batch string edits, opinion-row\nfills, or one frontmatter field. Substantial rewrites should use\n`replace_memory` so history stays explicit.\n\nWhen `RELATION_DISPOSITION_STALE` or `RELATION_DISPOSITION_MISSING` blocks\nan edit, first call the identical operation with `validate_only=true`.\nThen commit it unchanged with `transition_token=<returned transition_token>`,\n`relation_disposition=\"reviewed_none\"`,\n`relation_review_hash=<returned relation_review_hash>`, and an explicit\n`relation_review_reason`. The validate response uses the exact field name\nrequired by the commit; do not substitute the page content hash.\n\nAlternatively, author a typed page relation in the body exactly as:\n`## Relations` followed by\n`- supports [[Knowledge Base/Notes/Research/example-target]]`.\nDataview-style `supports:: [[...]]` fields are not supported relation syntax.\n\nSemantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1303,6 +1303,10 @@
             {
               "additionalProperties": false,
               "properties": {
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "transition_token": {
                   "anyOf": [
                     {
@@ -1389,6 +1393,10 @@
             {
               "additionalProperties": false,
               "properties": {
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "transition_token": {
                   "anyOf": [
                     {
@@ -1464,6 +1472,10 @@
             {
               "additionalProperties": false,
               "properties": {
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "transition_token": {
                   "anyOf": [
                     {
@@ -1546,10 +1558,6 @@
                     }
                   ],
                   "default": null
-                },
-                "validate_only": {
-                  "default": false,
-                  "type": "boolean"
                 }
               },
               "required": [
@@ -1562,6 +1570,10 @@
             {
               "additionalProperties": false,
               "properties": {
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "transition_token": {
                   "anyOf": [
                     {
@@ -1644,10 +1656,6 @@
                   },
                   "minItems": 1,
                   "type": "array"
-                },
-                "validate_only": {
-                  "default": false,
-                  "type": "boolean"
                 }
               },
               "required": [
@@ -1659,6 +1667,10 @@
             {
               "additionalProperties": false,
               "properties": {
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "transition_token": {
                   "anyOf": [
                     {
@@ -1758,6 +1770,10 @@
             {
               "additionalProperties": false,
               "properties": {
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "transition_token": {
                   "anyOf": [
                     {
@@ -1802,6 +1818,17 @@
                   ],
                   "default": null
                 },
+                "expected_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
                 "kind": {
                   "const": "patch_frontmatter",
                   "type": "string"
@@ -1811,10 +1838,6 @@
                 },
                 "value": {},
                 "allow_curated": {
-                  "default": false,
-                  "type": "boolean"
-                },
-                "validate_only": {
                   "default": false,
                   "type": "boolean"
                 }
@@ -1829,6 +1852,65 @@
             {
               "additionalProperties": false,
               "properties": {
+                "validate_only": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "transition_token": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_disposition": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "relation_review_reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "expected_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
                 "kind": {
                   "const": "fill_row",
                   "type": "string"
@@ -2693,8 +2775,71 @@
       "type": "object"
     }
   },
+  "preserve_artifacts": {
+    "description": "Preserve client-provided binary file handles as append-only Evidence.\n\nUse this canonical binary-preservation command when the client can supply\ntemporary HTTPS file handles. Exomem retrieves each handle server-side and\nreturns one stored or failed outcome per file; no binary data is passed as\nbase64 through model-visible arguments. Clients without file handles keep\nusing `transfer_artifact(operation=\"upload\")` followed by `/upload`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "description": "Incident, case, project, or domain key.",
+          "type": "string"
+        },
+        "category": {
+          "description": "Evidence category within the scope.",
+          "type": "string"
+        },
+        "files": {
+          "description": "One to eight temporary client file handles.",
+          "items": {
+            "description": "Client-neutral temporary remote file handle used by ``preserve_artifacts``.",
+            "properties": {
+              "download_url": {
+                "type": "string"
+              },
+              "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "mime_type": {
+                "maxLength": 255,
+                "type": "string"
+              },
+              "file_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "download_url",
+              "file_id"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array"
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "category",
+        "files"
+      ],
+      "type": "object"
+    }
+  },
   "preserve_evidence": {
-    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. Binary files use `transfer_artifact`\nplus the `/upload` endpoint so bytes do not pass through the model.",
+    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. For binary files supplied as client\nfile handles, use `preserve_artifacts`; otherwise use `transfer_artifact`\nplus `/upload`. Bytes never pass through the model.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3022,6 +3167,353 @@
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    }
+  },
+  "record_memory": {
+    "description": "Inspect, create, query, append, or update a governed Record collection.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "inspect, create, query, append, or update.",
+          "enum": [
+            "inspect",
+            "create",
+            "query",
+            "append",
+            "update"
+          ],
+          "type": "string"
+        },
+        "collection": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Collection manifest reference for inspect, query, append, or update."
+        },
+        "manifest_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "New manifest path for create."
+        },
+        "manifest_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Complete manifest text for create."
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for create, append, or update."
+        },
+        "scaffold": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Create the initial canonical source for create."
+        },
+        "view": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Saved query view; cannot be combined with inline shaping."
+        },
+        "filters": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Query predicates."
+        },
+        "columns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Query columns."
+        },
+        "sort_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Query sort column."
+        },
+        "descending": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sort query results descending."
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bounded query limit."
+        },
+        "aggregate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional query aggregate."
+        },
+        "date_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Inclusive query date lower bound."
+        },
+        "date_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Inclusive query date upper bound."
+        },
+        "date_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Query date property."
+        },
+        "expand_children": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Expand query child values."
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Snapshot-bound query continuation."
+        },
+        "include_agent_history": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Include bounded agent mutation history."
+        },
+        "output_format": {
+          "anyOf": [
+            {
+              "enum": [
+                "json",
+                "markdown",
+                "csv"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "json, markdown, or csv query output."
+        },
+        "item": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Values for append."
+        },
+        "item_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable item ID for append or update."
+        },
+        "expected_container_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact current container hash for append or update."
+        },
+        "body": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Markdown body for append."
+        },
+        "changes": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Targeted values for update."
+        },
+        "expected_item_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact current item version for update."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
       ],
       "type": "object"
     }
@@ -4175,7 +4667,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare out-of-band binary artifact transfer.\n\nReturns a short-lived token and URL for uploading evidence binaries or\ndownloading a vault file into a sandbox. The long-lived server secret never\nleaves the server.",
+    "description": "Prepare out-of-band binary artifact transfer.\n\nCompatibility transport for clients that cannot supply file handles to\n`preserve_artifacts`. Returns a short-lived token and URL for uploading\nevidence binaries or downloading a vault file into a sandbox. Minting an\nupload token does not mean bytes were stored.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

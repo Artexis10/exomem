@@ -35,6 +35,7 @@ from . import (
     corpus_aware,
     epistemic_graph,
     find_corpus,
+    recall_policy,
     semantic_index,
     semantic_units,
 )
@@ -248,6 +249,8 @@ def _load_parent_snapshot(
     rel_path: str,
 ) -> tuple[ParsedPage, semantic_index.SemanticParentIndexState] | None:
     """Read one parent once, then derive page and semantic state from those bytes."""
+    if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
+        return None
     try:
         root = vault_root.resolve()
         path = (root / rel_path).resolve()
@@ -468,6 +471,8 @@ def _neighborhood(
     neigh: dict[str, dict] = {}
 
     def _touch(target_path: str, packed_rel: str, direction: str) -> None:
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / target_path):
+            return
         canon = corpus_aware._canon(target_path)
         if canon in packed_canon:
             return
@@ -492,6 +497,8 @@ def _neighborhood(
 
     out: list[dict] = []
     for entry in shown:
+        if not recall_policy.is_recall_candidate(vault_root, vault_root / entry["path"]):
+            continue
         page = find_module._CACHE.get(vault_root / entry["path"], vault_root)
         directions = entry["directions"]
         direction = "both" if len(directions) > 1 else next(iter(directions))

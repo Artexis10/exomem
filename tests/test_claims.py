@@ -241,11 +241,11 @@ def test_sidecar_upsert_get_and_all(vault: Path) -> None:
     vec = np.zeros(embeddings.VECTOR_DIM, dtype=np.float32)
     vec[3] = 1.0
     idx.upsert_many([("Knowledge Base/Notes/Insights/a.md", "T\n\nclaim", "sum1", vec, "insight", "active", 1.0)])
-    row = idx.get_row("Knowledge Base/Notes/Insights/a.md")
+    row = idx._get_row_unchecked("Knowledge Base/Notes/Insights/a.md")
     assert row is not None
     assert row[0] == "T\n\nclaim"
     assert row[2] == "insight"
-    md, mat = idx.all_claims()
+    md, mat = idx._all_claims_unchecked()
     assert len(md) == 1 and mat.shape == (1, embeddings.VECTOR_DIM)
     assert idx.checksums() == {"Knowledge Base/Notes/Insights/a.md": "sum1"}
     idx.delete("Knowledge Base/Notes/Insights/a.md")
@@ -485,7 +485,7 @@ def test_claim_matrix_loads_once_and_is_reused(tmp_path, monkeypatch) -> None:
     count = _count_loads(monkeypatch, idx)
     metadata = matrix = None
     for _ in range(5):
-        metadata, matrix = idx.all_claims()
+        metadata, matrix = idx._all_claims_unchecked()
     assert count["n"] == 1  # loaded once, not per call
     assert matrix.shape[0] == 2
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
@@ -497,12 +497,12 @@ def test_claim_utime_bump_alone_does_not_reload(tmp_path, monkeypatch) -> None:
     vault = _fresh_vault(tmp_path)
     idx = claims.ClaimIndex(vault)
     idx.upsert_many([_claim_row("a.md", _cvec(1, 0))])
-    idx.all_claims()  # warm; cache keyed on generation
+    idx._all_claims_unchecked()  # warm; cache keyed on generation
 
     count = _count_loads(monkeypatch, idx)
     _bump_mtime(idx.path)  # move mtime WITHOUT changing content
-    idx.all_claims()
-    idx.all_claims()
+    idx._all_claims_unchecked()
+    idx._all_claims_unchecked()
     assert count["n"] == 0  # generation unchanged -> served from cache, no reload
 
 
@@ -513,16 +513,16 @@ def test_claim_local_write_nulls_cache_then_reloads_once(tmp_path, monkeypatch) 
     vault = _fresh_vault(tmp_path)
     idx = claims.ClaimIndex(vault)
     idx.upsert_many([_claim_row("a.md", _cvec(1, 0))])
-    idx.all_claims()  # warm
+    idx._all_claims_unchecked()  # warm
 
     count = _count_loads(monkeypatch, idx)
     idx.upsert_many([_claim_row("b.md", _cvec(0, 1), mtime=2.0)])
     with idx._lock:
         assert idx._cache is None  # nulled on write, never spliced
-    metadata, matrix = idx.all_claims()
+    metadata, matrix = idx._all_claims_unchecked()
     assert count["n"] == 1  # one reload after the write
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
-    idx.all_claims()
+    idx._all_claims_unchecked()
     assert count["n"] == 1  # reused after the reload
 
 
@@ -532,16 +532,16 @@ def test_claim_external_writer_detected_via_generation(tmp_path, monkeypatch) ->
     vault = _fresh_vault(tmp_path)
     idx = claims.ClaimIndex(vault)
     idx.upsert_many([_claim_row("a.md", _cvec(1, 0))])
-    idx.all_claims()  # warm
+    idx._all_claims_unchecked()  # warm
 
     count = _count_loads(monkeypatch, idx)
     external = claims.ClaimIndex(vault)
     external.upsert_many([_claim_row("b.md", _cvec(0, 1), mtime=2.0)])  # bumps DB generation
 
-    metadata, matrix = idx.all_claims()
+    metadata, matrix = idx._all_claims_unchecked()
     assert count["n"] == 1
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
-    idx.all_claims()
+    idx._all_claims_unchecked()
     assert count["n"] == 1  # second read reuses the reloaded cache
 
 
@@ -550,13 +550,13 @@ def test_claim_external_delete_detected_via_generation(tmp_path, monkeypatch) ->
     vault = _fresh_vault(tmp_path)
     idx = claims.ClaimIndex(vault)
     idx.upsert_many([_claim_row("a.md", _cvec(1, 0)), _claim_row("b.md", _cvec(0, 1))])
-    idx.all_claims()  # warm
+    idx._all_claims_unchecked()  # warm
 
     count = _count_loads(monkeypatch, idx)
     external = claims.ClaimIndex(vault)
     external.delete("a.md")  # bumps DB generation
 
-    metadata, matrix = idx.all_claims()
+    metadata, matrix = idx._all_claims_unchecked()
     assert count["n"] == 1
     assert [m[0] for m in metadata] == ["b.md"]
     assert matrix.shape[0] == 1
@@ -572,7 +572,7 @@ def test_claim_sidecar_deleted_and_recreated_aba_detected_via_instance(
     vault = _fresh_vault(tmp_path)
     idx = claims.ClaimIndex(vault)
     idx.upsert_many([_claim_row("old.md", _cvec(1, 0))])  # generation 1
-    idx.all_claims()  # warm
+    idx._all_claims_unchecked()  # warm
     old_instance = idx._cache.instance
     old_gen = idx._cache.generation
 
@@ -588,7 +588,7 @@ def test_claim_sidecar_deleted_and_recreated_aba_detected_via_instance(
     assert new_gen == old_gen  # (epoch, gen) ALONE would have looked "fresh"
     assert new_instance != old_instance  # the instance nonce catches it
 
-    metadata, matrix = idx.all_claims()
+    metadata, matrix = idx._all_claims_unchecked()
     assert count["n"] == 1  # detected via instance mismatch -> reloaded
     assert [m[0] for m in metadata] == ["new.md"]  # NEW file's rows, never stale "old.md"
 
@@ -607,14 +607,14 @@ def test_claim_legacy_sidecar_migrates_and_mtime_fallback_invalidates(
     assert not _claims_meta_exists(idx.path)  # legacy: no meta table yet
 
     count = _count_loads(monkeypatch, idx)
-    metadata, matrix = idx.all_claims()  # migrates meta, loads at generation 0
+    metadata, matrix = idx._all_claims_unchecked()  # migrates meta, loads at generation 0
     assert [m[0] for m in metadata] == ["a.md"]
     assert idx._cache.generation == 0  # legacy sidecar reads generation 0
     assert count["n"] == 1
     assert _claims_meta_exists(idx.path)  # migration created the meta table
 
     _bump_mtime(idx.path)  # gen==0 fallback: a bare mtime bump STILL invalidates
-    idx.all_claims()
+    idx._all_claims_unchecked()
     assert count["n"] == 2
 
 

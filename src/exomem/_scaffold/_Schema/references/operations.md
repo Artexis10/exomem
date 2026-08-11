@@ -12,7 +12,8 @@ commands.
 |---|---|---|
 | `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `ask_memory`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
 | `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
-| `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
+| `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
+| `record` | Log, correct, inspect, or query an observed event or current state | `record_memory` for a configured Record collection |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
@@ -22,6 +23,46 @@ commands.
 Do not ask users to choose internal folders, graph sidecars, or page types unless
 the distinction changes the write. Translate back to simple language when
 reporting results.
+
+## Records
+
+`record_memory` is the one public product command for human-owned observed
+state. It has exactly five actions: `inspect`, `create`, `query`, `append`, and
+`update`. Do not replace it with storage-specific tools. `inspect` is report-only;
+`create` explicitly creates a reviewed collection contract; `query` returns a
+bounded current view; `append` adds a new event; and `update` changes one item
+with current stale-write guards and a concise reason. Generic derived-index repair
+remains `maintain_memory(mode="reconcile")`.
+
+Records are intentionally manual-first. Canonical data remains ordinary files:
+an append-heavy chronological Markdown log, one Markdown file per item, or a
+CSV/TSV/JSON dataset. Storage is declared or inferred by the collection; there
+is no hidden database, and indexes and generated views are rebuildable from the
+canonical files. Datasets are query-only in this delivery. A migration between
+shapes is explicit and provenance-preserving; a derived view never becomes
+canonical merely because it was generated.
+
+Templates are optional, ordinary editable Markdown scaffolds, not schema truth.
+The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
+their normal **Templates → Insert template** workflow. Exomem does not require
+Obsidian or a plugin and does not edit `.obsidian`; editing a template never
+rewrites historical records.
+
+An existing `type: tracker` without an adjacent reviewed collection manifest is
+inspectable only at collection level. Do not guess its item grammar or rewrite
+it. Adding an adjacent manifest opts into query and mutation while preserving the
+tracker, archive, notation, and templates; new agent-authored log items receive
+prospective stable markers, while old items remain as they are. Removing the
+manifest leaves the tracker manually usable. Fresh queries see direct editor
+changes; `inspect` reports drift and audit gaps without repairing canonical
+files. Agent history is bounded and may be incomplete after manual change.
+
+Structured reads and reductions pass Records governance before rows or
+aggregates are disclosed. A sensitive aggregate cannot reveal filtered data.
+High-volume raw items stay out of ordinary semantic recall; find the collection
+or compiled Note, then use a bounded Records query. Planning links are opaque
+references plus query descriptors only: no inferred progress, success, health
+judgment, or automatic Planning mutation.
 
 ## Index and log discipline (applies to every write)
 Every confirmed write that creates, moves, or supersedes a page performs two
@@ -309,14 +350,19 @@ preservation.
 - Category — a subfolder under the scope (e.g., `01 - Initial Letter 2026-05-15`). Use existing categories where they fit.
 - Optional: a descriptive filename if the original is generic.
 
-### Delivering the bytes — out-of-band (never inline through the model)
+### Delivering the bytes — direct handles first, never inline through the model
 
-Binaries are delivered out-of-band — never inline as a tool argument (the
-`preserve_evidence` command takes text only). Pick the channel by where the file actually is:
+Binaries are never inline as a tool argument (the `preserve_evidence` command
+takes text only). Pick the channel by the client capability:
 
-- **On claude.ai web — hands-off (preferred):** (1) call **`transfer_artifact(mode="upload")`** →
-  a short-lived `{token, ttl_seconds, upload_url}`; (2) in the code sandbox,
-  multipart-`curl` each attached file to `upload_url` with `Authorization: Bearer
+- **When the client can provide file handles:** call
+  **`preserve_artifacts(scope="...", category="...", files=[{"download_url": "...", "file_id": "..."}])`**.
+  Use one call for the whole batch. A successful preservation response contains
+  `stored_path`, `size`, and `hash`; never treat an upload token as proof that bytes landed.
+
+- **Without file handles (including Claude web):** (1) call **`transfer_artifact(operation="upload")`** →
+  a short-lived `{token, ttl_seconds, upload_url}`; (2) only where the runtime
+  holding the file can reach `upload_url`, multipart-POST each attached file with `Authorization: Bearer
   <token>` and form fields `file` / `scope` / `category` (optional `filename`,
   `description`, **`text`**); (3) **searchability is automatic** — the server
   transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
@@ -372,7 +418,7 @@ through the model.
 - needing the raw bytes of a dataset, an evidence scan, or any stored artifact to process locally
 
 ### Procedure
-1. Call **`transfer_artifact(mode="download")`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived).
+1. Call **`transfer_artifact(operation="download")`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived).
 2. In the sandbox, `GET {download_url}?path=<vault-relative path>` with header `Authorization: Bearer <token>`.
 3. The server resolves the path under the vault root (traversal-safe) and streams the file. An out-of-vault or missing path is refused.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -135,6 +136,40 @@ def test_path_guards_share_new_parent_chain_safely(tmp_path: Path) -> None:
 
     assert vault.batch_atomic_write(writes, vault_root=tmp_path) == paths
     assert [path.read_text(encoding="utf-8") for path in paths] == ["one", "two"]
+
+
+def test_preparing_a_bounded_content_guard_preserves_its_read_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "guarded.md"
+    target.write_bytes(b"bounded bytes")
+    _data, guard = vault.read_bounded_guarded_bytes(tmp_path, "guarded.md", limit=64)
+
+    def unbounded_hash(*_args, **_kwargs):
+        raise AssertionError("bounded guard must not use _leaf_hash")
+
+    monkeypatch.setattr(vault, "_leaf_hash", unbounded_hash)
+    prepared = vault._prepare_path_guards(tmp_path, (guard,))
+
+    assert prepared[0].expected_content_size == len(b"bounded bytes")
+    target.write_bytes(b"bounded bytes grew")
+    with pytest.raises(vault.PathGuardError, match="PATH_GUARD"):
+        prepared[0].recheck(tmp_path)
+
+
+def test_batch_write_refuses_portably_colliding_destinations(tmp_path: Path) -> None:
+    with pytest.raises(vault.PathGuardError) as raised:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(tmp_path / "Record.md", "first"),
+                vault.PlannedWrite(tmp_path / "record.md", "second"),
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert raised.value.code == "PATH_GUARD_TARGET"
+    assert not (tmp_path / "Record.md").exists()
+    assert not (tmp_path / "record.md").exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows binary-read regression")
@@ -279,3 +314,153 @@ def test_vault_creation_lock_timeout_covers_thread_wait(tmp_path: Path) -> None:
         thread.join(5)
 
     assert not thread.is_alive()
+
+
+def test_guarded_reader_dispatches_to_the_windows_descriptor_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[tuple[Path, tuple[str, ...], str, int]] = []
+    expected = vault.PathGuard("entry.md", (), (), None, "content", "a" * 64)
+
+    def windows(root: Path, parts: tuple[str, ...], target: str, limit: int):
+        captured.append((root, parts, target, limit))
+        return b"", expected
+
+    monkeypatch.setattr(vault, "_uses_windows_guarded_reader", lambda: True)
+    monkeypatch.setattr(vault, "_read_bounded_windows_snapshot", windows)
+
+    data, guard = vault._read_bounded_guarded_snapshot(tmp_path, "entry.md", 64)
+
+    assert data == b""
+    assert guard is expected
+    assert len(captured) == 1
+    assert captured[0][0].as_posix() == tmp_path.as_posix()
+    assert captured[0][1:] == (("entry.md",), "entry.md", 64)
+
+
+def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    leaf_path = guarded / "entry.md"
+    leaf_path.write_bytes(b"safe")
+    real_read = os.read
+    real_lstat = Path.lstat
+    reads: list[int] = []
+    directory_open_modes: list[tuple[int, int | None]] = []
+    swapped = False
+
+    def open_leaf(path: Path, **_kwargs: object) -> int:
+        return os.open(path, os.O_RDONLY)
+
+    def open_pinned_directory(
+        path: Path,
+        *,
+        desired_access: int = 0,
+        share_mode: int | None = None,
+    ) -> int:
+        directory_open_modes.append((desired_access, share_mode))
+        return os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+
+    def read_and_swap(descriptor: int, size: int) -> bytes:
+        nonlocal swapped
+        reads.append(size)
+        data = real_read(descriptor, size)
+        if not swapped:
+            swapped = True
+        return data
+
+    def lstat_after_read(path: Path):
+        info = real_lstat(path)
+        if swapped and path == guarded:
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino + 1,
+                st_file_attributes=getattr(info, "st_file_attributes", 0),
+            )
+        return info
+
+    if os.name != "nt":
+        monkeypatch.setattr(vault, "_open_windows_path_descriptor", open_leaf)
+        monkeypatch.setattr(vault, "_open_directory_path", open_pinned_directory)
+    monkeypatch.setattr(vault.os, "read", read_and_swap)
+    monkeypatch.setattr(Path, "lstat", lstat_after_read)
+
+    with pytest.raises(vault.PathGuardError) as excinfo:
+        vault._read_bounded_windows_snapshot(
+            tmp_path, ("guarded", "entry.md"), "guarded/entry.md", 4
+        )
+
+    assert excinfo.value.code == "PATH_GUARD_CHANGED"
+    assert max(reads) == 5
+    assert all(size <= 5 for size in reads)
+    if os.name != "nt":
+        assert directory_open_modes == [
+            (
+                vault._WINDOWS_FILE_LIST_DIRECTORY,
+                vault._WINDOWS_GUARDED_DIRECTORY_SHARE,
+            )
+        ] * 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows descriptors")
+def test_guarded_reader_uses_windows_descriptor_branch_for_regular_files(tmp_path: Path) -> None:
+    target = tmp_path / "entry.md"
+    target.write_bytes(b"safe")
+
+    data, guard = vault.read_bounded_guarded_bytes(tmp_path, "entry.md", limit=16)
+
+    assert data == b"safe"
+    guard.recheck(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share semantics")
+def test_windows_guarded_reader_pins_parent_through_leaf_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    leaf = guarded / "entry.md"
+    leaf.write_bytes(b"safe")
+    retired = tmp_path / "guarded-retired"
+    real_open = vault._open_windows_path_descriptor
+    real_read = os.read
+    swap_attempted = False
+    swap_blocked = False
+    forbidden_bytes_read = False
+
+    def try_parent_swap(path: Path, **kwargs: object) -> int:
+        nonlocal swap_attempted, swap_blocked
+        if Path(path) == leaf and kwargs.get("desired_access") == 0x80000000:
+            swap_attempted = True
+            try:
+                guarded.rename(retired)
+            except OSError:
+                swap_blocked = True
+            else:
+                guarded.mkdir()
+                (guarded / "entry.md").write_bytes(b"SECRET")
+        return real_open(path, **kwargs)
+
+    def observe_read(descriptor: int, size: int) -> bytes:
+        nonlocal forbidden_bytes_read
+        data = real_read(descriptor, size)
+        forbidden_bytes_read |= b"SECRET" in data
+        return data
+
+    monkeypatch.setattr(vault, "_open_windows_path_descriptor", try_parent_swap)
+    monkeypatch.setattr(vault.os, "read", observe_read)
+
+    data, guard = vault.read_bounded_guarded_bytes(
+        tmp_path,
+        "guarded/entry.md",
+        limit=16,
+    )
+
+    assert data == b"safe"
+    assert swap_attempted is True
+    assert swap_blocked is True
+    assert forbidden_bytes_read is False
+    guard.recheck(tmp_path)

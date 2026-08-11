@@ -51,6 +51,104 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
     return env
 
 
+def _write_records_fixture(vault: Path) -> dict[str, str]:
+    """Create the ordinary X3 files used only by the installed-product journey."""
+    collection = "Knowledge Base/Records/Health/X3/_collection.md"
+    log = "Knowledge Base/Records/Health/X3/Training Log.md"
+    template = "Knowledge Base/Templates/Records/Health/X3/X3 Push.md"
+    manifest_path = vault / collection
+    log_path = vault / log
+    template_path = vault / template
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    template_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        """---
+type: collection
+exomem_id: 9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8
+title: X3 training sessions
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-log
+  source: Training Log.md
+  format_version: 1
+  section:
+    level: 2
+    title: Sessions (newest first)
+  item_heading:
+    level: 3
+    fields:
+      - name: occurred_on
+        type: date
+        format: "%Y-%m-%d"
+      - name: title
+        type: string
+    separator: " · "
+    note:
+      field: note
+      open: " ("
+      close: ")"
+  defaults:
+    status: completed
+  insertion: newest-first
+  child_rows:
+    prefix: "- "
+    delimiter: "|"
+    fields: [movement, band, repetitions]
+    container_field: movements
+item_schema:
+  natural_key: [occurred_on, title]
+  fields:
+    occurred_on: {type: date, required: true}
+    title: {type: string, required: true}
+    status: {type: enum, enum: [completed, partial, aborted]}
+    movements: {type: array, items: {type: object}}
+templates:
+  - path: Knowledge Base/Templates/Records/Health/X3/X3 Push.md
+links:
+  plans:
+    - reference: exomem://memory/81947000-4c22-46e4-9874-23fed028314b
+      query: {filters: {status: completed}, limit: 24}
+---
+
+Human-owned X3 sessions remain ordinary Markdown.
+""",
+        encoding="utf-8",
+    )
+    log_path.write_text(
+        """---
+type: tracker
+---
+# X3 Training Log
+
+## Sessions (newest first)
+""",
+        encoding="utf-8",
+    )
+    template_path.write_text(
+        """### {{date}} · Push
+- Overhead Press | white short paraforce | 8
+- Deadlift | grey short paraforce | e2e record row-only sentinel
+""",
+        encoding="utf-8",
+    )
+    return {"collection": collection, "log": log, "template": template}
+
+
+def _insert_manual_x3_session(vault: Path, fixture: dict[str, str]) -> None:
+    log = vault / fixture["log"]
+    template = vault / fixture["template"]
+    entry = template.read_text(encoding="utf-8").replace("{{date}}", "2026-08-03")
+    log.write_text(
+        log.read_text(encoding="utf-8").replace(
+            "## Sessions (newest first)\n", f"## Sessions (newest first)\n\n{entry}\n", 1
+        ),
+        encoding="utf-8",
+    )
+
+
 def _run(
     command: list[str],
     *,
@@ -209,6 +307,164 @@ async def _assert_relation_contexts(
             raise RuntimeError(f"installed edge {canonical} lost raw observation identity")
 
 
+def _record_source_hash(result: dict[str, Any], suffix: str) -> str:
+    versions = result.get("source_versions")
+    if not isinstance(versions, list):
+        raise RuntimeError(f"record query omitted source versions: {result!r}")
+    for version in versions:
+        if isinstance(version, dict) and str(version.get("path", "")).endswith(suffix):
+            digest = version.get("hash")
+            if isinstance(digest, str):
+                return digest
+    raise RuntimeError(f"record query omitted source hash for {suffix!r}")
+
+
+async def _records_first_session(client, state: dict[str, Any], timeout: float) -> None:
+    fixture = state["records"]
+    collection = fixture["collection"]
+    before = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": collection,
+            "columns": ["occurred_on", "title", "status", "movements"],
+            "limit": 20,
+        },
+        timeout,
+    )
+    if not any(row.get("occurred_on") == "2026-08-03" for row in before.get("rows", [])):
+        raise RuntimeError("installed Records query did not return the manual template session")
+    item_key = "77777777-7777-4777-8777-777777777777"
+    appended = await _call_mutation(
+        client,
+        "record_memory",
+        {
+            "action": "append",
+            "collection": collection,
+            "item": {
+                "occurred_on": "2026-08-04",
+                "title": "Pull",
+                "status": "completed",
+                "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}],
+            },
+            "item_key": item_key,
+            "expected_container_hash": _record_source_hash(before, "Training Log.md"),
+            "why": "record installed product session",
+        },
+        timeout,
+    )
+    if appended.get("operation") != "append":
+        raise RuntimeError(f"installed Records append returned unexpected data: {appended!r}")
+    after_append = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": collection,
+            "columns": ["occurred_on", "title", "movements"],
+            "limit": 20,
+        },
+        timeout,
+    )
+    item = next(
+        (row for row in after_append.get("rows", []) if row.get("record_id") == item_key),
+        None,
+    )
+    if not isinstance(item, dict) or not isinstance(item.get("item_version"), str):
+        raise RuntimeError("installed Records query did not return the appended item version")
+    updated = await _call_mutation(
+        client,
+        "record_memory",
+        {
+            "action": "update",
+            "collection": collection,
+            "item_key": item_key,
+            "changes": {"title": "Push corrected"},
+            "expected_container_hash": _record_source_hash(after_append, "Training Log.md"),
+            "expected_item_version": item["item_version"],
+            "why": "correct installed product session",
+        },
+        timeout,
+    )
+    if updated.get("operation") != "update":
+        raise RuntimeError(f"installed Records update returned unexpected data: {updated!r}")
+    derived = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": collection,
+            "columns": ["occurred_on", "title", "movements"],
+            "limit": 20,
+            "output_format": "markdown",
+        },
+        timeout,
+    )
+    if derived.get("derived") is not True or "| occurred_on" not in derived.get("rendered", ""):
+        raise RuntimeError("installed Records query did not return a bounded derived Markdown view")
+    inspection = await _call(
+        client, "record_memory", {"action": "inspect", "collection": collection}, timeout
+    )
+    expected_plan = {
+        "reference": "exomem://memory/81947000-4c22-46e4-9874-23fed028314b",
+        "query": {"filters": {"status": "completed"}, "limit": 24},
+    }
+    if inspection.get("contract", {}).get("plans") != [expected_plan]:
+        raise RuntimeError(
+            "installed Records inspection did not round-trip the Planning descriptor"
+        )
+    recalled = await _call(
+        client,
+        "ask_memory",
+        {"query": "e2e record row-only sentinel", "mode": "keyword"},
+        timeout,
+    )
+    hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
+    if fixture["log"] in {hit.get("path") for hit in hits if isinstance(hit, dict)}:
+        raise RuntimeError("ordinary recall exposed the raw Records log")
+    state["records"].update({"item_key": item_key})
+
+
+async def _records_restart_session(client, state: dict[str, Any], timeout: float) -> None:
+    fixture = state["records"]
+    result = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": fixture["collection"],
+            "columns": ["occurred_on", "title", "movements"],
+            "limit": 30,
+        },
+        timeout,
+    )
+    rows = result.get("rows", [])
+    if not any(row.get("occurred_on") == "2026-08-03" for row in rows):
+        raise RuntimeError("manual Records state did not survive restart")
+    if not any(
+        row.get("record_id") == fixture["item_key"] and row.get("title") == "Push corrected"
+        for row in rows
+    ):
+        raise RuntimeError("guarded Records mutation did not survive restart")
+    if not any(
+        movement.get("repetitions") == "23"
+        for row in rows
+        for movement in row.get("movements", [])
+        if isinstance(movement, dict)
+    ):
+        raise RuntimeError("direct Records edit was not visible after restart")
+    inspection = await _call(
+        client,
+        "record_memory",
+        {"action": "inspect", "collection": fixture["collection"]},
+        timeout,
+    )
+    audit = inspection.get("audit", {})
+    if audit.get("status") != "gap" or not audit.get("gaps"):
+        raise RuntimeError("direct Records edit did not retain a positive audit gap")
+
+
 async def _stdio_session(
     executable: Path,
     env: dict[str, str],
@@ -246,6 +502,7 @@ async def _stdio_session(
                 "review_memory",
                 "maintain_memory",
                 "schema_memory",
+                "record_memory",
             }
             missing = required - tools
             if missing:
@@ -463,6 +720,7 @@ async def _stdio_session(
                         "registry_hash": registry_result["saved"]["content_hash"],
                     }
                 )
+                await _records_first_session(client, state, timeout)
             else:
                 reconcile = await _call_maintenance(
                     client,
@@ -501,6 +759,7 @@ async def _stdio_session(
                     relation_ref=state["relation_ref"],
                     timeout=timeout,
                 )
+                await _records_restart_session(client, state, timeout)
                 from exomem import epistemic_graph
 
                 graph_status = reconcile.get("graph_status")
@@ -522,6 +781,8 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     home = Path(args.home)
     env = _clean_env(home, vault)
     state: dict[str, Any] = {}
+    state["records"] = _write_records_fixture(vault)
+    _insert_manual_x3_session(vault, state["records"])
     asyncio.run(
         _stdio_session(
             executable,
@@ -537,6 +798,13 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     refs_sidecar.unlink(missing_ok=True)
     graph_sidecar = vault / "Knowledge Base" / ".graph.sqlite"
     graph_sidecar.unlink(missing_ok=True)
+    log = vault / state["records"]["log"]
+    log.write_text(
+        log.read_text(encoding="utf-8")
+        + "\n### 2026-08-06 · Pull (human restart edit)\n"
+        + "- Deadlift | grey | 23\n",
+        encoding="utf-8",
+    )
     asyncio.run(
         _stdio_session(
             executable,
@@ -603,6 +871,29 @@ def _http_get_raw(
     except urllib.error.HTTPError as exc:
         headers = {key.lower(): value for key, value in exc.headers.items()}
         return exc.code, headers, exc.read()
+
+
+def _http_post_raw(
+    url: str,
+    *,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float,
+) -> tuple[int, dict[str, str], bytes]:
+    """POST a protocol payload and retain its unparsed response boundary."""
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response_headers = {key.lower(): value for key, value in response.headers.items()}
+            return response.status, response_headers, response.read()
+    except urllib.error.HTTPError as exc:
+        response_headers = {key.lower(): value for key, value in exc.headers.items()}
+        return exc.code, response_headers, exc.read()
 
 
 def _first_review_item(base_url: str, token: str, timeout: float) -> dict[str, Any]:
@@ -753,10 +1044,137 @@ async def _initialize_http_mcp(base_url: str, timeout: float) -> None:
                 raise RuntimeError("HTTP MCP initialization omitted bootstrap")
 
 
+def _assert_unauthenticated_records_refusal(base_url: str, timeout: float) -> None:
+    """Prove the installed remote route refuses a real Records MCP request."""
+    metadata_url = f"{base_url}/.well-known/oauth-protected-resource/mcp"
+    status, headers, response = _http_post_raw(
+        f"{base_url}/mcp",
+        body={
+            "jsonrpc": "2.0",
+            "id": "records-auth-refusal",
+            "method": "tools/call",
+            "params": {
+                "name": "record_memory",
+                "arguments": {
+                    "action": "inspect",
+                    "collection": "Knowledge Base/Records/Health/X3/_collection.md",
+                },
+            },
+        },
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        },
+        timeout=timeout,
+    )
+    expected_challenge = f'Bearer resource_metadata="{metadata_url}"'
+    if status != 401 or headers.get("www-authenticate") != expected_challenge:
+        raise RuntimeError(
+            "unauthenticated installed HTTP Records request did not receive the expected "
+            f"401 Bearer challenge: {status} {headers.get('www-authenticate')!r}"
+        )
+    for forbidden in (b"Records/Health/X3", b"Planning", b"rows", b"aggregate"):
+        if forbidden in response:
+            raise RuntimeError("unauthenticated HTTP Records refusal disclosed collection content")
+
+
 def _reserve_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _reserve_port_reservations(count: int) -> list[socket.socket]:
+    """Hold distinct local ports until their respective server launches."""
+    reservations: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            reservation = socket.socket()
+            try:
+                reservation.bind(("127.0.0.1", 0))
+            except OSError:
+                reservation.close()
+                raise
+            reservations.append(reservation)
+    except OSError:
+        for reservation in reservations:
+            reservation.close()
+        raise
+    return reservations
+
+
+def _installed_auth_required_records_refusal(args: argparse.Namespace) -> None:
+    """Start the installed auth-required HTTP server and verify its ingress boundary."""
+    vault = Path(args.vault)
+    work = Path(args.work)
+    home = Path(args.home)
+    port = _reserve_port()
+    base_url = f"http://127.0.0.1:{port}"
+    env = _clean_env(home, vault)
+    env.update(
+        {
+            "EXOMEM_BASE_URL": base_url,
+            "GITHUB_CLIENT_ID": "e2e-github-client-id",
+            "GITHUB_CLIENT_SECRET": "e2e-github-client-secret",
+            "EXOMEM_GITHUB_USERNAME": "e2e-github-user",
+            "EXOMEM_GITHUB_USER_ID": "123456",
+            "EXOMEM_JWT_SIGNING_KEY": "e2e-jwt-signing-key",
+        }
+    )
+    server_log = work / "auth-required-http-server.log"
+    with server_log.open("w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            [
+                args.python,
+                "-m",
+                "exomem",
+                "--transport",
+                "http",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+            ],
+            cwd=work,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        clean_shutdown = False
+        try:
+            deadline = time.monotonic() + args.request_timeout
+            while True:
+                if proc.poll() is not None:
+                    raise RuntimeError(
+                        f"auth-required HTTP server exited during startup ({proc.returncode}):\n"
+                        + server_log.read_text(encoding="utf-8")[-4000:]
+                    )
+                try:
+                    _assert_unauthenticated_records_refusal(base_url, args.request_timeout)
+                    break
+                except urllib.error.URLError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "auth-required HTTP server did not become ready before timeout"
+                        ) from None
+                    time.sleep(0.1)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=args.request_timeout)
+                    clean_shutdown = True
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            else:
+                clean_shutdown = proc.returncode == 0
+        if not clean_shutdown:
+            raise RuntimeError(
+                "auth-required HTTP server did not shut down cleanly:\n"
+                + server_log.read_text(encoding="utf-8")[-4000:]
+            )
 
 
 def _installed_http(args: argparse.Namespace) -> int:
@@ -863,6 +1281,7 @@ def _installed_http(args: argparse.Namespace) -> int:
                 "HTTP server did not shut down cleanly:\n"
                 + server_log.read_text(encoding="utf-8")[-4000:]
             )
+    _installed_auth_required_records_refusal(args)
     print(json.dumps({"success": True, "transport": "http", "clean_shutdown": True}))
     return 0
 
@@ -922,9 +1341,11 @@ def _installed_lease(args: argparse.Namespace) -> int:
     work = Path(args.work)
     home = Path(args.home)
     timeout = args.request_timeout
-    coord_port = _reserve_port()
-    port_a = _reserve_port()
-    port_b = _reserve_port()
+    reservations = _reserve_port_reservations(3)
+    coordinator_reservation, replica_a_reservation, replica_b_reservation = reservations
+    coord_port = int(coordinator_reservation.getsockname()[1])
+    port_a = int(replica_a_reservation.getsockname()[1])
+    port_b = int(replica_b_reservation.getsockname()[1])
     coord_url = f"http://127.0.0.1:{coord_port}"
     url_a = f"http://127.0.0.1:{port_a}"
     url_b = f"http://127.0.0.1:{port_b}"
@@ -947,6 +1368,7 @@ def _installed_lease(args: argparse.Namespace) -> int:
     try:
         coord_handle = coord_log.open("w", encoding="utf-8")
         handles.append(coord_handle)
+        coordinator_reservation.close()
         coordinator = subprocess.Popen(
             [
                 args.python,
@@ -975,12 +1397,13 @@ def _installed_lease(args: argparse.Namespace) -> int:
             label="lease coordinator",
         )
 
-        for url, env, log, handle_label in (
-            (url_a, env_a, log_a, port_a),
-            (url_b, env_b, log_b, port_b),
+        for url, env, log, handle_label, reservation in (
+            (url_a, env_a, log_a, port_a, replica_a_reservation),
+            (url_b, env_b, log_b, port_b, replica_b_reservation),
         ):
             handle = log.open("w", encoding="utf-8")
             handles.append(handle)
+            reservation.close()
             replica = subprocess.Popen(
                 [args.python, args.http_server, "--host", "127.0.0.1", "--port", str(handle_label)],
                 cwd=work,
@@ -1088,6 +1511,8 @@ def _installed_lease(args: argparse.Namespace) -> int:
             _terminate(proc, 5)
         for handle in handles:
             handle.close()
+        for reservation in reservations:
+            reservation.close()
     print(json.dumps({"success": True, "transport": "lease", "takeover": True}))
     return 0
 

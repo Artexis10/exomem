@@ -1826,8 +1826,9 @@ def test_os_advisory_lock_times_out_and_releases_when_owner_is_killed(tmp_path: 
 
 @pytest.mark.parametrize("force_fallback", [False, True])
 def test_expired_state_is_tombstoned_and_pruned_with_both_lock_orders(
-    tmp_path: Path, force_fallback: bool
+    tmp_path: Path, force_fallback: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_LOCK_SECONDS", 2.0)
     home = tmp_path / "home"
     old = _event(client="codex", session_id="old")
     current = _event(client="codex", session_id="current")

@@ -9,6 +9,7 @@ jobs:
   test:
     name: tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +31,19 @@ jobs:
           # conftest autouse defaults so a forgotten extra can't change behaviour.
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
-        run: uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
+          --session-timeout=1500
+          --durations=50
+          --durations-min=1
+          --junitxml=test-results/junit-${{ matrix.python-version }}.xml
+      - name: Upload lean test timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-py${{ matrix.python-version }}-junit
+          path: test-results/junit-${{ matrix.python-version }}.xml
+          if-no-files-found: warn
       - name: Sample vault smoke (the exact command users run)
         run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
 

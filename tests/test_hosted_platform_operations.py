@@ -90,6 +90,21 @@ def _signed_receipt(
     }
 
 
+def _write_active_secret_completion(registry_path: Path, public_key_path: Path) -> None:
+    registry_path.with_name(f"{registry_path.name}.complete").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "registry": registry_path.name,
+                "public_key": public_key_path.name,
+                "registry_sha256": hashlib.sha256(registry_path.read_bytes()).hexdigest(),
+                "public_key_sha256": hashlib.sha256(public_key_path.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_hosted_ci_wires_every_static_security_gate() -> None:
     workflow = (ROOT / ".github/workflows/hosted-infrastructure.yml").read_text(encoding="utf-8")
     validator = (INFRA / "scripts/validate.sh").read_text(encoding="utf-8")
@@ -138,9 +153,12 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "(github.event_name == 'workflow_dispatch' && inputs.external_blackbox)"
     )
     assert "--require-published" in workflow
-    assert "DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json" in workflow
+    assert (
+        "DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
+        in workflow
+    )
     assert "verify_hosted_release.py" in workflow
-    assert "--phase \"$DEPLOYMENT_PHASE\"" in workflow
+    assert '--phase "$DEPLOYMENT_PHASE"' in workflow
     assert "--deployment-lock-pair" not in workflow
     assert "--member-sha256" not in workflow
     assert 'uvx --from "ruff==${RUFF_VERSION}"' in validator
@@ -466,6 +484,7 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
         "cloudflare-access",
         "cloudflare-tunnel",
         "provisioner-credential",
+        "provisioner-database",
         "cell-credential",
         "hosted-scheduler",
         "provisioner-wrapping-key",
@@ -646,6 +665,156 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
                 )
 
 
+def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reversible() -> None:
+    contract = json.loads((INFRA / "contracts/rotation-drills-v1.json").read_text())
+    assert contract["rotations"]["provisioner-database"]["retirement_requires"] == [
+        "ready_cell_baseline_verified",
+        "three_deployments_and_five_cronjobs_quiesced",
+        "transient_database_consumers_drained",
+        "new_sops_ciphertext_and_exact_registry_verified",
+        "new_database_secret_applied_before_provider_cutover",
+        "new_database_credential_accepts",
+        "old_database_credential_rejected",
+        "three_deployments_and_five_cronjobs_restored",
+        "ready_cell_health_reverified",
+    ]
+    secrets = (ROOT / "docs/runbooks/hosted/secrets.md").read_text(encoding="utf-8")
+    deploy = (ROOT / "docs/runbooks/hosted/deploy.md").read_text(encoding="utf-8")
+    for marker in (
+        "69843186-5161-40a2-951f-b487011122ce",
+        "--private-key-stdin",
+        "--verify-only",
+        "/secure/operator/exomem-hosted/active-secret-registry/",
+        "exomem-durability-actions",
+        "exomem-export-gc",
+        "exomem-durability-backup",
+        "exomem-database-backup",
+        "exomem-deletion-dispatcher",
+        "exomem-provisioner-api",
+        "exomem-provisioner-worker",
+        "exomem-volume-worker",
+    ):
+        assert marker in secrets + deploy
+    assert (
+        "BWS_PROJECT_ID=69843186-5161-40a2-951f-b487011122ce "
+        "\\\n"
+        "  bwsx-run EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY --"
+    ) in secrets
+    assert "bwsx-run --project" not in secrets
+    ordered = [
+        "ready_cell_baseline_verified",
+        "three_deployments_and_five_cronjobs_quiesced",
+        "new_sops_ciphertext_and_exact_registry_verified",
+        "new_database_credential_accepts",
+        "three_deployments_and_five_cronjobs_restored",
+        "ready_cell_health_reverified",
+    ]
+    positions = [secrets.index(marker) for marker in ordered]
+    assert positions == sorted(positions)
+    reconcile = "exomem-hosted-scheduler-exomem-reconcile"
+    assert reconcile in secrets
+    assert secrets.index("suspend the external reconcile CronJob") < secrets.index(
+        "restore the external reconcile state"
+    )
+    for command in (
+        "set -euo pipefail",
+        "trap 'rollback' ERR",
+        "rotation_phase=pre_password_cutover",
+        "DATABASE_PASSWORD_ROLLBACK_VERIFIED",
+        "leave consumers stopped; perform the verified database-password rollback",
+        'any(.metadata.ownerReferences[]?; .controller == true and .kind == "CronJob"',
+        "--wait=false",
+        "-l exomem.io/deletion-job=true",
+        "! kubectl -n exomem-platform get job exomem-provisioner-database-migration",
+        "! kubectl -n exomem-platform get job exomem-provisioner-database-bootstrap",
+        "kubectl -n exomem-platform rollout status deployment/exomem-provisioner-api",
+        "kubectl -n exomem-platform rollout status deployment/exomem-provisioner-worker",
+        "kubectl -n exomem-platform rollout status deployment/exomem-volume-worker",
+        "kubectl -n exomem-platform get cronjob \"$name\" -o jsonpath='{.spec.suspend}'",
+        "rotation_root=/secure/operator/exomem-hosted/rotation-runs",
+        'mkdir -m 0700 "$rotation_run"',
+        "set -o noclobber",
+        "length == 3 and ([.deployments[].name] | sort)",
+        "length == 6 and ([.cronjobs[].name] | sort)",
+        "(.spec.initContainers // []) + (.spec.containers // [])",
+        '"$rotation_run/cronjob-jobs.json"',
+        '"$rotation_run/deletion-jobs.json"',
+        "rotation SQL session remains open; consumers stay stopped",
+        "rollback()",
+        "kubectl -n exomem-platform get deployment",
+        "kubectl -n exomem-platform get cronjob",
+        "kubectl -n exomem-platform get pods -o json",
+        "kubectl -n exomem-platform scale deployment",
+        "kubectl -n exomem-platform patch cronjob",
+        "kubectl -n exomem-platform get jobs -o json",
+        "kubectl -n exomem-platform apply -f",
+        "password authentication failed",
+    ):
+        assert command in secrets
+    assert secrets.index("DATABASE_PASSWORD_ROLLBACK_VERIFIED") < secrets.index(
+        '--registry "$registry_v1"'
+    )
+
+
+def test_rotation_job_drain_jq_selects_only_captured_controller_jobs(tmp_path: Path) -> None:
+    jobs = {
+        "items": [
+            {
+                "metadata": {
+                    "name": "owned",
+                    "uid": "owned-uid",
+                    "ownerReferences": [
+                        {"controller": True, "kind": "CronJob", "name": "exomem-export-gc"}
+                    ],
+                }
+            },
+            {
+                "metadata": {
+                    "name": "other",
+                    "uid": "other-uid",
+                    "ownerReferences": [{"controller": True, "kind": "CronJob", "name": "other"}],
+                }
+            },
+        ]
+    }
+    expression = '[.items[] | select(any(.metadata.ownerReferences[]?; .controller == true and .kind == "CronJob" and (.name | IN("exomem-export-gc")))) | .metadata.uid]'
+    selected = subprocess.run(
+        ["jq", "-c", expression], input=json.dumps(jobs), text=True, capture_output=True, check=True
+    )
+    assert json.loads(selected.stdout) == ["owned-uid"]
+    captured = tmp_path / "captured.json"
+    captured.write_text('[{"uid":"owned-uid"}]', encoding="utf-8")
+    wait_expression = "[.items[].metadata.uid] as $live | [$captured[0][] | select(.uid as $uid | $live | index($uid))] | length > 0"
+    remaining = subprocess.run(
+        ["jq", "-e", "--slurpfile", "captured", str(captured), wait_expression],
+        input=json.dumps(jobs),
+        text=True,
+        capture_output=True,
+    )
+    assert remaining.returncode == 0
+    jobs["items"] = jobs["items"][1:]
+    gone = subprocess.run(
+        ["jq", "-e", "--slurpfile", "captured", str(captured), wait_expression],
+        input=json.dumps(jobs),
+        text=True,
+        capture_output=True,
+    )
+    assert gone.returncode == 1
+    aborted = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail; false > "$1"; echo drained',
+            "bash",
+            str(tmp_path / "jobs-current.json"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert aborted.returncode != 0
+    assert "drained" not in aborted.stdout
+
+
 def test_capacity_gate_blocks_unknown_economics_and_the_cell_past_the_cap(tmp_path: Path) -> None:
     module = _load("infra/scripts/capacity_gate.py", "capacity_gate_test")
     contract = json.loads((INFRA / "operations/private-alpha-capacity-v1.json").read_text())
@@ -666,8 +835,7 @@ def test_capacity_gate_blocks_unknown_economics_and_the_cell_past_the_cap(tmp_pa
     # transaction, both digested into the evidence block below.
     assert contract["live_costs_verified"] is True
     assert all(
-        isinstance(value, (int, float))
-        for value in contract["monthly_costs_eur_ex_vat"].values()
+        isinstance(value, (int, float)) for value in contract["monthly_costs_eur_ex_vat"].values()
     )
     assert contract["receipt_authentication"] == {
         "algorithm": "ed25519",
@@ -976,6 +1144,7 @@ def test_active_secret_registry_is_signed_complete_and_explicit(tmp_path: Path) 
         path = tmp_path / "active-secret-registry.json"
         path.write_text(json.dumps(registry), encoding="utf-8")
         path.chmod(0o644)
+        _write_active_secret_completion(path, public_key_path)
         return path
 
     registry_path = write_registry("v2", artifact_v2)
@@ -992,6 +1161,7 @@ def test_active_secret_registry_is_signed_complete_and_explicit(tmp_path: Path) 
     tampered = json.loads(registry_path.read_text(encoding="utf-8"))
     tampered["destinations"]["k3s.example.active"]["version"] = "v1"
     registry_path.write_text(json.dumps(tampered), encoding="utf-8")
+    _write_active_secret_completion(registry_path, public_key_path)
     with pytest.raises(module.ActiveSecretRegistryError, match="signature"):
         module.load_registry(
             matrix_path=matrix_path,
@@ -1009,6 +1179,7 @@ def test_active_secret_registry_is_signed_complete_and_explicit(tmp_path: Path) 
         private_key,
     )
     registry_path.write_text(json.dumps(incomplete), encoding="utf-8")
+    _write_active_secret_completion(registry_path, public_key_path)
     with pytest.raises(module.ActiveSecretRegistryError, match="exact active destination set"):
         module.load_registry(
             matrix_path=matrix_path,
@@ -1024,6 +1195,7 @@ def test_active_secret_registry_is_signed_complete_and_explicit(tmp_path: Path) 
             serialization.PublicFormat.SubjectPublicKeyInfo,
         )
     )
+    _write_active_secret_completion(write_registry("v2", artifact_v2), public_key_path)
     with pytest.raises(module.ActiveSecretRegistryError, match="not trusted"):
         module.load_registry(
             matrix_path=matrix_path,
@@ -1031,6 +1203,463 @@ def test_active_secret_registry_is_signed_complete_and_explicit(tmp_path: Path) 
             public_key_path=public_key_path,
             trust_contract_path=trust_contract_path,
         )
+
+
+def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signer = _load(
+        "infra/scripts/sign_active_secret_registry.py", "sign_active_secret_registry_test"
+    )
+    applier = _load(
+        "infra/scripts/apply_active_sops_secrets.py", "apply_active_sops_secrets_signer_test"
+    )
+    matrix = json.loads((INFRA / "contracts/secret-destinations-v1.json").read_text())
+    selection = json.loads((INFRA / "contracts/active-secret-selection-v1.json").read_text())
+    expected = {
+        destination_id
+        for secret in matrix["secrets"].values()
+        for destination_id, destination in secret["destinations"].items()
+        if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active"
+    }
+    assert len(expected) == 34
+    assert selection == {"schema_version": 1, "destinations": {name: "v1" for name in expected}}
+    assert all(
+        (ROOT / destination["target"].format(version="v1")).is_file()
+        for secret in matrix["secrets"].values()
+        for destination in secret["destinations"].values()
+        if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active"
+    )
+
+    private_key = Ed25519PrivateKey.generate()
+    raw_public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    trust = json.loads((INFRA / "contracts/active-secret-registry-v1.json").read_text())
+    trust["public_key_id"] = hashlib.sha256(raw_public_key).hexdigest()
+    trust_path = tmp_path / "trust.json"
+    trust_path.write_text(json.dumps(trust), encoding="utf-8")
+    output = tmp_path / "registry-output"
+    output.mkdir(mode=0o700)
+    key = bytearray(
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    monkeypatch.setattr(
+        sys, "stdin", type("Input", (), {"buffer": type("Buffer", (), {"read": lambda _: key})()})()
+    )
+    registry_path = output / "registry.json"
+    public_key_path = output / "registry-public.pem"
+
+    assert (
+        signer.main(
+            [
+                "--matrix",
+                str(INFRA / "contracts/secret-destinations-v1.json"),
+                "--selection",
+                str(INFRA / "contracts/active-secret-selection-v1.json"),
+                "--trust-contract",
+                str(trust_path),
+                "--private-key-stdin",
+                "--registry-output",
+                str(registry_path),
+                "--public-key-output",
+                str(public_key_path),
+            ]
+        )
+        == 0
+    )
+    assert not any(key)
+    assert (
+        len(
+            applier.load_registry(
+                matrix_path=INFRA / "contracts/secret-destinations-v1.json",
+                registry_path=registry_path,
+                public_key_path=public_key_path,
+                trust_contract_path=trust_path,
+            )
+        )
+        == 34
+    )
+
+
+def test_active_secret_registry_signer_rejects_unsafe_inputs_and_leaves_no_partial_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signer = _load(
+        "infra/scripts/sign_active_secret_registry.py", "active_secret_registry_signer_safety"
+    )
+    private_key = Ed25519PrivateKey.generate()
+    public = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    trust_path = tmp_path / "trust.json"
+    trust_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "algorithm": "ed25519",
+                "public_key_id": hashlib.sha256(public).hexdigest(),
+                "private_key_custody": "secret-release-custodian-only",
+            }
+        ),
+        encoding="utf-8",
+    )
+    malformed = bytearray(b"-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-key\n")
+    with pytest.raises(signer.ActiveSecretRegistrySigningError, match="key is invalid"):
+        signer.load_private_key(malformed, trust_path)
+
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text('{"schema_version": 1, "schema_version": 1}', encoding="utf-8")
+    with pytest.raises(signer.ActiveSecretRegistrySigningError, match="input JSON is invalid"):
+        signer._strict_json(duplicate, "input")
+
+    matrix_path = INFRA / "contracts/secret-destinations-v1.json"
+    matrix_raw, destinations = signer.load_active_destinations(matrix_path)
+    selection = signer.load_selection(
+        INFRA / "contracts/active-secret-selection-v1.json", set(destinations)
+    )
+    registry = signer.build_registry(matrix_raw, destinations, selection, ROOT, private_key)
+    output = tmp_path / "output"
+    output.mkdir(mode=0o700)
+    registry_path = output / "registry.json"
+    public_path = output / "public.pem"
+    real_link = signer.os.link
+
+    def fail_second_link(source: str, target: str, **kwargs: object) -> None:
+        if target == public_path.name:
+            raise OSError("injected second publication failure")
+        real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(signer.os, "link", fail_second_link)
+    with pytest.raises(signer.ActiveSecretRegistrySigningError, match="publication failed"):
+        signer.publish_verified_pair(
+            matrix_path=matrix_path,
+            trust_path=trust_path,
+            registry_output=registry_path,
+            public_key_output=public_path,
+            registry=registry,
+            private_key=private_key,
+        )
+    assert not registry_path.exists()
+    assert not public_path.exists()
+
+    registry_path.write_text("already-present", encoding="utf-8")
+    with pytest.raises(signer.ActiveSecretRegistrySigningError, match="already exists"):
+        signer.publish_verified_pair(
+            matrix_path=matrix_path,
+            trust_path=trust_path,
+            registry_output=registry_path,
+            public_key_output=public_path,
+            registry=registry,
+            private_key=private_key,
+        )
+    assert registry_path.read_text(encoding="utf-8") == "already-present"
+
+    monkeypatch.setattr(signer.os, "link", real_link)
+    swapped_output = tmp_path / "swapped-output"
+    swapped_output.mkdir(mode=0o700)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    moved = tmp_path / "moved-output"
+    swapped_registry = swapped_output / "registry.json"
+    swapped_public = swapped_output / "public.pem"
+
+    def swap_parent_after_first_link(source: str, target: str, **kwargs: object) -> None:
+        real_link(source, target, **kwargs)
+        if target == swapped_registry.name:
+            swapped_output.rename(moved)
+            swapped_output.symlink_to(attacker, target_is_directory=True)
+
+    monkeypatch.setattr(signer.os, "link", swap_parent_after_first_link)
+    signer.publish_verified_pair(
+        matrix_path=matrix_path,
+        trust_path=trust_path,
+        registry_output=swapped_registry,
+        public_key_output=swapped_public,
+        registry=registry,
+        private_key=private_key,
+    )
+    assert not any(attacker.iterdir())
+    assert (moved / "registry.json.complete").is_file()
+
+
+def test_active_secret_registry_signer_rejects_a_parent_swap_during_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signer = _load("infra/scripts/sign_active_secret_registry.py", "active_registry_openat_test")
+    stable = tmp_path / "stable"
+    middle = stable / "middle"
+    output = middle / "output"
+    output.mkdir(parents=True, mode=0o700)
+    output.chmod(0o700)
+    attacker = tmp_path / "attacker"
+    (attacker / "output").mkdir(parents=True, mode=0o700)
+    (attacker / "output").chmod(0o700)
+    real_open = signer.os.open
+
+    def swap_before_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if path == "middle":
+            middle.rename(stable / "moved")
+            middle.symlink_to(attacker, target_is_directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(signer.os, "open", swap_before_open)
+    with pytest.raises(signer.ActiveSecretRegistrySigningError, match="directory"):
+        signer._open_output_directory(output / "registry.json", output / "public.pem")
+
+
+def test_active_secret_registry_signer_parser_never_echoes_mistaken_key_material(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    signer = _load(
+        "infra/scripts/sign_active_secret_registry.py", "active_secret_registry_signer_parser_test"
+    )
+    sentinel = "PRIVATE-KEY-SENTINEL-MUST-NOT-PRINT"
+
+    assert signer.main([f"--private-key-stdin={sentinel}"]) == 2
+    assert signer.main(["--private-key", sentinel]) == 2
+    captured = capsys.readouterr()
+    assert sentinel not in captured.out + captured.err
+
+
+def test_active_secret_registry_signer_rejects_ambiguous_artifacts_and_invalid_matrix_targets(
+    tmp_path: Path,
+) -> None:
+    signer = _load(
+        "infra/scripts/sign_active_secret_registry.py", "active_secret_registry_signer_matrix_test"
+    )
+    artifact = tmp_path / "artifact.v1.sops.json"
+    artifact.write_text(
+        '{"stringData":{"url":"first","url":"second"},"sops":{},"sops":{}}',
+        encoding="utf-8",
+    )
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "secrets": {
+                    "example": {
+                        "destinations": {
+                            "k3s.example.active": {
+                                "kind": "sops_k8s_secret",
+                                "slot": "active",
+                                "target": "artifact.{version}.sops.json",
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    matrix_raw, destinations = signer.load_active_destinations(matrix_path)
+    private_key = Ed25519PrivateKey.generate()
+    with pytest.raises(signer.ActiveSecretRegistrySigningError, match="input JSON"):
+        signer.build_registry(
+            matrix_raw,
+            destinations,
+            {"k3s.example.active": "v1"},
+            tmp_path,
+            private_key,
+        )
+
+    invalid_matrix = tmp_path / "invalid-matrix.json"
+    invalid_matrix.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "secrets": {
+                    "first": {
+                        "destinations": {
+                            "shared.destination": {
+                                "kind": "sops_k8s_secret",
+                                "slot": "active",
+                                "target": "../escape.{version}.sops.json",
+                            }
+                        }
+                    },
+                    "second": {
+                        "destinations": {
+                            "shared.destination": {
+                                "kind": "sops_escrow",
+                                "slot": "active",
+                                "target": "/absolute.{version}.sops.json",
+                            }
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(signer.ActiveSecretRegistrySigningError, match="matrix"):
+        signer.load_active_destinations(invalid_matrix)
+
+
+def test_active_secret_registry_loader_requires_a_completed_pair(tmp_path: Path) -> None:
+    module = _load(
+        "infra/scripts/apply_active_sops_secrets.py", "active_secret_registry_completion_test"
+    )
+    artifact = tmp_path / "secret.v1.sops.json"
+    artifact.write_text('{"sops": {}}', encoding="utf-8")
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "secrets": {
+                    "example": {
+                        "destinations": {
+                            "k3s.example.active": {
+                                "kind": "sops_k8s_secret",
+                                "slot": "active",
+                                "target": str(tmp_path / "secret.{version}.sops.json"),
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    private_key = Ed25519PrivateKey.generate()
+    public = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    trust_path = tmp_path / "trust.json"
+    trust_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "algorithm": "ed25519",
+                "public_key_id": hashlib.sha256(public).hexdigest(),
+                "private_key_custody": "secret-release-custodian-only",
+            }
+        ),
+        encoding="utf-8",
+    )
+    public_path = tmp_path / "public.pem"
+    public_path.write_bytes(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    )
+    unsigned = {
+        "schema_version": 1,
+        "matrix_sha256": hashlib.sha256(matrix_path.read_bytes()).hexdigest(),
+        "destinations": {
+            "k3s.example.active": {
+                "secret": "example",
+                "version": "v1",
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            }
+        },
+    }
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_signed_receipt(unsigned, private_key)), encoding="utf-8")
+    with pytest.raises(module.ActiveSecretRegistryError, match="completion"):
+        module.load_registry(
+            matrix_path=matrix_path,
+            registry_path=registry_path,
+            public_key_path=public_path,
+            trust_contract_path=trust_path,
+        )
+
+
+def test_active_secret_registry_verify_only_never_starts_a_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load(
+        "infra/scripts/apply_active_sops_secrets.py", "apply_active_sops_secrets_verify_test"
+    )
+    artifact = tmp_path / "secret.v1.sops.json"
+    artifact.write_text('{"sops": {}}', encoding="utf-8")
+    matrix_path = tmp_path / "matrix.json"
+    matrix = {
+        "schema_version": 1,
+        "secrets": {
+            "example": {
+                "destinations": {
+                    "k3s.example.active": {
+                        "kind": "sops_k8s_secret",
+                        "slot": "active",
+                        "target": str(tmp_path / "secret.{version}.sops.json"),
+                    }
+                }
+            }
+        },
+    }
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    private_key = Ed25519PrivateKey.generate()
+    public = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    key_id = hashlib.sha256(public).hexdigest()
+    trust_path = tmp_path / "trust.json"
+    trust_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "algorithm": "ed25519",
+                "public_key_id": key_id,
+                "private_key_custody": "secret-release-custodian-only",
+            }
+        ),
+        encoding="utf-8",
+    )
+    public_key_path = tmp_path / "public.pem"
+    public_key_path.write_bytes(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    )
+    unsigned = {
+        "schema_version": 1,
+        "matrix_sha256": hashlib.sha256(matrix_path.read_bytes()).hexdigest(),
+        "destinations": {
+            "k3s.example.active": {
+                "secret": "example",
+                "version": "v1",
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            }
+        },
+    }
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_signed_receipt(unsigned, private_key)), encoding="utf-8")
+    _write_active_secret_completion(registry_path, public_key_path)
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "apply_active_sops_secrets.py",
+            "--matrix",
+            str(matrix_path),
+            "--registry",
+            str(registry_path),
+            "--registry-public-key",
+            str(public_key_path),
+            "--trust-contract",
+            str(trust_path),
+            "--verify-only",
+        ],
+    )
+
+    assert module.main() == 0
+    assert (
+        capsys.readouterr().out
+        == f"Verified 1 active destinations with trusted public-key ID {key_id}\n"
+    )
 
 
 def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
@@ -2236,3 +2865,70 @@ def test_new_operator_scripts_are_executable() -> None:
     ):
         mode = (INFRA / "scripts" / name).stat().st_mode
         assert stat.S_IMODE(mode) & stat.S_IXUSR, name
+
+
+def test_capacity_snapshot_reads_the_location_hcloud_actually_returns() -> None:
+    """HCloud returns `location` on the server and no longer sends `datacenter`.
+
+    The collector read only `server.datacenter.location.name`, so every run
+    failed closed with "HCloud server identity differs" and no capacity receipt
+    was ever written — which left provisioning parked on
+    `capacity-live-observation-mismatch` indefinitely. The old fixture encoded
+    the obsolete shape, so the suite stayed green while production could not
+    work at all.
+    """
+
+    module = _load(
+        "infra/helm/platform/files/operational_receipt_collector.py",
+        "operational_receipt_collector_location_test",
+    )
+    tenant_id, cell_id, operation_id = "tenant-1", "cell-1", "operation-1"
+    resource_name = f"exo-{hashlib.sha256(cell_id.encode()).hexdigest()[:20]}"
+    namespaces = [
+        {
+            "metadata": {
+                "name": resource_name,
+                "labels": {
+                    "exomem.io/tenant-cell": "true",
+                    "exomem.io/cell-resource": resource_name,
+                },
+                "annotations": {
+                    "exomem.io/tenant-id": tenant_id,
+                    "exomem.io/cell-id": cell_id,
+                    "exomem.io/operation-id": operation_id,
+                    "exomem.io/tenant-digest": hashlib.sha256(tenant_id.encode()).hexdigest(),
+                    "exomem.io/subject-digest": hashlib.sha256(cell_id.encode()).hexdigest(),
+                    "exomem.io/operation-digest": hashlib.sha256(operation_id.encode()).hexdigest(),
+                    "exomem.io/fence": "1",
+                    "exomem.io/resource-name": resource_name,
+                    "exomem.io/provision-mode": "serve",
+                },
+            }
+        }
+    ]
+    pages = [{"volumes": [{"id": 11, "server": 101}], "meta": {"pagination": {"next_page": None}}}]
+
+    current_shape = {"server": {"id": 101, "location": {"name": "fsn1"}}}
+    legacy_shape = {"server": {"id": 101, "datacenter": {"location": {"name": "fsn1"}}}}
+
+    for label, document in (("current", current_shape), ("legacy", legacy_shape)):
+        snapshot = module.capacity_snapshot_from_documents(
+            tenant_namespaces={"kind": "NamespaceList", "items": namespaces},
+            cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+            hcloud_server=document,
+            hcloud_pages=pages,
+            expected_server_id=101,
+            expected_location="fsn1",
+        )
+        assert snapshot is not None, label
+
+    # A genuine location mismatch must still fail in the shape now returned.
+    with pytest.raises(module.ReceiptCollectorError, match="HCloud server"):
+        module.capacity_snapshot_from_documents(
+            tenant_namespaces={"kind": "NamespaceList", "items": namespaces},
+            cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+            hcloud_server={"server": {"id": 101, "location": {"name": "nbg1"}}},
+            hcloud_pages=pages,
+            expected_server_id=101,
+            expected_location="fsn1",
+        )

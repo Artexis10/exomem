@@ -145,6 +145,55 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "Progressive disclosure" not in serialized
 
 
+def test_bootstrap_full_teaches_copyable_direct_and_fallback_artifact_calls(vault: Path) -> None:
+    examples = commands.op_bootstrap(vault, profile="full")["examples"]
+    calls = [example["call"] for example in examples]
+
+    assert any("preserve_artifacts(scope='...'" in call and "download_url" in call for call in calls)
+    assert any("transfer_artifact(operation='upload')" in call and "/upload" in call for call in calls)
+
+
+def test_bootstrap_routes_observed_state_to_records_without_activating_state(
+    vault: Path,
+) -> None:
+    out = commands.op_bootstrap(vault)
+    contract = out["records"]
+
+    assert contract["available"] is True
+    assert contract["route"] == {
+        "tool": "record_memory",
+        "actions": ["inspect", "create", "query", "append", "update"],
+    }
+    assert contract["intent_boundary"] == {
+        "records": "observed events, measurements, transactions, sessions, and state changes",
+        "planning": "intended future state, goals, priorities, commitments, and candidate work",
+    }
+    assert "ordinary editable files" in contract["manual_first"]
+    assert "schema" in contract["template_rule"]
+    assert "does not create" in contract["activation_rule"]
+    assert "OpenSpec" in contract["software_rule"]
+
+
+def test_bootstrap_does_not_advertise_records_when_surface_omits_command(
+    vault: Path,
+) -> None:
+    descriptor = ActiveSurfaceDescriptor(
+        surface="test",
+        profile="without-records",
+        tier2_enabled=False,
+        product_commands=("bootstrap", "ask_memory"),
+    )
+
+    with active_surface(descriptor):
+        contract = commands.op_bootstrap(vault)["records"]
+
+    assert contract == {
+        "available": False,
+        "unavailable_reason": "The active surface does not export the Records command.",
+    }
+    assert "record_memory" not in json.dumps(contract)
+
+
 def test_bootstrap_reports_governance(vault: Path) -> None:
     out = commands.op_bootstrap(vault)
 
@@ -355,7 +404,7 @@ def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
     out = commands.op_bootstrap(vault)
     guidance = json.dumps(out["workflow"]).lower()
 
-    assert out["contract_version"] == "2026-07-28.1"
+    assert out["contract_version"] == "2026-08-02.1"
     for required in (
         "show the note title by default",
         "normal user-facing prose",

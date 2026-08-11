@@ -54,6 +54,7 @@ class _EmbCache(NamedTuple):
     generation: int
     instance: int
     mtime: float
+    recall_policy_identity: tuple[str, str]
     metadata: list[tuple[str, int]]
     matrix: np.ndarray
 
@@ -102,9 +103,10 @@ class EmbeddingIndex:
         self._vec_quant_synced = False
         self._vec_failed = False
 
-    def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
+    def _connect(self, path: Path | None = None) -> sqlite3.Connection:
+        target = path if path is not None else self.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(target)
         sidecar_store.apply_sidecar_pragmas(conn)
         conn.execute(
             """
@@ -207,23 +209,93 @@ class EmbeddingIndex:
         self._patch_cache(rel_path, new_meta, new_vecs, own_epoch, own_gen, own_instance)
 
     def delete_file(self, rel_path: str) -> None:
-        conn = self._connect()
+        """Remove one parent's page and semantic-unit rows if the sidecar exists."""
+        self.purge_paths_if_present([rel_path])
+
+    def purge_paths_if_present(
+        self, rel_paths: list[str], *, connection_path: Path | None = None
+    ) -> int:
+        """Model-free, idempotent removal for paths no longer admitted to recall.
+
+        This intentionally never calls :meth:`_connect` for an absent sidecar:
+        policy changes and disabled-model writes must be able to clean stale rows
+        without creating derived state.  The chunk and semantic-unit tables (and
+        vec0's chunk mirror) move together under one transaction.
+        """
+        paths = sorted({path for path in rel_paths if path})
+        target = connection_path if connection_path is not None else self.path
+        if not paths or not target.exists():
+            return 0
+        conn = self._connect(target)
         try:
             vec_on = vec_gate(self, conn)
             with conn:
-                if vec_on:
-                    self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
-                conn.execute("DELETE FROM chunks WHERE file_path = ?", (rel_path,))
-                conn.execute(
-                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
-                    (rel_path,),
-                )
-                sidecar_store.bump_meta(conn, "generation")
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
-                own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
+                removed = 0
+                for rel_path in paths:
+                    chunk_count = conn.execute(
+                        "SELECT COUNT(*) FROM chunks WHERE file_path = ?", (rel_path,)
+                    ).fetchone()[0]
+                    unit_count = conn.execute(
+                        "SELECT COUNT(*) FROM semantic_unit_vectors WHERE parent_path = ?",
+                        (rel_path,),
+                    ).fetchone()[0]
+                    if not chunk_count and not unit_count:
+                        continue
+                    if vec_on and chunk_count:
+                        self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
+                    conn.execute("DELETE FROM chunks WHERE file_path = ?", (rel_path,))
+                    conn.execute(
+                        "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
+                        (rel_path,),
+                    )
+                    removed += 1
+                if removed:
+                    sidecar_store.bump_meta(conn, "generation")
+                    sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                    own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
-        self._patch_cache(rel_path, [], None, own_epoch, own_gen, own_instance)
+        if removed:
+            self._purge_cache_paths(set(paths), own_epoch, own_gen, own_instance)
+        return removed
+
+    def purge_exact_persisted_rows(
+        self, values: list[str], *, connection_path: Path | None = None
+    ) -> int:
+        """Remove quarantined stored identities without filesystem routing."""
+        return self.purge_paths_if_present(values, connection_path=connection_path)
+
+    def _purge_cache_paths(
+        self,
+        paths: set[str],
+        own_epoch: int,
+        own_gen: int,
+        own_instance: int,
+    ) -> None:
+        """Drop a multi-path block from a warm matrix only when contiguous."""
+        with self._lock:
+            cached = self._cache
+            if cached is None:
+                return
+            if (
+                own_epoch != cached.epoch
+                or own_instance != cached.instance
+                or own_gen != cached.generation + 1
+            ):
+                self._cache = None
+                return
+            keep = [i for i, (path, _chunk) in enumerate(cached.metadata) if path not in paths]
+            self._cache = _EmbCache(
+                cached.epoch,
+                own_gen,
+                cached.instance,
+                cached.mtime,
+                cached.recall_policy_identity,
+                [cached.metadata[i] for i in keep],
+                cached.matrix[keep]
+                if keep
+                else np.zeros((0, VECTOR_DIM), dtype=np.float32),
+            )
 
     def upsert_semantic_units(
         self,
@@ -365,7 +437,13 @@ class EmbeddingIndex:
                         f"{len(new_metadata)} meta rows vs {new_matrix.shape[0]} vectors"
                     )
                 self._cache = _EmbCache(
-                    c.epoch, own_gen, c.instance, c.mtime, new_metadata, new_matrix
+                    c.epoch,
+                    own_gen,
+                    c.instance,
+                    c.mtime,
+                    c.recall_policy_identity,
+                    new_metadata,
+                    new_matrix,
                 )
             except Exception as e:  # noqa: BLE001 — self-heal, never break a write
                 log.warning("embedding matrix splice failed (%s); dropping cache", e)
@@ -383,17 +461,30 @@ class EmbeddingIndex:
             return [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
+        from . import recall_policy
+
+        policy_identity = recall_policy.recall_policy_identity(self.vault_root)
         c = self._cache
-        served = sidecar_store.try_serve_cached(c, self.path)
+        served = (
+            sidecar_store.try_serve_cached(c, self.path)
+            if c is not None and c.recall_policy_identity == policy_identity
+            else None
+        )
         if served is not None:
             return served.metadata, served.matrix
         with self._lock:
             # Re-check under the lock: another thread may have loaded while we
             # waited, or the fast-path token read may have failed transiently.
             c = self._cache
-            served = sidecar_store.try_serve_cached(c, self.path)
+            served = (
+                sidecar_store.try_serve_cached(c, self.path)
+                if c is not None and c.recall_policy_identity == policy_identity
+                else None
+            )
             if served is not None:
                 return served.metadata, served.matrix
+            # Keep this call zero-argument: cache tests and production probes
+            # deliberately wrap the named full-reload seam.
             loaded = self._load_all_rows()
             log.info(
                 "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d",
@@ -425,7 +516,7 @@ class EmbeddingIndex:
             "generation": c.generation,
         }
 
-    def _load_all_rows(self) -> _EmbCache:
+    def _load_all_rows(self, policy_identity: tuple[str, str] | None = None) -> _EmbCache:
         """Full reload from the sidecar → an `_EmbCache`.
 
         Reads the meta token AND the rows inside ONE explicit `BEGIN` so they
@@ -437,6 +528,10 @@ class EmbeddingIndex:
         text is neither SELECTed nor retained; file_path strings are interned so N
         rows of one file share a single str object.
         """
+        if policy_identity is None:
+            from . import recall_policy
+
+            policy_identity = recall_policy.recall_policy_identity(self.vault_root)
         conn = self._connect()
         try:
             conn.execute("BEGIN")
@@ -455,14 +550,22 @@ class EmbeddingIndex:
             mtime = 0.0
         if not rows:
             return _EmbCache(
-                epoch, gen, instance, mtime, [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
+                epoch,
+                gen,
+                instance,
+                mtime,
+                policy_identity,
+                [],
+                np.zeros((0, VECTOR_DIM), dtype=np.float32),
             )
         metadata: list[tuple[str, int]] = []
         vectors: list[np.ndarray] = []
         for fp, idx, blob in rows:
             metadata.append((sys.intern(fp), idx))
             vectors.append(np.frombuffer(blob, dtype=np.float32))
-        return _EmbCache(epoch, gen, instance, mtime, metadata, np.stack(vectors, axis=0))
+        return _EmbCache(
+            epoch, gen, instance, mtime, policy_identity, metadata, np.stack(vectors, axis=0)
+        )
 
     def search(
         self,
@@ -514,6 +617,7 @@ class EmbeddingIndex:
         k: int,
         *,
         allowed_unit_refs: set[str] | None = None,
+        allowed_parent_paths: set[str] | None = None,
         validate: bool = True,
     ) -> list[SemanticUnitVectorHit]:
         """Score unit rows first, then validate only a bounded winner window.
@@ -528,22 +632,44 @@ class EmbeddingIndex:
             return []
         if allowed_unit_refs is not None and not allowed_unit_refs:
             return []
+        if allowed_parent_paths is not None and not allowed_parent_paths:
+            return []
 
         conn = self._connect()
         try:
-            if allowed_unit_refs is None:
+            if allowed_unit_refs is None and allowed_parent_paths is None:
                 rows = conn.execute(
                     "SELECT unit_ref, parent_path, parent_generation, "
                     "parent_source_hash, parser_version, vector "
                     "FROM semantic_unit_vectors"
                 ).fetchall()
-            else:
+            elif allowed_unit_refs is not None and allowed_parent_paths is None:
                 rows = conn.execute(
                     "SELECT unit_ref, parent_path, parent_generation, "
                     "parent_source_hash, parser_version, vector "
                     "FROM semantic_unit_vectors "
                     "WHERE unit_ref IN (SELECT value FROM json_each(?))",
                     (json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),),
+                ).fetchall()
+            elif allowed_unit_refs is None:
+                rows = conn.execute(
+                    "SELECT unit_ref, parent_path, parent_generation, "
+                    "parent_source_hash, parser_version, vector "
+                    "FROM semantic_unit_vectors "
+                    "WHERE parent_path IN (SELECT value FROM json_each(?))",
+                    (json.dumps(sorted(allowed_parent_paths), ensure_ascii=False),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT unit_ref, parent_path, parent_generation, "
+                    "parent_source_hash, parser_version, vector "
+                    "FROM semantic_unit_vectors "
+                    "WHERE unit_ref IN (SELECT value FROM json_each(?)) "
+                    "AND parent_path IN (SELECT value FROM json_each(?))",
+                    (
+                        json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),
+                        json.dumps(sorted(allowed_parent_paths), ensure_ascii=False),
+                    ),
                 ).fetchall()
         finally:
             conn.close()
@@ -574,7 +700,9 @@ class EmbeddingIndex:
             key=lambda index: (-float(scores[index]), candidates[index][0]),
         )
         validation_limit = (
-            len(order) if allowed_unit_refs is not None else min(len(order), max(k * 4, k + 32))
+            len(order)
+            if allowed_unit_refs is not None or allowed_parent_paths is not None
+            else min(len(order), max(k * 4, k + 32))
         )
         if not validate:
             return [
@@ -739,6 +867,28 @@ class EmbeddingIndex:
             for parent_path, (generations, unit_refs) in grouped.items()
         }
 
+    def _projected_source_snapshot(
+        self,
+    ) -> tuple[tuple[str, str], tuple[tuple[str, tuple[int, int, int]], ...]]:
+        """Current ordinary-recall source identity for a rebuild publication.
+
+        Rebuilds are staged from human-owned files.  This compact snapshot binds
+        the staged vectors to exactly the projected corpus and local policy that
+        was scanned, so a direct edit, create/delete, or access transition can
+        refuse publication instead of replacing a still-valid sidecar with a
+        mixed-generation corpus.
+        """
+        from . import freshness, recall_policy
+
+        root = self.vault_root.resolve()
+        rows: list[tuple[str, tuple[int, int, int]]] = []
+        for path in index_paths.iter_index_markdown(self.vault_root):
+            try:
+                rows.append((path.relative_to(root).as_posix(), freshness.stat_signature(path)))
+            except (OSError, ValueError):
+                continue
+        return recall_policy.recall_policy_identity(self.vault_root), tuple(sorted(rows))
+
     def rebuild_all(self) -> int:
         """Wipe + re-embed every compiled .md the index scope covers. Returns row count.
 
@@ -758,18 +908,7 @@ class EmbeddingIndex:
         # early return). Vault scope always proceeds — it indexes the wider tree.
         if scope == "kb" and not index_paths.kb_index_root(self.vault_root).is_dir():
             return 0
-        # Wipe whole table — easier than per-file diff for a one-shot rebuild.
-        conn = self._connect()
-        try:
-            vec_on = vec_gate(self, conn)
-            with conn:
-                if vec_on:
-                    self._vec.wipe(conn)
-                conn.execute("DELETE FROM chunks")
-                conn.execute("DELETE FROM semantic_unit_vectors")
-        finally:
-            conn.close()
-        self._cache = None
+        source_snapshot = self._projected_source_snapshot()
 
         all_chunks: list[tuple[str, list[str], float]] = []
         all_unit_states: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
@@ -848,6 +987,11 @@ class EmbeddingIndex:
             unit_offset += count
         conn = self._connect()
         try:
+            # No initial wipe: retain the prior coherent sidecar until the staged
+            # projected corpus proves it still matches immediately before commit.
+            if self._projected_source_snapshot() != source_snapshot:
+                log.info("rebuild_embeddings: projected source changed; publication refused")
+                return 0
             vec_on = vec_gate(self, conn)
             with conn:
                 conn.execute("DELETE FROM chunks")

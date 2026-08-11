@@ -38,7 +38,7 @@ import sqlite3
 import textwrap
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -100,17 +100,34 @@ class DisclosureCollector:
 _DISCLOSURE_COLLECTOR: ContextVar[DisclosureCollector | None] = ContextVar(
     "exomem_disclosure_collector", default=None
 )
+_DISCLOSURE_BOUNDARY_OWNERS: ContextVar[tuple[bool, ...]] = ContextVar(
+    "exomem_disclosure_boundary_owners", default=()
+)
 
 
 @contextmanager
-def disclosure_boundary(vault_root: Path, command_name: str):
-    """Collect one top-level read's decisions and emit only on its success."""
-    collector = DisclosureCollector(Path(vault_root), uuid.uuid4().hex, command_name)
-    token = _DISCLOSURE_COLLECTOR.set(collector)
+def disclosure_boundary(vault_root: Path, command_name: str, *, join_existing: bool = False):
+    """Collect one command's decisions and emit only on its success.
+
+    Nested commands own separate receipts unless their caller explicitly opts
+    into the active command's same-vault collector.
+    """
+    existing = _collector()
+    root = Path(vault_root)
+    if join_existing and existing is not None and existing.vault_root != root:
+        raise RuntimeError("nested disclosure boundary cannot use a different vault")
+    owns_collector = not (join_existing and existing is not None)
+    collector = existing if not owns_collector else DisclosureCollector(root, uuid.uuid4().hex, command_name)
+    token = _DISCLOSURE_COLLECTOR.set(collector) if owns_collector else None
+    owners = _DISCLOSURE_BOUNDARY_OWNERS.set(
+        (*_DISCLOSURE_BOUNDARY_OWNERS.get(), owns_collector)
+    )
     try:
         yield collector
     finally:
-        _DISCLOSURE_COLLECTOR.reset(token)
+        _DISCLOSURE_BOUNDARY_OWNERS.reset(owners)
+        if token is not None:
+            _DISCLOSURE_COLLECTOR.reset(token)
 
 
 def _collector() -> DisclosureCollector | None:
@@ -224,6 +241,9 @@ def _outcome_for_decision(
 
 def emit_boundary_receipt(collector: DisclosureCollector) -> None:
     """Synchronously append evidence after the final representation is fixed."""
+    owners = _DISCLOSURE_BOUNDARY_OWNERS.get()
+    if not owners or not owners[-1]:
+        return
     try:
         if collector.credential_redactions:
             receipts.append_event(
@@ -508,6 +528,18 @@ _PROJECTORS: dict[str, frozenset[str]] = {
     # coverage check permanently unsatisfiable.
     "page": _PAGE_FIELDS,
 }
+_PROJECTOR_VALIDATORS: dict[str, Callable[[Mapping[str, Any]], dict[str, Any] | None]] = {}
+_PROJECTOR_VALIDATOR_UNSET = object()
+
+_FULL_ONLY_PROJECTORS: frozenset[str] = frozenset(
+    {
+        "record_query",
+        "record_inspection",
+        "record_manifest",
+        "record_template",
+        "record_mutation",
+    }
+)
 
 
 def _kind_for(payload: Any) -> str | None:
@@ -794,6 +826,8 @@ def project(
         return _notice(level, rule_ids=rule_ids, scope_label=scope_label, options=options)
 
     resolved_kind = kind or _kind_for(payload)
+    if resolved_kind in _FULL_ONLY_PROJECTORS and level < LEVEL_FULL:
+        return _fail_closed_notice("records_requires_full_release")
     allowed = _PROJECTORS.get(resolved_kind or "")
     if not allowed:
         log.warning(
@@ -811,6 +845,22 @@ def project(
             resolved_kind,
         )
         return _fail_closed_notice("no_projector")
+
+    validator = _PROJECTOR_VALIDATORS.get(resolved_kind or "")
+    if validator is not None:
+        try:
+            validated = validator(raw)
+        except Exception:  # noqa: BLE001 - a projector is an untrusted extension boundary.
+            label = (
+                resolved_kind
+                if type(resolved_kind) is str and len(resolved_kind) <= 128
+                else type(resolved_kind).__name__
+            )
+            log.warning("governance.egress: projector validator failed for kind %s", label)
+            return _fail_closed_notice("invalid_projector_payload")
+        if validated is None:
+            return _fail_closed_notice("invalid_projector_payload")
+        raw = validated
 
     # Only L5–L6 reach this line: every lower level returned a notice above,
     # which is how "scores, graph seeds, relation matches, matched units,
@@ -889,9 +939,20 @@ def annotate_pack(pack: dict[str, Any] | None, release: AnnotatedHits) -> dict[s
     return pack
 
 
-def register_projector(kind: str, allowed_fields: Iterable[str]) -> None:
+def register_projector(
+    kind: str,
+    allowed_fields: Iterable[str],
+    *,
+    validator: Callable[[Mapping[str, Any]], dict[str, Any] | None] | None | object = _PROJECTOR_VALIDATOR_UNSET,
+) -> None:
     """Register the wire allow-list for one payload kind."""
     _PROJECTORS[kind] = frozenset(allowed_fields)
+    if validator is _PROJECTOR_VALIDATOR_UNSET:
+        return
+    if validator is None:
+        _PROJECTOR_VALIDATORS.pop(kind, None)
+    else:
+        _PROJECTOR_VALIDATORS[kind] = validator  # type: ignore[assignment]
 
 
 def registered_kinds() -> frozenset[str]:
@@ -2060,6 +2121,7 @@ _REFERENCE_KWARGS = frozenset(
         "source_path",
         "target_path",
         "manifest_path",
+        "collection",
         "only_paths",
         "selector_paths",
     }
@@ -2225,6 +2287,7 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "remember",
         "capture_source",
         "preserve_evidence",
+        "preserve_artifacts",
         "compile_source",
         "observe_memory",
         "replace_memory",
@@ -2276,6 +2339,9 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "provenance_report": "structure",
     "query_data": "structure",
     "adopt": "structure",
+    # The action dispatcher routes all content through the typed Records
+    # inspection/query/mutation projectors before it returns.
+    "record_memory": "structure",
 }
 
 # Receipt adapters follow the same default-deny registry as serializers.  A
@@ -2293,6 +2359,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
             "evolution", "propose_compilation", "provenance_report", "query_data", "adopt",
         )
     },
+    "record_memory": "structure",
 }
 
 # Every content selector declares both evidence collection and tombstone
@@ -2361,6 +2428,13 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "infer": "save-conditional",
         "validate": "structure",
         "diff": "structure",
+    },
+    ("record_memory", "action"): {
+        "inspect": "structure",
+        "create": "mutation",
+        "query": "structure",
+        "append": "mutation",
+        "update": "mutation",
     },
 }
 
@@ -2748,6 +2822,53 @@ def release_level_for(
         purpose=declared_purpose,
     )
     return level
+
+
+def release_level_for_path_only(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+    receipt_decision: str | None = None,
+) -> int:
+    """Decide an opaque candidate without parsing its bytes.
+
+    A structured Record must be authorized before parsing. Scopes that need
+    the candidate's frontmatter therefore withhold it conservatively.
+    """
+    vault_root = Path(vault_root)
+    if lifecycle.is_tombstoned(vault_root, rel_path):
+        return DISCLOSURE_MIN
+    policy = policy_module.load(vault_root)
+    if policy.empty:
+        return DISCLOSURE_MAX
+    who = principal if principal is not None else effective_principal()
+    if policy.blocked or not who.resolved:
+        return DISCLOSURE_MIN
+    if any(
+        scope.projects or scope.tags or scope.types or scope.classes
+        for scope in policy.scopes.values()
+    ):
+        return DISCLOSURE_MIN
+    scope_ids = membership_module.evaluate_path_only(vault_root, rel_path, policy)
+    decision = decide(
+        scope_ids,
+        audience=who.audience_id,
+        purpose=_declared_purpose(vault_root, who, purpose),
+        policy=policy,
+    )
+    if receipt_decision is not None:
+        _outcome_for_decision(
+            vault_root,
+            rel_path,
+            decision=decision,
+            policy=policy,
+            audience=who.audience_id,
+            outcome=receipt_decision if decision.level >= LEVEL_FULL else "withheld",
+            purpose=purpose,
+        )
+    return decision.level
 
 
 def _binary_boundary(

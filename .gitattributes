@@ -11,6 +11,9 @@
 *.yml       text eol=lf
 *.lock      text eol=lf
 
+# Fidelity fixtures retain the source vault's meaningful trailing spaces.
+tests/fixtures/records/x3/*.md whitespace=-trailing-space
+
 # Shell and service files must stay LF on Unix-like systems.
 *.sh        text eol=lf
 *.service   text eol=lf
