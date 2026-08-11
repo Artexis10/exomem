@@ -147,6 +147,9 @@ async def test_kubernetes_adapter_discovers_csi_handle_then_labels_with_full_ide
             "pv-alpha",
             {
                 "metadata": {
+                    "labels": {
+                        "exomem.io/resource-name": metadata.resource_name,
+                    },
                     "annotations": {
                         **metadata.kubernetes_annotations,
                         "exomem.io/recovery-envelope": "sealed-pv-envelope",

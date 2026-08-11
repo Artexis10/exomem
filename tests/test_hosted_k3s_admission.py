@@ -1695,7 +1695,6 @@ def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> 
     identityless_pv = copy.deepcopy(pv)
     identityless_pv["metadata"] = {
         "name": "pvc-identityless-transition",
-        "labels": {"exomem.io/resource-name": namespace},
     }
     identityless_pv["spec"]["csi"]["volumeHandle"] = "5678"
     _kubectl(k3s, ["apply", "--filename=-"], documents=[identityless_pv])
@@ -1727,7 +1726,7 @@ def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> 
     assert partial_identity_patch.returncode != 0
     assert "immutable authenticated hosted PV identity" in partial_identity_patch.stderr
 
-    full_identity_patch = _kubectl(
+    full_identity_without_label_patch = _kubectl(
         k3s,
         [
             "patch",
@@ -1736,6 +1735,30 @@ def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> 
             "--type=merge",
             "--patch",
             json.dumps({"metadata": {"annotations": identity}}),
+            "--dry-run=server",
+            f"--as={volume_user}",
+        ],
+        check=False,
+    )
+    assert full_identity_without_label_patch.returncode != 0
+    assert "exact encrypted 10 GiB Retain HCloud PV specification" in full_identity_without_label_patch.stderr
+
+    full_identity_patch = _kubectl(
+        k3s,
+        [
+            "patch",
+            "persistentvolume",
+            "pvc-identityless-transition",
+            "--type=merge",
+            "--patch",
+            json.dumps(
+                {
+                    "metadata": {
+                        "labels": {"exomem.io/resource-name": namespace},
+                        "annotations": identity,
+                    }
+                }
+            ),
             "--dry-run=server",
             f"--as={volume_user}",
         ],
