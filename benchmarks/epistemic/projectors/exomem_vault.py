@@ -20,6 +20,8 @@ The mapping and its documentation, field by field, is in
   (numeric confidence is an explicit non-field); unresolved knowledge is
   written under an ``## Open threads`` heading, which is what this projector
   reads.
+- ``kind`` — an entity page with ``entity_type: decision`` is a documented
+  settled decision surface, projected without relying on its folder name.
 
 What is *not* projected is recorded in :data:`COMPLETENESS_NOTES` rather than
 silently dropped.
@@ -30,6 +32,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -63,6 +66,27 @@ TYPE_TO_KIND: Mapping[str, str] = {
     "production-log": "container",
     "entity": "container",
 }
+
+#: Every branch in :func:`_kind_for` is grounded in the documented public
+#: frontmatter/page-type surface. The values are immutable because this is
+#: fairness evidence, not an extension point for a scenario or provider run.
+KIND_MAPPING_EVIDENCE: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "source": ("src/exomem/_scaffold/_Schema/references/page-types.md:17",),
+        "research-note": ("src/exomem/_scaffold/_Schema/references/page-types.md:55",),
+        "insight": ("src/exomem/_scaffold/_Schema/references/page-types.md:100",),
+        "pattern": ("src/exomem/_scaffold/_Schema/references/page-types.md:194",),
+        "failure": ("src/exomem/_scaffold/_Schema/references/page-types.md:147",),
+        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:244",),
+        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:316",),
+        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:413",),
+        "entity:decision": (
+            "src/exomem/_scaffold/_Schema/references/page-types.md:468",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:469",
+        ),
+        "sources_fallback": ("src/exomem/_scaffold/_Schema/references/page-types.md:14",),
+    }
+)
 
 #: exomem page ``status`` -> neutral currency.
 STATUS_TO_CURRENCY: Mapping[str, str] = {
@@ -113,7 +137,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="kind",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:15",
+        evidence=KIND_MAPPING_EVIDENCE["entity:decision"][1],
     ),
     FieldDeclaration(
         field="current",
@@ -247,7 +271,9 @@ def _sections(body: str) -> dict[str, list[str]]:
     return grouped
 
 
-def _kind_for(page_type: str, relative: str) -> str:
+def _kind_for(page_type: str, entity_type: str, relative: str) -> str:
+    if page_type.strip().casefold() == "entity" and entity_type.strip().casefold() == "decision":
+        return "decision"
     mapped = TYPE_TO_KIND.get(page_type)
     if mapped is not None:
         return mapped
@@ -304,6 +330,7 @@ class VaultProjector(Projector):
             item_id = relative[: -len(".md")] if relative.endswith(".md") else relative
             sections = _sections(body)
             page_type = str(frontmatter.get("type") or "").strip()
+            entity_type = str(frontmatter.get("entity_type") or "")
             status = str(frontmatter.get("status") or "").strip().casefold()
 
             cites = list(_links(frontmatter.get("sources")))
@@ -366,13 +393,21 @@ class VaultProjector(Projector):
 
             raw = {
                 key: _as_text(frontmatter.get(key))
-                for key in ("type", "status", "project", "source_type", "tags", "review_state")
+                for key in (
+                    "type",
+                    "entity_type",
+                    "status",
+                    "project",
+                    "source_type",
+                    "tags",
+                    "review_state",
+                )
                 if frontmatter.get(key) is not None
             }
 
             items[item_id] = StateItem(
                 id=item_id,
-                kind=_kind_for(page_type, relative),
+                kind=_kind_for(page_type, entity_type, relative),
                 title=str(frontmatter.get("title") or "").strip() or item_id.rsplit("/", 1)[-1],
                 text="\n".join(line for line in body.splitlines()).strip(),
                 current=STATUS_TO_CURRENCY.get(status, "undeclared"),

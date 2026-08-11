@@ -183,6 +183,75 @@ def test_projector_is_read_only(snapshot) -> None:
     assert before == after
 
 
+def test_decision_entity_maps_to_decision_and_retains_raw_entity_type(tmp_path: Path) -> None:
+    (tmp_path / "Decisions").mkdir()
+    (tmp_path / "Notes").mkdir()
+    (tmp_path / "Decisions" / "settled.md").write_text(
+        "---\ntype: entity\nentity_type: ' Decision '\nstatus: active\n---\nSettled.",
+        encoding="utf-8",
+    )
+    (tmp_path / "Notes" / "other.md").write_text(
+        "---\ntype: entity\nentity_type: person\nstatus: active\n---\nOther.",
+        encoding="utf-8",
+    )
+
+    projected = VaultProjector(tmp_path).project(phase="p1", taken_at="2026-01-01T00:00:00Z")
+
+    decision = projected.item("Decisions/settled")
+    other = projected.item("Notes/other")
+    assert decision is not None and decision.kind == "decision"
+    assert decision.raw["entity_type"] == " Decision "
+    assert other is not None and other.kind == "container"
+
+
+def test_projected_decision_and_hypothesis_make_f07_pass_without_folder_guessing(tmp_path: Path) -> None:
+    (tmp_path / "misc").mkdir()
+    (tmp_path / "misc" / "settled.md").write_text(
+        "---\ntype: entity\nentity_type: DECISION\nstatus: active\n---\nSettled.",
+        encoding="utf-8",
+    )
+    (tmp_path / "misc" / "tentative.md").write_text(
+        "---\ntype: experiment\nstatus: active\n---\nTentative.",
+        encoding="utf-8",
+    )
+    projected = VaultProjector(tmp_path).project(phase="p1", taken_at="2026-01-01T00:00:00Z")
+
+    from epistemic.assertions import AssertionContext
+    from epistemic.registry import resolve
+
+    result = resolve("decision_distinguishable_from_hypothesis")(
+        AssertionContext(
+            snapshot=projected,
+            subject="misc/settled",
+            counterpart="misc/tentative",
+        )
+    )
+
+    assert result.outcome == "pass"
+    assert "typed kind field" in result.evidence
+
+
+def test_feedback1_kind_mapping_evidence_covers_every_mapping_with_documented_surfaces() -> None:
+    from epistemic.projectors.exomem_vault import KIND_MAPPING_EVIDENCE, TYPE_TO_KIND
+    from epistemic.snapshot import parse_evidence_citation
+
+    expected = {
+        **{page_type: f"type: {page_type}" for page_type in TYPE_TO_KIND},
+        "entity:decision": "entity_type: decision",
+        "sources_fallback": "Location:",
+    }
+    assert set(KIND_MAPPING_EVIDENCE) == set(expected)
+    for mapping, citations in KIND_MAPPING_EVIDENCE.items():
+        assert citations
+        cited_lines = []
+        for evidence in citations:
+            parsed = parse_evidence_citation(evidence)
+            assert parsed is not None
+            path, line = parsed
+            cited_lines.append((REPO_ROOT / path).read_text(encoding="utf-8").splitlines()[line - 1])
+        assert any(expected[mapping] in cited for cited in cited_lines), mapping
+
+
 # --------------------------------------------------------------------------
 # Correction round.
 # --------------------------------------------------------------------------

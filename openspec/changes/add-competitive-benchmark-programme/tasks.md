@@ -251,12 +251,28 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       APPROVE-WITH-FIXES → correction → recheck NOT-CLEAR (R-B1b) → surgical
       fixes incl. sibling unobservable-subject guards → 227 tests green;
       §7 amendment records vacuity-fails for evidence_path_resolves)
-- [ ] 5.1b W6b runner glue (ledgered from review M7): scenario→AssertionContext
+- [x] 5.1b W6b runner glue (ledgered from review M7): scenario→AssertionContext
       binding for served_items / foreign_case_hits / external_edit_at;
-      REQUIRES_SNAPSHOT_PAIR bound to AssertionContext.prior
-- [ ] 5.1c exomem decision projection (review M9): entity_type: decision →
+      REQUIRES_SNAPSHOT_PAIR bound to AssertionContext.prior. COMPLETE:
+      caller-supplied observations bind deterministically in trajectory order;
+      snapshot pairs are same-row, non-aliased, deep-isolated evidence; edit
+      pairs straddle a strict RFC3339 timestamp; every binding and registry
+      error refuses before any assertion executes. Red-first evidence: initial
+      import RED, behavioural `9 failed, 19 passed`, preflight `1 failed,
+      9 passed`, reviewer correction `9 failed`, timestamp correction `1
+      failed`, and RFC3339 correction `3 failed, 3 passed`. Final affected
+      gates: feedback selectors `17 passed`; runner/projector `47 passed`;
+      focused `161 passed`; epistemic+privacy `257 passed`; prior independent
+      cross-lane gate `632 passed, 33 skipped`. Fresh independent review:
+      REQUEST_CHANGES → correction → REQUEST_CHANGES → correction → CLEAR.
+- [x] 5.1c exomem decision projection (review M9): entity_type: decision →
       kind "decision" in the vault projector, else f07 is unscoreable for
-      the subject product
+      the subject product. COMPLETE: normalized decision entities project as
+      neutral decisions, retain their raw entity type, leave other entities as
+      containers, and make f07 scoreable without folder guessing. An immutable,
+      exhaustive, dereferenced competitor-evidence registry now covers every
+      kind mapping and fallback. Covered by the joint 5.1b gates and final
+      independent `CLEAR`; pre-registration bytes remained unchanged.
 - [ ] 5.1d census gaps (review): pre-registration sha256 into run manifests;
       negative controls wired into every epistemic table; privileged-endpoint
       disqualification check; headline table carries failing-assertion
