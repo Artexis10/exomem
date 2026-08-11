@@ -1691,6 +1691,58 @@ def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> 
         check=False,
     )
     assert valid_pv.returncode == 0, valid_pv.stderr
+
+    identityless_pv = copy.deepcopy(pv)
+    identityless_pv["metadata"] = {
+        "name": "pvc-identityless-transition",
+        "labels": {"exomem.io/resource-name": namespace},
+    }
+    identityless_pv["spec"]["csi"]["volumeHandle"] = "5678"
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[identityless_pv])
+
+    partial_identity_patch = _kubectl(
+        k3s,
+        [
+            "patch",
+            "persistentvolume",
+            "pvc-identityless-transition",
+            "--type=merge",
+            "--patch",
+            json.dumps(
+                {
+                    "metadata": {
+                        "annotations": {
+                            key: value
+                            for key, value in identity.items()
+                            if key != "exomem.io/recovery-envelope"
+                        }
+                    }
+                }
+            ),
+            "--dry-run=server",
+            f"--as={volume_user}",
+        ],
+        check=False,
+    )
+    assert partial_identity_patch.returncode != 0
+    assert "immutable authenticated hosted PV identity" in partial_identity_patch.stderr
+
+    full_identity_patch = _kubectl(
+        k3s,
+        [
+            "patch",
+            "persistentvolume",
+            "pvc-identityless-transition",
+            "--type=merge",
+            "--patch",
+            json.dumps({"metadata": {"annotations": identity}}),
+            "--dry-run=server",
+            f"--as={volume_user}",
+        ],
+        check=False,
+    )
+    assert full_identity_patch.returncode == 0, full_identity_patch.stderr
+
     wrong_secret_pv = copy.deepcopy(pv)
     wrong_secret_pv["spec"]["csi"]["nodePublishSecretRef"]["name"] = "foreign-key"
     denied_pv = _kubectl(

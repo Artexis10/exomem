@@ -42,10 +42,16 @@ permissions:
   contents: read
   attestations: read
 
+concurrency:
+  group: hosted-infrastructure-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  # New pushes supersede PR feedback, but main and promotion evidence must finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   UV_VERSION: "0.11.28"
   PYTHON_VERSION: "3.13.5"
   NODE_VERSION: "22.17.1"
+  GO_VERSION: "1.26.5"
 
 jobs:
   static:
@@ -64,7 +70,7 @@ jobs:
           enable-cache: true
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.25.1"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -73,7 +79,25 @@ jobs:
         with:
           terraform_version: "1.15.8"
           terraform_wrapper: false
+      - name: Restore exact validator bundle
+        id: validator-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/go/bin/tflint
+            ~/go/bin/helm
+            ~/go/bin/kubeconform
+            ~/go/bin/conftest
+            ~/go/bin/sops
+            ~/go/bin/age-keygen
+            ~/.local/bin/trivy
+            ~/.local/bin/shellcheck
+            ~/.local/bin/oras
+            .venv-hosted-ci
+            ~/.ansible/collections
+          key: hosted-validators-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('infra/tool-versions.env', 'infra/ansible/collections/requirements.yml') }}
       - name: Install exact infrastructure validators
+        if: steps.validator-cache.outputs.cache-hit != 'true'
         run: |
           source infra/tool-versions.env
           install -d -m 0755 "$HOME/.local/bin"
@@ -105,10 +129,62 @@ jobs:
           uv pip install --python .venv-hosted-ci/bin/python \
             ansible-core==${ANSIBLE_CORE_VERSION} ansible-lint==${ANSIBLE_LINT_VERSION} \
             checkov==${CHECKOV_VERSION}
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          echo "$PWD/.venv-hosted-ci/bin" >> "$GITHUB_PATH"
           export PATH="$PWD/.venv-hosted-ci/bin:$PATH"
           ansible-galaxy collection install -r infra/ansible/collections/requirements.yml
+      - name: Expose infrastructure validators
+        run: |
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          echo "$PWD/.venv-hosted-ci/bin" >> "$GITHUB_PATH"
+      - name: Audit exact validator versions
+        run: |
+          source infra/tool-versions.env
+          require_go_module_version() {
+            local binary="$1"
+            local module="$2"
+            local expected="$3"
+            if ! go version -m "$(command -v "${binary}")" | \
+              awk -v module="${module}" -v version="v${expected}" \
+                '$1 == "mod" && $2 == module && $3 == version { found = 1 } END { exit !found }'; then
+              echo "${binary} does not contain ${module}@v${expected}" >&2
+              return 1
+            fi
+          }
+          require_output_version() {
+            local binary="$1"
+            local expected="$2"
+            shift 2
+            local output
+            local escaped="${expected//./\\.}"
+            output="$("${binary}" "$@" 2>&1)"
+            if ! grep -Eq "(^|[^0-9])v?${escaped}([^0-9]|$)" <<<"${output}"; then
+              echo "${binary} did not report exact version ${expected}" >&2
+              return 1
+            fi
+          }
+          require_python_distribution() {
+            local distribution="$1"
+            local expected="$2"
+            local actual
+            actual="$(python -c 'import importlib.metadata as metadata, sys; print(metadata.version(sys.argv[1]))' "${distribution}")"
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "${distribution} is ${actual}, expected ${expected}" >&2
+              return 1
+            fi
+          }
+          require_go_module_version tflint github.com/terraform-linters/tflint "$TFLINT_VERSION"
+          require_go_module_version helm helm.sh/helm/v3 "$HELM_VERSION"
+          require_go_module_version kubeconform github.com/yannh/kubeconform "$KUBECONFORM_VERSION"
+          require_go_module_version conftest github.com/open-policy-agent/conftest "$CONFTEST_VERSION"
+          require_go_module_version sops github.com/getsops/sops/v3 "$SOPS_VERSION"
+          require_go_module_version age-keygen filippo.io/age "$AGE_VERSION"
+          require_python_distribution ansible-core "$ANSIBLE_CORE_VERSION"
+          require_python_distribution ansible-lint "$ANSIBLE_LINT_VERSION"
+          require_python_distribution checkov "$CHECKOV_VERSION"
+          require_output_version ansible-galaxy "$COMMUNITY_GENERAL_VERSION" collection list community.general
+          require_output_version ansible-galaxy "$COMMUNITY_LIBRARY_INVENTORY_FILTERING_VERSION" collection list community.library_inventory_filtering_v1
+          require_output_version trivy "$TRIVY_VERSION" --version
+          require_output_version shellcheck "$SHELLCHECK_VERSION" --version
+          require_output_version oras "$ORAS_VERSION" version
       - name: Terraform, TFLint, Checkov, Ansible, Helm, policy, SOPS, types, tests, and secret scan
         run: |
           EXOMEM_RUN_REAL_SOPS_TESTS=1 \
@@ -133,6 +209,13 @@ jobs:
       attestations: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Install pinned ORAS for locked provisioner evidence discovery
         run: |
@@ -150,17 +233,17 @@ jobs:
           DEPLOYMENT_PHASE: ${{ inputs.deployment_phase }}
         run: |
           test -f "$DEPLOYMENT_LOCK_PAIR" || { echo "canonical deployment lock pair is not committed" >&2; exit 2; }
-          python3 infra/scripts/prepare_hosted_release.py \
+          uv run --frozen python infra/scripts/prepare_hosted_release.py \
             --lock-pair "$DEPLOYMENT_LOCK_PAIR" \
             --phase "$DEPLOYMENT_PHASE" \
             --control-hostname control.example.invalid \
             --transfer-hostname transfer.example.invalid \
             --values-output /tmp/exomem-hosted-release-values.json
           PROVISIONER_IMAGE="$(python3 -c 'import json; print(json.load(open("/tmp/exomem-hosted-release-values.json"))["provisioner"]["deploymentLockJson"] )' | python3 -c 'import json, sys; print(json.load(sys.stdin)["components"]["provisioner"]["image"])')"
-          python3 infra/scripts/verify_hosted_release.py \
+          uv run --frozen python infra/scripts/verify_hosted_release.py \
             --phase "$DEPLOYMENT_PHASE" \
             --repository .
-          python3 infra/scripts/verify_provisioner_image.py \
+          uv run --frozen python infra/scripts/verify_provisioner_image.py \
             --image "$PROVISIONER_IMAGE" \
             --require-published
 

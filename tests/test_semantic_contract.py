@@ -819,7 +819,7 @@ def test_evaluate_fails_closed_when_before_corpus_does_not_match_before_state(
         if finding.code == "unregistered_relation"
     ]
     assert len(unregistered) == 1
-    assert unregistered[0].severity == "error"
+    assert unregistered[0].severity == "warning"
 
 
 def test_outside_kb_pages_remain_resolvable_but_never_governed(
@@ -1066,6 +1066,99 @@ def test_project_scoped_relation_requires_an_attached_authored_project(
     assert authored.projects == ()
     assert not qualified.qualifies
     assert "scope_violation" in qualified.reasons
+
+
+@pytest.mark.parametrize(
+    ("extensions", "raw_relation", "finding_code"),
+    (
+        (
+            {
+                "science.current": {
+                    "parent": "supports",
+                    "description": "Current relation",
+                },
+                "science.old": {
+                    "parent": "supports",
+                    "description": "Deprecated relation",
+                    "status": "deprecated",
+                    "replaced_by": "science.current",
+                },
+            },
+            "science.old",
+            "inactive_relation",
+        ),
+        (
+            {
+                "science.scoped": {
+                    "parent": "supports",
+                    "description": "Project-scoped relation",
+                    "scope": {"projects": ["alpha"]},
+                }
+            },
+            "science.scoped",
+            "scope_violation",
+        ),
+    ),
+)
+def test_governed_relation_registry_violations_remain_blocking_errors(
+    tmp_path: Path,
+    extensions: dict,
+    raw_relation: str,
+    finding_code: str,
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={"schema_version": 1, "extensions": extensions}
+    )
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/target.md",
+        _source(title="Target", page_type="pattern", project="alpha"),
+    )
+    page = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(
+            project="beta",
+            body=(
+                "## Observations\n\n"
+                "- [constraint] Keep the boundary explicit.\n\n"
+                "## Relations\n"
+                "- cites [[Knowledge Base/Notes/Patterns/target]]\n"
+                f"- {raw_relation} [[Knowledge Base/Notes/Patterns/target]]\n"
+            ),
+        ),
+        relation_registry=registry,
+        language_registry=semantic_language_registry.core_registry(),
+        review_fingerprint="review-v1",
+    )
+    before_corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (target,),
+        registry=registry,
+        identity_census=_identity_census(target),
+    )
+    after_corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (page, target),
+        registry=registry,
+        identity_census=_identity_census(page, target),
+    )
+
+    result = _evaluate(
+        before=None,
+        after=page,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        operation="create",
+    )
+
+    finding = next(
+        finding for finding in result.findings if finding.code == finding_code
+    )
+    assert finding.severity == "error"
+    assert result.relation_disposition.satisfied is True
+    assert result.relation_disposition.qualifying_signal == "connectivity"
+    assert result.should_block is True
 
 
 def test_relation_scope_uses_graph_file_target_kind_and_preserves_raw_alias(
