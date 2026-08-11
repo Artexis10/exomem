@@ -209,6 +209,11 @@ jobs:
       attestations: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Install pinned ORAS for locked provisioner evidence discovery
         run: |
@@ -226,17 +231,17 @@ jobs:
           DEPLOYMENT_PHASE: ${{ inputs.deployment_phase }}
         run: |
           test -f "$DEPLOYMENT_LOCK_PAIR" || { echo "canonical deployment lock pair is not committed" >&2; exit 2; }
-          python3 infra/scripts/prepare_hosted_release.py \
+          uv run --frozen python infra/scripts/prepare_hosted_release.py \
             --lock-pair "$DEPLOYMENT_LOCK_PAIR" \
             --phase "$DEPLOYMENT_PHASE" \
             --control-hostname control.example.invalid \
             --transfer-hostname transfer.example.invalid \
             --values-output /tmp/exomem-hosted-release-values.json
           PROVISIONER_IMAGE="$(python3 -c 'import json; print(json.load(open("/tmp/exomem-hosted-release-values.json"))["provisioner"]["deploymentLockJson"] )' | python3 -c 'import json, sys; print(json.load(sys.stdin)["components"]["provisioner"]["image"])')"
-          python3 infra/scripts/verify_hosted_release.py \
+          uv run --frozen python infra/scripts/verify_hosted_release.py \
             --phase "$DEPLOYMENT_PHASE" \
             --repository .
-          python3 infra/scripts/verify_provisioner_image.py \
+          uv run --frozen python infra/scripts/verify_provisioner_image.py \
             --image "$PROVISIONER_IMAGE" \
             --require-published
 
