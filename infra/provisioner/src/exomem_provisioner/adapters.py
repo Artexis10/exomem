@@ -116,6 +116,8 @@ class KubernetesVolumeAdapter:
                 return None
             raise
         pvc_annotations = dict(getattr(pvc.metadata, "annotations", None) or {})
+        if getattr(pvc.metadata, "deletion_timestamp", None) is not None:
+            raise MetadataConflict("PVC is terminating")
         _require_annotations(pvc_annotations, metadata)
         pvc_envelope = str(pvc_annotations.get("exomem.io/recovery-envelope", ""))
         if self._identity_verifier is not None:
@@ -143,6 +145,8 @@ class KubernetesVolumeAdapter:
         if not isinstance(pv_name, str) or not pv_name:
             return None
         pv = await asyncio.to_thread(self._core.read_persistent_volume, pv_name)
+        if getattr(pv.metadata, "deletion_timestamp", None) is not None:
+            raise MetadataConflict("PV is terminating")
         csi = getattr(pv.spec, "csi", None)
         handle = getattr(csi, "volume_handle", None)
         if not isinstance(handle, str) or not handle:
@@ -1083,6 +1087,8 @@ class HCloudVolumeAdapter:
     ) -> bool:
         volume = await self._get(handle)
         if volume is None:
+            return False
+        if getattr(volume, "status", None) == "deleting":
             return False
         labels = dict(getattr(volume, "labels", {}) or {})
         actual_location = getattr(getattr(volume, "location", None), "name", None)

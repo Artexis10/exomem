@@ -23,6 +23,7 @@ PROVISIONER_ROOT = Path(__file__).resolve().parents[1]
 PROVISIONER_TEST_IMAGE = os.environ.get("PROVISIONER_TEST_IMAGE")
 if PROVISIONER_TEST_IMAGE is None:
     from sqlalchemy import func, select, text, update
+    from sqlalchemy.exc import DBAPIError
 
     import exomem_provisioner.repository as repository_module
     from exomem_provisioner.capacity import (
@@ -39,9 +40,19 @@ if PROVISIONER_TEST_IMAGE is None:
         CapacityDestructiveFence,
         CapacityLedger,
         CapacityReservation,
+        CapacityReservationClass,
         Operation,
         OperationAction,
+        OperationRecoveryReceipt,
+        OperationState,
+        Resource,
+        ResourceKind,
         TenantFence,
+    )
+    from exomem_provisioner.operation_recovery import (
+        LiveObservation,
+        RecoveryRefusal,
+        RecoveryService,
     )
     from exomem_provisioner.repository import OperationRepository, StaleFence
 else:
@@ -374,6 +385,149 @@ def _repository(
         codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
         claim_seconds=settings.claim_seconds,
     )
+
+
+@ASYNCIO_POSTGRESQL17
+async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
+    postgresql17: PostgreSQL17,
+) -> None:
+    target = _new_database(postgresql17, "recovery")
+    migrated = _migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    assert target.settings is not None
+    database = ProvisionerDatabase(target.settings)
+
+    class Lock:
+        def matches_runtime_request(self, request: dict[str, object], *, wire_protocol: str) -> bool:
+            return (
+                wire_protocol == "exomem-cell-provisioner.v1"
+                and request["provisionMode"] == "serve"
+                and request["releaseVersion"] == "0.39.2"
+                and request["protocolVersion"] == "1"
+            )
+
+    class Observer:
+        async def observe(
+            self, operation: Operation, resources: tuple[Resource, ...]
+        ) -> LiveObservation:
+            assert len(resources) == 4
+            return LiveObservation(
+                namespace_present=True,
+                release_present=True,
+                pvc_bound=True,
+                volume_present=True,
+                init_job_present=False,
+                init_complete=False,
+                init_failed_only=False,
+                terminating=False,
+                runtime_admitted=False,
+                routes_present=0,
+            )
+
+    request: dict[str, object] = {
+        "operationId": "provider-recovery-postgresql",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "tenantId": "tenant-recovery-postgresql",
+        "cellId": "cell-recovery-postgresql",
+        "protocolVersion": "1",
+        "releaseVersion": "0.39.2",
+        "provisionMode": "serve",
+    }
+    codec = AesGcmEnvelopeCodec.from_secret(target.settings.envelope_key.get_secret_value())
+    operation_id = str(uuid.uuid4())
+    try:
+        async with database.session_factory.begin() as session:
+            operation = Operation(
+                id=operation_id,
+                action=OperationAction.PROVISION,
+                idempotency_key="recovery-postgresql-key",
+                canonical_request_sha256=repository_module.canonical_request_sha256(request),
+                tenant_id="tenant-recovery-postgresql",
+                cell_id="cell-recovery-postgresql",
+                external_operation_id="provider-recovery-postgresql",
+                provider_operation_id="provider-recovery-postgresql",
+                fence_generation=7,
+                provider_fence_generation=7,
+                state=OperationState.ERROR,
+                caller_checkpoint="requested",
+                checkpoint="failed",
+                request_ciphertext=codec.encrypt_json(
+                    request, purpose="operation-request:provision:recovery-postgresql-key"
+                ),
+                error_code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                finalized_at=datetime.now(UTC),
+            )
+            session.add(operation)
+            session.add(TenantFence(tenant_id=operation.tenant_id, fence_generation=7))
+            await session.flush()
+            for kind in (
+                ResourceKind.HELM_RELEASE,
+                ResourceKind.KUBERNETES_NAMESPACE,
+                ResourceKind.PVC,
+                ResourceKind.VOLUME,
+            ):
+                reference = f"recovery-reference-{kind.value}"
+                session.add(
+                    Resource(
+                        operation_id=operation_id,
+                        tenant_id=operation.tenant_id,
+                        cell_id=operation.cell_id,
+                        kind=kind,
+                        reference_digest=hashlib.sha256(reference.encode()).hexdigest(),
+                        reference_ciphertext=codec.encrypt_json(
+                            {"reference": reference},
+                            purpose=f"resource-reference:{operation_id}:{kind.value}",
+                        ),
+                        provider_operation_id=operation.external_operation_id,
+                        provider_fence_generation=operation.fence_generation,
+                    )
+                )
+            session.add(
+                CapacityReservation(
+                    tenant_id=operation.tenant_id,
+                    cell_id=operation.cell_id,
+                    resource_name="exo-recovery-postgresql",
+                    reservation_class=CapacityReservationClass.USER,
+                    reserving_operation_id=operation_id,
+                    reserving_provider_operation_id=operation.external_operation_id,
+                    reserving_fence_generation=operation.fence_generation,
+                )
+            )
+        denied = RecoveryService(
+            sessions=database.session_factory,
+            codec=codec,
+            database_role=target.role,
+            database_schema=target.schema,
+            deployment_lock=object(),  # type: ignore[arg-type]
+            observer=Observer(),
+        )
+        with pytest.raises(RecoveryRefusal, match="preflight-failed"):
+            await denied.preflight(operation_id)
+        service = RecoveryService(
+            sessions=database.session_factory,
+            codec=codec,
+            database_role=target.role,
+            database_schema=target.schema,
+            deployment_lock=Lock(),  # type: ignore[arg-type]
+            observer=Observer(),
+        )
+        result = await service.reopen(operation_id)
+        assert result["status"] == "reopened"
+        assert isinstance(result["receipt_digest"], str) and len(result["receipt_digest"]) == 64
+        assert (await service.reopen(operation_id))["status"] == "already-recovered"
+        async with database.session_factory() as session:
+            operation = await session.get(Operation, operation_id)
+            receipt = await session.get(OperationRecoveryReceipt, operation_id)
+            assert operation is not None and operation.state is OperationState.PENDING
+            assert operation.checkpoint == "volume-owned"
+            assert operation.error_code is None and operation.finalized_at is None
+            assert receipt is not None
+            with pytest.raises(DBAPIError):
+                receipt.resource_count = 5
+                await session.commit()
+    finally:
+        await database.dispose()
 
 
 @ASYNCIO_POSTGRESQL17

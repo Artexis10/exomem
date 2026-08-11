@@ -108,6 +108,11 @@ class KubernetesProviderRegistry:
             ) from error
 
     @staticmethod
+    def _require_not_terminating(resource: Any) -> None:
+        if getattr(getattr(resource, "metadata", None), "deletion_timestamp", None) is not None:
+            raise MetadataConflict("Kubernetes provider object is terminating")
+
+    @staticmethod
     def _cell_identity(
         annotations: dict[str, str] | None,
         metadata: OpaqueProviderMetadata,
@@ -138,6 +143,7 @@ class KubernetesProviderRegistry:
             return KubernetesProviderSnapshot(
                 False, False, False, False, False, False, False, (False, False)
             )
+        self._require_not_terminating(namespace)
         self._cell_identity(getattr(namespace.metadata, "annotations", None), current)
         _require_annotations(getattr(namespace.metadata, "annotations", None), owned)
         self._authenticate_annotations(
@@ -167,6 +173,7 @@ class KubernetesProviderRegistry:
             current.resource_name,
         )
         if pvc is not None:
+            self._require_not_terminating(pvc)
             _require_annotations(getattr(pvc.metadata, "annotations", None), owned)
             self._authenticate_annotations(
                 getattr(pvc.metadata, "annotations", None),
@@ -185,12 +192,16 @@ class KubernetesProviderRegistry:
             current.resource_name,
             label_selector=(f"owner=helm,name={current.resource_name},status=deployed"),
         )
+        for release in getattr(helm_releases, "items", ()) or ():
+            self._require_not_terminating(release)
         release_deployed = bool(getattr(helm_releases, "items", ()) or ())
         init_job = await exists(
             self._batch.read_namespaced_job,
             current.resource_name + "-init",
             current.resource_name,
         )
+        if init_job is not None:
+            self._require_not_terminating(init_job)
         conditions = getattr(getattr(init_job, "status", None), "conditions", ()) or ()
         init_complete = any(
             getattr(item, "type", None) == "Complete" and getattr(item, "status", None) == "True"
@@ -209,6 +220,8 @@ class KubernetesProviderRegistry:
             current.resource_name,
             current.resource_name,
         )
+        if stateful_set is not None:
+            self._require_not_terminating(stateful_set)
         routes: list[bool] = []
         for suffix in ("control", "transfer"):
             route = await exists(
@@ -223,6 +236,9 @@ class KubernetesProviderRegistry:
                 current.resource_name,
             )
             if route is not None:
+                metadata = route.get("metadata", {})
+                if metadata.get("deletionTimestamp") is not None:
+                    raise MetadataConflict("Kubernetes provider object is terminating")
                 _require_annotations(route.get("metadata", {}).get("annotations"), owned)
                 self._authenticate_annotations(
                     route.get("metadata", {}).get("annotations"),
