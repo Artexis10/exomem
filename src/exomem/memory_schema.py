@@ -26,6 +26,7 @@ from .kbdir import kb_dirname
 
 SCHEMA_VERSION = 1
 MIN_REQUIRED_SAMPLE = 5
+DEFAULT_RELATION_PROMOTION_THRESHOLD = 3
 # Fixed generic description for reviewed-corpus category candidates. Inference
 # never infers semantics, so every proposed definition shares this public-safe
 # text; a human reviewer refines it before saving.
@@ -370,8 +371,11 @@ def infer_relation_registry(
     project: str | None = None,
     page_type: str | None = None,
     include_model_suggestions: bool = False,
+    recurrence_threshold: int = DEFAULT_RELATION_PROMOTION_THRESHOLD,
 ) -> dict[str, Any]:
     """Profile explicit relation observations without assigning new semantics."""
+    if recurrence_threshold < 1:
+        raise ValueError("recurrence_threshold must be at least 1")
     registry = relation_registry.load_registry(vault_root)
     pages, observations = _scan_relation_observations(
         vault_root, project=project, page_type=page_type, registry=registry
@@ -401,7 +405,10 @@ def infer_relation_registry(
     proposal = relation_registry_proposal(registry)
     for item in grouped.values():
         raw = item["raw_relation"]
-        if item["registry_status"] == "unregistered" and "." in raw:
+        if (
+            item["registry_status"] == "unregistered"
+            and item["count"] >= recurrence_threshold
+        ):
             proposal["extensions"].setdefault(raw, {"parent": None, "description": None})
     warnings: list[dict[str, str]] = []
     suggestions: list[dict[str, Any]] = []

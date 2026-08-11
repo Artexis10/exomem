@@ -1,7 +1,8 @@
 """Read-only audit of the Knowledge Base. Returns structured findings.
 
 Checks (all read-only; no writes ever):
-- `broken_wikilink`: `[[...]]` whose resolved target file doesn't exist.
+- `broken_wikilink`: `[[...]]` with a definite resolution error.
+- `forward_reference`: `[[...]]` to a Markdown page that does not exist yet.
   Skips wikilinks inside fenced code blocks and inline code spans (so
   `[[:space:]]` regex literals don't false-positive). Bare names resolve
   against filename stems AND frontmatter `title:` (so date-prefixed
@@ -73,7 +74,7 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 ALL_CATEGORIES: tuple[str, ...] = (
-    "broken_wikilink", "orphan_entity", "unprocessed_source",
+    "broken_wikilink", "forward_reference", "orphan_entity", "unprocessed_source",
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
     "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
@@ -358,8 +359,9 @@ def audit(
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
-    if "broken_wikilink" in selected:
-        findings.extend(_check_broken_wikilinks(vault_root, pages))
+    link_categories = selected & {"broken_wikilink", "forward_reference"}
+    if link_categories:
+        findings.extend(_check_wikilinks(vault_root, pages, link_categories))
     if "orphan_entity" in selected:
         findings.extend(_check_orphan_entities(vault_root, pages))
     if "unprocessed_source" in selected:
@@ -1272,11 +1274,13 @@ def _page_signal_version(page: find_module.ParsedPage) -> str:
     return content_hash(frontmatter + "\n" + page.body)[:16]
 
 
-# ---------------- check: broken_wikilink ----------------
+# ---------------- checks: broken_wikilink / forward_reference ----------------
 
 
-def _check_broken_wikilinks(
-    vault_root: Path, pages: list[find_module.ParsedPage]
+def _check_wikilinks(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    selected: set[str],
 ) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
 
@@ -1286,7 +1290,7 @@ def _check_broken_wikilinks(
     # existence set from the full vault so those don't false-positive.
     full_paths: set[str] = set()          # vault-relative, no .md, e.g. "Reference/Strategy"
     kb_stripped_paths: set[str] = set()   # KB-relative, no .md
-    names_to_paths: dict[str, str] = {}   # bare filename (no ext) → first vault-rel path
+    names_to_paths: dict[str, list[str]] = {}  # bare filename (no ext) → vault-rel paths
     titles_to_paths: dict[str, list[str]] = {}  # lower(frontmatter title) → paths
     for md_path in _walk_vault_md(vault_root):
         try:
@@ -1296,7 +1300,7 @@ def _check_broken_wikilinks(
         no_ext = rel.removesuffix(".md")
         full_paths.add(no_ext)
         kb_stripped_paths.add(no_ext.removeprefix(kb_prefix()))
-        names_to_paths.setdefault(md_path.stem, no_ext)
+        names_to_paths.setdefault(md_path.stem, []).append(no_ext)
         # Title fallback: lets `[[North-Led Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
         try:
@@ -1329,14 +1333,19 @@ def _check_broken_wikilinks(
                 continue
             # Bare-name lookup: Obsidian resolves [[name]] by filename anywhere
             # in the vault. Only attempt if no path separator.
+            ambiguous_stem = False
+            ambiguous_title = False
             if "/" not in target_for_resolve:
-                if target_for_resolve in names_to_paths:
+                stem_matches = names_to_paths.get(target_for_resolve)
+                if stem_matches and len(stem_matches) == 1:
                     continue
+                ambiguous_stem = bool(stem_matches)
                 # Title fallback. Only resolves when unambiguous; ambiguous
                 # title matches stay flagged so the user can disambiguate.
                 title_matches = titles_to_paths.get(target_for_resolve.lower())
-                if title_matches and len(title_matches) == 1:
+                if not ambiguous_stem and title_matches and len(title_matches) == 1:
                     continue
+                ambiguous_title = not ambiguous_stem and bool(title_matches)
             # Attachment links: Obsidian resolves a wikilink carrying an
             # explicit (non-.md) extension to the file on disk of any type
             # (e.g. [[.../scan.pdf]], [[Reference/diagram.png]]). The resolution
@@ -1351,12 +1360,46 @@ def _check_broken_wikilinks(
                     vault_root / kb_dirname() / normalized
                 ).exists():
                     continue
+
+            non_markdown_collision = (
+                not suffix
+                and _has_non_markdown_collision(
+                    vault_root, target_for_resolve.lstrip("/"), normalized
+                )
+            )
+            broken = bool(
+                (suffix and suffix != ".md")
+                or ambiguous_stem
+                or ambiguous_title
+                or non_markdown_collision
+            )
+            category = "broken_wikilink" if broken else "forward_reference"
+            if category not in selected:
+                continue
+
+            immutable = in_append_only_tree(str(page.rel_path)) is not None
+            if not broken:
+                meta = {"signal_version": _page_signal_version(page)}
+                if immutable:
+                    meta["immutable"] = True
+                findings.append(AuditFinding(
+                    category="forward_reference",
+                    severity="info",
+                    path=str(page.rel_path),
+                    detail=(
+                        f"Wikilink [[{target}]] is a forward reference to a page "
+                        "that does not exist yet"
+                    ),
+                    proposed_fix=(
+                        "Create the referenced page when ready. If the target is a "
+                        "typo or obsolete, correct or remove the link."
+                    ),
+                    meta=meta,
+                ))
+                continue
+
             # A broken link inside an append-only tree (Sources/, Evidence/)
             # can't be repaired in place — the containing file is immutable.
-            # Surface it at `info` + meta.immutable so it stays out of the
-            # actionable `warn` set (you'd fix it in the source body desk-side
-            # or accept it as a stray reference in captured material).
-            immutable = in_append_only_tree(str(page.rel_path)) is not None
             findings.append(AuditFinding(
                 category="broken_wikilink",
                 severity="info" if immutable else "warn",
@@ -1376,6 +1419,31 @@ def _check_broken_wikilinks(
                 meta={"immutable": True} if immutable else None,
             ))
     return findings
+
+
+def _has_non_markdown_collision(
+    vault_root: Path, vault_relative: str, kb_relative: str
+) -> bool:
+    """Whether an extensionless note link names an existing non-note file."""
+    resolved_root = vault_root.resolve()
+    for candidate in (
+        vault_root / vault_relative,
+        vault_root / kb_dirname() / kb_relative,
+    ):
+        try:
+            resolved_parent = candidate.parent.resolve()
+            resolved_parent.relative_to(resolved_root)
+            siblings = tuple(resolved_parent.iterdir())
+        except (OSError, ValueError):
+            continue
+        for sibling in siblings:
+            if (
+                sibling.is_file()
+                and sibling.stem == candidate.name
+                and sibling.suffix.lower() != ".md"
+            ):
+                return True
+    return False
 
 
 def _walk_vault_md(vault_root: Path):
