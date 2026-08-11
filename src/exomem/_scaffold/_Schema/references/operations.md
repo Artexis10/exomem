@@ -13,6 +13,7 @@ commands.
 | `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `ask_memory`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
 | `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
+| `plan` | Capture, inspect, query, update, or triage intended future state | `plan_memory` for a configured Planning collection |
 | `record` | Log, correct, inspect, or query an observed event or current state | `record_memory` for a configured Record collection |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
@@ -23,6 +24,16 @@ commands.
 Do not ask users to choose internal folders, graph sidecars, or page types unless
 the distinction changes the write. Translate back to simple language when
 reporting results.
+
+## Planning
+
+`plan_memory` is the one public command for human-owned intended future state.
+It has exactly six actions: `inspect`, `create`, `query`, `add`, `update`, and
+`triage`. Canonical Planning is one ordinary Markdown item file per plan under
+`Knowledge Base/Planning/`; the authored horizon is never auto-rebucketed.
+Outcomes, initiatives, and work items may form an explicit hierarchy; areas are
+separate membership. Records evidence and external execution pointers remain
+opaque. Review, dashboards, and UI workflows are separate product work.
 
 ## Records
 

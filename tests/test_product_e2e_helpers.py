@@ -1,3 +1,4 @@
+import importlib.util
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -5,7 +6,11 @@ from pathlib import Path
 import pytest
 from pydantic import RootModel
 
-from scripts import e2e_product_loop
+SCRIPT = Path(__file__).parents[1] / "scripts" / "e2e_product_loop.py"
+SPEC = importlib.util.spec_from_file_location("e2e_product_loop_under_test", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+e2e_product_loop = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(e2e_product_loop)
 
 
 class _Hit(RootModel[dict[str, object]]):
@@ -80,6 +85,25 @@ def test_records_fixture_is_self_contained_and_preserves_manual_template_ownersh
     assert "{{date}}" in template.read_text(encoding="utf-8")
 
 
+def test_planning_fixtures_cover_software_and_nonsoftware_journeys(tmp_path: Path) -> None:
+    fixtures = e2e_product_loop._write_planning_fixtures(tmp_path)
+
+    software = fixtures["software"]
+    nonsoftware = fixtures["nonsoftware"]
+    assert not (tmp_path / software["collection"]).exists()
+    assert not (tmp_path / nonsoftware["collection"]).exists()
+    assert "semantic_profile: planning" in software["manifest_text"]
+    assert "semantic_profile: planning" in nonsoftware["manifest_text"]
+    assert "execution: {type: array, items: {type: object}}" in software["manifest_text"]
+    assert "progress_evidence: {type: array, items: {type: object}}" in nonsoftware["manifest_text"]
+    assert "domain: home" in nonsoftware["manifest_text"]
+    assert fixtures["nonsoftware"]["records_view"] == {
+        "collection": "exomem://memory/9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8",
+        "role": "progress",
+        "view": "completed-sessions",
+    }
+
+
 def test_unauthenticated_records_request_requires_exact_challenge_and_no_disclosure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -127,6 +151,46 @@ def test_unauthenticated_records_request_requires_exact_challenge_and_no_disclos
             },
         )
     ]
+
+
+def test_unauthenticated_planning_request_requires_exact_challenge_and_no_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_url = "http://127.0.0.1:8765"
+    calls: list[tuple[str, dict[str, object], dict[str, str]]] = []
+
+    def raw_post(
+        url: str, *, body: dict[str, object], headers: dict[str, str], timeout: float
+    ) -> tuple[int, dict[str, str], bytes]:
+        calls.append((url, body, headers))
+        assert timeout == 2.0
+        return (
+            401,
+            {
+                "www-authenticate": (
+                    'Bearer resource_metadata="http://127.0.0.1:8765/'
+                    '.well-known/oauth-protected-resource/mcp"'
+                )
+            },
+            b"",
+        )
+
+    monkeypatch.setattr(e2e_product_loop, "_http_post_raw", raw_post)
+
+    e2e_product_loop._assert_unauthenticated_planning_refusal(base_url, timeout=2.0)
+
+    assert calls[0][1] == {
+        "jsonrpc": "2.0",
+        "id": "planning-auth-refusal",
+        "method": "tools/call",
+        "params": {
+            "name": "plan_memory",
+            "arguments": {
+                "action": "inspect",
+                "collection": "Knowledge Base/Planning/Software/_collection.md",
+            },
+        },
+    }
 
 
 @pytest.mark.parametrize(

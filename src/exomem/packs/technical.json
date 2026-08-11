@@ -5,7 +5,7 @@
   "purpose": "Compound engineering knowledge across projects, repositories, incidents, decisions, failures, experiments, and runbooks.",
   "audience": "Engineers, maintainers, technical founders, operators, and agents working across software projects.",
   "beginner_description": "Use this for code projects, architecture decisions, incidents, debugging, runbooks, experiments, and reusable engineering lessons.",
-  "agent_instructions": "Treat code repositories and specs as source-of-truth outside Exomem. Use Exomem for cross-session conclusions, decisions, architecture orientation, failures, patterns, experiments, and project entities. Do not mirror code inventories that will drift.",
+  "agent_instructions": "Treat code repositories and specs as source-of-truth outside Exomem. Use Exomem for cross-session conclusions, decisions, architecture orientation, failures, patterns, experiments, and project entities. Use plan_memory only for explicit intended work such as goals, bugs, features, priorities, and authored horizons; it is optional guidance and selecting this pack creates no Planning collection. Do not mirror code inventories that will drift.",
   "default_note_types": [
     "research-note",
     "failure",

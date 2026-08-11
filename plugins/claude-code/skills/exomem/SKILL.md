@@ -281,6 +281,7 @@ experiments, proof-bearing records, review, and supersession.
 | `ask` | "what do I know," "find what I concluded," "show the context" | `ask_memory(detail="compact", rerank=false)` first; `read_memory` or `ask_memory(deep=true)` when synthesis needs context |
 | `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
+| `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `plan_memory` for intended future state in a configured Planning collection |
 | `record` | "log this session," "record this measurement," "add this transaction," "update the mileage" | `record_memory` for observed state in a configured Record collection |
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
@@ -301,6 +302,7 @@ Examples:
   general note.
 - "Log this training session" -> `record_memory(action="append")` after resolving the collection; keep the session as an observed Record, not a compiled conclusion.
 - "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
+- "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from prose or elapsed time.
 - "Compile these three sources" -> draft a sourced note with `remember` link suggestions,
   then write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for

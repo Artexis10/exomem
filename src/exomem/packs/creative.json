@@ -5,7 +5,7 @@
   "purpose": "Organize creative references, drafts, assets, production decisions, releases, and reusable taste knowledge.",
   "audience": "Creators, designers, writers, musicians, filmmakers, photographers, and teams managing creative work.",
   "beginner_description": "Use this for references, drafts, production logs, assets, taste notes, release notes, and creative decisions.",
-  "agent_instructions": "Save references and drafts as sources unless the user is preserving a final artifact or proof. Compile durable production knowledge as production logs, insights, or research notes. Link people, concepts, tools, and decisions when they recur across projects.",
+  "agent_instructions": "Save references and drafts as sources unless the user is preserving a final artifact or proof. Use plan_memory only for explicit creative goals, release priorities, or authored horizons; selecting this pack remains guidance-only and creates no Planning collection. Compile durable production knowledge as production logs, insights, or research notes. Link people, concepts, tools, and decisions when they recur across projects.",
   "default_note_types": [
     "production-log",
     "insight",

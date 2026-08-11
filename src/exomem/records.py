@@ -17,6 +17,7 @@ from typing import Any
 
 from . import record_formats, record_governance, vault, writer_lease
 from . import structured_collections as collections
+from .collection_profiles import profile_for
 
 _MAX_WHY_BYTES = 512
 _MAX_VALUE_BYTES = 32 * 1024
@@ -62,6 +63,7 @@ def append_record(
     expected_container_hash: str | None = None,
     why: str,
     body: str = "",
+    validate_snapshot: Callable[[collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Append one structured item, or return a content-identical replay."""
     root = Path(vault_root)
@@ -103,6 +105,8 @@ def append_record(
             _expect_hash(expected_container_hash, current_hash, "container")
         existing = [record for record in snapshot.records if record.identity.key == key]
         payload_hash = _payload_hash(manifest, key, values, body)
+        if validate_snapshot is not None:
+            validate_snapshot(manifest, snapshot, key, values)
         if existing:
             if len(existing) != 1 or existing[0].ambiguous:
                 raise collections.CollectionError("AMBIGUOUS_RECORD", "record key is ambiguous")
@@ -138,7 +142,7 @@ def append_record(
             )
         audit_correlation = _transition_id()
         after_manifest_text = record_formats.render_manifest_audit_head(
-            manifest_text, audit_correlation
+            manifest_text, audit_correlation, semantic_profile=manifest.semantic_profile
         )
         after_manifest = collections.parse_manifest_bytes(
             root, root / manifest.path, after_manifest_text.encode("utf-8")
@@ -249,12 +253,18 @@ def update_record(
     expected_container_hash: str,
     expected_item_version: str,
     why: str,
+    operation: str = "update",
+    delete_fields: tuple[str, ...] = (),
+    body: str | None = None,
+    validate_snapshot: Callable[[collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Apply a guarded, exact-key update to one existing Markdown record."""
     root = Path(vault_root)
     _validate_why(why)
+    if body is not None:
+        _validate_body(body)
     item_key = _validate_item_key(item_key)
-    if not isinstance(changes, Mapping) or not changes:
+    if not isinstance(changes, Mapping) or (not changes and not delete_fields and body is None):
         raise collections.CollectionError(
             "INVALID_RECORD_CHANGES", "changes must be a non-empty object"
         )
@@ -287,6 +297,12 @@ def update_record(
         if len(matches) != 1 or matches[0].ambiguous:
             raise collections.CollectionError("AMBIGUOUS_RECORD", "record key is ambiguous")
         record = matches[0]
+        final_values = dict(record.values)
+        for name in delete_fields:
+            final_values.pop(name, None)
+        final_values.update(changes)
+        if validate_snapshot is not None:
+            validate_snapshot(manifest, snapshot, item_key, final_values)
         source_path = root / record.source.path
         if manifest.storage.strategy != "markdown-log":
             source_bytes, source_guard = _read_record_bytes(root, record.source.path)
@@ -305,11 +321,13 @@ def update_record(
             _expect_hash(expected_container_hash, snapshot.snapshot, "container")
         _expect_hash(expected_item_version, record.source.hash, "item")
         merged = dict(record.values)
+        for name in delete_fields:
+            merged.pop(name, None)
         merged.update(changes)
         values = _validate_values(manifest, merged)
         audit_correlation = _transition_id()
         after_manifest_text = record_formats.render_manifest_audit_head(
-            manifest_text, audit_correlation
+            manifest_text, audit_correlation, semantic_profile=manifest.semantic_profile
         )
         after_manifest = collections.parse_manifest_bytes(
             root, root / manifest.path, after_manifest_text.encode("utf-8")
@@ -329,7 +347,12 @@ def update_record(
             after_container_hash = hashlib.sha256(after_text.encode("utf-8")).hexdigest()
         else:
             replacement = record_formats.render_markdown_item_update(
-                source_text, changes, audit_correlation
+                source_text,
+                changes,
+                audit_correlation,
+                semantic_profile=manifest.semantic_profile,
+                delete_fields=delete_fields,
+                body=body,
             )
             after_text = replacement
             canonical_path = source_path
@@ -345,7 +368,7 @@ def update_record(
         audit = _audit_body(
             transition_id=audit_correlation,
             parent_id=parent,
-            operation="update",
+            operation=operation,
             manifest=manifest,
             item_key=item_key,
             canonical_path=record.source.path,
@@ -392,7 +415,7 @@ def update_record(
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         return _result(
-            operation="update",
+            operation=operation,
             manifest=manifest,
             key=item_key,
             before_item_hash=record.source.hash,
@@ -423,6 +446,10 @@ def create_collection(
             "INVALID_COLLECTION_MANIFEST", "manifest text is required"
         )
     with writer_lease.active_manager().mutation_guard(root, operation="record_create"):
+        if path.name != "_collection.md":
+            raise collections.CollectionError(
+                "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
+            )
         manifest = _preflight_collection_create(root, path, manifest_text, scaffold=scaffold)
         manifest_guard = vault.PathGuard.capture(
             root, path.relative_to(root).as_posix(), leaf_policy="absent"
@@ -430,7 +457,7 @@ def create_collection(
         _require_activity_log(root)
         audit_correlation = _transition_id()
         marked_manifest_text = record_formats.render_manifest_audit_head(
-            manifest_text, audit_correlation
+            manifest_text, audit_correlation, semantic_profile=manifest.semantic_profile
         )
         manifest = collections.parse_manifest_bytes(
             root, path, marked_manifest_text.encode("utf-8")
@@ -782,7 +809,12 @@ def _reconstruct_audit_chain(
     history_guard: vault.DirectoryCensusGuard | None = None,
     authorize_path: Callable[[str], bool] | None = None,
 ) -> _AuditChain:
-    history = _audit_events(root, history_guard=history_guard, authorize_path=authorize_path)
+    history = _audit_events(
+        root,
+        semantic_profile=manifest.semantic_profile,
+        history_guard=history_guard,
+        authorize_path=authorize_path,
+    )
     events = history.events
     relevant = [event for event in events if event["collection_id"] == manifest.collection_id]
     influencing = _audit_influencing_events(
@@ -987,12 +1019,14 @@ def _event_matches_collection(
 def _event_matches_transition(
     event: Mapping[str, Any], manifest: collections.CollectionManifest
 ) -> bool:
-    if not _valid_audit_event(event) or not _event_matches_collection(event, manifest):
+    if not _valid_audit_event(event, manifest.semantic_profile) or not _event_matches_collection(event, manifest):
         return False
     source = manifest.storage.source
     operation = event["operation"]
     item_key = event["item_key"]
-    if operation == "create":
+    profile = profile_for(manifest.semantic_profile)
+    create_operation = "create" if profile.name == "records" else "plan_create"
+    if operation == create_operation:
         return (
             event["parent_id"] == "absent"
             and item_key is None
@@ -1072,7 +1106,10 @@ def _structural_audit_marker(
     lines = frontmatter.splitlines()
     if not lines:
         return None
-    audit = _ITEM_AUDIT_MARKER.fullmatch(lines[-1].strip())
+    marker = re.compile(
+        rb"#\s*" + re.escape(profile_for(manifest.semantic_profile).item_audit_marker.encode()) + rb":\s*([0-9a-f]{24})\s*"
+    )
+    audit = marker.fullmatch(lines[-1].strip())
     return audit.group(1).decode("ascii") if audit is not None else None
 
 
@@ -1109,7 +1146,8 @@ def _replay_audit_correlation(
         for event in chain.events
         if event["transition_id"] == correlation
         and _event_matches_transition(event, manifest)
-        and event["operation"] == "append"
+        and event["operation"]
+        == ("append" if manifest.semantic_profile == "records" else "plan_add")
         and event["item_key"] == record.identity.key
         and event["canonical_path"] == record.source.path
         and event["after_item_hash"] == record.source.hash
@@ -1121,6 +1159,7 @@ def _replay_audit_correlation(
 def _audit_events(
     root: Path,
     *,
+    semantic_profile: str = "records",
     history_guard: vault.DirectoryCensusGuard | None = None,
     authorize_path: Callable[[str], bool] | None = None,
 ) -> _AuditEvents:
@@ -1159,14 +1198,15 @@ def _audit_events(
         file_guards.append(file_guard)
         if total > 8_000_000:
             return _AuditEvents((), False)
+        prefix = profile_for(semantic_profile).activity_prefix
         for line in text.splitlines():
-            if not line.startswith("Records audit-v1 "):
+            if not line.startswith(prefix):
                 continue
             try:
-                event = json.loads(line.removeprefix("Records audit-v1 "))
+                event = json.loads(line.removeprefix(prefix))
             except json.JSONDecodeError:
                 return _AuditEvents((), False)
-            if not _valid_audit_event(event):
+            if not _valid_audit_event(event, semantic_profile):
                 return _AuditEvents((), False)
             events.append(event)
             if len(events) > 10_000:
@@ -1181,10 +1221,13 @@ def _audit_events(
     return _AuditEvents(tuple(events), True)
 
 
-def _valid_audit_event(event: Any) -> bool:
-    if not _audit_event_syntax(event):
+def _valid_audit_event(event: Any, semantic_profile: str = "records") -> bool:
+    if not _audit_event_syntax(event, semantic_profile):
         return False
-    if event["operation"] == "create":
+    profile = profile_for(semantic_profile)
+    create_operation = "create" if profile.name == "records" else "plan_create"
+    add_operation = "append" if profile.name == "records" else "plan_add"
+    if event["operation"] == create_operation:
         return (
             event["parent_id"] == "absent"
             and event["item_key"] is None
@@ -1197,7 +1240,7 @@ def _valid_audit_event(event: Any) -> bool:
         )
     if event["parent_id"] == "absent" or _validate_audit_item_key(event["item_key"] or "") is None:
         return False
-    if event["operation"] == "append":
+    if event["operation"] == add_operation:
         return (
             event["before_item_hash"] is None
             and event["after_item_hash"] is not None
@@ -1218,7 +1261,7 @@ def _valid_audit_event(event: Any) -> bool:
     )
 
 
-def _audit_event_syntax(event: Any) -> bool:
+def _audit_event_syntax(event: Any, semantic_profile: str = "records") -> bool:
     if not isinstance(event, dict) or set(event) != {
         "version",
         "transition_id",
@@ -1258,7 +1301,12 @@ def _audit_event_syntax(event: Any) -> bool:
         and isinstance(event["transition_id"], str)
         and re.fullmatch(r"[0-9a-f]{24}", event["transition_id"]) is not None
         and parent_is_valid
-        and event["operation"] in {"append", "update", "create"}
+        and event["operation"]
+        in (
+            {"append", "update", "create"}
+            if profile_for(semantic_profile).name == "records"
+            else {"plan_add", "plan_update", "plan_triage", "plan_create"}
+        )
         and _validate_audit_item_key(event["collection_id"]) is not None
         and all(
             _safe_audit_path(event[name])
@@ -1332,7 +1380,9 @@ def _validate_values(
     if not isinstance(item, Mapping):
         raise collections.CollectionError("INVALID_ITEM", "item must be an object")
     names = set(item)
-    if names & _SYSTEM_FIELDS:
+    profile = profile_for(manifest.semantic_profile)
+    system_fields = _SYSTEM_FIELDS - {"record_id"} | {profile.item_id_property}
+    if names & system_fields:
         raise collections.CollectionError(
             "RESERVED_RECORD_FIELD", "item uses a reserved system field"
         )
@@ -1545,13 +1595,14 @@ def _plan_required_audit(
     body: str,
     token_hash: str,
 ) -> vault.LogWritePlan:
+    profile = profile_for(manifest.semantic_profile)
     plan = vault.plan_log_writes(
         root,
         date_iso=dt.date.today().isoformat(),
-        op="record_memory",
+        op="record_memory" if profile.name == "records" else "plan_memory",
         rel_path_no_ext=manifest.storage.source.removesuffix(".md"),
         body=body,
-        operation_token=f"records:{manifest.collection_id}:{key}:{token_hash}",
+        operation_token=f"{profile.name}:{manifest.collection_id}:{key}:{token_hash}",
     )
     if plan.warning is not None:
         raise collections.CollectionError(
@@ -1578,6 +1629,14 @@ def _audit_body(
     why: str,
 ) -> str:
     """Render one strict, content-free activity event."""
+    profile = profile_for(manifest.semantic_profile)
+    if profile.name == "planning":
+        operation = {
+            "create": "plan_create",
+            "append": "plan_add",
+            "update": "plan_update",
+            "triage": "plan_triage",
+        }.get(operation, operation)
     event = {
         "version": 1,
         "transition_id": transition_id,
@@ -1597,7 +1656,7 @@ def _audit_body(
         "payload_hash": payload_hash,
         "rationale": why,
     }
-    return "Records audit-v1 " + json.dumps(
+    return profile.activity_prefix + json.dumps(
         event, ensure_ascii=False, separators=(",", ":"), allow_nan=False, sort_keys=True
     )
 
@@ -1716,12 +1775,17 @@ def _result(
     outcome: str,
     audit_correlation: str | None,
 ) -> dict[str, Any]:
+    profile = profile_for(manifest.semantic_profile)
+    if profile.name == "planning":
+        operation = {"append": "add"}.get(operation, operation)
     return {
-        "_record_receipt": _RECEIPT_MARKER,
+        "_record_receipt" if profile.name == "records" else "_plan_receipt": (
+            _RECEIPT_MARKER if profile.name == "records" else "exomem.planning-mutation"
+        ),
         "receipt_version": _RECEIPT_VERSION,
         "operation": operation,
         "collection_id": manifest.collection_id,
-        "item_key": key,
+        "item_key" if profile.name == "records" else "plan_id": key,
         "before_item_hash": before_item_hash,
         "after_item_hash": after_item_hash,
         "before_container_hash": before_container_hash,
