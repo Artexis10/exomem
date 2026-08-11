@@ -232,6 +232,7 @@ def observe_memory(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            validate_only=operation == "validate",
         )
     except semantic_writes.SemanticWriteError as error:
         raise ObserveMemoryError(error.code, error.reason) from error

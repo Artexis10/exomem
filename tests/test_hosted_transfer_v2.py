@@ -413,6 +413,13 @@ def test_grant_v2_rejects_oversized_noncanonical_and_duplicate_json() -> None:
         (NOW, NOW, NOW, False),
         (NOW, NOW, NOW + 901, False),
     ],
+    ids=[
+        "valid-future-window",
+        "not-before-exceeds-skew",
+        "issued-after-now",
+        "zero-lifetime",
+        "lifetime-exceeds-limit",
+    ],
 )
 def test_grant_v2_enforces_exact_time_equations(
     issued_at: int,

@@ -2290,6 +2290,7 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "remember",
         "capture_source",
         "preserve_evidence",
+        "preserve_artifacts",
         "compile_source",
         "observe_memory",
         "replace_memory",
@@ -2434,6 +2435,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "diff": "structure",
     },
     ("record_memory", "action"): {
+        "describe": "structure",
+        "validate": "structure",
         "inspect": "structure",
         "create": "mutation",
         "query": "structure",

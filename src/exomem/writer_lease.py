@@ -71,7 +71,15 @@ _IMPLICIT_RETRY_TTL_SECONDS = 600.0
 # `commit_existing`. `EXOMEM_WIDE_MUTATION_BOUNDARY` restores today's
 # wide-boundary behavior for every command in this set.
 _NARROW_BOUNDARY_COMMANDS = frozenset(
-    {"remember", "replace_memory", "edit_memory", "observe_memory", "record_memory", "plan_memory"}
+    {
+        "remember",
+        "replace_memory",
+        "edit_memory",
+        "observe_memory",
+        "record_memory",
+        "plan_memory",
+        "preserve_artifacts",
+    }
 )
 _EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
 _IDEMPOTENCY_WAIT_SECONDS = 5.0

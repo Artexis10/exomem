@@ -466,18 +466,43 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> 
     assert "RELATION_DISPOSITION_MISSING" in codes
     assert "missing_semantic_unit" not in codes
     finding = next(item for item in result.blocking_findings if item.code == "RELATION_DISPOSITION_MISSING")
-    # Route-neutral: this finding also fires on ordinary edits, where `validate_only`
-    # and the draft trio do not exist as parameters. Naming them unconditionally sent
-    # edit callers onto an unnatural operation to find a field they could reach.
-    assert "validate_only" not in finding.remediation
-    assert "draft_id" in finding.remediation
-    assert "draft_hash" in finding.remediation
-    assert "draft_token" in finding.remediation
-    assert "Creation writers" in finding.remediation
+    assert "validate_only" in finding.remediation
+    assert "transition_token" in finding.remediation
+    assert "draft_id" not in finding.remediation
+    assert "draft_hash" not in finding.remediation
+    assert "draft_token" not in finding.remediation
     assert 'relation_disposition="reviewed_none"' in finding.remediation
-    assert "re-issue the same call" in finding.remediation
+    assert "re-issue the same edit" in finding.remediation
     assert "relation_review_hash" in finding.remediation
     assert "relation_review_reason" in finding.remediation
+
+
+def test_posthoc_existing_page_uses_edit_remediation(tmp_path: Path) -> None:
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/posthoc-existing.md",
+        _source(
+            exomem_id=_ID_A,
+            body="## Observations\n\n- [constraint] Preserve the invariant.\n",
+        ),
+    )
+    corpus = _corpus(tmp_path, after)
+    result = _evaluate(
+        before=None,
+        after=after,
+        before_corpus=corpus,
+        after_corpus=corpus,
+        operation="audit",
+        mode="posthoc",
+    )
+
+    finding = next(
+        item
+        for item in result.findings
+        if item.code == "RELATION_DISPOSITION_MISSING"
+    )
+    assert "transition_token" in finding.remediation
+    assert "draft_id" not in finding.remediation
 
 
 def test_qualifying_relation_does_not_satisfy_missing_unit(tmp_path: Path) -> None:
@@ -794,7 +819,7 @@ def test_evaluate_fails_closed_when_before_corpus_does_not_match_before_state(
         if finding.code == "unregistered_relation"
     ]
     assert len(unregistered) == 1
-    assert unregistered[0].severity == "error"
+    assert unregistered[0].severity == "warning"
 
 
 def test_outside_kb_pages_remain_resolvable_but_never_governed(
@@ -1041,6 +1066,99 @@ def test_project_scoped_relation_requires_an_attached_authored_project(
     assert authored.projects == ()
     assert not qualified.qualifies
     assert "scope_violation" in qualified.reasons
+
+
+@pytest.mark.parametrize(
+    ("extensions", "raw_relation", "finding_code"),
+    (
+        (
+            {
+                "science.current": {
+                    "parent": "supports",
+                    "description": "Current relation",
+                },
+                "science.old": {
+                    "parent": "supports",
+                    "description": "Deprecated relation",
+                    "status": "deprecated",
+                    "replaced_by": "science.current",
+                },
+            },
+            "science.old",
+            "inactive_relation",
+        ),
+        (
+            {
+                "science.scoped": {
+                    "parent": "supports",
+                    "description": "Project-scoped relation",
+                    "scope": {"projects": ["alpha"]},
+                }
+            },
+            "science.scoped",
+            "scope_violation",
+        ),
+    ),
+)
+def test_governed_relation_registry_violations_remain_blocking_errors(
+    tmp_path: Path,
+    extensions: dict,
+    raw_relation: str,
+    finding_code: str,
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={"schema_version": 1, "extensions": extensions}
+    )
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/target.md",
+        _source(title="Target", page_type="pattern", project="alpha"),
+    )
+    page = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(
+            project="beta",
+            body=(
+                "## Observations\n\n"
+                "- [constraint] Keep the boundary explicit.\n\n"
+                "## Relations\n"
+                "- cites [[Knowledge Base/Notes/Patterns/target]]\n"
+                f"- {raw_relation} [[Knowledge Base/Notes/Patterns/target]]\n"
+            ),
+        ),
+        relation_registry=registry,
+        language_registry=semantic_language_registry.core_registry(),
+        review_fingerprint="review-v1",
+    )
+    before_corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (target,),
+        registry=registry,
+        identity_census=_identity_census(target),
+    )
+    after_corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (page, target),
+        registry=registry,
+        identity_census=_identity_census(page, target),
+    )
+
+    result = _evaluate(
+        before=None,
+        after=page,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        operation="create",
+    )
+
+    finding = next(
+        finding for finding in result.findings if finding.code == finding_code
+    )
+    assert finding.severity == "error"
+    assert result.relation_disposition.satisfied is True
+    assert result.relation_disposition.qualifying_signal == "connectivity"
+    assert result.should_block is True
 
 
 def test_relation_scope_uses_graph_file_target_kind_and_preserves_raw_alias(

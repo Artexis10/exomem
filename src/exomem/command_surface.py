@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
@@ -299,6 +299,9 @@ class Command:
     first_run_safe: bool = False
     routes: tuple[str, ...] = ()
     response_detail: ResponseDetail | None = None
+    mcp_meta: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: types.MappingProxyType({}), hash=False
+    )
 
     @property
     def doc(self) -> str:

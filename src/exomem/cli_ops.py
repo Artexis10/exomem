@@ -20,6 +20,8 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from . import guards
 
 if TYPE_CHECKING:
@@ -338,6 +340,28 @@ def _coerce_dict(value: Any, name: str) -> dict:
     return out
 
 
+def _coerce_client_artifact_files(value: Any, name: str, *, cli: bool) -> list[dict[str, str]]:
+    """Validate file handles at non-MCP boundaries without reflecting signed URLs."""
+    from .commands import _ClientArtifactFiles
+
+    try:
+        files = TypeAdapter(_ClientArtifactFiles).validate_python(_coerce_json(value, name, cli=cli))
+        if any(
+            not isinstance(file, dict)
+            or not isinstance(file.get("download_url"), str)
+            or not isinstance(file.get("file_id"), str)
+            or any(
+                key in file and not isinstance(file[key], str)
+                for key in ("mime_type", "file_name")
+            )
+            for file in files
+        ):
+            raise ValueError("invalid client artifact file handle")
+        return files
+    except (ValidationError, TypeError, ValueError) as error:
+        raise OpError("INVALID_FILE", "`files` must be one to eight valid file handles") from error
+
+
 def coerce(
     params: tuple[Param, ...],
     raw: dict,
@@ -407,6 +431,8 @@ def coerce(
             kwargs[name] = _coerce_dict(value, name)
         elif p.type == "json":
             kwargs[name] = _coerce_json(value, name, cli=cli)
+        elif p.type == "client_artifact_files":
+            kwargs[name] = _coerce_client_artifact_files(value, name, cli=cli)
         else:  # "str"
             kwargs[name] = value if isinstance(value, str) else str(value)
     return kwargs

@@ -947,6 +947,61 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         },
         "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
     }
+    ingress_policy = {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": namespace + "-traefik-ingress",
+            "namespace": namespace,
+            "annotations": identity,
+            "labels": labels,
+        },
+        "spec": {
+            "podSelector": {
+                "matchLabels": {
+                    "app.kubernetes.io/name": "exomem-cell",
+                    "exomem.io/cell": namespace,
+                }
+            },
+            "policyTypes": ["Ingress"],
+            "ingress": [
+                {
+                    "from": [{
+                        "namespaceSelector": {"matchLabels": {
+                            "kubernetes.io/metadata.name": "exomem-platform"
+                        }},
+                        "podSelector": {"matchLabels": {
+                            "app.kubernetes.io/name": "traefik",
+                            "exomem.io/ingress": "traefik",
+                        }},
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 8765}],
+                },
+                {
+                    "from": [{
+                        "namespaceSelector": {"matchLabels": {
+                            "kubernetes.io/metadata.name": "exomem-platform"
+                        }},
+                        "podSelector": {"matchLabels": {
+                            "app.kubernetes.io/name": "exomem-durability-actions"
+                        }},
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 8765}],
+                },
+                {
+                    "from": [{
+                        "namespaceSelector": {"matchLabels": {
+                            "kubernetes.io/metadata.name": "exomem-platform"
+                        }},
+                        "podSelector": {"matchLabels": {
+                            "app.kubernetes.io/name": "exomem-provisioner-worker"
+                        }},
+                    }],
+                    "ports": [{"protocol": "TCP", "port": 8765}],
+                },
+            ],
+        },
+    }
     route = {
         "apiVersion": "traefik.io/v1alpha1",
         "kind": "IngressRoute",
@@ -971,6 +1026,27 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         },
     }
     _kubectl(k3s, ["apply", "--filename=-"], documents=[service, network_policy, route])
+
+    admitted_ingress = _kubectl(
+        k3s,
+        ["apply", "--dry-run=server", "--filename=-", f"--as={routine_username}"],
+        documents=[ingress_policy],
+        check=False,
+    )
+    assert admitted_ingress.returncode == 0, admitted_ingress.stderr
+
+    forged_ingress = copy.deepcopy(ingress_policy)
+    forged_ingress["spec"]["ingress"][2]["from"][0]["podSelector"]["matchLabels"] = {
+        "app.kubernetes.io/name": "foreign-worker"
+    }
+    forged_admission = _kubectl(
+        k3s,
+        ["apply", "--dry-run=server", "--filename=-", f"--as={routine_username}"],
+        documents=[forged_ingress],
+        check=False,
+    )
+    assert forged_admission.returncode != 0
+    assert "exact default-deny and platform ingress policies" in forged_admission.stderr
 
     retargeted_service = copy.deepcopy(service)
     retargeted_service["spec"]["selector"]["exomem.io/cell"] = "exo-foreign-cell"
@@ -1691,6 +1767,81 @@ def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> 
         check=False,
     )
     assert valid_pv.returncode == 0, valid_pv.stderr
+
+    identityless_pv = copy.deepcopy(pv)
+    identityless_pv["metadata"] = {
+        "name": "pvc-identityless-transition",
+    }
+    identityless_pv["spec"]["csi"]["volumeHandle"] = "5678"
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[identityless_pv])
+
+    partial_identity_patch = _kubectl(
+        k3s,
+        [
+            "patch",
+            "persistentvolume",
+            "pvc-identityless-transition",
+            "--type=merge",
+            "--patch",
+            json.dumps(
+                {
+                    "metadata": {
+                        "annotations": {
+                            key: value
+                            for key, value in identity.items()
+                            if key != "exomem.io/recovery-envelope"
+                        }
+                    }
+                }
+            ),
+            "--dry-run=server",
+            f"--as={volume_user}",
+        ],
+        check=False,
+    )
+    assert partial_identity_patch.returncode != 0
+    assert "immutable authenticated hosted PV identity" in partial_identity_patch.stderr
+
+    full_identity_without_label_patch = _kubectl(
+        k3s,
+        [
+            "patch",
+            "persistentvolume",
+            "pvc-identityless-transition",
+            "--type=merge",
+            "--patch",
+            json.dumps({"metadata": {"annotations": identity}}),
+            "--dry-run=server",
+            f"--as={volume_user}",
+        ],
+        check=False,
+    )
+    assert full_identity_without_label_patch.returncode != 0
+    assert "exact encrypted 10 GiB Retain HCloud PV specification" in full_identity_without_label_patch.stderr
+
+    full_identity_patch = _kubectl(
+        k3s,
+        [
+            "patch",
+            "persistentvolume",
+            "pvc-identityless-transition",
+            "--type=merge",
+            "--patch",
+            json.dumps(
+                {
+                    "metadata": {
+                        "labels": {"exomem.io/resource-name": namespace},
+                        "annotations": identity,
+                    }
+                }
+            ),
+            "--dry-run=server",
+            f"--as={volume_user}",
+        ],
+        check=False,
+    )
+    assert full_identity_patch.returncode == 0, full_identity_patch.stderr
+
     wrong_secret_pv = copy.deepcopy(pv)
     wrong_secret_pv["spec"]["csi"]["nodePublishSecretRef"]["name"] = "foreign-key"
     denied_pv = _kubectl(

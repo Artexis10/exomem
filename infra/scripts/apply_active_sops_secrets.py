@@ -117,13 +117,37 @@ def _verified_registry(path: Path, public_key: Ed25519PublicKey) -> dict[str, An
     return unsigned
 
 
+def _completed_pair(registry_path: Path, public_key_path: Path) -> None:
+    completion_path = registry_path.with_name(f"{registry_path.name}.complete")
+    try:
+        completion = json.loads(_safe_public_file(completion_path, "registry completion"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ActiveSecretRegistryError("registry completion is invalid") from exc
+    if (
+        not isinstance(completion, dict)
+        or set(completion)
+        != {"schema_version", "registry", "public_key", "registry_sha256", "public_key_sha256"}
+        or completion.get("schema_version") != 1
+        or completion.get("registry") != registry_path.name
+        or completion.get("public_key") != public_key_path.name
+        or completion.get("registry_sha256")
+        != hashlib.sha256(_safe_public_file(registry_path, "active-secret registry")).hexdigest()
+        or completion.get("public_key_sha256")
+        != hashlib.sha256(_safe_public_file(public_key_path, "registry public key")).hexdigest()
+    ):
+        raise ActiveSecretRegistryError("registry completion is invalid")
+
+
 def load_registry(
     *,
     matrix_path: Path,
     registry_path: Path,
     public_key_path: Path,
     trust_contract_path: Path,
+    require_completion: bool = True,
 ) -> tuple[ActiveSecret, ...]:
+    if require_completion:
+        _completed_pair(registry_path, public_key_path)
     matrix_raw = _safe_public_file(matrix_path, "secret destination matrix")
     try:
         matrix = json.loads(matrix_raw)
@@ -217,6 +241,7 @@ def main() -> int:
     )
     parser.add_argument("--sops", default="sops")
     parser.add_argument("--kubectl", default="kubectl")
+    parser.add_argument("--verify-only", action="store_true")
     args = parser.parse_args()
     try:
         active = load_registry(
@@ -225,6 +250,18 @@ def main() -> int:
             public_key_path=args.registry_public_key,
             trust_contract_path=args.trust_contract,
         )
+        if args.verify_only:
+            public_key = _public_key(args.registry_public_key, args.trust_contract)
+            public_key_id = hashlib.sha256(
+                public_key.public_bytes(
+                    serialization.Encoding.Raw,
+                    serialization.PublicFormat.Raw,
+                )
+            ).hexdigest()
+            print(
+                f"Verified {len(active)} active destinations with trusted public-key ID {public_key_id}"
+            )
+            return 0
         for item in active:
             result = subprocess.run(
                 [

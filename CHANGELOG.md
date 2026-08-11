@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.0](https://github.com/Artexis10/exomem/compare/v0.44.0...v0.45.0) (2026-08-11)
+
+
+### Features
+
+* **hosted:** compose v0.44 deployment lock ([ee5cb9e](https://github.com/Artexis10/exomem/commit/ee5cb9e755b85dab8ca04b0685123bcb16ac498d))
+* **hosted:** select atomic PV label provisioner ([d014d0b](https://github.com/Artexis10/exomem/commit/d014d0b496e757634361c09db9cafa780d7e3e33))
+* **records:** expose collection authoring contract ([#435](https://github.com/Artexis10/exomem/issues/435)) ([159d62a](https://github.com/Artexis10/exomem/commit/159d62a6069bfcf646ec69a9e2e4374af263fb91))
+
+
+### Bug Fixes
+
+* **hosted:** install release proof dependencies ([#432](https://github.com/Artexis10/exomem/issues/432)) ([5895ac9](https://github.com/Artexis10/exomem/commit/5895ac98330bb63651a2083ae9fe86c43287fa35))
+* **hosted:** label recovered PV atomically ([#433](https://github.com/Artexis10/exomem/issues/433)) ([682489a](https://github.com/Artexis10/exomem/commit/682489a87f958e95052549c35b9ba780145a575a))
+
+## [0.44.0](https://github.com/Artexis10/exomem/compare/v0.43.0...v0.44.0) (2026-08-11)
+
+
+### Features
+
+* **memory:** complete note-connectivity follow-ups ([7d47065](https://github.com/Artexis10/exomem/commit/7d470659eabd01529ebbf28117d7eb3ce1e4232e))
+
+
+### Bug Fixes
+
+* **hosted:** atomically label bound volumes ([a35b4db](https://github.com/Artexis10/exomem/commit/a35b4dbc054775b0acfa5b091483cf395f58af11))
+
+
+### Performance
+
+* **ci:** cache hosted validator bundle ([#426](https://github.com/Artexis10/exomem/issues/426)) ([608116e](https://github.com/Artexis10/exomem/commit/608116ee4dbe645354d5f6ae0098db85cd326eea))
+
+## [0.43.0](https://github.com/Artexis10/exomem/compare/v0.42.0...v0.43.0) (2026-08-11)
+
+
+### Features
+
+* **hosted:** add governed database credential rotation ([#423](https://github.com/Artexis10/exomem/issues/423)) ([ca76488](https://github.com/Artexis10/exomem/commit/ca76488e9aed3ec15178de387b0a69219816a4e8))
+* **hosted:** compose v0.42 deployment lock ([#421](https://github.com/Artexis10/exomem/issues/421)) ([725e5c9](https://github.com/Artexis10/exomem/commit/725e5c9432ed2d49ed678058c26f7a8c9491fc42))
+
+
+### Performance
+
+* **ci:** shard the full test matrix ([#425](https://github.com/Artexis10/exomem/issues/425)) ([042d233](https://github.com/Artexis10/exomem/commit/042d2330e51a62d4629c78414a8f0a80af0fb73d))
+
+## [0.42.0](https://github.com/Artexis10/exomem/compare/v0.41.0...v0.42.0) (2026-08-10)
+
+
+### Features
+
+* **memory:** preserve client artifacts ([#415](https://github.com/Artexis10/exomem/issues/415)) ([229df96](https://github.com/Artexis10/exomem/commit/229df9678e3e23d054bf82fe09e6ac6a0e4a04c7))
+
+
+### Bug Fixes
+
+* **memory:** repair existing edit review handshake ([#411](https://github.com/Artexis10/exomem/issues/411)) ([665d2f4](https://github.com/Artexis10/exomem/commit/665d2f4fd75ceca4b978017621fa248575238a67))
+* **release:** publish from the created tag ([#419](https://github.com/Artexis10/exomem/issues/419)) ([0a7e78e](https://github.com/Artexis10/exomem/commit/0a7e78e7d9d53619c74df0dd78e8754d4ebdde6d))
+
 ## [0.41.0](https://github.com/Artexis10/exomem/compare/v0.40.0...v0.41.0) (2026-08-10)
 
 

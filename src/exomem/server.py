@@ -311,6 +311,14 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 else (runtime.vault_root,)
             )
             description = cmd.doc
+            tool_kwargs = {
+                "annotations": cmd.mcp_annotations,
+                **(
+                    {"meta": {key: list(value) for key, value in cmd.mcp_meta.items()}}
+                    if cmd.mcp_meta
+                    else {}
+                ),
+            }
             mcp.tool(
                 commands_module.bind_vault(
                     cmd.leaf,
@@ -320,7 +328,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
                     command=cmd,
                     surface_descriptor=surface_descriptor,
                 ),
-                annotations=cmd.mcp_annotations,
+                **tool_kwargs,
             )
 
         if legacy_commands:

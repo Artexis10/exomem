@@ -621,6 +621,60 @@ def load_adapter(
     raise collections.CollectionError("UNSUPPORTED_STORAGE", "collection storage is unsupported")
 
 
+def validate_storage_contract(manifest: collections.CollectionManifest) -> None:
+    """Validate strategy-specific descriptor grammar without opening canonical data."""
+    descriptor = manifest.storage.descriptor
+    if manifest.storage.strategy == "markdown-items":
+        return
+    if manifest.storage.strategy == "dataset":
+        record_path = descriptor.get("record_path")
+        if record_path is not None and (not isinstance(record_path, str) or not record_path):
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR",
+                "dataset record path must be a non-empty string",
+            )
+        key = descriptor.get("key")
+        if key is not None and (
+            not isinstance(key, str) or not key or key not in manifest.schema.fields
+        ):
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR",
+                "dataset key must name a declared field",
+            )
+        return
+    section = descriptor.get("section")
+    item_heading = descriptor.get("item_heading")
+    if not isinstance(section, Mapping) or not isinstance(item_heading, Mapping):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR",
+            "markdown log needs section and item heading grammar",
+        )
+    section_level, section_title = section.get("level"), section.get("title")
+    if (
+        type(section_level) is not int
+        or not 1 <= section_level <= 6
+        or not _bounded_literal(section_title)
+    ):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "markdown log grammar is invalid"
+        )
+    heading = _heading_grammar(item_heading)
+    for heading_field in heading.fields:
+        field = manifest.schema.fields.get(heading_field.name)
+        if field is None or field.type != heading_field.type:
+            raise collections.CollectionError(
+                "INVALID_STORAGE_DESCRIPTOR",
+                "markdown log heading fields must match declared item fields",
+            )
+    _status_values(descriptor, None)
+    if descriptor.get("insertion") not in {"newest-first", "oldest-first"}:
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR",
+            "markdown log needs an insertion direction",
+        )
+    _child_grammar(descriptor.get("child_rows"), manifest.schema)
+
+
 def render_markdown_log_item(
     manifest: collections.CollectionManifest,
     values: Mapping[str, Any],

@@ -89,6 +89,13 @@ Versioned runbooks SHALL cover backend bootstrap/recovery, saved-plan review, ho
 - **WHEN** an authorized maintainer uses only the documented deployment and product paths from a clean workstation
 - **THEN** the owner cell becomes ready without undocumented console or shell mutation
 
+### Requirement: Provisioner database rotation retains a ready-cell baseline
+The provisioner-database credential SHALL rotate only from a previously authenticated ready cell. The operator SHALL quiesce exactly the three provisioner Deployments and five named CronJobs, discover and drain every transient Pod that references `exomem-provisioner-database`, retain the previous ciphertext and signed registry pair, apply the complete v2 Kubernetes registry while PostgreSQL still accepts v1, prove new-role authentication acceptance and old-password rejection, restore exact controller state, and reprove authenticated health against the baseline cell.
+
+#### Scenario: Future provisioner database password rotation
+- **WHEN** a ready cell has been authenticated and the operator promotes the reviewed v2 database ciphertext selection
+- **THEN** all 34 active destinations are verified before the PostgreSQL password changes, the old password is rejected specifically by password authentication after cutover, and failure retains stopped consumers until the v1 registry/password/controller state is restored
+
 ### Requirement: Owner proof precedes every non-technical invitation
 The private alpha SHALL remain closed until the owner account completes real invite/onboarding, capture, recall, epistemic review, direct upload/download, export, pod restart, compatible upgrade, clean restore, suspension/resume, and disposable-tenant deletion. The proof SHALL also include contract digest match, isolation attacks, pending/fence replay, node reconstruction, backup age/RPO, secret rotation, and the live cost sheet.
 

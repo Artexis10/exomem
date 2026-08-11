@@ -49,4 +49,14 @@ spec:
       ports:
         - protocol: TCP
           port: 8765
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: exomem-platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-provisioner-worker
+      ports:
+        - protocol: TCP
+          port: 8765
 {{- end }}

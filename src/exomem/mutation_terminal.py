@@ -89,6 +89,13 @@ def _operation_id(result: Any) -> str | None:
 def _warning_count(result: Any) -> int:
     if not isinstance(result, Mapping):
         return 0
+    artifact_receipt = _artifact_receipt_projection(result)
+    if artifact_receipt:
+        return sum(
+            len(item.get("warnings", []))
+            for item in artifact_receipt["files"]
+            if item["outcome"] == "stored"
+        )
     warnings = result.get("warnings")
     if isinstance(warnings, (list, tuple)):
         return len(warnings)
@@ -107,6 +114,17 @@ def _path_projection(result: Any) -> dict[str, Any]:
     """Adapt only the small set of explicit mutation path shapes we own."""
     if not isinstance(result, Mapping):
         return {"paths": []}
+    artifact_receipt = _artifact_receipt_projection(result)
+    if artifact_receipt:
+        paths = [
+            item["stored_path"]
+            for item in artifact_receipt["files"]
+            if item["outcome"] == "stored"
+        ]
+        if len(paths) == 1:
+            return {"path": paths[0]}
+        if paths:
+            return {"paths": paths}
     path = result.get("path")
     if isinstance(path, str):
         return {"path": path}
@@ -152,6 +170,82 @@ def _path_projection(result: Any) -> dict[str, Any]:
     if isinstance(restored_path, str):
         return {"path": restored_path}
     return {"paths": []}
+
+
+def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
+    """Keep the bounded client-artifact outcome visible in compact terminals."""
+    def string(value: Any, *, limit: int, allow_none: bool = False) -> bool:
+        return (allow_none and value is None) or (isinstance(value, str) and 0 < len(value) <= limit)
+
+    def nonnegative_int(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    def sha256(value: Any) -> bool:
+        return isinstance(value, str) and len(value) == 64 and all(
+            character in "0123456789abcdef" for character in value
+        )
+
+    if not isinstance(result, Mapping):
+        return {}
+    files = result.get("files")
+    summary = result.get("summary")
+    if not isinstance(files, (list, tuple)) or not 1 <= len(files) <= 8 or not isinstance(summary, Mapping):
+        return {}
+    def invalid_row(item: Any, index: int) -> dict[str, str]:
+        file_id = item.get("file_id") if isinstance(item, Mapping) else None
+        return {
+            "file_id": file_id if string(file_id, limit=256) else f"invalid-file-{index + 1}",
+            "outcome": "failed",
+            "code": "INVALID_ARTIFACT_RECEIPT",
+            "reason": "artifact result was invalid",
+        }
+
+    projected: list[dict[str, Any]] = []
+    for index, item in enumerate(files):
+        if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
+            projected.append(invalid_row(item, index))
+            continue
+        outcome = item.get("outcome")
+        if outcome == "stored":
+            if not (
+                string(item.get("stored_path"), limit=2048)
+                and nonnegative_int(item.get("size"))
+                and sha256(item.get("hash"))
+                and item.get("hash_algorithm") == "sha256"
+                and string(item.get("content_type"), limit=255, allow_none=True)
+                and string(item.get("media_id"), limit=512, allow_none=True)
+                and isinstance(item.get("warnings"), list)
+                and len(item["warnings"]) <= 8
+                and all(string(warning, limit=300) for warning in item["warnings"])
+            ):
+                projected.append(invalid_row(item, index))
+                continue
+            row = {
+                key: item[key]
+                for key in (
+                    "file_id",
+                    "outcome",
+                    "stored_path",
+                    "size",
+                    "hash",
+                    "hash_algorithm",
+                    "media_id",
+                    "content_type",
+                    "warnings",
+                )
+                if key in item
+            }
+        elif outcome == "failed" and string(item.get("code"), limit=64) and string(
+            item.get("reason"), limit=300
+        ):
+            row = {key: item[key] for key in ("file_id", "outcome", "code", "reason")}
+        else:
+            projected.append(invalid_row(item, index))
+            continue
+        projected.append(row)
+    stored = sum(item["outcome"] == "stored" for item in projected)
+    failed = len(projected) - stored
+    return {"files": projected, "summary": {"stored": stored, "failed": failed}}
 
 
 def committed_terminal(
@@ -308,6 +402,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+    compact.update(_artifact_receipt_projection(leaf))
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
         compact["diagnostics"] = result["leaf_result"]

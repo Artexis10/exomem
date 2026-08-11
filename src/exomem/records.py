@@ -446,34 +446,23 @@ def create_collection(
             "INVALID_COLLECTION_MANIFEST", "manifest text is required"
         )
     with writer_lease.active_manager().mutation_guard(root, operation="record_create"):
-        _assert_portable_absent(root, path)
-        if path.exists():
-            raise collections.CollectionError(
-                "CREATE_ONLY_CONFLICT", "collection manifest already exists"
-            )
-        manifest_guard = vault.PathGuard.capture(
-            root, path.relative_to(root).as_posix(), leaf_policy="absent"
-        )
-        # Parsing the proposed bytes validates its declared storage before staging.
         if path.name != "_collection.md":
             raise collections.CollectionError(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
-        proposed = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
+        manifest = _preflight_collection_create(root, path, manifest_text, scaffold=scaffold)
+        manifest_guard = vault.PathGuard.capture(
+            root, path.relative_to(root).as_posix(), leaf_policy="absent"
+        )
         _require_activity_log(root)
         audit_correlation = _transition_id()
         marked_manifest_text = record_formats.render_manifest_audit_head(
-            manifest_text, audit_correlation, semantic_profile=proposed.semantic_profile
+            manifest_text, audit_correlation, semantic_profile=manifest.semantic_profile
         )
         manifest = collections.parse_manifest_bytes(
             root, path, marked_manifest_text.encode("utf-8")
         )
         source = root / manifest.storage.source
-        _assert_portable_absent(root, source)
-        if source.exists() or _casefold_alias(source):
-            raise collections.CollectionError(
-                "CREATE_ONLY_CONFLICT", "canonical source already exists"
-            )
         writes = [
             vault.PlannedWrite(
                 path,
@@ -571,6 +560,103 @@ def create_collection(
             outcome="committed",
             audit_correlation=audit_correlation,
         )
+
+
+def validate_collection_create(
+    vault_root: Path,
+    manifest_path: str | Path,
+    manifest_text: str,
+    *,
+    scaffold: bool = True,
+) -> dict[str, Any]:
+    """Preflight collection creation without writer authority or vault mutation."""
+    root = Path(vault_root)
+    if not isinstance(manifest_text, str) or not manifest_text:
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest text is required"
+        )
+    manifest = _preflight_collection_create(
+        root, root / manifest_path, manifest_text, scaffold=scaffold
+    )
+    record_governance.require_records_profile(manifest)
+    _require_activity_log(root)
+    if not all(
+        record_governance.full_release_filter(root)(path)
+        for path in (manifest.path, manifest.storage.source, f"{vault.kb_prefix()}/log.md")
+    ):
+        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    would_create = [manifest.path]
+    warnings: list[dict[str, str]] = []
+    if scaffold and manifest.storage.strategy in {"markdown-items", "markdown-log"}:
+        would_create.append(manifest.storage.source)
+    elif scaffold and manifest.storage.strategy == "dataset":
+        warnings.append(
+            {
+                "code": "DATASET_SCAFFOLD_NOT_CREATED",
+                "message": "dataset canonical sources are supplied separately",
+            }
+        )
+    return {
+        "valid": True,
+        "manifest_path": manifest.path,
+        "would_create": would_create,
+        "normalized_contract": _normalized_manifest_contract(manifest),
+        "warnings": warnings,
+    }
+
+
+def _preflight_collection_create(
+    root: Path,
+    path: Path,
+    manifest_text: str,
+    *,
+    scaffold: bool,
+) -> collections.CollectionManifest:
+    _assert_portable_absent(root, path)
+    if path.exists() or _casefold_alias(path):
+        raise collections.CollectionError(
+            "CREATE_ONLY_CONFLICT", "collection manifest already exists"
+        )
+    manifest = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
+    record_formats.validate_storage_contract(manifest)
+    source = root / manifest.storage.source
+    _assert_portable_absent(root, source)
+    if source.exists() or _casefold_alias(source):
+        raise collections.CollectionError("CREATE_ONLY_CONFLICT", "canonical source already exists")
+    if scaffold and manifest.storage.strategy == "markdown-log":
+        # Descriptor shape is validated above; this access pins the exact scaffold fields.
+        manifest.storage.descriptor["section"]["title"]
+        manifest.storage.descriptor["section"]["level"]
+    return manifest
+
+
+def _normalized_manifest_contract(
+    manifest: collections.CollectionManifest,
+) -> dict[str, Any]:
+    return {
+        "collection_id": manifest.collection_id,
+        "title": manifest.title,
+        "semantic_profile": manifest.semantic_profile,
+        "collection_version": manifest.collection_version,
+        "schema_version": manifest.schema.version,
+        "lifecycle": manifest.lifecycle,
+        "storage": {
+            "strategy": manifest.storage.strategy,
+            "source": manifest.storage.source,
+            "format_version": manifest.storage.format_version,
+        },
+        "natural_key": list(manifest.schema.natural_key),
+        "fields": {
+            name: {
+                "type": spec.type,
+                "required": spec.required,
+                **({"enum": list(spec.enum)} if spec.enum else {}),
+                **({"units": list(spec.units)} if spec.units else {}),
+                **({"link_kind": spec.link_kind} if spec.link_kind is not None else {}),
+            }
+            for name, spec in manifest.schema.fields.items()
+        },
+    }
 
 
 def inspect_audit_gap(

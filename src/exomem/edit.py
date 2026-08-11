@@ -77,9 +77,9 @@ class EditValidation:
 
     path: str            # vault-relative, with .md
     validate_only: bool  # always True
-    mode: str            # "surgical"
-    match_count: int     # occurrences of old_string in the body
-    matches: list[str]   # the line(s) around each occurrence (capped)
+    mode: str            # selected edit mode
+    match_count: int     # occurrences of old_string for surgical edits
+    matches: list[str]   # matching lines for surgical edits (capped)
     semantic: dict | None = None
 
     def as_dict(self) -> dict:
@@ -198,20 +198,16 @@ def edit(
     if not why or not why.strip():
         missing.append("why")
         reasons.append("why is required — edits without rationale aren't auditable")
-    if validate_only and not surgical:
-        missing.append("old_string")
-        reasons.append(
-            "validate_only previews a surgical match — it needs `old_string` "
-            "(there's nothing to preview for whole-body or tags edits)"
-        )
-
     if missing:
         raise EditError(
             code="INVALID_EDIT", missing=missing, reason="; ".join(reasons)
         )
 
     now = today or temporal.now()
-    date_iso = _reviewed_stamp(semantic_transition_token, now) or temporal.stamp(now)
+    date_iso = (
+        semantic_writes.reviewed_transition_stamp(semantic_transition_token, now)
+        or temporal.stamp(now)
+    )
 
     editable = load_editable(vault_root, path, expected_hash=expected_hash)
     abs_path = editable.abs_path
@@ -234,50 +230,33 @@ def edit(
     # Resolve the new body across the three modes.
     body_warnings: list[str] = []
     body_changed = False
+    validation_mode = (
+        "surgical"
+        if surgical
+        else "section"
+        if heading_mode
+        else "body"
+        if new_body is not None
+        else "tags"
+    )
+    match_count = 0
+    matches: list[str] = []
 
     if surgical:
         # old_string/new_string are not None here (validated above).
         if validate_only:
             # Preview only — report the count (don't raise on 0 or >1; seeing
             # the count is the whole point) and write nothing.
-            count = body.count(old_string)  # type: ignore[arg-type]
-            semantic: dict | None = None
-            if count >= 1 and (replace_all or count == 1):
-                resolver = find_module.writer_resolver_snapshot(vault_root)
-                rendered, _ = apply_surgical_replace(
-                    body,
-                    old_string,  # type: ignore[arg-type]
-                    new_string,  # type: ignore[arg-type]
-                    replace_all,
-                    vault_root,
-                    rel_path=rel_path,
-                    resolver=resolver,
+            match_count = body.count(old_string)  # type: ignore[arg-type]
+            matches = _match_contexts(body, old_string)  # type: ignore[arg-type]
+            if match_count == 0 or (match_count > 1 and not replace_all):
+                return EditValidation(
+                    path=rel_path,
+                    validate_only=True,
+                    mode=validation_mode,
+                    match_count=match_count,
+                    matches=matches,
                 )
-                rendered = rendered.rstrip() + "\n"
-                proposed = f"---\n{fm_text}\n---\n{rendered}"
-                try:
-                    semantic = semantic_writes.preflight_existing(
-                        vault_root,
-                        path=rel_path,
-                        after_source=proposed,
-                        operation="edit",
-                        expected_before_hash=editable.semantic_before_hash,
-                        transition_token=semantic_transition_token,
-                        relation_disposition=relation_disposition,
-                        relation_review_hash=relation_review_hash,
-                        relation_review_reason=relation_review_reason,
-                        stamp=date_iso,
-                    ).as_dict()
-                except semantic_writes.SemanticWriteError as error:
-                    raise EditError(error.code, ["semantic"], error.reason) from error
-            return EditValidation(
-                path=rel_path,
-                validate_only=True,
-                mode="surgical",
-                match_count=count,
-                matches=_match_contexts(body, old_string),  # type: ignore[arg-type]
-                semantic=semantic,
-            )
         resolver = find_module.writer_resolver_snapshot(vault_root)
         new_body_final, body_warnings = apply_surgical_replace(
             body,
@@ -318,6 +297,32 @@ def edit(
     new_body_final = new_body_final.rstrip() + "\n"
 
     new_text = f"---\n{fm_text}\n---\n{new_body_final}"
+
+    if validate_only:
+        try:
+            semantic = semantic_writes.preflight_existing(
+                vault_root,
+                path=rel_path,
+                after_source=new_text,
+                operation="edit",
+                expected_before_hash=editable.semantic_before_hash,
+                transition_token=semantic_transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
+                stamp=date_iso,
+                validate_only=True,
+            ).as_dict()
+        except semantic_writes.SemanticWriteError as error:
+            raise EditError(error.code, [], error.reason) from error
+        return EditValidation(
+            path=rel_path,
+            validate_only=True,
+            mode=validation_mode,
+            match_count=match_count,
+            matches=matches,
+            semantic=semantic,
+        )
 
     changed: list[str] = []
     if body_changed:
@@ -759,7 +764,7 @@ def commit_edit(
             auxiliary_writes=tuple(writes),
         )
     except semantic_writes.SemanticWriteError as error:
-        raise EditError(error.code, ["semantic"], error.reason) from error
+        raise EditError(error.code, [], error.reason) from error
     except OpError:
         # Ordinary boundary contention (MUTATION_BUSY/MUTATION_WARMING) from
         # the commit seam's own guard is not a partial write — nothing was
@@ -822,36 +827,6 @@ def _match_contexts(body: str, old_string: str, *, max_matches: int = 5) -> list
 
 
 _FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
-
-
-_MAX_REVIEWED_STAMP_AGE = dt.timedelta(hours=24)
-_MAX_REVIEWED_STAMP_SKEW = dt.timedelta(minutes=5)
-
-
-def _reviewed_stamp(transition_token: str | None, now: dt.datetime) -> str | None:
-    """Reuse the instant a validated transition already reviewed, when sane.
-
-    `updated:` is stamped at second resolution, so recomputing it on commit
-    changes the projected page and the transition check rejects the write for a
-    difference nobody authored. Reusing the reviewed instant makes the committed
-    bytes identical to the reviewed ones.
-
-    The token is opaque but unauthenticated, so the instant is bounded rather
-    than trusted: a stamp from the future or older than a day is ignored and the
-    clock wins, which fails safe toward an honest `updated`.
-    """
-
-    stamp = semantic_writes.transition_token_stamp(transition_token)
-    if stamp is None:
-        return None
-    moment = temporal.parse(stamp)
-    if moment is None or moment.instant is None:
-        return None
-    reference = now if now.tzinfo is not None else now.replace(tzinfo=dt.UTC)
-    delta = reference.astimezone(dt.UTC) - moment.instant
-    if delta > _MAX_REVIEWED_STAMP_AGE or -delta > _MAX_REVIEWED_STAMP_SKEW:
-        return None
-    return stamp
 
 
 def _set_or_append(fm_text: str, key: str, value: str) -> str:

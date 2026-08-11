@@ -152,12 +152,6 @@ class KubernetesVolumeAdapter:
         identity_keys = set(metadata.kubernetes_annotations)
         if identity_keys.intersection(annotations):
             _require_annotations(annotations, metadata)
-        else:
-            await asyncio.to_thread(
-                self._core.patch_persistent_volume,
-                pv_name,
-                {"metadata": {"annotations": metadata.kubernetes_annotations}},
-            )
         pv_envelope = str(annotations.get("exomem.io/recovery-envelope", ""))
         if self._identity_verifier is not None and pv_envelope:
             try:
@@ -197,7 +191,12 @@ class KubernetesVolumeAdapter:
         await asyncio.to_thread(
             self._core.patch_persistent_volume,
             recorded.pv_name,
-            {"metadata": {"annotations": annotations}},
+            {
+                "metadata": {
+                    "labels": {"exomem.io/resource-name": recorded.metadata.resource_name},
+                    "annotations": annotations,
+                }
+            },
         )
 
     @staticmethod

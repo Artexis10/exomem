@@ -14,10 +14,10 @@ Use when the user asks to find media evidence, look inside a recording, inspect 
 
 ## Workflow
 1. Search with media-aware filters or artifact terms using `ask_memory`.
-2. Use artifact-specific product tools: extracted text/OCR/transcripts, `process_media` status/retry, `read_media`, `transfer_artifact`, upload metadata, or preserved evidence paths.
+2. Use artifact-specific product tools: extracted text/OCR/transcripts, `process_media` status/retry, `read_media`, `preserve_artifacts` for file handles, fallback `transfer_artifact`, upload metadata, or preserved evidence paths.
 3. Cite raw artifact paths and timestamps/pages/frames when available.
 4. Compile textual conclusions with `remember` only when there is a durable finding, naming the artifact path from step 2 or 5 in `sources:` so the note points back at the artifact it describes.
-5. Preserve new raw artifacts with `capture_source`, `preserve_evidence`, or `transfer_artifact` before analyzing them.
+5. Preserve new raw artifacts with `capture_source`, `preserve_evidence`, `preserve_artifacts` for file handles, or fallback `transfer_artifact` before analyzing them.
 6. Run `connect_memory(operation="suggest-links")` before writing a compiled note, and accept the links that genuinely clarify context.
 
 ## Output contract

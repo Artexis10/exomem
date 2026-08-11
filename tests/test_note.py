@@ -110,7 +110,46 @@ def test_note_returns_structural_write_feedback(vault: Path) -> None:
         "errors": [],
         "relation_debt": False,
     }
+    assert "unregistered" not in feedback["relations"]
     assert "write_feedback" in result.as_dict()
+
+
+def test_note_feedback_surfaces_unregistered_relation_promotion_route(
+    vault: Path,
+) -> None:
+    target = (
+        "Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation"
+    )
+    result = note_module.note(
+        vault,
+        content=(
+            "# Vocabulary feedback\n\n"
+            "## Observations\n\n"
+            "- [constraint] Keep vocabulary promotion reviewed.\n\n"
+            "## Relations\n"
+            f"- relates_to [[{target}]]\n"
+            f"- parent [[{target}]]\n"
+        ),
+        note_type="insight",
+        title="Vocabulary feedback",
+        today=TODAY,
+    )
+
+    assert (vault / result.path).exists()
+    feedback = result.write_feedback
+    signal = feedback["relations"]["unregistered"]
+    assert feedback["relations"]["typed_note"] == 1
+    assert signal["labels"] == ["parent"]
+    assert signal["count"] == 1
+    assert signal["promotion_route"] == {
+        "tool": "schema_memory",
+        "args": {"operation": "infer", "subject": "relations"},
+    }
+    assert any(
+        "schema_memory" in action and "relations" in action
+        for action in feedback["next_actions"]
+    )
 
 
 def test_note_feedback_surfaces_relation_debt_without_blocking_write(vault: Path) -> None:

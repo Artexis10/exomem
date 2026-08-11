@@ -157,7 +157,18 @@ def test_platform_rejects_deployment_lock_hash_drift(
         encoding="utf-8",
     )
     result = subprocess.run(
-        [str(HELM), "template", "exomem-platform", str(PLATFORM), "--namespace", "exomem-platform", "--values", str(PLATFORM / "values.validation.yaml"), "--values", str(override)],
+        [
+            str(HELM),
+            "template",
+            "exomem-platform",
+            str(PLATFORM),
+            "--namespace",
+            "exomem-platform",
+            "--values",
+            str(PLATFORM / "values.validation.yaml"),
+            "--values",
+            str(override),
+        ],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -231,12 +242,13 @@ def test_platform_admission_policies_admit_each_governed_legacy_runtime_image(
     }
     policies = {name: "\n".join(expressions) for name, expressions in policy_expressions.items()}
     runtime_images = json.dumps([forward_image, *legacy_images], separators=(",", ":"))
-    assert f"object.spec.containers[0].image in {runtime_images}" in policies[
-        "exomem-tenant-boundary"
-    ]
-    assert f"variables.restore.image in {runtime_images}" in policies[
-        "exomem-tenant-restore-candidate"
-    ]
+    assert (
+        f"object.spec.containers[0].image in {runtime_images}" in policies["exomem-tenant-boundary"]
+    )
+    assert (
+        f"variables.restore.image in {runtime_images}"
+        in policies["exomem-tenant-restore-candidate"]
+    )
     provisioner_image_guard = (
         f"variables.target.spec.template.spec.containers[0].image in {runtime_images}"
     )
@@ -246,9 +258,10 @@ def test_platform_admission_policies_admit_each_governed_legacy_runtime_image(
         "request.resource.resource != 'statefulsets'",
     )
     assert all(
-        any(guard in expression and provisioner_image_guard in expression for expression in policy_expressions[
-            "exomem-durability-actions-scope"
-        ])
+        any(
+            guard in expression and provisioner_image_guard in expression
+            for expression in policy_expressions["exomem-durability-actions-scope"]
+        )
         for guard in durability_guards
     )
     assert unrelated_image not in "\n".join(policies.values())
@@ -297,17 +310,19 @@ def test_platform_renders_real_provisioner_composition() -> None:
     expected_lock = json.loads(validation_values["provisioner"]["deploymentLockJson"])
     expected_image = expected_lock["components"]["provisioner"]["image"]
 
-    lock_name = "exomem-hosted-deployment-lock-v2-" + validation_values["provisioner"][
-        "deploymentLockSha256"
-    ][:16]
+    lock_name = (
+        "exomem-hosted-deployment-lock-v2-"
+        + validation_values["provisioner"]["deploymentLockSha256"][:16]
+    )
     lock_config = _find(documents, "ConfigMap", lock_name)
     assert lock_config["metadata"]["namespace"] == "exomem-platform"
     assert lock_config["immutable"] is True
     assert json.loads(lock_config["data"]["exomem-hosted-deployment-lock-v2.json"]) == expected_lock
     rendered_lock = lock_config["data"]["exomem-hosted-deployment-lock-v2.json"]
-    assert hashlib.sha256(rendered_lock.encode()).hexdigest() == validation_values["provisioner"][
-        "deploymentLockSha256"
-    ]
+    assert (
+        hashlib.sha256(rendered_lock.encode()).hexdigest()
+        == validation_values["provisioner"]["deploymentLockSha256"]
+    )
 
     service = _find(documents, "Service", "exomem-provisioner")
     assert service["metadata"]["namespace"] == "exomem-platform"
@@ -346,7 +361,10 @@ def test_platform_renders_real_provisioner_composition() -> None:
         "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
     )
     assert environment["EXOMEM_PROVISIONER_ADMISSION_MODE"]["value"] == "expand"
-    assert json.loads(environment["EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON"]["value"]) == expected_lock["runtimeTarget"]
+    assert (
+        json.loads(environment["EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON"]["value"])
+        == expected_lock["runtimeTarget"]
+    )
     assert {item["name"] for item in worker_container["volumeMounts"]} >= {
         "deployment-lock",
         "temporary",
@@ -364,7 +382,13 @@ def test_platform_renders_real_provisioner_composition() -> None:
         if rule.get("apiGroups") == [""] and "configmaps" in rule.get("resources", [])
     )
     assert set(provisioner_configmaps["verbs"]) == {
-        "create", "delete", "get", "list", "patch", "update", "watch"
+        "create",
+        "delete",
+        "get",
+        "list",
+        "patch",
+        "update",
+        "watch",
     }
     volume_attachment_rule = next(
         rule
@@ -376,8 +400,7 @@ def test_platform_renders_real_provisioner_composition() -> None:
     persistent_volume_rule = next(
         rule
         for rule in provisioner_role["rules"]
-        if rule.get("apiGroups") == [""]
-        and "persistentvolumes" in rule.get("resources", [])
+        if rule.get("apiGroups") == [""] and "persistentvolumes" in rule.get("resources", [])
     )
     assert persistent_volume_rule["verbs"] == ["get", "list", "watch"]
     assert not any(
@@ -406,9 +429,9 @@ def test_platform_renders_real_provisioner_composition() -> None:
 def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
-    lock_name = "exomem-hosted-deployment-lock-v2-" + values["provisioner"][
-        "deploymentLockSha256"
-    ][:16]
+    lock_name = (
+        "exomem-hosted-deployment-lock-v2-" + values["provisioner"]["deploymentLockSha256"][:16]
+    )
     deletion_job = json.loads(
         _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
     )
@@ -419,9 +442,9 @@ def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -
         "exomem-durability-actions": _find(documents, "CronJob", "exomem-durability-actions")[
             "spec"
         ]["jobTemplate"]["spec"]["template"]["spec"],
-        "exomem-durability-backup": _find(documents, "CronJob", "exomem-durability-backup")[
-            "spec"
-        ]["jobTemplate"]["spec"]["template"]["spec"],
+        "exomem-durability-backup": _find(documents, "CronJob", "exomem-durability-backup")["spec"][
+            "jobTemplate"
+        ]["spec"]["template"]["spec"],
         "exomem-deletion-worker": deletion_job["spec"]["template"]["spec"],
     }
     for name, pod in workloads.items():
@@ -441,6 +464,68 @@ def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -
         ], name
         if name == "exomem-deletion-worker":
             assert volume["configMap"]["defaultMode"] == 0o444
+
+
+def test_platform_rotation_quiescence_surfaces_every_database_consumer() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    expected_deployments = {
+        "exomem-provisioner-api",
+        "exomem-provisioner-worker",
+        "exomem-volume-worker",
+    }
+    expected_cronjobs = {
+        "exomem-durability-actions",
+        "exomem-export-gc",
+        "exomem-durability-backup",
+        "exomem-database-backup",
+        "exomem-deletion-dispatcher",
+    }
+
+    def references_database(container: dict) -> bool:
+        return any(
+            item.get("valueFrom", {}).get("secretKeyRef", {}).get("name")
+            == "exomem-provisioner-database"
+            for item in container.get("env", [])
+        )
+
+    standing: set[tuple[str, str]] = set()
+    for document in documents:
+        kind = document.get("kind")
+        pod_paths = {
+            "Deployment": ("spec", "template", "spec"),
+            "StatefulSet": ("spec", "template", "spec"),
+            "DaemonSet": ("spec", "template", "spec"),
+            "ReplicaSet": ("spec", "template", "spec"),
+            "Job": ("spec", "template", "spec"),
+            "CronJob": ("spec", "jobTemplate", "spec", "template", "spec"),
+            "Pod": ("spec",),
+        }
+        if kind not in pod_paths:
+            continue
+        pod: dict = document
+        for key in pod_paths[kind]:
+            pod = pod[key]
+        if any(
+            references_database(container)
+            for container in [*(pod.get("initContainers") or []), *(pod.get("containers") or [])]
+        ):
+            standing.add((kind, document["metadata"]["name"]))
+    assert standing == {
+        *(("Deployment", name) for name in expected_deployments),
+        *(("CronJob", name) for name in expected_cronjobs),
+        ("Job", "exomem-provisioner-database-migration"),
+    }
+
+    deletion_template = json.loads(
+        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
+    )
+    migration = _find(documents, "Job", "exomem-provisioner-database-migration")
+    for transient in (deletion_template, migration):
+        pod = transient["spec"]["template"]["spec"]
+        assert any(
+            references_database(container)
+            for container in [*(pod.get("initContainers") or []), *(pod.get("containers") or [])]
+        )
 
 
 def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:
@@ -525,9 +610,7 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
     api = _find(documents, "Deployment", "exomem-provisioner-api")
     worker = _find(documents, "Deployment", "exomem-provisioner-worker")
     volume_worker = _find(documents, "Deployment", "exomem-volume-worker")
-    assert "EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY" not in json.dumps(
-        [api, worker, volume_worker]
-    )
+    assert "EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY" not in json.dumps([api, worker, volume_worker])
     assert "EXOMEM_HCLOUD_CAPACITY_TOKEN" not in json.dumps([api, worker, volume_worker])
     assert rendered.count("exomem-capacity-receipt-signer") == 1
 
@@ -734,9 +817,7 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "156895713"
 
     deletion_job = json.loads(
-        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"][
-            "job-template.json"
-        ]
+        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
     )
     assert not any(
         item.get("kind") == "Deployment"
@@ -855,9 +936,7 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
                 validation["expression"] for validation in policy["spec"]["validations"]
             )
         _find(documents, "ValidatingAdmissionPolicyBinding", policy_name)
-    provisioner_scope = _find(
-        documents, "ValidatingAdmissionPolicy", "exomem-provisioner-scope"
-    )
+    provisioner_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-provisioner-scope")
     provisioner_scope_text = json.dumps(provisioner_scope)
     for required_guard in (
         "helmRelease",
@@ -1030,19 +1109,39 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert "metadata.labels['batch.kubernetes.io/job-name']" in expressions
     assert f"{container}.resources.requests.cpu == quantity('25m')" not in expressions
     assert f"{container}.resources.limits.memory == quantity('384Mi')" not in expressions
-    assert "quantity(dyn(object.spec.template.spec.containers[0].resources).requests['cpu']).compareTo(quantity('25m')) == 0" in expressions
-    assert "quantity(dyn(object.spec.template.spec.containers[0].resources).limits['memory']).compareTo(quantity('384Mi')) == 0" in expressions
-    assert "size(dyn(object.spec.template.spec.containers[0].resources).requests) == 2" in expressions
+    assert (
+        "quantity(dyn(object.spec.template.spec.containers[0].resources).requests['cpu']).compareTo(quantity('25m')) == 0"
+        in expressions
+    )
+    assert (
+        "quantity(dyn(object.spec.template.spec.containers[0].resources).limits['memory']).compareTo(quantity('384Mi')) == 0"
+        in expressions
+    )
+    assert (
+        "size(dyn(object.spec.template.spec.containers[0].resources).requests) == 2" in expressions
+    )
     assert "size(dyn(object.spec.template.spec.containers[0].resources).limits) == 2" in expressions
     assert "!has(dyn(object.spec.template.spec).resources)" in expressions
     assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH" in expressions
-    assert f"{container}.env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json'" in expressions
-    assert 'volumes[1].configMap.name == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"' in expressions
-    assert "volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json'" in expressions
+    assert (
+        f"{container}.env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json'"
+        in expressions
+    )
+    assert (
+        'volumes[1].configMap.name == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"'
+        in expressions
+    )
+    assert (
+        "volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json'"
+        in expressions
+    )
     assert "volumes[1].configMap.defaultMode == 292" in expressions
     assert "!has(dyn(object.spec.template.spec.volumes[1].configMap.items[0]).mode)" in expressions
     assert "!has(object.spec.template.spec.volumes[1].configMap.defaultMode)" not in expressions
-    assert "quantity(dyn(object.spec.template.spec.volumes[0].emptyDir).sizeLimit).compareTo(quantity('64Mi')) == 0" in expressions
+    assert (
+        "quantity(dyn(object.spec.template.spec.volumes[0].emptyDir).sizeLimit).compareTo(quantity('64Mi')) == 0"
+        in expressions
+    )
     assert "!has(dyn(object.spec.template.spec).overhead)" in expressions
     assert "!has(dyn(object.spec.template.spec).activeDeadlineSeconds)" in expressions
     assert "object.spec.parallelism == 1" in expressions
@@ -1050,8 +1149,14 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert "object.spec.completionMode == 'NonIndexed'" in expressions
     assert "dyn(object.spec).podReplacementPolicy == 'TerminatingOrFailed'" in expressions
     assert "!has(dyn(object.spec).managedBy)" in expressions
-    assert "object.spec.selector.matchLabels['batch.kubernetes.io/controller-uid'] == object.metadata.uid" in expressions
-    assert "object.spec.template.metadata.labels['batch.kubernetes.io/controller-uid'] == object.metadata.uid" in expressions
+    assert (
+        "object.spec.selector.matchLabels['batch.kubernetes.io/controller-uid'] == object.metadata.uid"
+        in expressions
+    )
+    assert (
+        "object.spec.template.metadata.labels['batch.kubernetes.io/controller-uid'] == object.metadata.uid"
+        in expressions
+    )
     assert "object.spec.template.spec.serviceAccount == 'exomem-deletion-worker'" in expressions
     assert f"{container}.env[16].valueFrom.fieldRef.apiVersion == 'v1'" in expressions
     assert f"{container}.volumeMounts[1].readOnly == true" in expressions
@@ -1100,9 +1205,7 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
     assert pod["automountServiceAccountToken"] is True
     assert pod["restartPolicy"] == "Never"
     container = pod["containers"][0]
-    assert container["image"] == (
-        "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64
-    )
+    assert container["image"] == ("ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64)
     assert container["command"] == ["exomem-durability-actions"]
     env = {item["name"]: item for item in container["env"]}
     assert env["EXOMEM_DURABILITY_MAX_OPERATIONS"]["value"] == "1"
@@ -1110,9 +1213,12 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
     assert env["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"]["value"] == (
         "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
     )
-    assert next(item for item in pod["volumes"] if item["name"] == "deployment-lock")[
-        "configMap"
-    ]["name"] == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"
+    assert (
+        next(item for item in pod["volumes"] if item["name"] == "deployment-lock")["configMap"][
+            "name"
+        ]
+        == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"
+    )
     assert env["EXOMEM_DURABILITY_PROVISIONER_IMAGE"]["value"] == (
         "ghcr.io/artexis10/exomem-provisioner@sha256:" + "b" * 64
     )
@@ -1145,15 +1251,11 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
     expected_secret_refs = {
         "EXOMEM_DURABILITY_DATABASE_URL": "exomem-provisioner-database/url",
         "EXOMEM_DURABILITY_ENVELOPE_KEY": "exomem-provisioner-wrapping-key/key-material",
-        "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY": (
-            "exomem-provider-recovery-signer/private-key"
-        ),
+        "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY": ("exomem-provider-recovery-signer/private-key"),
         "EXOMEM_DURABILITY_RECOVERY_RESTORE_KEY_ID": (
             "exomem-recovery-restore-key-id/application-key-id"
         ),
-        "EXOMEM_DURABILITY_RECOVERY_RESTORE_KEY": (
-            "exomem-recovery-restore-key/application-key"
-        ),
+        "EXOMEM_DURABILITY_RECOVERY_RESTORE_KEY": ("exomem-recovery-restore-key/application-key"),
         "EXOMEM_DURABILITY_USER_EXPORT_UPLOAD_KEY_ID": (
             "exomem-user-export-upload-key-id/application-key-id"
         ),
@@ -1205,41 +1307,8 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
         (tuple(rule["apiGroups"]), tuple(rule["resources"])): set(rule["verbs"])
         for rule in role["rules"]
     }
-    assert permissions[(('',), ('namespaces',))] == {
-        "get", "list", "patch", "update", "watch"
-    }
-    assert permissions[(('',), ('configmaps',))] == {
-        "create", "delete", "get", "list", "patch", "update"
-    }
-    assert permissions[(('',), ('secrets',))] == {"create", "delete", "get", "list"}
-    assert permissions[(('',), ('persistentvolumeclaims',))] == {
-        "get", "list", "patch", "update"
-    }
-    assert permissions[(('',), ('limitranges', 'resourcequotas', 'serviceaccounts'))] == {
-        "get", "list", "patch", "update"
-    }
-    assert permissions[(('',), ('services',))] == {
-        "create", "delete", "get", "list", "patch", "update"
-    }
-    assert permissions[(('',), ('pods',))] == {"delete", "get", "list"}
-    assert permissions[(('',), ('pods/log',))] == {"get"}
-    assert permissions[(('apps',), ('statefulsets', 'statefulsets/scale'))] == {
-        "get",
-        "list",
-        "patch",
-        "update",
-        "create",
-        "delete",
-    }
-    assert permissions[(('batch',), ('jobs',))] == {"create", "delete", "get", "list"}
-    assert permissions[(('coordination.k8s.io',), ('leases',))] == {
-        "create",
-        "delete",
-        "get",
-        "patch",
-        "update",
-    }
-    assert permissions[(('networking.k8s.io',), ('networkpolicies',))] == {
+    assert permissions[(("",), ("namespaces",))] == {"get", "list", "patch", "update", "watch"}
+    assert permissions[(("",), ("configmaps",))] == {
         "create",
         "delete",
         "get",
@@ -1247,7 +1316,49 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
         "patch",
         "update",
     }
-    assert permissions[(('traefik.io',), ('ingressroutes', 'middlewares'))] == {
+    assert permissions[(("",), ("secrets",))] == {"create", "delete", "get", "list"}
+    assert permissions[(("",), ("persistentvolumeclaims",))] == {"get", "list", "patch", "update"}
+    assert permissions[(("",), ("limitranges", "resourcequotas", "serviceaccounts"))] == {
+        "get",
+        "list",
+        "patch",
+        "update",
+    }
+    assert permissions[(("",), ("services",))] == {
+        "create",
+        "delete",
+        "get",
+        "list",
+        "patch",
+        "update",
+    }
+    assert permissions[(("",), ("pods",))] == {"delete", "get", "list"}
+    assert permissions[(("",), ("pods/log",))] == {"get"}
+    assert permissions[(("apps",), ("statefulsets", "statefulsets/scale"))] == {
+        "get",
+        "list",
+        "patch",
+        "update",
+        "create",
+        "delete",
+    }
+    assert permissions[(("batch",), ("jobs",))] == {"create", "delete", "get", "list"}
+    assert permissions[(("coordination.k8s.io",), ("leases",))] == {
+        "create",
+        "delete",
+        "get",
+        "patch",
+        "update",
+    }
+    assert permissions[(("networking.k8s.io",), ("networkpolicies",))] == {
+        "create",
+        "delete",
+        "get",
+        "list",
+        "patch",
+        "update",
+    }
+    assert permissions[(("traefik.io",), ("ingressroutes", "middlewares"))] == {
         "create",
         "delete",
         "get",
@@ -1263,7 +1374,10 @@ def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() 
         ".compareTo(quantity('10Gi')) == 0"
     )
     assert exact_tenant_pvc_quantity in action_scope_text
-    assert "variables.target.spec.resources.requests.storage == quantity('10Gi')" not in action_scope_text
+    assert (
+        "variables.target.spec.resources.requests.storage == quantity('10Gi')"
+        not in action_scope_text
+    )
     for exact_guard in (
         "system:serviceaccount:exomem-platform:exomem-durability-actions",
         "^restore-[a-f0-9]{20}$",
@@ -1381,14 +1495,14 @@ def test_platform_pins_exact_durability_contracts() -> None:
         "database_backup_bucket_name": "EXOMEM_DURABILITY_DATABASE_BACKUP_BUCKET",
     }
 
+
 def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
     gate = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))
     assert gate == {
         "artifact": "exomem-hosted-runtime-k3s-gate",
         "schemaVersion": 1,
         "k3sImage": (
-            "rancher/k3s@sha256:"
-            "9d6b9c15e8031c1aea7dd7f0cdc019f5e74a23c53b9eada564b7a8dc94efc14c"
+            "rancher/k3s@sha256:9d6b9c15e8031c1aea7dd7f0cdc019f5e74a23c53b9eada564b7a8dc94efc14c"
         ),
         "sourceRepository": "https://github.com/Artexis10/exomem",
         "sourceCommit": "54618b931dec8f0ad053dce48dd80cc36c95c549",
@@ -1492,7 +1606,9 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "request.userInfo.username" in namespace_policy_text
     assert "system:admin" in namespace_policy_text
     assert "system:serviceaccount:exomem-platform:exomem-cell-provisioner" in namespace_policy_text
-    assert "system:serviceaccount:exomem-platform:exomem-durability-actions" in namespace_policy_text
+    assert (
+        "system:serviceaccount:exomem-platform:exomem-durability-actions" in namespace_policy_text
+    )
     assert "restricted-v1.35 tenant namespace contract" in namespace_policy_text
     for exact_value in (
         "pod-security.kubernetes.io/enforce",
@@ -1522,9 +1638,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     ):
         assert protected_field in namespace_policy_text
 
-    provisioner_scope = _find(
-        documents, "ValidatingAdmissionPolicy", "exomem-provisioner-scope"
-    )
+    provisioner_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-provisioner-scope")
     provisioner_scope_text = json.dumps(provisioner_scope)
     for exact_guard in (
         "request.namespace",
@@ -1547,8 +1661,23 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "quantity(dyn(variables.target.spec).resources.requests['storage'])"
         ".compareTo(quantity('10Gi')) == 0"
     ) in provisioner_scope_text
-    assert "variables.target.spec.resources.requests.storage == quantity('10Gi')" not in provisioner_scope_text
+    assert (
+        "variables.target.spec.resources.requests.storage == quantity('10Gi')"
+        not in provisioner_scope_text
+    )
     assert "NetworkPolicy deletion is reserved for namespace destruction" in provisioner_scope_text
+    action_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-durability-actions-scope")
+    for scope in (provisioner_scope, action_scope):
+        scope_text = json.dumps(scope)
+        assert "size(variables.target.spec.ingress) == 3" in scope_text
+        for index in range(3):
+            assert f"size(variables.target.spec.ingress[{index}].from) == 1" in scope_text
+        assert "variables.target.spec.ingress[2].from[0].namespaceSelector.matchLabels" in scope_text
+        assert "variables.target.spec.ingress[2].from[0].podSelector.matchLabels" in scope_text
+        assert "'app.kubernetes.io/name': 'exomem-provisioner-worker'" in scope_text
+        assert "size(variables.target.spec.ingress[2].ports) == 1" in scope_text
+        assert "variables.target.spec.ingress[2].ports[0].protocol == 'TCP'" in scope_text
+        assert "variables.target.spec.ingress[2].ports[0].port == 8765" in scope_text
 
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
     cronjobs = {
@@ -1704,7 +1833,9 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     # Daily full archives: the newest object always approaches the 24-hour
     # objective just before each run, so thresholds sit past it. Warn at 26h
     # catches a late run; block at 30h catches a missed one inside the same day.
-    backup_check = next(check for check in contract["checks"] if check["name"] == "backup-freshness")
+    backup_check = next(
+        check for check in contract["checks"] if check["name"] == "backup-freshness"
+    )
     assert backup_check["maximum_age_seconds"] == 108000
     assert contract["alerts"]["backup_warn_age_seconds"] == 93600
     assert contract["alerts"]["backup_block_age_seconds"] == 108000
@@ -1830,6 +1961,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "exomem.io/transfer-hostname": "transfer.example.test",
     }
     if expected_kind == "Job":
+        assert workload["spec"]["ttlSecondsAfterFinished"] == 300
         pod = workload["spec"]["template"]["spec"]
         assert pod["runtimeClassName"] == "exomem-storage-init"
         container = pod["containers"][0]
@@ -1905,26 +2037,45 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert "egress" not in ingress["spec"]
         assert ingress["spec"]["ingress"] == [
             {
-                "from": [{
-                    "namespaceSelector": {"matchLabels": {
-                        "kubernetes.io/metadata.name": "exomem-platform"
-                    }},
-                    "podSelector": {"matchLabels": {
-                        "app.kubernetes.io/name": "traefik",
-                        "exomem.io/ingress": "traefik",
-                    }},
-                }],
+                "from": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}
+                        },
+                        "podSelector": {
+                            "matchLabels": {
+                                "app.kubernetes.io/name": "traefik",
+                                "exomem.io/ingress": "traefik",
+                            }
+                        },
+                    }
+                ],
                 "ports": [{"protocol": "TCP", "port": 8765}],
             },
             {
-                "from": [{
-                    "namespaceSelector": {"matchLabels": {
-                        "kubernetes.io/metadata.name": "exomem-platform"
-                    }},
-                    "podSelector": {"matchLabels": {
-                        "app.kubernetes.io/name": "exomem-durability-actions"
-                    }},
-                }],
+                "from": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "exomem-durability-actions"}
+                        },
+                    }
+                ],
+                "ports": [{"protocol": "TCP", "port": 8765}],
+            },
+            {
+                "from": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "exomem-provisioner-worker"}
+                        },
+                    }
+                ],
                 "ports": [{"protocol": "TCP", "port": 8765}],
             },
         ]
@@ -1940,6 +2091,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     assert all(item["spec"].get("policyTypes") for item in network_policies)
     service = [item for item in documents if item.get("kind") == "Service"]
     assert (len(service) == 1) == (expected_kind == "StatefulSet")
+    if expected_kind == "StatefulSet":
+        assert not [item for item in documents if item.get("kind") == "Job"]
     if service:
         assert service[0]["spec"]["type"] == "ClusterIP"
 
@@ -2271,7 +2424,9 @@ def test_no_rendered_value_uses_scientific_notation() -> None:
         text=True,
     ).stdout
     offenders = re.findall(r"\d+\.\d+e[+-]\d+", rendered)
-    assert not offenders, f"rendered manifests contain float-formatted numbers: {sorted(set(offenders))}"
+    assert not offenders, (
+        f"rendered manifests contain float-formatted numbers: {sorted(set(offenders))}"
+    )
 
 
 def test_provisioner_api_can_read_the_selected_deployment_lock() -> None:
@@ -2298,7 +2453,11 @@ def test_provisioner_api_can_read_the_selected_deployment_lock() -> None:
 
     lock_path = "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"
     assert environment["EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH"] == lock_path
-    assert {"name": "deployment-lock", "mountPath": "/etc/exomem/deployment-lock", "readOnly": True} in container["volumeMounts"]
+    assert {
+        "name": "deployment-lock",
+        "mountPath": "/etc/exomem/deployment-lock",
+        "readOnly": True,
+    } in container["volumeMounts"]
     lock_volume = next(volume for volume in pod["volumes"] if volume["name"] == "deployment-lock")
     assert lock_volume["configMap"]["items"] == [
         {
@@ -2374,9 +2533,7 @@ def test_traefik_preserves_the_tunnel_forwarded_scheme() -> None:
         f"X-Forwarded-Proto and the provisioner rejects every call; args were {arguments}"
     )
     networks = [
-        ipaddress.ip_network(value)
-        for value in trusted[0].split("=", 1)[1].split(",")
-        if value
+        ipaddress.ip_network(value) for value in trusted[0].split("=", 1)[1].split(",") if value
     ]
     cloudflared = ipaddress.ip_address("10.42.0.1")
     assert any(cloudflared in network for network in networks), (

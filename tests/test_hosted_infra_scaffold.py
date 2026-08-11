@@ -34,6 +34,7 @@ def test_tool_versions_are_exact_and_required_provider_versions_are_exact() -> N
         for line in (INFRA / "tool-versions.env").read_text(encoding="utf-8").splitlines()
         if line and not line.startswith("#")
     )
+    assert versions["GO_VERSION"] == "1.26.5"
     assert versions["TERRAFORM_VERSION"] == "1.15.8"
     assert versions["K3S_VERSION"] == "v1.35.6+k3s1"
     assert versions["HCLOUD_CSI_CHART_VERSION"] == "2.21.1"
