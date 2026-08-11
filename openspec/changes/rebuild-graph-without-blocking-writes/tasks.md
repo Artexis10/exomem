@@ -1,70 +1,44 @@
-## 1. Regression coverage
+## 1. Red-first protocol coverage
 
-- [ ] 1.1 Prove an unrelated mutation is not blocked while a full rebuild runs.
-- [ ] 1.2 Prove a reader during a rebuild sees the old graph or the new one, never a partial one.
-- [ ] 1.3 Prove concurrent rebuild requests run exactly one rebuild.
-- [ ] 1.4 Prove the existing write-path contract still holds: a write against an
-      unusable sidecar indexes the whole vault and leaves it available
-      (the contract #346 broke).
-- [ ] 1.5 Prove a vault change during the final pass retries rather than publishes.
-- [ ] 1.6 Prove exhausted stabilization still marks the graph unavailable.
+- [ ] 1.1 Add failing checkpoint/floor tests for exact closed shapes, strict 24-hex mutation identity, monotonic non-reuse, safe sorted path/deletion projection, full-scope overflow, domain-separated canonical digest vectors, semantic exclusion, and caught batch rollback.
+- [ ] 1.2 Add failing writer tests proving narrow and wide operation guards release before graph join and a second canonical batch commits while the first caller waits.
+- [ ] 1.3 Add failing single-flight tests proving one builder, checkpoint N+1 invalidation/retry, bounded waiter coverage, and no stale waiter success.
+- [ ] 1.4 Add failing publication tests proving readers see old/available or unavailable, never temp/partial state; final boundary work is only checkpoint/freshness verification plus swap.
+- [ ] 1.5 Add failing crash/restart tests for committed-unacknowledged checkpoint recovery, the commit-before-`graph_pending` uncertain cut, valid-floor malformed-checkpoint recovery, missing/corrupt-floor refusal, accepted pre-floor seeding, descriptor-locked abandoned-temp sweep, and exact current acknowledgement.
+- [ ] 1.6 Add failing terminal/idempotency tests for durable nonterminal `graph_pending`, concurrent retry waiting, dead-owner graph-only resume, successful off-boundary join, projected committed graph failure, exact replay without duplicate canonical write, and later recovery.
 
-## 2. Rebuild off the boundary
+## 2. Durable canonical-to-graph handoff
 
-- [ ] 2.1 Build rebuild passes into a temporary database beside the sidecar.
-- [ ] 2.2 Publish by atomic replacement under a boundary hold scoped to the swap.
-- [ ] 2.3 Re-verify freshness under the boundary immediately before publishing.
-- [ ] 2.4 Verify the replacement behaves correctly on the Windows service path,
-      where replacing an open SQLite file does not follow POSIX rename semantics.
+- [ ] 2.1 Implement the version 1 graph-sync checkpoint and internal monotonic floor parsers/renderers plus domain-separated digest helpers with strict validation and bounded path/full projection.
+- [ ] 2.2 Include ordered floor/canonical/checkpoint replacement in graph-relevant guarded batches; include floor/checkpoint in recoverable file/directory trash transitions; exclude both from semantic/index candidates, public paths, and recursive input.
+- [ ] 2.3 Expose coherent epoch status to graph availability, reconcile, readiness diagnostics, and bounded coordination status without path/content leakage.
 
-## 3. Single-flight
+## 3. Off-boundary single-flight rebuild
 
-- [ ] 3.1 Serialize rebuilds per vault so concurrent writers do not each start one.
-- [ ] 3.2 Resolve waiting requests from the in-flight rebuild's outcome.
-- [ ] 3.3 Settle the open question: whether a waiting writer blocks or defers,
-      and reconcile that with the contract in 1.4.
+- [ ] 3.1 Thread the exact committed checkpoint through incremental fanout; acknowledge an eligible immediate successor in one SQLite transaction and register off-boundary full work without building under writer authority when proof fails.
+- [ ] 3.2 Persist durable `graph_pending` after canonical commit while each narrow/wide operation guard is still held, then release every guard before graph work; implement graph-only dead-owner resume, committed-uncertain handling for the cross-store crash cut, and completed success/failure persistence before public replay.
+- [ ] 3.3 Run one cross-process per-vault builder under a descriptor-validated persistent OS lock in shared runtime state keyed by canonical vault identity, with unique temporary databases, bounded checkpoint-aware waiters, and safe abandoned-temp sweep under the same lock.
+- [ ] 3.4 Build each full pass privately, close/checkpoint/validate it, and under one bounded final hold perform the two epoch/freshness checks around acknowledgement plus atomic replacement.
+- [ ] 3.5 Resolve waiters only from proven checkpoint lineage; terminalize same-generation conflicts, stopped uncovered flights, capacity/start failures, stabilization exhaustion, and platform sharing refusal as explicit committed derived failures.
 
-## 4. Housekeeping
+## 4. Recovery and compatibility
 
-- [ ] 4.1 Name temporary rebuild databases with a reserved prefix.
-- [ ] 4.2 Sweep abandoned temporary databases during reconcile.
+- [ ] 4.1 Detect incoherent floor/checkpoint/ack state at startup/readiness/reconcile; recover above a valid floor, seed the floor only for accepted pre-floor checkpoint states, and fail closed on missing/corrupt-floor ambiguity without changing user-authored canonical bytes or reusing a generation.
+- [ ] 4.2 Name temporary rebuild databases with a reserved per-vault prefix/nonce and sweep only while holding the cross-process rebuild lock.
+- [ ] 4.3 Verify sidecar replacement with open readers on POSIX and the Windows service path.
+- [ ] 4.4 Preserve exact legacy no-epoch graphs until first publication; provide a rollback compatibility build retaining floor/checkpoint parsing, graph-pending replay safety, and recovery.
 
 ## 5. Verification
 
-- [ ] 5.1 Run the epistemic graph, freshness, boundary, semantic unit graph, and
-      reconcile suites, plus Ruff and strict OpenSpec validation.
-- [ ] 5.2 Re-run the reproduction harness and record the new first-write cost at
-      500 and 2,000 pages against the pre-change baseline.
-- [ ] 5.3 Confirm under a concurrent-write load that the stabilization budget is
-      still sufficient, and raise `REBUILD_STABILIZATION_ATTEMPTS` if not.
-- [ ] 5.4 Run the lean suite.
+- [ ] 5.1 Run epistemic graph freshness, mutation-boundary, writer lease/idempotency, index-sync, deletion/reconcile, and Records concurrency suites with embeddings disabled.
+- [ ] 5.2 Run Ruff, targeted Mypy, strict OpenSpec validation, and `git diff --check`.
+- [ ] 5.3 Re-run the reproduction at 500 and 2,000 pages and record boundary-hold p95 separately from request latency; the hold must not scale with vault size.
+- [ ] 5.4 Run the installed-wheel product loop and lean suite.
 
 ### Baseline to beat
 
-Measured on a maintainer workstation against synthetic dense vaults, on main,
-one `upsert_after_write` with no usable sidecar:
-
-| vault | first write | steady-state write | ratio |
-|---|---|---|---|
-| 500 pages | 7,727.8 ms | 314.5 ms | 24.6x |
-| 2,000 pages | 32,381.5 ms | 1,186.2 ms | 27.3x |
-
-with `vault mutation boundary held too long ...
-operation=epistemic_graph_refresh_paths holder_kind=graph hold_ms=32371.03`.
-
-CI's write-latency benchmark shows `hold_ms=39092` at 2,000 pages and
-`hold_ms=172205` at 8,000.
-
-The target is that the *boundary hold* stops scaling with vault size. The first
-writer after invalidation still pays the rebuild; what must stop is every other
-mutation waiting behind it.
+Measured on main with an unusable sidecar: 7,727.8 ms at 500 pages and 32,381.5 ms at 2,000 pages for the first write, with the vault mutation boundary held for the rebuild. CI observed 39,092 ms at 2,000 pages and 172,205 ms at 8,000. The required improvement is boundary hold, not removal of the first caller's graph wait.
 
 ### Prior art
 
-#346 attempted to fix this by removing the escalation so writes deferred to
-reconcile. CI rejected it:
-`test_refresh_missing_sidecar_routes_to_full_rebuild` requires a write against a
-missing sidecar to index the whole vault and leave it available, and three other
-tests depend on the same escalation — the spawned-mutator boundary contract,
-forced re-resolution after a relation-registry change, and the schema-v3 sidecar
-migration. Task 1.4 exists to keep that contract pinned while the rebuild moves.
+#346 removed the full-rebuild escalation and failed the contract that a write against an unusable sidecar leaves the graph available. This change retains that terminal contract while moving the wait outside canonical writer authority.
