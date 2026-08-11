@@ -40,6 +40,9 @@ def test_alembic_upgrades_empty_sqlite_database_to_head(tmp_path: Path) -> None:
         }
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
         operation_columns = {row[1] for row in connection.execute("PRAGMA table_info(operations)")}
+        receipt_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(operation_recovery_receipts)")
+        }
         ledger = connection.execute("SELECT id, revision FROM capacity_ledger").fetchall()
     assert {
         "alembic_version",
@@ -57,8 +60,9 @@ def test_alembic_upgrades_empty_sqlite_database_to_head(tmp_path: Path) -> None:
         "capacity_ledger",
         "capacity_reservations",
         "capacity_destructive_fences",
+        "operation_recovery_receipts",
     } <= tables
-    assert revision == ("0006_operation_wire_protocol",)
+    assert revision == ("0007_operation_recovery_receipt",)
     assert ledger == [(1, 0)]
     assert {
         "caller_checkpoint",
@@ -69,6 +73,13 @@ def test_alembic_upgrades_empty_sqlite_database_to_head(tmp_path: Path) -> None:
         "claim_expires_at",
         "wire_protocol",
     } <= operation_columns
+    assert {
+        "operation_id",
+        "helper_source_sha256",
+        "request_ciphertext_sha256",
+        "committed_operation_sha256",
+        "committed_at",
+    } <= receipt_columns
 
 
 def test_capacity_migration_downgrade_upgrade_round_trip(tmp_path: Path) -> None:
@@ -113,8 +124,9 @@ def test_capacity_migration_downgrade_upgrade_round_trip(tmp_path: Path) -> None
                 "capacity_ledger",
                 "capacity_reservations",
                 "capacity_destructive_fences",
+                "operation_recovery_receipts",
             } <= tables
-            assert revision == ("0006_operation_wire_protocol",)
+            assert revision == ("0007_operation_recovery_receipt",)
 
 
 def test_wire_protocol_sqlite_backfill_default_constraint_and_round_trip(tmp_path: Path) -> None:

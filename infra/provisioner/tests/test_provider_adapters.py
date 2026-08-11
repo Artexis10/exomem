@@ -196,6 +196,33 @@ async def test_kubernetes_adapter_rejects_pvc_identity_or_location_without_mutat
 
 
 @pytest.mark.asyncio
+async def test_recovery_bound_volume_digest_changes_for_pv_replacement() -> None:
+    metadata = _metadata()
+    core = _KubernetesCore(metadata)
+    core.pv.metadata.annotations = {
+        **metadata.kubernetes_annotations,
+        "exomem.io/recovery-envelope": "sealed-pv-envelope",
+    }
+    core.pv.metadata.uid = "pv-uid-one"
+    core.pv.metadata.resource_version = "11"
+    adapter = KubernetesVolumeAdapter(
+        core_v1=core,
+        storage_class_name="encrypted-retain",
+        encryption_secret_name="volume-encryption",
+        encryption_secret_namespace="exomem-platform",
+    )
+
+    first = await adapter.observe_recovery_bound_volume(metadata)
+    assert first is not None
+    core.pv.metadata.uid = "pv-uid-two"
+    core.pv.metadata.resource_version = "12"
+    second = await adapter.observe_recovery_bound_volume(metadata)
+
+    assert second is not None
+    assert first.stability_digest != second.stability_digest
+
+
+@pytest.mark.asyncio
 async def test_cell_adapter_creates_external_secret_then_reads_the_exact_bundle() -> None:
     metadata = _metadata()
     identity = ProviderRecoveryIdentityCodec.from_secret("credential-secret-recovery")

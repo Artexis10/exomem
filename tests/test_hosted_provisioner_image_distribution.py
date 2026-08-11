@@ -33,6 +33,10 @@ def test_provisioner_distribution_exposes_three_database_commands() -> None:
             "exomem_provisioner.database_bootstrap:run_validate"
         ),
     } == project["project"]["scripts"]
+    assert (
+        project["project"]["scripts"]["exomem-provisioner-recover-init-retry"]
+        == "exomem_provisioner.operation_recovery:main"
+    )
 
 
 def test_provisioner_image_packages_migrations_at_fixed_read_only_path() -> None:
@@ -75,6 +79,9 @@ def test_image_verifier_requires_packaged_migrations_and_database_commands() -> 
         "exomem-provisioner-database-migrate",
         "exomem-provisioner-database-validate",
     } <= set(module._ENTRYPOINTS)
+    assert module._ENTRYPOINTS["exomem-provisioner-recover-init-retry"] == (
+        "exomem_provisioner.operation_recovery:main"
+    )
     assert module._MIGRATION_ROOT == MIGRATION_ROOT
     assert "DATABASE_REVISION" in module._PROBE
     assert "is_symlink" in module._PROBE
@@ -91,6 +98,7 @@ def test_image_verifier_requires_packaged_migrations_and_database_commands() -> 
         ]
         if path.is_file() and "__pycache__" not in path.parts
     }
+    assert "entry.value" in module._PROBE
 
 
 def test_provisioner_workflow_is_an_independent_digest_bound_candidate_producer() -> None:
