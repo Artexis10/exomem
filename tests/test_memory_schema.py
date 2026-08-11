@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, commands, memory_schema, semantic_language_registry
+from exomem import (
+    audit,
+    commands,
+    memory_schema,
+    relation_registry,
+    semantic_language_registry,
+)
 from exomem.__main__ import main
 
 
@@ -330,12 +336,20 @@ def test_schema_memory_registry_parity_and_strict_cli_exit(
 def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     pages = _seed_pages(vault)
-    pages[0].write_text(
-        pages[0].read_text(encoding="utf-8")
-        + "\n- science.replicates: [[Knowledge Base/Notes/future]]\n",
-        encoding="utf-8",
-    )
-    before = pages[0].read_text(encoding="utf-8")
+    for page in pages[:3]:
+        page.write_text(
+            page.read_text(encoding="utf-8")
+            + "\n- science.replicates: [[Knowledge Base/Notes/future]]\n",
+            encoding="utf-8",
+        )
+    for page in pages[:2]:
+        page.write_text(
+            page.read_text(encoding="utf-8")
+            + "\n- science.sibling: [[Knowledge Base/Notes/future]]\n",
+            encoding="utf-8",
+        )
+    before = {page: page.read_bytes() for page in pages}
+    registry_path = relation_registry.extension_registry_path(vault)
 
     inferred = commands.op_schema_memory(
         vault,
@@ -349,14 +363,20 @@ def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path
         item for item in inferred["relations"] if item["raw_relation"] == "science.replicates"
     )
     assert candidate["registry_status"] == "unregistered"
-    assert candidate["count"] == 1
+    assert candidate["count"] == 3
     assert candidate["examples"][0]["path"].endswith("page-0.md")
     assert inferred["proposal"]["extensions"]["science.replicates"] == {
         "parent": None,
         "description": None,
     }
+    sibling = next(
+        item for item in inferred["relations"] if item["raw_relation"] == "science.sibling"
+    )
+    assert sibling["count"] == 2
+    assert "science.sibling" not in inferred["proposal"]["extensions"]
     assert inferred["warnings"][0]["code"] == "model_suggestions_unavailable"
-    assert pages[0].read_text(encoding="utf-8") == before
+    assert {page: page.read_bytes() for page in pages} == before
+    assert not registry_path.exists()
 
     with pytest.raises(ValueError, match="INCOMPLETE_RELATION_PROPOSAL"):
         commands.op_schema_memory(vault, operation="infer", subject="relations", save=True)
@@ -468,11 +488,12 @@ def test_relation_registry_audit_is_explicit_and_not_default_attention_noise(
 def test_relation_diff_without_proposal_compares_corpus_reality(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     pages = _seed_pages(vault)
-    pages[0].write_text(
-        pages[0].read_text(encoding="utf-8")
-        + "\n- science.replicates: [[Knowledge Base/Notes/future]]\n",
-        encoding="utf-8",
-    )
+    for page in pages[:3]:
+        page.write_text(
+            page.read_text(encoding="utf-8")
+            + "\n- science.replicates: [[Knowledge Base/Notes/future]]\n",
+            encoding="utf-8",
+        )
     result = commands.op_schema_memory(vault, operation="diff", subject="relations")
     assert result["comparison"] == "corpus"
     assert result["changed"] is True

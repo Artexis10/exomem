@@ -3002,7 +3002,7 @@ def _registry_findings(
         findings.append(
             ContractFinding(
                 code=code,
-                severity="error",
+                severity="warning" if code == "unregistered_relation" else "error",
                 path=page.path,
                 span=None,
                 detail=detail,

@@ -184,6 +184,70 @@ def test_qualify_connectivity_accepts_what_the_typed_lane_excludes(
     ).qualifies
 
 
+def test_unregistered_relation_is_advisory_but_never_qualifies(
+    tmp_path: Path,
+) -> None:
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(
+            body=(
+                _OBS
+                + "## Relations\n"
+                + "- parent [[Knowledge Base/Notes/Patterns/target]]\n"
+            )
+        ),
+    )
+    target = _target(tmp_path)
+    corpus = _corpus(tmp_path, page, target)
+    fact = corpus.outbound[page.path][0]
+
+    assert not semantic_contract.qualify_relation(
+        fact, registry=relation_registry.core_registry(), corpus=corpus
+    ).qualifies
+    assert not semantic_contract.qualify_connectivity(
+        fact, registry=relation_registry.core_registry(), corpus=corpus
+    ).qualifies
+
+    result = _disposition(tmp_path, page, target)
+    finding = next(
+        finding
+        for finding in result.findings
+        if finding.code == "unregistered_relation"
+    )
+    assert finding.severity == "warning"
+    assert result.relation_disposition.satisfied is False
+    assert result.should_block is True
+
+
+def test_unregistered_warning_does_not_block_separately_connected_page(
+    tmp_path: Path,
+) -> None:
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(
+            body=(
+                _OBS
+                + "## Relations\n"
+                + "- cites [[Knowledge Base/Notes/Patterns/target]]\n"
+                + "- parent [[Knowledge Base/Notes/Patterns/target]]\n"
+            )
+        ),
+    )
+
+    result = _disposition(tmp_path, page, _target(tmp_path))
+    finding = next(
+        finding
+        for finding in result.findings
+        if finding.code == "unregistered_relation"
+    )
+    assert finding.severity == "warning"
+    assert result.relation_disposition.satisfied is True
+    assert result.relation_disposition.qualifying_signal == "connectivity"
+    assert result.should_block is False
+
+
 # --------------------------------------------------------------------------
 # What the weaker lane does and does not count.
 # --------------------------------------------------------------------------
