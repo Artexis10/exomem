@@ -213,6 +213,38 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     release_job = parsed["jobs"]["release-proof"]
     assert release_job["needs"] == "static"
     assert "inputs.release_proof" in release_job["if"]
+    release_checkout = next(
+        step
+        for step in release_job["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    assert release_checkout.get("with") == {"fetch-depth": 0}
+    release_uv_steps = [
+        step
+        for step in release_job["steps"]
+        if step.get("uses", "").startswith("astral-sh/setup-uv@")
+    ]
+    assert len(release_uv_steps) == 1
+    assert release_uv_steps[0] == {
+        "uses": "astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
+        "with": {
+            "version": "${{ env.UV_VERSION }}",
+            "python-version": "${{ env.PYTHON_VERSION }}",
+            "enable-cache": True,
+        },
+    }
+    release_proof_step = next(
+        step
+        for step in release_job["steps"]
+        if step.get("name")
+        == "Derive and prove both published images from the reviewed phase lock"
+    )
+    for script in (
+        "prepare_hosted_release.py",
+        "verify_hosted_release.py",
+        "verify_provisioner_image.py",
+    ):
+        assert f"uv run --frozen python infra/scripts/{script}" in release_proof_step["run"]
     blackbox_job = parsed["jobs"]["external-blackbox"]
     assert blackbox_job["if"] == (
         "github.event_name == 'schedule' || "
