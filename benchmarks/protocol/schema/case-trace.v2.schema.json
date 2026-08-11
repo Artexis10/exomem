@@ -1,0 +1,367 @@
+{
+  "$defs": {
+    "AnswerRecordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "prompt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Prompt Sha256",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "record": {
+          "const": "answer",
+          "default": "answer",
+          "title": "Record",
+          "type": "string"
+        },
+        "response_ref": {
+          "title": "Response Ref",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "prompt_sha256",
+        "model_id",
+        "response_ref",
+        "input_tokens",
+        "output_tokens",
+        "protocol_version",
+        "schema_version"
+      ],
+      "title": "AnswerRecordV2",
+      "type": "object"
+    },
+    "CleanupRecordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "title": "Namespace",
+          "type": "string"
+        },
+        "observation_path": {
+          "title": "Observation Path",
+          "type": "string"
+        },
+        "observation_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Observation Sha256",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "record": {
+          "const": "cleanup",
+          "default": "cleanup",
+          "title": "Record",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "schema_version",
+        "run_id",
+        "session_id",
+        "namespace",
+        "observation_path",
+        "observation_sha256"
+      ],
+      "title": "CleanupRecordV2",
+      "type": "object"
+    },
+    "IngestRecordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "payload_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Payload Sha256",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "provider_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Provider Ids",
+          "type": "array"
+        },
+        "record": {
+          "const": "ingest",
+          "default": "ingest",
+          "title": "Record",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_ordinal": {
+          "minimum": 1,
+          "title": "Session Ordinal",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_ordinal",
+        "payload_sha256",
+        "provider_ids",
+        "protocol_version",
+        "schema_version"
+      ],
+      "title": "IngestRecordV2",
+      "type": "object"
+    },
+    "JudgeRecordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "parser_warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Parser Warnings",
+          "type": "array"
+        },
+        "prompt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Prompt Sha256",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "record": {
+          "const": "judge",
+          "default": "judge",
+          "title": "Record",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "verdict_label": {
+          "title": "Verdict Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_sha256",
+        "model_id",
+        "verdict_label",
+        "protocol_version",
+        "schema_version"
+      ],
+      "title": "JudgeRecordV2",
+      "type": "object"
+    },
+    "SearchRecordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "normalized_hit_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Normalized Hit Ids",
+          "type": "array"
+        },
+        "normalized_hit_shas": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Normalized Hit Shas",
+          "type": "array"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "raw_response_ref": {
+          "title": "Raw Response Ref",
+          "type": "string"
+        },
+        "record": {
+          "const": "search",
+          "default": "search",
+          "title": "Record",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "top_k": {
+          "minimum": 0,
+          "title": "Top K",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query",
+        "raw_response_ref",
+        "normalized_hit_ids",
+        "normalized_hit_shas",
+        "top_k",
+        "protocol_version",
+        "schema_version"
+      ],
+      "title": "SearchRecordV2",
+      "type": "object"
+    },
+    "TimingRecordV2": {
+      "additionalProperties": false,
+      "properties": {
+        "ms": {
+          "minimum": 0,
+          "title": "Ms",
+          "type": "number"
+        },
+        "phase": {
+          "title": "Phase",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "record": {
+          "const": "timing",
+          "default": "timing",
+          "title": "Record",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "phase",
+        "ms",
+        "protocol_version",
+        "schema_version"
+      ],
+      "title": "TimingRecordV2",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "entries": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "answer": "#/$defs/AnswerRecordV2",
+            "cleanup": "#/$defs/CleanupRecordV2",
+            "ingest": "#/$defs/IngestRecordV2",
+            "judge": "#/$defs/JudgeRecordV2",
+            "search": "#/$defs/SearchRecordV2",
+            "timing": "#/$defs/TimingRecordV2"
+          },
+          "propertyName": "record"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/IngestRecordV2"
+          },
+          {
+            "$ref": "#/$defs/SearchRecordV2"
+          },
+          {
+            "$ref": "#/$defs/AnswerRecordV2"
+          },
+          {
+            "$ref": "#/$defs/JudgeRecordV2"
+          },
+          {
+            "$ref": "#/$defs/TimingRecordV2"
+          },
+          {
+            "$ref": "#/$defs/CleanupRecordV2"
+          }
+        ]
+      },
+      "title": "Entries",
+      "type": "array"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "case_id"
+  ],
+  "title": "CaseTraceV2",
+  "type": "object"
+}

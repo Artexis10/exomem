@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .contracts import PreregistrationIdentity
 from .version import (
     BUDGET_LEDGER_SCHEMA_VERSION, CASE_GOLD_SCHEMA_VERSION, CASE_TRACE_SCHEMA_VERSION,
+    CASE_TRACE_V2_SCHEMA_VERSION, PROVIDER_CLEANUP_OBSERVATION_SCHEMA_VERSION,
     EQUIVALENCE_DIFF_SCHEMA_VERSION, EQUIVALENCE_EXCEPTION_SCHEMA_VERSION,
     GAP_REPORT_SCHEMA_VERSION, PROBE_RESULT_SCHEMA_VERSION, PROTOCOL_EVENT_SCHEMA_VERSION,
     PROTOCOL_VERSION, READINESS_REPORT_SCHEMA_VERSION, RUN_MANIFEST_SCHEMA_VERSION,
@@ -248,8 +249,54 @@ class CleanupRecord(StrictModel):
     verified: bool
 
 
+class IngestRecordV2(IngestRecord):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+
+
+class SearchRecordV2(SearchRecord):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+
+
+class AnswerRecordV2(AnswerRecord):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+
+
+class JudgeRecordV2(JudgeRecord):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+
+
+class TimingRecordV2(TimingRecord):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+
+
+class CleanupRecordV2(StrictModel):
+    protocol_version: Literal[PROTOCOL_VERSION]
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION]
+    record: Literal["cleanup"] = "cleanup"
+    run_id: str
+    session_id: str
+    namespace: str
+    observation_path: str
+    observation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("observation_path")
+    @classmethod
+    def _safe_observation_path(cls, value: str) -> str:
+        return _canonical_relative_path(value)
+
+
 TraceRecord = Annotated[
     IngestRecord | SearchRecord | AnswerRecord | JudgeRecord | TimingRecord | CleanupRecord,
+    Field(discriminator="record"),
+]
+
+TraceRecordV2 = Annotated[
+    IngestRecordV2 | SearchRecordV2 | AnswerRecordV2 | JudgeRecordV2 | TimingRecordV2 | CleanupRecordV2,
     Field(discriminator="record"),
 ]
 
@@ -259,6 +306,95 @@ class CaseTrace(StrictModel):
     schema_version: Literal[CASE_TRACE_SCHEMA_VERSION] = CASE_TRACE_SCHEMA_VERSION
     case_id: str
     entries: list[TraceRecord] = Field(default_factory=list)
+
+
+class CaseTraceV2(StrictModel):
+    protocol_version: Literal[PROTOCOL_VERSION] = PROTOCOL_VERSION
+    schema_version: Literal[CASE_TRACE_V2_SCHEMA_VERSION] = CASE_TRACE_V2_SCHEMA_VERSION
+    case_id: str
+    entries: list[TraceRecordV2] = Field(default_factory=list)
+
+
+def _canonical_relative_path(value: str) -> str:
+    if not value or value.startswith("/") or "\\" in value or "//" in value:
+        raise ValueError("path must be a canonical relative POSIX path")
+    if any(part in {"", ".", ".."} for part in value.split("/")):
+        raise ValueError("path must be a canonical relative POSIX path")
+    return value
+
+
+class ProviderCleanupNamespaceMembership(StrictModel):
+    kind: Literal["namespace-membership"] = "namespace-membership"
+    expected_namespace: str
+    live_namespaces: list[str]
+
+    @field_validator("live_namespaces")
+    @classmethod
+    def _namespaces_sorted_unique(cls, value: list[str]) -> list[str]:
+        return _require_sorted_unique(value, "live_namespaces")
+
+
+class ProviderCleanupProviderState(StrictModel):
+    kind: Literal["provider-state"] = "provider-state"
+    remaining_record_ids: list[str]
+    backend_active: bool
+
+    @field_validator("remaining_record_ids")
+    @classmethod
+    def _ids_sorted_unique(cls, value: list[str]) -> list[str]:
+        return _require_sorted_unique(value, "remaining_record_ids")
+
+
+class ProviderCleanupPathLstat(StrictModel):
+    kind: Literal["path-lstat"] = "path-lstat"
+    path: str
+    raw_kind: Literal["missing", "directory", "regular", "symlink", "other"]
+    entries: list[str]
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_canonical(cls, value: str) -> str:
+        return _canonical_relative_path(value)
+
+    @field_validator("entries")
+    @classmethod
+    def _entries_sorted_unique(cls, value: list[str]) -> list[str]:
+        return _require_sorted_unique(value, "entries")
+
+
+ProviderCleanupRawObservation = Annotated[
+    ProviderCleanupNamespaceMembership | ProviderCleanupProviderState | ProviderCleanupPathLstat,
+    Field(discriminator="kind"),
+]
+
+
+class ProviderCleanupObservation(StrictModel):
+    protocol_version: Literal[PROTOCOL_VERSION] = PROTOCOL_VERSION
+    schema_version: Literal[PROVIDER_CLEANUP_OBSERVATION_SCHEMA_VERSION] = PROVIDER_CLEANUP_OBSERVATION_SCHEMA_VERSION
+    artifact_type: Literal["provider-cleanup-observation.v1"] = "provider-cleanup-observation.v1"
+    run_id: str
+    session_id: str
+    requested_provider: str
+    provider_variant: str | None
+    namespace: str
+    cleanup_called: bool
+    required_surface_ids: list[str]
+    observations: list[ProviderCleanupRawObservation]
+
+    @field_validator("required_surface_ids")
+    @classmethod
+    def _surface_ids_sorted_unique(cls, value: list[str]) -> list[str]:
+        return _require_sorted_unique(value, "required_surface_ids")
+
+    @model_validator(mode="after")
+    def _observation_kinds_unique(self) -> "ProviderCleanupObservation":
+        keys = [
+            (item.kind, getattr(item, "path", getattr(item, "expected_namespace", "")))
+            for item in self.observations
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("cleanup observations must be unique")
+        return self
 
 
 class ReadinessReport(StrictModel):
@@ -852,6 +988,8 @@ class GuestCleanup(StrictModel):
 SCHEMA_EXPORTS: dict[str, type[BaseModel]] = {
     "protocol-event": ProtocolEvent, "case-gold": CaseGold, "run-manifest": RunManifest,
     "case-trace": CaseTrace, "readiness-report": ReadinessReport, "probe-result": ProbeResult,
+    "case-trace-v2": CaseTraceV2,
+    "provider-cleanup-observation": ProviderCleanupObservation,
     "budget-ledger": BudgetLedgerEntry, "equivalence-diff": EquivalenceDiff,
     "equivalence-exception": EquivalenceException, "gap-report": GapReport,
     "memorybench-run-plan": MemoryBenchRunPlan,
@@ -1192,6 +1330,12 @@ def _enhance_memorybench_schema(name: str, schema: dict[str, Any]) -> dict[str, 
                 "else": {"properties": {"all_absent": {"const": False}}},
             },
         ])
+    elif name == "provider-cleanup-observation":
+        schema["properties"]["required_surface_ids"]["uniqueItems"] = True
+        definitions = schema["$defs"]
+        definitions["ProviderCleanupNamespaceMembership"]["properties"]["live_namespaces"]["uniqueItems"] = True
+        definitions["ProviderCleanupProviderState"]["properties"]["remaining_record_ids"]["uniqueItems"] = True
+        definitions["ProviderCleanupPathLstat"]["properties"]["entries"]["uniqueItems"] = True
     return schema
 
 
@@ -1202,7 +1346,8 @@ def export_json_schemas(out_dir: Path) -> list[Path]:
     written: list[Path] = []
     for name, model in sorted(SCHEMA_EXPORTS.items()):
         version = get_args(model.model_fields["schema_version"].annotation)[0]
-        path = out_dir / f"{name}.v{version}.schema.json"
+        basename = "case-trace" if name == "case-trace-v2" else name
+        path = out_dir / f"{basename}.v{version}.schema.json"
         schema = _enhance_memorybench_schema(name, model.model_json_schema())
         path.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         written.append(path)

@@ -360,6 +360,19 @@
     algorithm version in manifest evidence. Generic `--pilot 25` remains a
     separate non-comparative selection and cannot substitute for this cohort.
 
+14. **Direct-provider lifecycle evidence is runner-owned.**  Registration
+    resolves an inert immutable provider specification before the started
+    manifest; construction and setup happen afterwards in a run-owned session
+    context.  The requested registry key and observed variant remain distinct.
+    Every constructed diagnostic or scored instance has one outer lifecycle
+    owner, which calls cleanup exactly once, persists only raw independently
+    re-observed cleanup facts, and terminalizes failures without replacing a
+    control-flow exception.  Direct traces use v2 records, each self-versioned
+    and bound to a contained cleanup-observation reference.  VALID and
+    READINESS_UNVERIFIABLE terminalization and later report loading require
+    exact expected-instance trace/observation completeness; a one-case run is
+    isolation-unverifiable because it has no prior live session to probe.
+
 ## Execution
 
 fable-delegate discipline: Stage-0 packet → Codex/Claude implementer lanes in

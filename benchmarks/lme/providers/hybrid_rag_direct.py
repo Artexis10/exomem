@@ -33,7 +33,7 @@ from membench.adapters.base import Profile
 from protocol.models import CaseHandle, LaneReadiness, ProtocolEvent
 from rank_bm25 import BM25Okapi
 
-from .base import ProviderHit, require_neutral
+from .base import ProviderHit, ProviderSessionContext, RetrievalPurpose, require_neutral
 
 _TOKEN = re.compile(r"[A-Za-z0-9']+")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
@@ -130,8 +130,8 @@ class HybridRagDirectProvider:
         self._chunks: list[_Chunk] = []
         self._index: BM25Okapi | None = None
 
-    def setup(self, profile: Profile | None) -> None:
-        del profile
+    def setup(self, profile: Profile | None, context: ProviderSessionContext) -> None:
+        del profile, context
         if os.environ.get("PROTOCOL_FIXTURE_EMBEDDER") != "1":
             # The model seam is explicit: production wiring may supply it, while
             # offline benchmark runs never download a model accidentally.
@@ -182,7 +182,8 @@ class HybridRagDirectProvider:
             )
         ]
 
-    def retrieve(self, question_text: str, top_k: int) -> list[ProviderHit]:
+    def retrieve(self, question_text: str, top_k: int, purpose: RetrievalPurpose) -> list[ProviderHit]:
+        del purpose
         if top_k < 0:
             raise ValueError("top_k must be non-negative")
         ranks: dict[str, float] = {}

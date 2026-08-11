@@ -12,9 +12,9 @@ FIXTURE = Path("benchmarks/lme/fixtures/mini.json")
 
 # name -> environment the row legitimately needs to run offline.
 _EXPECTED_SIGNATURES = {
-    "setup": ["profile"],
+    "setup": ["profile", "context"],
     "ingest_case": ["events", "handle"],
-    "retrieve": ["question_text", "top_k"],
+    "retrieve": ["question_text", "top_k", "purpose"],
     "export_state": [],
     "cleanup": [],
     "variant_id": [],
@@ -49,11 +49,11 @@ def _offline_profile():
 
 @pytest.mark.parametrize("name", ["exomem-source-only", "hybrid-rag-control", "no-memory"])
 def test_every_registered_provider_implements_and_runs_the_direct_boundary(
-    name: str, monkeypatch: pytest.MonkeyPatch
+    name: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from lme.dataset import load_dataset
     from lme.normalize import neutralize
-    from lme.providers.base import DirectProvider, ProviderHit
+    from lme.providers.base import DirectProvider, ProviderHit, ProviderSessionContext, RetrievalPurpose
     from lme.providers.registry import provider_factory, registered_provider_names
     from protocol.models import CaseHandle, LaneReadiness
 
@@ -71,11 +71,11 @@ def test_every_registered_provider_implements_and_runs_the_direct_boundary(
     question = load_dataset(FIXTURE).questions[0]
     events = neutralize(question, _identity())
     handle = CaseHandle(case_id=question.question_id, case_ordinal=1, question_date=question.question_date_text)
-    provider.setup(_offline_profile())
+    provider.setup(_offline_profile(), ProviderSessionContext("provider-test", "session", "namespace", tmp_path / "work", tmp_path / "evidence"))
     try:
         inserted = provider.ingest_case(events, handle)
         assert isinstance(inserted, tuple)
-        hits = provider.retrieve(question.question, 3)
+        hits = provider.retrieve(question.question, 3, RetrievalPurpose.SCORED_RETRIEVAL)
         assert isinstance(hits, list)
         assert all(isinstance(hit, ProviderHit) for hit in hits)
         assert provider.export_state() is not None
@@ -113,18 +113,19 @@ def test_the_boundary_refuses_a_genuinely_gold_bearing_object() -> None:
             provider_factory(name)().ingest_case([gold], handle)  # type: ignore[arg-type]
 
 
-def test_the_null_control_returns_nothing_for_any_query() -> None:
+def test_the_null_control_returns_nothing_for_any_query(tmp_path: Path) -> None:
     from lme.dataset import load_dataset
     from lme.normalize import neutralize
+    from lme.providers.base import ProviderSessionContext, RetrievalPurpose
     from lme.providers.null_direct import NullDirectProvider
     from protocol.models import CaseHandle
 
     question = load_dataset(FIXTURE).questions[0]
     provider = NullDirectProvider()
-    provider.setup(None)
+    provider.setup(None, ProviderSessionContext("null-test", "session", "namespace", tmp_path / "work", tmp_path / "evidence"))
     handle = CaseHandle(case_id=question.question_id, case_ordinal=1, question_date=question.question_date_text)
     assert provider.ingest_case(neutralize(question, _identity()), handle) == ()
-    assert provider.retrieve(question.question, 10) == []
+    assert provider.retrieve(question.question, 10, RetrievalPurpose.SCORED_RETRIEVAL) == []
     assert provider.export_state() == ()
     assert provider.retains_nothing is True
     provider.cleanup()

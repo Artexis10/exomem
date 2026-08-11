@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import datetime as dt
-import tempfile
 from collections.abc import Sequence
-from pathlib import Path
 
 from membench.adapters.base import Profile
 from protocol.models import CaseHandle, LaneReadiness, ProtocolEvent
 
 from ..adapter import LmeExomemAdapter, lme_profile
-from .base import ProviderHit, require_neutral
+from .base import ProviderHit, ProviderSessionContext, RetrievalPurpose, require_neutral
 
 
 class ExomemDirectProvider:
@@ -24,14 +22,15 @@ class ExomemDirectProvider:
 
     def __init__(self) -> None:
         self._adapter = LmeExomemAdapter()
-        self._temporary: tempfile.TemporaryDirectory[str] | None = None
+        self._context: ProviderSessionContext | None = None
         self._question_date: dt.datetime | None = None
         self._profile: Profile | None = None
 
-    def setup(self, profile: Profile | None) -> None:
+    def setup(self, profile: Profile | None, context: ProviderSessionContext) -> None:
         self._profile = profile or lme_profile()
-        self._temporary = tempfile.TemporaryDirectory(prefix="lme-exomem-")
-        self._adapter.setup(Path(self._temporary.name), self._profile)
+        self._context = context
+        context.work_root.mkdir(parents=True, exist_ok=True)
+        self._adapter.setup(context.work_root, self._profile)
 
     def ingest_case(self, events: Sequence[ProtocolEvent], handle: CaseHandle) -> tuple[str, ...]:
         require_neutral(events, handle)
@@ -43,7 +42,8 @@ class ExomemDirectProvider:
             raise RuntimeError("Exomem ingestion failed: " + "; ".join(result.detail or "unknown error" for result in failures))
         return tuple(result.source_id for result in results)
 
-    def retrieve(self, question_text: str, top_k: int) -> list[ProviderHit]:
+    def retrieve(self, question_text: str, top_k: int, purpose: RetrievalPurpose) -> list[ProviderHit]:
+        del purpose
         if self._question_date is None:
             raise RuntimeError("retrieve called before ingest_case")
         hits = self._adapter.retrieve_text(question_text, self._question_date, limit=top_k)
@@ -56,9 +56,10 @@ class ExomemDirectProvider:
         try:
             self._adapter.cleanup()
         finally:
-            if self._temporary is not None:
-                self._temporary.cleanup()
-                self._temporary = None
+            if self._context is not None and self._context.work_root.exists():
+                import shutil
+                shutil.rmtree(self._context.work_root)
+            self._context = None
             self._question_date = None
 
     def variant_id(self) -> str:

@@ -174,6 +174,33 @@ refused while final absence remains unproved.
 - **THEN** the programme-owned runner calls the transport cleanup, records its
   result, and refuses terminal validity unless final absence is proven
 
+### Requirement: Direct Provider Lifecycle Is Independently Observable
+Direct-provider registration SHALL expose an inert immutable specification with
+a factory, static descriptor, namespace derivation, and runner-owned runtime
+binding. The runner SHALL distinguish requested provider from observed variant,
+bind the latter only after setup, and refuse drift. Each constructed provider
+instance SHALL receive an immutable run/session/namespace/work/evidence
+context and SHALL have exactly one cleanup-owning outer lifecycle.
+
+Cleanup observations SHALL be self-identifying raw facts only, written under
+the session evidence root and independently reopened, digest-checked, and
+re-observed by the runner. Provider-returned cleanup claims SHALL not establish
+absence. A direct trace SHALL use self-versioned case-trace v2 records; its
+cleanup record binds only session identity and the contained observation
+reference. VALID and READINESS_UNVERIFIABLE terminalization and later artifact
+loading SHALL require exactly one validated cleanup record and observation for
+each factory-returned instance, with no downgrade, duplicate, or orphan.
+
+#### Scenario: One live session cannot establish cross-case isolation
+- **WHEN** a direct run contains one scored case
+- **THEN** it records typed `not-applicable-no-prior-case` and terminalizes
+  READINESS_UNVERIFIABLE or INVALID rather than VALID
+
+#### Scenario: Cleanup artifact disagreement invalidates
+- **WHEN** a cleanup observation is missing, unsafe, changed, duplicated,
+  unobservable, or disagrees with independent re-observation
+- **THEN** absence is unproved and the run terminalizes INVALID
+
 ### Requirement: MemoryBench Export And Cleanup Wires Are Strict
 The programme-owned MemoryBench runner SHALL emit a strict
 `memorybench-export.v1.json` projection and a strict `guest-cleanup.v1.json`

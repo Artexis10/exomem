@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from membench.adapters.base import Profile
 from protocol.models import CaseHandle, LaneReadiness, ProtocolEvent
 
-from .base import ProviderHit, require_neutral
+from .base import ProviderHit, ProviderSessionContext, RetrievalPurpose, require_neutral
 
 
 class NullDirectProvider:
@@ -18,15 +18,15 @@ class NullDirectProvider:
     #: still lets a cross-case or never-ingested hit contaminate the run.
     retains_nothing = True
 
-    def setup(self, profile: Profile | None) -> None:
-        del profile
+    def setup(self, profile: Profile | None, context: ProviderSessionContext) -> None:
+        del profile, context
 
     def ingest_case(self, events: Sequence[ProtocolEvent], handle: CaseHandle) -> tuple[()]:
         require_neutral(events, handle)
         return ()
 
-    def retrieve(self, question_text: str, top_k: int) -> list[ProviderHit]:
-        del question_text, top_k
+    def retrieve(self, question_text: str, top_k: int, purpose: RetrievalPurpose) -> list[ProviderHit]:
+        del question_text, top_k, purpose
         return []
 
     def export_state(self) -> tuple[()]:

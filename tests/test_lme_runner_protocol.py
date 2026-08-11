@@ -44,11 +44,31 @@ def _manifest(run_dir: Path) -> dict:
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, factory) -> None:
-    """Replace the closed registry lookup for the duration of one test."""
+    """Replace only the factory in the direct provider specification."""
 
     from lme.providers import registry
+    from lme.providers.base import ProviderSpec
 
-    monkeypatch.setattr(registry, "provider_factory", lambda name: factory)
+    original = registry.provider_spec
+
+    def replacement(name: str) -> ProviderSpec:
+        spec = original(name)
+        return ProviderSpec(
+            factory=factory,
+            descriptor=spec.descriptor,
+            namespace_kind=spec.namespace_kind,
+            derive_namespace=spec.derive_namespace,
+            runtime_binding=spec.runtime_binding,
+        )
+
+    monkeypatch.setattr(registry, "provider_spec", replacement)
+
+
+def test_legacy_provider_factory_is_a_compatible_inert_spec_accessor() -> None:
+    from lme.providers.registry import provider_factory, provider_spec
+
+    factory = provider_factory("hybrid-rag-control")
+    assert factory is provider_spec("hybrid-rag-control").factory
 
 
 def _strict_validate(run_dir: Path) -> tuple[int, str]:
@@ -156,7 +176,9 @@ def test_traces_carry_per_session_ingest_search_answer_and_cleanup_records(clean
     kinds = [record.record for record in records]
     assert kinds.count("ingest") == len(question.sessions) + 1, "one record per session plus the canary session"
     assert {"search", "timing", "answer", "cleanup"} <= set(kinds)
-    assert [record for record in records if record.record == "cleanup"][0].verified is True
+    cleanup = [record for record in records if record.record == "cleanup"][0]
+    assert cleanup.observation_path.startswith("evidence/")
+    assert len(cleanup.observation_sha256) == 64
     ingests = [record for record in records if record.record == "ingest"]
     assert [record.session_ordinal for record in ingests] == sorted(record.session_ordinal for record in ingests)
     events = neutralize(question, identity)
@@ -285,10 +307,10 @@ def test_a_provider_whose_retrieve_raises_never_finalises_valid(
             self._case_id = handle.case_id
             return super().ingest_case(events, handle)
 
-        def retrieve(self, question_text, top_k):
+        def retrieve(self, question_text, top_k, purpose):
             if not self._case_id.startswith("__probe__"):
                 raise RuntimeError("provider retrieval exploded")
-            return super().retrieve(question_text, top_k)
+            return super().retrieve(question_text, top_k, purpose)
 
     _install(monkeypatch, _Crashing)
     with pytest.raises(LmeRunInvalid, match="provider failure"):
@@ -306,27 +328,24 @@ def test_a_poisoned_cross_case_canary_invalidates_the_run_and_strict_validate_re
     """Acceptance demo (b): a real cross-case leak, refused end to end."""
 
     from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
+    from lme.providers.base import ProviderHit, RetrievalPurpose
     from lme.runner import LmeRunInvalid
-    from protocol.canary import canary_for
-
     run_id = "poisoned-demo"
 
     class _CrossCaseLeak(HybridRagDirectProvider):
+        shared_tokens: list[str] = []
+
         def ingest_case(self, events, handle):
             inserted = super().ingest_case(events, handle)
-            if handle.case_id.startswith("__probe__"):
-                return inserted
-            token = canary_for(run_id, handle.case_id + "-other", "cross_case")
-            content = f"Neighbouring case material crossed the namespace boundary. Token: {token}."
-            leak = events[0].model_copy(
-                update={
-                    "content": content,
-                    "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
-                    "session_ordinal": max(event.session_ordinal for event in events) + 1,
-                    "ingestion_ordinal": max(event.ingestion_ordinal for event in events) + 1,
-                }
-            )
-            return inserted + super().ingest_case([leak], handle)
+            token = next((event.content.rsplit(": ", 1)[-1].rstrip(".") for event in events if "canary-presence-" in event.content), None)
+            if token is not None:
+                self.shared_tokens.append(token)
+            return inserted
+
+        def retrieve(self, question_text, top_k, purpose):
+            if purpose is RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY and question_text in self.shared_tokens:
+                return [ProviderHit(hit_id="leak", text=question_text, score=1.0)]
+            return super().retrieve(question_text, top_k, purpose)
 
     _install(monkeypatch, _CrossCaseLeak)
     with pytest.raises(LmeRunInvalid, match="contaminat"):
@@ -394,10 +413,10 @@ def test_a_failed_semantic_probe_invalidates_a_run_that_requested_semantics(
     from lme.runner import LmeRunInvalid
 
     class _SemanticBlind(HybridRagDirectProvider):
-        def retrieve(self, question_text, top_k):
-            if question_text.startswith("Retrieve the meaning-preserving"):
+        def retrieve(self, question_text, top_k, purpose):
+            if question_text == "Which blue ceramic atlas was relocated to the seaside repository?":
                 return []
-            return super().retrieve(question_text, top_k)
+            return super().retrieve(question_text, top_k, purpose)
 
     _install(monkeypatch, _SemanticBlind)
     with pytest.raises(LmeRunInvalid, match="semantic known-answer readiness probe failed"):
@@ -468,24 +487,24 @@ class _FixtureAdapter:
         return [render_session(session) for session in question.sessions]
 
 
-def _poisoning_provider(run_id: str):
+def _poisoning_provider(_run_id: str):
     from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
-    from protocol.canary import canary_for
+    from lme.providers.base import ProviderHit, RetrievalPurpose
 
     class _CrossCaseLeak(HybridRagDirectProvider):
+        shared_tokens: list[str] = []
+
         def ingest_case(self, events, handle):
             inserted = super().ingest_case(events, handle)
-            if handle.case_id.startswith("__probe__"):
-                return inserted
-            token = canary_for(run_id, handle.case_id + "-other", "cross_case")
-            content = f"Neighbouring case material crossed the namespace boundary. Token: {token}."
-            leak = events[0].model_copy(update={
-                "content": content,
-                "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
-                "session_ordinal": max(event.session_ordinal for event in events) + 1,
-                "ingestion_ordinal": max(event.ingestion_ordinal for event in events) + 1,
-            })
-            return inserted + super().ingest_case([leak], handle)
+            token = next((event.content.rsplit(": ", 1)[-1].rstrip(".") for event in events if "canary-presence-" in event.content), None)
+            if token is not None:
+                self.shared_tokens.append(token)
+            return inserted
+
+        def retrieve(self, question_text, top_k, purpose):
+            if purpose is RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY and question_text in self.shared_tokens:
+                return [ProviderHit(hit_id="leak", text=question_text, score=1.0)]
+            return super().retrieve(question_text, top_k, purpose)
 
     return _CrossCaseLeak
 
@@ -572,17 +591,17 @@ def test_leakage_invalidated_cases_is_a_real_per_case_count(
         _execute(tmp_path, run_id)
     poisoned = _manifest(tmp_path / run_id)["leakage"]
     assert poisoned["scanned_cases"] == CASE_COUNT
-    assert poisoned["invalidated_cases"] == CASE_COUNT, "every contaminated case must be counted"
+    assert poisoned["invalidated_cases"] == CASE_COUNT - 1, "every probe-observable contaminated case must be counted"
 
     class _Crashing(HybridRagDirectProvider):
         def ingest_case(self, events, handle):
             self._case_id = handle.case_id
             return super().ingest_case(events, handle)
 
-        def retrieve(self, question_text, top_k):
+        def retrieve(self, question_text, top_k, purpose):
             if not self._case_id.startswith("__probe__"):
                 raise RuntimeError("provider retrieval exploded")
-            return super().retrieve(question_text, top_k)
+            return super().retrieve(question_text, top_k, purpose)
 
     _install(monkeypatch, _Crashing)
     with pytest.raises(LmeRunInvalid):

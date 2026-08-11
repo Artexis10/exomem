@@ -62,16 +62,31 @@ def test_committed_lme_selection_validates_against_its_closed_schema() -> None:
     assert len(payload["target_question_ids"]) == 25
 
 
-def test_every_trace_record_validates_against_the_case_trace_schema(emitted) -> None:
-    validator = _validator("case-trace")
+def test_lifecycle_enabled_direct_traces_validate_against_case_trace_v2(emitted) -> None:
+    validator = _validator("case-trace", 2)
     traces = sorted((emitted["run"] / "traces").glob("*.jsonl"))
     assert traces, "no traces were written"
     for trace in traces:
         entries = _rows(trace)
         assert entries
         validator.validate({
-            "protocol_version": "1.0.0", "schema_version": 1, "case_id": trace.stem, "entries": entries,
+            "protocol_version": "1.0.0", "schema_version": 2, "case_id": trace.stem, "entries": entries,
         })
+
+
+def test_standalone_v1_traces_remain_accepted_but_mixed_versions_are_refused(tmp_path: Path) -> None:
+    from protocol.trace import CaseTraceReader, CaseTraceWriter, TraceError
+
+    CaseTraceWriter(tmp_path, "legacy").append({"record": "timing", "phase": "legacy", "ms": 1})
+    assert _validator("case-trace").is_valid({
+        "protocol_version": "1.0.0", "schema_version": 1, "case_id": "legacy",
+        "entries": [{"record": "timing", "phase": "legacy", "ms": 1}],
+    })
+    with pytest.raises(TraceError, match="mixed"):
+        CaseTraceWriter(tmp_path, "legacy", schema_version=2).append({
+            "record": "timing", "phase": "new", "ms": 1,
+        })
+    assert [record.record for record in CaseTraceReader(tmp_path, "legacy")] == ["timing"]
 
 
 def test_every_probe_result_validates_against_its_committed_schema(emitted) -> None:

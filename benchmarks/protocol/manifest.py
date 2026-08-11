@@ -44,6 +44,8 @@ def start_manifest(
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raise ManifestError("manifest already exists")
+    if "requested_provider" in (pins or {}):
+        raise ManifestError("pins are selection-only; requested provider belongs in lme metadata")
     manifest = RunManifest(
         run_id=run_id, dataset=dataset, status="started", started_at=started_at,
         namespaces=namespaces or {}, pins=pins or {}, readiness=readiness or [],
@@ -68,6 +70,8 @@ def finalize_manifest(
     if not path.exists():
         raise ManifestError("manifest must be started before finalization")
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if status in {"VALID", "READINESS_UNVERIFIABLE"}:
+        _validate_lifecycle_artifacts(Path(run_dir))
     raw["status"] = status
     raw["finalized_at"] = finalized_at
     # Always written, so a re-finalization can never leave a stale reason
@@ -138,4 +142,33 @@ def load_manifest(run_dir: Path | str) -> RunManifest:
         raise ManifestError(f"pre-registration identity refused: {exc}") from exc
     if not is_terminal(manifest.status):
         raise ManifestError("non-terminal manifest cannot be used for reports")
+    if manifest.status in {"VALID", "READINESS_UNVERIFIABLE"}:
+        _validate_lifecycle_artifacts(Path(run_dir))
     return manifest
+
+
+def _validate_lifecycle_artifacts(run_dir: Path) -> None:
+    environment_path = run_dir / "environment.json"
+    if not environment_path.exists():
+        return
+    try:
+        environment = json.loads(environment_path.read_text(encoding="utf-8"))
+        expected_instances = environment.get("lme", {}).get("lifecycle_expected_instances", [])
+    except (OSError, json.JSONDecodeError, AttributeError) as exc:
+        raise ManifestError("lifecycle environment metadata is unavailable") from exc
+    if not expected_instances:
+        return
+    try:
+        from lme.providers.lifecycle import LifecycleCompletenessError, validate_lifecycle_completeness
+
+        validate_lifecycle_completeness(
+            expected_instances=tuple(
+                (item["session_id"], item["namespace"], item["provider_variant"])
+                for item in expected_instances
+            ),
+            cleanup_records=None,
+            evidence_root=run_dir / "evidence",
+            run_dir=run_dir,
+        )
+    except (LifecycleCompletenessError, OSError, ValueError, KeyError) as exc:
+        raise ManifestError(f"lifecycle evidence is incomplete: {exc}") from exc

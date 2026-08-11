@@ -41,3 +41,16 @@ def test_memorybench_contract_schemas_are_committed(tmp_path: Path) -> None:
     } == expected
     committed = {path.name for path in Path("benchmarks/protocol/schema").glob("*.schema.json")}
     assert expected <= committed
+
+
+def test_direct_provider_lifecycle_schemas_are_exactly_committed(tmp_path: Path) -> None:
+    from protocol.models import export_json_schemas
+
+    fresh = {path.name for path in export_json_schemas(tmp_path)}
+    expected = {
+        "case-trace.v2.schema.json",
+        "provider-cleanup-observation.v1.schema.json",
+    }
+    assert expected <= fresh
+    committed = {path.name for path in Path("benchmarks/protocol/schema").glob("*.schema.json")}
+    assert expected <= committed
