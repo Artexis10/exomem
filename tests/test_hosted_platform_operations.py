@@ -213,6 +213,12 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     release_job = parsed["jobs"]["release-proof"]
     assert release_job["needs"] == "static"
     assert "inputs.release_proof" in release_job["if"]
+    release_checkout = next(
+        step
+        for step in release_job["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    assert release_checkout.get("with") == {"fetch-depth": 0}
     release_uv_steps = [
         step
         for step in release_job["steps"]
