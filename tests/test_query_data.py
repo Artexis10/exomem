@@ -186,6 +186,26 @@ def test_json_top_level_array(vault: Path) -> None:
     assert r.rows[0]["value"] == 77
 
 
+def test_uuid_filters_use_exact_string_comparison(vault: Path) -> None:
+    first_id = "00000000-0000-0000-0000-000000000001"
+    second_id = "00000000-0000-0000-0000-0000000003e8"
+    rel = _write(
+        vault,
+        "Knowledge Base/Evidence/Test/ids.json",
+        json.dumps([{"id": first_id}, {"id": second_id}]),
+    )
+
+    equal = qd.query_data(
+        vault, path=rel, filters=[{"column": "id", "op": "eq", "value": second_id}]
+    )
+    unequal = qd.query_data(
+        vault, path=rel, filters=[{"column": "id", "op": "ne", "value": second_id}]
+    )
+
+    assert equal.rows == [{"id": second_id}]
+    assert unequal.rows == [{"id": first_id}]
+
+
 def test_json_nested_record_path_and_dotted_column(vault: Path) -> None:
     data = {
         "sections": {

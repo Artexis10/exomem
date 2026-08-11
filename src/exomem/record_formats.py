@@ -1009,6 +1009,24 @@ def inspect_collection(
     )
 
 
+def _source_versions_for_returned_rows(
+    parsed: AdapterSnapshot,
+    manifest: collections.CollectionManifest,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    item_id_property: str,
+) -> tuple[collections.SourceVersion, ...]:
+    returned_item_ids = {str(row.get(item_id_property)) for row in rows}
+    returned_source_paths = {
+        record.source.path for record in parsed.records if record.identity.key in returned_item_ids
+    }
+    return tuple(
+        version
+        for version in parsed.source_versions
+        if version.path == manifest.path or version.path in returned_source_paths
+    )
+
+
 def query_collection(
     vault_root: Path,
     manifest: collections.CollectionManifest,
@@ -1149,16 +1167,11 @@ def query_collection(
         aggregate=result.aggregate,
         query=query,
         source_versions=(
-            tuple(
-                version
-                for version in parsed.source_versions
-                if version.path == manifest.path
-                or version.path
-                in {
-                    record.source.path
-                    for record in parsed.records
-                    if record.identity.key in {str(row.get(profile.item_id_property)) for row in result.rows}
-                }
+            _source_versions_for_returned_rows(
+                parsed,
+                manifest,
+                result.rows,
+                item_id_property=profile.item_id_property,
             )
             if source_versions_for_rows
             else (
