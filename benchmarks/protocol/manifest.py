@@ -70,8 +70,8 @@ def finalize_manifest(
     if not path.exists():
         raise ManifestError("manifest must be started before finalization")
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if status in {"VALID", "READINESS_UNVERIFIABLE"}:
-        _validate_lifecycle_artifacts(Path(run_dir))
+    if status in {"VALID", "READINESS_UNVERIFIABLE"} and raw.get("provider_variant") is not None:
+        _validate_lifecycle_artifacts(Path(run_dir), required=True)
     raw["status"] = status
     raw["finalized_at"] = finalized_at
     # Always written, so a re-finalization can never leave a stale reason
@@ -142,22 +142,24 @@ def load_manifest(run_dir: Path | str) -> RunManifest:
         raise ManifestError(f"pre-registration identity refused: {exc}") from exc
     if not is_terminal(manifest.status):
         raise ManifestError("non-terminal manifest cannot be used for reports")
-    if manifest.status in {"VALID", "READINESS_UNVERIFIABLE"}:
-        _validate_lifecycle_artifacts(Path(run_dir))
+    if manifest.status in {"VALID", "READINESS_UNVERIFIABLE"} and manifest.provider_variant is not None:
+        _validate_lifecycle_artifacts(Path(run_dir), required=True)
     return manifest
 
 
-def _validate_lifecycle_artifacts(run_dir: Path) -> None:
+def _validate_lifecycle_artifacts(run_dir: Path, *, required: bool = False) -> None:
     environment_path = run_dir / "environment.json"
-    if not environment_path.exists():
+    if not environment_path.exists() and not required:
         return
     try:
         environment = json.loads(environment_path.read_text(encoding="utf-8"))
         expected_instances = environment.get("lme", {}).get("lifecycle_expected_instances", [])
     except (OSError, json.JSONDecodeError, AttributeError) as exc:
         raise ManifestError("lifecycle environment metadata is unavailable") from exc
-    if not expected_instances:
+    if not expected_instances and not required:
         return
+    if not expected_instances:
+        raise ManifestError("lifecycle expected instances are unavailable")
     try:
         from lme.providers.lifecycle import LifecycleCompletenessError, validate_lifecycle_completeness
 

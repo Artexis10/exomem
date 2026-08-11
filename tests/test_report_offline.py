@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 from pathlib import Path
 from unittest import mock
@@ -99,10 +100,8 @@ def test_the_false_green_manifest_shape_renders_invalid(tmp_path: Path) -> None:
     manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
     manifest["contamination"] = "contaminated"
     (false_green / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    rendered = render_run_report(false_green, offline=True)
-    assert "INVALID" in rendered
-    assert "contamination=contaminated" in rendered
-    assert "invalid environment" in rendered
+    with pytest.raises(ValueError, match="lifecycle|environment|cleanup|trace"):
+        render_run_report(false_green, offline=True)
 
 
 def test_a_readiness_unverifiable_manifest_renders_its_own_status(tmp_path: Path) -> None:
@@ -110,12 +109,7 @@ def test_a_readiness_unverifiable_manifest_renders_its_own_status(tmp_path: Path
 
     result = _run(tmp_path, "unverifiable-source")
     target = tmp_path / "unverifiable"
-    target.mkdir()
-    for name in ("dataset.json", "hypotheses.jsonl", "failures.jsonl"):
-        (target / name).write_bytes((result.run_dir / name).read_bytes())
-    (target / "bounds").mkdir()
-    for name in ("gold-evidence-ceiling.jsonl", "null-abstain-floor.jsonl"):
-        (target / "bounds" / name).write_bytes((result.run_dir / "bounds" / name).read_bytes())
+    shutil.copytree(result.run_dir, target)
     manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
     manifest["status"] = "READINESS_UNVERIFIABLE"
     (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

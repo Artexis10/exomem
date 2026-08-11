@@ -365,7 +365,7 @@ def test_a_poisoned_cross_case_canary_invalidates_the_run_and_strict_validate_re
     (false_green / "manifest.json").write_text(json.dumps(poisoned), encoding="utf-8")
     code, output = _strict_validate(false_green)
     assert code == 2
-    assert "contaminated" in output
+    assert "lifecycle" in output or "environment" in output
 
 
 @pytest.mark.parametrize(
@@ -411,10 +411,13 @@ def test_a_failed_semantic_probe_invalidates_a_run_that_requested_semantics(
 
     from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
     from lme.runner import LmeRunInvalid
+    from protocol.probes import known_answer_probe_specs
+
+    semantic_query = next(spec.query for spec in known_answer_probe_specs() if spec.kind == "semantic-zero-overlap")
 
     class _SemanticBlind(HybridRagDirectProvider):
         def retrieve(self, question_text, top_k, purpose):
-            if question_text == "Which blue ceramic atlas was relocated to the seaside repository?":
+            if question_text == semantic_query:
                 return []
             return super().retrieve(question_text, top_k, purpose)
 

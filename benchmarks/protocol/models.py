@@ -281,6 +281,7 @@ class CleanupRecordV2(StrictModel):
     run_id: str
     session_id: str
     namespace: str
+    requested_provider: str | None = None
     observation_path: str
     observation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -1336,6 +1337,9 @@ def _enhance_memorybench_schema(name: str, schema: dict[str, Any]) -> dict[str, 
         definitions["ProviderCleanupNamespaceMembership"]["properties"]["live_namespaces"]["uniqueItems"] = True
         definitions["ProviderCleanupProviderState"]["properties"]["remaining_record_ids"]["uniqueItems"] = True
         definitions["ProviderCleanupPathLstat"]["properties"]["entries"]["uniqueItems"] = True
+        definitions["ProviderCleanupPathLstat"]["properties"]["path"]["pattern"] = r"^(?!/)(?!.*[\\\\])(?!.*//)(?!\\.?\.?$)(?!.*(?:^|/)\.{1,2}(?:/|$)).+$"
+    elif name == "case-trace-v2":
+        schema["$defs"]["CleanupRecordV2"]["properties"]["observation_path"]["pattern"] = r"^(?!/)(?!.*[\\\\])(?!.*//)(?!\\.?\.?$)(?!.*(?:^|/)\.{1,2}(?:/|$)).+$"
     return schema
 
 

@@ -22,8 +22,8 @@ def known_answer_probe_specs() -> tuple[ProbeSpec, ...]:
     outcomes = ("pass", "fail", "inconclusive-by-design")
     return (
         ProbeSpec("lexical-rare-token", "Retrieve the unique rare token exactly.", outcomes, fact="The rare orchard marker identifies the record.", query="Retrieve the rare marker."),
-        ProbeSpec("semantic-zero-overlap", "Which blue ceramic atlas was relocated to the seaside repository?", outcomes, fact="The blue ceramic atlas was relocated to the seaside repository.", query="Which blue ceramic atlas was relocated to the seaside repository?"),
-        ProbeSpec("update-current-state", "Return only the current revision after an update.", outcomes, fact="The current opaque revision supersedes the old opaque revision.", query="Return the current opaque revision.", old_marker="revision-old-opaque", current_marker="revision-current-opaque"),
+        ProbeSpec("semantic-zero-overlap", "Where was azure atlas relocated?", outcomes, fact="The cobaltic cartographer moved the porcelain codex to the littoral archive.", query="Where was azure atlas relocated?"),
+        ProbeSpec("update-current-state", "Return only the current revision after an update.", outcomes, fact="revision-old-opaque revision-current-opaque", query="revision-current-opaque", old_marker="revision-old-opaque", current_marker="revision-current-opaque"),
     )
 
 

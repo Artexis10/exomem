@@ -107,12 +107,52 @@ def observe_cleanup(
 
 def _atomic_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    with temporary.open("xb") as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_fd = os.open(path.parent, flags)
+    except OSError as exc:
+        raise CleanupUnproved(f"cleanup evidence root is unavailable: {exc}") from exc
+    temporary = f".{path.name}.tmp"
+    try:
+        with os.scandir(root_fd) as entries:
+            if any(entry.is_symlink() for entry in entries):
+                raise CleanupUnproved("cleanup evidence root contains a symlink")
+        try:
+            os.stat(path.name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise CleanupUnproved("cleanup evidence target already exists")
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=root_fd,
+            )
+        except OSError as exc:
+            raise CleanupUnproved(f"cleanup evidence temporary cannot be opened: {exc}") from exc
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.replace(temporary, path.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            final = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+        except OSError as exc:
+            raise CleanupUnproved(f"cleanup evidence final cannot be opened: {exc}") from exc
+        with os.fdopen(final, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise CleanupUnproved("cleanup evidence is not a regular file")
+            if handle.read() != content:
+                raise CleanupUnproved("cleanup evidence changed during persistence")
+        os.fsync(root_fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=root_fd)
+        except FileNotFoundError:
+            pass
+        os.close(root_fd)
 
 
 def _safe_regular_path(path: Path, evidence_root: Path | None = None) -> None:
@@ -178,13 +218,19 @@ def run_provider_lifecycle(
         getattr(provider, "setup")(profile, context)
         observed_variant = bind_observed_variant(context, provider)
         result = operation(provider)
+        bind_observed_variant(context, provider)
     except BaseException as exc:
         primary = exc
     finally:
         try:
             getattr(provider, "cleanup")()
+            if observed_variant is not None:
+                bind_observed_variant(context, provider)
         except BaseException as exc:
-            secondary.append(str(exc))
+            if primary is None and not isinstance(exc, Exception):
+                primary = exc
+            else:
+                secondary.append(str(exc))
         try:
             observation = observe_cleanup(
                 context=context, requested_provider=requested_provider, observed_variant=observed_variant,
@@ -192,7 +238,10 @@ def run_provider_lifecycle(
             )
             observation_path, observation_digest = _persist_observation(context, observation)
         except BaseException as exc:
-            secondary.append(str(exc))
+            if primary is None and not isinstance(exc, Exception):
+                primary = exc
+            else:
+                secondary.append(str(exc))
     if primary is not None:
         if not isinstance(primary, Exception):
             for note in secondary:
@@ -242,10 +291,13 @@ def validate_lifecycle_completeness(
         raise LifecycleCompletenessError("cleanup records are unavailable")
     seen: set[tuple[str, str, str]] = set()
     expected = set(expected_instances)
+    referenced: set[Path] = set()
     for record in records:
         path_value = record.get("observation_path")
         digest = record.get("observation_sha256")
-        if not isinstance(path_value, str) or not isinstance(digest, str):
+        trace_run_id = record.get("run_id")
+        trace_requested_provider = record.get("requested_provider")
+        if not all(isinstance(value, str) and value for value in (path_value, digest)):
             raise LifecycleCompletenessError("cleanup record lacks bound observation reference")
         if path_value.startswith("/") or "\\" in path_value or any(part in {"", ".", ".."} for part in path_value.split("/")):
             raise LifecycleCompletenessError("cleanup observation path is unsafe")
@@ -255,6 +307,16 @@ def validate_lifecycle_completeness(
             observation = ProviderCleanupObservation.model_validate_json(payload)
         except Exception as exc:
             raise LifecycleCompletenessError(str(exc)) from exc
+        if not observation.cleanup_called or not _absence([item.model_dump(mode="json") for item in observation.observations]):
+            raise LifecycleCompletenessError("cleanup observation does not prove absence")
+        if not all(isinstance(value, str) and value for value in (trace_run_id, trace_requested_provider)):
+            raise LifecycleCompletenessError("cleanup record lacks bound observation reference")
+        if observation.required_surface_ids != sorted(set(observation.required_surface_ids)) or not observation.required_surface_ids:
+            raise LifecycleCompletenessError("cleanup observation required surfaces are invalid")
+        if trace_run_id != observation.run_id:
+            raise LifecycleCompletenessError("cleanup observation run binding disagrees with trace")
+        if trace_requested_provider != observation.requested_provider:
+            raise LifecycleCompletenessError("cleanup observation requested-provider binding disagrees with trace")
         trace_variant = record.get("provider_variant")
         if trace_variant is not None and trace_variant != observation.provider_variant:
             raise LifecycleCompletenessError("cleanup observation binding disagrees with trace")
@@ -264,7 +326,15 @@ def validate_lifecycle_completeness(
         if key in seen:
             raise LifecycleCompletenessError("duplicate lifecycle cleanup record")
         seen.add(key)
+        referenced.add(path.resolve())
         if (observation.session_id, observation.namespace, observation.provider_variant) != key:
             raise LifecycleCompletenessError("cleanup observation binding disagrees with trace")
     if seen != expected:
         raise LifecycleCompletenessError("missing lifecycle cleanup record")
+    for candidate in evidence_root.rglob("*.json"):
+        try:
+            candidate_observation = ProviderCleanupObservation.model_validate_json(candidate.read_bytes())
+        except Exception:
+            continue
+        if candidate_observation.artifact_type == "provider-cleanup-observation.v1" and candidate.resolve() not in referenced:
+            raise LifecycleCompletenessError("orphan lifecycle cleanup observation")

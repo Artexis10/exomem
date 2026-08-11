@@ -63,6 +63,7 @@
           "type": "string"
         },
         "observation_path": {
+          "pattern": "^(?!/)(?!.*[\\\\\\\\])(?!.*//)(?!\\\\.?\\.?$)(?!.*(?:^|/)\\.{1,2}(?:/|$)).+$",
           "title": "Observation Path",
           "type": "string"
         },
@@ -81,6 +82,18 @@
           "default": "cleanup",
           "title": "Record",
           "type": "string"
+        },
+        "requested_provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requested Provider"
         },
         "run_id": {
           "title": "Run Id",

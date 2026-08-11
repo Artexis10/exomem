@@ -61,6 +61,7 @@ class ExomemDirectProvider:
                 shutil.rmtree(self._context.work_root)
             self._context = None
             self._question_date = None
+            self._adapter.last_ingest_results = ()
 
     def variant_id(self) -> str:
         return "exomem-source-only"

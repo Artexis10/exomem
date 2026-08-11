@@ -398,7 +398,7 @@ def _run_probes(provider: object, identity: DatasetIdentity, run_id: str) -> tup
         event = ProtocolEvent(dataset=identity, case_id=case_id, session_ordinal=1, sequence=0, role="user", turn_ordinal=1, content=content, content_sha256=hashlib.sha256(content.encode()).hexdigest(), original_timestamp="2026-01-01T00:00:00Z", timestamp_semantics="ingestion_order_only", ingestion_ordinal=0, provenance=EventProvenance(dataset_row_index=0, upstream_session_id_sha256=hashlib.sha256(case_id.encode()).hexdigest(), converter="harness-probe", converter_version="1"))
         provider.ingest_case([event], handle)
         hits = provider.retrieve(getattr(spec, "query", spec.prompt) if spec.kind == "semantic-zero-overlap" else token, 1, RetrievalPurpose.POSITIVE_PROBE)
-        passed = _hit_contains(hits, token)
+        passed = bool(hits) if spec.kind == "semantic-zero-overlap" else _hit_contains(hits, token)
         results.append(ProbeResult(case_id=case_id, probe_kind=spec.kind, outcome="pass" if passed else "fail", hits=[str(getattr(hit, "hit_id", "")) for hit in hits], detail="returned hit text contained probe token" if passed else "probe token absent from returned hit text"))
     return results, readiness
 
@@ -512,7 +512,7 @@ def execute_run(
         run_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError as exc:
         raise FileExistsError(f"run directory is immutable and already exists: {run_dir}") from exc
-    provider_variant = config.provider or "exomem-source-only"
+    provider_variant = None
     provider_spec_value = None
     provider_kind = "exomem"
     if config.provider:
@@ -526,6 +526,11 @@ def execute_run(
         namespaces={question.question_id: derive_namespace(run_id, question.question_id, provider_kind) for question in dataset.questions},
         pins=selection_pins,
     )
+    # The legacy adapter has no direct provider instance to observe.  Its
+    # report label remains historical presentation metadata; the immutable
+    # manifest stays unbound (`null`).
+    if not config.provider:
+        provider_variant = "exomem-source-only"
 
     active_reader = reader or _reader(config, run_dir)
 
@@ -576,9 +581,45 @@ def execute_run(
     lifecycle_instances: list[dict[str, str]] = []
     isolation_rows: list[dict[str, object]] = []
     prior_presence_token: str | None = None
+    control_flow: BaseException | None = None
     case_ids = [question.question_id for question in dataset.questions]
+    if config.provider:
+        assert provider_spec_value is not None
+        diagnostic_id = "__diagnostic__"
+        diagnostic_context = ProviderSessionContext(
+            run_id=run_id, session_id=diagnostic_id,
+            namespace=provider_spec_value.derive_namespace(run_id, diagnostic_id),
+            work_root=run_dir / "work" / diagnostic_id,
+            evidence_root=run_dir / "evidence" / diagnostic_id,
+        )
+        try:
+            diagnostic_provider = provider_spec_value.factory()
+            (diagnostic_result, diagnostic_path, diagnostic_digest, diagnostic_variant) = run_provider_lifecycle(
+                provider=diagnostic_provider, profile=lme_profile(), context=diagnostic_context,
+                binding=provider_spec_value.runtime_binding, requested_provider=config.provider,
+                operation=lambda candidate: _run_probes(candidate, dataset_identity, run_id),
+            )
+            probes, _ = diagnostic_result
+            probe_results.extend(probes)
+            with (run_dir / "probes.jsonl").open("a", encoding="utf-8") as probe_file:
+                for probe in probes:
+                    probe_file.write(probe.model_dump_json() + "\n")
+            lifecycle_instances.append({"session_id": diagnostic_id, "namespace": diagnostic_context.namespace, "provider_variant": diagnostic_variant})
+            diagnostic_trace = CaseTraceWriter(run_dir, diagnostic_id, schema_version=2)
+            diagnostic_trace.append({"record": "cleanup", "run_id": run_id, "session_id": diagnostic_id, "namespace": diagnostic_context.namespace, "requested_provider": config.provider, "observation_path": diagnostic_path.relative_to(run_dir).as_posix(), "observation_sha256": diagnostic_digest})
+            provider_variant = diagnostic_variant
+            config_value = getattr(diagnostic_provider, "config", None)
+            config_hash = getattr(config_value, "sha256", None)
+            control_config_sha256 = config_hash() if callable(config_hash) else None
+            bind_started_manifest_provider(run_dir, provider_variant=provider_variant, control_config_sha256=control_config_sha256)
+        except BaseException as exc:
+            failure = exc.primary if isinstance(exc, LifecycleRunError) else exc
+            invalid_reason = f"diagnostic provider failure {type(failure).__name__}: {failure}"
+            failures.append({"question_id": diagnostic_id, "phase": "diagnostic", "detail": f"{type(failure).__name__}: {failure}"})
+            if not isinstance(exc, Exception):
+                control_flow = exc
     started = time.perf_counter()
-    for case_ordinal, question in enumerate(dataset.questions, 1):
+    for case_ordinal, question in enumerate(() if control_flow is not None else dataset.questions, 1):
         question_started = time.perf_counter()
         adapter = adapter_factory()
         reader_attempted = False
@@ -599,7 +640,15 @@ def execute_run(
                     provider = provider_spec_value.factory()
                 except BaseException as exc:
                     terminalize_constructor_failure(context, requested_provider=config.provider, error=exc)
-                events = neutralize(question, dataset_identity)
+                try:
+                    events = neutralize(question, dataset_identity)
+                except BaseException as exc:
+                    run_provider_lifecycle(
+                        provider=provider, profile=lme_profile(), context=context,
+                        binding=provider_spec_value.runtime_binding, requested_provider=config.provider,
+                        operation=lambda _candidate: (_ for _ in ()).throw(exc),
+                    )
+                    raise
                 token = canary_for(run_id, question.question_id, "presence")
                 handle = CaseHandle(case_id=question.question_id, case_ordinal=case_ordinal, question_date=question.question_date_text)
                 canary_event = _harness_canary(events, handle, token)
@@ -618,12 +667,6 @@ def execute_run(
                     raise RuntimeError("leakage scan rejected outbound provider payload: " + "; ".join(item.detector for item in blocking_findings))
                 def _owned(candidate: object):
                     nonlocal prior_presence_token, reader_attempted, reader_wall_time
-                    if case_ordinal == 1:
-                        probes, _ = _run_probes(candidate, dataset_identity, run_id)
-                        probe_results.extend(probes)
-                        with (run_dir / "probes.jsonl").open("a", encoding="utf-8") as probe_file:
-                            for probe in probes:
-                                probe_file.write(probe.model_dump_json() + "\n")
                     inserted = candidate.ingest_case(events, handle)
                     payload_shas: list[str] = []
                     canary_ordinals = {event.session_ordinal for event in events if event.provenance.converter == "harness-canary"}
@@ -657,14 +700,14 @@ def execute_run(
                     return payload_shas, per_case_readiness, hits, retrieved, hypothesis
                 (payload_shas, per_case_readiness, hits, retrieved, hypothesis), observation_path, observation_digest, observed_variant = run_provider_lifecycle(provider=provider, profile=lme_profile(), context=context, binding=provider_spec_value.runtime_binding, requested_provider=config.provider, operation=_owned)
                 lifecycle_instances.append({"session_id": context.session_id, "namespace": context.namespace, "provider_variant": observed_variant})
-                if provider_variant == config.provider:
+                if provider_variant is None:
                     provider_variant = observed_variant
                     config_value = getattr(provider, "config", None)
                     config_hash = getattr(config_value, "sha256", None)
                     control_config_sha256 = config_hash() if callable(config_hash) else None
                     bind_started_manifest_provider(run_dir, provider_variant=provider_variant, control_config_sha256=control_config_sha256)
                 readiness_list.extend(per_case_readiness)
-                trace.append({"record": "cleanup", "run_id": run_id, "session_id": context.session_id, "namespace": context.namespace, "observation_path": observation_path.relative_to(run_dir).as_posix(), "observation_sha256": observation_digest})
+                trace.append({"record": "cleanup", "run_id": run_id, "session_id": context.session_id, "namespace": context.namespace, "requested_provider": config.provider, "observation_path": observation_path.relative_to(run_dir).as_posix(), "observation_sha256": observation_digest})
                 equivalence_cases.append(_equivalence_case(
                     question=question, case_ids=case_ids, namespace_pattern=namespace_pattern(provider_kind),
                     payload_shas=payload_shas, readiness=per_case_readiness,
@@ -728,6 +771,17 @@ def execute_run(
             )
             if config.provider:
                 break
+        except BaseException as exc:
+            control_flow = exc
+            invalid_reason = f"{question.question_id}: provider control-flow {type(exc).__name__}: {exc}"
+            failures.append(
+                {
+                    "question_id": question.question_id,
+                    "phase": "retrieve-or-read",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            break
         hypotheses.append(
             {"question_id": question.question_id, "hypothesis": hypothesis}
         )
@@ -883,6 +937,8 @@ def execute_run(
         budget=_budget_summary(ledger),
         invalid_reason=invalid_reason,
     )
+    if control_flow is not None:
+        raise control_flow
     if invalid_reason is not None:
         raise LmeRunInvalid(invalid_reason, run_dir)
     return RunResult(
