@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import access, freshness, vault
 
-RECALL_POLICY_VERSION = "records-manifest-only-v1"
+RECALL_POLICY_VERSION = "structured-collection-manifest-only-v2"
 _MAX_MANIFEST_BYTES = 512 * 1024
 
 
@@ -161,10 +161,10 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
         # letting it bypass the exact Records boundary.
         if canonical_parts is None or canonical_parts != parts:
             return False
-    if _is_records_alias(parts):
+    if _is_structured_alias(parts):
         # Casefold/Unicode aliases are never ordinary pages: on a
         # case-insensitive filesystem they can reach the same Records bytes.
-        if not _is_records_descendant(parts):
+        if not _is_structured_descendant(parts):
             return False
         if len(parts) < 3 or parts[-1] != "_collection.md":
             return False
@@ -179,7 +179,7 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
             manifest = structured_collections.parse_manifest_bytes(root, rel, data)
         except (UnicodeError, ValueError, OSError, vault.PathGuardError):
             return False
-        return manifest.semantic_profile == "records"
+        return manifest.semantic_profile in {"records", "planning"}
     if not access.is_indexable(root, rel):
         return False
     return True
@@ -188,7 +188,7 @@ def is_recall_candidate(vault_root: Path, path: Path | str) -> bool:
 def is_structured_only_path(vault_root: Path, path: Path | str) -> bool:
     """True for an exact Records-layer descendant without opening it."""
     rel = _vault_relative(Path(vault_root), path)
-    return rel is not None and _is_records_alias(rel.split("/"))
+    return rel is not None and _is_structured_alias(rel.split("/"))
 
 
 def iter_recall_markdown(vault_root: Path, paths: Iterable[Path]) -> Iterator[Path]:
@@ -230,6 +230,18 @@ def _is_records_alias(parts: list[str]) -> bool:
         len(parts) >= 3
         and parts[0].casefold() == vault.kb_dirname().casefold()
         and parts[1].casefold() == "records"
+    )
+
+
+def _is_structured_descendant(parts: list[str]) -> bool:
+    return len(parts) >= 3 and parts[0] == vault.kb_dirname() and parts[1] in {"Records", "Planning"}
+
+
+def _is_structured_alias(parts: list[str]) -> bool:
+    return (
+        len(parts) >= 3
+        and parts[0].casefold() == vault.kb_dirname().casefold()
+        and parts[1].casefold() in {"records", "planning"}
     )
 
 

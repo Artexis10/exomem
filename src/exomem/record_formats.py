@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from . import memory_refs, query_data, vault
 from . import structured_collections as collections
+from .collection_profiles import profile_for
 
 _MARKER = re.compile(rb"<!--\s*exomem-record-id:\s*([0-9a-fA-F-]{36})\s*-->")
 _HEADING = re.compile(rb"^(#{1,6})\s+(.+?)\s*(?:\r?\n|$)")
@@ -40,6 +41,13 @@ _MAX_CHILD_FIELDS = 16
 _SYSTEM_FIELDS = frozenset(
     {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
+
+
+def _profile_system_fields(manifest: collections.CollectionManifest) -> frozenset[str]:
+    profile = profile_for(manifest.semantic_profile)
+    return frozenset(
+        {"collection_id", profile.item_id_property, "item_version", "inferred", "ambiguous", "parent_record_id"}
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,7 +171,7 @@ class _BaseAdapter:
     def _validate_values(
         self, values: dict[str, Any], *, allowed_fields: Iterable[str] = ()
     ) -> None:
-        if _SYSTEM_FIELDS.intersection(self.manifest.schema.fields):
+        if _profile_system_fields(self.manifest).intersection(self.manifest.schema.fields):
             raise collections.CollectionError(
                 "RESERVED_RECORD_FIELD", "schema uses a reserved record field"
             )
@@ -455,13 +463,15 @@ class MarkdownItemsAdapter(_BaseAdapter):
                 frontmatter, body, marker = vault.parse_frontmatter(text, strict=True)
             except vault.FrontmatterError as error:
                 raise collections.CollectionError(error.code, error.reason) from error
-            if marker is None or frontmatter.get("type") != "record":
+            profile = profile_for(self.manifest.semantic_profile)
+            if marker is None or frontmatter.get("type") != profile.item_type:
                 continue
             collection_id = memory_refs.normalize_id(str(frontmatter.get("collection_id", "")))
-            record_id = memory_refs.normalize_id(str(frontmatter.get("record_id", "")))
-            if collection_id != self.manifest.collection_id or record_id is None:
+            item_id = memory_refs.normalize_id(str(frontmatter.get(profile.item_id_property, "")))
+            if collection_id != self.manifest.collection_id or item_id is None:
                 raise collections.CollectionError(
-                    "INVALID_RECORD_ITEM", "record item identity is invalid"
+                    "INVALID_RECORD_ITEM" if profile.name == "records" else "INVALID_PLAN",
+                    "record item identity is invalid" if profile.name == "records" else "plan item identity is invalid",
                 )
             if frontmatter.get("schema_version") != self.manifest.schema.version:
                 raise collections.CollectionError(
@@ -470,10 +480,10 @@ class MarkdownItemsAdapter(_BaseAdapter):
             values = {
                 name: _json_value(value)
                 for name, value in frontmatter.items()
-                if name not in {"type", "collection_id", "record_id", "schema_version"}
+                if name not in {"type", "collection_id", profile.item_id_property, "schema_version"}
             }
             self._validate_values(values)
-            identity = collections.ItemIdentity(collection_id, record_id)
+            identity = collections.ItemIdentity(collection_id, item_id)
             values = self._project_values(values)
             records.append(
                 Record(
@@ -720,20 +730,27 @@ def render_markdown_item(
     audit_correlation: str | None = None,
 ) -> str:
     """Render a new ordinary record item from bounded structured values."""
+    profile = profile_for(manifest.semantic_profile)
     frontmatter: dict[str, Any] = {
-        "type": "record",
+        "type": profile.item_type,
         "collection_id": manifest.collection_id,
-        "record_id": collections.ItemIdentity(manifest.collection_id, item_key).key,
+        profile.item_id_property: collections.ItemIdentity(manifest.collection_id, item_key).key,
         "schema_version": manifest.schema.version,
     }
     frontmatter.update(values)
-    audit_line = f"# exomem-record-audit: {audit_correlation}\n" if audit_correlation else ""
+    audit_line = f"# {profile.item_audit_marker}: {audit_correlation}\n" if audit_correlation else ""
     text = "---\n" + vault.serialize_frontmatter(frontmatter) + "\n" + audit_line + "---\n"
     return text + ("\n" + body if body else "")
 
 
 def render_markdown_item_update(
-    source: str, changes: Mapping[str, Any], audit_correlation: str | None = None
+    source: str,
+    changes: Mapping[str, Any],
+    audit_correlation: str | None = None,
+    *,
+    semantic_profile: str = "records",
+    delete_fields: tuple[str, ...] = (),
+    body: str | None = None,
 ) -> str:
     """Replace complete top-level YAML nodes while retaining unrelated source bytes."""
     bom = "\ufeff" if source.startswith("\ufeff") else ""
@@ -763,6 +780,12 @@ def render_markdown_item_update(
             raise collections.CollectionError("DUPLICATE_FRONTMATTER_KEY", "item key is duplicated")
         spans[key_node.value] = (key_node.start_mark.index, value_node.end_mark.index)
     replacements: list[tuple[int, int, str]] = []
+    for name in delete_fields:
+        span = spans.get(name)
+        if span is None:
+            continue
+        end = yaml_text.find(newline, span[1])
+        replacements.append((span[0], len(yaml_text) if end == -1 else end + len(newline), ""))
     for name, value in changes.items():
         span = spans.get(name)
         rendered = vault.serialize_frontmatter({name: value}).replace("\n", newline)
@@ -773,12 +796,22 @@ def render_markdown_item_update(
     updated_yaml = yaml_text
     for start, end, rendered in sorted(replacements, reverse=True):
         updated_yaml = updated_yaml[:start] + rendered + updated_yaml[end:]
-    updated_yaml = re.sub(r"(?m)^# exomem-record-audit: [0-9a-f]{24}\r?\n?", "", updated_yaml)
-    audit_line = f"# exomem-record-audit: {audit_correlation}{newline}" if audit_correlation else ""
-    return bom + text[: opening.end()] + updated_yaml + audit_line + text[close_start:]
+    profile = profile_for(semantic_profile)
+    marker = re.escape(profile.item_audit_marker)
+    updated_yaml = re.sub(rf"(?m)^# {marker}: [0-9a-f]{{24}}\r?\n?", "", updated_yaml)
+    audit_line = (
+        f"# {profile.item_audit_marker}: {audit_correlation}{newline}"
+        if audit_correlation
+        else ""
+    )
+    close_end = close_start + len(closing.group(0))
+    suffix = text[close_end:] if body is None else newline + body
+    return bom + text[: opening.end()] + updated_yaml + audit_line + text[close_start:close_end] + suffix
 
 
-def render_manifest_audit_head(source: str, transition_id: str) -> str:
+def render_manifest_audit_head(
+    source: str, transition_id: str, *, semantic_profile: str = "records"
+) -> str:
     """Replace only the ordinary manifest audit state while retaining all other bytes."""
     if not re.fullmatch(r"[0-9a-f]{24}", transition_id):
         raise collections.CollectionError("INVALID_RECORD_AUDIT", "audit transition is invalid")
@@ -798,7 +831,8 @@ def render_manifest_audit_head(source: str, transition_id: str) -> str:
     start = opening.end()
     end = start + closing.start()
     frontmatter = text[start:end]
-    audit_node = collections._validate_record_audit_source(text)
+    profile = profile_for(semantic_profile)
+    audit_node = collections._validate_audit_source(text, profile.manifest_audit_property)
     try:
         parsed, _body, marker = vault.parse_frontmatter(bom + text, strict=True)
         document = vault.yaml.compose(frontmatter)
@@ -815,9 +849,11 @@ def render_manifest_audit_head(source: str, transition_id: str) -> str:
             raise collections.CollectionError(
                 "INVALID_COLLECTION_MANIFEST", "manifest keys are invalid"
             )
-    collections.record_audit_head(parsed)
+    collections._audit_head(parsed, profile.manifest_audit_property)
     if audit_node is None:
-        frontmatter += f"record_audit: {{version: 1, head: {transition_id}}}{newline}"
+        frontmatter += (
+            f"{profile.manifest_audit_property}: {{version: 1, head: {transition_id}}}{newline}"
+        )
     else:
         heads = [
             value_node
@@ -938,6 +974,8 @@ def query_collection(
     view: str | None = None,
     authorize_path: Callable[[str], bool] | None = None,
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    source_versions_limit: int | None = None,
+    source_versions_for_rows: bool = False,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor."""
     view_provenance: dict[str, Any] | None = None
@@ -1004,10 +1042,13 @@ def query_collection(
                 "INVALID_RECORD_CONTINUATION", "continuation does not match query"
             )
         offset = token["offset"]
-    rows = _query_rows(parsed.records, expand_children, include_item_version=adapter.mutable)
+    profile = profile_for(manifest.semantic_profile)
+    rows = _query_rows(
+        parsed.records, expand_children, include_item_version=adapter.mutable, item_id_property=profile.item_id_property
+    )
     effective_columns = columns
     if columns:
-        identity_columns = ["collection_id", "record_id", "inferred", "ambiguous"]
+        identity_columns = ["collection_id", profile.item_id_property, "inferred", "ambiguous"]
         if adapter.mutable:
             identity_columns.append("item_version")
         effective_columns = list(dict.fromkeys([*columns, *identity_columns]))
@@ -1053,7 +1094,25 @@ def query_collection(
         rendered="",
         aggregate=result.aggregate,
         query=query,
-        source_versions=parsed.source_versions,
+        source_versions=(
+            tuple(
+                version
+                for version in parsed.source_versions
+                if version.path == manifest.path
+                or version.path
+                in {
+                    record.source.path
+                    for record in parsed.records
+                    if record.identity.key in {str(row.get(profile.item_id_property)) for row in result.rows}
+                }
+            )
+            if source_versions_for_rows
+            else (
+                parsed.source_versions
+                if source_versions_limit is None
+                else parsed.source_versions[:source_versions_limit]
+            )
+        ),
         columns=tuple(result.columns),
         view=view_provenance,
     )
@@ -1546,13 +1605,13 @@ def _schema_values(
 
 
 def _query_rows(
-    records: tuple[Record, ...], expand_children: bool, *, include_item_version: bool
+    records: tuple[Record, ...], expand_children: bool, *, include_item_version: bool, item_id_property: str = "record_id"
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in records:
         system = {
             "collection_id": record.identity.collection_id,
-            "record_id": record.identity.key,
+            item_id_property: record.identity.key,
             "inferred": record.identity.inferred,
             "ambiguous": record.ambiguous,
         }

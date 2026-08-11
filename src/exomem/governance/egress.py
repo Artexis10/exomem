@@ -538,6 +538,9 @@ _FULL_ONLY_PROJECTORS: frozenset[str] = frozenset(
         "record_manifest",
         "record_template",
         "record_mutation",
+        "planning_query",
+        "planning_inspection",
+        "planning_mutation",
     }
 )
 
@@ -2341,6 +2344,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     # The action dispatcher routes all content through the typed Records
     # inspection/query/mutation projectors before it returns.
     "record_memory": "structure",
+    "plan_memory": "structure",
 }
 
 # Receipt adapters follow the same default-deny registry as serializers.  A
@@ -2359,6 +2363,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
         )
     },
     "record_memory": "structure",
+    "plan_memory": "structure",
 }
 
 # Every content selector declares both evidence collection and tombstone
@@ -2434,6 +2439,14 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "query": "structure",
         "append": "mutation",
         "update": "mutation",
+    },
+    ("plan_memory", "action"): {
+        "inspect": "structure",
+        "create": "mutation",
+        "query": "structure",
+        "add": "mutation",
+        "update": "mutation",
+        "triage": "mutation",
     },
 }
 

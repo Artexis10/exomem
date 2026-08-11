@@ -26,6 +26,20 @@ _RECORD_RECEIPT_FIELDS = (
 )
 _RECORD_RECEIPT_MARKER = "exomem.records-mutation"
 _RECORD_RECEIPT_VERSION = 1
+_PLAN_RECEIPT_MARKER = "exomem.planning-mutation"
+_PLAN_RECEIPT_FIELDS = (
+    "operation",
+    "collection_id",
+    "plan_id",
+    "before_item_hash",
+    "after_item_hash",
+    "before_container_hash",
+    "after_container_hash",
+    "affected_paths",
+    "payload_hash",
+    "outcome",
+    "audit_correlation",
+)
 
 #: The closed mutation state machine. A client may branch on exactly these values and
 #: MUST NOT infer any other. `needs_review` is explicitly NONTERMINAL: it means the
@@ -97,7 +111,7 @@ def _path_projection(result: Any) -> dict[str, Any]:
     if isinstance(path, str):
         return {"path": path}
     affected_paths = result.get("affected_paths")
-    if valid_record_receipt(result) and isinstance(affected_paths, (list, tuple)) and all(
+    if valid_collection_receipt(result) and isinstance(affected_paths, (list, tuple)) and all(
         isinstance(item, str) for item in affected_paths
     ):
         return {"paths": list(affected_paths)}
@@ -182,8 +196,8 @@ def replayed_terminal(
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     """Present a verified Records no-op replay without fabricating a commit."""
-    if not valid_record_receipt(leaf_result) or leaf_result.get("outcome") != "replayed":
-        raise ValueError("replayed terminal requires a valid replayed record receipt")
+    if not valid_collection_receipt(leaf_result) or leaf_result.get("outcome") != "replayed":
+        raise ValueError("replayed terminal requires a valid replayed collection receipt")
 
     terminal: dict[str, Any] = {
         "_terminal": _TERMINAL_MARKER,
@@ -292,6 +306,8 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     leaf = result["leaf_result"]
     if _is_record_receipt(leaf):
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
+    elif valid_planning_receipt(leaf):
+        compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
         compact["diagnostics"] = result["leaf_result"]
@@ -380,6 +396,68 @@ def valid_record_receipt(value: Any) -> bool:
     if operation == "create":
         return True
     return False
+
+
+def valid_planning_receipt(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    operation = value.get("operation")
+    if (
+        value.get("_plan_receipt") != _PLAN_RECEIPT_MARKER
+        or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
+        or operation not in {"create", "add", "update", "triage"}
+        or not _normalized_uuid(value.get("collection_id"))
+        or not isinstance(value.get("affected_paths"), list)
+        or len(value["affected_paths"]) > 16
+        or not all(
+            isinstance(path, str) and 0 < len(path) <= 1024 for path in value["affected_paths"]
+        )
+        or value.get("outcome") not in {"committed", "replayed"}
+    ):
+        return False
+    if operation == "create":
+        if value.get("plan_id") is not None or value.get("outcome") != "committed":
+            return False
+    elif not _normalized_uuid(value.get("plan_id")):
+        return False
+    for name in _PLAN_RECEIPT_FIELDS[3:7]:
+        hash_value = value.get(name)
+        if hash_value is not None and not _hash(hash_value):
+            return False
+    correlation = value.get("audit_correlation")
+    if not (
+        isinstance(correlation, str)
+        and len(correlation) == 24
+        and all(character in "0123456789abcdef" for character in correlation)
+    ):
+        return False
+    if operation == "create":
+        return (
+            value.get("before_item_hash") is None
+            and value.get("before_container_hash") is None
+            and value.get("payload_hash") is None
+            and _hash(value.get("after_container_hash"))
+        )
+    if operation == "add":
+        return (
+            _hash(value.get("before_item_hash"))
+            if value.get("outcome") == "replayed"
+            else value.get("before_item_hash") is None
+        ) and _hash(value.get("after_item_hash")) and _hash(
+            value.get("before_container_hash")
+        ) and _hash(value.get("after_container_hash")) and _hash(value.get("payload_hash"))
+    return (
+        value.get("outcome") == "committed"
+        and _hash(value.get("before_item_hash"))
+        and _hash(value.get("after_item_hash"))
+        and _hash(value.get("before_container_hash"))
+        and _hash(value.get("after_container_hash"))
+        and value.get("payload_hash") is None
+    )
+
+
+def valid_collection_receipt(value: Any) -> bool:
+    return valid_record_receipt(value) or valid_planning_receipt(value)
 
 
 _is_record_receipt = valid_record_receipt

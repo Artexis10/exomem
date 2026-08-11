@@ -19,10 +19,12 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from . import memory_refs, vault
+from .collection_profiles import profile_for
 
 COLLECTION_VERSION = 1
 STORAGE_FORMAT_VERSION = 1
 RECORD_REF_PREFIX = "exomem://record/"
+PLAN_REF_PREFIX = "exomem://plan/"
 _SUPPORTED_PROFILES = frozenset({"records", "planning"})
 _SUPPORTED_STORAGE = frozenset({"markdown-log", "markdown-items", "dataset"})
 _SUPPORTED_FIELD_TYPES = frozenset(
@@ -64,8 +66,8 @@ _SAVED_VIEW_QUERY_KEYS = frozenset(
         "limit",
     }
 )
-_SAVED_VIEW_SYSTEM_FIELDS = frozenset(
-    {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
+_SAVED_VIEW_SHARED_SYSTEM_FIELDS = frozenset(
+    {"collection_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
 _SAVED_VIEW_QUERY_OPS = frozenset(
     {
@@ -248,7 +250,9 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "collection manifest is not UTF-8"
         ) from error
-    _validate_record_audit_source(text)
+    audit_name = _profile_owned_audit_name(text)
+    if audit_name is not None:
+        _validate_audit_source(text, audit_name)
     try:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except vault.FrontmatterError as error:
@@ -288,7 +292,9 @@ def parse_manifest_bytes(vault_root: Path, path: Path | str, data: bytes) -> Col
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8") from error
-    _validate_record_audit_source(text)
+    audit_name = _profile_owned_audit_name(text)
+    if audit_name is not None:
+        _validate_audit_source(text, audit_name)
     try:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except vault.FrontmatterError as error:
@@ -395,18 +401,36 @@ def resolve_collection(
 
 
 def record_ref(collection_id: str, item_key: str) -> str:
+    return _item_ref(RECORD_REF_PREFIX, collection_id, item_key)
+
+
+def plan_ref(collection_id: str, item_key: str) -> str:
+    """Return a canonical collection-scoped Planning item reference."""
+    return _item_ref(PLAN_REF_PREFIX, collection_id, item_key)
+
+
+def _item_ref(prefix: str, collection_id: str, item_key: str) -> str:
     normalized = memory_refs.normalize_id(collection_id)
     if normalized is None:
         raise ValueError(f"invalid collection id: {collection_id!r}")
     _validate_item_key(item_key)
-    return f"{RECORD_REF_PREFIX}{normalized}/{quote(item_key, safe='')}"
+    return f"{prefix}{normalized}/{quote(item_key, safe='')}"
 
 
 def parse_record_ref(value: str) -> tuple[str, str] | None:
+    return _parse_item_ref(RECORD_REF_PREFIX, value)
+
+
+def parse_plan_ref(value: str) -> tuple[str, str] | None:
+    """Parse only a canonical Planning item reference."""
+    return _parse_item_ref(PLAN_REF_PREFIX, value)
+
+
+def _parse_item_ref(prefix: str, value: str) -> tuple[str, str] | None:
     raw = str(value or "").strip()
-    if not raw.lower().startswith(RECORD_REF_PREFIX):
+    if not raw.lower().startswith(prefix):
         return None
-    remainder = raw[len(RECORD_REF_PREFIX) :]
+    remainder = raw[len(prefix) :]
     collection_id, separator, encoded_key = remainder.partition("/")
     normalized = memory_refs.normalize_id(collection_id)
     if not separator or normalized is None:
@@ -542,15 +566,14 @@ def _manifest_from_frontmatter(
     if type(schema_version) is not int or schema_version < 1:
         raise CollectionError("INVALID_SCHEMA_VERSION", "schema_version must be a positive integer")
     storage = _parse_storage(root, manifest_rel, frontmatter.get("storage"))
-    if profile == "records":
-        _require_records_layer(manifest_rel, "manifest")
-        _require_records_layer(storage.source, "storage.source")
+    _require_profile_layer(profile, manifest_rel, "manifest")
+    _require_profile_layer(profile, storage.source, "storage.source")
     if _portable_path_key(storage.source) == _portable_path_key(manifest_rel):
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "storage.source must not alias the collection manifest"
         )
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
-    audit_head = record_audit_head(frontmatter)
+    audit_head = _audit_head(frontmatter, "record_audit" if profile == "records" else "plan_audit")
     templates = _parse_templates(root, manifest_rel, frontmatter.get("templates", []))
     views = _parse_saved_views(frontmatter.get("views", {}), schema, storage)
     links = _parse_links(frontmatter.get("links", {}))
@@ -585,7 +608,8 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
     plain_definition = _plain_json_value(definition)
     assert isinstance(plain_definition, dict)
     normalized_definition = _normalize_saved_view(
-        plain_definition, _saved_view_fields(manifest.schema, manifest.storage)
+        plain_definition,
+        _saved_view_fields(manifest.schema, manifest.storage, manifest.semantic_profile),
     )
     canonical = json.dumps(
         {
@@ -615,8 +639,11 @@ def _parse_saved_views(
     return _freeze_mapping(views, "views")
 
 
-def _saved_view_fields(schema: ItemSchema, storage: StorageSpec) -> set[str]:
-    fields = set(schema.fields) | set(_SAVED_VIEW_SYSTEM_FIELDS)
+def _saved_view_fields(
+    schema: ItemSchema, storage: StorageSpec, semantic_profile: str
+) -> set[str]:
+    fields = set(schema.fields) | set(_SAVED_VIEW_SHARED_SYSTEM_FIELDS)
+    fields.add(profile_for(semantic_profile).item_id_property)
     if storage.strategy != "markdown-log":
         return fields
     heading = storage.descriptor.get("item_heading")
@@ -763,21 +790,66 @@ def _normalize_saved_view_aggregate(value: object, fields: set[str]) -> str:
 
 def record_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
     """Validate the optional manifest audit mapping and return its head."""
-    audit = frontmatter.get("record_audit")
+    return _audit_head(frontmatter, "record_audit")
+
+
+def plan_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
+    """Validate the optional Planning manifest audit mapping and return its head."""
+    return _audit_head(frontmatter, "plan_audit")
+
+
+def _audit_head(frontmatter: Mapping[str, Any], name: str) -> str | None:
+    code = "INVALID_RECORD_AUDIT" if name == "record_audit" else "INVALID_COLLECTION_AUDIT"
+    audit = frontmatter.get(name)
     if audit is None:
         return None
     if not isinstance(audit, Mapping) or set(audit) != {"version", "head"}:
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        raise CollectionError(code, "collection audit state is invalid")
     head = audit.get("head")
     if type(audit.get("version")) is not int or audit["version"] != 1 or not isinstance(head, str):
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        raise CollectionError(code, "collection audit state is invalid")
     if re.fullmatch(r"[0-9a-f]{24}", head) is None:
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit head is invalid")
+        raise CollectionError(code, "collection audit head is invalid")
     return head
 
 
 def _validate_record_audit_source(text: str) -> vault.yaml.nodes.MappingNode | None:
     """Require an audit mapping's keys to be authored rather than YAML-merged."""
+    return _validate_audit_source(text, "record_audit")
+
+
+def _profile_owned_audit_name(text: str) -> str | None:
+    """Find the declared profile without constructing YAML audit mappings."""
+    text = text.removeprefix("\ufeff")
+    opening = re.match(r"\A---\r?\n", text)
+    if opening is None:
+        return None
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :])
+    if closing is None:
+        return None
+    try:
+        document = vault.yaml.compose(text[opening.end() : opening.end() + closing.start()])
+    except vault.yaml.YAMLError:
+        return None
+    if not isinstance(document, vault.yaml.nodes.MappingNode):
+        return None
+    for key, value in document.value:
+        if (
+            isinstance(key, vault.yaml.nodes.ScalarNode)
+            and key.value == "semantic_profile"
+            and isinstance(value, vault.yaml.nodes.ScalarNode)
+        ):
+            if value.value == "records":
+                return "record_audit"
+            if value.value == "planning":
+                return "plan_audit"
+    return None
+
+
+def _validate_audit_source(
+    text: str, expected_name: str | None = None
+) -> vault.yaml.nodes.MappingNode | None:
+    """Validate profile audit mappings without assuming Records semantics."""
     text = text.removeprefix("\ufeff")
     opening = re.match(r"\A---\r?\n", text)
     if opening is None:
@@ -793,29 +865,42 @@ def _validate_record_audit_source(text: str) -> vault.yaml.nodes.MappingNode | N
         ) from error
     if not isinstance(document, vault.yaml.nodes.MappingNode):
         return None
-    return _validate_record_audit_document(document)
+    names = (expected_name,) if expected_name is not None else ("record_audit", "plan_audit")
+    result = None
+    for name in names:
+        node = _validate_audit_document(document, name)
+        if node is not None:
+            result = node
+    return result
 
 
 def _validate_record_audit_document(
     document: vault.yaml.nodes.MappingNode,
 ) -> vault.yaml.nodes.MappingNode | None:
+    return _validate_audit_document(document, "record_audit")
+
+
+def _validate_audit_document(
+    document: vault.yaml.nodes.MappingNode, name: str
+) -> vault.yaml.nodes.MappingNode | None:
+    code = "INVALID_RECORD_AUDIT" if name == "record_audit" else "INVALID_COLLECTION_AUDIT"
     matches = [
         value
         for key, value in document.value
-        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == "record_audit"
+        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == name
     ]
     if len(matches) > 1:
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is duplicated")
+        raise CollectionError(code, "collection audit state is duplicated")
     if not matches:
         return None
     audit = matches[0]
     if not isinstance(audit, vault.yaml.nodes.MappingNode):
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        raise CollectionError(code, "collection audit state is invalid")
     keys = [
         key.value for key, _value in audit.value if isinstance(key, vault.yaml.nodes.ScalarNode)
     ]
     if len(keys) != 2 or set(keys) != {"version", "head"}:
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        raise CollectionError(code, "collection audit state is invalid")
     return audit
 
 
@@ -836,10 +921,21 @@ def _manifest_stable_hash(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
     if not isinstance(document, vault.yaml.nodes.MappingNode):
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    profile = next(
+        (
+            value.value
+            for key, value in document.value
+            if isinstance(key, vault.yaml.nodes.ScalarNode)
+            and key.value == "semantic_profile"
+            and isinstance(value, vault.yaml.nodes.ScalarNode)
+        ),
+        None,
+    )
+    audit_name = "plan_audit" if profile == "planning" else "record_audit"
     matches = [
         (key, value)
         for key, value in document.value
-        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == "record_audit"
+        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == audit_name
     ]
     if len(matches) != 1:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -1173,6 +1269,15 @@ def _require_records_layer(path: str, name: str) -> None:
     if len(parts) < 3 or parts[0] != vault.kb_dirname() or parts[1] != "Records":
         raise CollectionError(
             "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/Records"
+        )
+
+
+def _require_profile_layer(profile: str, path: str, name: str) -> None:
+    layer = profile_for(profile).placement_layer
+    parts = path.split("/")
+    if len(parts) < 3 or parts[0] != vault.kb_dirname() or parts[1] != layer:
+        raise CollectionError(
+            "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/{layer}"
         )
 
 
