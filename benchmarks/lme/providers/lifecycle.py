@@ -150,20 +150,14 @@ def observe_cleanup(
     )
 
 
-def _atomic_write(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        root_fd = os.open(path.parent, flags)
-    except OSError as exc:
-        raise CleanupUnproved(f"cleanup evidence root is unavailable: {exc}") from exc
-    temporary = f".{path.name}.tmp"
+def _atomic_write(root_fd: int, name: str, content: bytes) -> None:
+    temporary = f".{name}.tmp"
     try:
         with os.scandir(root_fd) as entries:
             if any(entry.is_symlink() for entry in entries):
                 raise CleanupUnproved("cleanup evidence root contains a symlink")
         try:
-            os.stat(path.name, dir_fd=root_fd, follow_symlinks=False)
+            os.stat(name, dir_fd=root_fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
         else:
@@ -184,7 +178,7 @@ def _atomic_write(path: Path, content: bytes) -> None:
         try:
             os.link(
                 temporary,
-                path.name,
+                name,
                 src_dir_fd=root_fd,
                 dst_dir_fd=root_fd,
                 follow_symlinks=False,
@@ -194,7 +188,7 @@ def _atomic_write(path: Path, content: bytes) -> None:
         except OSError as exc:
             raise CleanupUnproved(f"cleanup evidence cannot be published exclusively: {exc}") from exc
         try:
-            final = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+            final = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
         except OSError as exc:
             raise CleanupUnproved(f"cleanup evidence final cannot be opened: {exc}") from exc
         with os.fdopen(final, "rb") as handle:
@@ -208,7 +202,6 @@ def _atomic_write(path: Path, content: bytes) -> None:
             os.unlink(temporary, dir_fd=root_fd)
         except FileNotFoundError:
             pass
-        os.close(root_fd)
 
 
 def _verify_cleanup_observation_descriptor(descriptor: int, digest: str) -> bytes:
@@ -290,7 +283,7 @@ def _persist_observation(context: ProviderSessionContext, observation: ProviderC
         raise CleanupUnproved(f"cleanup evidence root binding is unavailable: {exc}") from exc
     try:
         root_stat = os.fstat(root_fd)
-        _atomic_write(path, payload)
+        _atomic_write(root_fd, path.name, payload)
         try:
             current_root = os.lstat(context.evidence_root)
         except OSError as exc:

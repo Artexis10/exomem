@@ -107,6 +107,13 @@ def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def _add_control_flow_note(control_flow: BaseException, note: str) -> None:
+    try:
+        control_flow.add_note(note)
+    except BaseException:
+        pass
+
+
 def _reader(config: RunConfig, run_dir: Path) -> Reader:
     if config.reader_name == "stub":
         return StubReader()
@@ -969,21 +976,15 @@ def execute_run(
             _write_jsonl(bounds_dir / "null-abstain-floor.jsonl", [])
             _write_jsonl(run_dir / "failures.jsonl", failures)
             _write_jsonl(run_dir / "question-outcomes.jsonl", outcomes)
-        except Exception as exc:
-            try:
-                control_flow.add_note(f"local artifact persistence failed: {exc}")
-            except AttributeError:
-                pass
+        except BaseException as exc:
+            _add_control_flow_note(control_flow, f"local artifact persistence failed: {exc}")
         if config.provider:
             try:
                 _write_jsonl(run_dir / "isolation.jsonl", isolation_rows)
                 environment["lme"]["lifecycle_expected_instances"] = lifecycle_instances
                 _write_json(run_dir / "environment.json", environment)
-            except Exception as exc:
-                try:
-                    control_flow.add_note(f"lifecycle ledger persistence failed: {exc}")
-                except AttributeError:
-                    pass
+            except BaseException as exc:
+                _add_control_flow_note(control_flow, f"lifecycle ledger persistence failed: {exc}")
         try:
             finalize_manifest(
                 run_dir,
@@ -995,11 +996,8 @@ def execute_run(
                 budget=_budget_summary(ledger),
                 invalid_reason=invalid_reason,
             )
-        except Exception as exc:
-            try:
-                control_flow.add_note(f"terminal manifest finalization failed: {exc}")
-            except AttributeError:
-                pass
+        except BaseException as exc:
+            _add_control_flow_note(control_flow, f"terminal manifest finalization failed: {exc}")
         raise control_flow
 
     bounds_dir = run_dir / "bounds"

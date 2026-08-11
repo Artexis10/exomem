@@ -1695,19 +1695,20 @@ def test_feedback2_root_swap_cannot_substitute_the_reopened_observation(
     real_atomic_write = lifecycle._atomic_write
     displaced = tmp_path / "held-evidence-root"
     outside = tmp_path / "substituted-evidence-root"
+    context = _feedback2_context(tmp_path, "root-swap")
 
-    def swap_after_publish(path: Path, content: bytes) -> None:
-        real_atomic_write(path, content)
-        path.parent.rename(displaced)
+    def swap_after_publish(root_fd: int, name: str, content: bytes) -> None:
+        real_atomic_write(root_fd, name, content)
+        context.evidence_root.rename(displaced)
         outside.mkdir()
-        path.parent.symlink_to(outside, target_is_directory=True)
-        (outside / path.name).write_bytes(content)
+        context.evidence_root.symlink_to(outside, target_is_directory=True)
+        (outside / name).write_bytes(content)
 
     monkeypatch.setattr(lifecycle, "_atomic_write", swap_after_publish)
     with pytest.raises(CleanupUnproved, match="root|swap|binding|symlink"):
         run_provider_lifecycle(
             provider=_Provider(), profile=None,
-            context=_feedback2_context(tmp_path, "root-swap"), binding=_binding(),
+            context=context, binding=_binding(),
             requested_provider="fixture", operation=lambda _provider: None,
         )
     assert (displaced / "provider-cleanup-observation.json").is_file()
@@ -1848,3 +1849,109 @@ def test_feedback3_runner_preserves_control_flow_after_local_write_and_terminali
         assert manifest["status"] == "INVALID"
         environment = json.loads((tmp_path / run_id / "environment.json").read_text(encoding="utf-8"))
         assert [item["session_id"] for item in environment["lme"]["lifecycle_expected_instances"]] == ["__diagnostic__"]
+
+
+@pytest.mark.parametrize("secondary", (KeyboardInterrupt(), SystemExit(7)))
+def test_feedback4_runner_preserves_hostile_primary_when_persistence_raises_base_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, secondary: BaseException
+) -> None:
+    from lme.providers import registry
+    import lme.runner as runner
+    from lme.reader import StubReader
+
+    class PrimaryControl(BaseException):
+        def add_note(self, _note: str) -> None:
+            raise RuntimeError("hostile note attachment")
+
+    primary = PrimaryControl("primary")
+
+    class InterruptingProvider(_Provider):
+        def setup(self, profile, context) -> None:
+            super().setup(profile, context)
+            raise primary
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(InterruptingProvider))
+    real_write_jsonl = runner._write_jsonl
+
+    def interrupt_persistence(path: Path, rows: list[dict[str, object]]) -> None:
+        if path.name == "gold-evidence-ceiling.jsonl":
+            raise secondary
+        real_write_jsonl(path, rows)
+
+    monkeypatch.setattr(runner, "_write_jsonl", interrupt_persistence)
+    run_id = f"feedback4-persistence-{type(secondary).__name__}"
+    caught: BaseException | None = None
+    try:
+        runner.execute_run(_mini_config(tmp_path, 1, run_id, provider="fixture"), reader=StubReader())
+    except BaseException as exc:
+        caught = exc
+    assert caught is primary
+    assert json.loads((tmp_path / run_id / "manifest.json").read_text(encoding="utf-8"))["status"] == "INVALID"
+
+
+def test_feedback4_runner_preserves_primary_when_terminalization_raises_custom_base_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme.providers import registry
+    import lme.runner as runner
+    from lme.reader import StubReader
+
+    class PrimaryControl(BaseException):
+        pass
+
+    class TerminalControl(BaseException):
+        pass
+
+    primary = PrimaryControl("primary")
+    terminal = TerminalControl("terminal")
+
+    class InterruptingProvider(_Provider):
+        def setup(self, profile, context) -> None:
+            super().setup(profile, context)
+            raise primary
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(InterruptingProvider))
+    real_finalize = runner.finalize_manifest
+
+    def finalize_then_interrupt(*args, **kwargs):
+        real_finalize(*args, **kwargs)
+        raise terminal
+
+    monkeypatch.setattr(runner, "finalize_manifest", finalize_then_interrupt)
+    run_id = "feedback4-terminal"
+    with pytest.raises(PrimaryControl) as raised:
+        runner.execute_run(_mini_config(tmp_path, 1, run_id, provider="fixture"), reader=StubReader())
+    assert raised.value is primary
+    assert json.loads((tmp_path / run_id / "manifest.json").read_text(encoding="utf-8"))["status"] == "INVALID"
+
+
+def test_feedback4_persistence_never_reopens_a_swapped_intermediate_evidence_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lme.providers.lifecycle as lifecycle
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    intermediate = tmp_path / "intermediate"
+    intermediate.mkdir()
+    context = _context(intermediate)
+    displaced = tmp_path / "displaced"
+    real_open = lifecycle.os.open
+    swapped = False
+
+    def swap_after_held_root(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == context.evidence_root and dir_fd is None and not swapped:
+            swapped = True
+            intermediate.rename(displaced)
+            (intermediate / "evidence").mkdir(parents=True)
+        return descriptor
+
+    monkeypatch.setattr(lifecycle.os, "open", swap_after_held_root)
+    with pytest.raises(CleanupUnproved, match="root|binding|changed"):
+        run_provider_lifecycle(
+            provider=_Provider(), profile=None, context=context, binding=_binding(),
+            requested_provider="fixture", operation=lambda _provider: None,
+        )
+    assert swapped
+    assert not (intermediate / "evidence" / "provider-cleanup-observation.json").exists()
