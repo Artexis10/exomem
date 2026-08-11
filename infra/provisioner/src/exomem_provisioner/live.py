@@ -47,6 +47,7 @@ from .wire_protocol import runtime_identity
 class KubernetesProviderSnapshot:
     namespace: bool
     release: bool
+    init_job_present: bool
     init_complete: bool
     init_failed: bool
     serving: bool
@@ -135,7 +136,7 @@ class KubernetesProviderRegistry:
                 raise
         if namespace is None:
             return KubernetesProviderSnapshot(
-                False, False, False, False, False, False, (False, False)
+                False, False, False, False, False, False, False, (False, False)
             )
         self._cell_identity(getattr(namespace.metadata, "annotations", None), current)
         _require_annotations(getattr(namespace.metadata, "annotations", None), owned)
@@ -236,6 +237,7 @@ class KubernetesProviderRegistry:
         return KubernetesProviderSnapshot(
             True,
             pvc is not None and release_deployed,
+            init_job is not None,
             init_complete,
             init_failed,
             stateful_set is not None,
@@ -597,9 +599,23 @@ class LiveLifecyclePlane:
         snapshot = await self._refresh(metadata)
         if snapshot.init_failed:
             raise MetadataConflict("cell storage initialization failed")
+        helm_request = request
         if not snapshot.init_complete:
-            return False
-        values = _fixed_helm_values(self._owner(metadata), request, config)
+            if snapshot.init_job_present:
+                return False
+            try:
+                helm_request = self._helm_requests[self._key(metadata)]
+            except KeyError as error:
+                raise MetadataConflict("original Helm request was not authenticated") from error
+            values = _fixed_helm_values(self._owner(metadata), helm_request, config)
+            values["workloadMode"] = "initialize"
+            await self._helm.ensure_release(self._owner(metadata), values)
+            snapshot = await self._refresh(metadata)
+            if snapshot.init_failed:
+                raise MetadataConflict("cell storage initialization failed")
+            if not snapshot.init_complete:
+                return False
+        values = _fixed_helm_values(self._owner(metadata), helm_request, config)
         values["workloadMode"] = "serve"
         await self._helm.ensure_release(self._owner(metadata), values)
         return (await self._refresh(metadata)).serving

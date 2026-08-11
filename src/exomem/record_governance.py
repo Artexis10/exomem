@@ -681,13 +681,24 @@ def _resolve_released_collection(
 def query_collection(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
+    *,
+    semantic_profile: str = "records",
     **kwargs: Any,
 ) -> record_formats.RecordQueryResult:
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
         manifest = _resolve_released_collection(root, collection, receipt=True)
-        require_records_profile(manifest)
+        if manifest.semantic_profile != semantic_profile:
+            error_code = (
+                "RECORDS_PROFILE_REQUIRED"
+                if semantic_profile == "records"
+                else "PLANNING_PROFILE_REQUIRED"
+            )
+            raise collections.CollectionError(
+                error_code,
+                "collection profile is not available",
+            )
         if not _authorize(
             root, manifest.storage.source, receipt=True
         ):
@@ -821,6 +832,49 @@ def inspect_collection(
         projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
         egress.emit_boundary_receipt(collector)
         return projected
+
+
+def inventory_collections(vault_root: Path) -> dict[str, Any]:
+    """Return a bounded authorized inventory without opening canonical item data."""
+    root = Path(vault_root)
+    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
+        def authorize(path: str) -> bool:
+            return _authorize(root, path, receipt=True)
+
+        manifests = [
+            manifest
+            for manifest in collections.discover_collections(root, authorize_path=authorize)
+            if manifest.semantic_profile == "records" and authorize(manifest.storage.source)
+        ]
+        legacy, legacy_truncated = collections.discover_legacy_trackers(
+            root, authorize_path=authorize
+        )
+        payload = {
+            "kind": "records_inventory",
+            "report_only": True,
+            "collections": [
+                {
+                    "collection_id": manifest.collection_id,
+                    "title": manifest.title,
+                    "manifest_path": manifest.path,
+                    "semantic_profile": manifest.semantic_profile,
+                    "lifecycle": manifest.lifecycle,
+                    "storage_strategy": manifest.storage.strategy,
+                }
+                for manifest in manifests
+            ],
+            "legacy_trackers": [
+                {"path": tracker.path, "inspect_only": tracker.inspect_only}
+                for tracker in legacy
+            ],
+            "truncated": {"collections": False, "legacy_trackers": legacy_truncated},
+            "contract_route": {
+                "tool": "record_memory",
+                "arguments": {"action": "describe"},
+            },
+        }
+        egress.emit_boundary_receipt(collector)
+        return payload
 
 
 def inspect_legacy_tracker(vault_root: Path, path: str | Path) -> dict[str, Any]:

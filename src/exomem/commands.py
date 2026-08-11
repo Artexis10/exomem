@@ -75,6 +75,7 @@ from . import multi_edit as multi_edit_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
+from . import plan_memory as plan_memory_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
@@ -342,8 +343,26 @@ def op_bootstrap(
             "available": True,
             "route": {
                 "tool": "record_memory",
-                "actions": ["inspect", "create", "query", "append", "update"],
+                "actions": [
+                    "describe",
+                    "validate",
+                    "inspect",
+                    "create",
+                    "query",
+                    "append",
+                    "update",
+                ],
             },
+            "manifest": {
+                "filename": "_collection.md",
+                "collection_versions": [1],
+                "semantic_profiles": ["planning", "records"],
+            },
+            "contract_route": {
+                "tool": "record_memory",
+                "arguments": {"action": "describe"},
+            },
+            "agent_workflow": ["describe", "validate", "create", "inspect", "append"],
             "intent_boundary": {
                 "records": (
                     "observed events, measurements, transactions, sessions, and state changes"
@@ -382,8 +401,48 @@ def op_bootstrap(
             "available": False,
             "unavailable_reason": "The active surface does not export the Records command.",
         }
+    planning_contract = {
+        "available": "plan_memory" in active_product_names,
+        "route": {
+            "tool": "plan_memory",
+            "actions": ["inspect", "create", "query", "add", "update", "triage"],
+        },
+        "kinds": ["area", "outcome", "initiative", "work-item"],
+        "horizons": ["inbox", "week", "month", "quarter", "year", "multi-year"],
+        "lifecycle": ["active", "archived"],
+        "priorities": ["critical", "high", "medium", "low", "none"],
+        "commitments": ["uncommitted", "considering", "committed"],
+        "default_capture": (
+            "Default capture creates an active candidate work-item with none priority, "
+            "uncommitted commitment, unknown health, and inbox horizon."
+        ),
+        "manual_first": (
+            "Canonical Planning remains ordinary editable Markdown; direct human edits and "
+            "work without an agent are supported product paths."
+        ),
+        "template_independence": (
+            "Templates are optional editable scaffolds; Planning schema and validation do not "
+            "depend on template content."
+        ),
+        "horizon_semantics": (
+            "Horizon is an authored bucket, not a computed deadline; use explicit date filters "
+            "for calendar windows."
+        ),
+        "intent_first_routing": (
+            "Route goals, priorities, commitments, candidate work, and future-state intent to "
+            "plan_memory before treating them as observed Records."
+        ),
+        "evidence_execution_boundary": (
+            "Progress evidence is an opaque Records pointer and execution is a thin opaque pointer; "
+            "neither resolves, evaluates, or updates Planning automatically."
+        ),
+        "execution_truth_boundary": (
+            "Planning owns durable intent and prioritisation. OpenSpec defines accepted product "
+            "contracts; repositories, git, tests, and code own software execution truth."
+        ),
+    }
     payload: dict = {
-        "contract_version": "2026-08-02.1",
+        "contract_version": "2026-08-11.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -420,6 +479,7 @@ def op_bootstrap(
         },
         "semantic_authoring": semantic_authoring_projection,
         "records": records_contract,
+        "planning": planning_contract,
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -5950,7 +6010,7 @@ def op_manage_memory_file(
 
 def op_record_memory(
     vault_root: Path,
-    action: Literal["inspect", "create", "query", "append", "update"],
+    action: Literal["describe", "validate", "inspect", "create", "query", "append", "update"],
     collection: str | None = None,
     manifest_path: str | None = None,
     manifest_text: str | None = None,
@@ -5977,13 +6037,13 @@ def op_record_memory(
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect, create, query, append, or update a governed Record collection.
+    """Describe, validate, inspect, create, query, append, or update Records.
 
     Args:
-        action: inspect, create, query, append, or update.
-        collection: Collection manifest reference for inspect, query, append, or update.
-        manifest_path: New manifest path for create.
-        manifest_text: Complete manifest text for create.
+        action: describe, validate, inspect, create, query, append, or update.
+        collection: Optional for inventory inspect; required for targeted reads/writes.
+        manifest_path: Proposed manifest path for validate or create.
+        manifest_text: Complete proposed manifest text for validate or create.
         why: Audit reason for create, append, or update.
         scaffold: Create the initial canonical source for create.
         view: Saved query view; cannot be combined with inline shaping.
@@ -6415,6 +6475,11 @@ _PRODUCT_METADATA: dict[str, dict] = {
         "actions": ("ask", "review", "save", "update"),
         "first_run_safe": False,
     },
+    "plan_memory": {
+        "surface": "primary",
+        "actions": ("ask", "review", "save", "update"),
+        "first_run_safe": False,
+    },
 }
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
@@ -6461,6 +6526,7 @@ _SPEC: tuple[tuple, ...] = (
     ("list_inbound_links", op_list_inbound_links, 2, False, False, "target", _MCRC),
     ("schema_memory", op_schema_memory, 1, True, False, None, _MCRC),
     ("record_memory", op_record_memory, 1, True, False, None, _MCRC),
+    ("plan_memory", plan_memory_module.plan_memory, 1, True, False, None, _MCRC),
     ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
 )
 
@@ -6810,6 +6876,21 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("record_memory",),
+        {
+            "surface": "primary",
+            "actions": ("ask", "review", "save", "update"),
+            "first_run_safe": False,
+        },
+    ),
+    (
+        "plan_memory",
+        plan_memory_module.plan_memory,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("plan_memory",),
         {
             "surface": "primary",
             "actions": ("ask", "review", "save", "update"),

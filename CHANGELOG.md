@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.0](https://github.com/Artexis10/exomem/compare/v0.44.0...v0.45.0) (2026-08-11)
+
+
+### Features
+
+* **hosted:** compose v0.44 deployment lock ([ee5cb9e](https://github.com/Artexis10/exomem/commit/ee5cb9e755b85dab8ca04b0685123bcb16ac498d))
+* **hosted:** select atomic PV label provisioner ([d014d0b](https://github.com/Artexis10/exomem/commit/d014d0b496e757634361c09db9cafa780d7e3e33))
+* **records:** expose collection authoring contract ([#435](https://github.com/Artexis10/exomem/issues/435)) ([159d62a](https://github.com/Artexis10/exomem/commit/159d62a6069bfcf646ec69a9e2e4374af263fb91))
+
+
+### Bug Fixes
+
+* **hosted:** install release proof dependencies ([#432](https://github.com/Artexis10/exomem/issues/432)) ([5895ac9](https://github.com/Artexis10/exomem/commit/5895ac98330bb63651a2083ae9fe86c43287fa35))
+* **hosted:** label recovered PV atomically ([#433](https://github.com/Artexis10/exomem/issues/433)) ([682489a](https://github.com/Artexis10/exomem/commit/682489a87f958e95052549c35b9ba780145a575a))
+
 ## [0.44.0](https://github.com/Artexis10/exomem/compare/v0.43.0...v0.44.0) (2026-08-11)
 
 

@@ -208,12 +208,18 @@ class BM25Index:
             (
                 (path, score)
                 for path, score in zip(paths, scores, strict=True)
-                if allowed_paths is None or path in allowed_paths
+                if (allowed_paths is None or path in allowed_paths)
+                and bool(
+                    set(tokens)
+                    & set(self._tokens[vault_root / path][1])
+                )
             ),
             key=lambda item: (-item[1], item[0]),
         )[:k]
-        # Drop zero-score hits — they aren't really matches.
-        return [(p, float(s)) for p, s in ranked if s > 0]
+        # Rank-BM25's epsilon fallback can make every matching score
+        # non-positive in a tiny corpus. Token overlap, not score sign, is the
+        # relevance proof; otherwise a valid lone structured manifest vanishes.
+        return [(p, float(s)) for p, s in ranked]
 
     def warm(self, vault_root: Path, scope: str = "kb") -> None:
         """Build (or freshness-check) whichever backend serves this lane —

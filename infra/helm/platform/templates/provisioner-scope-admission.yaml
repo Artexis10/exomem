@@ -192,7 +192,7 @@ spec:
                 'exomem.io/cell': request.namespace
               } &&
               variables.target.spec.policyTypes == ['Ingress'] &&
-              size(variables.target.spec.ingress) == 2 &&
+              size(variables.target.spec.ingress) == 3 &&
               size(variables.target.spec.ingress[0].from) == 1 &&
               variables.target.spec.ingress[0].from[0].namespaceSelector.matchLabels == {
                 'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'
@@ -214,6 +214,16 @@ spec:
               size(variables.target.spec.ingress[1].ports) == 1 &&
               variables.target.spec.ingress[1].ports[0].protocol == 'TCP' &&
               variables.target.spec.ingress[1].ports[0].port == 8765 &&
+              size(variables.target.spec.ingress[2].from) == 1 &&
+              variables.target.spec.ingress[2].from[0].namespaceSelector.matchLabels == {
+                'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'
+              } &&
+              variables.target.spec.ingress[2].from[0].podSelector.matchLabels == {
+                'app.kubernetes.io/name': 'exomem-provisioner-worker'
+              } &&
+              size(variables.target.spec.ingress[2].ports) == 1 &&
+              variables.target.spec.ingress[2].ports[0].protocol == 'TCP' &&
+              variables.target.spec.ingress[2].ports[0].port == 8765 &&
               !has(variables.target.spec.egress)))
       message: The hosted provisioner may manage only the exact default-deny and platform ingress policies.
     - expression: >-
@@ -501,7 +511,8 @@ spec:
                 'exomem.io/cell': variables.resourceName
               } &&
               variables.target.spec.policyTypes == ['Ingress'] &&
-              size(variables.target.spec.ingress) == 2 &&
+              size(variables.target.spec.ingress) == 3 &&
+              size(variables.target.spec.ingress[0].from) == 1 &&
               variables.target.spec.ingress[0].from[0].namespaceSelector.matchLabels ==
                 {'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'} &&
               variables.target.spec.ingress[0].from[0].podSelector.matchLabels == {
@@ -510,6 +521,7 @@ spec:
               size(variables.target.spec.ingress[0].ports) == 1 &&
               variables.target.spec.ingress[0].ports[0].protocol == 'TCP' &&
               variables.target.spec.ingress[0].ports[0].port == 8765 &&
+              size(variables.target.spec.ingress[1].from) == 1 &&
               variables.target.spec.ingress[1].from[0].namespaceSelector.matchLabels ==
                 {'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'} &&
               variables.target.spec.ingress[1].from[0].podSelector.matchLabels ==
@@ -517,6 +529,14 @@ spec:
               size(variables.target.spec.ingress[1].ports) == 1 &&
               variables.target.spec.ingress[1].ports[0].protocol == 'TCP' &&
               variables.target.spec.ingress[1].ports[0].port == 8765 &&
+              size(variables.target.spec.ingress[2].from) == 1 &&
+              variables.target.spec.ingress[2].from[0].namespaceSelector.matchLabels ==
+                {'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'} &&
+              variables.target.spec.ingress[2].from[0].podSelector.matchLabels ==
+                {'app.kubernetes.io/name': 'exomem-provisioner-worker'} &&
+              size(variables.target.spec.ingress[2].ports) == 1 &&
+              variables.target.spec.ingress[2].ports[0].protocol == 'TCP' &&
+              variables.target.spec.ingress[2].ports[0].port == 8765 &&
               !has(variables.target.spec.egress))
           : (variables.target.spec.podSelector.matchLabels == variables.labels &&
           variables.target.spec.policyTypes == ['Egress'] &&

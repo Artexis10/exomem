@@ -14,12 +14,17 @@ from exomem_provisioner.config import (
     ProviderWorkerSettings,
     load_hosted_release_manifest,
 )
-from exomem_provisioner.lifecycle import MetadataConflict, OpaqueProviderMetadata
+from exomem_provisioner.driver import DriverPending, EffectContext
+from exomem_provisioner.lifecycle import (
+    CellLifecycleDriver,
+    MetadataConflict,
+    OpaqueProviderMetadata,
+)
 from exomem_provisioner.live import (
     KubernetesProviderRegistry,
     LiveLifecyclePlane,
 )
-from exomem_provisioner.models import CapacityReservationClass
+from exomem_provisioner.models import CapacityReservationClass, ResourceKind
 from exomem_provisioner.production import build_live_provider_components
 from exomem_provisioner.provider_identity import (
     ProviderRecoveryIdentityCodec,
@@ -715,6 +720,311 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
     core.releases.append(object())
     snapshot = await registry.inspect(metadata, metadata)
     assert snapshot.release is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job", "present", "complete", "failed"),
+    (
+        (None, False, False, False),
+        (SimpleNamespace(status=SimpleNamespace(conditions=(), failed=0)), True, False, False),
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    conditions=(SimpleNamespace(type="Complete", status="True"),), failed=0
+                )
+            ),
+            True,
+            True,
+            False,
+        ),
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    conditions=(SimpleNamespace(type="Failed", status="True"),), failed=1
+                )
+            ),
+            True,
+            False,
+            True,
+        ),
+    ),
+)
+async def test_registry_distinguishes_absent_running_complete_and_failed_init_job(
+    job, present: bool, complete: bool, failed: bool
+) -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    class Core:
+        def read_namespace(self, name):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["namespace"],
+                    }
+                )
+            )
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["vaultPvc"],
+                    }
+                )
+            )
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            return SimpleNamespace(items=[object()])
+
+    class Batch:
+        def read_namespaced_job(self, name, namespace):
+            if job is None:
+                raise _NotFound()
+            return job
+
+    class Missing:
+        def __getattr__(self, name):
+            def missing(*args, **kwargs):
+                raise _NotFound()
+
+            return missing
+
+    registry = KubernetesProviderRegistry(
+        core_v1=Core(),
+        apps_v1=Missing(),
+        batch_v1=Batch(),
+        custom_objects=Missing(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+
+    snapshot = await registry.inspect(metadata, metadata)
+
+    assert snapshot.init_job_present is present
+    assert snapshot.init_complete is complete
+    assert snapshot.init_failed is failed
+
+
+def _init_snapshot(*, present: bool, complete: bool = False, failed: bool = False, serving: bool = False):
+    return SimpleNamespace(
+        namespace=True,
+        release=True,
+        init_job_present=present,
+        init_complete=complete,
+        init_failed=failed,
+        serving=serving,
+        runtime_admitted=False,
+        routes=(False, False),
+    )
+
+
+def _init_recovery_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+        browser_origin="https://substratesystems.io",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        protocol_version="1",
+        release_version="0.22.0",
+    )
+
+
+def _init_recovery_request(*, envelope: str, worker_count: int = 2) -> dict[str, object]:
+    return {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": worker_count, "semantic": True, "media": False},
+        "_providerRecoveryEnvelopes": {"initJob": envelope},
+    }
+
+
+def _init_recovery_plane(snapshots: list[SimpleNamespace]):
+    metadata = _metadata()
+    original_owner = OpaqueProviderMetadata(
+        metadata.tenant_id, metadata.subject_id, "original-operation", 6
+    )
+    helm_calls: list[tuple[OpaqueProviderMetadata, dict[str, object]]] = []
+
+    class Registry:
+        async def inspect(self, current, owner):
+            assert current == metadata
+            assert owner == original_owner
+            return snapshots.pop(0)
+
+        async def observed_fence(self, tenant_id):
+            assert tenant_id == metadata.tenant_id
+            return 0
+
+        async def record_operation(self, current, envelope):
+            assert current == metadata
+            assert isinstance(envelope, str)
+
+    class Helm:
+        async def ensure_release(self, owner, values):
+            helm_calls.append((owner, values))
+
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=_init_recovery_config(),  # type: ignore[arg-type]
+    )
+    key = plane._key(metadata)
+    plane._owned[key] = original_owner
+    plane._helm_requests[key] = _init_recovery_request(envelope="original-init-envelope")
+    return plane, metadata, original_owner, helm_calls
+
+
+@pytest.mark.asyncio
+async def test_initialize_replays_absent_init_job_with_original_authenticated_release() -> None:
+    plane, metadata, original_owner, helm_calls = _init_recovery_plane(
+        [
+            _init_snapshot(present=False),
+            _init_snapshot(present=True, complete=True),
+            _init_snapshot(present=False, serving=True),
+        ]
+    )
+
+    initialized = await plane.initialize(
+        metadata,
+        _init_recovery_request(envelope="current-untrusted-envelope", worker_count=1),
+        _init_recovery_config(),  # type: ignore[arg-type]
+    )
+
+    assert initialized is True
+    assert [owner for owner, _values in helm_calls] == [original_owner, original_owner]
+    assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize", "serve"]
+    assert helm_calls[0][1]["workerPolicyDigest"] == helm_calls[1][1]["workerPolicyDigest"]
+    assert helm_calls[0][1]["providerRecoveryEnvelopes"] == {
+        "initJob": "original-init-envelope"
+    }
+    assert helm_calls[1][1]["providerRecoveryEnvelopes"] == {
+        "initJob": "original-init-envelope"
+    }
+
+
+@pytest.mark.asyncio
+async def test_initialize_keeps_present_running_init_job_pending_without_helm_replay() -> None:
+    plane, metadata, _original_owner, helm_calls = _init_recovery_plane(
+        [_init_snapshot(present=True)]
+    )
+
+    initialized = await plane.initialize(
+        metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+    )
+
+    assert initialized is False
+    assert helm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_initialize_keeps_replayed_pending_init_job_pending_without_serving() -> None:
+    plane, metadata, _original_owner, helm_calls = _init_recovery_plane(
+        [_init_snapshot(present=False), _init_snapshot(present=True)]
+    )
+
+    initialized = await plane.initialize(
+        metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+    )
+
+    assert initialized is False
+    assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize"]
+
+
+@pytest.mark.asyncio
+async def test_initialize_raises_for_failed_replayed_init_job_without_serving() -> None:
+    plane, metadata, _original_owner, helm_calls = _init_recovery_plane(
+        [_init_snapshot(present=False), _init_snapshot(present=True, failed=True)]
+    )
+
+    with pytest.raises(MetadataConflict, match="cell storage initialization failed"):
+        await plane.initialize(
+            metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+        )
+
+    assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize"]
+
+
+@pytest.mark.asyncio
+async def test_initializing_checkpoint_recovers_deleted_init_job_without_looping() -> None:
+    plane, metadata, original_owner, helm_calls = _init_recovery_plane(
+        [
+            _init_snapshot(present=False),
+            _init_snapshot(present=False),
+            _init_snapshot(present=True, complete=True),
+            _init_snapshot(present=False, serving=True),
+        ]
+    )
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+    original_request = _init_recovery_request(envelope="original-init-envelope")
+    original_request["_providerRecoveryEnvelopes"] = envelopes
+
+    class Repository:
+        async def list_resources(self, *, tenant_id, cell_id):
+            assert (tenant_id, cell_id) == (metadata.tenant_id, metadata.subject_id)
+            return [
+                SimpleNamespace(
+                    kind=ResourceKind.KUBERNETES_NAMESPACE,
+                    operation_id="original-database-operation",
+                    provider_operation_id=original_owner.operation_id,
+                    provider_fence_generation=original_owner.fence_generation,
+                )
+            ]
+
+        async def load_request(self, operation_id):
+            assert operation_id == "original-database-operation"
+            return original_request
+
+    class Cell:
+        async def volume_claim_bound(self, owner):
+            assert owner == original_owner
+            return True
+
+    plane._repository = Repository()  # type: ignore[assignment]
+    plane._cell = Cell()  # type: ignore[assignment]
+    driver = CellLifecycleDriver(
+        plane=plane, volume_worker=None, config=_init_recovery_config()  # type: ignore[arg-type]
+    )
+
+    outcome = await driver.execute(
+        "provision",
+        original_request,
+        EffectContext(
+            operation_id="current-database-operation",
+            provider_operation_id=metadata.operation_id,
+            tenant_id=metadata.tenant_id,
+            cell_id=metadata.subject_id,
+            fence_generation=metadata.fence_generation,
+            checkpoint="initializing",
+        ),
+    )
+
+    assert outcome == DriverPending("initialized", 1)
+    assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize", "serve"]
 
 
 @pytest.mark.asyncio

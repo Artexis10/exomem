@@ -44,7 +44,7 @@ from .mutation_terminal import (
     project_terminal,
     replayed_terminal,
     split_response_detail,
-    valid_record_receipt,
+    valid_collection_receipt,
 )
 from .privacy_log import content_private_logging_enabled
 
@@ -71,7 +71,15 @@ _IMPLICIT_RETRY_TTL_SECONDS = 600.0
 # `commit_existing`. `EXOMEM_WIDE_MUTATION_BOUNDARY` restores today's
 # wide-boundary behavior for every command in this set.
 _NARROW_BOUNDARY_COMMANDS = frozenset(
-    {"remember", "replace_memory", "edit_memory", "observe_memory", "record_memory", "preserve_artifacts"}
+    {
+        "remember",
+        "replace_memory",
+        "edit_memory",
+        "observe_memory",
+        "record_memory",
+        "plan_memory",
+        "preserve_artifacts",
+    }
 )
 _EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
 _IDEMPOTENCY_WAIT_SECONDS = 5.0
@@ -1373,8 +1381,8 @@ class LeaseManager:
                         idempotency_key=effective_public_idempotency_key,
                     )
                 if (
-                    command.name == "record_memory"
-                    and valid_record_receipt(leaf_result)
+                    command.name in {"record_memory", "plan_memory"}
+                    and valid_collection_receipt(leaf_result)
                     and leaf_result.get("outcome") == "replayed"
                 ):
                     return replayed_terminal(

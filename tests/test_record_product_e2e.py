@@ -1,4 +1,4 @@
-"""End-to-end product paths for the five-action Records command."""
+"""End-to-end product paths for the Records product command."""
 
 from __future__ import annotations
 
