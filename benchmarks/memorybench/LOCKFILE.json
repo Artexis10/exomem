@@ -15,7 +15,7 @@
   "provider_files_sha256": {
     "src/cli/commands/competitive-ingest.ts": {
       "source": "competitive-ingest.ts",
-      "sha256": "fa831f04c0e939213ca656b1282c611d5f2ae932aec1f05322f2cea21e394071"
+      "sha256": "85d35878da56b99fa03c2d451485dfed3cfbbab69e6f3f14a364bda16e45cff9"
     },
     "src/providers/_guest_transport.ts": {
       "source": "providers/_guest_transport.ts",

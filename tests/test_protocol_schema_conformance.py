@@ -24,8 +24,8 @@ FIXTURE = Path("benchmarks/lme/fixtures/mini.json")
 TWIN = Path("benchmarks/equivalence/fixtures/perturbed-twin")
 
 
-def _validator(name: str) -> Draft202012Validator:
-    schema = json.loads((SCHEMA_DIR / f"{name}.v1.schema.json").read_text(encoding="utf-8"))
+def _validator(name: str, version: int = 1) -> Draft202012Validator:
+    schema = json.loads((SCHEMA_DIR / f"{name}.v{version}.schema.json").read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(schema)
     return Draft202012Validator(schema)
 
@@ -52,7 +52,7 @@ def emitted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
 
 
 def test_the_run_manifest_validates_against_its_committed_schema(emitted) -> None:
-    _validator("run-manifest").validate(json.loads((emitted["run"] / "manifest.json").read_text(encoding="utf-8")))
+    _validator("run-manifest", 2).validate(json.loads((emitted["run"] / "manifest.json").read_text(encoding="utf-8")))
 
 
 def test_every_trace_record_validates_against_the_case_trace_schema(emitted) -> None:
@@ -201,6 +201,7 @@ def _memorybench_payloads() -> dict[str, dict]:
         "output_root": "/owned/output",
         "guest_work_root": "/owned/output/work",
         "guest_evidence_root": "/owned/output/evidence",
+        "contract_revision": "7cd15e6d6c67eb914e4f57bd943f98f7d1894b7f",
         "preregistration_sha256": "8" * 64,
         "privacy_hmac_key_hex": HMAC_KEY_HEX,
     }

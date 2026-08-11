@@ -20,8 +20,14 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       `benchmarks/epistemic/PREREGISTRATION.md` (14 families, assertion
       registry, acceptance predicates, decision gates G1–G5 with proposed
       thresholds) + sha256 recorded there
-- [ ] 0.7 ⛳ Founder ratifies pre-registration thresholds (gates freeze at the
-      first competitor run; later edits are dated amendments)
+- [x] 0.7 ⛳ Founder ratified the unchanged pre-registration on 2026-08-11:
+      `benchmarks/epistemic/PREREGISTRATION.md` sha256
+      `21aa5a8815038b82358336798b10afd8d3ffbd9739c8da597955bd14d8d962e3`.
+      Immutable receipt `benchmarks/epistemic/contracts/ratification.v1.json`
+      sha256 `31b74c6cdd69504da31af903e8464177f35fbf525f655c49e0e92e1f9862e5c6`
+      binds the founder decision and repository revision. Later changes require
+      an ordered amendment receipt; no competitor run occurred during
+      ratification or implementation.
 - [ ] 0.8 KB updated: 2026-08-08 REJECT audit + this programme's supersession
       filed as a research note (the KB thread currently ends at the
       2026-08-06 direction-lock)
@@ -273,10 +279,30 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       exhaustive, dereferenced competitor-evidence registry now covers every
       kind mapping and fallback. Covered by the joint 5.1b gates and final
       independent `CLEAR`; pre-registration bytes remained unchanged.
-- [ ] 5.1d census gaps (review): pre-registration sha256 into run manifests;
-      negative controls wired into every epistemic table; privileged-endpoint
-      disqualification check; headline table carries failing-assertion
-      artifact paths
+- [x] 5.1d census gaps (review) COMPLETE: comparative manifest schema v2
+      carries the Git-reconstructed ratification identity and complete ordered
+      amendment chain across LME, MemoryBench, and Membench; v1/unversioned
+      results are historical-untrusted. Receipt validation binds the exact
+      document at the run pin plus each receipt's unique full-history Git
+      introduction, refusing branch, mutation/restore, delete/re-add, rename,
+      substitution, and incomplete-chain attacks. Privileged endpoints use a
+      closed surface × provider × variant matrix and an attested, HMAC-bound
+      parent broker; untrusted driver code runs only in a fail-closed
+      Bubblewrap namespace, and capability gaps become named noncomparability,
+      never scores. Every product/control cohort cell has provider/variant-
+      bound evidence that is reopened no-follow and deterministically replayed;
+      exact `grep-markdown` + `no-memory` controls mask matching product signal
+      across all five outcomes before every gate count. The sole offline table
+      renderer accepts only the validated cohort, carries replayed catastrophic
+      artifact paths, and suppresses the whole table when evidence cannot be
+      reproduced. Red-first evidence is preserved in
+      `.task/RESULT-5.1d.md`; final gates: 184 focused checks; 700 cross-lane
+      checks + 2 expected absent-artifact skips; 31 Bun checks; schema,
+      fixture, OpenSpec, privacy, compile, lifecycle, and diff checks green.
+      Fresh independent review: two REQUEST_CHANGES rounds plus targeted
+      corrections and final `CLEAR`. No §4.6, §5.2, §5.3, §5.4, provider,
+      competitor, model, dataset benchmark, credential, metered, or external
+      network run occurred.
 - [ ] 5.2 Families 1–9 fixtures + runs vs exomem + grep-markdown + no-memory
       (controls score non-trivially)
 - [ ] 5.3 4b.18 structural-blinding fix + structure-swap test (hard-gates all

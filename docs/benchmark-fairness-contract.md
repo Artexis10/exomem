@@ -54,11 +54,16 @@ structurally impossible, not merely discouraged.
    extraction models; document-search vs memory-search are different
    products in effect; git-backed vs plain Basic Memory differ on history.
    Each is a registered variant with its own row and disclosure text.
-9. **Pre-registration.** Epistemic scenario families, assertions, acceptance
-   predicates, and the strategy decision gates are committed and hashed
-   before any competitor run; the hash appears in every manifest; later
-   changes are dated amendments. Negative controls (grep-over-markdown,
-   no-memory) accompany every epistemic table.
+9. **Pre-registration is reconstructed, not selected.** Epistemic scenario
+   families, assertions, acceptance predicates, and the strategy decision
+   gates are founder-ratified before any competitor run. Ratification leaves
+   the approved bytes unchanged and adds an immutable receipt. Every
+   comparative manifest pins a Git revision and carries the complete typed
+   receipt chain through that revision; validators re-read the document and
+   discover each receipt's unique full-history introduction. A plan-supplied
+   digest is only a checked assertion. Later changes are ordered amendments,
+   and mutation, omission, reordering, branch substitution, or a receipt edit
+   that is later restored all refuse.
 10. **Independent adversarial review before publication.** The
     auto-generated adversarial packet (assumptions, confounds,
     suspicious-win flags, challenge-artifact paths, pre-registration hash)
@@ -87,6 +92,23 @@ structurally impossible, not merely discouraged.
     sees them. Private mappings stay in protected evidence. Isolation glue
     must also prove that every configured project path is benchmark-owned;
     it may not discover or index an operator's existing memory directory.
+13. **Privileged calls cross one attested boundary.** Epistemic drivers receive
+    only a serializable broker proxy. The parent broker owns credentials,
+    sockets, SDKs, CLIs, and provider filesystems; untrusted driver code runs
+    in a fail-closed Bubblewrap namespace with no provider roots or network.
+    An authenticated invocation log is checked against the closed
+    `driver_surface_id × provider × variant` matrix before assertions run.
+    Undeclared or unaudited calls refuse. A documented capability gap is a
+    named noncomparability exclusion, never an unsupported score.
+14. **Every epistemic claim replays.** Every product and control cohort cell,
+    including passes, has provider/variant-bound evidence. Validation opens
+    every path component without following symlinks, verifies digests and
+    snapshots, reconstructs the assertion context, and requires the frozen
+    assertion to reproduce the exact outcome. The exact `grep-markdown` and
+    `no-memory` rows share the ordered cohort. If either control passes an
+    assertion instance, the product keeps its five-valued outcome but loses
+    product-signal eligibility for every strategy gate. Any unreplayable cell
+    suppresses the public cohort table rather than emitting a partial claim.
 
 ## Fairness-matrix row (rendered per lane × provider × variant)
 
@@ -109,6 +131,10 @@ structurally impossible, not merely discouraged.
 - Are Exomem's projector/driver LOC materially larger than competitors'?
 - Did any row score a product where the manifest shows an environment fault?
 - Does any comparative claim rest on a family containing an N/A?
+- Does every privileged call have an authenticated sandbox receipt and an
+  exact matrix entry, with capability gaps excluded rather than scored?
+- Does every product/control cell replay from provider-bound evidence, and do
+  control passes disappear from every product-signal gate count?
 - Is any judged number published without the structural-blinding fix and a
   judge–human agreement measurement?
 - Does any cost claim include unmetered server-side extraction?

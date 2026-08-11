@@ -8,6 +8,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from .contracts import (
+    ContractIdentityError,
+    derive_preregistration_identity,
+    validate_preregistration_identity,
+)
 from .models import BudgetSummary, DatasetIdentity, LaneReadiness, LeakageSummary, RunManifest
 from .validity import is_terminal
 
@@ -26,8 +31,15 @@ def start_manifest(
     readiness: list[LaneReadiness] | None = None, leakage: LeakageSummary | None = None,
     contamination: str | None = None, budget: BudgetSummary | None = None,
     provider_variant: str | None = None, control_config_sha256: str | None = None,
-    pre_registration_sha256: str | None = None,
+    contract_revision: str | None = None, repo_root: Path | str | None = None,
 ) -> RunManifest:
+    repository = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[2]
+    try:
+        preregistration_identity = derive_preregistration_identity(
+            repository, contract_revision=contract_revision
+        )
+    except ContractIdentityError as exc:
+        raise ManifestError(f"pre-registration identity refused: {exc}") from exc
     path = _path(run_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -36,7 +48,8 @@ def start_manifest(
         run_id=run_id, dataset=dataset, status="started", started_at=started_at,
         namespaces=namespaces or {}, pins=pins or {}, readiness=readiness or [],
         leakage=leakage or LeakageSummary(scanned_cases=0, invalidated_cases=0),
-        contamination=contamination, budget=budget, pre_registration_sha256=pre_registration_sha256,
+        contamination=contamination, budget=budget,
+        preregistration_identity=preregistration_identity,
         provider_variant=provider_variant, control_config_sha256=control_config_sha256,
     )
     path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -68,21 +81,61 @@ def finalize_manifest(
         raw["contamination"] = contamination
     if budget is not None:
         raw["budget"] = budget.model_dump()
-    manifest = RunManifest.model_validate(raw)
+    manifest = RunManifest.model_validate_json(json.dumps(raw))
     path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
     return manifest
+
+
+def bind_started_manifest_provider(
+    run_dir: Path | str,
+    *,
+    provider_variant: str,
+    control_config_sha256: str | None,
+) -> RunManifest:
+    """Bind metadata learned only after the manifest-safe provider construction."""
+
+    path = _path(run_dir)
+    if not path.exists():
+        raise ManifestError("manifest must exist before provider construction")
+    try:
+        manifest = RunManifest.model_validate_json(path.read_bytes())
+    except ValidationError as exc:
+        raise ManifestError("started manifest is invalid") from exc
+    if manifest.status != "started":
+        raise ManifestError("provider metadata can only bind a started manifest")
+    updated = manifest.model_copy(
+        update={
+            "provider_variant": provider_variant,
+            "control_config_sha256": control_config_sha256,
+        }
+    )
+    path.write_text(updated.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return updated
 
 
 def load_manifest(run_dir: Path | str) -> RunManifest:
     path = _path(run_dir)
     try:
-        manifest = RunManifest.model_validate_json(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise ManifestError("manifest is missing") from exc
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ManifestError("unknown schema_version or invalid manifest") from exc
+    if isinstance(raw, dict) and raw.get("schema_version") == 1:
+        raise ManifestError("historical-untrusted manifest schema v1 is refused for comparison")
+    try:
+        manifest = RunManifest.model_validate_json(json.dumps(raw))
     except ValidationError as exc:
         raise ManifestError("unknown schema_version or invalid manifest") from exc
-    if manifest.schema_version != 1:
+    if manifest.schema_version != 2:
         raise ManifestError("unknown schema_version")
+    try:
+        validate_preregistration_identity(
+            manifest.preregistration_identity,
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+    except ContractIdentityError as exc:
+        raise ManifestError(f"pre-registration identity refused: {exc}") from exc
     if not is_terminal(manifest.status):
         raise ManifestError("non-terminal manifest cannot be used for reports")
     return manifest

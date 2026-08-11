@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from protocol.contracts import PreregistrationIdentity, derive_preregistration_identity
 from protocol.models import (
     GuestCleanup,
     GuestCleanupPlan,
@@ -1376,10 +1377,14 @@ def _utc_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _started_manifest(plan: MemoryBenchRunPlan, started_at: str) -> dict[str, Any]:
+def _started_manifest(
+    plan: MemoryBenchRunPlan,
+    started_at: str,
+    preregistration_identity: PreregistrationIdentity,
+) -> dict[str, Any]:
     return RunManifest.model_validate({
         "protocol_version": "1.0.0",
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": plan.run_id,
         "dataset": plan.dataset.model_dump(mode="json"),
         "status": "started",
@@ -1399,7 +1404,7 @@ def _started_manifest(plan: MemoryBenchRunPlan, started_at: str) -> dict[str, An
         "budget": None,
         "provider_variant": plan.provider_variant,
         "control_config_sha256": None,
-        "pre_registration_sha256": plan.preregistration_sha256,
+        "preregistration_identity": preregistration_identity,
     }).model_dump(mode="json")
 
 
@@ -1446,6 +1451,15 @@ def run_export(
     try:
         run_plan_bytes = _secure_read(run_plan_path, private=True)
         plan = MemoryBenchRunPlan.model_validate(_load_json_bytes(run_plan_bytes, "run plan"))
+    except Exception:
+        return ExportResult("BLOCKED", 2)
+    try:
+        preregistration_identity = derive_preregistration_identity(
+            Path(__file__).resolve().parents[2],
+            contract_revision=plan.contract_revision,
+        )
+        if plan.preregistration_sha256 != preregistration_identity.original.sha256:
+            raise ValueError("pre-registration digest assertion differs from derived original")
         _validate_registered_variant(plan)
         output_root = Path(plan.output_root)
         if output_root.exists():
@@ -1482,7 +1496,9 @@ def run_export(
     )
     try:
         started_value = utc_now()
-        started = _started_manifest(plan, _utc_timestamp(started_value))
+        started = _started_manifest(
+            plan, _utc_timestamp(started_value), preregistration_identity
+        )
         write(manifest_path, _json_bytes(started), mode=0o600)
         write(output_root / "ledger.jsonl", b"", mode=0o600)
     except Exception:
@@ -1620,7 +1636,7 @@ def run_export(
                 "invalid_reason": None if status == "VALID" else "memorybench_export_invalid",
             }
             try:
-                RunManifest.model_validate(terminal)
+                RunManifest.model_validate_json(_json_bytes(terminal))
                 finalize_manifest(manifest_path, terminal)
             except Exception:
                 return ExportResult("INVALID", 1 if first_signal is None else exit_code)

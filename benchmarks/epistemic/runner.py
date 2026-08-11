@@ -6,8 +6,15 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from .assertions import AssertionContext, AssertionResult
+from .broker import (
+    InvocationReceiptRef,
+    ProviderBroker,
+    SandboxDriverResult,
+    audit_invocation_receipts,
+)
 from .registry import REQUIRES_SNAPSHOT_PAIR, resolve
 from .schema import Scenario
 from .snapshot import EpistemicStateSnapshot
@@ -45,6 +52,7 @@ class ScenarioRun:
     """All deterministic assertion results in declared trajectory order."""
 
     assertions: tuple[BoundAssertion, ...]
+    comparability_exclusions: tuple[str, ...] = ()
 
 
 def _binding_error(detail: str) -> RunnerBindingError:
@@ -105,7 +113,7 @@ def _timestamp(value: str, *, label: str) -> datetime:
         raise _binding_error(f"{label} timestamp is not RFC3339: {value!r}") from error
 
 
-def run_scenario(
+def evaluate_scenario(
     scenario: Scenario,
     *,
     snapshots: Mapping[str, EpistemicStateSnapshot],
@@ -195,4 +203,41 @@ def run_scenario(
             )
             for phase_id, assertion, context, assertion_fn in resolved
         )
+    )
+
+
+def run_scenario(
+    scenario: Scenario,
+    *,
+    snapshots: Mapping[str, EpistemicStateSnapshot],
+    run_root: Path | str | None = None,
+    provider: str | None = None,
+    variant: str | None = None,
+    invocation_receipt_ref: InvocationReceiptRef | None = None,
+    broker: ProviderBroker | None = None,
+    sandbox_result: SandboxDriverResult | None = None,
+    phase_observations: Mapping[str, PhaseObservation] | None = None,
+) -> ScenarioRun:
+    """Audit a comparative row before evaluating any frozen assertion."""
+
+    if run_root is None or provider is None or variant is None:
+        raise _binding_error("comparative receipt audit requires run_root, provider, and variant")
+    if invocation_receipt_ref is not None or broker is None or sandbox_result is None:
+        raise _binding_error(
+            "comparative audit requires a live broker sandbox result attestation; raw receipt refused"
+        )
+    audit = audit_invocation_receipts(
+        broker=broker,
+        run_root=run_root,
+        driver_result=sandbox_result,
+        matrix=scenario.fairness.privileged_endpoint_matrix,
+        provider=provider,
+        variant=variant,
+    )
+    if not audit.comparable:
+        return ScenarioRun(assertions=(), comparability_exclusions=audit.exclusions)
+    return evaluate_scenario(
+        scenario,
+        snapshots=snapshots,
+        phase_observations=phase_observations,
     )

@@ -139,7 +139,8 @@ def _plan_payload(tmp_path: Path, *, fresh_runtime: bool = True) -> dict[str, An
         "output_root": str(output),
         "guest_work_root": str(output / "guest-work"),
         "guest_evidence_root": str(output / "guest-evidence"),
-        "preregistration_sha256": "d" * 64,
+        "contract_revision": "7cd15e6d6c67eb914e4f57bd943f98f7d1894b7f",
+        "preregistration_sha256": "21aa5a8815038b82358336798b10afd8d3ffbd9739c8da597955bd14d8d962e3",
         "privacy_hmac_key_hex": HMAC_KEY_HEX,
     }
 
@@ -502,6 +503,8 @@ def test_preflight_binds_real_setup_provider_checkout_and_dataset_before_first_s
         )
         manifest = json.loads((tmp_path / "output/manifest.json").read_text())
         assert manifest["status"] == "started"
+        assert manifest["schema_version"] == 2
+        assert manifest["preregistration_identity"]["original"]["sha256"] == payload["preregistration_sha256"]
         assert (tmp_path / "output/ledger.jsonl").read_bytes() == b""
         return subprocess.CompletedProcess(argv, 0)
 
@@ -533,6 +536,31 @@ def test_preflight_binds_real_setup_provider_checkout_and_dataset_before_first_s
     assert all(call["env"]["MEMORYBENCH_GUEST_WORK_ROOT"] == str(tmp_path / "output/guest-work") for call in stage_calls)
     assert all(call["env"]["MEMORYBENCH_GUEST_EVIDENCE_ROOT"] == str(tmp_path / "output/guest-evidence") for call in stage_calls)
     assert all("OPENAI_API_KEY" not in call["env"] for call in stage_calls)
+    terminal_manifest = json.loads((tmp_path / "output/manifest.json").read_text())
+    assert terminal_manifest["preregistration_identity"]["contract_revision"] == payload["contract_revision"]
+
+
+def test_preregistration_plan_digest_is_only_an_assertion_against_derived_identity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from memorybench.export import main
+
+    plan = _plan(tmp_path)
+    payload = json.loads(plan.read_text())
+    payload["preregistration_sha256"] = "d" * 64
+    plan.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    plan.chmod(0o600)
+    stages: list[object] = []
+
+    result = _run(plan, stage_runner=lambda *args, **kwargs: stages.append((args, kwargs)))
+
+    assert result.status == "BLOCKED" and result.exit_code == 2
+    assert stages == []
+    assert not Path(payload["output_root"]).exists()
+    assert main(["--plan", str(plan)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_production_default_calls_the_real_setup_verifier(

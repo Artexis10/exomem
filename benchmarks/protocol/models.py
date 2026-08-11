@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .contracts import PreregistrationIdentity
 from .version import (
     BUDGET_LEDGER_SCHEMA_VERSION, CASE_GOLD_SCHEMA_VERSION, CASE_TRACE_SCHEMA_VERSION,
     EQUIVALENCE_DIFF_SCHEMA_VERSION, EQUIVALENCE_EXCEPTION_SCHEMA_VERSION,
@@ -142,7 +143,7 @@ class RunManifest(StrictModel):
     budget: BudgetSummary | None = None
     provider_variant: str | None = None
     control_config_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    pre_registration_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    preregistration_identity: PreregistrationIdentity
 
 
 class IngestRecord(StrictModel):
@@ -393,6 +394,7 @@ class MemoryBenchRunPlan(StrictModel):
     output_root: str
     guest_work_root: str
     guest_evidence_root: str
+    contract_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
     preregistration_sha256: str = Field(pattern=_SHA256_PATTERN)
     privacy_hmac_key_hex: str = Field(pattern=_SHA256_PATTERN)
 

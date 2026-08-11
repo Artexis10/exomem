@@ -11,6 +11,9 @@ def test_manifest_starts_before_call_and_trace_refuses_unfinished_runs(tmp_path:
 
     start_manifest(tmp_path, run_id="run-1", dataset={"id": "fixture", "variant": "mini", "source": "local", "revision": "1", "sha256": "a" * 64, "case_count": 1}, started_at="2026-01-01T00:00:00Z")
     assert (tmp_path / "manifest.json").is_file()
+    assert start_manifest(
+        tmp_path / "second", run_id="run-2", dataset={"id": "fixture", "variant": "mini", "source": "local", "revision": "1", "sha256": "a" * 64, "case_count": 1}, started_at="2026-01-01T00:00:00Z"
+    ).schema_version == 2
     with pytest.raises(ManifestError, match="non-terminal"):
         load_manifest(tmp_path)
     writer = CaseTraceWriter(tmp_path, "case-1")

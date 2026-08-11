@@ -108,6 +108,7 @@ async function fixture(provider: "exomem" | "basic-memory" = "exomem"): Promise<
     output_root: output,
     guest_work_root: work,
     guest_evidence_root: evidence,
+    contract_revision: "7cd15e6d6c67eb914e4f57bd943f98f7d1894b7f",
     preregistration_sha256: "d".repeat(64),
     privacy_hmac_key_hex: HMAC_KEY_HEX,
   }

@@ -54,11 +54,23 @@ fairness:
       mechanism: retained superseded artifact reachable via the documented list surface
       verdict: satisfiable
       evidence: benchmarks/epistemic/PREREGISTRATION.md:68
-  privileged_endpoint_check:
-    - driver_tool: read-only state projection over documented surfaces
-      competitor_equivalent: documented list/read endpoint
-    - driver_tool: ingest of the corpus source
-      competitor_equivalent: documented write/ingest endpoint
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: corpus.ingest
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: corpus source ingestion
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:16
+      reason: The same neutral corpus source is ingested for this fixture row.
+      competitor_surface: documented write/ingest endpoint
   acceptance_predicate: >-
     PREREGISTRATION.md section 4, prior_revision_retained and
     revision_links_to_predecessor.

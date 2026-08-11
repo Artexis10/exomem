@@ -191,6 +191,14 @@ def test_lockfile_pins_memorybench_basic_and_every_overlay_byte() -> None:
         assert record["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
+def test_competitive_ingest_v2_parser_bytes_are_exactly_lockfile_bound() -> None:
+    lock = json.loads(LOCKFILE.read_text(encoding="utf-8"))
+    record = lock["provider_files_sha256"]["src/cli/commands/competitive-ingest.ts"]
+    source = ROOT / record["source"]
+
+    assert record["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
 def test_registration_preimages_are_the_reviewed_upstream_bytes() -> None:
     lock = json.loads(LOCKFILE.read_text(encoding="utf-8"))
     records = {row["path"]: row for row in lock["registration_overlay"]["files"]}

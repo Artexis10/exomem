@@ -18,7 +18,7 @@ from membench.judge.backends import ClaudeCliBackend, OpenAICompatBackend
 from protocol.budget import BudgetLedger
 from protocol.canary import canary_for, evaluate_probes
 from protocol.leakage import scan_ingest
-from protocol.manifest import finalize_manifest, start_manifest
+from protocol.manifest import bind_started_manifest_provider, finalize_manifest, start_manifest
 from protocol.models import BudgetSummary, CaseGold, CaseHandle, DatasetIdentity, EventProvenance, LeakageSummary, ProtocolEvent, ProbeResult
 from protocol.namespace import derive_namespace, namespace_pattern
 from protocol.readiness import validate as validate_readiness
@@ -445,8 +445,21 @@ def execute_run(
     )
     run_id = config.run_id or _default_run_id()
     run_dir = Path(config.out) / run_id
-    # ApiReader validates the metered gate without touching the filesystem.
-    # Construct it before reserving an immutable run id so a refusal is retryable.
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise FileExistsError(f"run directory is immutable and already exists: {run_dir}") from exc
+    provider_variant = config.provider or "exomem-source-only"
+    provider_kind = "hybrid-rag" if config.provider == "hybrid-rag-control" else "exomem"
+    start_manifest(
+        run_dir, run_id=run_id, dataset=dataset_identity,
+        started_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+        provider_variant=provider_variant,
+        namespaces={question.question_id: derive_namespace(run_id, question.question_id, provider_kind) for question in dataset.questions},
+    )
+
+    # Provider and reader constructors may inspect credentials or initialize a
+    # backend, so the derived-identity manifest is durable before either runs.
     active_reader = reader or _reader(config, run_dir)
     pilot_evidence = (
         None
@@ -459,11 +472,6 @@ def execute_run(
             is_pilot=config.pilot is not None,
         )
     )
-    try:
-        run_dir.mkdir(parents=True, exist_ok=False)
-    except FileExistsError as exc:
-        raise FileExistsError(f"run directory is immutable and already exists: {run_dir}") from exc
-    provider_variant = config.provider or "exomem-source-only"
     control_config_sha256 = None
     if config.provider:
         from .providers.registry import provider_factory
@@ -472,12 +480,10 @@ def execute_run(
         config_hash = getattr(config_value, "sha256", None)
         control_config_sha256 = config_hash() if callable(config_hash) else None
         provider_variant = candidate.variant_id()
-    provider_kind = "hybrid-rag" if config.provider == "hybrid-rag-control" else "exomem"
-    start_manifest(
-        run_dir, run_id=run_id, dataset=dataset_identity,
-        started_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
-        provider_variant=provider_variant, control_config_sha256=control_config_sha256,
-        namespaces={question.question_id: derive_namespace(run_id, question.question_id, provider_kind) for question in dataset.questions},
+    bind_started_manifest_provider(
+        run_dir,
+        provider_variant=provider_variant,
+        control_config_sha256=control_config_sha256,
     )
     ledger = BudgetLedger(run_dir, caps={"usd": config.budget_cap_usd})
     ledger.reserve(ts=dt.datetime.now(dt.UTC).isoformat(), seq=0, actor="lme-runner", op="stub-reader-budget", units=0)

@@ -1,5 +1,52 @@
 {
   "$defs": {
+    "AmendmentIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "affected_sections": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Affected Sections",
+          "type": "array"
+        },
+        "contract": {
+          "$ref": "#/$defs/ContractArtifactIdentity"
+        },
+        "effective_policy": {
+          "title": "Effective Policy",
+          "type": "string"
+        },
+        "parent_contract_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Contract Sha256",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        },
+        "receipt": {
+          "$ref": "#/$defs/ReceiptIdentity"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "receipt",
+        "parent_contract_sha256",
+        "contract",
+        "affected_sections",
+        "rationale",
+        "effective_policy"
+      ],
+      "title": "AmendmentIdentity",
+      "type": "object"
+    },
     "BudgetSummary": {
       "additionalProperties": false,
       "properties": {
@@ -25,6 +72,33 @@
         "refusals"
       ],
       "title": "BudgetSummary",
+      "type": "object"
+    },
+    "ContractArtifactIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "repository_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Repository Revision",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "repository_revision"
+      ],
+      "title": "ContractArtifactIdentity",
       "type": "object"
     },
     "DatasetIdentity": {
@@ -142,6 +216,75 @@
       ],
       "title": "LeakageSummary",
       "type": "object"
+    },
+    "PreregistrationIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "amendments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AmendmentIdentity"
+          },
+          "title": "Amendments",
+          "type": "array"
+        },
+        "contract_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Contract Revision",
+          "type": "string"
+        },
+        "effective": {
+          "$ref": "#/$defs/ContractArtifactIdentity"
+        },
+        "original": {
+          "$ref": "#/$defs/ContractArtifactIdentity"
+        },
+        "ratification": {
+          "$ref": "#/$defs/ReceiptIdentity"
+        }
+      },
+      "required": [
+        "contract_revision",
+        "original",
+        "ratification",
+        "effective"
+      ],
+      "title": "PreregistrationIdentity",
+      "type": "object"
+    },
+    "ReceiptIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "introduction_revision": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{40}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Introduction Revision"
+        },
+        "receipt_path": {
+          "minLength": 1,
+          "title": "Receipt Path",
+          "type": "string"
+        },
+        "receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Receipt Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "receipt_path",
+        "receipt_sha256",
+        "introduction_revision"
+      ],
+      "title": "ReceiptIdentity",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -231,18 +374,8 @@
       "title": "Pins",
       "type": "object"
     },
-    "pre_registration_sha256": {
-      "anyOf": [
-        {
-          "pattern": "^[0-9a-f]{64}$",
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Pre Registration Sha256"
+    "preregistration_identity": {
+      "$ref": "#/$defs/PreregistrationIdentity"
     },
     "protocol_version": {
       "const": "1.0.0",
@@ -274,8 +407,8 @@
       "type": "string"
     },
     "schema_version": {
-      "const": 1,
-      "default": 1,
+      "const": 2,
+      "default": 2,
       "title": "Schema Version",
       "type": "integer"
     },
@@ -300,7 +433,8 @@
     "run_id",
     "dataset",
     "status",
-    "started_at"
+    "started_at",
+    "preregistration_identity"
   ],
   "title": "RunManifest",
   "type": "object"

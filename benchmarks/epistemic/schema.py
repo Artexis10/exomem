@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from .assertions import AssertionContext, AssertionResult
 from .catastrophic import CATASTROPHIC_ASSERTIONS
@@ -90,11 +90,25 @@ class FairnessMechanism(StrictModel):
     evidence: str = Field(min_length=1)
 
 
-class PrivilegedEndpointCheck(StrictModel):
-    """One driver tool and the competitor surface claimed to be equivalent."""
+class PrivilegedEndpointMatrixEntry(StrictModel):
+    """One exact driver-surface × provider × variant audit disposition."""
 
-    driver_tool: str = Field(min_length=1)
-    competitor_equivalent: str = Field(min_length=1)
+    driver_surface_id: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    variant: str = Field(min_length=1)
+    disposition: Literal["equivalent", "capability_gap"]
+    audit_scope: str = Field(min_length=1)
+    evidence: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    competitor_surface: str | None = None
+
+    @model_validator(mode="after")
+    def _closed_disposition(self) -> "PrivilegedEndpointMatrixEntry":
+        if self.disposition == "equivalent" and not self.competitor_surface:
+            raise ValueError("equivalent disposition requires a competitor surface")
+        if self.disposition == "capability_gap" and self.competitor_surface is not None:
+            raise ValueError("capability_gap cannot carry a competitor surface")
+        return self
 
 
 class FairnessPacket(StrictModel):
@@ -103,8 +117,18 @@ class FairnessPacket(StrictModel):
     why_neutral: str = Field(min_length=1)
     public_coverage_subtraction: str = Field(min_length=1)
     mechanisms: tuple[FairnessMechanism, ...] = Field(min_length=1)
-    privileged_endpoint_check: tuple[PrivilegedEndpointCheck, ...] = Field(min_length=1)
+    privileged_endpoint_matrix: tuple[PrivilegedEndpointMatrixEntry, ...] = Field(min_length=1)
     acceptance_predicate: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _matrix_keys_are_unique(self) -> "FairnessPacket":
+        keys = [
+            (row.driver_surface_id, row.provider, row.variant)
+            for row in self.privileged_endpoint_matrix
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("privileged endpoint matrix keys must be unique")
+        return self
 
 
 class ScenarioPhase(StrictModel):

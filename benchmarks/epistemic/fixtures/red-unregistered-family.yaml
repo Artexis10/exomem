@@ -19,7 +19,13 @@ fairness:
       mechanism: none
       verdict: unknown
       evidence: benchmarks/epistemic/PREREGISTRATION.md:14
-  privileged_endpoint_check:
-    - driver_tool: read-only state projection
-      competitor_equivalent: documented list/read endpoint
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
   acceptance_predicate: none

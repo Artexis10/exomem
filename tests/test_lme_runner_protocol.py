@@ -74,6 +74,10 @@ def clean_run(tmp_path_factory: pytest.TempPathFactory):
 
 def test_clean_fixture_run_finalises_valid_with_measured_summaries(clean_run) -> None:
     manifest = _manifest(clean_run.run_dir)
+    assert manifest["schema_version"] == 2
+    assert manifest["preregistration_identity"]["original"]["sha256"] == (
+        "21aa5a8815038b82358336798b10afd8d3ffbd9739c8da597955bd14d8d962e3"
+    )
     assert manifest["status"] == "VALID"
     assert manifest["contamination"] == "isolated"
     assert manifest["provider_variant"] == "hybrid-rag-fixture"
@@ -184,8 +188,7 @@ def test_manifest_exists_before_any_provider_is_constructed(tmp_path: Path, monk
     _install(monkeypatch, _Observing)
     _execute(tmp_path, "ordering")
     assert observed, "provider was never constructed"
-    assert observed[0] is False, "the first construction happens while choosing the variant"
-    assert all(observed[1:]), "every per-case provider was constructed after the manifest existed"
+    assert all(observed), "every provider construction must happen after the derived-identity manifest"
     assert _manifest(tmp_path / "ordering")["status"] == "VALID"
 
 

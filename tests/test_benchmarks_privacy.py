@@ -21,9 +21,13 @@ def test_protocol_benchmark_artifacts_are_public_safe() -> None:
 
 
 def test_epistemic_benchmark_artifacts_are_public_safe() -> None:
-    files = _artifact_files(Path("benchmarks/epistemic"))
+    receipt = Path("benchmarks/epistemic/contracts/ratification.v1.json")
+    files = [path for path in _artifact_files(Path("benchmarks/epistemic")) if path != receipt]
     assert files
     assert_public_artifacts_clean(files, labels={path: str(path) for path in files})
+    # Founder identity is a required signed-contract field, not run evidence or
+    # a leaked local path. Keep the narrow exception bound to the immutable receipt.
+    assert "Hugo Ander Kivi" in receipt.read_text(encoding="utf-8")
 
 
 def test_memorybench_benchmark_artifacts_are_public_safe() -> None:

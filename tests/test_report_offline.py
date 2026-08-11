@@ -46,6 +46,9 @@ def test_the_offline_guard_refuses_a_real_socket_connect() -> None:
     """RM8: a genuine socket.connect attempt, not a stand-in call on the patch."""
 
     from lme.report import offline_guard
+    from protocol.offline import offline_guard as shared_offline_guard
+
+    assert offline_guard is shared_offline_guard
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(1.0)

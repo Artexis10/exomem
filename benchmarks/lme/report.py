@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Set
-from contextlib import contextmanager
 import json
-import socket
 from pathlib import Path
+
+from protocol.offline import offline_guard
 
 from .dataset import LmeDataset, QUESTION_TYPES
 
@@ -124,23 +124,6 @@ def render_report(
         lines.append("| " + " | ".join((ability, provider_variant, *row[1:]) if provider_variant else row) + " |")
     lines.append("")
     return "\n".join(lines)
-
-
-@contextmanager
-def offline_guard():
-    """Make artifact-only report regeneration fail loudly on any network use."""
-
-    original = socket.socket.connect
-
-    def refused(self, address):  # type: ignore[no-untyped-def]
-        del self, address
-        raise OSError("offline report generation forbids socket.connect")
-
-    socket.socket.connect = refused
-    try:
-        yield
-    finally:
-        socket.socket.connect = original
 
 
 def render_run_report(run_dir: Path | str, *, offline: bool = False) -> str:

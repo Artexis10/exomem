@@ -42,6 +42,7 @@ function plan(selection: Record<string, unknown>): Record<string, unknown> {
     harness: {}, dataset: {}, dataset_path: `${root}/dataset.json`, selection,
     provider_checkout: {}, memorybench_home: root, output_root: `${root}/output`,
     guest_work_root: `${root}/output/work`, guest_evidence_root: `${root}/output/evidence`,
+    contract_revision: "7cd15e6d6c67eb914e4f57bd943f98f7d1894b7f",
     preregistration_sha256: "a".repeat(64), privacy_hmac_key_hex: "b".repeat(64),
   }
 }

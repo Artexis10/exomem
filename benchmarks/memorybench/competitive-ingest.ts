@@ -21,6 +21,7 @@ interface CompetitivePlan {
     target_question_ids: string[] | null
   }
   memorybench_home: string
+  contract_revision: string
   [key: string]: unknown
 }
 
@@ -35,10 +36,11 @@ const PLAN_KEYS = [
   "protocol_version", "schema_version", "artifact_type", "run_id", "upstream_run_id",
   "provider", "provider_variant", "benchmark", "harness", "dataset", "dataset_path",
   "selection", "provider_checkout", "memorybench_home", "output_root", "guest_work_root",
-  "guest_evidence_root", "preregistration_sha256", "privacy_hmac_key_hex",
+  "guest_evidence_root", "contract_revision", "preregistration_sha256", "privacy_hmac_key_hex",
 ] as const
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const SHA256 = /^[0-9a-f]{64}$/
+const REVISION = /^[0-9a-f]{40}$/
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected object")
@@ -137,6 +139,7 @@ export function parseCompetitivePlan(bytes: Uint8Array): CompetitivePlan {
       !RUN_ID.test(String(raw.run_id)) || !RUN_ID.test(String(raw.upstream_run_id)) ||
       !["basic-memory", "exomem"].includes(String(raw.provider)) ||
       raw.benchmark !== "longmemeval" || typeof raw.memorybench_home !== "string" ||
+      !REVISION.test(String(raw.contract_revision)) ||
       !isAbsolute(raw.memorybench_home) || normalize(raw.memorybench_home) !== raw.memorybench_home) {
     throw new Error("run plan identity is invalid")
   }

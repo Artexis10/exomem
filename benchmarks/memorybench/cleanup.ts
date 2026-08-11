@@ -134,6 +134,7 @@ interface RunPlan {
   output_root: string
   guest_work_root: string
   guest_evidence_root: string
+  contract_revision: string
   privacy_hmac_key_hex: string
   selection: { mode: "full" | "explicit"; target_question_ids: string[] | null }
   [key: string]: unknown
@@ -161,7 +162,7 @@ const RUN_PLAN_KEYS = [
   "provider", "provider_variant", "benchmark", "harness", "dataset", "dataset_path",
   "selection",
   "provider_checkout", "memorybench_home", "output_root", "guest_work_root",
-  "guest_evidence_root", "preregistration_sha256", "privacy_hmac_key_hex",
+  "guest_evidence_root", "contract_revision", "preregistration_sha256", "privacy_hmac_key_hex",
 ]
 const CLEANUP_PLAN_KEYS = [
   "protocol_version", "schema_version", "artifact_type", "run_id", "provider",
@@ -332,7 +333,8 @@ function validateRunPlan(raw: Record<string, unknown>): RunPlan {
       raw.artifact_type !== "memorybench-run-plan.v1" ||
       !["basic-memory", "exomem"].includes(String(raw.provider)) ||
       !RUN_ID.test(String(raw.run_id)) || !RUN_ID.test(String(raw.upstream_run_id)) ||
-      raw.benchmark !== "longmemeval" || !isHex64(raw.preregistration_sha256) ||
+      raw.benchmark !== "longmemeval" || !/^[0-9a-f]{40}$/.test(String(raw.contract_revision)) ||
+      !isHex64(raw.preregistration_sha256) ||
       !isHex64(raw.privacy_hmac_key_hex)) throw new Error("run plan identity is invalid")
   const provider = raw.provider as ProviderName
   const registered = provider === "basic-memory" ? "basic-memory-controlled" : "exomem-source-only"

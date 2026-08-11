@@ -192,6 +192,11 @@
       "title": "Benchmark",
       "type": "string"
     },
+    "contract_revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Contract Revision",
+      "type": "string"
+    },
     "dataset": {
       "$ref": "#/$defs/DatasetIdentity"
     },
@@ -291,6 +296,7 @@
     "output_root",
     "guest_work_root",
     "guest_evidence_root",
+    "contract_revision",
     "preregistration_sha256",
     "privacy_hmac_key_hex"
   ],

@@ -6,12 +6,16 @@ import pytest
 
 from epistemic.assertions import AssertionResult
 from epistemic.registry import RegistryError
-from epistemic.runner import PhaseObservation, RunnerBindingError, run_scenario
+from epistemic.runner import (
+    PhaseObservation,
+    RunnerBindingError,
+    evaluate_scenario as run_scenario,
+)
 from epistemic.schema import (
     Expectation,
     FairnessMechanism,
     FairnessPacket,
-    PrivilegedEndpointCheck,
+    PrivilegedEndpointMatrixEntry,
     Scenario,
     ScenarioOp,
     ScenarioPhase,
@@ -42,8 +46,17 @@ FAIRNESS = FairnessPacket(
             provider_role="provider", mechanism="documented metadata", verdict="possible", evidence="docs",
         ),
     ),
-    privileged_endpoint_check=(
-        PrivilegedEndpointCheck(driver_tool="project", competitor_equivalent="documented read surface"),
+    privileged_endpoint_matrix=(
+        PrivilegedEndpointMatrixEntry(
+            driver_surface_id="state.read",
+            provider="fixture",
+            variant="native",
+            disposition="equivalent",
+            audit_scope="read-only projected state",
+            evidence="https://example.invalid/documented-read-surface",
+            reason="Both rows read documented state.",
+            competitor_surface="documented read surface",
+        ),
     ),
     acceptance_predicate="A documented kind field distinguishes the two records.",
 )
