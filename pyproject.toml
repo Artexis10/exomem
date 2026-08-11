@@ -159,6 +159,7 @@ tui = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-split>=0.11,<1",
     "pytest-timeout>=2.3",
 ]
 # TUI snapshot/interaction testing. Separate group: the lean dev matrix must
