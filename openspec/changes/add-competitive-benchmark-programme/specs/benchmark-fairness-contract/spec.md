@@ -82,7 +82,13 @@ locked protocol adapters. Every private observation seam SHALL preserve the
 post-projection arguments, exceptions, object identity, and return values; its files, line count,
 endpoints, and observed calls SHALL be disclosed. Isolation-only values SHALL
 be labelled Exomem-authored transport values and SHALL NOT be represented as
-competitor configuration.
+competitor configuration. The disclosed driver-call inventory SHALL come from
+a persisted, digest-bound receipt emitted at the instrumented driver/broker
+boundary; a caller-authored list is not observation evidence. Every
+provider-visible credential, socket, SDK, CLI, and filesystem surface SHALL be
+available to the driver only through that boundary. Source/import conformance
+and runtime capability isolation SHALL prove the driver cannot reach a product
+surface directly.
 
 #### Scenario: Observation wrapper changes behavior
 - **WHEN** a wrapper changes a competitor call's post-projection arguments,
@@ -115,3 +121,14 @@ competitor configuration.
   session ID with a neutral digest before the Basic renderer is called
 - **THEN** the projection is recorded as shared protocol hygiene and the
   observation seam proves exact forwarding from that normalized boundary
+
+#### Scenario: Caller omits a privileged driver call
+- **WHEN** a declared endpoint inventory differs from the persisted invocation
+  receipt for the same run
+- **THEN** the row is disqualified before scoring and the undeclared surface is
+  named
+
+#### Scenario: Driver bypasses the instrumented boundary
+- **WHEN** source/import or runtime conformance finds a provider-visible access
+  path that does not cross the receipt-emitting broker
+- **THEN** the driver is disqualified before any comparative run

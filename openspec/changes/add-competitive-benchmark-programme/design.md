@@ -287,6 +287,57 @@
     package, prompt, harness phase, competitor provider, or lockfile is
     modified.
 
+12. **Epistemic audit claims are reconstructed, never self-attested.** Founder
+    ratification leaves the approved `PREREGISTRATION.md` bytes unchanged and
+    creates one immutable versioned receipt binding its repository path,
+    sha256, decision, ratifier, date, and repository revision. Each later
+    amendment has its own immutable, ordered receipt binding the parent digest
+    to the amended whole-document digest, its repository revision, the exact
+    affected sections, rationale, and effective policy. A comparative run pins
+    `contract_revision` and records the complete typed identity chain through
+    that revision; neither a plan nor a caller chooses an "applicable" digest.
+    Validators re-read and hash every referenced committed artifact as of the
+    pin. Later amendments can change current publishability and must be
+    disclosed, but never retroactively make a historically valid run's identity
+    invalid.
+
+    Privileged-endpoint parity is a closed matrix over exact
+    `driver_surface_id × provider × variant`. Both `equivalent` and
+    `capability_gap` dispositions require an audit scope, competitor-authored
+    evidence citation, and reason; only an equivalent disposition carries a
+    competitor surface. The actual Exomem driver inventory comes from a
+    persisted, digest-bound invocation receipt emitted by the instrumented
+    driver/broker boundary, never from a caller list. Every provider-visible
+    credential, socket, SDK, CLI, and filesystem surface is available only
+    through that boundary; source/import checks plus runtime capability
+    isolation prove the driver cannot bypass it. An undeclared call refuses
+    before assertions execute. A proved capability gap becomes a named
+    family/table non-comparability exclusion and never a score.
+
+    Deterministic assertion functions remain filesystem-free. The bound-run
+    layer persists a typed evidence payload containing scenario/family/phase/
+    expectation identity, current and prior snapshot references, probe inputs,
+    and the deterministic result. A separate `AssertionEvidenceRef` carries
+    its canonical run-relative path and sha256. Every failed assertion requires
+    a reference. Validation opens every path component beneath the run root
+    without following symlinks, verifies regular-file type and digest,
+    reconstructs the assertion context, reruns the frozen assertion, and
+    requires exact result equality before a headline can render. Safe path
+    syntax is escaped for Markdown output.
+
+    Both products and the exact `grep-markdown` and `no-memory` controls are
+    assembled into one `ValidatedEpistemicCohort`. Cohort identity is the exact
+    ordered sequence of scenario id+digest, phase, expectation ordinal,
+    assertion, subject/counterpart, tolerance, and freshness bound—not a set of
+    family names. Every control×scenario row contains at least one actual
+    deterministic `pass` or `fail`; empty and blocked/unsupported/N/A-only rows
+    refuse. When either control passes an assertion instance, the matching
+    product result remains the five-valued `pass` and receives the orthogonal
+    `signal_disposition=no_product_signal`; G2 excludes masked instances and
+    the report discloses them. The single public epistemic table renderer
+    consumes only this validated cohort, so report generation cannot bypass
+    the gates.
+
 ## Execution
 
 fable-delegate discipline: Stage-0 packet → Codex/Claude implementer lanes in
@@ -308,6 +359,18 @@ implementation lane (observed failing before the normalizer exists).
 - **Extend membench into the epistemic bench**: schema changes would re-pin
   the frozen corpus release, violate the internal-instrument contract, and
   inherit text-reading gates blind to lifecycle state (the 4b.43 lesson).
+- **Hash whichever pre-registration file is present at run time**: loses the
+  original founder decision and lets a run silently select amendments. The
+  ordered receipt chain is the authority.
+- **Trust a driver-supplied endpoint list**: a privileged call can be omitted
+  from the claim. Invocation inventory must be emitted and hashed at the
+  instrumented boundary.
+- **Put only a path string on a failed assertion**: a safe path may still point
+  to unrelated bytes. The validator must re-read the typed evidence bundle and
+  reproduce the deterministic result.
+- **Compare controls by family-name sets**: equal names can hide different
+  scenarios, parameters, phases, or multiplicity. Cohorts bind the exact
+  ordered assertion instances instead.
 - **Vendor MemoryBench into this repo**: MIT permits it, but it invites
   drift-by-local-edit and bloats the tree; a pinned sibling checkout with a
   lockfile, hash-verified provider sync, and a single registration patch is

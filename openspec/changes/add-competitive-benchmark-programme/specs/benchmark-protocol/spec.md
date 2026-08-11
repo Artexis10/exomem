@@ -68,12 +68,27 @@ normalized results, packed context, prompts, model identities, judge
 outputs, timings, token and cost accounting, and cleanup results. Report
 generation SHALL read only stored artifacts, refuse non-terminal manifests
 and unknown schema versions, and prove offline operation via a network
-guard.
+guard. Every comparative run/result manifest SHALL contain a typed
+pre-registration identity derived from the checked-in founder-ratification
+receipt and its complete ordered amendment-receipt chain through the manifest's
+pinned `contract_revision`. Every amendment receipt SHALL bind its own
+repository revision. Artifact validation SHALL re-read and hash every
+referenced receipt and contract artifact as of the pin and refuse a missing,
+caller-substituted, incomplete, out-of-order, or repository-inconsistent
+identity before report generation. Later amendments SHALL affect current
+publishability and disclosure, not the historical validity of a run whose
+pinned chain remains complete.
 
 #### Scenario: Report from artifacts only
 - **WHEN** a report is regenerated from a completed run directory with the
   network guard active
 - **THEN** rendering succeeds with zero provider or network calls
+
+#### Scenario: Caller-selected pre-registration identity is refused
+- **WHEN** a plan, manifest, or result substitutes a digest or omits an ordered
+  amendment receipt effective at its pinned contract revision
+- **THEN** validation refuses before the artifact can support a comparative
+  report
 
 ### Requirement: Spend Is Reserved Before It Happens
 Billable operations SHALL reserve an upper-bound estimate against a shared
