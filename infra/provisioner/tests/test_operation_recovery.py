@@ -340,6 +340,58 @@ def test_final_proof_requires_the_exact_normal_provision_completion_shape() -> N
     assert recovery.RecoveryService._final_proof(operation) is False
 
 
+@pytest.mark.asyncio
+async def test_production_observer_compares_live_volume_fields_not_absent_hcloud_copy() -> None:
+    recovery = _module()
+    from exomem_provisioner.lifecycle import OpaqueProviderMetadata, RecordedVolume
+    from exomem_provisioner.models import ResourceKind
+
+    metadata = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "provider-alpha", 7)
+    expected = RecordedVolume(
+        "42", "pv-alpha", "fsn1", metadata, "hcloud-envelope", "pv-envelope", "pvc-envelope"
+    )
+    live = RecordedVolume("42", "pv-alpha", "fsn1", metadata, "", "pv-envelope", "pvc-envelope")
+    references = {
+        ResourceKind.KUBERNETES_NAMESPACE: metadata.resource_name,
+        ResourceKind.HELM_RELEASE: metadata.resource_name,
+        ResourceKind.PVC: metadata.resource_name + "-data",
+        ResourceKind.VOLUME: expected.recoverable_reference(),
+    }
+
+    class Codec:
+        def decrypt_json(self, ciphertext, *, purpose):
+            return {"reference": references[ResourceKind(ciphertext)]}
+
+    class Registry:
+        async def inspect(self, current, owned):
+            return type("Snapshot", (), {"namespace": True, "release": True, "init_job_present": False, "init_complete": False, "init_failed": False, "serving": False, "runtime_admitted": False, "routes": (False, False)})()
+
+        async def authenticate_recovery_record(self, current):
+            return "a" * 64
+
+    class Volumes:
+        async def observe_recovery_bound_volume(self, current):
+            return type("Bound", (), {"recorded": live, "stability_digest": "b" * 64})()
+
+    class HCloud:
+        async def verify_recovery_volume(self, handle, current, location, envelope):
+            return (handle, current, location, envelope) == ("42", metadata, "fsn1", "hcloud-envelope")
+
+    class Cell:
+        async def volume_claim_bound(self, current):
+            return current == metadata
+
+    observer = recovery._ProductionRecoveryObserver(Registry(), Cell(), Volumes(), HCloud(), "fsn1", Codec())
+    operation = type("Operation", (), {"cell_id": "cell-alpha", "tenant_id": "tenant-alpha", "external_operation_id": "provider-alpha", "fence_generation": 7})()
+    resources = tuple(
+        type("Resource", (), {"kind": kind, "reference_ciphertext": kind.value, "operation_id": "internal"})()
+        for kind in references
+    )
+
+    observed = await observer.observe(operation, resources)
+    assert observed.volume_present is True
+
+
 def test_main_converts_refusals_to_content_free_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     recovery = _module()
 

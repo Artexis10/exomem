@@ -1169,6 +1169,29 @@ class HCloudVolumeAdapter:
                 ) from error
         return True
 
+    async def verify_recovery_volume(
+        self,
+        handle: str,
+        metadata: OpaqueProviderMetadata,
+        location: str,
+        recovery_envelope: str,
+    ) -> bool:
+        """Authenticate the durable HCloud envelope before reading live state."""
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    recovery_envelope,
+                    provider="hcloud",
+                    provider_reference=ProviderReference.hcloud(kind="volume", resource_id=handle),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict("HCloud provider recovery identity did not authenticate") from error
+        return await self.verify_volume(handle, metadata, location)
+
     async def delete_volume(self, handle: str) -> None:
         volume = await self._get(handle)
         if volume is not None:

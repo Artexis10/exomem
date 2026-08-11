@@ -792,9 +792,19 @@ class _ProductionRecoveryObserver:
         volume_observation = await self.volumes.observe_recovery_bound_volume(metadata)  # type: ignore[attr-defined]
         volume_present = (
             volume_observation is not None
-            and volume_observation.recorded == expected_volume
-            and await self.hcloud.verify_volume(  # type: ignore[attr-defined]
+            and (
+                volume_observation.recorded.volume_handle == expected_volume.volume_handle
+                and volume_observation.recorded.pv_name == expected_volume.pv_name
+                and volume_observation.recorded.location == expected_volume.location
+                and volume_observation.recorded.metadata == expected_volume.metadata
+                and volume_observation.recorded.pv_recovery_envelope
+                == expected_volume.pv_recovery_envelope
+                and volume_observation.recorded.pvc_recovery_envelope
+                == expected_volume.pvc_recovery_envelope
+            )
+            and await self.hcloud.verify_recovery_volume(  # type: ignore[attr-defined]
             expected_volume.volume_handle, metadata, self.location
+            , expected_volume.hcloud_recovery_envelope
             )
         )
         return LiveObservation(
