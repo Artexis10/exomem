@@ -596,7 +596,10 @@ async def _planning_restart_session(client, state: dict[str, Any], timeout: floa
         (row for row in query.get("rows", []) if row.get("plan_id") == software["work_item_id"]),
         None,
     )
-    if not isinstance(item, dict) or item.get("title") != "Ship Planning query surface (human edit)":
+    if (
+        not isinstance(item, dict)
+        or item.get("title") != "Ship Planning query surface (human edit)"
+    ):
         raise RuntimeError("direct Planning edit was not visible after restart")
     inspection = await _call(
         client,
