@@ -128,6 +128,30 @@ def test_compact_still_teaches_the_core_loop(payloads):
         assert section in compact, section
 
 
+def test_bootstrap_planning_contract_is_complete_and_exact(payloads):
+    planning = payloads["full"]["planning"]
+
+    assert planning["route"] == {
+        "tool": "plan_memory",
+        "actions": ["inspect", "create", "query", "add", "update", "triage"],
+    }
+    assert planning["kinds"] == ["area", "outcome", "initiative", "work-item"]
+    assert planning["horizons"] == ["inbox", "week", "month", "quarter", "year", "multi-year"]
+    assert planning["lifecycle"] == ["active", "archived"]
+    assert planning["priorities"] == ["critical", "high", "medium", "low", "none"]
+    assert planning["commitments"] == ["uncommitted", "considering", "committed"]
+    for key in (
+        "default_capture",
+        "manual_first",
+        "template_independence",
+        "horizon_semantics",
+        "intent_first_routing",
+        "evidence_execution_boundary",
+        "execution_truth_boundary",
+    ):
+        assert planning[key]
+
+
 def test_compact_and_full_agree_on_everything_but_detail(payloads):
     """The trim is a presentation choice; it must not change what is advertised."""
     compact, full = payloads["compact"], payloads["full"]

@@ -3778,8 +3778,11 @@ def _format_yaml_line(key: str, value: Any) -> str:
         if not value:
             return f"{key}: []"
         # Inline form for short string lists; matches add.py's tags rendering.
-        items = ", ".join(_yaml_scalar(v) for v in value)
-        return f"{key}: [{items}]"
+        if all(not isinstance(item, (dict, list)) for item in value):
+            items = ", ".join(_yaml_scalar(item) for item in value)
+            return f"{key}: [{items}]"
+        block = yaml.safe_dump({key: value}, default_flow_style=False, sort_keys=False)
+        return block.rstrip("\n")
     if isinstance(value, dict):
         # Fall back to PyYAML block-style for nested dicts.
         block = yaml.safe_dump({key: value}, default_flow_style=False, sort_keys=False)

@@ -5,7 +5,7 @@
   "purpose": "Track health, training, symptoms, protocols, measurements, and evidence without turning raw logs into unsupported conclusions.",
   "audience": "Athletes, patients, coaches, health experimenters, and people managing personal records with professional oversight.",
   "beginner_description": "Use this for workouts, symptoms, injuries, measurements, protocols, appointments, and health records.",
-  "agent_instructions": "Use record_memory for observed training sessions, symptoms, measurements, and protocol events; this is guidance only and selecting the pack creates nothing. Keep external documents as Sources or Evidence. Do not infer medical advice or progress. Compile only explicit conclusions, decisions, and experiment summaries with links and review prompts.",
+  "agent_instructions": "Use record_memory for observed training sessions, symptoms, measurements, and protocol events; this is guidance only and selecting the pack creates nothing. Use plan_memory only for explicit future intent such as an authored training horizon or priority, never inferred health progress. Keep external documents as Sources or Evidence. Do not infer medical advice or progress. Compile only explicit conclusions, decisions, and experiment summaries with links and review prompts.",
   "default_note_types": [
     "experiment",
     "research-note",

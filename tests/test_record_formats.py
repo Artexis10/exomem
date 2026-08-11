@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,67 @@ def test_markdown_log_query_expands_declared_child_rows_without_domain_logic(
     assert result.returned == 20
     assert {row["repetitions"] for row in result.rows}.issuperset({"", "8", "15", "21"})
     assert all(row["parent_record_id"] == row["record_id"] for row in result.rows)
+
+
+def test_query_collection_selects_returned_source_versions_without_repeating_row_lookups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_dataset_fixture(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    records = tuple(
+        record_formats.Record(
+            identity=collections.ItemIdentity(manifest.collection_id, f"record-{number}"),
+            values={"value": number},
+            source=collections.SourceVersion(f"Records/{number}.md", f"hash-{number}"),
+            span=record_formats.SourceSpan(0, 0),
+        )
+        for number in range(100)
+    )
+    snapshot = record_formats.AdapterSnapshot(
+        records=records,
+        snapshot="snapshot",
+        data_snapshot="data-snapshot",
+        source_versions=(
+            manifest.manifest_version,
+            *(record.source for record in records),
+        ),
+    )
+
+    class Adapter:
+        mutable = False
+
+        def read(self) -> record_formats.AdapterSnapshot:
+            return snapshot
+
+    class CountingRow(dict[str, object]):
+        get_calls = 0
+
+        def get(self, key: object, default: object = None) -> object:
+            type(self).get_calls += 1
+            return super().get(key, default)
+
+    evaluate_rows = record_formats.query_data.evaluate_rows
+
+    def evaluate_counting_rows(*args: object, **kwargs: object) -> object:
+        result = evaluate_rows(*args, **kwargs)
+        return replace(result, rows=[CountingRow(row) for row in result.rows])
+
+    monkeypatch.setattr(record_formats, "load_adapter", lambda *_args, **_kwargs: Adapter())
+    monkeypatch.setattr(record_formats.query_data, "evaluate_rows", evaluate_counting_rows)
+
+    result = record_formats.query_collection(
+        tmp_path,
+        manifest,
+        limit=50,
+        source_versions_for_rows=True,
+    )
+
+    assert [row["record_id"] for row in result.rows] == [f"record-{number}" for number in range(50)]
+    assert [version.path for version in result.source_versions] == [
+        manifest.path,
+        *(f"Records/{number}.md" for number in range(50)),
+    ]
+    assert CountingRow.get_calls == len(result.rows)
 
 
 def test_markdown_log_identity_survives_manual_reorder_and_date_correction(tmp_path: Path) -> None:

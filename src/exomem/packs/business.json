@@ -5,7 +5,7 @@
   "purpose": "Keep customer, partner, contract, meeting, risk, and commitment knowledge findable with provenance and review.",
   "audience": "Founders, operators, consultants, sales teams, account owners, and solo professionals tracking business context.",
   "beginner_description": "Use this for work relationships, meetings, promises, contracts, open risks, and business decisions.",
-  "agent_instructions": "Treat meeting notes and documents as sources first. Preserve proof for commitments, contracts, invoices, disputes, and compliance records. Compile durable conclusions as research notes or decisions, and link customers, accounts, and counterparties as entities.",
+  "agent_instructions": "Treat meeting notes and documents as sources first. Preserve proof for commitments, contracts, invoices, disputes, and compliance records. Use plan_memory only for an explicit business goal, priority, horizon, or follow-up intent; Records remain observed facts and selecting this pack creates no Planning collection. Compile durable conclusions as research notes or decisions, and link customers, accounts, and counterparties as entities.",
   "default_note_types": [
     "research-note",
     "insight",
