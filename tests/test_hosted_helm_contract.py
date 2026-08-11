@@ -1949,6 +1949,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "exomem.io/transfer-hostname": "transfer.example.test",
     }
     if expected_kind == "Job":
+        assert workload["spec"]["ttlSecondsAfterFinished"] == 300
         pod = workload["spec"]["template"]["spec"]
         assert pod["runtimeClassName"] == "exomem-storage-init"
         container = pod["containers"][0]
@@ -2065,6 +2066,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     assert all(item["spec"].get("policyTypes") for item in network_policies)
     service = [item for item in documents if item.get("kind") == "Service"]
     assert (len(service) == 1) == (expected_kind == "StatefulSet")
+    if expected_kind == "StatefulSet":
+        assert not [item for item in documents if item.get("kind") == "Job"]
     if service:
         assert service[0]["spec"]["type"] == "ClusterIP"
 
