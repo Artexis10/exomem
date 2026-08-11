@@ -131,6 +131,9 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'UV_VERSION: "0.11.28"' in workflow
     assert 'PYTHON_VERSION: "3.13.5"' in workflow
     assert 'NODE_VERSION: "22.17.1"' in workflow
+    assert 'GO_VERSION: "1.26.5"' in workflow
+    assert "go-version: ${{ env.GO_VERSION }}" in workflow
+    assert "GO_VERSION=1.26.5" in tool_versions
     assert "go install github.com/aquasecurity/trivy" not in workflow
     assert "https://github.com/aquasecurity/trivy/releases/download/" in workflow
     assert 'install -d -m 0755 "$HOME/.local/bin"' in workflow
@@ -139,11 +142,74 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "TRIVY_LINUX_AMD64_SHA256=bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
     ) in tool_versions
     parsed = yaml.safe_load(workflow)
+    assert parsed["concurrency"] == {
+        "group": (
+            "hosted-infrastructure-${{ github.event_name == 'pull_request' "
+            "&& github.event.pull_request.number || github.run_id }}"
+        ),
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
     triggers = parsed.get("on", parsed.get(True))
     blackbox_input = triggers["workflow_dispatch"]["inputs"]["external_blackbox"]
     assert blackbox_input["default"] is False
     assert blackbox_input["type"] == "boolean"
-    assert parsed["jobs"]["static"]["name"] == "Offline static validation (not release proof)"
+    static_job = parsed["jobs"]["static"]
+    assert static_job["name"] == "Offline static validation (not release proof)"
+    cache_step = next(
+        step for step in static_job["steps"] if step.get("name") == "Restore exact validator bundle"
+    )
+    assert cache_step["id"] == "validator-cache"
+    assert cache_step["uses"] == "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae"
+    assert set(cache_step["with"]["path"].splitlines()) == {
+        "~/go/bin/tflint",
+        "~/go/bin/helm",
+        "~/go/bin/kubeconform",
+        "~/go/bin/conftest",
+        "~/go/bin/sops",
+        "~/go/bin/age-keygen",
+        "~/.local/bin/trivy",
+        "~/.local/bin/shellcheck",
+        "~/.local/bin/oras",
+        ".venv-hosted-ci",
+        "~/.ansible/collections",
+    }
+    assert "restore-keys" not in cache_step["with"]
+    assert cache_step["with"]["key"] == (
+        "hosted-validators-v1-${{ runner.os }}-${{ runner.arch }}-"
+        "${{ hashFiles('infra/tool-versions.env', "
+        "'infra/ansible/collections/requirements.yml') }}"
+    )
+    install_step = next(
+        step
+        for step in static_job["steps"]
+        if step.get("name") == "Install exact infrastructure validators"
+    )
+    assert install_step["if"] == "steps.validator-cache.outputs.cache-hit != 'true'"
+    expose_step = next(
+        step for step in static_job["steps"] if step.get("name") == "Expose infrastructure validators"
+    )
+    assert 'echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"' in expose_step["run"]
+    assert 'echo "$PWD/.venv-hosted-ci/bin" >> "$GITHUB_PATH"' in expose_step["run"]
+    audit_step = next(
+        step for step in static_job["steps"] if step.get("name") == "Audit exact validator versions"
+    )
+    for required_audit in (
+        "require_go_module_version tflint github.com/terraform-linters/tflint",
+        "require_go_module_version helm helm.sh/helm/v3",
+        "require_go_module_version kubeconform github.com/yannh/kubeconform",
+        "require_go_module_version conftest github.com/open-policy-agent/conftest",
+        "require_go_module_version sops github.com/getsops/sops/v3",
+        "require_go_module_version age-keygen filippo.io/age",
+        "require_python_distribution ansible-core",
+        "require_python_distribution ansible-lint",
+        "require_python_distribution checkov",
+        "collection list community.general",
+        "collection list community.library_inventory_filtering_v1",
+        "require_output_version trivy",
+        "require_output_version shellcheck",
+        "require_output_version oras",
+    ):
+        assert required_audit in audit_step["run"]
     release_job = parsed["jobs"]["release-proof"]
     assert release_job["needs"] == "static"
     assert "inputs.release_proof" in release_job["if"]
