@@ -17,7 +17,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import cast, func, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .config import DeploymentLock
@@ -37,20 +38,33 @@ from .models import (
     ResourceKind,
     TenantFence,
 )
+from .provider_identity import cell_resource_name
 from .repository import canonical_request_sha256
 
 _FIXED_MODES = ("preflight", "reopen", "inspect", "verify-receipt")
 _RECEIPT_PAYLOAD_KEYS = frozenset(
     {
+        "schema_version",
         "helper_source_sha256",
+        "old_state",
+        "old_checkpoint",
+        "new_state",
+        "new_checkpoint",
+        "resource_count",
+        "route_count",
+        "init_job_present",
+        "init_job_complete",
         "operation_sha256",
+        "preserved_sha256",
         "request_sha256",
+        "request_ciphertext_sha256",
         "resources_sha256",
         "reservation_sha256",
         "tenant_fence_sha256",
         "first_observation_sha256",
         "second_observation_sha256",
         "committed_operation_sha256",
+        "committed_at",
     }
 )
 _OUTPUT_KEYS = frozenset(
@@ -70,6 +84,12 @@ _OUTPUT_KEYS = frozenset(
 
 class RecoveryRefusal(RuntimeError):
     """A content-free no-op refusal."""
+
+
+class _RecoveryArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        del message
+        raise RecoveryRefusal("command arguments are invalid")
 
 
 def _json_value(value: object) -> object:
@@ -102,27 +122,51 @@ def canonical_sha256(value: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class RecoveryReceiptPayload:
+    schema_version: int
     helper_source_sha256: str
+    old_state: str
+    old_checkpoint: str
+    new_state: str
+    new_checkpoint: str
+    resource_count: int
+    route_count: int
+    init_job_present: bool
+    init_job_complete: bool
     operation_sha256: str
+    preserved_sha256: str
     request_sha256: str
+    request_ciphertext_sha256: str
     resources_sha256: str
     reservation_sha256: str
     tenant_fence_sha256: str
     first_observation_sha256: str
     second_observation_sha256: str
     committed_operation_sha256: str
+    committed_at: datetime
 
     def to_payload(self) -> dict[str, object]:
         return {
+            "schema_version": self.schema_version,
             "helper_source_sha256": self.helper_source_sha256,
+            "old_state": self.old_state,
+            "old_checkpoint": self.old_checkpoint,
+            "new_state": self.new_state,
+            "new_checkpoint": self.new_checkpoint,
+            "resource_count": self.resource_count,
+            "route_count": self.route_count,
+            "init_job_present": self.init_job_present,
+            "init_job_complete": self.init_job_complete,
             "operation_sha256": self.operation_sha256,
+            "preserved_sha256": self.preserved_sha256,
             "request_sha256": self.request_sha256,
+            "request_ciphertext_sha256": self.request_ciphertext_sha256,
             "resources_sha256": self.resources_sha256,
             "reservation_sha256": self.reservation_sha256,
             "tenant_fence_sha256": self.tenant_fence_sha256,
             "first_observation_sha256": self.first_observation_sha256,
             "second_observation_sha256": self.second_observation_sha256,
             "committed_operation_sha256": self.committed_operation_sha256,
+            "committed_at": self.committed_at,
         }
 
 
@@ -138,6 +182,7 @@ class LiveObservation:
     terminating: bool
     runtime_admitted: bool
     routes_present: int
+    identity_digest: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +271,7 @@ def validate_live_observation(observation: LiveObservation) -> None:
         or observation.terminating
         or observation.runtime_admitted
         or observation.routes_present != 0
+        or (observation.identity_digest and len(observation.identity_digest) != 64)
     ):
         raise RecoveryRefusal("live recovery preflight failed")
 
@@ -267,15 +313,27 @@ def _hash_model(model: object, *, excluded: frozenset[str] = frozenset()) -> str
 
 def _receipt_payload(receipt: OperationRecoveryReceipt) -> RecoveryReceiptPayload:
     return RecoveryReceiptPayload(
+        schema_version=receipt.schema_version,
         helper_source_sha256=receipt.helper_source_sha256,
+        old_state=receipt.old_state,
+        old_checkpoint=receipt.old_checkpoint,
+        new_state=receipt.new_state,
+        new_checkpoint=receipt.new_checkpoint,
+        resource_count=receipt.resource_count,
+        route_count=receipt.route_count,
+        init_job_present=receipt.init_job_present,
+        init_job_complete=receipt.init_job_complete,
         operation_sha256=receipt.operation_sha256,
+        preserved_sha256=receipt.preserved_sha256,
         request_sha256=receipt.request_sha256,
+        request_ciphertext_sha256=receipt.request_ciphertext_sha256,
         resources_sha256=receipt.resources_sha256,
         reservation_sha256=receipt.reservation_sha256,
         tenant_fence_sha256=receipt.tenant_fence_sha256,
         first_observation_sha256=receipt.first_observation_sha256,
         second_observation_sha256=receipt.second_observation_sha256,
         committed_operation_sha256=receipt.committed_operation_sha256,
+        committed_at=receipt.committed_at,
     )
 
 
@@ -324,7 +382,19 @@ class RecoveryService:
                     "status": "ready",
                     "state": snapshot.operation.state.value,
                     "checkpoint": snapshot.operation.checkpoint,
-                    "resource_kind_counts": {kind.value: 1 for kind in ResourceKind if kind is not ResourceKind.ROUTE},
+                    "resource_kind_counts": {
+                        **{
+                            kind.value: 1
+                            for kind in (
+                                ResourceKind.HELM_RELEASE,
+                                ResourceKind.KUBERNETES_NAMESPACE,
+                                ResourceKind.PVC,
+                                ResourceKind.VOLUME,
+                            )
+                        },
+                        ResourceKind.ROUTE.value: 0,
+                        "provider-object": 0,
+                    },
                     "active_reservation": True,
                 }
         except RecoveryRefusal:
@@ -335,6 +405,7 @@ class RecoveryService:
     async def reopen(self, operation_id: str) -> dict[str, object]:
         try:
             async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
                 existing = await session.get(OperationRecoveryReceipt, operation_id, with_for_update=True)
                 if existing is not None:
                     return self._receipt_result(existing, "already-recovered")
@@ -361,6 +432,8 @@ class RecoveryService:
                         Operation.claim_token.is_(None),
                         Operation.claim_expires_at.is_(None),
                         Operation.result_ciphertext.is_(None),
+                        cast(Operation.result_redacted, JSONB) == cast({}, JSONB),
+                        Operation.finalized_at.is_not(None),
                         Operation.external_operation_id == Operation.provider_operation_id,
                         Operation.fence_generation == Operation.provider_fence_generation,
                         Operation.canonical_request_sha256 == before.canonical_request_sha256,
@@ -410,7 +483,8 @@ class RecoveryService:
 
     async def inspect(self, operation_id: str) -> dict[str, object]:
         try:
-            async with self._sessions() as session:
+            async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
                 operation = await session.get(Operation, operation_id)
                 if operation is None:
                     raise RecoveryRefusal("operation is unavailable")
@@ -425,7 +499,6 @@ class RecoveryService:
                         CapacityReservation.released_at.is_(None),
                     )
                 )
-                receipt = await session.get(OperationRecoveryReceipt, operation.id)
                 return {
                     "status": "inspected",
                     "state": operation.state.value,
@@ -436,7 +509,7 @@ class RecoveryService:
                         for kind in ResourceKind
                     },
                     "active_reservation": reservation is not None,
-                    "final_proof": receipt is not None,
+                    "final_proof": self._final_proof(operation),
                 }
         except RecoveryRefusal:
             raise
@@ -445,7 +518,8 @@ class RecoveryService:
 
     async def verify_receipt(self, operation_id: str) -> dict[str, object]:
         try:
-            async with self._sessions() as session:
+            async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
                 receipt = await session.get(OperationRecoveryReceipt, operation_id)
                 if receipt is None:
                     raise RecoveryRefusal("receipt is unavailable")
@@ -456,17 +530,7 @@ class RecoveryService:
             raise RecoveryRefusal("receipt-verification-failed") from error
 
     async def _preflight(self, session: AsyncSession, operation_id: str) -> _RecoverySnapshot:
-        require_postgresql(session.get_bind().dialect.name)
-        await session.scalar(
-            select(func.pg_advisory_xact_lock(database_lock_key(self._database_schema, self._database_role)))
-        )
-        revision_rows = list(await session.scalars(text("SELECT version_num FROM alembic_version")))
-        if revision_rows != [DATABASE_REVISION]:
-            raise RecoveryRefusal("database revision is invalid")
-        role = await session.scalar(select(func.current_user()))
-        schema = await session.scalar(select(func.current_schema()))
-        if role != self._database_role or schema != self._database_schema:
-            raise RecoveryRefusal("database identity is invalid")
+        await self._require_database_identity(session)
         initial = await session.get(Operation, operation_id)
         if initial is None:
             raise RecoveryRefusal("operation is unavailable")
@@ -479,6 +543,24 @@ class RecoveryService:
             or fence.fence_generation != operation.fence_generation
         ):
             raise RecoveryRefusal("recovery preflight failed")
+        return await self._preflight_locked(session, operation, fence)
+
+    async def _require_database_identity(self, session: AsyncSession) -> None:
+        require_postgresql(session.get_bind().dialect.name)
+        await session.scalar(
+            select(func.pg_advisory_xact_lock(database_lock_key(self._database_schema, self._database_role)))
+        )
+        revision_rows = list(await session.scalars(text("SELECT version_num FROM alembic_version")))
+        if revision_rows != [DATABASE_REVISION]:
+            raise RecoveryRefusal("database revision is invalid")
+        role = await session.scalar(select(func.current_user()))
+        schema = await session.scalar(select(func.current_schema()))
+        if role != self._database_role or schema != self._database_schema:
+            raise RecoveryRefusal("database identity is invalid")
+
+    async def _preflight_locked(
+        self, session: AsyncSession, operation: Operation, fence: TenantFence
+    ) -> _RecoverySnapshot:
         transition = recovery_transition_values(
             OperationPreState(
                 action=operation.action.value,
@@ -489,7 +571,7 @@ class RecoveryService:
                     value is not None
                     for value in (operation.claim_owner, operation.claim_token, operation.claim_expires_at)
                 ),
-                has_result=operation.result_ciphertext is not None,
+                has_result=(operation.result_ciphertext is not None or operation.result_redacted != {}),
                 finalized=operation.finalized_at is not None,
             )
         )
@@ -535,7 +617,8 @@ class RecoveryService:
         lock = await session.get(CellOperationLock, operation.cell_id, with_for_update=True)
         if lock is not None:
             raise RecoveryRefusal("recovery preflight failed")
-        await session.get(CapacityLedger, 1, with_for_update=True)
+        if await session.get(CapacityLedger, 1, with_for_update=True) is None:
+            raise RecoveryRefusal("recovery preflight failed")
         destructive = tuple(
             await session.scalars(
                 select(CapacityDestructiveFence)
@@ -582,11 +665,7 @@ class RecoveryService:
         if (
             {item.kind for item in resources} != expected
             or len(resources) != len(expected)
-            or any(item.kind is ResourceKind.ROUTE for item in scoped)
-            or any(
-                item.kind is ResourceKind.KUBERNETES_NAMESPACE and item.operation_id != operation.id
-                for item in scoped
-            )
+            or any(item.operation_id != operation.id for item in scoped)
         ):
             raise RecoveryRefusal("recovery preflight failed")
         for resource in resources:
@@ -622,6 +701,7 @@ class RecoveryService:
         reservation = reservations[0]
         if (
             reservation.reservation_class.value != "USER"
+            or reservation.resource_name != cell_resource_name(operation.cell_id)
             or reservation.reserving_provider_operation_id != operation.external_operation_id
             or reservation.reserving_fence_generation != operation.fence_generation
             or reservation.released_at is not None
@@ -637,6 +717,20 @@ class RecoveryService:
         ):
             raise RecoveryRefusal("recovery preflight failed")
         return reservation
+
+    @staticmethod
+    def _final_proof(operation: Operation) -> bool:
+        result = operation.result_redacted
+        return (
+            operation.state is OperationState.FINAL
+            and operation.checkpoint == "complete"
+            and operation.result_ciphertext is not None
+            and result == {
+                "completed": True,
+                "fields": ["privateEndpoint", "providerRef"],
+            }
+            and operation.finalized_at is not None
+        )
 
     @staticmethod
     def _receipt_result(receipt: OperationRecoveryReceipt, status: str) -> dict[str, object]:
@@ -655,6 +749,7 @@ class _ProductionRecoveryObserver:
     volumes: object
     hcloud: object
     location: str
+    codec: EnvelopeCodec
 
     async def observe(
         self,
@@ -663,7 +758,6 @@ class _ProductionRecoveryObserver:
     ) -> LiveObservation:
         from .lifecycle import OpaqueProviderMetadata
 
-        del resources
         if operation.cell_id is None:
             raise RecoveryRefusal("live recovery preflight failed")
         metadata = OpaqueProviderMetadata(
@@ -672,10 +766,36 @@ class _ProductionRecoveryObserver:
             operation_id=operation.external_operation_id,
             fence_generation=operation.fence_generation,
         )
+        references: dict[ResourceKind, str] = {}
+        for resource in resources:
+            value = self.codec.decrypt_json(
+                resource.reference_ciphertext,
+                purpose=f"resource-reference:{resource.operation_id}:{resource.kind.value}",
+            ).get("reference")
+            if not isinstance(value, str):
+                raise RecoveryRefusal("live recovery preflight failed")
+            references[resource.kind] = value
+        if references != {
+            ResourceKind.KUBERNETES_NAMESPACE: metadata.resource_name,
+            ResourceKind.HELM_RELEASE: metadata.resource_name,
+            ResourceKind.PVC: metadata.resource_name + "-data",
+            ResourceKind.VOLUME: references.get(ResourceKind.VOLUME, ""),
+        }:
+            raise RecoveryRefusal("live recovery preflight failed")
+        from .lifecycle import RecordedVolume
+
+        expected_volume = RecordedVolume.from_recoverable_reference(
+            references[ResourceKind.VOLUME], metadata
+        )
         snapshot = await self.registry.inspect(metadata, metadata)  # type: ignore[attr-defined]
-        recorded = await self.volumes.discover_bound_volume(metadata)  # type: ignore[attr-defined]
-        volume_present = recorded is not None and await self.hcloud.verify_volume(  # type: ignore[attr-defined]
-            recorded.volume_handle, metadata, self.location
+        registry_digest = await self.registry.authenticate_recovery_record(metadata)  # type: ignore[attr-defined]
+        volume_observation = await self.volumes.observe_recovery_bound_volume(metadata)  # type: ignore[attr-defined]
+        volume_present = (
+            volume_observation is not None
+            and volume_observation.recorded == expected_volume
+            and await self.hcloud.verify_volume(  # type: ignore[attr-defined]
+            expected_volume.volume_handle, metadata, self.location
+            )
         )
         return LiveObservation(
             namespace_present=snapshot.namespace,
@@ -688,6 +808,16 @@ class _ProductionRecoveryObserver:
             terminating=False,
             runtime_admitted=snapshot.runtime_admitted,
             routes_present=sum(snapshot.routes),
+            identity_digest=canonical_sha256(
+                {
+                    "kubernetes": registry_digest,
+                    "pv": (
+                        volume_observation.stability_digest
+                        if volume_observation is not None
+                        else ""
+                    ),
+                }
+            ),
         )
 
 
@@ -699,7 +829,7 @@ def emit_result(payload: dict[str, object]) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = _RecoveryArgumentParser(add_help=False)
     parser.add_argument("mode", choices=_FIXED_MODES)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--stdin", action="store_true")
@@ -758,6 +888,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 identity_verifier=identity,
             ),
             location=volume.location,
+            codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
         )
         service = RecoveryService(
             sessions=database.session_factory,

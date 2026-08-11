@@ -128,6 +128,114 @@ class KubernetesProviderRegistry:
             if values.get(key) != expected[key]:
                 raise MetadataConflict("Kubernetes cell identity annotations differ")
 
+    @staticmethod
+    def _recovery_digest(*resources: Any) -> str:
+        """Expose only a stability digest for exact Kubernetes object versions."""
+        values: list[dict[str, str]] = []
+        for resource in resources:
+            metadata = getattr(resource, "metadata", None)
+            values.append(
+                {
+                    "name": str(getattr(metadata, "name", "")),
+                    "namespace": str(getattr(metadata, "namespace", "")),
+                    "uid": str(getattr(metadata, "uid", "")),
+                    "resourceVersion": str(getattr(metadata, "resource_version", "")),
+                }
+            )
+        return hashlib.sha256(
+            json.dumps(values, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    async def authenticate_recovery_record(self, metadata: OpaqueProviderMetadata) -> str:
+        """Read and authenticate the durable Kubernetes recovery identities once."""
+        namespace = await asyncio.to_thread(self._core.read_namespace, metadata.resource_name)
+        pvc = await asyncio.to_thread(
+            self._core.read_namespaced_persistent_volume_claim,
+            metadata.resource_name + "-data",
+            metadata.resource_name,
+        )
+        operation_record = await asyncio.to_thread(
+            self._core.read_namespaced_config_map,
+            provider_operation_resource_name(metadata.operation_id),
+            metadata.resource_name,
+        )
+        helm_records = tuple(
+            getattr(
+                await asyncio.to_thread(
+                    self._core.list_namespaced_config_map,
+                    metadata.resource_name,
+                    label_selector=(
+                        f"owner=helm,name={metadata.resource_name},status=deployed"
+                    ),
+                ),
+                "items",
+                (),
+            )
+            or ()
+        )
+        if len(helm_records) != 1:
+            raise MetadataConflict("deployed Helm release record is not exact")
+        helm_record = helm_records[0]
+        self._require_not_terminating(helm_record)
+        helm_labels = dict(getattr(helm_record.metadata, "labels", None) or {})
+        if (
+            getattr(helm_record.metadata, "namespace", None) != metadata.resource_name
+            or helm_labels.get("owner") != "helm"
+            or helm_labels.get("name") != metadata.resource_name
+            or helm_labels.get("status") != "deployed"
+        ):
+            raise MetadataConflict("deployed Helm release record identity differs")
+        for resource in (namespace, pvc, operation_record):
+            self._require_not_terminating(resource)
+            _require_annotations(getattr(resource.metadata, "annotations", None), metadata)
+        self._authenticate_annotations(
+            getattr(namespace.metadata, "annotations", None),
+            metadata,
+            provider="kubernetes",
+            provider_reference=ProviderReference.kubernetes(
+                provider="kubernetes", api_version="v1", kind="Namespace", namespace="", name=metadata.resource_name
+            ),
+        )
+        self._authenticate_annotations(
+            getattr(pvc.metadata, "annotations", None),
+            metadata,
+            provider="kubernetes",
+            provider_reference=ProviderReference.kubernetes(
+                provider="kubernetes", api_version="v1", kind="PersistentVolumeClaim", namespace=metadata.resource_name, name=metadata.resource_name + "-data"
+            ),
+        )
+        self._authenticate_annotations(
+            getattr(operation_record.metadata, "annotations", None),
+            metadata,
+            provider="kubernetes",
+            provider_reference=ProviderReference.kubernetes(
+                provider="kubernetes", api_version="v1", kind="ConfigMap", namespace=metadata.resource_name, name=provider_operation_resource_name(metadata.operation_id)
+            ),
+        )
+        try:
+            init_job = await asyncio.to_thread(
+                self._batch.read_namespaced_job,
+                metadata.resource_name + "-init",
+                metadata.resource_name,
+            )
+        except Exception as error:
+            if _api_status(error) != 404:
+                raise
+            init_job = None
+        if init_job is not None:
+            self._require_not_terminating(init_job)
+            self._authenticate_annotations(
+                getattr(init_job.metadata, "annotations", None),
+                metadata,
+                provider="kubernetes",
+                provider_reference=ProviderReference.kubernetes(
+                    provider="kubernetes", api_version="batch/v1", kind="Job", namespace=metadata.resource_name, name=metadata.resource_name + "-init"
+                ),
+            )
+        return self._recovery_digest(
+            namespace, pvc, operation_record, helm_record, init_job
+        )
+
     async def inspect(
         self,
         current: OpaqueProviderMetadata,

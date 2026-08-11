@@ -12,6 +12,7 @@ import re
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,14 @@ from .provider_identity import (
     chunk_hcloud_identity_envelope,
     decode_hcloud_identity_envelope,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class BoundVolumeRecoveryObservation:
+    """Authenticated bound-volume identity with no raw Kubernetes identifiers."""
+
+    recorded: RecordedVolume
+    stability_digest: str
 
 
 def _api_status(error: Exception) -> int | None:
@@ -185,6 +194,54 @@ class KubernetesVolumeAdapter:
             metadata,
             pv_recovery_envelope=pv_envelope,
             pvc_recovery_envelope=pvc_envelope,
+        )
+
+    async def observe_recovery_bound_volume(
+        self, metadata: OpaqueProviderMetadata
+    ) -> BoundVolumeRecoveryObservation | None:
+        """Bind recovery to the exact authenticated PV object and its version."""
+        recorded = await self.discover_bound_volume(metadata)
+        if recorded is None:
+            return None
+        pv = await asyncio.to_thread(self._core.read_persistent_volume, recorded.pv_name)
+        if getattr(pv.metadata, "deletion_timestamp", None) is not None:
+            raise MetadataConflict("PV is terminating")
+        annotations = dict(getattr(pv.metadata, "annotations", None) or {})
+        _require_annotations(annotations, metadata)
+        if not recorded.pv_recovery_envelope:
+            raise MetadataConflict("PV provider recovery identity is absent")
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    recorded.pv_recovery_envelope,
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="PersistentVolume",
+                        namespace="",
+                        name=recorded.pv_name,
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict("PV provider recovery identity did not authenticate") from error
+        return BoundVolumeRecoveryObservation(
+            recorded=recorded,
+            stability_digest=hashlib.sha256(
+                json.dumps(
+                    {
+                        "name": recorded.pv_name,
+                        "uid": str(getattr(pv.metadata, "uid", "")),
+                        "resourceVersion": str(getattr(pv.metadata, "resource_version", "")),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
         )
 
     async def label_bound_volume(self, recorded: RecordedVolume, recovery_envelope: str) -> None:

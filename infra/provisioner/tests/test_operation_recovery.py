@@ -29,10 +29,27 @@ def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
     assert parser.parse_args(["preflight", "--stdin"]).mode == "preflight"
     for mode in ("reopen", "inspect", "verify-receipt"):
         assert parser.parse_args([mode, "--stdin"]).mode == mode
-    with pytest.raises(SystemExit):
+    with pytest.raises(recovery.RecoveryRefusal):
         parser.parse_args(["anything-else", "--stdin"])
-    with pytest.raises(SystemExit):
+    with pytest.raises(recovery.RecoveryRefusal):
         parser.parse_args(["preflight", "--operation-id", str(uuid.uuid4())])
+
+
+def test_recovery_command_never_echoes_rejected_arguments(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recovery = _module()
+    forbidden = str(uuid.uuid4())
+
+    assert recovery.main(["preflight", "--operation-id", forbidden]) == 2
+
+    captured = capsys.readouterr()
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert json.loads(captured.out) == {
+        "refusal": "command arguments are invalid",
+        "status": "refused",
+    }
 
 
 @pytest.mark.parametrize(
@@ -95,39 +112,95 @@ def test_canonical_hash_is_order_stable_and_never_serializes_secret_fields() -> 
 
     assert recovery.canonical_sha256(first) == recovery.canonical_sha256(second)
     receipt = recovery.RecoveryReceiptPayload(
+        schema_version=1,
         helper_source_sha256="9" * 64,
+        old_state="error",
+        old_checkpoint="failed",
+        new_state="pending",
+        new_checkpoint="volume-owned",
+        resource_count=4,
+        route_count=0,
+        init_job_present=False,
+        init_job_complete=False,
         operation_sha256="a" * 64,
+        preserved_sha256="a" * 64,
         request_sha256="b" * 64,
+        request_ciphertext_sha256="b" * 64,
         resources_sha256="c" * 64,
         reservation_sha256="d" * 64,
         tenant_fence_sha256="e" * 64,
         first_observation_sha256="f" * 64,
         second_observation_sha256="0" * 64,
         committed_operation_sha256="1" * 64,
+        committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
     )
     encoded = recovery.canonical_receipt_bytes(receipt.to_payload())
     assert b"operation_sha256" in encoded
-    assert b"ciphertext" not in encoded
+    assert b"request_ciphertext_sha256" in encoded
     assert b"reference" not in encoded
 
 
 def test_transactional_receipt_payload_is_content_free_and_hashable() -> None:
     recovery = _module()
     receipt = recovery.RecoveryReceiptPayload(
+        schema_version=1,
         helper_source_sha256="9" * 64,
+        old_state="error",
+        old_checkpoint="failed",
+        new_state="pending",
+        new_checkpoint="volume-owned",
+        resource_count=4,
+        route_count=0,
+        init_job_present=False,
+        init_job_complete=False,
         operation_sha256="a" * 64,
+        preserved_sha256="a" * 64,
         request_sha256="b" * 64,
+        request_ciphertext_sha256="b" * 64,
         resources_sha256="c" * 64,
         reservation_sha256="d" * 64,
         tenant_fence_sha256="e" * 64,
         first_observation_sha256="f" * 64,
         second_observation_sha256="0" * 64,
         committed_operation_sha256="1" * 64,
+        committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
     )
 
     encoded = recovery.canonical_receipt_bytes(receipt.to_payload())
     assert set(json.loads(encoded)) == recovery._RECEIPT_PAYLOAD_KEYS
-    assert b"ciphertext" not in encoded and b"reference" not in encoded
+    assert b"request_ciphertext_sha256" in encoded and b"reference" not in encoded
+
+
+def test_receipt_digest_binds_every_content_free_receipt_field() -> None:
+    recovery = _module()
+    receipt = recovery.RecoveryReceiptPayload(
+        schema_version=1,
+        helper_source_sha256="9" * 64,
+        old_state="error",
+        old_checkpoint="failed",
+        new_state="pending",
+        new_checkpoint="volume-owned",
+        resource_count=4,
+        route_count=0,
+        init_job_present=False,
+        init_job_complete=False,
+        operation_sha256="a" * 64,
+        preserved_sha256="b" * 64,
+        request_sha256="c" * 64,
+        request_ciphertext_sha256="d" * 64,
+        resources_sha256="e" * 64,
+        reservation_sha256="f" * 64,
+        tenant_fence_sha256="0" * 64,
+        first_observation_sha256="1" * 64,
+        second_observation_sha256="2" * 64,
+        committed_operation_sha256="3" * 64,
+        committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+    assert set(receipt.to_payload()) == recovery._RECEIPT_PAYLOAD_KEYS
+    assert recovery.canonical_sha256(receipt.to_payload()) != recovery.canonical_sha256(
+        replace(receipt, init_job_complete=True).to_payload()
+    )
 
 
 def test_recovery_receipt_model_is_one_to_one_content_free_and_immutable() -> None:
@@ -243,6 +316,28 @@ def test_reopen_is_single_exact_cas_and_a_second_invocation_is_noop() -> None:
         recovery.recovery_transition_values(
             replace(before, state="pending", checkpoint="volume-owned")
         )
+
+
+def test_final_proof_requires_the_exact_normal_provision_completion_shape() -> None:
+    recovery = _module()
+    operation = type(
+        "OperationProof",
+        (),
+        {
+            "state": recovery.OperationState.FINAL,
+            "checkpoint": "complete",
+            "result_ciphertext": "encrypted-result",
+            "result_redacted": {
+                "completed": True,
+                "fields": ["privateEndpoint", "providerRef"],
+            },
+            "finalized_at": datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+        },
+    )()
+
+    assert recovery.RecoveryService._final_proof(operation) is True
+    operation.result_redacted = {"completed": True, "fields": []}
+    assert recovery.RecoveryService._final_proof(operation) is False
 
 
 def test_main_converts_refusals_to_content_free_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
