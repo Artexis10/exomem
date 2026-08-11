@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.0](https://github.com/Artexis10/exomem/compare/v0.45.0...v0.46.0) (2026-08-11)
+
+
+### Features
+
+* **hosted:** compose v0.45 deployment lock ([#439](https://github.com/Artexis10/exomem/issues/439)) ([7fd0e88](https://github.com/Artexis10/exomem/commit/7fd0e885c0baf26151557724af31574d942c7cfd))
+* **hosted:** select provisioner cell ingress fix ([#441](https://github.com/Artexis10/exomem/issues/441)) ([e0b4525](https://github.com/Artexis10/exomem/commit/e0b45253f6bad329de6bb3cfd317ec21df195e00))
+* **planning:** add multi-horizon planning ([8f2b21b](https://github.com/Artexis10/exomem/commit/8f2b21bff112383d50f16d311d57151a4ac5309b))
+
+
+### Bug Fixes
+
+* **hosted:** accept successful init job retries ([#443](https://github.com/Artexis10/exomem/issues/443)) ([568c82c](https://github.com/Artexis10/exomem/commit/568c82c9912ade1584afac447b188ad72c1f7747))
+* **hosted:** allow provisioner cell health ingress ([#440](https://github.com/Artexis10/exomem/issues/440)) ([e347779](https://github.com/Artexis10/exomem/commit/e347779959cb8a8b49e7d62851aa11bb3cd769a6))
+* **hosted:** correct retained private contract evidence ([#442](https://github.com/Artexis10/exomem/issues/442)) ([d2471d1](https://github.com/Artexis10/exomem/commit/d2471d100f8e035bac7a4ba51b40e4a7317e0450))
+* **hosted:** recover deleted init jobs ([979ad25](https://github.com/Artexis10/exomem/commit/979ad2586382e2129361ec1533e602a5f1eb62ed))
+* **hosted:** recover init retry operation ([#445](https://github.com/Artexis10/exomem/issues/445)) ([ec817c5](https://github.com/Artexis10/exomem/commit/ec817c598b22c03b2fdd0c0568aceaabed1c99d9))
+
 ## [0.45.0](https://github.com/Artexis10/exomem/compare/v0.44.0...v0.45.0) (2026-08-11)
 
 
