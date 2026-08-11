@@ -117,7 +117,12 @@ def test_clean_run_records_every_known_answer_probe(clean_run) -> None:
     assert {row["probe_kind"] for row in probes} == {
         "lexical-rare-token", "semantic-zero-overlap", "update-current-state",
     }
-    assert {row["outcome"] for row in probes} == {"pass"}
+    outcomes = {row["probe_kind"]: row["outcome"] for row in probes}
+    assert outcomes == {
+        "lexical-rare-token": "pass",
+        "semantic-zero-overlap": "pass",
+        "update-current-state": "superseded",
+    }
     assert all(row["detail"] for row in probes)
 
 

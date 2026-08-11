@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import stat
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from protocol.models import ProviderCleanupObservation
@@ -38,14 +40,57 @@ class LifecycleRunError(RuntimeError):
         self.terminal_status = "INVALID"
 
 
-_VARIANTS: dict[tuple[str, str], str] = {}
+_VARIANTS: dict[str, str] = {}
+
+
+@dataclass(frozen=True)
+class LifecycleEvidence:
+    """Finalized cleanup evidence emitted before lifecycle control returns."""
+
+    run_id: str
+    requested_provider: str
+    session_id: str
+    namespace: str
+    provider_variant: str | None
+    required_surface_ids: tuple[str, ...]
+    observation_path: Path
+    observation_sha256: str
+
+    def expected_instance(self, run_dir: Path) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "requested_provider": self.requested_provider,
+            "session_id": self.session_id,
+            "namespace": self.namespace,
+            "provider_variant": self.provider_variant,
+            "required_surface_ids": list(self.required_surface_ids),
+            "observation_path": self.observation_path.relative_to(run_dir).as_posix(),
+            "observation_sha256": self.observation_sha256,
+        }
+
+    def trace_record(self, run_dir: Path) -> dict[str, object]:
+        return {
+            "record": "cleanup",
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "namespace": self.namespace,
+            "requested_provider": self.requested_provider,
+            "observation_path": self.observation_path.relative_to(run_dir).as_posix(),
+            "observation_sha256": self.observation_sha256,
+        }
+
+
+def reset_observed_variant(run_id: str) -> None:
+    """Start one runner-owned run-global variant binding."""
+
+    _VARIANTS.pop(run_id, None)
 
 
 def bind_observed_variant(context: ProviderSessionContext, provider: object) -> str:
     value = getattr(provider, "variant_id")()
     if not isinstance(value, str) or not value:
         raise VariantDriftError("provider returned an empty observed variant")
-    key = (context.run_id, context.session_id)
+    key = context.run_id
     previous = _VARIANTS.setdefault(key, value)
     if previous != value:
         raise VariantDriftError(f"observed provider variant drift: {previous!r} -> {value!r}")
@@ -137,7 +182,18 @@ def _atomic_write(path: Path, content: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         try:
-            os.replace(temporary, path.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            os.link(
+                temporary,
+                path.name,
+                src_dir_fd=root_fd,
+                dst_dir_fd=root_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            raise CleanupUnproved("cleanup evidence publish target already exists") from exc
+        except OSError as exc:
+            raise CleanupUnproved(f"cleanup evidence cannot be published exclusively: {exc}") from exc
+        try:
             final = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
         except OSError as exc:
             raise CleanupUnproved(f"cleanup evidence final cannot be opened: {exc}") from exc
@@ -197,7 +253,26 @@ def verify_cleanup_observation(path: Path, digest: str, *, evidence_root: Path |
 def _persist_observation(context: ProviderSessionContext, observation: ProviderCleanupObservation) -> tuple[Path, str]:
     payload = observation.model_dump_json(indent=2).encode() + b"\n"
     path = context.evidence_root / "provider-cleanup-observation.json"
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_fd = os.open(context.evidence_root, flags)
+    except OSError as exc:
+        raise CleanupUnproved(f"cleanup evidence root binding is unavailable: {exc}") from exc
+    try:
+        root_stat = os.fstat(root_fd)
+    finally:
+        os.close(root_fd)
     _atomic_write(path, payload)
+    try:
+        reopened_root = os.open(context.evidence_root, flags)
+    except OSError as exc:
+        raise CleanupUnproved(f"cleanup evidence root binding changed: {exc}") from exc
+    try:
+        reopened_stat = os.fstat(reopened_root)
+    finally:
+        os.close(reopened_root)
+    if (root_stat.st_dev, root_stat.st_ino) != (reopened_stat.st_dev, reopened_stat.st_ino):
+        raise CleanupUnproved("cleanup evidence root binding changed during persistence")
     digest = hashlib.sha256(payload).hexdigest()
     verify_cleanup_observation(path, digest, evidence_root=context.evidence_root)
     return path, digest
@@ -206,6 +281,7 @@ def _persist_observation(context: ProviderSessionContext, observation: ProviderC
 def run_provider_lifecycle(
     *, provider: object, profile: object, context: ProviderSessionContext,
     binding: ProviderRuntimeBinding, requested_provider: str, operation: Callable[[object], object],
+    finalized: Callable[[LifecycleEvidence], None] | None = None,
 ) -> tuple[object, Path, str, str]:
     """Setup through persistence in one cleanup-owning outer ``finally``."""
     primary: BaseException | None = None
@@ -242,6 +318,24 @@ def run_provider_lifecycle(
                 primary = exc
             else:
                 secondary.append(str(exc))
+        if observation_path is not None and observation_digest is not None:
+            try:
+                if finalized is not None:
+                    finalized(LifecycleEvidence(
+                        run_id=context.run_id,
+                        requested_provider=requested_provider,
+                        session_id=context.session_id,
+                        namespace=context.namespace,
+                        provider_variant=observed_variant,
+                        required_surface_ids=tuple(binding.required_surface_ids),
+                        observation_path=observation_path,
+                        observation_sha256=observation_digest,
+                    ))
+            except BaseException as exc:
+                if primary is None and not isinstance(exc, Exception):
+                    primary = exc
+                else:
+                    secondary.append(f"lifecycle evidence callback failed: {exc}")
     if primary is not None:
         if not isinstance(primary, Exception):
             for note in secondary:
@@ -260,13 +354,51 @@ def run_provider_lifecycle(
 def terminalize_constructor_failure(
     context: ProviderSessionContext, *, requested_provider: str, error: BaseException,
 ) -> None:
+    del requested_provider
+    runner_parents = (
+        (context.work_root.parent, context.evidence_root.parent)
+        if (
+            context.work_root.parent.name == "work"
+            and context.evidence_root.parent.name == "evidence"
+            and context.work_root.parent.parent == context.evidence_root.parent.parent
+        )
+        else ()
+    )
     for root in (context.work_root, context.evidence_root):
-        if root.exists():
-            if root.is_dir():
-                import shutil
-                shutil.rmtree(root)
-            else:
-                root.unlink()
+        try:
+            mode = os.lstat(root).st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
+            import shutil
+            shutil.rmtree(root)
+        else:
+            root.unlink()
+        try:
+            os.lstat(root)
+        except FileNotFoundError:
+            pass
+        else:  # pragma: no cover - a concurrent reappearance is an environment fault
+            raise ProviderConstructionFailure("constructor roots could not be proved absent")
+    for parent in runner_parents:
+        try:
+            parent.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                raise ProviderConstructionFailure(
+                    f"constructor parent absence could not be proved: {exc}"
+                ) from exc
+        else:
+            try:
+                os.lstat(parent)
+            except FileNotFoundError:
+                pass
+            else:  # pragma: no cover - a concurrent reappearance is an environment fault
+                raise ProviderConstructionFailure("constructor parent could not be proved absent")
+    if not isinstance(error, Exception):
+        raise error
     raise ProviderConstructionFailure(f"constructor failure: {error}") from error
 
 
@@ -282,15 +414,46 @@ def _records_from_run(run_dir: Path) -> list[dict[str, object]]:
     return records
 
 
+def _expected_index(
+    expected_instances: tuple[Mapping[str, object], ...],
+) -> dict[tuple[object, ...], Mapping[str, object]]:
+    fields = {
+        "run_id", "requested_provider", "session_id", "namespace", "provider_variant",
+        "required_surface_ids", "observation_path", "observation_sha256",
+    }
+    expected: dict[tuple[object, ...], Mapping[str, object]] = {}
+    for item in expected_instances:
+        if not isinstance(item, Mapping) or set(item) != fields:
+            raise LifecycleCompletenessError("expected lifecycle instance is not a strict full record")
+        required = item["required_surface_ids"]
+        if not isinstance(required, list) or required != sorted(set(required)) or not required:
+            raise LifecycleCompletenessError("expected lifecycle required surfaces are invalid")
+        string_fields = fields - {"required_surface_ids"}
+        if any(not isinstance(item[name], str) or not item[name] for name in string_fields):
+            raise LifecycleCompletenessError("expected lifecycle identity is incomplete")
+        if not re_full_sha256(str(item["observation_sha256"])):
+            raise LifecycleCompletenessError("expected lifecycle digest is invalid")
+        path_value = str(item["observation_path"])
+        if path_value.startswith("/") or path_value.endswith("/") or "\\" in path_value or any(part in {"", ".", ".."} for part in path_value.split("/")):
+            raise LifecycleCompletenessError("expected cleanup observation path is unsafe")
+        key = (
+            item["run_id"], item["requested_provider"], item["session_id"], item["namespace"],
+            item["provider_variant"], tuple(required), item["observation_path"], item["observation_sha256"],
+        )
+        if key in expected:
+            raise LifecycleCompletenessError("duplicate expected lifecycle instance")
+        expected[key] = item
+    return expected
+
+
 def validate_lifecycle_completeness(
-    *, expected_instances: tuple[tuple[str, str, str], ...], cleanup_records: list[dict[str, object]] | None,
+    *, expected_instances: tuple[Mapping[str, object], ...], cleanup_records: list[dict[str, object]] | None,
     evidence_root: Path, run_dir: Path | None = None,
 ) -> None:
     records = _records_from_run(run_dir) if cleanup_records is None and run_dir is not None else cleanup_records
     if records is None:
         raise LifecycleCompletenessError("cleanup records are unavailable")
-    seen: set[tuple[str, str, str]] = set()
-    expected = set(expected_instances)
+    seen: set[tuple[object, ...]] = set()
     referenced: set[Path] = set()
     for record in records:
         path_value = record.get("observation_path")
@@ -299,7 +462,7 @@ def validate_lifecycle_completeness(
         trace_requested_provider = record.get("requested_provider")
         if not all(isinstance(value, str) and value for value in (path_value, digest)):
             raise LifecycleCompletenessError("cleanup record lacks bound observation reference")
-        if path_value.startswith("/") or "\\" in path_value or any(part in {"", ".", ".."} for part in path_value.split("/")):
+        if path_value.startswith("/") or path_value.endswith("/") or "\\" in path_value or any(part in {"", ".", ".."} for part in path_value.split("/")):
             raise LifecycleCompletenessError("cleanup observation path is unsafe")
         path = (run_dir / path_value) if run_dir is not None else evidence_root / path_value
         try:
@@ -320,21 +483,43 @@ def validate_lifecycle_completeness(
         trace_variant = record.get("provider_variant")
         if trace_variant is not None and trace_variant != observation.provider_variant:
             raise LifecycleCompletenessError("cleanup observation binding disagrees with trace")
-        key = (str(record.get("session_id")), str(record.get("namespace")), str(observation.provider_variant))
-        if key not in expected:
-            raise LifecycleCompletenessError("orphan lifecycle cleanup record")
+        key = (
+            observation.run_id,
+            observation.requested_provider,
+            observation.session_id,
+            observation.namespace,
+            observation.provider_variant,
+            tuple(observation.required_surface_ids),
+            path_value,
+            digest,
+        )
         if key in seen:
             raise LifecycleCompletenessError("duplicate lifecycle cleanup record")
         seen.add(key)
         referenced.add(path.resolve())
-        if (observation.session_id, observation.namespace, observation.provider_variant) != key:
+        if (
+            record.get("session_id") != observation.session_id
+            or record.get("namespace") != observation.namespace
+            or trace_run_id != observation.run_id
+            or trace_requested_provider != observation.requested_provider
+        ):
             raise LifecycleCompletenessError("cleanup observation binding disagrees with trace")
-    if seen != expected:
+    expected = _expected_index(expected_instances)
+    if seen != set(expected):
         raise LifecycleCompletenessError("missing lifecycle cleanup record")
-    for candidate in evidence_root.rglob("*.json"):
+    for candidate in evidence_root.rglob("*"):
+        try:
+            if not stat.S_ISREG(os.lstat(candidate).st_mode):
+                continue
+        except OSError:
+            continue
         try:
             candidate_observation = ProviderCleanupObservation.model_validate_json(candidate.read_bytes())
         except Exception:
             continue
         if candidate_observation.artifact_type == "provider-cleanup-observation.v1" and candidate.resolve() not in referenced:
             raise LifecycleCompletenessError("orphan lifecycle cleanup observation")
+
+
+def re_full_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)

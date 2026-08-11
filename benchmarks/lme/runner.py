@@ -25,7 +25,14 @@ from protocol.readiness import validate as validate_readiness
 from protocol.trace import CaseTraceWriter
 
 from .providers.base import ProviderSessionContext, RetrievalPurpose
-from .providers.lifecycle import LifecycleRunError, ProviderConstructionFailure, run_provider_lifecycle, terminalize_constructor_failure
+from .providers.lifecycle import (
+    LifecycleEvidence,
+    LifecycleRunError,
+    bind_observed_variant,
+    reset_observed_variant,
+    run_provider_lifecycle,
+    terminalize_constructor_failure,
+)
 
 from .adapter import LmeExomemAdapter, lme_profile
 from .bounds import BoundRun, Hypothesis, run_bounds
@@ -378,9 +385,42 @@ def _harness_canary(events: list[ProtocolEvent], handle: CaseHandle, token: str)
     )
 
 
-def _run_probes(provider: object, identity: DatasetIdentity, run_id: str) -> tuple[list[ProbeResult], list[object]]:
+def _run_probes(
+    provider: object,
+    identity: DatasetIdentity,
+    run_id: str,
+    *,
+    check_variant: Callable[[], str] | None = None,
+) -> tuple[list[ProbeResult], list[object]]:
     """Execute all declared probes and retain their evidence as typed records."""
-    from protocol.probes import known_answer_probe_specs
+    from protocol.probes import classify_update_outcome, known_answer_probe_specs
+
+    def checked(call):
+        value = call()
+        if check_variant is not None:
+            check_variant()
+        return value
+
+    def probe_event(*, case_id: str, content: str, sequence: int) -> ProtocolEvent:
+        return ProtocolEvent(
+            dataset=identity,
+            case_id=case_id,
+            session_ordinal=1,
+            sequence=sequence,
+            role="user",
+            turn_ordinal=sequence + 1,
+            content=content,
+            content_sha256=hashlib.sha256(content.encode()).hexdigest(),
+            original_timestamp="2026-01-01T00:00:00Z",
+            timestamp_semantics="ingestion_order_only",
+            ingestion_ordinal=sequence,
+            provenance=EventProvenance(
+                dataset_row_index=0,
+                upstream_session_id_sha256=hashlib.sha256(case_id.encode()).hexdigest(),
+                converter="harness-probe",
+                converter_version="1",
+            ),
+        )
 
     results: list[ProbeResult] = []
     readiness: list[object] = []
@@ -393,13 +433,50 @@ def _run_probes(provider: object, identity: DatasetIdentity, run_id: str) -> tup
         if getattr(provider, "retains_nothing", False):
             results.append(ProbeResult(case_id=case_id, probe_kind=spec.kind, outcome="inconclusive-by-design", detail="provider declares it retains nothing, so a known-answer probe is inapplicable"))
             continue
+        if spec.kind == "update-current-state":
+            for sequence, marker in enumerate((spec.old_marker, spec.current_marker)):
+                event = probe_event(case_id=case_id, content=marker, sequence=sequence)
+                checked(lambda event=event: provider.ingest_case([event], handle))
+            hits = checked(
+                lambda: provider.retrieve(spec.query, 2, RetrievalPurpose.POSITIVE_PROBE)
+            )
+            outcome = classify_update_outcome(
+                [str(getattr(hit, "text", "")) for hit in hits],
+                old_marker=spec.old_marker,
+                current_marker=spec.current_marker,
+            )
+            results.append(ProbeResult(
+                case_id=case_id,
+                probe_kind=spec.kind,
+                outcome=outcome,
+                hits=[str(getattr(hit, "hit_id", "")) for hit in hits],
+                detail="exact returned marker membership classified by declared update sequence",
+            ))
+            continue
         token = f"probe-{hashlib.sha256((run_id + spec.kind).encode()).hexdigest()[:16]}"
-        content = f"{getattr(spec, 'fact', 'Known answer probe record')}: {token}."
-        event = ProtocolEvent(dataset=identity, case_id=case_id, session_ordinal=1, sequence=0, role="user", turn_ordinal=1, content=content, content_sha256=hashlib.sha256(content.encode()).hexdigest(), original_timestamp="2026-01-01T00:00:00Z", timestamp_semantics="ingestion_order_only", ingestion_ordinal=0, provenance=EventProvenance(dataset_row_index=0, upstream_session_id_sha256=hashlib.sha256(case_id.encode()).hexdigest(), converter="harness-probe", converter_version="1"))
-        provider.ingest_case([event], handle)
-        hits = provider.retrieve(getattr(spec, "query", spec.prompt) if spec.kind == "semantic-zero-overlap" else token, 1, RetrievalPurpose.POSITIVE_PROBE)
-        passed = bool(hits) if spec.kind == "semantic-zero-overlap" else _hit_contains(hits, token)
-        results.append(ProbeResult(case_id=case_id, probe_kind=spec.kind, outcome="pass" if passed else "fail", hits=[str(getattr(hit, "hit_id", "")) for hit in hits], detail="returned hit text contained probe token" if passed else "probe token absent from returned hit text"))
+        content = f"{spec.fact}: {token}."
+        event = probe_event(case_id=case_id, content=content, sequence=0)
+        checked(lambda: provider.ingest_case([event], handle))
+        query = spec.query if spec.kind == "semantic-zero-overlap" else token
+        top_k = 10 if spec.kind == "semantic-zero-overlap" else 1
+        hits = checked(lambda: provider.retrieve(query, top_k, RetrievalPurpose.POSITIVE_PROBE))
+        if spec.kind == "semantic-zero-overlap":
+            passed = any(
+                spec.fact in str(getattr(hit, "text", ""))
+                and token in str(getattr(hit, "text", ""))
+                for hit in hits
+            )
+            detail = "returned hit text contained the exact declared fact and marker" if passed else "declared fact identity absent from returned hit text"
+        else:
+            passed = _hit_contains(hits, token)
+            detail = "returned hit text contained probe token" if passed else "probe token absent from returned hit text"
+        results.append(ProbeResult(
+            case_id=case_id,
+            probe_kind=spec.kind,
+            outcome="pass" if passed else "fail",
+            hits=[str(getattr(hit, "hit_id", "")) for hit in hits],
+            detail=detail,
+        ))
     return results, readiness
 
 
@@ -491,6 +568,8 @@ def execute_run(
         else None
     )
     run_id = config.run_id or _default_run_id()
+    if config.provider:
+        reset_observed_variant(run_id)
     run_dir = Path(config.out) / run_id
     # Reader approval and full-run evidence are preflight checks: a refusal
     # must not leave an immutable-looking run directory behind.
@@ -578,11 +657,22 @@ def execute_run(
     leakage_findings: list[object] = []
     probe_results: list[ProbeResult] = []
     equivalence_cases: list[dict[str, object]] = []
-    lifecycle_instances: list[dict[str, str]] = []
+    lifecycle_instances: list[dict[str, object]] = []
     isolation_rows: list[dict[str, object]] = []
     prior_presence_token: str | None = None
     control_flow: BaseException | None = None
     case_ids = [question.question_id for question in dataset.questions]
+
+    def prepare_context(context: ProviderSessionContext) -> None:
+        context.work_root.mkdir(parents=True, exist_ok=False)
+        context.evidence_root.mkdir(parents=True, exist_ok=False)
+
+    def record_lifecycle(evidence: LifecycleEvidence, trace_writer: Callable[[], CaseTraceWriter]) -> None:
+        # Register the expected instance first. A trace persistence failure is
+        # then an explicit incomplete ledger, never an unowned observation.
+        lifecycle_instances.append(evidence.expected_instance(run_dir))
+        trace_writer().append(evidence.trace_record(run_dir))
+
     if config.provider:
         assert provider_spec_value is not None
         diagnostic_id = "__diagnostic__"
@@ -592,26 +682,55 @@ def execute_run(
             work_root=run_dir / "work" / diagnostic_id,
             evidence_root=run_dir / "evidence" / diagnostic_id,
         )
-        try:
-            diagnostic_provider = provider_spec_value.factory()
-            (diagnostic_result, diagnostic_path, diagnostic_digest, diagnostic_variant) = run_provider_lifecycle(
-                provider=diagnostic_provider, profile=lme_profile(), context=diagnostic_context,
-                binding=provider_spec_value.runtime_binding, requested_provider=config.provider,
-                operation=lambda candidate: _run_probes(candidate, dataset_identity, run_id),
+        diagnostic_trace: CaseTraceWriter | None = None
+
+        def get_diagnostic_trace() -> CaseTraceWriter:
+            nonlocal diagnostic_trace
+            if diagnostic_trace is None:
+                diagnostic_trace = CaseTraceWriter(run_dir, diagnostic_id, schema_version=2)
+            return diagnostic_trace
+
+        def run_diagnostics(candidate: object) -> tuple[list[ProbeResult], list[object]]:
+            nonlocal control_config_sha256, provider_variant
+            diagnostic_result = _run_probes(
+                candidate,
+                dataset_identity,
+                run_id,
+                check_variant=lambda: bind_observed_variant(diagnostic_context, candidate),
             )
             probes, _ = diagnostic_result
             probe_results.extend(probes)
             with (run_dir / "probes.jsonl").open("a", encoding="utf-8") as probe_file:
                 for probe in probes:
                     probe_file.write(probe.model_dump_json() + "\n")
-            lifecycle_instances.append({"session_id": diagnostic_id, "namespace": diagnostic_context.namespace, "provider_variant": diagnostic_variant})
-            diagnostic_trace = CaseTraceWriter(run_dir, diagnostic_id, schema_version=2)
-            diagnostic_trace.append({"record": "cleanup", "run_id": run_id, "session_id": diagnostic_id, "namespace": diagnostic_context.namespace, "requested_provider": config.provider, "observation_path": diagnostic_path.relative_to(run_dir).as_posix(), "observation_sha256": diagnostic_digest})
-            provider_variant = diagnostic_variant
-            config_value = getattr(diagnostic_provider, "config", None)
+            provider_variant = bind_observed_variant(diagnostic_context, candidate)
+            config_value = getattr(candidate, "config", None)
             config_hash = getattr(config_value, "sha256", None)
             control_config_sha256 = config_hash() if callable(config_hash) else None
-            bind_started_manifest_provider(run_dir, provider_variant=provider_variant, control_config_sha256=control_config_sha256)
+            bind_started_manifest_provider(
+                run_dir,
+                provider_variant=provider_variant,
+                control_config_sha256=control_config_sha256,
+            )
+            return diagnostic_result
+
+        try:
+            prepare_context(diagnostic_context)
+            try:
+                diagnostic_provider = provider_spec_value.factory()
+            except BaseException as exc:
+                terminalize_constructor_failure(
+                    diagnostic_context,
+                    requested_provider=config.provider,
+                    error=exc,
+                )
+            (_diagnostic_result, _diagnostic_path, _diagnostic_digest, diagnostic_variant) = run_provider_lifecycle(
+                provider=diagnostic_provider, profile=lme_profile(), context=diagnostic_context,
+                binding=provider_spec_value.runtime_binding, requested_provider=config.provider,
+                operation=run_diagnostics,
+                finalized=lambda evidence: record_lifecycle(evidence, get_diagnostic_trace),
+            )
+            assert diagnostic_variant == provider_variant
         except BaseException as exc:
             failure = exc.primary if isinstance(exc, LifecycleRunError) else exc
             invalid_reason = f"diagnostic provider failure {type(failure).__name__}: {failure}"
@@ -619,15 +738,29 @@ def execute_run(
             if not isinstance(exc, Exception):
                 control_flow = exc
     started = time.perf_counter()
-    for case_ordinal, question in enumerate(() if control_flow is not None else dataset.questions, 1):
+    for case_ordinal, question in enumerate(
+        () if control_flow is not None or invalid_reason is not None else dataset.questions,
+        1,
+    ):
         question_started = time.perf_counter()
-        adapter = adapter_factory()
+        adapter = adapter_factory() if not config.provider else None
         reader_attempted = False
         reader_wall_time = 0.0
         reader_started = question_started
         provider_answered = False
+        trace: CaseTraceWriter | None = None
+
+        def get_case_trace() -> CaseTraceWriter:
+            nonlocal trace
+            if trace is None:
+                trace = CaseTraceWriter(
+                    run_dir,
+                    question.question_id,
+                    schema_version=2 if config.provider else 1,
+                )
+            return trace
+
         try:
-            trace = CaseTraceWriter(run_dir, question.question_id, schema_version=2 if config.provider else 1)
             if config.provider:
                 assert provider_spec_value is not None
                 context = ProviderSessionContext(
@@ -636,38 +769,49 @@ def execute_run(
                     work_root=run_dir / "work" / _safe_id(question.question_id),
                     evidence_root=run_dir / "evidence" / _safe_id(question.question_id),
                 )
+                prepare_context(context)
                 try:
                     provider = provider_spec_value.factory()
                 except BaseException as exc:
                     terminalize_constructor_failure(context, requested_provider=config.provider, error=exc)
-                try:
-                    events = neutralize(question, dataset_identity)
-                except BaseException as exc:
-                    run_provider_lifecycle(
-                        provider=provider, profile=lme_profile(), context=context,
-                        binding=provider_spec_value.runtime_binding, requested_provider=config.provider,
-                        operation=lambda _candidate: (_ for _ in ()).throw(exc),
-                    )
-                    raise
-                token = canary_for(run_id, question.question_id, "presence")
-                handle = CaseHandle(case_id=question.question_id, case_ordinal=case_ordinal, question_date=question.question_date_text)
-                canary_event = _harness_canary(events, handle, token)
-                events = [*events, canary_event]
-                content_fields, authored_literals, harness_fields = ingest_field_groups(events, handle)
-                authored_literals = {**authored_literals, "harness_canary": canary_event.content}
-                findings = scan_ingest(content_fields, authored_literals, harness_fields, CaseGold(case_id=question.question_id, answer=question.answer, answer_session_ids=list(question.answer_session_ids), question_type=question.question_type, question=question.question), raw_upstream_session_ids=[session.session_id for session in question.sessions])
-                leakage_findings.extend(findings)
-                # The scanner deliberately records query-phrase overlap in
-                # raw source dialogue.  It is an advisory observation here:
-                # neutral LongMemEval source content may naturally quote the
-                # question's facts.  Every other scanner finding is an actual
-                # provider-boundary refusal.
-                blocking_findings = [item for item in findings if item.detector != "question-text"]
-                if blocking_findings:
-                    raise RuntimeError("leakage scan rejected outbound provider payload: " + "; ".join(item.detector for item in blocking_findings))
+
                 def _owned(candidate: object):
-                    nonlocal prior_presence_token, reader_attempted, reader_wall_time
+                    nonlocal prior_presence_token, reader_attempted, reader_started, reader_wall_time
+                    events = neutralize(question, dataset_identity)
+                    token = canary_for(run_id, question.question_id, "presence")
+                    handle = CaseHandle(
+                        case_id=question.question_id,
+                        case_ordinal=case_ordinal,
+                        question_date=question.question_date_text,
+                    )
+                    canary_event = _harness_canary(events, handle, token)
+                    events = [*events, canary_event]
+                    content_fields, authored_literals, harness_fields = ingest_field_groups(events, handle)
+                    authored_literals = {**authored_literals, "harness_canary": canary_event.content}
+                    findings = scan_ingest(
+                        content_fields,
+                        authored_literals,
+                        harness_fields,
+                        CaseGold(
+                            case_id=question.question_id,
+                            answer=question.answer,
+                            answer_session_ids=list(question.answer_session_ids),
+                            question_type=question.question_type,
+                            question=question.question,
+                        ),
+                        raw_upstream_session_ids=[session.session_id for session in question.sessions],
+                    )
+                    leakage_findings.extend(findings)
+                    blocking_findings = [
+                        item for item in findings if item.detector != "question-text"
+                    ]
+                    if blocking_findings:
+                        raise RuntimeError(
+                            "leakage scan rejected outbound provider payload: "
+                            + "; ".join(item.detector for item in blocking_findings)
+                        )
                     inserted = candidate.ingest_case(events, handle)
+                    bind_observed_variant(context, candidate)
                     payload_shas: list[str] = []
                     canary_ordinals = {event.session_ordinal for event in events if event.provenance.converter == "harness-canary"}
                     for session_ordinal in sorted({event.session_ordinal for event in events}):
@@ -675,31 +819,47 @@ def execute_run(
                         payload_sha = hashlib.sha256(payload.encode()).hexdigest()
                         if session_ordinal not in canary_ordinals:
                             payload_shas.append(payload_sha)
-                        trace.append({"record": "ingest", "session_ordinal": session_ordinal, "payload_sha256": payload_sha, "provider_ids": list(inserted or [])})
+                        get_case_trace().append({"record": "ingest", "session_ordinal": session_ordinal, "payload_sha256": payload_sha, "provider_ids": list(inserted or [])})
                     per_case_readiness = candidate.readiness()
+                    bind_observed_variant(context, candidate)
                     hits = candidate.retrieve(question.question, config.top_k, RetrievalPurpose.SCORED_RETRIEVAL)
+                    bind_observed_variant(context, candidate)
                     retrieved = [hit.text for hit in hits]
-                    trace.append({"record": "search", "query": question.question, "raw_response_ref": "inline:provider-hit-list", "normalized_hit_ids": [hit.hit_id for hit in hits], "normalized_hit_shas": [hashlib.sha256(hit.text.encode()).hexdigest() for hit in hits], "top_k": config.top_k})
-                    presence = _hit_contains(candidate.retrieve(token, 1, RetrievalPurpose.POSITIVE_PROBE), token)
+                    get_case_trace().append({"record": "search", "query": question.question, "raw_response_ref": "inline:provider-hit-list", "normalized_hit_ids": [hit.hit_id for hit in hits], "normalized_hit_shas": [hashlib.sha256(hit.text.encode()).hexdigest() for hit in hits], "top_k": config.top_k})
+                    presence_hits = candidate.retrieve(token, 1, RetrievalPurpose.POSITIVE_PROBE)
+                    bind_observed_variant(context, candidate)
+                    presence = _hit_contains(presence_hits, token)
                     if prior_presence_token is None:
                         isolation_rows.append({"case_ordinal": case_ordinal, "prior_case": "not-applicable-no-prior-case"})
                         prior_hit = False
                     else:
-                        prior_hit = _hit_contains(candidate.retrieve(prior_presence_token, 1, RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY), prior_presence_token)
+                        prior_hits = candidate.retrieve(prior_presence_token, 1, RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY)
+                        bind_observed_variant(context, candidate)
+                        prior_hit = _hit_contains(prior_hits, prior_presence_token)
                         isolation_rows.append({"case_ordinal": case_ordinal, "prior_case_token": prior_presence_token, "hit": prior_hit})
                     never_token = canary_for(run_id, question.question_id, "never_ingested")
-                    never_hit = _hit_contains(candidate.retrieve(never_token, 1, RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY), never_token)
+                    never_hits = candidate.retrieve(never_token, 1, RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY)
+                    bind_observed_variant(context, candidate)
+                    never_hit = _hit_contains(never_hits, never_token)
                     contamination_by_case[question.question_id] = _canary_verdict({"presence": presence, "cross_case": prior_hit, "never_ingested": never_hit}, retains_nothing=bool(getattr(candidate, "retains_nothing", False)))
                     reader_attempted = True
                     reader_started = time.perf_counter()
                     hypothesis = active_reader.answer(question, retrieved)
                     reader_wall_time = time.perf_counter() - reader_started
-                    trace.append({"record": "timing", "phase": "retrieve-and-read", "ms": (time.perf_counter() - question_started) * 1000.0})
-                    trace.append({"record": "answer", "prompt_sha256": hashlib.sha256(question.question.encode()).hexdigest(), "model_id": _reader_model(active_reader, config), "response_ref": "inline:stub-response" if isinstance(active_reader, StubReader) else "reader-artifact", "input_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "input_tokens", 0) or 0), "output_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "output_tokens", 0) or 0)})
+                    get_case_trace().append({"record": "timing", "phase": "retrieve-and-read", "ms": (time.perf_counter() - question_started) * 1000.0})
+                    get_case_trace().append({"record": "answer", "prompt_sha256": hashlib.sha256(question.question.encode()).hexdigest(), "model_id": _reader_model(active_reader, config), "response_ref": "inline:stub-response" if isinstance(active_reader, StubReader) else "reader-artifact", "input_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "input_tokens", 0) or 0), "output_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "output_tokens", 0) or 0)})
                     prior_presence_token = token
                     return payload_shas, per_case_readiness, hits, retrieved, hypothesis
-                (payload_shas, per_case_readiness, hits, retrieved, hypothesis), observation_path, observation_digest, observed_variant = run_provider_lifecycle(provider=provider, profile=lme_profile(), context=context, binding=provider_spec_value.runtime_binding, requested_provider=config.provider, operation=_owned)
-                lifecycle_instances.append({"session_id": context.session_id, "namespace": context.namespace, "provider_variant": observed_variant})
+
+                (payload_shas, per_case_readiness, hits, retrieved, hypothesis), _observation_path, _observation_digest, observed_variant = run_provider_lifecycle(
+                    provider=provider,
+                    profile=lme_profile(),
+                    context=context,
+                    binding=provider_spec_value.runtime_binding,
+                    requested_provider=config.provider,
+                    operation=_owned,
+                    finalized=lambda evidence: record_lifecycle(evidence, get_case_trace),
+                )
                 if provider_variant is None:
                     provider_variant = observed_variant
                     config_value = getattr(provider, "config", None)
@@ -707,7 +867,6 @@ def execute_run(
                     control_config_sha256 = config_hash() if callable(config_hash) else None
                     bind_started_manifest_provider(run_dir, provider_variant=provider_variant, control_config_sha256=control_config_sha256)
                 readiness_list.extend(per_case_readiness)
-                trace.append({"record": "cleanup", "run_id": run_id, "session_id": context.session_id, "namespace": context.namespace, "requested_provider": config.provider, "observation_path": observation_path.relative_to(run_dir).as_posix(), "observation_sha256": observation_digest})
                 equivalence_cases.append(_equivalence_case(
                     question=question, case_ids=case_ids, namespace_pattern=namespace_pattern(provider_kind),
                     payload_shas=payload_shas, readiness=per_case_readiness,
@@ -718,6 +877,8 @@ def execute_run(
                 status = "ok"
                 provider_answered = True
             else:
+                assert adapter is not None
+                trace = get_case_trace()
                 retrieved = adapter.run_question(
                     question,
                     run_dir / "questions" / _safe_id(question.question_id),

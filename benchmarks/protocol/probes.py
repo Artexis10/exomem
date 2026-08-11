@@ -23,7 +23,7 @@ def known_answer_probe_specs() -> tuple[ProbeSpec, ...]:
     return (
         ProbeSpec("lexical-rare-token", "Retrieve the unique rare token exactly.", outcomes, fact="The rare orchard marker identifies the record.", query="Retrieve the rare marker."),
         ProbeSpec("semantic-zero-overlap", "Where was azure atlas relocated?", outcomes, fact="The cobaltic cartographer moved the porcelain codex to the littoral archive.", query="Where was azure atlas relocated?"),
-        ProbeSpec("update-current-state", "Return only the current revision after an update.", outcomes, fact="revision-old-opaque revision-current-opaque", query="revision-current-opaque", old_marker="revision-old-opaque", current_marker="revision-current-opaque"),
+        ProbeSpec("update-current-state", "Return only the current revision after an update.", outcomes, fact="revision-old-opaque revision-current-opaque", query="Which revision is currently authoritative?", old_marker="revision-old-opaque", current_marker="revision-current-opaque"),
     )
 
 

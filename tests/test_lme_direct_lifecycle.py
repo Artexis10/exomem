@@ -1106,3 +1106,650 @@ def test_dataset_roles_are_preserved_while_harness_diagnostic_events_are_user_on
     normalized_roles = [event.role for event in neutralize(question, identity)]
     assert normalized_roles == dataset_roles
     assert {event.role for event in diagnostic_probe_events()} == {"user"}
+
+
+def _feedback2_offline_profile():
+    from membench.adapters.base import Profile
+
+    return Profile(
+        name="feedback2-offline",
+        settings={
+            "EXOMEM_DISABLE_EMBEDDINGS": "1",
+            "EXOMEM_DISABLE_WARMUP": "1",
+            "EXOMEM_DISABLE_FILE_WATCHER": "1",
+            "EXOMEM_DISABLE_MODE_WATCH": "1",
+            "EXOMEM_DISABLE_CORPUS_CACHE": "1",
+            "EXOMEM_DISABLE_CLIP": "1",
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+        },
+    )
+
+
+def _feedback2_context(tmp_path: Path, label: str):
+    from lme.providers.base import ProviderSessionContext
+
+    work_root = tmp_path / "work"
+    evidence_root = tmp_path / "evidence"
+    work_root.mkdir(parents=True)
+    evidence_root.mkdir(parents=True)
+    return ProviderSessionContext(
+        run_id=f"feedback2-{label}",
+        session_id=f"{label}-session",
+        namespace=f"{label}-namespace",
+        work_root=work_root,
+        evidence_root=evidence_root,
+    )
+
+
+class _Feedback2RememberingProvider(_Provider):
+    """Small real-boundary provider used to keep runner attacks deterministic."""
+
+    def __init__(self, *, variant: str = "observed") -> None:
+        super().__init__(variant=variant)
+        self.records: list[str] = []
+
+    def ingest_case(self, events, _handle):
+        self.records.extend(event.content for event in events)
+        return tuple(f"record-{index}" for index, _event in enumerate(events))
+
+    def retrieve(self, question, _top_k, purpose):
+        from lme.providers.base import ProviderHit, RetrievalPurpose
+
+        if purpose is RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY:
+            return []
+        matches = [record for record in self.records if question in record]
+        selected = matches[:1] or (self.records[:1] if purpose is RetrievalPurpose.POSITIVE_PROBE else [])
+        return [ProviderHit(f"hit-{index}", text, 1.0) for index, text in enumerate(selected)]
+
+
+def _feedback2_cleanup_fixture(tmp_path: Path) -> tuple[dict[str, object], dict[str, object], Path]:
+    from protocol.models import ProviderCleanupObservation
+
+    run_dir = tmp_path / "run"
+    path = run_dir / "evidence" / "session-1" / "cleanup.attestation"
+    path.parent.mkdir(parents=True)
+    observation = ProviderCleanupObservation(
+        run_id="run-1",
+        session_id="session-1",
+        requested_provider="fixture",
+        provider_variant="observed",
+        namespace="namespace-1",
+        cleanup_called=True,
+        required_surface_ids=["provider-state"],
+        observations=[
+            {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False}
+        ],
+    )
+    payload = observation.model_dump_json(indent=2).encode() + b"\n"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    observation_path = path.relative_to(run_dir).as_posix()
+    expected = {
+        "run_id": "run-1",
+        "requested_provider": "fixture",
+        "session_id": "session-1",
+        "namespace": "namespace-1",
+        "provider_variant": "observed",
+        "required_surface_ids": ["provider-state"],
+        "observation_path": observation_path,
+        "observation_sha256": digest,
+    }
+    record = {
+        "run_id": "run-1",
+        "requested_provider": "fixture",
+        "session_id": "session-1",
+        "namespace": "namespace-1",
+        "observation_path": observation_path,
+        "observation_sha256": digest,
+    }
+    return expected, record, run_dir
+
+
+def test_feedback2_exomem_observer_uses_real_vault_bytes_not_allocated_wrapper(
+    tmp_path: Path,
+) -> None:
+    """A removed real vault is absent even while the adapter still holds its Path."""
+    from lme.dataset import load_dataset
+    from lme.normalize import neutralize
+    from lme.providers.base import RetrievalPurpose
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+    from lme.providers.registry import provider_spec
+    from protocol.models import CaseHandle, DatasetIdentity
+
+    question = load_dataset(Path("benchmarks/lme/fixtures/mini.json")).questions[0]
+    identity = DatasetIdentity(
+        id="fixture",
+        variant="mini",
+        source="local",
+        revision="feedback2",
+        sha256=hashlib.sha256(Path("benchmarks/lme/fixtures/mini.json").read_bytes()).hexdigest(),
+        case_count=6,
+    )
+    events = neutralize(question, identity)
+    handle = CaseHandle(
+        case_id=question.question_id,
+        case_ordinal=1,
+        question_date=question.question_date_text,
+    )
+    spec = provider_spec("exomem-source-only")
+    clean_context = _feedback2_context(tmp_path / "clean", "exomem-clean")
+    _result, _path, _digest, variant = run_provider_lifecycle(
+        provider=spec.factory(),
+        profile=_feedback2_offline_profile(),
+        context=clean_context,
+        binding=spec.runtime_binding,
+        requested_provider="exomem-source-only",
+        operation=lambda provider: provider.ingest_case(events, handle),
+    )
+    assert variant == "exomem-source-only"
+    assert not clean_context.work_root.exists()
+
+    retained_context = _feedback2_context(tmp_path / "retained", "exomem-retained")
+    retained_provider = spec.factory()
+    real_cleanup = retained_provider.cleanup
+
+    def retain_source_bytes() -> None:
+        real_cleanup()
+        source = retained_context.work_root / "vault" / "Knowledge Base" / "Sources" / "Other" / "retained.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("retained provider bytes", encoding="utf-8")
+
+    retained_provider.cleanup = retain_source_bytes  # type: ignore[method-assign]
+    with pytest.raises(CleanupUnproved, match="absence|state|remain"):
+        run_provider_lifecycle(
+            provider=retained_provider,
+            profile=_feedback2_offline_profile(),
+            context=retained_context,
+            binding=spec.runtime_binding,
+            requested_provider="exomem-source-only",
+            operation=lambda provider: provider.ingest_case(events, handle),
+        )
+
+
+def test_feedback2_hybrid_observer_reads_chunk_and_index_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme.dataset import load_dataset
+    from lme.normalize import neutralize
+    from lme.providers.registry import provider_spec
+    from protocol.models import CaseHandle, DatasetIdentity
+
+    monkeypatch.setenv("PROTOCOL_FIXTURE_EMBEDDER", "1")
+    spec = provider_spec("hybrid-rag-control")
+    provider = spec.factory()
+    context = _feedback2_context(tmp_path, "hybrid")
+    question = load_dataset(Path("benchmarks/lme/fixtures/mini.json")).questions[0]
+    identity = DatasetIdentity(
+        id="fixture", variant="mini", source="local", revision="feedback2",
+        sha256="a" * 64, case_count=6,
+    )
+    handle = CaseHandle(case_id=question.question_id, case_ordinal=1, question_date=question.question_date_text)
+    provider.setup(None, context)
+    inserted = provider.ingest_case(neutralize(question, identity), handle)
+    before = spec.runtime_binding.observe(context, provider)
+    state = next(item for item in before if item["kind"] == "provider-state")
+    assert state == {
+        "kind": "provider-state",
+        "remaining_record_ids": sorted(inserted),
+        "backend_active": True,
+    }
+    provider.cleanup()
+    after = spec.runtime_binding.observe(context, provider)
+    state = next(item for item in after if item["kind"] == "provider-state")
+    assert state["remaining_record_ids"] == [] and state["backend_active"] is False
+
+
+def test_feedback2_null_observer_fails_closed_on_unexpected_retained_attributes(
+    tmp_path: Path,
+) -> None:
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+    from lme.providers.registry import provider_spec
+
+    spec = provider_spec("no-memory")
+    provider = spec.factory()
+    provider.retained_state = {"record": "still-live"}
+    with pytest.raises(CleanupUnproved, match="state|shape|attribute|unobservable"):
+        run_provider_lifecycle(
+            provider=provider,
+            profile=None,
+            context=_feedback2_context(tmp_path, "null"),
+            binding=spec.runtime_binding,
+            requested_provider="no-memory",
+            operation=lambda _provider: None,
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("run_id", "wrong-run"),
+        ("requested_provider", "wrong-provider"),
+        ("session_id", "wrong-session"),
+        ("namespace", "wrong-namespace"),
+        ("provider_variant", "wrong-variant"),
+        ("required_surface_ids", ["namespace-membership"]),
+        ("observation_path", "evidence/session-1/wrong.attestation"),
+        ("observation_sha256", "0" * 64),
+    ),
+)
+def test_feedback2_expected_instance_binds_the_full_cleanup_identity(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    from lme.providers.lifecycle import LifecycleCompletenessError, validate_lifecycle_completeness
+
+    expected, record, run_dir = _feedback2_cleanup_fixture(tmp_path)
+    validate_lifecycle_completeness(
+        expected_instances=(expected,),
+        cleanup_records=[record],
+        evidence_root=run_dir / "evidence",
+        run_dir=run_dir,
+    )
+    forged = dict(expected)
+    forged[field] = value
+    with pytest.raises(LifecycleCompletenessError):
+        validate_lifecycle_completeness(
+            expected_instances=(forged,),
+            cleanup_records=[record],
+            evidence_root=run_dir / "evidence",
+            run_dir=run_dir,
+        )
+
+
+def test_feedback2_non_json_cleanup_observation_is_still_an_orphan(
+    tmp_path: Path,
+) -> None:
+    from lme.reader import StubReader
+    from lme.runner import execute_run
+    from protocol.manifest import ManifestError, load_manifest
+    from protocol.trace import CaseTraceReader
+
+    with mock.patch.dict(
+        os.environ,
+        {"PROTOCOL_FIXTURE_EMBEDDER": "1", "EXOMEM_DISABLE_EMBEDDINGS": "1"},
+    ):
+        run = execute_run(
+            _mini_config(tmp_path, 2, "feedback2-non-json-orphan", provider="hybrid-rag-control"),
+            reader=StubReader(),
+        ).run_dir
+    trace = next((run / "traces").glob("*.jsonl"))
+    cleanup = next(row for row in CaseTraceReader(run, trace.stem) if row.record == "cleanup")
+    payload = (run / cleanup.observation_path).read_bytes()
+    (run / "evidence" / "unreferenced-cleanup.attestation").write_bytes(payload)
+    with pytest.raises(ManifestError, match="orphan|lifecycle|cleanup"):
+        load_manifest(run)
+
+
+def test_feedback2_blocking_leakage_after_factory_return_is_owned_and_ledgered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lme.runner as runner
+    from lme.providers import registry
+    from lme.reader import StubReader
+    from lme.runner import LmeRunInvalid, execute_run
+    from protocol.trace import CaseTraceReader
+
+    providers: list[_Provider] = []
+
+    def factory(_spec) -> _Provider:
+        providers.append(_Provider())
+        return providers[-1]
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
+    monkeypatch.setattr(
+        runner,
+        "scan_ingest",
+        lambda *_args, **_kwargs: [type("Finding", (), {"detector": "gold-answer"})()],
+    )
+    with pytest.raises(LmeRunInvalid, match="leakage") as rejected:
+        execute_run(
+            _mini_config(tmp_path, 1, "feedback2-owned-leakage", provider="fixture"),
+            reader=StubReader(),
+        )
+    assert len(providers) == 2
+    assert [provider.cleanups for provider in providers] == [1, 1]
+    environment = json.loads((rejected.value.run_dir / "environment.json").read_text(encoding="utf-8"))
+    expected = environment["lme"]["lifecycle_expected_instances"]
+    assert {item["session_id"] for item in expected} == {"__diagnostic__", "mini-single-user"}
+    trace = list(CaseTraceReader(rejected.value.run_dir, "mini-single-user"))
+    assert len([row for row in trace if row.record == "cleanup"]) == 1
+
+
+@pytest.mark.parametrize("failure_mode", ("retrieve", "cleanup"))
+def test_feedback2_failure_ledger_is_written_for_operation_and_cleanup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
+) -> None:
+    from lme.providers import registry
+    from lme.providers.base import RetrievalPurpose
+    from lme.reader import StubReader
+    from lme.runner import LmeRunInvalid, execute_run
+    from protocol.trace import CaseTraceReader
+
+    calls = 0
+
+    class Failing(_Feedback2RememberingProvider):
+        def retrieve(self, question, top_k, purpose):
+            if failure_mode == "retrieve" and purpose is RetrievalPurpose.SCORED_RETRIEVAL:
+                raise RuntimeError("feedback2 retrieve failure")
+            return super().retrieve(question, top_k, purpose)
+
+        def cleanup(self) -> None:
+            super().cleanup()
+            if failure_mode == "cleanup":
+                raise RuntimeError("feedback2 cleanup failure")
+
+    def factory(_spec):
+        nonlocal calls
+        calls += 1
+        return _Feedback2RememberingProvider() if calls == 1 else Failing()
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
+    with pytest.raises(LmeRunInvalid, match=failure_mode) as rejected:
+        execute_run(
+            _mini_config(tmp_path, 1, f"feedback2-ledger-{failure_mode}", provider="fixture"),
+            reader=StubReader(),
+        )
+    environment = json.loads((rejected.value.run_dir / "environment.json").read_text(encoding="utf-8"))
+    expected = environment["lme"]["lifecycle_expected_instances"]
+    assert {item["session_id"] for item in expected} == {"__diagnostic__", "mini-single-user"}
+    assert all(
+        set(item) == {
+            "run_id", "requested_provider", "session_id", "namespace", "provider_variant",
+            "required_surface_ids", "observation_path", "observation_sha256",
+        }
+        for item in expected
+    )
+    cleanup_rows = [row for row in CaseTraceReader(rejected.value.run_dir, "mini-single-user") if row.record == "cleanup"]
+    assert len(cleanup_rows) == 1
+    expected_case = next(item for item in expected if item["session_id"] == "mini-single-user")
+    assert cleanup_rows[0].observation_path == expected_case["observation_path"]
+    assert cleanup_rows[0].observation_sha256 == expected_case["observation_sha256"]
+
+
+@pytest.mark.parametrize("failed_factory", ("diagnostic", "scored"))
+def test_feedback2_constructor_control_flow_keeps_exact_identity_after_root_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_factory: str
+) -> None:
+    from lme.providers import registry
+    from lme.reader import StubReader
+    from lme.runner import execute_run
+
+    class ConstructorControl(BaseException):
+        pass
+
+    failure = ConstructorControl(failed_factory)
+    run_id = f"feedback2-constructor-{failed_factory}"
+    calls = 0
+
+    def factory(_spec):
+        nonlocal calls
+        calls += 1
+        session = "__diagnostic__" if calls == 1 else "mini-single-user"
+        work = tmp_path / run_id / "work" / session
+        evidence = tmp_path / run_id / "evidence" / session
+        assert work.is_dir() and evidence.is_dir()
+        if failed_factory == "diagnostic" or calls == 2:
+            raise failure
+        return _Feedback2RememberingProvider()
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
+    with pytest.raises(ConstructorControl) as raised:
+        execute_run(_mini_config(tmp_path, 1, run_id, provider="fixture"), reader=StubReader())
+    assert raised.value is failure
+    failed_session = "__diagnostic__" if failed_factory == "diagnostic" else "mini-single-user"
+    assert not (tmp_path / run_id / "work" / failed_session).exists()
+    assert not (tmp_path / run_id / "evidence" / failed_session).exists()
+    manifest = json.loads((tmp_path / run_id / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "INVALID"
+
+
+def test_feedback2_ordinary_diagnostic_constructor_failure_is_typed_and_cleans_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme.providers import registry
+    from lme.reader import StubReader
+    from lme.runner import LmeRunInvalid, execute_run
+
+    run_id = "feedback2-constructor-ordinary"
+    calls = 0
+
+    def factory(_spec):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert (tmp_path / run_id / "work" / "__diagnostic__").is_dir()
+            assert (tmp_path / run_id / "evidence" / "__diagnostic__").is_dir()
+            raise RuntimeError("ordinary constructor")
+        return _Feedback2RememberingProvider()
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
+    with pytest.raises(LmeRunInvalid, match="ProviderConstructionFailure") as rejected:
+        execute_run(_mini_config(tmp_path, 1, run_id, provider="fixture"), reader=StubReader())
+    assert calls == 1
+    assert not (rejected.value.run_dir / "work" / "__diagnostic__").exists()
+    assert not (rejected.value.run_dir / "evidence" / "__diagnostic__").exists()
+
+
+def test_feedback2_cleanup_only_control_flow_is_primary_after_finalized_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme.providers import registry
+    from lme.reader import StubReader
+    from lme.runner import execute_run
+    from protocol.trace import CaseTraceReader
+
+    class CleanupControl(BaseException):
+        pass
+
+    failure = CleanupControl("cleanup control")
+    calls = 0
+
+    class InterruptingCleanup(_Feedback2RememberingProvider):
+        def cleanup(self) -> None:
+            super().cleanup()
+            raise failure
+
+    def factory(_spec):
+        nonlocal calls
+        calls += 1
+        return _Feedback2RememberingProvider() if calls == 1 else InterruptingCleanup()
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
+    run_id = "feedback2-cleanup-control"
+    with pytest.raises(CleanupControl) as raised:
+        execute_run(_mini_config(tmp_path, 1, run_id, provider="fixture"), reader=StubReader())
+    assert raised.value is failure
+    run = tmp_path / run_id
+    assert json.loads((run / "manifest.json").read_text(encoding="utf-8"))["status"] == "INVALID"
+    expected = json.loads((run / "environment.json").read_text(encoding="utf-8"))["lme"]["lifecycle_expected_instances"]
+    assert {item["session_id"] for item in expected} == {"__diagnostic__", "mini-single-user"}
+    assert len([row for row in CaseTraceReader(run, "mini-single-user") if row.record == "cleanup"]) == 1
+
+
+def test_feedback2_semantic_probe_rejects_an_unrelated_hit() -> None:
+    from lme.providers.base import ProviderHit
+    from lme.runner import _run_probes
+    from protocol.models import DatasetIdentity
+    from protocol.probes import known_answer_probe_specs
+
+    semantic_query = next(
+        spec.query for spec in known_answer_probe_specs() if spec.kind == "semantic-zero-overlap"
+    )
+
+    class Unrelated(_Provider):
+        def retrieve(self, question, _top_k, _purpose):
+            if question == semantic_query:
+                return [ProviderHit("unrelated", "an unrelated memory", 1.0)]
+            return []
+
+    results, _readiness = _run_probes(
+        Unrelated(),
+        DatasetIdentity(
+            id="diagnostic", variant="fixture", source="local", revision="1",
+            sha256="0" * 64, case_count=0,
+        ),
+        "feedback2-semantic",
+    )
+    semantic = next(result for result in results if result.probe_kind == "semantic-zero-overlap")
+    assert semantic.outcome == "fail"
+    assert semantic.hits == ["unrelated"]
+
+
+def test_feedback2_update_probe_uses_declared_sequence_neutral_query_and_exact_markers() -> None:
+    from lme.providers.base import ProviderHit
+    from lme.runner import _run_probes
+    from protocol.models import DatasetIdentity
+    from protocol.probes import known_answer_probe_specs
+
+    update = next(spec for spec in known_answer_probe_specs() if spec.kind == "update-current-state")
+    ingested: list[tuple[str, list[str]]] = []
+    queries: list[str] = []
+
+    class Echo(_Provider):
+        def ingest_case(self, events, handle):
+            ingested.append((handle.case_id, [event.content for event in events]))
+            return ()
+
+        def retrieve(self, question, _top_k, _purpose):
+            queries.append(question)
+            return [ProviderHit("echo", question, 1.0)]
+
+    results, _readiness = _run_probes(
+        Echo(),
+        DatasetIdentity(
+            id="diagnostic", variant="fixture", source="local", revision="1",
+            sha256="0" * 64, case_count=0,
+        ),
+        "feedback2-update",
+    )
+    update_writes = [contents for case_id, contents in ingested if case_id == "__probe__-update-current-state"]
+    assert update.query not in {update.old_marker, update.current_marker}
+    assert update_writes == [[update.old_marker], [update.current_marker]]
+    assert queries[-1] == update.query
+    outcome = next(result for result in results if result.probe_kind == "update-current-state")
+    assert outcome.outcome == "unresolvable"
+
+
+def test_feedback2_observed_variant_is_immutable_across_all_run_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lme.providers import registry
+    from lme.reader import StubReader
+    from lme.runner import LmeRunInvalid, execute_run
+
+    calls = 0
+
+    def factory(_spec):
+        nonlocal calls
+        calls += 1
+        return _Feedback2RememberingProvider(variant="diagnostic-variant" if calls == 1 else "scored-variant")
+
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
+    with pytest.raises(LmeRunInvalid, match="variant|drift"):
+        execute_run(
+            _mini_config(tmp_path, 2, "feedback2-global-variant", provider="fixture"),
+            reader=StubReader(),
+        )
+
+
+def test_feedback2_existing_final_race_cannot_be_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lme.providers.lifecycle as lifecycle
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    real_open = lifecycle.os.open
+    raced = False
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal raced
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if not raced and str(path).startswith(".provider-cleanup-observation.json.tmp") and dir_fd is not None:
+            raced = True
+            final = real_open(
+                "provider-cleanup-observation.json",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=dir_fd,
+            )
+            os.write(final, b"racer-owned")
+            os.close(final)
+        return descriptor
+
+    monkeypatch.setattr(lifecycle.os, "open", racing_open)
+    context = _feedback2_context(tmp_path, "existing-final-race")
+    with pytest.raises(CleanupUnproved, match="exist|publish|target"):
+        run_provider_lifecycle(
+            provider=_Provider(), profile=None, context=context, binding=_binding(),
+            requested_provider="fixture", operation=lambda _provider: None,
+        )
+    assert (context.evidence_root / "provider-cleanup-observation.json").read_bytes() == b"racer-owned"
+
+
+def test_feedback2_root_swap_cannot_substitute_the_reopened_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lme.providers.lifecycle as lifecycle
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    real_atomic_write = lifecycle._atomic_write
+    displaced = tmp_path / "held-evidence-root"
+    outside = tmp_path / "substituted-evidence-root"
+
+    def swap_after_publish(path: Path, content: bytes) -> None:
+        real_atomic_write(path, content)
+        path.parent.rename(displaced)
+        outside.mkdir()
+        path.parent.symlink_to(outside, target_is_directory=True)
+        (outside / path.name).write_bytes(content)
+
+    monkeypatch.setattr(lifecycle, "_atomic_write", swap_after_publish)
+    with pytest.raises(CleanupUnproved, match="root|swap|binding|symlink"):
+        run_provider_lifecycle(
+            provider=_Provider(), profile=None,
+            context=_feedback2_context(tmp_path, "root-swap"), binding=_binding(),
+            requested_provider="fixture", operation=lambda _provider: None,
+        )
+    assert (displaced / "provider-cleanup-observation.json").is_file()
+
+
+@pytest.mark.parametrize("path", ("work/", "a/b/"))
+def test_feedback2_trailing_separator_is_rejected_by_models_and_draft_schemas(
+    tmp_path: Path, path: str
+) -> None:
+    from jsonschema import Draft202012Validator
+    from pydantic import ValidationError
+    from protocol.models import CleanupRecordV2, ProviderCleanupObservation, ProviderCleanupPathLstat, export_json_schemas
+
+    with pytest.raises(ValidationError):
+        CleanupRecordV2(
+            protocol_version="1.0.0", schema_version=2, run_id="run-1", session_id="session-1",
+            namespace="namespace-1", observation_path=path, observation_sha256="a" * 64,
+        )
+    with pytest.raises(ValidationError):
+        ProviderCleanupPathLstat(kind="path-lstat", path=path, raw_kind="missing", entries=[])
+
+    schemas = {item.name: json.loads(item.read_text(encoding="utf-8")) for item in export_json_schemas(tmp_path)}
+    trace_payload = {
+        "protocol_version": "1.0.0", "schema_version": 2, "case_id": "case-1",
+        "entries": [{
+            "protocol_version": "1.0.0", "schema_version": 2, "record": "cleanup",
+            "run_id": "run-1", "session_id": "session-1", "namespace": "namespace-1",
+            "observation_path": path, "observation_sha256": "a" * 64,
+        }],
+    }
+    observation_payload = ProviderCleanupObservation(
+        run_id="run-1", session_id="session-1", requested_provider="fixture",
+        provider_variant="observed", namespace="namespace-1", cleanup_called=True,
+        required_surface_ids=["provider-state"],
+        observations=[{"kind": "provider-state", "remaining_record_ids": [], "backend_active": False}],
+    ).model_dump(mode="json")
+    observation_payload["observations"] = [
+        {"kind": "path-lstat", "path": path, "raw_kind": "missing", "entries": []}
+    ]
+    assert list(Draft202012Validator(schemas["case-trace.v2.schema.json"]).iter_errors(trace_payload))
+    assert list(
+        Draft202012Validator(schemas["provider-cleanup-observation.v1.schema.json"]).iter_errors(
+            observation_payload
+        )
+    )

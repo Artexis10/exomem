@@ -317,7 +317,7 @@ class CaseTraceV2(StrictModel):
 
 
 def _canonical_relative_path(value: str) -> str:
-    if not value or value.startswith("/") or "\\" in value or "//" in value:
+    if not value or value.startswith("/") or value.endswith("/") or "\\" in value or "//" in value:
         raise ValueError("path must be a canonical relative POSIX path")
     if any(part in {"", ".", ".."} for part in value.split("/")):
         raise ValueError("path must be a canonical relative POSIX path")
@@ -1337,9 +1337,9 @@ def _enhance_memorybench_schema(name: str, schema: dict[str, Any]) -> dict[str, 
         definitions["ProviderCleanupNamespaceMembership"]["properties"]["live_namespaces"]["uniqueItems"] = True
         definitions["ProviderCleanupProviderState"]["properties"]["remaining_record_ids"]["uniqueItems"] = True
         definitions["ProviderCleanupPathLstat"]["properties"]["entries"]["uniqueItems"] = True
-        definitions["ProviderCleanupPathLstat"]["properties"]["path"]["pattern"] = r"^(?!/)(?!.*[\\\\])(?!.*//)(?!\\.?\.?$)(?!.*(?:^|/)\.{1,2}(?:/|$)).+$"
+        definitions["ProviderCleanupPathLstat"]["properties"]["path"]["pattern"] = r"^(?!/)(?!.*[\\\\])(?!.*//)(?!.*\/$)(?!\\.?\.?$)(?!.*(?:^|/)\.{1,2}(?:/|$)).+$"
     elif name == "case-trace-v2":
-        schema["$defs"]["CleanupRecordV2"]["properties"]["observation_path"]["pattern"] = r"^(?!/)(?!.*[\\\\])(?!.*//)(?!\\.?\.?$)(?!.*(?:^|/)\.{1,2}(?:/|$)).+$"
+        schema["$defs"]["CleanupRecordV2"]["properties"]["observation_path"]["pattern"] = r"^(?!/)(?!.*[\\\\])(?!.*//)(?!.*\/$)(?!\\.?\.?$)(?!.*(?:^|/)\.{1,2}(?:/|$)).+$"
     return schema
 
 

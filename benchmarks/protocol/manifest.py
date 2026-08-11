@@ -164,10 +164,7 @@ def _validate_lifecycle_artifacts(run_dir: Path, *, required: bool = False) -> N
         from lme.providers.lifecycle import LifecycleCompletenessError, validate_lifecycle_completeness
 
         validate_lifecycle_completeness(
-            expected_instances=tuple(
-                (item["session_id"], item["namespace"], item["provider_variant"])
-                for item in expected_instances
-            ),
+            expected_instances=tuple(expected_instances),
             cleanup_records=None,
             evidence_root=run_dir / "evidence",
             run_dir=run_dir,

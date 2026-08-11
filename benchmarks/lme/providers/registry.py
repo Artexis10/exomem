@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Callable
+from pathlib import Path
 
 from protocol.namespace import derive_namespace
 
@@ -43,9 +44,24 @@ def _rows(context, *, ids, active):
 
 def _exomem_state(context, provider):
     adapter = provider._adapter
-    vault = getattr(adapter, "_vault", None)
-    source_paths = getattr(adapter, "_source_paths", {})
-    return _rows(context, ids=getattr(source_paths, "keys", lambda: ())(), active=vault is not None)
+    vault = context.work_root / "vault"
+    retained: list[str] = []
+    try:
+        mode = os.lstat(vault).st_mode
+    except FileNotFoundError:
+        active = getattr(adapter, "_mcp", None) is not None
+    else:
+        active = True
+        if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
+            for root, directories, files in os.walk(vault, followlinks=False):
+                root_path = Path(root)
+                retained.extend(
+                    (root_path / name).relative_to(vault).as_posix()
+                    for name in (*directories, *files)
+                )
+        else:
+            retained.append("vault-root")
+    return _rows(context, ids=retained, active=active)
 
 
 def _hybrid_state(context, provider):
@@ -53,8 +69,8 @@ def _hybrid_state(context, provider):
 
 
 def _null_state(context, provider):
-    del provider
-    return _rows(context, ids=(), active=False)
+    retained = sorted(str(name) for name in vars(provider))
+    return _rows(context, ids=retained, active=bool(retained))
 _EXOMEM_BINDING = ProviderRuntimeBinding(("namespace-membership", "provider-state", "session-root"), _exomem_state)
 _HYBRID_BINDING = ProviderRuntimeBinding(("namespace-membership", "provider-state", "session-root"), _hybrid_state)
 _NULL_BINDING = ProviderRuntimeBinding(("namespace-membership", "provider-state", "session-root"), _null_state)
