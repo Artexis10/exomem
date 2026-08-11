@@ -191,7 +191,12 @@ class KubernetesVolumeAdapter:
         await asyncio.to_thread(
             self._core.patch_persistent_volume,
             recorded.pv_name,
-            {"metadata": {"annotations": annotations}},
+            {
+                "metadata": {
+                    "labels": {"exomem.io/resource-name": recorded.metadata.resource_name},
+                    "annotations": annotations,
+                }
+            },
         )
 
     @staticmethod
