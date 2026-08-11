@@ -162,8 +162,26 @@ def test_bootstrap_routes_observed_state_to_records_without_activating_state(
     assert contract["available"] is True
     assert contract["route"] == {
         "tool": "record_memory",
-        "actions": ["inspect", "create", "query", "append", "update"],
+        "actions": ["describe", "validate", "inspect", "create", "query", "append", "update"],
     }
+    assert contract["manifest"] == {
+        "filename": "_collection.md",
+        "collection_versions": [1],
+        "semantic_profiles": ["planning", "records"],
+    }
+    assert contract["contract_route"] == {
+        "tool": "record_memory",
+        "arguments": {"action": "describe"},
+    }
+    assert contract["agent_workflow"] == [
+        "describe",
+        "validate",
+        "create",
+        "inspect",
+        "append",
+    ]
+    assert "json_schema" not in json.dumps(contract)
+    assert "manifest_text" not in json.dumps(contract)
     assert contract["intent_boundary"] == {
         "records": "observed events, measurements, transactions, sessions, and state changes",
         "planning": "intended future state, goals, priorities, commitments, and candidate work",
@@ -404,7 +422,7 @@ def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
     out = commands.op_bootstrap(vault)
     guidance = json.dumps(out["workflow"]).lower()
 
-    assert out["contract_version"] == "2026-08-02.1"
+    assert out["contract_version"] == "2026-08-11.1"
     for required in (
         "show the note title by default",
         "normal user-facing prose",

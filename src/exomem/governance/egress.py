@@ -2430,6 +2430,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "diff": "structure",
     },
     ("record_memory", "action"): {
+        "describe": "structure",
+        "validate": "structure",
         "inspect": "structure",
         "create": "mutation",
         "query": "structure",
