@@ -13,6 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 PREPARE = ROOT / "infra/scripts/prepare_hosted_release.py"
 VERIFIER = ROOT / "infra/scripts/verify_hosted_release.py"
 V1_CORPUS = ROOT / "infra/provisioner/tests/fixtures/provisioner-wire-v1.json"
+LEGACY_CONTRACT = (
+    ROOT
+    / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.39.2.json"
+)
+LEGACY_MANIFEST = (
+    ROOT
+    / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-manifest-0.39.2.json"
+)
 
 
 def _module(path: Path = PREPARE):
@@ -25,6 +33,29 @@ def _module(path: Path = PREPARE):
 
 def _canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def test_retained_legacy_evidence_uses_the_private_gateway_contract() -> None:
+    private_gateway_digest = "577cd528bf841abd8e3588de4eda73ca131f3428fabfe695f1049f80564ebe42"
+    agent_gateway_digest = "7828c5b2b0281d11eab810e89f8d59aa88d755371f13ed02585cabd49a046078"
+    contract = json.loads(LEGACY_CONTRACT.read_text(encoding="utf-8"))
+    manifest = json.loads(LEGACY_MANIFEST.read_text(encoding="utf-8"))
+
+    assert (contract["releaseVersion"], contract["protocolVersion"]) == ("0.39.2", "1")
+    assert contract["gatewayContractDigest"] == private_gateway_digest
+    assert contract["gatewayContractDigest"] != agent_gateway_digest
+    assert manifest["gatewayContractSha256"] == contract["gatewayContractDigest"]
+    assert (
+        manifest["release"],
+        manifest["hostedProtocol"],
+        manifest["runtimeImage"],
+        manifest["sourceCommit"],
+    ) == (
+        contract["releaseVersion"],
+        contract["protocolVersion"],
+        contract["runtimeImage"],
+        contract["sourceCommit"],
+    )
 
 
 def _member(mode: str) -> dict[str, object]:
