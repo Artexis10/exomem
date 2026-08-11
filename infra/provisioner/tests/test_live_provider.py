@@ -741,6 +741,16 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
         (
             SimpleNamespace(
                 status=SimpleNamespace(
+                    conditions=(SimpleNamespace(type="Complete", status="True"),), failed=1
+                )
+            ),
+            True,
+            True,
+            False,
+        ),
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
                     conditions=(SimpleNamespace(type="Failed", status="True"),), failed=1
                 )
             ),
