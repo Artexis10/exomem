@@ -2686,6 +2686,48 @@ def qualify_connectivity(
     return RelationQualification(not ordered, ordered)
 
 
+@dataclass(frozen=True, slots=True)
+class _WikilinkResolverView:
+    """Read-only resolver attributes already snapshotted on the corpus."""
+
+    full_paths: frozenset[str]
+    kb_stripped: frozenset[str]
+    stems: Mapping[str, tuple[str, ...]]
+    titles: Mapping[str, tuple[str, ...]]
+
+
+def _qualifying_body_wikilink_targets(
+    page: SemanticPageState,
+    corpus: SemanticCorpusContext,
+) -> tuple[str, ...]:
+    """Resolve body links by normalized set membership without relation facts."""
+    resolver = _WikilinkResolverView(
+        full_paths=corpus.resolver_full_paths,
+        kb_stripped=corpus.resolver_kb_stripped,
+        stems=corpus.resolver_stems,
+        titles=corpus.resolver_titles,
+    )
+    targets: list[str] = []
+    for raw_target, _line in page.body_wikilinks:
+        try:
+            normalized, _ = vault.normalize_wikilink(
+                raw_target,
+                corpus.vault_root,
+                resolver=resolver,  # type: ignore[arg-type]
+                strict=True,
+            )
+        except (vault.AmbiguousWikilinkError, vault.UnresolvedWikilinkError):
+            continue
+        path = normalized.split("#", 1)[0]
+        resolved_path = path if path.lower().endswith(".md") else f"{path}.md"
+        if (
+            resolved_path != page.path
+            and resolved_path in corpus.connectable_target_paths
+        ):
+            targets.append(resolved_path)
+    return tuple(targets)
+
+
 def is_relation_review_current(
     review: RelationReviewState,
     page: SemanticPageState,
@@ -2760,6 +2802,17 @@ def _relation_disposition(
             current=True,
             qualifying_directions=("outbound",) * len(connectivity),
             qualifying_facts=tuple(sorted(connectivity, key=lambda item: item.identity)),
+            rejected_facts=tuple(rejected),
+            actions=_satisfied_actions(),
+            qualifying_signal="connectivity",
+        )
+    body_wikilink_targets = _qualifying_body_wikilink_targets(page, corpus)
+    if body_wikilink_targets:
+        return RelationDisposition(
+            kind="qualifying_relation",
+            satisfied=True,
+            current=True,
+            qualifying_directions=("outbound",) * len(body_wikilink_targets),
             rejected_facts=tuple(rejected),
             actions=_satisfied_actions(),
             qualifying_signal="connectivity",

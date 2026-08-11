@@ -5,9 +5,9 @@ family connects a page instead of forcing a reviewed-none round trip.
 
 Two boundaries are deliberate. Frontmatter provenance does not count, mirroring
 the relation-debt audit, which also ignores `sources:` — otherwise every
-adoption-compiled note would satisfy the gate by construction. And body wikilinks
-are collected but not yet a signal: emitting them as relation facts blew the
-write-latency gate at 8k pages, so that half is withdrawn pending a cheaper check.
+adoption-compiled note would satisfy the gate by construction. Body wikilinks use
+the weaker lane only when their outbound target resolves to the existing
+connectable set; no per-link relation fact is constructed.
 
 These also pin the three things that must not break — the typed predicate's
 meaning, the empty-corpus bootstrap carve-out, and non-vacuity.
@@ -233,17 +233,10 @@ def test_cited_provenance_alone_does_not_satisfy_the_disposition(
     assert result.relation_disposition.kind == "missing"
 
 
-def test_body_wikilinks_are_collected_but_do_not_yet_satisfy(
+def test_resolved_body_wikilink_satisfies_connectivity_without_a_fact(
     tmp_path: Path,
 ) -> None:
-    """Body links are measured on page state, but are not yet a disposition signal.
-
-    Emitting them as relation facts blew the semantic write-latency gate at 8k
-    pages (commit median 1259ms against a 750ms threshold, scaling 4.7x where
-    ~2.75x is allowed), so the fact emission was withdrawn. The collected
-    `body_wikilinks` remain, ready for a cheaper set-membership check that does not
-    route every link through full fact construction and target resolution.
-    """
+    """Resolved page-state links qualify by set membership, never as facts."""
     page = _state(
         tmp_path,
         "Knowledge Base/Notes/Insights/page.md",
@@ -257,6 +250,102 @@ def test_body_wikilinks_are_collected_but_do_not_yet_satisfy(
     assert corpus.outbound.get(page.path, ()) == ()
 
     result = _disposition(tmp_path, page, _target(tmp_path))
+    disposition = result.relation_disposition
+    assert disposition.kind == "qualifying_relation"
+    assert disposition.satisfied is True
+    assert disposition.qualifying_signal == "connectivity"
+    assert disposition.qualifying_facts == ()
+    assert result.should_block is False
+
+    warning = next(
+        finding
+        for finding in result.findings
+        if finding.code == "RELATION_TYPED_EDGE_ABSENT"
+    )
+    assert warning.severity == "warning"
+
+
+def test_body_wikilink_to_captured_source_satisfies_connectivity(tmp_path: Path) -> None:
+    captured = _captured_source(tmp_path)
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body=_OBS + f"Evidence lives in [[{_SOURCE_PAGE.removesuffix('.md')}]].\n"),
+    )
+
+    result = _disposition(tmp_path, page, captured)
+
+    assert result.relation_disposition.satisfied is True
+    assert result.relation_disposition.qualifying_signal == "connectivity"
+    assert result.relation_disposition.qualifying_facts == ()
+    assert result.should_block is False
+
+
+@pytest.mark.parametrize(
+    ("target_path", "target_source"),
+    (
+        (
+            "Knowledge Base/Notes/Other/plain.md",
+            _source(title="Plain", page_type=None, project=None),
+        ),
+        (
+            "Knowledge Base/Notes/Patterns/inactive.md",
+            _source(title="Inactive", page_type="pattern", status="draft"),
+        ),
+    ),
+)
+def test_body_wikilink_to_non_connectable_or_inactive_page_does_not_connect(
+    tmp_path: Path,
+    target_path: str,
+    target_source: str,
+) -> None:
+    target = _state(tmp_path, target_path, target_source)
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body=_OBS + f"Points at [[{target_path.removesuffix('.md')}]].\n"),
+    )
+
+    result = _disposition(tmp_path, page, target)
+
+    assert target.path not in _corpus(tmp_path, page, target).connectable_target_paths
+    assert result.relation_disposition.satisfied is False
+
+
+def test_ambiguous_body_wikilink_does_not_connect(tmp_path: Path) -> None:
+    first = _target(tmp_path)
+    second = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Research/atlas/target.md",
+        _source(title="Other target", page_type="research-note"),
+    )
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body=_OBS + "Points at [[target]].\n"),
+    )
+
+    result = _disposition(tmp_path, page, first, second)
+
+    assert result.relation_disposition.satisfied is False
+
+
+def test_self_body_wikilink_does_not_connect(tmp_path: Path) -> None:
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(
+            body=(
+                _OBS
+                + "Points back to [[Knowledge Base/Notes/Insights/page]].\n"
+            )
+        ),
+    )
+    target = _target(tmp_path)
+
+    result = _disposition(tmp_path, page, target)
+
+    assert page.path in _corpus(tmp_path, page, target).connectable_target_paths
     assert result.relation_disposition.satisfied is False
 
 
