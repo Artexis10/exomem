@@ -255,6 +255,11 @@ rollout but blocks an unacknowledged schema change. The post-deploy promotion is
 a manual attestation because ChatGPT exposes no API for reading its registered
 plugin snapshot.
 
+Disconnecting and reconnecting the app only renews its OAuth connection; it does
+not rescan MCP action schemas. Use the app's action refresh/rescan control when
+available, or delete and recreate the app definition, then verify the callable
+schema from a fresh conversation.
+
 `bootstrap.server.published_mcp_tool_surface_sha256` identifies the packaged
 canonical surface; `/health/ready` fingerprints the tools actually registered
 by that process, including configuration differences. Tool discovery alone is
