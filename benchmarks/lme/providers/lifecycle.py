@@ -40,6 +40,13 @@ class LifecycleRunError(RuntimeError):
         self.terminal_status = "INVALID"
 
 
+def _attach_note(error: BaseException, note: str) -> None:
+    try:
+        error.add_note(note)
+    except BaseException:
+        pass
+
+
 _VARIANTS: dict[str, str] = {}
 
 
@@ -358,10 +365,7 @@ def run_provider_lifecycle(
     if primary is not None:
         if not isinstance(primary, Exception):
             for note in secondary:
-                try:
-                    primary.add_note(note)
-                except AttributeError:
-                    pass
+                _attach_note(primary, note)
             raise primary
         raise LifecycleRunError(primary, secondary) from primary
     if secondary:
@@ -374,6 +378,7 @@ def terminalize_constructor_failure(
     context: ProviderSessionContext, *, requested_provider: str, error: BaseException,
 ) -> None:
     del requested_provider
+    secondary: list[str] = []
     runner_parents = (
         (context.work_root.parent, context.evidence_root.parent)
         if (
@@ -388,17 +393,20 @@ def terminalize_constructor_failure(
             mode = os.lstat(root).st_mode
         except FileNotFoundError:
             continue
-        if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
-            import shutil
-            shutil.rmtree(root)
-        else:
-            root.unlink()
         try:
-            os.lstat(root)
-        except FileNotFoundError:
-            pass
-        else:  # pragma: no cover - a concurrent reappearance is an environment fault
-            raise ProviderConstructionFailure("constructor roots could not be proved absent")
+            if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
+                import shutil
+                shutil.rmtree(root)
+            else:
+                root.unlink()
+            try:
+                os.lstat(root)
+            except FileNotFoundError:
+                pass
+            else:  # pragma: no cover - a concurrent reappearance is an environment fault
+                raise ProviderConstructionFailure("constructor roots could not be proved absent")
+        except BaseException as exc:
+            secondary.append(f"constructor root cleanup failed: {exc}")
     for parent in runner_parents:
         try:
             parent.rmdir()
@@ -406,16 +414,16 @@ def terminalize_constructor_failure(
             continue
         except OSError as exc:
             if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
-                raise ProviderConstructionFailure(
-                    f"constructor parent absence could not be proved: {exc}"
-                ) from exc
+                secondary.append(f"constructor parent cleanup failed: {exc}")
         else:
             try:
                 os.lstat(parent)
             except FileNotFoundError:
                 pass
             else:  # pragma: no cover - a concurrent reappearance is an environment fault
-                raise ProviderConstructionFailure("constructor parent could not be proved absent")
+                secondary.append("constructor parent could not be proved absent")
+    for note in secondary:
+        _attach_note(error, note)
     if not isinstance(error, Exception):
         raise error
     raise ProviderConstructionFailure(f"constructor failure: {error}") from error

@@ -1955,3 +1955,53 @@ def test_feedback4_persistence_never_reopens_a_swapped_intermediate_evidence_dir
         )
     assert swapped
     assert not (intermediate / "evidence" / "provider-cleanup-observation.json").exists()
+
+
+def test_feedback5_hostile_primary_note_cannot_replace_setup_control_flow(
+    tmp_path: Path,
+) -> None:
+    from lme.providers.lifecycle import run_provider_lifecycle
+
+    class PrimaryControl(BaseException):
+        def add_note(self, _note: str) -> None:
+            raise RuntimeError("hostile note attachment")
+
+    primary = PrimaryControl("setup")
+
+    class CleanupFailure(_Provider):
+        def cleanup(self) -> None:
+            super().cleanup()
+            raise RuntimeError("cleanup secondary")
+
+    provider = CleanupFailure(failure=primary)
+    caught: BaseException | None = None
+    try:
+        run_provider_lifecycle(
+            provider=provider, profile=None, context=_context(tmp_path), binding=_binding(),
+            requested_provider="fixture", operation=lambda _provider: None,
+        )
+    except BaseException as exc:
+        caught = exc
+    assert caught is primary
+    assert provider.cleanups == 1
+
+
+@pytest.mark.parametrize("primary", (KeyboardInterrupt(), SystemExit(7), BaseException("custom")))
+def test_feedback5_constructor_cleanup_failure_never_replaces_base_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary: BaseException
+) -> None:
+    import shutil
+    from lme.providers.lifecycle import terminalize_constructor_failure
+
+    context = _context(tmp_path)
+
+    def fail_root_cleanup(_path: Path) -> None:
+        raise RuntimeError("constructor cleanup secondary")
+
+    monkeypatch.setattr(shutil, "rmtree", fail_root_cleanup)
+    caught: BaseException | None = None
+    try:
+        terminalize_constructor_failure(context, requested_provider="fixture", error=primary)
+    except BaseException as exc:
+        caught = exc
+    assert caught is primary
