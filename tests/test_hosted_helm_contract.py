@@ -1666,6 +1666,18 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         not in provisioner_scope_text
     )
     assert "NetworkPolicy deletion is reserved for namespace destruction" in provisioner_scope_text
+    action_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-durability-actions-scope")
+    for scope in (provisioner_scope, action_scope):
+        scope_text = json.dumps(scope)
+        assert "size(variables.target.spec.ingress) == 3" in scope_text
+        for index in range(3):
+            assert f"size(variables.target.spec.ingress[{index}].from) == 1" in scope_text
+        assert "variables.target.spec.ingress[2].from[0].namespaceSelector.matchLabels" in scope_text
+        assert "variables.target.spec.ingress[2].from[0].podSelector.matchLabels" in scope_text
+        assert "'app.kubernetes.io/name': 'exomem-provisioner-worker'" in scope_text
+        assert "size(variables.target.spec.ingress[2].ports) == 1" in scope_text
+        assert "variables.target.spec.ingress[2].ports[0].protocol == 'TCP'" in scope_text
+        assert "variables.target.spec.ingress[2].ports[0].port == 8765" in scope_text
 
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
     cronjobs = {
@@ -2048,6 +2060,19 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
                         },
                         "podSelector": {
                             "matchLabels": {"app.kubernetes.io/name": "exomem-durability-actions"}
+                        },
+                    }
+                ],
+                "ports": [{"protocol": "TCP", "port": 8765}],
+            },
+            {
+                "from": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "exomem-provisioner-worker"}
                         },
                     }
                 ],
