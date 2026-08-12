@@ -692,7 +692,11 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
     validated = await _call(
         client,
         "record_memory",
-        {"action": "validate", "manifest_path": collection, "manifest_text": fixture["manifest_text"]},
+        {
+            "action": "validate",
+            "manifest_path": collection,
+            "manifest_text": fixture["manifest_text"],
+        },
         timeout,
     )
     if not isinstance(validated, dict) or validated.get("valid") is not True:
@@ -700,7 +704,12 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
     created = await _call_mutation(
         client,
         "record_memory",
-        {"action": "create", "manifest_path": collection, "manifest_text": fixture["manifest_text"], "why": "author installed Records collection"},
+        {
+            "action": "create",
+            "manifest_path": collection,
+            "manifest_text": fixture["manifest_text"],
+            "why": "author installed Records collection",
+        },
         timeout,
     )
     if created.get("operation") != "create":
@@ -877,7 +886,9 @@ async def _manual_records_session(client, state: dict[str, Any], timeout: float)
         "query": {"filters": {"status": "completed"}, "limit": 24},
     }
     if inspection.get("contract", {}).get("plans") != [expected_plan]:
-        raise RuntimeError("installed Records inspection did not round-trip the Planning descriptor")
+        raise RuntimeError(
+            "installed Records inspection did not round-trip the Planning descriptor"
+        )
 
 
 async def _records_restart_session(client, state: dict[str, Any], timeout: float) -> None:
