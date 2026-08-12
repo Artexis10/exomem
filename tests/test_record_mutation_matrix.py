@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from record_fixtures import copy_vehicle_maintenance_fixture, copy_x3_fixture
 
-from exomem import mutation_lock, record_formats, vault, writer_lease
+from exomem import graph_sync, mutation_lock, record_formats, vault, writer_lease
 from exomem import structured_collections as collections
 
 
@@ -58,6 +58,10 @@ def _item_update_context(root: Path) -> tuple[Path, collections.CollectionManife
     return fixture, manifest, record, log
 
 
+def _is_caller_target(root: Path, target: Path) -> bool:
+    return target not in {graph_sync.floor_path(root), graph_sync.checkpoint_path(root)}
+
+
 @pytest.mark.parametrize("prefix", [1, 2, 3])
 def test_bom_crlf_item_update_caught_prefixes_restore_exact_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: int
@@ -76,8 +80,9 @@ def test_bom_crlf_item_update_caught_prefixes_restore_exact_bytes(
 
     def deny(workspace, artifact, target):  # noqa: ANN001
         nonlocal calls
-        calls += 1
-        if calls == prefix:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == prefix:
             raise PermissionError(13, "Access is denied", str(target))
         return real_replace(workspace, artifact, target)
 
@@ -117,8 +122,9 @@ def test_bom_crlf_item_update_abrupt_prefixes_report_audit_gap(
     def interrupt(workspace, artifact, target):  # noqa: ANN001
         nonlocal calls
         result = real_replace(workspace, artifact, target)
-        calls += 1
-        if calls == prefix:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == prefix:
             raise KeyboardInterrupt("abrupt markdown item publication")
         return result
 

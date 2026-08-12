@@ -1,162 +1,310 @@
 ## ADDED Requirements
 
-### Requirement: Canonical mutations publish a durable graph checkpoint
+### Requirement: Canonical mutations use non-owned lifecycle states and exact receipts
 
-Every graph-relevant guarded canonical batch SHALL publish the closed version 1 graph-sync checkpoint at `<Knowledge Base>/.graph-sync.json` in the same staged replacement set as its canonical files. The checkpoint SHALL carry a monotonic generation greater than every generation previously issued for the vault, an independent lowercase 24-hex mutation identity, bounded sorted post-write path hashes/deletions or full scope, created paths, and a domain-separated canonical digest. It SHALL be excluded from semantic indexing and its own input set.
+Each namespaced idempotent mutation SHALL use only `reserved`, `executing`,
+`canonically_committed`, and `completed` as its durable canonical lifecycle
+states. Execution ownership SHALL be a bounded per-claim attempt, not a durable
+state owner. A dead `reserved` row SHALL be reclaimable. A dead `executing` row
+without valid authenticated evidence SHALL be terminally `outcome_unknown` and
+SHALL NOT be reclaimed for leaf execution.
 
-The same guarded set SHALL maintain an internal content-free monotonic generation floor at `<Knowledge Base>/.graph-sync-floor.json`. Its closed version 1 object SHALL contain exactly `version`, `generation`, and `floor_sha256`, with a distinct domain-separated canonical digest. New generation selection SHALL be one greater than the maximum valid floor, current checkpoint, and live-graph acknowledgement. The floor SHALL publish before caller canonical replacements and the checkpoint SHALL publish last; caught failure SHALL restore every member of the set. With a valid floor, missing/malformed or contradictory checkpoint state SHALL make the graph unavailable, SHALL force full-scope recovery at a generation greater than that floor, and SHALL NOT permit generation reuse. Without a valid floor, only exact legacy or the closed pre-floor migration states defined below are admissible; every other combination fails closed. Legacy state is exactly the absence of floor, checkpoint, and acknowledgement.
+A claim SHALL receive a lowercase 24-hex `commit_token` and fresh private
+32-byte per-attempt secret. It SHALL retain one atomically installed, hidden,
+portable, content-free `GraphCommitReceipt` v2 for at least the retry-row
+lifetime. Receipt v2 SHALL bind the namespaced idempotency-key digest,
+command/payload digest, attempt/claim and commit token, canonical terminal
+projection, and exact checkpoint generation/digest, and SHALL authenticate its
+canonical v2 bytes with HMAC-SHA256 using that secret. The secret SHALL exist
+only in the matching owner-only local idempotency runtime state, never in a
+synced vault artifact, log, terminal, or diagnostic. The local runtime directory
+SHALL be owner-only (`0700`); its database, WAL/SHM files, and secret material
+SHALL be `0600` or stricter. On Windows, the per-attempt secret SHALL exist
+only in the local SQLite binary BLOB
+`EXID | version=1 | provider=1(DPAPI_CURRENT_USER) | uint32be ciphertext_length | ciphertext`.
+Total BLOB length and ciphertext length SHALL each be at most 4096 bytes;
+`ciphertext_length` SHALL exactly consume the remaining bytes. The parser SHALL
+reject truncation, trailing bytes, unknown version/provider, and every other
+non-exact encoding. Its entropy SHALL be UTF-8
+`exomem-graph-commit-receipt-dpapi:v1\0<attempt_id>\0<commit_token>`; no clear
+secret SHALL be serialized. The protected inheritable runtime DACL SHALL permit
+only the current service identity, `LocalSystem`, and `Administrators`. Before
+SQLite is opened or a runtime row is unpickled, the service SHALL reject a
+reparse-point runtime path and an existing unsafe DACL. SQLite, WAL, and SHM
+SHALL contain only the DPAPI ciphertext. An account/profile change, copied
+envelope, failed DPAPI unprotect, or raw legacy secret row SHALL classify the
+claim `outcome_unknown`; none may heal local CAS or authorize leaf replay.
 
-#### Scenario: Canonical batch and checkpoint commit together
-- **WHEN** a graph-relevant mutation commits normally
-- **THEN** its canonical files and exact next-generation checkpoint are both published before writer authority releases
-- **AND** a caught failure leaves neither the canonical change nor a newer checkpoint
+Receipt eligibility SHALL be non-circular. “Complete ordinary protocol
+succeeded” SHALL mean, before signing, that: the claimed leaf returned its
+candidate terminal; one guarded vault batch successfully applied its selected
+floor, caller canonical replacements, and exact checkpoint; and every bounded
+canonical fanout precondition needed to select and validate that checkpoint's
+incremental-or-rebuild route completed. It SHALL exclude receipt
+installation/authentication, local lifecycle CAS, durable derived-handle
+registration, `ensure_started`, graph join, and completed-terminal persistence.
 
-#### Scenario: Lost unacknowledged checkpoint cannot reuse its generation
-- **WHEN** restart finds a valid generation floor N but the current checkpoint is missing, malformed, or contradictory
-- **THEN** the graph remains unavailable and recovery publishes a full-scope checkpoint with generation greater than N
-- **AND** no later mutation or recovery reuses generation N
+`terminal_projection` SHALL be a closed content-free object. Its only permitted
+fields are `_terminal`, `version`, `ok`, `state`, `status`, `committed`,
+`mutated`, `terminal`, `request_id`, `receipt_id`, `operation_id`,
+`warnings_count`, and `result_sha256`; absent permitted fields SHALL be omitted.
+Scalar identifiers SHALL use their existing bounded formats and `result_sha256`
+SHALL be lowercase SHA-256 of an otherwise non-retained result summary. No
+other top-level or nested projection field is permitted. In particular,
+`path`, `paths`, `affected_paths`, every vault path or file name, Markdown,
+metadata values, source text, and arbitrary leaf result/content SHALL NOT be
+stored in the projection. Graph outcome SHALL be attached only after receipt
+persistence and SHALL NOT be part of `terminal_projection`.
 
-#### Scenario: Graph-irrelevant write does not advance the epoch
-- **WHEN** a canonical mutation affects only paths excluded by the binding recall policy
-- **THEN** neither the generation floor nor graph checkpoint changes
-- **AND** no full graph rebuild is scheduled for that mutation
+Receipt v2 SHALL be a closed object with exactly `version`,
+`idempotency_key_digest`, `command_digest`, `attempt_id`, `commit_token`,
+`terminal_projection`, `terminal_projection_sha256`, `checkpoint_generation`,
+`checkpoint_sha256`, `canonical_disposition`, and `receipt_hmac_sha256`.
+`version` SHALL be integer `2`; `canonical_disposition` SHALL be exactly
+`success` or `committed_failure`; the checkpoint fields SHALL both be null or a
+positive integer/lowercase SHA-256 pair; every other digest SHALL be lowercase
+SHA-256. `canonical_disposition` SHALL be HMAC-covered and SHALL NOT alter the
+closed `terminal_projection` allowlist. Its HMAC input
+SHALL be UTF-8 bytes `exomem-graph-commit-receipt-auth:v2\0` concatenated with
+canonical UTF-8 JSON of every v2 field except `receipt_hmac_sha256`. Canonical
+JSON SHALL have no insignificant whitespace, lexicographically sorted object
+keys, and unescaped non-ASCII Unicode. The parser SHALL reject duplicate,
+missing, surplus, wrongly typed, or noncanonical fields and a mismatched
+terminal-projection digest before authentication. Verification SHALL recompute
+HMAC-SHA256 and compare the received digest in constant time.
 
-#### Scenario: Checkpoint digest is deterministic and non-recursive
-- **WHEN** the same version, generation, mutation identity, scope, paths, and created paths are canonicalized twice
-- **THEN** SHA-256 over `exomem-graph-sync-checkpoint:v1\0` plus those canonical JSON bytes is identical
-- **AND** the digest input excludes the digest itself and all graph output bytes
+There SHALL be no mutable `commit_point` field or two-write receipt marker.
+Receipt v2 SHALL be authoritative only after the defined pre-signing ordinary
+protocol succeeded. It SHALL be atomically installed before the local
+CAS from the matching `executing` row to `canonically_committed`. A failed local
+CAS after installation MAY be healed only by that exact receipt, matching
+trusted executing row, attempt/token binding, and retained private secret.
+`graph_pending` SHALL NOT be written by new code. Valid legacy `graph_pending`
+is a local-row-only migration to `canonically_committed`; it SHALL never permit
+the canonical leaf to replay. Legacy v1 boolean receipts and all synced vault
+receipt artifacts are advisory only. Graph health for a canonically committed
+local row SHALL be dynamically joinable or recomputable from its exact
+checkpoint, independent of the original attempt.
 
-#### Scenario: Shared checkpoint digest vector
-- **WHEN** the canonical checkpoint input is `{"created_paths":["Knowledge Base/Notes/example.md"],"generation":1,"mutation_id":"0123456789abcdef01234567","paths":[["Knowledge Base/Notes/example.md","dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]],"scope":"paths","version":1}`
-- **THEN** its domain-separated digest is `941d8a67ae715b6795daade34607f445d4c5b5726b9dc5e4ac095c9946c6d877`
+An authenticated orphaned v2 receipt with `canonical_disposition: success` MAY
+heal only its matching trusted executing CAS and then continue the ordinary
+derived graph path. An authenticated orphan with
+`canonical_disposition: committed_failure` SHALL suppress leaf replay; it SHALL
+replay the retained exact local failure when available and otherwise persist
+`outcome_unknown` while independently recovering graph health. A missing,
+invalid, or fieldless v2 receipt SHALL heal neither disposition.
 
-### Requirement: Full graph work and joins occur outside writer authority
+#### Scenario: Dead execution attempt cannot duplicate a committed leaf
+- **WHEN** a claim's executing attempt dies after canonical files could change
+- **AND** no exact receipt v2 can be authenticated with its trusted local row and secret
+- **THEN** exact retry returns `outcome_unknown` rather than reclaiming the leaf
 
-When a canonical mutation encounters an unusable graph, dispatch SHALL register exact checkpoint work and return control to the leaf. After canonical commit is observed and while the operation guard still owns mutation authority, the idempotency store SHALL durably transition the result from owned `pending` to nonterminal `graph_pending`, binding the canonical committed terminal and complete validated content-free checkpoint. It SHALL release every leaf/command mutation guard before starting or joining full graph work. A concurrent exact retry SHALL wait rather than receive or replay that internal payload. If the owner dies after `graph_pending`, a new proven owner MAY resume only graph work; it SHALL NOT execute the canonical leaf again.
+#### Scenario: Installed receipt heals only its matching local CAS
+- **WHEN** receipt v2 installs but the matching executing-to-committed CAS fails
+- **THEN** recovery heals it only with that exact trusted executing row and retained secret
+- **AND** a copied receipt alone cannot suppress or complete a mutation
 
-No storage engine can atomically commit the vault batch and the separate idempotency database. If the process terminates after the canonical commit point but before `graph_pending` persistence, the dead ordinary `pending` row SHALL become or project the existing committed-uncertain outcome and SHALL never expire into canonical re-execution. The durable checkpoint/batch evidence SHALL drive graph recovery independently, while the caller must re-read canonical state rather than blindly retry the mutation. The request MAY wait off-boundary to preserve its terminal contract.
+#### Scenario: Predecessor graph-pending row migrates safely
+- **WHEN** a retry reads a valid legacy `graph_pending` row
+- **THEN** it treats the row as `canonically_committed` with its validated checkpoint
+- **AND** it can join/recompute graph work without replaying the leaf
 
-#### Scenario: Second canonical batch enters during a held rebuild
-- **WHEN** one request has committed generation N and is waiting on a deliberately held rebuild
-- **AND** a second valid mutation begins
-- **THEN** the second mutation acquires writer authority and commits generation N+1 without waiting for graph build work
-- **AND** both requests may join the same per-vault flight
+### Requirement: The multi-store canonical cut remains outcome-unknown
 
-#### Scenario: Wide command does not hide an outer hold
-- **WHEN** a graph-relevant wide command commits and requires a rebuild
-- **THEN** its outer operation guard releases before the graph join just as a narrow command's leaf guard does
+The vault batch and retry-store receipt SHALL NOT be treated as one atomic
+transaction. If the process dies after any canonical caller file, floor, or
+checkpoint write can have committed but before matching receipt v2 atomically
+installs, the exact retry SHALL return the fail-closed `outcome_unknown`
+terminal classification with readback guidance. If it dies after v2 installation
+but before local CAS, only its matching trusted executing row and retained
+private secret may heal the CAS. A committed-attempt cleanup failure SHALL NOT
+reconstruct a successful mutation from an orphaned receipt.
+`outcome_unknown` is outside the four canonical lifecycle states and SHALL NOT
+be treated as proof that the canonical mutation reached either
+`canonically_committed` or successful `completed`. The retry store MAY retain
+the immutable fail-closed classification in a `completed` row solely as a
+terminal storage envelope, so exact retries read back the same classification
+without creating a fifth state; that envelope does not assert canonical
+completion. The system SHALL NOT rerun the leaf, infer success from filesystem
+state, fabricate a canonical terminal, or convert the cut to a receipt.
+Checkpoint recovery MAY independently converge graph health. Recovery SHALL
+not scan receipt artifacts: it SHALL read only the exact receipt address named
+by a trusted local row, under bounded artifact-size and parsing limits. A synced
+receipt is untrusted/advisory, and a copied receipt without matching local row
+and secret SHALL NOT suppress a mutation. Cross-replica exactly-once is
+explicitly deferred until a shared pre-leaf CAS exists.
 
-#### Scenario: Crash during graph wait cannot duplicate the write
-- **WHEN** a process dies after persisting `graph_pending` but before graph completion
-- **THEN** an exact retry resumes or joins the bound checkpoint work without invoking the canonical mutation again
-- **AND** no internal pending payload is returned as a terminal success
+#### Scenario: Crash after checkpoint before receipt installation
+- **WHEN** a process dies after the caller batch published its checkpoint but before matching receipt v2 atomically installs
+- **THEN** exact retry returns `outcome_unknown`
+- **AND** the canonical leaf invocation count remains one
 
-#### Scenario: Crash between canonical commit and graph-pending persistence is uncertain
-- **WHEN** a process dies after the canonical/checkpoint commit point but before the idempotency row reaches `graph_pending`
-- **THEN** exact retry returns committed-uncertain guidance and does not invoke the canonical leaf
-- **AND** checkpoint recovery may repair the graph without fabricating a mutation terminal
+### Requirement: Canonical batches publish strict graph epochs and receipts in order
 
-### Requirement: Concurrent rebuild requests are checkpoint-aware single-flight
+Every graph-relevant claimed canonical mutation SHALL select one generation
+above the maximum valid floor, checkpoint, and acknowledgement, then execute
+`floor → caller files → checkpoint → one authenticated receipt v2 → local CAS`
+in that order. Caught failure SHALL roll back the vault batch and SHALL not
+install a receipt. Graph-irrelevant writes SHALL advance neither artifact and
+create no graph receipt. Setup, floor seeding, reconcile repair, cleanup, and
+rollback SHALL use `commit_point=False` and SHALL never mark a mutation
+committed; this API flag SHALL NOT be persisted as a receipt marker.
 
-The system SHALL run at most one full graph builder per vault across threads and processes. Builder authority SHALL use a persistent OS-locked regular file under the configured shared runtime-state root, keyed by the same canonical vault identity as writer coordination. The lock directory and file SHALL be opened descriptor-first with no-follow/no-symlink validation and restrictive permissions; the file SHALL never live in human/sync-writable vault content and SHALL never be unlinked. Kernel lock ownership, not PID metadata, is liveness authority. A builder SHALL acquire it before creating its unique temporary database, and reconcile SHALL acquire the same lock before sweeping proven abandoned temporary databases. A flight SHALL continue until it publishes a stable graph covering the latest checkpoint observed before publication or reports a bounded failure. Waiters SHALL resolve only when the published generation covers their required checkpoint lineage; a same-generation/different-digest requirement or a stopped uncovered flight SHALL terminate with explicit lineage failure rather than wait forever.
+The public `.graph-sync.json` SHALL remain closed v1 with unchanged canonical
+bytes and valid digest vectors. Its parser SHALL reject more than 1,000 `paths`
+entries before normalization; surplus fields; paths not already NFC-normalized;
+unsafe/noncanonical POSIX-relative paths;
+absolute, backslash, empty, dot, dotdot, or NUL path components; non-null hashes
+other than lowercase 64-hex; conflicting duplicate paths; non-unique or
+non-created `created_paths`; and non-empty arrays for `full` scope. The internal
+floor SHALL remain closed `{version,generation,floor_sha256}` under its distinct
+digest domain.
 
-#### Scenario: New checkpoint arrives during a build pass
-- **WHEN** the builder started at generation N and another mutation publishes N+1 before swap
-- **THEN** the N pass is not published as current
-- **AND** the same flight retries and resolves both waiters only after a stable graph consumes N+1 or the attempt budget fails
+#### Scenario: Existing checkpoint vector remains stable
+- **WHEN** the existing v1 checkpoint test vector is rendered after this change
+- **THEN** its bytes and domain-separated digest exactly equal the pinned vector
 
-#### Scenario: Several writers require one rebuild
-- **WHEN** several writers commit while the graph is unusable
-- **THEN** exactly one builder runs and bounded waiters resolve from its checkpoint-covered outcome
+#### Scenario: Strict parser rejects normalization ambiguity
+- **WHEN** a v1 checkpoint contains an equivalent-but-noncanonical path, duplicate conflict, or malformed full scope
+- **THEN** parsing fails before it can influence generation, acknowledgement, or recovery
 
-#### Scenario: Another process cannot sweep a live builder
-- **WHEN** one process holds the vault-local rebuild lock and owns a temporary sidecar
-- **THEN** another writer or reconcile process cannot start a second builder or sweep that temporary path
-- **AND** process death releases authority through the kernel lock
+### Requirement: Epoch migration and acknowledgement parity fail closed
 
-#### Scenario: Replacing a vault path cannot replace lock authority
-- **WHEN** a user or sync client unlinks or replaces a similarly named path inside the vault
-- **THEN** all processes still contend on the descriptor-validated runtime-state lock keyed by canonical vault identity
-- **AND** POSIX and Windows multi-process tests prove a second builder cannot enter
+Exact legacy is the simultaneous absence of floor, checkpoint, and graph
+acknowledgement. The only accepted pre-floor state is a valid checkpoint with
+absent floor and either absent acknowledgement or acknowledgement exactly equal
+to that checkpoint; mutation authority may seed the floor at that generation.
+A valid floor with missing, malformed, or older checkpoint SHALL recover only at
+a higher full-scope generation. All other missing/malformed floor or
+contradictory acknowledgement combinations SHALL fail closed.
 
-### Requirement: A partially rebuilt graph is never observable
+Public graph availability SHALL require exact current checkpoint
+generation/digest parity and every currently written acknowledgement metadata
+key, including `graph_sync_checkpoint`. Missing metadata SHALL NOT default to
+success in this migration. A malformed state requires fresh full recovery, not
+incremental admission.
 
-The builder SHALL populate a unique reserved temporary database beside the live sidecar. It SHALL close/checkpoint every temporary SQLite handle and validate a self-contained database before publication. Readers SHALL observe the previous usable graph or the fully populated replacement, never the temporary or partially filled database. The final swap SHALL occur under a boundary hold that performs no vault-size-dependent build work. A platform sharing refusal SHALL leave the prior live sidecar intact and the checkpoint unacknowledged, returning explicit committed graph failure rather than copying or deleting the live database.
+#### Scenario: Missing acknowledgement metadata is unavailable
+- **WHEN** a graph sidecar has matching generation/digest but lacks `graph_sync_checkpoint`
+- **THEN** graph availability is false and full recovery is required
 
-#### Scenario: Read during rebuild
-- **WHEN** a graph read occurs during full rebuild
-- **THEN** it sees the prior usable sidecar or graph unavailable
-- **AND** it never sees empty or partial rebuilt tables
+#### Scenario: Valid floor plus stale checkpoint recovers above the floor
+- **WHEN** recovery finds floor generation N and a missing, malformed, or older checkpoint
+- **THEN** it publishes a fresh full-scope checkpoint with generation greater than N
+- **AND** it does not reuse a generation or alter user-authored bytes
 
-#### Scenario: Boundary hold is bounded by verification and swap
-- **WHEN** a full rebuild completes
-- **THEN** writer authority is acquired only to recheck checkpoint/freshness and replace the sidecar
-- **AND** hold duration does not scale with vault size
+### Requirement: Every committed checkpoint has an exact graph outcome handle
 
-### Requirement: Published graphs consume an exact stable checkpoint
+Before a graph-relevant checkpoint leaves canonical writer authority, the system
+SHALL either atomically acknowledge it incrementally, register an exact durable
+rebuild handle, or persist an explicit exact graph failure handle.
+`accepted_unverified` is forbidden. After every canonical guard releases,
+`ensure_started(handle)` SHALL start or join that registered exact flight without
+consuming bounded waiter capacity. `join(handle)` SHALL separately admit a
+bounded waiter and release its capacity in `finally` on every completion,
+cancellation, and failure path.
 
-Each full build pass SHALL snapshot full vault freshness and the current coherent generation floor/checkpoint epoch. Under the final boundary hold it SHALL re-read both before acknowledgement, write the exact acknowledgement into the closed temporary database, then re-read both again immediately before replacement. It SHALL publish only if both checks match. The live graph metadata SHALL record the exact consumed generation/digest, and public availability SHALL require parity with the current checkpoint.
+Coordinator start failure, capacity failure, stopped/uncovered flight, lineage
+conflict, stabilization exhaustion, and platform sharing refusal SHALL create
+explicit durable handles with stable codes and recovery guidance. A
+`canonically_committed` receipt can later join or recompute its exact handle
+without canonical leaf replay.
 
-When the prior graph is otherwise usable and the exact new checkpoint has bounded path scope, incremental refresh MAY admit the exact predecessor acknowledgement instead of forcing a full rebuild. It SHALL validate that the durable checkpoint still equals the passed checkpoint, its paths/deletions match the committed graph-relevant mutation, the graph acknowledges the immediately preceding generation (or the explicit generation-1 legacy predecessor), and every existing recall/freshness/topology proof succeeds. Row changes, ordinary availability markers, and the new graph checkpoint acknowledgement SHALL commit in one SQLite transaction. Failed proof SHALL roll back and require off-boundary full work; it SHALL NOT rebuild while writer authority is held.
+#### Scenario: Handle registration is total before guard release
+- **WHEN** an unusable graph prevents incremental acknowledgement
+- **THEN** the exact checkpoint has a registered rebuild or failure handle before canonical authority releases
+- **AND** the canonical request does not wait for graph work while holding authority
 
-#### Scenario: Vault or checkpoint changes during final pass
-- **WHEN** vault freshness or checkpoint identity differs at publication
-- **THEN** the pass is discarded/retried and no stale graph is published
+#### Scenario: Join capacity cannot leak
+- **WHEN** a bounded join raises, times out, or is cancelled
+- **THEN** its waiter slot is released
+- **AND** a later valid join can be admitted
 
-#### Scenario: Stable pass publishes acknowledgement
-- **WHEN** both inputs remain stable through the final recheck
-- **THEN** the replacement graph atomically records the consumed checkpoint generation/digest and becomes available
+### Requirement: Incremental and full graph acknowledgement are exact
 
-#### Scenario: Ordinary path-scoped write stays incremental
-- **WHEN** a usable graph acknowledges generation N and a graph-relevant write publishes a valid path-scoped checkpoint N+1
-- **THEN** incremental refresh atomically updates graph rows and acknowledgement to N+1 without starting a full-vault builder
+Incremental refresh SHALL run only when the durable checkpoint still equals the
+receipt binding, the current graph acknowledgement is its exact immediate
+predecessor, and all existing freshness, recall, and topology proofs pass. Rows,
+availability markers, and all exact acknowledgement metadata SHALL commit in
+one SQLite transaction. Failed proof SHALL roll back and register full work;
+it SHALL not build under canonical authority.
 
-### Requirement: Crash recovery preserves canonical truth
+Each full pass SHALL build a unique private temporary sidecar from a coherent
+epoch and real full-vault freshness snapshot. Privately it SHALL commit exact
+acknowledgement/checkpoint metadata, truncate WAL, run full integrity and direct
+source/membership/topology proof, warm the live `RecallFreshnessCheckpoint`,
+and capture recall-policy version plus bounded no-follow `_access.yaml`
+content snapshot/fingerprint. It SHALL close the temp and emit an immutable
+ticket binding exact graph publication epoch, direct projection identity, the
+warmed checkpoint, policy/access snapshot, no-external-pending epoch, and exact
+closed temp-file/meta identity. Under canonical authority it SHALL perform only
+two O(1)/bounded ticket checks around the publication hook and atomic
+replacement; no vault/sidecar walk, cache warm, WAL, integrity, or projection
+proof is permitted. Any cold/dirty cache, epoch/access mismatch, observed
+external Markdown/access edit, hook failure, or ticket mismatch discards the
+ticket and retries via reconcile. Missed/unobserved direct edits converge by
+watcher-periodic reconcile; arbitrary-editor linearizability requires an
+out-of-scope broker/journal.
 
-Startup/readiness and reconcile SHALL compare the generation floor, current checkpoint, and graph acknowledgement. An unacknowledged, missing, malformed, or contradictory checkpoint with a valid floor SHALL make the graph unavailable and require full recovery at a generation above that floor. A missing or malformed floor in any non-legacy or ambiguous state SHALL fail closed and SHALL NOT be automatically repaired. Exact legacy state has no floor, checkpoint, or acknowledgement. The only accepted pre-floor migration states have a valid checkpoint and either no acknowledgement or an acknowledgement exactly matching that checkpoint; under mutation authority they initialize the floor to the checkpoint generation before ordinary availability/recovery logic proceeds. A checkpoint plus conflicting acknowledgement, or acknowledgement without checkpoint/floor, SHALL fail closed. Recovery SHALL report refreshed/current only after the repaired epoch and graph availability are independently re-read and proven. Abandoned reserved temp databases SHALL be swept only while holding the runtime-state rebuild lock.
+#### Scenario: Original-index edit races final publication
+- **WHEN** the original index changes at either real freshness seam during final publication
+- **THEN** the temporary pass is not published as current
+- **AND** the exact handle retries or resolves to its durable failure outcome
 
-#### Scenario: Process dies after canonical commit
-- **WHEN** the process terminates after checkpoint publication but before graph acknowledgement
-- **THEN** restart retains canonical files/checkpoint, refuses to call the graph current, and rebuilds from the full current vault
+### Requirement: Private rebuilds are cooperative and publication is non-partial
 
-#### Scenario: Process dies during temporary build
-- **WHEN** restart finds a reserved temp database with no live owner
-- **THEN** reconcile removes it without changing the live sidecar or checkpoint
+Within one configured trusted runtime root, at most one POSIX full builder per
+canonical vault identity SHALL run cooperatively. That root SHALL be
+operator-owned and neither group- nor world-writable; the persistent
+descriptor-validated no-follow lock file SHALL sit directly beneath it, have
+restrictive permissions, and never be unlinked. Hostile same-user replacement
+of the trusted root is outside this cooperative contract. The same lock
+serializes reserved-temp cleanup, which SHALL target only well-formed temps for
+the exact vault identity and never a registered active flight, live sidecar, or
+lock file.
 
-#### Scenario: Malformed checkpoint recovery is real
-- **WHEN** reconcile finds a valid floor but a malformed or missing current checkpoint
-- **THEN** it publishes a higher full-scope checkpoint, builds and acknowledges it, and reports refreshed only after availability proves current
-- **AND** user-authored canonical bytes remain unchanged
+Windows SHALL retain stronger no-delete-share locking/replacement behaviour. A
+sharing or rename refusal SHALL preserve the old live sidecar and temporary
+output, create an explicit graph failure handle, and SHALL NOT use
+delete-and-replace. Readers SHALL see only an old usable sidecar, a complete
+replacement, or unavailable—never a temporary or partial sidecar.
 
-#### Scenario: Valid pre-floor checkpoint seeds the floor
-- **WHEN** upgrade finds a valid checkpoint, no floor, and either no graph acknowledgement or an exact matching acknowledgement
-- **THEN** it atomically seeds the floor at that checkpoint generation before proceeding with current-state proof or recovery
+#### Scenario: Reader blocks Windows replacement safely
+- **WHEN** a Windows reader keeps the live sidecar open without delete sharing
+- **THEN** replacement is refused without changing the live sidecar
+- **AND** after the reader closes, a new exact recovery attempt may publish
 
-#### Scenario: Ambiguous missing floor refuses repair
-- **WHEN** the floor is missing or malformed and checkpoint/acknowledgement state is absent, malformed, or contradictory outside exact legacy or accepted pre-floor migration
-- **THEN** readiness and reconcile fail closed without inventing a generation or rewriting epoch state
+### Requirement: Lifecycle transitions and recovery preserve canonical truth
 
-### Requirement: Deletions publish a recoverable graph handoff
+Graph-relevant file and recursive-directory deletion SHALL use the existing
+lifecycle/trash transition under canonical authority: tombstone, floor, rename,
+exact null/full checkpoint, and existing deletion commit point. A caught
+checkpoint/later-batch failure SHALL reverse and fsync the rename and restore
+the prior epoch before reporting failure. A crash after rename SHALL leave
+lifecycle/floor evidence, force a higher full recovery generation, and neither
+restore nor duplicate the deletion. Restore obeys the same ordering. Recovery
+and rollback do not create a mutation receipt unless they are the originally
+claimed caller leaf.
 
-A graph-relevant file or recursive-directory deletion SHALL publish its null-path or bounded/full checkpoint through the same guarded trash-move transition, not through best-effort post-delete fanout. The transition SHALL durably establish its lifecycle tombstone and next generation floor before the canonical rename, install the exact checkpoint before the deletion commit point, and pass that checkpoint to derived fanout. A caught checkpoint failure SHALL reverse and fsync the rename and restore the prior epoch. An abrupt interruption after rename SHALL leave enough tombstone/floor evidence for reconcile to force higher full-scope recovery without generation reuse.
+Readiness and reconcile SHALL report current only after independent exact epoch
+parity and graph availability proof. Their repairs SHALL register an exact
+rebuild/failure handle before authority releases.
 
-#### Scenario: Caught deletion checkpoint failure rolls back
-- **WHEN** checkpoint installation fails after a file or directory was moved toward trash but before the deletion commit point
-- **THEN** the source placement and prior epoch are restored and the mutation is not reported committed
+#### Scenario: Caught recursive deletion rolls back
+- **WHEN** a recursive trash transition fails after rename but before its checkpoint protocol completes
+- **THEN** source placement and epoch are restored and fsynced
+- **AND** no receipt or committed terminal is created
 
-#### Scenario: Crash after rename remains recoverable
-- **WHEN** a process dies after the canonical trash rename but before checkpoint publication completes
-- **THEN** restart observes lifecycle/floor evidence, refuses the old graph as current, and recovers at a higher generation without restoring or duplicating the deletion
+### Requirement: Installed-product proof covers the full contract
 
-### Requirement: Write terminals distinguish canonical commit from graph failure
+The installed wheel SHALL prove a disposable Records-compatible mutation through
+the real MCP surface, including strict epoch creation, receipt/lifecycle,
+derived graph recovery, and exact terminal/retry behaviour. Native Windows
+verification SHALL exercise the installed-wheel service path, cross-process
+rebuild claim, and open-reader replacement refusal. A quiesced 500/2,000-page
+reproduction SHALL record p95 canonical boundary hold separately from request
+latency and show that the hold does not scale with vault size.
 
-A request whose canonical batch committed SHALL remain canonically committed while its idempotency state stays nonterminal `graph_pending`. No public response or terminal projector SHALL expose internal pending graph state as success. Success SHALL durably transition to `completed` only after proving graph availability for the required checkpoint. Exhausted stabilization, waiter admission failure, lineage failure, or safe platform publication refusal SHALL transition to `completed` with a stable committed graph failure code, required checkpoint digest, and recovery guidance; compact/full public projection SHALL retain those bounded fields, while legacy projection remains unchanged. Exact idempotent retry SHALL replay the same completed outcome without applying the canonical write again.
-
-#### Scenario: Write succeeds with current graph
-- **WHEN** the joined flight publishes a graph covering the request checkpoint
-- **THEN** the request returns committed with graph sync completed and the graph reports available
-
-#### Scenario: Stabilization exhausts after canonical commit
-- **WHEN** the builder cannot publish a stable checkpoint within its bounded attempts
-- **THEN** the request returns committed with explicit graph-sync failure and reconcile guidance
-- **AND** exact retry does not duplicate the canonical mutation
+#### Scenario: Disposable live MCP mutation crosses derived recovery
+- **WHEN** a disposable installed service receives a real MCP mutation while its graph needs recovery
+- **THEN** the canonical mutation commits once, graph work occurs off-boundary, and exact retry/inspection reports the required receipt and graph outcome

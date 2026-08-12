@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,14 @@ def _source_hash(result: dict[str, object], suffix: str) -> str:
 
 
 def _files(vault: Path) -> set[str]:
-    return {path.relative_to(vault).as_posix() for path in vault.rglob("*") if path.is_file()}
+    reserved = re.compile(
+        r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite(?:-(?:journal|wal|shm))?$"
+    )
+    return {
+        path.relative_to(vault).as_posix()
+        for path in vault.rglob("*")
+        if path.is_file() and reserved.fullmatch(path.name) is None
+    }
 
 
 def _write_l6_rule(vault: Path, *, paths: str) -> None:

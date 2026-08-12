@@ -204,6 +204,14 @@ def recall_policy_identity(vault_root: Path) -> tuple[str, str]:
     return RECALL_POLICY_VERSION, access.policy_fingerprint(Path(vault_root))
 
 
+def recall_publication_policy_identity(vault_root: Path) -> tuple[str, str] | None:
+    """Exact bounded policy identity suitable for sidecar publication."""
+    snapshot = access.publication_policy_snapshot(Path(vault_root))
+    if snapshot is None:
+        return None
+    return RECALL_POLICY_VERSION, snapshot.fingerprint
+
+
 def _vault_relative(root: Path, path: Path | str) -> str | None:
     raw = str(path)
     if ("\\" in raw and os.name != "nt") or "\x00" in raw:

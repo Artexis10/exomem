@@ -895,7 +895,7 @@ def test_note_partial_commit_after_registry_replacement_recovers_exactly(
     }
     real_batch = relation_review.vault.batch_atomic_write
     real_replace = vault_module.os.replace
-    replacements = 0
+    registry_path = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
     captured: list[tuple[tuple[str, str], ...]] = []
 
     def capture_batch(writes: object, **batch_kwargs: object):
@@ -912,13 +912,10 @@ def test_note_partial_commit_after_registry_replacement_recovers_exactly(
         return real_batch(detached, **batch_kwargs)
 
     def die_after_registry(src: object, dst: object) -> None:
-        nonlocal replacements
         real_replace(src, dst)
         destination = Path(dst)  # type: ignore[arg-type]
-        if str(src).endswith(".tmp") and destination.is_relative_to(vault):
-            replacements += 1
-            if replacements == 2:  # receipt, then project registry
-                raise SimulatedProcessDeath
+        if str(src).endswith(".tmp") and destination == registry_path:
+            raise SimulatedProcessDeath
 
     monkeypatch.setattr(relation_review.vault, "batch_atomic_write", capture_batch)
     monkeypatch.setattr(vault_module.os, "replace", die_after_registry)

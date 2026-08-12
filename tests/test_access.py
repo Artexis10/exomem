@@ -125,3 +125,28 @@ def test_find_hot_cache_invalidates_when_access_policy_changes(vault: Path) -> N
 
     second = find_module.find(vault, query="access-cache-secret-marker")
     assert not any(hit.path.endswith("cached-secret.md") for hit in second)
+
+
+def test_publication_policy_snapshot_is_bounded_and_fails_closed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = access.publication_policy_snapshot(vault)
+    assert snapshot is not None
+    assert snapshot.fingerprint == "missing"
+
+    config = _write_cfg(vault, "readonly: []\n")
+    snapshot = access.publication_policy_snapshot(vault)
+    assert snapshot is not None
+    assert snapshot.fingerprint == access.policy_fingerprint(vault)
+
+    config.write_bytes(b"x" * (access.PUBLICATION_POLICY_MAX_BYTES + 1))
+    assert access.publication_policy_snapshot(vault) is None
+
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(
+        vault_module,
+        "read_bounded_guarded_bytes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+    assert access.publication_policy_snapshot(vault) is None

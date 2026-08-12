@@ -275,13 +275,21 @@ def test_delete_after_move_purges_claim_and_semantic_receipt_but_keeps_identity_
         lambda _root, _changed, paths: calls.append(("resolver", paths)),
     )
     monkeypatch.setattr(lexstore, "delete_after_remove", lambda *_args: None)
-    monkeypatch.setattr(epistemic_graph, "delete_after_remove", lambda *_args: None)
+    monkeypatch.setattr(
+        epistemic_graph,
+        "upsert_after_write",
+        lambda *_args: epistemic_graph.GraphDispatchResult("completed", "incremental_completed"),
+    )
     monkeypatch.setattr(
         embeddings,
         "delete_after_remove_status",
         lambda *_args: embeddings.EmbeddingSyncStatus("completed", "embedding_delete_completed", 1),
     )
-    monkeypatch.setattr(embeddings, "delete_clip_after_remove", lambda *_args: None)
+    monkeypatch.setattr(
+        embeddings,
+        "delete_clip_after_remove",
+        lambda *_args: embeddings.EmbeddingSyncStatus("completed", "clip_delete_completed", 1),
+    )
 
     report = index_sync.delete_after_remove(tmp_path, [old_rel])
 
@@ -290,7 +298,7 @@ def test_delete_after_move_purges_claim_and_semantic_receipt_but_keeps_identity_
     assert deferred_index.snapshot(tmp_path) == []
     assert calls == [("memory_refs", [old_rel]), ("resolver", [old_rel])]
     assert receipt.rel_path == old_rel
-    assert next(item for item in report.components if item.component == "claims").outcome == "accepted"
+    assert next(item for item in report.components if item.component == "claims").outcome == "completed"
     assert next(
         item for item in report.components if item.component == "semantic_purge"
     ).outcome == "completed"

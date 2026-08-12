@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from exomem import find as find_mod
-from exomem import preserve, scene_frames
+from exomem import preserve, scene_frames, semantic_contract
 from exomem.embeddings import Scene
 from exomem.find import find
 
@@ -121,7 +121,8 @@ def test_plain_images_unaffected(vault: Path) -> None:
     _setup_video_with_frames(vault)
     photo = vault / "Knowledge Base/Evidence/Test/clips/whiteboard.jpg"
     photo.write_bytes(b"\xff\xd8x")
-    photo.with_name("whiteboard.jpg.md").write_text(
+    sidecar = photo.with_name("whiteboard.jpg.md")
+    sidecar.write_text(
         "---\ntype: source\nsource_type: other\ncaptured: 2026-07-01\n"
         "media_type: image\n"
         "evidence_file: Knowledge Base/Evidence/Test/clips/whiteboard.jpg\n"
@@ -130,6 +131,10 @@ def test_plain_images_unaffected(vault: Path) -> None:
         "architecture sketch for the ingestion pipeline\n",
         encoding="utf-8",
     )
+    # This test writes out of band while the suite watcher is disabled. Publish
+    # the same corpus event a real watcher/self-write path would emit so the
+    # warmed recall checkpoint admits the new sidecar.
+    semantic_contract.publish_corpus_files_changed(vault, changed=(sidecar,))
     hits = find(vault, query="architecture sketch ingestion", mode="hybrid")
     assert len(hits) == 1
     h = hits[0].as_dict()

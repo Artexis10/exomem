@@ -85,9 +85,10 @@ class ReconcileReport:
     remaining_drift: list[dict] = field(default_factory=list)
     receipt_reconcile: dict = field(default_factory=dict)
     dry_run: bool = False
+    _graph_reconcile_registered: int | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict:
-        return {
+        result = {
             "indexes_updated": self.indexes_updated,
             "embeddings_refreshed": self.embeddings_refreshed,
             "embeddings_status": self.embeddings_status,
@@ -132,6 +133,10 @@ class ReconcileReport:
             "receipt_reconcile": self.receipt_reconcile,
             "dry_run": self.dry_run,
         }
+        registered = self._graph_reconcile_registered
+        if registered is not None:
+            result["_graph_reconcile_registered"] = registered
+        return result
 
 
 def _rel(path: Path, vault_root: Path) -> str:
@@ -454,11 +459,55 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
     if os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX"):
         report.graph_status = "disabled"
     else:
-        if initial_graph_drift and not dry_run:
-            if audit_module._check_graph_drift(vault_root):
-                epistemic_graph.EpistemicGraphIndex(vault_root).rebuild_all()
-        report.graph_refreshed = len(initial_graph_drift)
-        report.graph_status = "refreshed" if initial_graph_drift else "current"
+        initial_epoch = epistemic_graph.graph_sync.status(vault_root)
+        index = epistemic_graph.EpistemicGraphIndex(vault_root)
+        needs_repair = (
+            bool(initial_graph_drift)
+            or initial_epoch["state"] != "current"
+            or not index.available()
+        )
+        if not dry_run:
+            epistemic_graph.graph_sync.sweep_abandoned_temporaries(
+                vault_root,
+                epistemic_graph.sidecar_path(vault_root),
+                live_paths=epistemic_graph.graph_sync.live_temporary_paths(),
+                state_root=index._canonical_mutation_coordinator().state_root,
+            )
+            if (
+                epistemic_graph.graph_sync.classify_epoch(vault_root).kind
+                == "recoverable"
+            ):
+                epistemic_graph.graph_sync.recover_checkpoint(vault_root)
+            if needs_repair and epistemic_graph.graph_sync.status(vault_root)["state"] != "unavailable":
+                if audit_module._check_graph_drift(vault_root) or not index.available():
+                    checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
+                        vault_root
+                    )
+                    dispatch = epistemic_graph._registered_or_failure(
+                        vault_root,
+                        checkpoint,
+                        index,
+                        index._canonical_mutation_coordinator(),
+                    )
+                    from .writer_lease import active_mutation_request_id
+
+                    if active_mutation_request_id() is None:
+                        epistemic_graph.graph_sync.wait_for_registered(
+                            vault_root,
+                            state_root=index._canonical_mutation_coordinator().state_root,
+                        )
+                    elif dispatch.outcome == "registered":
+                        report._graph_reconcile_registered = len(initial_graph_drift)
+        current = (
+            epistemic_graph.graph_sync.status(vault_root)["state"] == "current"
+            and index.available()
+            and not audit_module._check_graph_drift(vault_root)
+        )
+        report.graph_refreshed = len(initial_graph_drift) if current and needs_repair else 0
+        if current:
+            report.graph_status = "refreshed" if needs_repair else "current"
+        else:
+            report.graph_status = "unavailable"
 
     # ---- 2d. CLIP + scene-frame orphan healing ----
     # Heals vaults that already lost content through the pre-fix gap (a media

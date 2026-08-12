@@ -80,7 +80,7 @@ def test_delete_after_remove_drops_clip_rows(
     assert gen_after > gen_before
     clip_outcome = _outcome(report, "clip")
     assert clip_outcome.outcome == "completed"
-    assert clip_outcome.code == "dispatch_completed"
+    assert clip_outcome.code == "clip_delete_completed"
 
 
 def test_delete_after_remove_clip_extra_absent_delete_still_succeeds(
@@ -95,8 +95,8 @@ def test_delete_after_remove_clip_extra_absent_delete_still_succeeds(
     report = index_sync.delete_after_remove(vault, [rel])
 
     clip_outcome = _outcome(report, "clip")
-    assert clip_outcome.outcome == "completed"  # never breaks the delete
-    assert clip_outcome.code == "dispatch_completed"
+    assert clip_outcome.outcome == "accepted"  # never breaks the delete
+    assert clip_outcome.code == "clip_disabled"
     assert report.reconcile_required is False
 
 
@@ -144,7 +144,11 @@ def test_delete_after_remove_scene_frames_noop_when_no_frames_dir(
 
     report = index_sync.delete_after_remove(vault, [video_rel])
 
-    assert _outcome(report, "clip").outcome == "completed"
+    assert _outcome(report, "clip").as_dict() == {
+        "component": "clip",
+        "outcome": "accepted",
+        "code": "clip_disabled",
+    }
 
 
 # ---- 3. Media-binary fan-out gate -------------------------------------------
@@ -238,7 +242,12 @@ def test_delete_file_non_media_non_md_keeps_current_behavior(
     )
 
     assert not target.exists()
-    assert result.index is None
+    assert result.index == {
+        "components": [],
+        "derived_work": "not_required",
+        "paths_truncated": False,
+        "reconcile_required": False,
+    }
 
 
 def test_delete_directory_media_binaries_enter_fanout(

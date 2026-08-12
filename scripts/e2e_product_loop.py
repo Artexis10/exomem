@@ -286,7 +286,11 @@ def _mutation_diagnostics(result: Any, *, operation: str) -> Any:
         raise RuntimeError(
             f"{operation} mutation did not return a committed full terminal: {result!r}"
         )
-    return result["diagnostics"]
+    diagnostics = result["diagnostics"]
+    if isinstance(diagnostics, dict) and diagnostics.get("graph_sync") == "failed":
+        code = diagnostics.get("graph_sync_code", "unspecified graph synchronization error")
+        raise RuntimeError(f"{operation} graph synchronization failed: {code}")
+    return diagnostics
 
 
 def _maintenance_diagnostics(result: Any, *, operation: str) -> Any:
@@ -353,8 +357,15 @@ async def _assert_relation_contexts(
             timeout,
         )
         graph = context.get("graph", {})
-        if graph.get("profile", {}).get("name") != profile:
-            raise RuntimeError(f"installed context did not resolve {profile!r} profile")
+        if not isinstance(graph, dict):
+            raise RuntimeError(
+                f"installed context returned no graph for {profile!r}: {context!r}"
+            )
+        profile_data = graph.get("profile", {})
+        if not isinstance(profile_data, dict) or profile_data.get("name") != profile:
+            raise RuntimeError(
+                f"installed context did not resolve {profile!r} profile: {context!r}"
+            )
         edge = next(
             (item for item in graph.get("edges", []) if item.get("relation_type") == canonical),
             None,
