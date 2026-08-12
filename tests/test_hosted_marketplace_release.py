@@ -385,8 +385,12 @@ def test_openai_packet_rejects_missing_boolean_annotation(
     root = copy_hosted_tree(tmp_path / "repo")
     original_manifest = hosted_plugins.compatibility_manifest
 
-    def incomplete_annotations(repo_root: Path | None = None) -> dict[str, object]:
-        manifest = json.loads(json.dumps(original_manifest(repo_root)))
+    def incomplete_annotations(
+        repo_root: Path | None = None,
+        *,
+        candidate: str = hosted_plugins.DEFAULT_CANDIDATE,
+    ) -> dict[str, object]:
+        manifest = json.loads(json.dumps(original_manifest(repo_root, candidate=candidate)))
         del manifest["agent_contract"]["commands"][0]["mcp_tool"]["annotations"]["idempotentHint"]
         return manifest
 

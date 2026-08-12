@@ -85,7 +85,7 @@ spec:
         'exomem.io/worker-policy-digest' in variables.newAnnotations &&
         variables.newAnnotations['exomem.io/worker-policy-digest'].matches('^[a-f0-9]{64}$') &&
         'exomem.io/records-reader-version' in variables.newAnnotations &&
-        variables.newAnnotations['exomem.io/records-reader-version'].matches('^[2-9][0-9]*$') &&
+        variables.newAnnotations['exomem.io/records-reader-version'].matches('^([2-9]|[1-9][0-9]+)$') &&
         'exomem.io/lifecycle-actions-enabled' in variables.newAnnotations &&
         variables.newAnnotations['exomem.io/lifecycle-actions-enabled'] in ['true', 'false'] &&
         'exomem.io/browser-origin' in variables.newAnnotations &&

@@ -1902,6 +1902,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         documents, "ValidatingAdmissionPolicy", "exomem-tenant-namespace-contract"
     )
     namespace_policy_text = json.dumps(namespace_policy)
+    assert "^([2-9]|[1-9][0-9]+)$" in namespace_policy_text
     namespace_operations = namespace_policy["spec"]["matchConstraints"]["resourceRules"][0][
         "operations"
     ]
