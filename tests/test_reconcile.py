@@ -20,6 +20,7 @@ from exomem import (
     activation_manifest,
     commands,
     freshness,
+    graph_sync,
     index_sync,
     relation_review,
     semantic_contract,
@@ -203,6 +204,33 @@ def test_reconcile_does_not_report_relation_disposition_for_inactive_external_dr
     payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
 
     assert payload["semantic_contract_findings"] == []
+
+
+def test_reconcile_repairs_ahead_floor_and_older_checkpoint_with_full_recovery(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Knowledge Base/Notes/Insights/ahead-floor.md"
+    page.parent.mkdir(parents=True)
+    vault_module.batch_atomic_write(
+        [
+            vault_module.PlannedWrite(
+                page,
+                _semantic_page("00000000-0000-4000-8000-000000000299"),
+            )
+        ],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+
+    report = reconcile_module.reconcile(tmp_path)
+
+    checkpoint = graph_sync.read_checkpoint(tmp_path)
+    assert checkpoint is not None
+    assert checkpoint.generation == 3
+    assert checkpoint.scope == "full"
+    assert graph_sync.status(tmp_path)["state"] == "current"
+    assert report.graph_status == "refreshed"
 
 
 def test_reconcile_recomputes_and_clears_repaired_semantic_finding(
@@ -654,6 +682,19 @@ def test_reconcile_reports_malformed_state_and_deletes_nothing(tmp_path: Path) -
     assert malformed.read_text(encoding="utf-8") == "not-json"
     assert stale.read_bytes() == stale_bytes
     assert stale_page.read_bytes() == page_bytes
+
+
+def test_reconcile_fails_closed_without_crashing_on_deep_graph_protocol_json(
+    tmp_path: Path,
+) -> None:
+    nested = ("[" * 2_000 + "0" + "]" * 2_000).encode("ascii")
+    graph_sync.floor_path(tmp_path).parent.mkdir(parents=True)
+    graph_sync.floor_path(tmp_path).write_bytes(nested)
+    graph_sync.checkpoint_path(tmp_path).write_bytes(nested)
+
+    report = reconcile_module.reconcile(tmp_path, dry_run=True)
+
+    assert report.graph_status == "unavailable"
 
 
 @pytest.mark.parametrize("limit_kind", ["single", "aggregate"])

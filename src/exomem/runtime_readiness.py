@@ -35,6 +35,18 @@ def _public_mutation_boundary(value: object) -> dict[str, Any]:
     }
 
 
+def _public_graph_sync(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    state = value.get("state")
+    generation = value.get("generation")
+    if state not in {"current", "recovery_required", "unavailable"}:
+        return None
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        return None
+    return {"state": state, "generation": generation}
+
+
 def package_release() -> str:
     """Return the installed distribution release without making readiness fragile."""
     try:
@@ -90,6 +102,17 @@ def build_runtime_readiness(
         if isinstance(raw_stale_count, int) and raw_stale_count >= 0
         else 0
     )
+    coordination_payload = {
+        "enabled": enabled,
+        "role": role,
+        "coordinator_healthy": healthy,
+        "mutation_boundary": _public_mutation_boundary(
+            coordination.get("mutation_boundary")
+        ),
+    }
+    graph_sync = _public_graph_sync(coordination.get("graph_sync"))
+    if graph_sync is not None:
+        coordination_payload["graph_sync"] = graph_sync
     return {
         "status": "ready" if takeover_eligible else "not_ready",
         "service": "exomem",
@@ -99,14 +122,7 @@ def build_runtime_readiness(
         "transport": HTTP_TRANSPORT,
         "instance_id": _instance_id(),
         "replica_id": replica_id,
-        "coordination": {
-            "enabled": enabled,
-            "role": role,
-            "coordinator_healthy": healthy,
-            "mutation_boundary": _public_mutation_boundary(
-                coordination.get("mutation_boundary")
-            ),
-        },
+        "coordination": coordination_payload,
         "session_store": {
             "state": session_store_state,
             "stale_served_count": stale_served_count,

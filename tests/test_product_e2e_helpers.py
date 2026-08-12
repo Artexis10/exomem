@@ -259,6 +259,25 @@ def test_mutation_diagnostics_requires_and_unwraps_committed_full_envelope() -> 
     ) == diagnostics
 
 
+def test_mutation_diagnostics_rejects_explicit_graph_sync_failure() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match="capture_source graph synchronization failed: GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+    ):
+        e2e_product_loop._mutation_diagnostics(
+            {
+                "ok": True,
+                "status": "committed",
+                "mutated": True,
+                "diagnostics": {
+                    "graph_sync": "failed",
+                    "graph_sync_code": "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+                },
+            },
+            operation="capture_source",
+        )
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import multiprocessing
@@ -12,7 +13,30 @@ import pytest
 
 from exomem import mutation_lock as mutation_lock_module
 from exomem.cli_ops import OpError
-from exomem.mutation_lock import VaultMutationCoordinator, active_mutation_snapshot
+from exomem.mutation_lock import (
+    VaultMutationCoordinator,
+    active_mutation_snapshot,
+    last_mutation_timing,
+)
+
+
+def test_windows_path_inspection_access_has_dacl_read_right_without_mutation_rights() -> None:
+    access = inspect.signature(mutation_lock_module._windows_open_path).parameters["access"].default
+
+    assert isinstance(access, int)
+    assert access & 0x00000080  # FILE_READ_ATTRIBUTES
+    assert access & 0x00020000  # READ_CONTROL, required by GetSecurityInfo(DACL)
+    assert not access & 0x40000000  # GENERIC_WRITE
+    assert not access & 0x00010000  # DELETE
+
+
+def test_windows_private_dacl_deduplicates_local_system_principal() -> None:
+    sddl = mutation_lock_module._windows_private_dacl_sddl("S-1-5-18")
+
+    assert sddl == "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        sddl, "S-1-5-18", directory=True
+    )
 
 
 def _process_hold(
@@ -651,6 +675,22 @@ def test_hold_emits_acquired_and_released_events_with_timing(
     assert acquired.fields["operation"] == "remember"
     assert isinstance(released.fields["hold_ms"], float)
     assert released.fields["operation"] == "remember"
+
+
+def test_last_mutation_timing_identifies_the_completed_operation(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    with coordinator.hold(operation="epistemic_graph_publish_rebuild", holder_kind="graph"):
+        pass
+
+    timing = last_mutation_timing()
+    assert timing is not None
+    assert timing["wait_ms"] >= 0.0
+    assert timing["hold_ms"] >= 0.0
+    assert timing["operation"] == "epistemic_graph_publish_rebuild"
+    assert timing["holder_kind"] == "graph"
 
 
 def test_long_hold_warning_is_guaranteed_on_release_without_any_probe(

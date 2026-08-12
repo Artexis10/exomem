@@ -267,6 +267,7 @@ class FileWatcher:
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
         self._pending_external_epoch = 0
+        self._pending_access_policy = False
         self._last_change = 0.0
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -306,6 +307,19 @@ class FileWatcher:
         from .vault import in_excluded_scan_dir
 
         rel = self._rel(path)
+        if rel == f"{kb_prefix()}_access.yaml":
+            # Access policy changes are a publication boundary despite not
+            # being Markdown.  Do this before the generic non-Markdown return
+            # so graph reads fail closed until policy projection is reconciled.
+            with self._lock:
+                self._pending_access_policy = True
+                self._pending_external_epoch = max(
+                    self._pending_external_epoch,
+                    freshness.mark_external_pending(self._vault_root),
+                )
+                self._last_change = time.monotonic()
+            self._wake.set()
+            return
         if rel is not None and in_excluded_scan_dir(rel):
             # _trash/_archive/_Schema/…: every full walk skips these, so the
             # event path must too — else a delete's move-to-trash re-embeds
@@ -347,23 +361,27 @@ class FileWatcher:
             except ValueError:
                 return None
 
-    def _drain(self) -> tuple[list[Path], list[Path], list[str], int]:
+    def _drain(self) -> tuple[list[Path], list[Path], list[str], int, bool]:
         with self._lock:
             media = sorted(self._pending_media)
             ups = sorted(self._pending_upsert)
             dels = sorted(self._pending_delete)
             pending_epoch = self._pending_external_epoch
+            access_policy = self._pending_access_policy
             self._pending_media.clear()
             self._pending_upsert.clear()
             self._pending_delete.clear()
             self._pending_external_epoch = 0
+            self._pending_access_policy = False
         del_rels = [r for r in (self._rel(p) for p in dels) if r]
-        return media, ups, del_rels, pending_epoch
+        return media, ups, del_rels, pending_epoch, access_policy
 
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
-        media, ups, del_rels, pending_epoch = self._drain()
+        media, ups, del_rels, pending_epoch, access_policy = self._drain()
+        if access_policy:
+            self._reconcile_access_policy(pending_epoch)
         if not (media or ups or del_rels):
             return
 
@@ -390,6 +408,16 @@ class FileWatcher:
             cap=False,
             pending_epoch=pending_epoch,
         )
+
+    def _reconcile_access_policy(self, pending_epoch: int) -> None:
+        """Reproject one observed `_access.yaml` edit before clearing its barrier."""
+        try:
+            for scope in freshness.SCOPES:
+                if freshness.recall_is_live(self._vault_root, scope):
+                    freshness.recall_checkpoint(self._vault_root, scope)
+            self._recover_external_pending(pending_epoch)
+        except Exception:  # noqa: BLE001 - keep the observation pending for retry
+            log.exception("file watcher: access-policy reconciliation failed")
 
     # ---- debounce loop ----
 
@@ -553,12 +581,12 @@ class FileWatcher:
         from . import find as find_module
         from . import vault as vault_module
 
+        if not epistemic_graph.graph_enabled() or not epistemic_graph.sidecar_path(
+            self._vault_root
+        ).exists():
+            return
         graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
-        if (
-            not epistemic_graph.graph_enabled()
-            or not graph.path.exists()
-            or not graph.reads_suspended()
-        ):
+        if not graph.reads_suspended():
             return
         try:
             find_module.evict_resolver_caches(self._vault_root)
@@ -589,9 +617,9 @@ class FileWatcher:
         from . import find as find_module
         from . import vault as vault_module
 
-        graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
-        if not graph.path.exists():
+        if not epistemic_graph.sidecar_path(self._vault_root).exists():
             return
+        graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
         try:
             graph.suspend_reads()
             if not epistemic_graph.graph_enabled():

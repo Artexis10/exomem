@@ -248,6 +248,16 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     return {"files": projected, "summary": {"stored": stored, "failed": failed}}
 
 
+def receipt_leaf_projection(leaf_result: Any) -> dict[str, Any]:
+    """Portable graph receipts never retain collection paths or content metadata."""
+    # Collection receipts are public API results, not portable graph protocol
+    # authority: both shapes include affected paths.  A local exact retry can
+    # reconstruct only the envelope after a SQLite cut, which is preferable
+    # to copying user paths into a synced hidden file.
+    del leaf_result
+    return {}
+
+
 def committed_terminal(
     leaf_result: Any,
     *,
@@ -403,6 +413,16 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
     compact.update(_artifact_receipt_projection(leaf))
+    if isinstance(leaf, Mapping) and leaf.get("graph_sync") in {"completed", "failed"}:
+        compact["graph_sync"] = leaf["graph_sync"]
+        for key in (
+            "graph_sync_code",
+            "graph_sync_checkpoint",
+            "graph_sync_remediation",
+        ):
+            value = leaf.get(key)
+            if isinstance(value, str):
+                compact[key] = value
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
         compact["diagnostics"] = result["leaf_result"]
