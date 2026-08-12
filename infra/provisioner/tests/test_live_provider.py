@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from exomem_provisioner.capacity import CapacityConflict
 from exomem_provisioner.config import (
     ProviderWorkerSettings,
+    load_deployment_lock,
     load_hosted_release_manifest,
 )
 from exomem_provisioner.driver import DriverPending, EffectContext
@@ -178,6 +179,41 @@ def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(tmp
     )
     with pytest.raises(ValueError, match="deployment lock is unavailable"):
         _ = missing.deployment_lock
+
+
+def test_deployment_lock_requires_exact_legacy_v1_or_exact_forward_v2_target(tmp_path: Path) -> None:
+    path = _deployment_lock(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["runtimeTarget"]["releaseVersion"] = "0.39.2"
+    payload["composition"]["legacyCatalog"][0]["releaseVersion"] = "0.39.2"
+    payload["composition"]["legacyCatalog"][0]["protocolVersion"] = "1"
+    payload["composition"]["legacyCatalog"][0]["contract"]["releaseVersion"] = "0.39.2"
+    payload["composition"]["legacyCatalog"][0]["contract"]["protocolVersion"] = "1"
+    payload["composition"]["legacyCatalog"][0]["contractSha256"] = _canonical_sha256(
+        payload["composition"]["legacyCatalog"][0]["contract"]
+    )
+    payload["composition"]["legacyReleaseSetSha256"] = _canonical_sha256(
+        [{"releaseVersion": "0.39.2", "protocolVersion": "1"}]
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    lock = load_deployment_lock(path)
+    target = lock.runtime_target.model_dump(mode="json")
+
+    assert lock.matches_runtime_request(
+        {"releaseVersion": "0.39.2", "protocolVersion": "1"},
+        wire_protocol="exomem-cell-provisioner.v1",
+    )
+    assert not lock.matches_runtime_request(
+        {"releaseVersion": "0.39.1", "protocolVersion": "1"},
+        wire_protocol="exomem-cell-provisioner.v1",
+    )
+    assert lock.matches_runtime_request(
+        {"runtimeTarget": target}, wire_protocol="exomem-cell-provisioner.v2"
+    )
+    assert not lock.matches_runtime_request(
+        {"runtimeTarget": {**target, "releaseVersion": "0.39.1"}},
+        wire_protocol="exomem-cell-provisioner.v2",
+    )
 
 
 def test_release_manifest_is_complete_strict_and_immutable(tmp_path: Path) -> None:
@@ -741,6 +777,16 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
         (
             SimpleNamespace(
                 status=SimpleNamespace(
+                    conditions=(SimpleNamespace(type="Complete", status="True"),), failed=1
+                )
+            ),
+            True,
+            True,
+            False,
+        ),
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
                     conditions=(SimpleNamespace(type="Failed", status="True"),), failed=1
                 )
             ),
@@ -814,6 +860,109 @@ async def test_registry_distinguishes_absent_running_complete_and_failed_init_jo
     assert snapshot.init_job_present is present
     assert snapshot.init_complete is complete
     assert snapshot.init_failed is failed
+
+
+@pytest.mark.asyncio
+async def test_recovery_reader_authenticates_init_job_and_stabilizes_helm_record() -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    def resource(*, name: str, annotations: dict[str, str], uid: str, version: str, labels=None):
+        return SimpleNamespace(
+            metadata=SimpleNamespace(
+                name=name,
+                namespace=metadata.resource_name,
+                annotations=annotations,
+                labels=labels or {},
+                uid=uid,
+                resource_version=version,
+                deletion_timestamp=None,
+            )
+        )
+
+    class Core:
+        helm = resource(
+            name="helm-release",
+            annotations={},
+            uid="helm-one",
+            version="1",
+            labels={"owner": "helm", "name": metadata.resource_name, "status": "deployed"},
+        )
+
+        def read_namespace(self, name):
+            return resource(
+                name=name,
+                annotations={
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": envelopes["namespace"],
+                },
+                uid="namespace-one",
+                version="1",
+            )
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            return resource(
+                name=name,
+                annotations={
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": envelopes["vaultPvc"],
+                },
+                uid="pvc-one",
+                version="1",
+            )
+
+        def read_namespaced_config_map(self, name, namespace):
+            return resource(
+                name=name,
+                annotations={
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": envelopes["providerOperationConfigMap"],
+                },
+                uid="operation-one",
+                version="1",
+            )
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            return SimpleNamespace(items=[self.helm])
+
+    class Batch:
+        job = resource(
+            name=metadata.resource_name + "-init",
+            annotations={
+                **metadata.kubernetes_annotations,
+                "exomem.io/recovery-envelope": envelopes["initJob"],
+            },
+            uid="job-one",
+            version="1",
+        )
+
+        def read_namespaced_job(self, name, namespace):
+            return self.job
+
+    core = Core()
+    batch = Batch()
+    registry = KubernetesProviderRegistry(
+        core_v1=core,
+        apps_v1=SimpleNamespace(),
+        batch_v1=batch,
+        custom_objects=SimpleNamespace(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+
+    first = await registry.authenticate_recovery_record(metadata)
+    core.helm.metadata.uid = "helm-two"
+    assert first != await registry.authenticate_recovery_record(metadata)
+    batch.job.metadata.annotations["exomem.io/recovery-envelope"] = "forged"
+    with pytest.raises(MetadataConflict):
+        await registry.authenticate_recovery_record(metadata)
 
 
 def _init_snapshot(*, present: bool, complete: bool = False, failed: bool = False, serving: bool = False):

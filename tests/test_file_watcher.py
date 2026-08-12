@@ -1443,7 +1443,9 @@ def test_reconcile_drift_evicts_resolver_without_checkpoint_leapfrog(
     # Prime the process-shared resolver at the current freshness triple.
     r1 = find_module._get_query_resolver(vault)
 
-    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    # `index` is duplicated below Knowledge Base/; bare-link normalization
+    # deterministically promotes the KB-root path before stem matching.
+    target = vault / "Knowledge Base" / "index.md"
     future = time.time() + 10_000
     os.utime(target, (future, future))
 

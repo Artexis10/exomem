@@ -845,7 +845,7 @@ def test_incremental_graph_ack_rollback_keeps_prior_rows_and_ack(
 
     with index._connect() as conn:
         row = conn.execute(
-            "SELECT source_hash FROM graph_nodes WHERE node_key = ?", 
+            "SELECT source_hash FROM graph_nodes WHERE node_key = ?",
             ("file:Knowledge Base/Notes/Insights/atomic.md",),
         ).fetchone()
         meta = dict(

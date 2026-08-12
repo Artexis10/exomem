@@ -183,12 +183,10 @@ def graph_enabled() -> bool:
 
 def graph_scheduling_enabled() -> bool:
     """Compatibility builds retain epoch parsing/recovery but stop new work."""
-    return graph_enabled() and os.environ.get("EXOMEM_DISABLE_GRAPH_SCHEDULING", "").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    disabled = (
+        os.environ.get("EXOMEM_DISABLE_GRAPH_SCHEDULING", "").strip().lower()
+    )
+    return graph_enabled() and disabled not in {"1", "true", "yes", "on"}
 
 
 def sidecar_path(vault_root: Path) -> Path:
@@ -747,12 +745,19 @@ class EpistemicGraphIndex:
                 )
                 if not owner_claimed:
                     if required is None and self._wait_for_legacy_rebuild():
-                        return {"indexed_files": 0, "nodes": 0, "edges": 0, "joined": 1}
+                        return {
+                            "indexed_files": 0,
+                            "nodes": 0,
+                            "edges": 0,
+                            "joined": 1,
+                        }
                     if graph_sync.wait_for_current(
                         self.vault_root, required, availability=self.available
                     ):
                         return {"indexed_files": 0, "nodes": 0, "edges": 0, "joined": 1}
-                    raise RuntimeError("another graph rebuild owner did not publish a current sidecar")
+                    raise RuntimeError(
+                        "another graph rebuild owner did not publish a current sidecar"
+                    )
                 temporary_index = EpistemicGraphIndex(
                     self.vault_root, mutation_coordinator=self._mutation_coordinator
                 )
@@ -884,7 +889,11 @@ class EpistemicGraphIndex:
                 recall.policy_version,
                 recall.access_policy_fingerprint,
             )
-            if policy_identity != (recall.policy_version, recall.access_policy_fingerprint) or direct != recall_identity:
+            if (
+                policy_identity
+                != (recall.policy_version, recall.access_policy_fingerprint)
+                or direct != recall_identity
+            ):
                 return None
             assert policy_snapshot is not None
             expected_identity = _availability_freshness_value(direct)
@@ -958,9 +967,10 @@ class EpistemicGraphIndex:
                     metadata = dict(
                         check.execute(
                             "SELECT key, value FROM graph_meta WHERE key IN "
-                            "('schema_version', 'recall_policy_version', 'recall_access_fingerprint', "
-                            "'recall_projection_identity', 'recall_projection_checkpoint', "
-                            "'graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint', "
+                            "('schema_version', 'recall_policy_version', "
+                            "'recall_access_fingerprint', 'recall_projection_identity', "
+                            "'recall_projection_checkpoint', 'graph_sync_generation', "
+                            "'graph_sync_digest', 'graph_sync_checkpoint', "
                             "'read_barrier')"
                         ).fetchall()
                     )
@@ -3221,7 +3231,11 @@ def upsert_after_write(
                 index.suspend_reads()
             if required is None:
                 return GraphDispatchResult.not_required()
-            graph_sync.register_deferred(vault_root, required, state_root=mutation_coordinator.state_root)
+            graph_sync.register_deferred(
+                vault_root,
+                required,
+                state_root=mutation_coordinator.state_root,
+            )
             return GraphDispatchResult("deferred", "graph_index_disabled", required)
         if not graph_scheduling_enabled():
             if required is None:
@@ -3250,9 +3264,8 @@ def upsert_after_write(
                         GraphDispatchResult("registered", "graph_rebuild_registered", required),
                         mutation_coordinator,
                     )
-                if (acknowledged := graph_sync.acknowledged_checkpoint(vault_root)) and acknowledged.covers(
-                    required
-                ):
+                acknowledged = graph_sync.acknowledged_checkpoint(vault_root)
+                if acknowledged and acknowledged.covers(required):
                     return GraphDispatchResult("completed", "graph_rebuild_completed", required)
                 return _join_registered_standalone(
                     vault_root,
@@ -3274,9 +3287,8 @@ def upsert_after_write(
                     GraphDispatchResult("registered", "graph_rebuild_registered", required),
                     mutation_coordinator,
                 )
-            if (acknowledged := graph_sync.acknowledged_checkpoint(vault_root)) and acknowledged.covers(
-                required
-            ):
+            acknowledged = graph_sync.acknowledged_checkpoint(vault_root)
+            if acknowledged and acknowledged.covers(required):
                 return GraphDispatchResult("completed", "graph_rebuild_completed", required)
             return _join_registered_standalone(
                 vault_root,

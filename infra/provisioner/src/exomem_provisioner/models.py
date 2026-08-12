@@ -137,6 +137,68 @@ class Operation(Base):
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class OperationRecoveryReceipt(Base):
+    """One immutable, content-free transaction receipt for a reopened operation."""
+
+    __tablename__ = "operation_recovery_receipts"
+    __table_args__ = (
+        CheckConstraint("schema_version = 1", name="ck_recovery_receipt_schema_version"),
+        CheckConstraint("old_state = 'error'", name="ck_recovery_receipt_old_state"),
+        CheckConstraint("old_checkpoint = 'failed'", name="ck_recovery_receipt_old_checkpoint"),
+        CheckConstraint("new_state = 'pending'", name="ck_recovery_receipt_new_state"),
+        CheckConstraint(
+            "new_checkpoint = 'volume-owned'", name="ck_recovery_receipt_new_checkpoint"
+        ),
+        CheckConstraint("resource_count = 4", name="ck_recovery_receipt_resource_count"),
+        CheckConstraint("route_count = 0", name="ck_recovery_receipt_route_count"),
+        *(
+            CheckConstraint(
+                f"length({column}) = 64", name=f"ck_recovery_receipt_{column}_hash"
+            )
+            for column in (
+                "helper_source_sha256",
+                "operation_sha256",
+                "preserved_sha256",
+                "request_sha256",
+                "request_ciphertext_sha256",
+                "resources_sha256",
+                "reservation_sha256",
+                "tenant_fence_sha256",
+                "first_observation_sha256",
+                "second_observation_sha256",
+                "committed_operation_sha256",
+            )
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("operations.id", ondelete="RESTRICT"), primary_key=True
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    helper_source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    old_state: Mapped[str] = mapped_column(String(16), nullable=False, default="error")
+    old_checkpoint: Mapped[str] = mapped_column(String(256), nullable=False, default="failed")
+    new_state: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    new_checkpoint: Mapped[str] = mapped_column(String(256), nullable=False, default="volume-owned")
+    resource_count: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    route_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    init_job_present: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    init_job_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    operation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    preserved_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_ciphertext_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    resources_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    reservation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    tenant_fence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    first_observation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    second_observation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    committed_operation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    committed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class TenantFence(Base):
     __tablename__ = "tenant_fences"
     __table_args__ = (CheckConstraint("fence_generation >= 1", name="ck_tenant_fence"),)

@@ -90,6 +90,58 @@ the signing seed.
 Retry through the same Substrate endpoint and idempotency key. A pending result
 is healthy progress; never invent a new key to bypass it.
 
+## Init-retry false-negative recovery
+
+This is the only manual provider-operation recovery. Use it only for the
+recorded `PROVISION / ERROR / failed /
+PROVISIONER_PROVIDER_METADATA_CONFLICT` init-retry false-negative, after the
+selected signed provisioner image contains the recovery command. It is not an
+API action, SQL procedure, or a way to edit any other operation state.
+
+Keep Substrate reconciliation suspended. Capture the current controller state,
+suspend every database-mutating reconcile CronJob, drain its child Jobs, and
+scale the API, routine worker, and volume worker to zero. Leave the receipt
+collector running. Stop if any migration/bootstrap process or other database
+consumer remains, or if the collector cannot provide a fresh signed receipt.
+
+Supply the confidential internal operation ID only through a current-user-owned
+regular mode-`0600` file. Do not put it in a shell history, command argument,
+manifest, log, receipt, or ticket.
+
+```bash
+umask 077
+recovery_identity=/secure/operator/recovery-operation-id
+test -f "$recovery_identity" && test ! -L "$recovery_identity"
+test "$(stat -c %u "$recovery_identity")" = "$(id -u)"
+test "$(stat -c %a "$recovery_identity")" = 600
+```
+
+In an explicitly launched, non-network-published operator container using the
+selected provisioner image and its existing provisioner configuration, run the
+fixed sequence below. Preserve only the content-free JSON output and receipt
+digest as operator evidence.
+
+```bash
+exomem-provisioner-recover-init-retry preflight --identity-file "$recovery_identity"
+exomem-provisioner-recover-init-retry reopen --identity-file "$recovery_identity"
+exomem-provisioner-recover-init-retry verify-receipt --identity-file "$recovery_identity"
+```
+
+Any refusal, conflict, resource drift, receipt-verification failure, or timeout
+is a stop condition. Do not retry `reopen` after a refusal and never reverse the
+checkpoint manually.
+
+After a committed receipt, restore only the routine worker and bounded-poll the
+content-free `inspect` result for at most ten minutes until `FINAL / complete`.
+Stop on terminal error or unexpected resource mutation. Restore the API only
+after provider finalization, run one manual Substrate reconcile Job at a time
+until the original control operation succeeds and the cell is ready, then
+restore the volume worker/durability state and scheduled reconciliation last.
+
+```bash
+exomem-provisioner-recover-init-retry inspect --identity-file "$recovery_identity"
+```
+
 For direct operator diagnosis, use the authenticated internal API and the exact
 mode-`0600` health request captured by the control plane. It contains the full
 target identity and no human identifier:
