@@ -14,20 +14,20 @@ CHATGPT_PLUGIN_CONTRACT = (
 )
 OPENAI_PLUGIN_MANIFEST = REPO_ROOT / "plugins" / "hosted" / "generated" / "openai" / ".app.json"
 
-_REGISTERED_V1_ATTESTATION = {
-    "registered_tool_surface_sha256": "3fb189ee7d9e48183c404d5b5d36df3c36d5e8df995b7e4cd78ad8c763672ae6",
-    "last_verified_release": "0.25.5",
-    "last_verified_at": "2026-07-20",
-    "last_verified_tool_surface_sha256": "3fb189ee7d9e48183c404d5b5d36df3c36d5e8df995b7e4cd78ad8c763672ae6",
+_REGISTERED_PERSONAL_CONNECTOR_ATTESTATION = {
+    "registered_tool_surface_sha256": "819750430dc72129da8bc51c1163eccf6c0c536a04d1b72fcde265e0e54814b9",
+    "last_verified_release": "0.45.0",
+    "last_verified_at": "2026-08-11",
+    "last_verified_tool_surface_sha256": "819750430dc72129da8bc51c1163eccf6c0c536a04d1b72fcde265e0e54814b9",
     "verification": (
-        "Connector recreated against 0.25.5 and confirmed returning note content in a fresh "
-        "ChatGPT conversation, which is the check that matters: the active failure note "
-        "chatgpt-app-blocks-exomem-content-returning-mcp-reads-despite-safe-annotations "
-        "records that bootstrap and frontmatter-only reads can succeed while content-bearing "
-        "reads stay blocked, so connectivity alone is not evidence. bootstrap and ask_memory "
-        "were additionally verified over the live connector, with bootstrap reporting "
-        "published_mcp_tool_surface_sha256 equal to the promoted digest. Re-verify content "
-        "reads, not just connection, after any tool-surface change."
+        "The 0.45.0 service and bootstrap reported digest "
+        "819750430dc72129da8bc51c1163eccf6c0c536a04d1b72fcde265e0e54814b9, and a fresh "
+        "ChatGPT conversation exposed and successfully invoked the refreshed record_memory "
+        "surface after the app-side action cache invalidated. The existing ask_memory "
+        "content-read acceptance remains the connector baseline. This attests only the "
+        "0.45.0 Personal Plugin snapshot; the newer pending digest still requires its own "
+        "post-deploy refresh and acceptance. Disconnecting and reconnecting OAuth alone is "
+        "not an action-schema refresh."
     ),
 }
 _REGISTERED_OPENAI_APP_ID = "plugin_asdk_app_6a5e3d26f2b08191a04424d1c1b33fc0"
@@ -94,7 +94,7 @@ def test_chatgpt_personal_plugin_keeps_v2_records_acceptance_pending() -> None:
     plugin = json.loads(CHATGPT_PLUGIN_CONTRACT.read_text(encoding="utf-8"))
     app = json.loads(OPENAI_PLUGIN_MANIFEST.read_text(encoding="utf-8"))
 
-    assert {key: plugin[key] for key in _REGISTERED_V1_ATTESTATION} == _REGISTERED_V1_ATTESTATION
+    assert {key: plugin[key] for key in _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION} == _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION
     assert app["apps"]["exomem"]["id"] == _REGISTERED_OPENAI_APP_ID
     assert plugin["rollout_state"] == "awaiting-post-deploy-refresh"
     _assert_records_pending_acceptance(plugin, surface)
