@@ -2,9 +2,10 @@
 
 ## One worktree per change (sessions share a checkout)
 
-This repo is often edited by several Claude Code sessions at once over a single
-checkout, so switching branches or stashing in the main working tree disrupts the
-other session. Do every new change in its own git worktree:
+This repo is often edited by several Claude Code sessions at once. Switching
+branches in the shared primary checkout disrupts other sessions, so do every new
+change in its own git worktree. Do not use `git stash` from any checkout:
+`refs/stash` is repository-global, so a pop can apply another worktree's entry.
 
 ```
 git worktree add ../exomem-<topic> -b <branch>
