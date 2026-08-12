@@ -113,9 +113,7 @@ def validate_runtime_role(
             # role it creates to the account owner (Neon does this as `cloud_admin`),
             # so requiring no members at all is unsatisfiable there. Reject any grant
             # that can actually assume the runtime role, and any other grantee.
-            membership.member != database_owner
-            or membership.inherits
-            or membership.can_set_role
+            membership.member != database_owner or membership.inherits or membership.can_set_role
             for membership in state.members
         )
     ):
@@ -135,26 +133,28 @@ def _required_environment(name: str) -> str:
     return value
 
 
-def _database_url(name: str) -> URL:
+def validate_runtime_database_url(value: str) -> URL:
+    """Validate one direct, session-capable asyncpg runtime URL."""
+
     try:
-        value = make_url(_required_environment(name))
+        url = make_url(value)
     except Exception as error:
         raise DatabaseBootstrapError("database command configuration is invalid") from error
     if (
-        value.drivername != "postgresql+asyncpg"
-        or not value.username
-        or value.password is None
-        or not value.host
-        or not value.database
+        url.drivername != "postgresql+asyncpg"
+        or not url.username
+        or url.password is None
+        or not url.host
+        or not url.database
     ):
         raise DatabaseBootstrapError("database command configuration is invalid")
     query = {
         str(key).lower(): tuple(
             str(item).lower() for item in (raw if isinstance(raw, tuple) else (raw,))
         )
-        for key, raw in value.query.items()
+        for key, raw in url.query.items()
     }
-    hostname = str(value.host).lower().rstrip(".")
+    hostname = str(url.host).lower().rstrip(".")
     hostname_labels = hostname.split(".")
     explicit_session_pool = query.get("pool_mode") == ("session",)
     known_neon_transaction_pool = hostname.endswith(".neon.tech") and any(
@@ -175,14 +175,15 @@ def _database_url(name: str) -> URL:
         or "transaction" in query.get("pooling", ())
         or (
             not explicit_session_pool
-            and any(
-                item in {"1", "true", "yes", "on"}
-                for item in query.get("pgbouncer", ())
-            )
+            and any(item in {"1", "true", "yes", "on"} for item in query.get("pgbouncer", ()))
         )
     ):
         raise DatabaseBootstrapError("database command configuration is invalid")
-    return value.difference_update_query(["pool_mode"])
+    return url.difference_update_query(["pool_mode"])
+
+
+def _database_url(name: str) -> URL:
+    return validate_runtime_database_url(_required_environment(name))
 
 
 def load_configuration(*, require_admin: bool) -> DatabaseCommandConfiguration:
@@ -264,9 +265,7 @@ async def _acquire_lock(
 ) -> None:
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while True:
-        acquired = await connection.scalar(
-            text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
-        )
+        acquired = await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
         if acquired is True:
             return
         if asyncio.get_running_loop().time() >= deadline:
@@ -289,22 +288,16 @@ def new_lock_domain_challenge() -> int:
 async def _prove_lock_domain(connection: AsyncConnection, *, key: int) -> None:
     """Prove that another session in this cluster already owns the challenge."""
 
-    acquired = await connection.scalar(
-        text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
-    )
+    acquired = await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
     if acquired is not True:
         return
-    released = await connection.scalar(
-        text("SELECT pg_advisory_unlock(:key)"), {"key": key}
-    )
+    released = await connection.scalar(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
     if released is not True:
         raise DatabaseBootstrapError("database lock domain is invalid")
     raise DatabaseBootstrapError("database lock domain is invalid")
 
 
-async def _runtime_role_state(
-    connection: AsyncConnection, role: str
-) -> RuntimeRoleState | None:
+async def _runtime_role_state(connection: AsyncConnection, role: str) -> RuntimeRoleState | None:
     row = (
         await connection.execute(
             text(
@@ -363,9 +356,7 @@ async def _runtime_role_state(
 
 async def _database_owner(connection: AsyncConnection, database: str) -> str:
     owner = await connection.scalar(
-        text(
-            "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = :database"
-        ),
+        text("SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = :database"),
         {"database": database},
     )
     if not isinstance(owner, str):
@@ -464,10 +455,13 @@ async def _revisions(connection: AsyncConnection, schema: str) -> tuple[str, ...
     )
 
 
-def _upgrade(connection: object, packaged: PackagedMigrations, configuration: DatabaseCommandConfiguration) -> None:
+def _upgrade(
+    connection: object, packaged: PackagedMigrations, configuration: DatabaseCommandConfiguration
+) -> None:
     alembic_configuration = Config(str(Path(packaged.configuration.config_file_name or "")))
     alembic_configuration.set_main_option(
-        "sqlalchemy.url", configuration.runtime_url.render_as_string(hide_password=False).replace("%", "%%")
+        "sqlalchemy.url",
+        configuration.runtime_url.render_as_string(hide_password=False).replace("%", "%%"),
     )
     alembic_configuration.attributes.update(
         {

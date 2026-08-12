@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -15,6 +16,87 @@ def _module():
     return recovery
 
 
+def _selected_deployment_lock_json() -> str:
+    values = (
+        Path(__file__).resolve().parents[3] / "infra/helm/platform/values.validation.yaml"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"^  deploymentLockJson: \|\n    (?P<lock>\{.*\})$", values, re.MULTILINE)
+    assert match is not None
+    return match.group("lock")
+
+
+def _recovery_environment(**overrides: str) -> dict[str, str]:
+    values = {
+        "EXOMEM_RECOVERY_DATABASE_URL": "postgresql+asyncpg://recovery_role:password@db.example/recovery_db",
+        "EXOMEM_RECOVERY_DATABASE_SCHEMA": "recovery_schema",
+        "EXOMEM_RECOVERY_DATABASE_ROLE": "recovery_role",
+        "EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS": "1",
+        "EXOMEM_RECOVERY_ENVELOPE_KEY": "e" * 32,
+        "EXOMEM_RECOVERY_PROVIDER_RECOVERY_PUBLIC_KEY": "p" * 43,
+        "EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON": _selected_deployment_lock_json(),
+        "EXOMEM_RECOVERY_HCLOUD_TOKEN": "h" * 32,
+        "EXOMEM_RECOVERY_HCLOUD_LOCATION": "fsn1",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_recovery_settings_accept_only_the_exact_minimal_environment() -> None:
+    from exomem_provisioner.recovery_settings import load_recovery_settings
+
+    settings = load_recovery_settings(_recovery_environment())
+
+    assert settings.database_name == "recovery_db"
+    assert settings.deployment_lock.components.provisioner.image.endswith("b" * 64)
+    assert settings.hcloud_location == "fsn1"
+    for name, value in (
+        (
+            "EXOMEM_RECOVERY_DATABASE_URL",
+            "postgresql+asyncpg://recovery_role:password@db-pooler.example/recovery_db",
+        ),
+        ("EXOMEM_RECOVERY_DATABASE_SCHEMA", "public"),
+        ("EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS", "0"),
+        ("EXOMEM_RECOVERY_HCLOUD_TOKEN", "short"),
+        ("EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON", "{}"),
+        ("EXOMEM_RECOVERY_UNRELATED_SECRET", "forbidden"),
+        ("EXOMEM_PROVISIONER_BEARER", "b" * 32),
+        ("EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY", "s" * 43),
+    ):
+        environment = _recovery_environment(**{name: value})
+        with pytest.raises(ValueError):
+            load_recovery_settings(environment)
+
+
+def test_recovery_settings_retain_the_sanitized_session_pool_url() -> None:
+    from exomem_provisioner.recovery_settings import load_recovery_settings
+
+    settings = load_recovery_settings(
+        _recovery_environment(
+            EXOMEM_RECOVERY_DATABASE_URL=(
+                "postgresql+asyncpg://recovery_role:password@session-pooler.example/"
+                "recovery_db?pool_mode=session"
+            )
+        )
+    )
+
+    assert "pool_mode" not in settings.database_url.get_secret_value()
+    for absent in _recovery_environment():
+        environment = _recovery_environment()
+        environment.pop(absent)
+        with pytest.raises(ValueError):
+            load_recovery_settings(environment)
+
+
+def test_recovery_command_constructs_only_dedicated_recovery_settings() -> None:
+    recovery = _module()
+    source = Path(recovery.__file__).read_text(encoding="utf-8")
+
+    assert "RecoverySettings" in source
+    assert "ProvisionerSettings()" not in source
+    assert "ProviderWorkerSettings()" not in source
+    assert "VolumeWorkerSettings()" not in source
+
+
 def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -27,7 +109,7 @@ def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
     )
     parser = recovery._parser()
     assert parser.parse_args(["preflight", "--stdin"]).mode == "preflight"
-    for mode in ("reopen", "inspect", "verify-receipt"):
+    for mode in ("reopen", "inspect", "verify-recovery"):
         assert parser.parse_args([mode, "--stdin"]).mode == mode
     with pytest.raises(recovery.RecoveryRefusal):
         parser.parse_args(["anything-else", "--stdin"])
@@ -42,6 +124,23 @@ def test_recovery_command_never_echoes_rejected_arguments(
     forbidden = str(uuid.uuid4())
 
     assert recovery.main(["preflight", "--operation-id", forbidden]) == 2
+
+    captured = capsys.readouterr()
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert json.loads(captured.out) == {
+        "refusal": "command arguments are invalid",
+        "status": "refused",
+    }
+
+
+def test_recovery_command_accepts_operation_identity_only_from_stdin(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recovery = _module()
+    forbidden = "/secure/operator/operation-id"
+
+    assert recovery.main(["preflight", "--identity-file", forbidden]) == 2
 
     captured = capsys.readouterr()
     assert forbidden not in captured.out
@@ -70,34 +169,11 @@ def test_operation_identity_stdin_never_leaks_confidential_value() -> None:
     assert recovery.read_operation_identity(stdin=identity + "\n") == identity
 
 
-def test_operation_identity_file_requires_owned_regular_mode_0600(tmp_path: Path) -> None:
+def test_operation_identity_requires_stdin() -> None:
     recovery = _module()
-    identity = str(uuid.uuid4())
-    path = tmp_path / "identity"
-    path.write_text(identity + "\n", encoding="utf-8")
-    path.chmod(0o600)
-
-    assert recovery.read_operation_identity(identity_file=path) == identity
-
-    path.chmod(0o640)
-    with pytest.raises(recovery.RecoveryRefusal, match="operation identity file is unsafe"):
-        recovery.read_operation_identity(identity_file=path)
-
-    path.chmod(0o600)
-    linked = tmp_path / "linked"
-    linked.symlink_to(path)
-    with pytest.raises(recovery.RecoveryRefusal, match="operation identity file is unsafe"):
-        recovery.read_operation_identity(identity_file=linked)
-
-
-def test_operation_identity_rejects_both_or_neither_source() -> None:
-    recovery = _module()
-    identity = str(uuid.uuid4())
 
     with pytest.raises(recovery.RecoveryRefusal, match="operation identity source is invalid"):
         recovery.read_operation_identity()
-    with pytest.raises(recovery.RecoveryRefusal, match="operation identity source is invalid"):
-        recovery.read_operation_identity(stdin=identity + "\n", identity_file=Path("/tmp/identity"))
 
 
 def test_canonical_hash_is_order_stable_and_never_serializes_secret_fields() -> None:
@@ -111,131 +187,50 @@ def test_canonical_hash_is_order_stable_and_never_serializes_secret_fields() -> 
     second = dict(reversed(tuple(first.items())))
 
     assert recovery.canonical_sha256(first) == recovery.canonical_sha256(second)
-    receipt = recovery.RecoveryReceiptPayload(
-        schema_version=1,
-        helper_source_sha256="9" * 64,
-        old_state="error",
-        old_checkpoint="failed",
-        new_state="pending",
-        new_checkpoint="volume-owned",
-        resource_count=4,
-        route_count=0,
-        init_job_present=False,
-        init_job_complete=False,
-        operation_sha256="a" * 64,
-        preserved_sha256="a" * 64,
-        request_sha256="b" * 64,
-        request_ciphertext_sha256="b" * 64,
-        resources_sha256="c" * 64,
-        reservation_sha256="d" * 64,
-        tenant_fence_sha256="e" * 64,
-        first_observation_sha256="f" * 64,
-        second_observation_sha256="0" * 64,
-        committed_operation_sha256="1" * 64,
+    marker = recovery.recovery_marker(
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=7,
         committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
     )
-    encoded = recovery.canonical_receipt_bytes(receipt.to_payload())
-    assert b"operation_sha256" in encoded
-    assert b"request_ciphertext_sha256" in encoded
+    encoded = recovery.canonical_receipt_bytes(marker)
+    assert b"preflight_sha256" in encoded
+    assert b"helper_source_sha256" in encoded
     assert b"reference" not in encoded
 
 
-def test_transactional_receipt_payload_is_content_free_and_hashable() -> None:
+def test_recovery_marker_is_content_free_and_exact() -> None:
     recovery = _module()
-    receipt = recovery.RecoveryReceiptPayload(
-        schema_version=1,
-        helper_source_sha256="9" * 64,
-        old_state="error",
-        old_checkpoint="failed",
-        new_state="pending",
-        new_checkpoint="volume-owned",
-        resource_count=4,
-        route_count=0,
-        init_job_present=False,
-        init_job_complete=False,
-        operation_sha256="a" * 64,
-        preserved_sha256="a" * 64,
-        request_sha256="b" * 64,
-        request_ciphertext_sha256="b" * 64,
-        resources_sha256="c" * 64,
-        reservation_sha256="d" * 64,
-        tenant_fence_sha256="e" * 64,
-        first_observation_sha256="f" * 64,
-        second_observation_sha256="0" * 64,
-        committed_operation_sha256="1" * 64,
+    marker = recovery.recovery_marker(
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=7,
         committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
     )
 
-    encoded = recovery.canonical_receipt_bytes(receipt.to_payload())
-    assert set(json.loads(encoded)) == recovery._RECEIPT_PAYLOAD_KEYS
-    assert b"request_ciphertext_sha256" in encoded and b"reference" not in encoded
-
-
-def test_receipt_digest_binds_every_content_free_receipt_field() -> None:
-    recovery = _module()
-    receipt = recovery.RecoveryReceiptPayload(
-        schema_version=1,
-        helper_source_sha256="9" * 64,
-        old_state="error",
-        old_checkpoint="failed",
-        new_state="pending",
-        new_checkpoint="volume-owned",
-        resource_count=4,
-        route_count=0,
-        init_job_present=False,
-        init_job_complete=False,
-        operation_sha256="a" * 64,
-        preserved_sha256="b" * 64,
-        request_sha256="c" * 64,
-        request_ciphertext_sha256="d" * 64,
-        resources_sha256="e" * 64,
-        reservation_sha256="f" * 64,
-        tenant_fence_sha256="0" * 64,
-        first_observation_sha256="1" * 64,
-        second_observation_sha256="2" * 64,
-        committed_operation_sha256="3" * 64,
-        committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
-    )
-
-    assert set(receipt.to_payload()) == recovery._RECEIPT_PAYLOAD_KEYS
-    assert recovery.canonical_sha256(receipt.to_payload()) != recovery.canonical_sha256(
-        replace(receipt, init_job_complete=True).to_payload()
-    )
-
-
-def test_recovery_receipt_model_is_one_to_one_content_free_and_immutable() -> None:
-    from exomem_provisioner.database import DATABASE_REVISION
-    from exomem_provisioner.models import OperationRecoveryReceipt
-
-    assert DATABASE_REVISION == "0007_operation_recovery_receipt"
-    table = OperationRecoveryReceipt.__table__
-    assert set(table.c.keys()) == {
-        "operation_id",
-        "schema_version",
-        "helper_source_sha256",
-        "old_state",
-        "old_checkpoint",
-        "new_state",
-        "new_checkpoint",
-        "resource_count",
-        "route_count",
-        "init_job_present",
-        "init_job_complete",
-        "operation_sha256",
-        "preserved_sha256",
-        "request_sha256",
-        "request_ciphertext_sha256",
-        "resources_sha256",
-        "reservation_sha256",
-        "tenant_fence_sha256",
-        "first_observation_sha256",
-        "second_observation_sha256",
-        "committed_operation_sha256",
-        "committed_at",
+    assert marker == {
+        "schema": 1,
+        "preflight_sha256": "a" * 64,
+        "helper_source_sha256": "b" * 64,
+        "claim_generation": 7,
+        "committed_at": "2030-01-02T03:04:05Z",
     }
-    assert table.c.operation_id.primary_key is True
-    assert table.c.operation_id.foreign_keys
-    assert {"tenant_id", "cell_id", "provider_operation_id"}.isdisjoint(table.c.keys())
+    assert recovery.parse_recovery_marker(marker) == marker
+    for changed in (
+        {"schema": 2},
+        {"preflight_sha256": "short"},
+        {"reference": "secret"},
+    ):
+        with pytest.raises(recovery.RecoveryRefusal):
+            recovery.parse_recovery_marker({**marker, **changed})
+
+
+def test_database_stays_at_0006_without_recovery_receipt_table() -> None:
+    from exomem_provisioner.database import DATABASE_REVISION
+    from exomem_provisioner.models import Base
+
+    assert DATABASE_REVISION == "0006_operation_wire_protocol"
+    assert "operation_recovery_receipts" not in Base.metadata.tables
 
 
 def test_recovery_refusal_output_is_fixed_and_content_free(
@@ -259,7 +254,9 @@ def test_sqlite_is_refused_before_any_recovery_work() -> None:
         recovery.require_postgresql("sqlite")
 
 
-def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_or_terminating() -> None:
+def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_or_terminating() -> (
+    None
+):
     recovery = _module()
 
     absent = recovery.LiveObservation(
@@ -275,10 +272,14 @@ def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_
         routes_present=0,
     )
     assert recovery.validate_live_observation(absent) is None
-    assert recovery.validate_live_observation(
-        replace(absent, init_job_present=True, init_complete=True)
-    ) is None
+    assert (
+        recovery.validate_live_observation(
+            replace(absent, init_job_present=True, init_complete=True)
+        )
+        is None
+    )
     for changed in (
+        {"init_job_present": True},
         {"init_job_present": True, "init_failed_only": True},
         {"pvc_bound": False},
         {"terminating": True},
@@ -286,9 +287,7 @@ def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_
         {"routes_present": 1},
     ):
         with pytest.raises(recovery.RecoveryRefusal, match="live recovery preflight failed"):
-            recovery.validate_live_observation(
-                replace(absent, **changed)
-            )
+            recovery.validate_live_observation(replace(absent, **changed))
 
 
 def test_reopen_is_single_exact_cas_and_a_second_invocation_is_noop() -> None:
@@ -364,7 +363,20 @@ async def test_production_observer_compares_live_volume_fields_not_absent_hcloud
 
     class Registry:
         async def inspect(self, current, owned):
-            return type("Snapshot", (), {"namespace": True, "release": True, "init_job_present": False, "init_complete": False, "init_failed": False, "serving": False, "runtime_admitted": False, "routes": (False, False)})()
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "namespace": True,
+                    "release": True,
+                    "init_job_present": False,
+                    "init_complete": False,
+                    "init_failed": False,
+                    "serving": False,
+                    "runtime_admitted": False,
+                    "routes": (False, False),
+                },
+            )()
 
         async def authenticate_recovery_record(self, current):
             return "a" * 64
@@ -375,16 +387,36 @@ async def test_production_observer_compares_live_volume_fields_not_absent_hcloud
 
     class HCloud:
         async def verify_recovery_volume(self, handle, current, location, envelope):
-            return (handle, current, location, envelope) == ("42", metadata, "fsn1", "hcloud-envelope")
+            return (handle, current, location, envelope) == (
+                "42",
+                metadata,
+                "fsn1",
+                "hcloud-envelope",
+            )
 
     class Cell:
         async def volume_claim_bound(self, current):
             return current == metadata
 
-    observer = recovery._ProductionRecoveryObserver(Registry(), Cell(), Volumes(), HCloud(), "fsn1", Codec())
-    operation = type("Operation", (), {"cell_id": "cell-alpha", "tenant_id": "tenant-alpha", "external_operation_id": "provider-alpha", "fence_generation": 7})()
+    observer = recovery._ProductionRecoveryObserver(
+        Registry(), Cell(), Volumes(), HCloud(), "fsn1", Codec()
+    )
+    operation = type(
+        "Operation",
+        (),
+        {
+            "cell_id": "cell-alpha",
+            "tenant_id": "tenant-alpha",
+            "external_operation_id": "provider-alpha",
+            "fence_generation": 7,
+        },
+    )()
     resources = tuple(
-        type("Resource", (), {"kind": kind, "reference_ciphertext": kind.value, "operation_id": "internal"})()
+        type(
+            "Resource",
+            (),
+            {"kind": kind, "reference_ciphertext": kind.value, "operation_id": "internal"},
+        )()
         for kind in references
     )
 
@@ -392,7 +424,9 @@ async def test_production_observer_compares_live_volume_fields_not_absent_hcloud
     assert observed.volume_present is True
 
 
-def test_main_converts_refusals_to_content_free_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_converts_refusals_to_content_free_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     recovery = _module()
 
     async def refuse(_: object) -> dict[str, object]:
