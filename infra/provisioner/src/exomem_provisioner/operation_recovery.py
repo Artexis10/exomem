@@ -6,8 +6,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
-import stat
 import sys
 import uuid
 from collections.abc import Sequence
@@ -146,30 +144,10 @@ class _RecoverySnapshot:
     tenant_fence_sha256: str
 
 
-def read_operation_identity(*, stdin: str | None = None, identity_file: Path | None = None) -> str:
-    if (stdin is None) == (identity_file is None):
+def read_operation_identity(*, stdin: str | None = None) -> str:
+    if stdin is None:
         raise RecoveryRefusal("operation identity source is invalid")
-    if identity_file is not None:
-        try:
-            metadata = identity_file.stat(follow_symlinks=False)
-            if (
-                identity_file.is_symlink()
-                or not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.getuid()
-                or stat.S_IMODE(metadata.st_mode) != 0o600
-            ):
-                raise RecoveryRefusal("operation identity file is unsafe")
-            descriptor = os.open(identity_file, os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError as error:
-            raise RecoveryRefusal("operation identity file is unsafe") from error
-        try:
-            raw = os.read(descriptor, 128).decode("ascii")
-        except (OSError, UnicodeDecodeError) as error:
-            raise RecoveryRefusal("operation identity file is unsafe") from error
-        finally:
-            os.close(descriptor)
-    else:
-        raw = stdin or ""
+    raw = stdin
     if raw.count("\n") != 1 or not raw.endswith("\n"):
         raise RecoveryRefusal("operation identity is invalid")
     value = raw[:-1]
@@ -863,9 +841,7 @@ def emit_result(payload: dict[str, object]) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = _RecoveryArgumentParser(add_help=False)
     parser.add_argument("mode", choices=_FIXED_MODES)
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--stdin", action="store_true")
-    source.add_argument("--identity-file", type=Path)
+    parser.add_argument("--stdin", action="store_true", required=True)
     return parser
 
 
@@ -928,10 +904,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             deployment_lock=settings.deployment_lock,
             observer=observer,
         )
-        operation_id = read_operation_identity(
-            stdin=sys.stdin.read() if args.stdin else None,
-            identity_file=args.identity_file,
-        )
+        operation_id = read_operation_identity(stdin=sys.stdin.read())
         match args.mode:
             case "preflight":
                 return await service.preflight(operation_id)

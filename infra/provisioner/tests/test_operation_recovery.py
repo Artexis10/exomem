@@ -134,6 +134,23 @@ def test_recovery_command_never_echoes_rejected_arguments(
     }
 
 
+def test_recovery_command_accepts_operation_identity_only_from_stdin(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recovery = _module()
+    forbidden = "/secure/operator/operation-id"
+
+    assert recovery.main(["preflight", "--identity-file", forbidden]) == 2
+
+    captured = capsys.readouterr()
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+    assert json.loads(captured.out) == {
+        "refusal": "command arguments are invalid",
+        "status": "refused",
+    }
+
+
 @pytest.mark.parametrize(
     "raw",
     ["", "\n", "not-a-uuid\n", f"{uuid.uuid4()}\n{uuid.uuid4()}\n"],
@@ -152,34 +169,11 @@ def test_operation_identity_stdin_never_leaks_confidential_value() -> None:
     assert recovery.read_operation_identity(stdin=identity + "\n") == identity
 
 
-def test_operation_identity_file_requires_owned_regular_mode_0600(tmp_path: Path) -> None:
+def test_operation_identity_requires_stdin() -> None:
     recovery = _module()
-    identity = str(uuid.uuid4())
-    path = tmp_path / "identity"
-    path.write_text(identity + "\n", encoding="utf-8")
-    path.chmod(0o600)
-
-    assert recovery.read_operation_identity(identity_file=path) == identity
-
-    path.chmod(0o640)
-    with pytest.raises(recovery.RecoveryRefusal, match="operation identity file is unsafe"):
-        recovery.read_operation_identity(identity_file=path)
-
-    path.chmod(0o600)
-    linked = tmp_path / "linked"
-    linked.symlink_to(path)
-    with pytest.raises(recovery.RecoveryRefusal, match="operation identity file is unsafe"):
-        recovery.read_operation_identity(identity_file=linked)
-
-
-def test_operation_identity_rejects_both_or_neither_source() -> None:
-    recovery = _module()
-    identity = str(uuid.uuid4())
 
     with pytest.raises(recovery.RecoveryRefusal, match="operation identity source is invalid"):
         recovery.read_operation_identity()
-    with pytest.raises(recovery.RecoveryRefusal, match="operation identity source is invalid"):
-        recovery.read_operation_identity(stdin=identity + "\n", identity_file=Path("/tmp/identity"))
 
 
 def test_canonical_hash_is_order_stable_and_never_serializes_secret_fields() -> None:
