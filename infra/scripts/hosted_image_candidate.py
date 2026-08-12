@@ -170,6 +170,7 @@ def validate_records_compatibility_claim(
         },
     )
     target = _runtime_target(records["runtimeTarget"], label="recordsCompatibility.runtimeTarget")
+    release = _mapping(candidate.get("release"), label="release", fields={"tag", "version"})
     issued_at = _rfc3339_utc(records["issuedAt"], label="recordsCompatibility.issuedAt")
     expires_at = _rfc3339_utc(records["expiresAt"], label="recordsCompatibility.expiresAt")
     if (
@@ -180,7 +181,7 @@ def validate_records_compatibility_claim(
         or records["signerWorkflowDigest"] != workflow["signerWorkflowDigest"]
         or expires_at <= issued_at
         or expires_at - issued_at > _RECORDS_COMPATIBILITY_MAX_TTL
-        or target["releaseVersion"] != candidate["release"]["version"]
+        or target["releaseVersion"] != release["version"]
         or target["agentProfile"] != records["profile"]
     ):
         _error("runtime Records compatibility is invalid")

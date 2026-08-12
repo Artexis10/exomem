@@ -307,13 +307,14 @@ def prepare_v2(
         raise ReleaseManifestError("deployment lock v3 requires runtime selection")
     if schema_version == 2 and runtime_selection not in {None, "active"}:
         raise ReleaseManifestError("deployment runtime selection is invalid")
-    provisioner = {
+    provisioner: dict[str, object] = {
         "deploymentLockJson": _canonical(selected).decode("utf-8"),
         "deploymentLockSha256": digest,
         "controlHostname": control_hostname,
         "transferHostname": transfer_hostname,
     }
     if schema_version == 3:
+        assert runtime_selection is not None
         provisioner["runtimeSelection"] = runtime_selection
     _write_private_json(
         values_path,
