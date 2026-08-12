@@ -1344,7 +1344,7 @@ def verify_v3_rollback_runtime_candidate(
     image = verified["image"]["reference"]
     source = verified["source"]["commit"]
     claim = composer.hosted_image_candidate.validate_records_compatibility_claim(
-        verified, require_fresh=True
+        verified, require_fresh=False
     )
     expected_claim = rollback.get("readerStatusProof") if isinstance(rollback, dict) else None
     expected_target = rollback.get("runtimeTarget") if isinstance(rollback, dict) else None

@@ -24,6 +24,10 @@ target for that exact release. The trusted workflow adds the fixed v1 profile, r
 lifecycle-disabled, and bounded freshness claims before signing and retaining the
 candidate with the release. An omitted target continues to produce the unchanged v1
 candidate shape; the workflow never invents a cross-repository runtime target.
+Freshness is required when that candidate is composed into a reviewed v3 lock. Later
+deployment and emergency rollback reverify its exact signed bytes, digest, image, source,
+reader status, and target against the immutable lock; they do not expire the already
+reviewed rollback unit on wall-clock time.
 
 ```bash
 infra/scripts/validate.sh

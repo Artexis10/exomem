@@ -674,7 +674,7 @@ def test_selected_v3_lock_discovers_the_signed_rollback_candidate_from_its_relea
     assert verified == [(candidate, image_bundle, candidate_bundle)]
 
 
-def test_v3_rollback_runtime_verification_rejects_a_claim_stale_since_composition(
+def test_v3_rollback_runtime_verification_accepts_an_exact_claim_after_composition_ttl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     verifier = _module(VERIFIER)
@@ -690,10 +690,11 @@ def test_v3_rollback_runtime_verification_rejects_a_claim_stale_since_compositio
         "image": {"reference": rollback["image"]},
         "source": {"commit": rollback["sourceCommit"]},
     }
+    expected_claim = {**rollback["readerStatusProof"], "runtimeTarget": rollback["runtimeTarget"]}
     candidate_module = SimpleNamespace(
         validate_records_compatibility_claim=lambda _candidate, **kwargs: freshness.append(
             kwargs["require_fresh"]
-        ) or (_ for _ in ()).throw(ValueError("runtime Records compatibility is stale"))
+        ) or expected_claim
     )
     composer = SimpleNamespace(
         CandidateInput=lambda *_args: object(),
@@ -702,15 +703,14 @@ def test_v3_rollback_runtime_verification_rejects_a_claim_stale_since_compositio
     )
     monkeypatch.setattr(verifier, "_load_script", lambda _name: composer)
 
-    with pytest.raises(ValueError, match="stale"):
-        verifier.verify_v3_rollback_runtime_candidate(
-            lock,
-            candidate=candidate,
-            candidate_sha256=rollback["candidateSha256"],
-            image_bundle=image_bundle,
-            candidate_bundle=candidate_bundle,
-        )
-    assert freshness == [True]
+    verifier.verify_v3_rollback_runtime_candidate(
+        lock,
+        candidate=candidate,
+        candidate_sha256=rollback["candidateSha256"],
+        image_bundle=image_bundle,
+        candidate_bundle=candidate_bundle,
+    )
+    assert freshness == [False]
 
 
 def test_deploy_runbook_mandates_the_selected_lock_verifier() -> None:
