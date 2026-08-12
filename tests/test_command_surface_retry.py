@@ -526,6 +526,7 @@ def test_identical_pending_retry_waits_outside_mutation_boundary_and_replays(
         return {"value": value}
 
     command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
+    (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
         mutation_timeout_seconds=0.05,

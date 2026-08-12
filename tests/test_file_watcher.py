@@ -413,6 +413,17 @@ def test_non_markdown_is_ignored(vault, monkeypatch: pytest.MonkeyPatch) -> None
     assert ups == [] and dels == []
 
 
+def test_observed_access_policy_edit_marks_external_pending(vault: Path) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    policy = vault / "Knowledge Base" / "_access.yaml"
+    policy.write_text("excluded: []\n", encoding="utf-8")
+
+    watcher._record(policy, deleted=False)
+
+    assert freshness.external_pending(vault) is True
+    assert watcher._pending_upsert == set()
+
+
 # ---- Automatic governed-media dispatch (OpenSpec: automatic-media-processing) ----
 
 

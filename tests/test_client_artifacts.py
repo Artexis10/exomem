@@ -607,6 +607,7 @@ def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
 ) -> None:
     from exomem import client_artifacts, writer_lease
 
+    (tmp_path / "Knowledge Base").mkdir()
     command = _command("preserve_artifacts")
     stage_calls: list[str] = []
     commit_calls: list[str] = []

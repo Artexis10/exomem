@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, epistemic_graph, freshness, index_sync, reconcile, semantic_index
+from exomem import audit, epistemic_graph, freshness, graph_sync, index_sync, reconcile, semantic_index
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
@@ -95,16 +95,21 @@ def _spawn_graph_mutation(
 def test_graph_mutation_lock_is_shared_and_rooted_inside_vault_kb(
     tmp_path: Path,
 ) -> None:
+    from exomem.writer_lease import active_manager
+
     vault = tmp_path / "vault"
     _seed(vault)
 
     first = epistemic_graph.EpistemicGraphIndex(vault)
     second = epistemic_graph.EpistemicGraphIndex(vault / ".")
 
-    expected_root = (vault / "Knowledge Base" / ".graph-coordination").resolve()
+    expected_root = active_manager().config.state_dir
     assert first._mutation_coordinator.state_root == expected_root
     assert first._mutation_coordinator.lock_path == second._mutation_coordinator.lock_path
-    assert first._mutation_coordinator.timeout_seconds == 30.0
+    assert (
+        first._mutation_coordinator.timeout_seconds
+        == active_manager()._mutation_timeout_seconds
+    )
 
 
 def test_graph_mutation_lock_unavailable_preserves_current_graph(
@@ -124,10 +129,10 @@ def test_graph_mutation_lock_unavailable_preserves_current_graph(
         timeout_seconds=0.05,
     )
 
-    with pytest.raises(OpError) as raised:
+    with pytest.raises(graph_sync.GraphRebuildLockUnavailable) as raised:
         index.rebuild_all()
 
-    assert raised.value.code == "MUTATION_LOCK_UNAVAILABLE"
+    assert raised.value.code == "GRAPH_SYNC_REBUILD_LOCK_UNAVAILABLE"
     assert index.available() is True
     assert index.nodes() == before_nodes
     assert index.edges() == before_edges
@@ -157,7 +162,7 @@ def test_graph_dispatch_wrappers_propagate_structured_lock_errors(
 
 
 @pytest.mark.parametrize("operation", ["refresh", "delete"])
-def test_spawned_mutator_waits_for_full_rebuild_mutation_boundary(
+def test_spawned_mutator_commits_while_full_rebuild_is_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     context = multiprocessing.get_context("spawn")
@@ -200,7 +205,7 @@ def test_spawned_mutator_waits_for_full_rebuild_mutation_boundary(
     child.start()
     try:
         assert attempting.wait(5.0)
-        assert not completed.wait(0.5)
+        assert completed.wait(0.5)
     finally:
         release_rebuild.set()
         rebuild_thread.join(timeout=8.0)
@@ -215,7 +220,7 @@ def test_spawned_mutator_waits_for_full_rebuild_mutation_boundary(
     assert child.exitcode == 0
 
 
-def test_neighbor_reader_admitted_before_rebuild_sees_complete_old_snapshot(
+def test_neighbor_reader_during_rebuild_sees_complete_old_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = tmp_path / "vault"
@@ -224,32 +229,17 @@ def test_neighbor_reader_admitted_before_rebuild_sees_complete_old_snapshot(
     index.rebuild_all()
     expected = index.neighbors_for([A])
     assert expected
-    snapshot_admitted = threading.Event()
     writer_entered = threading.Event()
+    release_rebuild = threading.Event()
     reader_results: list[list[epistemic_graph.GraphNeighbor]] = []
     reader_errors: list[Exception] = []
     writer_errors: list[Exception] = []
-    real_rebuild_pass = index._rebuild_all_pass
+    real_index_path = index._index_path
 
-    def open_snapshot():
-        conn = sqlite3.connect(index.path)
-        conn.execute("BEGIN")
-        markers = dict(
-            conn.execute(
-                "SELECT key, value FROM graph_meta WHERE key IN "
-                "('schema_version', 'core_registry_version', 'extension_registry_hash')"
-            ).fetchall()
-        )
-        assert markers["schema_version"] == str(epistemic_graph.SCHEMA_VERSION)
-        snapshot_admitted.set()
-        if not writer_entered.wait(5.0):
-            conn.close()
-            raise RuntimeError("writer did not enter rebuild")
-        return conn
-
-    def rebuild_pass(resolver):
+    def index_path(*args, **kwargs):
         writer_entered.set()
-        return real_rebuild_pass(resolver)
+        assert release_rebuild.wait(5.0)
+        return real_index_path(*args, **kwargs)
 
     def read_neighbors() -> None:
         try:
@@ -263,17 +253,18 @@ def test_neighbor_reader_admitted_before_rebuild_sees_complete_old_snapshot(
         except Exception as exc:  # noqa: BLE001 - asserted in parent thread
             writer_errors.append(exc)
 
-    monkeypatch.setattr(index, "_open_read_snapshot", open_snapshot, raising=False)
-    monkeypatch.setattr(index, "_rebuild_all_pass", rebuild_pass)
+    monkeypatch.setattr(index, "_index_path", index_path)
     reader = threading.Thread(target=read_neighbors)
     writer = threading.Thread(target=rebuild)
-    reader.start()
     try:
-        assert snapshot_admitted.wait(3.0)
         writer.start()
+        assert writer_entered.wait(3.0)
+        reader.start()
         reader.join(timeout=8.0)
+        release_rebuild.set()
         writer.join(timeout=8.0)
     finally:
+        release_rebuild.set()
         if writer.is_alive():
             writer.join(timeout=3.0)
         if reader.is_alive():
@@ -320,10 +311,10 @@ def test_trusted_reads_after_marker_removal_never_expose_partial_rows(
     writer.start()
     try:
         assert partial_written.wait(3.0)
-        assert index.nodes() == []
-        assert index.edges() == []
-        assert index.neighbors_for([A]) == []
-        assert epistemic_graph.graph_context(vault, path=A)["available"] is False
+        assert index.nodes()
+        assert index.edges()
+        assert index.neighbors_for([A])
+        assert epistemic_graph.graph_context(vault, path=A)["available"] is True
     finally:
         release_rebuild.set()
         writer.join(timeout=8.0)
@@ -392,7 +383,7 @@ def test_full_rebuild_retries_when_target_is_renamed_after_snapshot(
     report = index.rebuild_all()
 
     assert source.exists()
-    assert acquisitions == 2
+    assert acquisitions == 3
     assert report["indexed_files"] == 2
     assert any(
         edge["relation_type"] == "links_to"
@@ -437,6 +428,7 @@ def test_full_rebuild_retry_acquisition_failure_marks_graph_unavailable(
     _seed(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
+    old_live = index.path.read_bytes()
     real_snapshot = find_module.recall_resolver_snapshot
     acquisitions = 0
 
@@ -456,6 +448,7 @@ def test_full_rebuild_retry_acquisition_failure_marks_graph_unavailable(
 
     assert acquisitions == 2
     assert index.available() is False
+    assert index.path.read_bytes() == old_live
 
 
 def test_full_rebuild_retry_freshness_failure_marks_graph_unavailable(
@@ -465,6 +458,7 @@ def test_full_rebuild_retry_freshness_failure_marks_graph_unavailable(
     _seed(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
+    old_live = index.path.read_bytes()
     real_freshness = epistemic_graph._disk_vault_freshness
     real_snapshot = find_module.recall_resolver_snapshot
     freshness_checks = 0
@@ -489,6 +483,7 @@ def test_full_rebuild_retry_freshness_failure_marks_graph_unavailable(
 
     assert freshness_checks == 3
     assert index.available() is False
+    assert index.path.read_bytes() == old_live
 
 
 def test_full_rebuild_pass_failure_marks_partial_graph_unavailable(
@@ -507,10 +502,10 @@ def test_full_rebuild_pass_failure_marks_partial_graph_unavailable(
     with pytest.raises(RuntimeError, match="index pass failed"):
         index.rebuild_all()
 
-    assert index.available() is False
+    assert index.available() is True
 
 
-def test_full_rebuild_keeps_schema_marker_absent_until_stable(
+def test_full_rebuild_keeps_previous_schema_marker_visible_until_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = tmp_path / "vault"
@@ -522,7 +517,7 @@ def test_full_rebuild_keeps_schema_marker_absent_until_stable(
 
     def index_path(*args, **kwargs):
         nonlocal indexed
-        assert index.available() is False
+        assert index.available() is True
         indexed += 1
         return real_index_path(*args, **kwargs)
 
@@ -540,17 +535,37 @@ def test_full_rebuild_rejects_direct_edit_before_availability_publication(
     vault = tmp_path / "vault"
     source, _target = _seed(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
-    real_mark_available = index._mark_available
+    index.rebuild_all()
+    with index._connect() as conn:
+        prior_rows = conn.execute(
+            "SELECT node_key, source_hash FROM graph_nodes ORDER BY node_key"
+        ).fetchall()
+    attempts = 0
+    temporary_paths: list[Path] = []
 
-    def mark_available(*args, **kwargs) -> bool:
-        source.write_text("# Edited after final graph freshness check\n", encoding="utf-8")
-        return real_mark_available(*args, **kwargs)
+    def race_before_replace(temporary: Path, live: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        assert live == index.path
+        assert temporary != live
+        temporary_paths.append(temporary)
+        source.write_text(
+            f"# Edited during availability publication attempt {attempts}\n",
+            encoding="utf-8",
+        )
+        freshness.mark_external_pending(vault)
 
-    monkeypatch.setattr(index, "_mark_available", mark_available)
+    monkeypatch.setattr(index, "_before_publish_replacement", race_before_replace)
 
     with pytest.raises(RuntimeError, match="did not stabilize"):
         index.rebuild_all()
 
+    assert attempts == 2
+    assert all(not temporary.exists() for temporary in temporary_paths)
+    with index._connect() as conn:
+        assert conn.execute(
+            "SELECT node_key, source_hash FROM graph_nodes ORDER BY node_key"
+        ).fetchall() == prior_rows
     assert index.available() is False
     assert index.nodes() == []
 
@@ -580,7 +595,9 @@ def test_full_rebuild_recovers_from_a_stale_live_registry(tmp_path: Path) -> Non
         ).fetchone()
     finally:
         conn.close()
-    assert checkpoint is None
+    assert checkpoint == (
+        epistemic_graph._checkpoint_value(freshness.recall_checkpoint(vault, "vault")),
+    )
 
 
 def test_checkpointless_refresh_rebuilds_unseen_direct_edits(tmp_path: Path) -> None:
@@ -653,7 +670,7 @@ def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
 
     assert overlap_triggered is True
     assert report["indexed_files"] == 1
-    assert index.available() is False
+    assert index.available() is True
 
 
 def test_refresh_missing_sidecar_routes_to_full_rebuild(tmp_path: Path) -> None:
@@ -691,7 +708,7 @@ def test_full_rebuild_first_post_pass_freshness_failure_marks_unavailable(
         index.rebuild_all()
 
     assert freshness_checks == 2
-    assert index.available() is False
+    assert index.available() is True
 
 
 def test_full_rebuild_snapshot_isolated_from_shared_cache_patch(
@@ -908,6 +925,31 @@ def test_live_incremental_refresh_does_not_repeat_a_full_disk_walk(
     current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
     assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
         source.read_text(encoding="utf-8")
+    )
+
+
+def test_source_version_recheck_preserves_crlf_bytes(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    source = vault / A
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(
+        b"---\r\ntype: insight\r\nstatus: active\r\n---\r\n"
+        b"# A\r\n\r\n## Claim\r\n\r\nWindows line endings stay exact.\r\n"
+    )
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    disk_freshness = epistemic_graph._disk_vault_freshness(vault)
+    resolver = find_module.recall_resolver_snapshot(vault, freshness=disk_freshness)
+    membership = index._recall_membership()
+
+    assert membership == frozenset({A})
+    versions = index._resolver_source_versions(resolver, membership)
+    assert versions is not None
+    assert index._source_versions_current(versions)
+    index.rebuild_all()
+    assert index.available()
+    file_node = next(node for node in index.nodes(path=A) if node["kind"] == "file")
+    assert file_node["source_hash"] == vault_module.content_hash(
+        source.read_bytes().decode("utf-8")
     )
 
 

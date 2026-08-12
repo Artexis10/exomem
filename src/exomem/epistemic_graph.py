@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -20,9 +23,10 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
-from . import find as find_module
 from . import (
+    access,
     freshness,
+    graph_sync,
     memory_refs,
     mutation_lock,
     recall_policy,
@@ -33,22 +37,25 @@ from . import (
     semantic_units,
     traversal_profiles,
 )
+from . import find as find_module
 from . import vault as vault_module
 from .cli_ops import OpError
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 8
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
 REBUILD_STABILIZATION_ATTEMPTS = 2
-GRAPH_MUTATION_TIMEOUT_SECONDS = 30.0
-GRAPH_COORDINATION_DIRNAME = ".graph-coordination"
+REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
 _RESOLVER_TOPOLOGY_KEY = "recall_resolver_topology"
 _READ_BARRIER_KEY = "read_barrier"
+_GRAPH_SYNC_CHECKPOINT_KEY = "graph_sync_checkpoint"
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -174,6 +181,16 @@ def graph_enabled() -> bool:
     }
 
 
+def graph_scheduling_enabled() -> bool:
+    """Compatibility builds retain epoch parsing/recovery but stop new work."""
+    return graph_enabled() and os.environ.get("EXOMEM_DISABLE_GRAPH_SCHEDULING", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def sidecar_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".graph.sqlite"
 
@@ -259,6 +276,22 @@ def _checkpoint_from_value(value: str | None) -> freshness.RecallFreshnessCheckp
         return None
 
 
+def _graph_sync_acknowledgement(
+    values: dict[str, str],
+) -> graph_sync.GraphSyncCheckpoint | None:
+    """Validate the complete checkpoint that established a graph acknowledgement."""
+    rendered = values.get(_GRAPH_SYNC_CHECKPOINT_KEY)
+    checkpoint = graph_sync.GraphSyncCheckpoint.parse(rendered) if rendered is not None else None
+    if checkpoint is None:
+        return None
+    if (
+        values.get("graph_sync_generation") != str(checkpoint.generation)
+        or values.get("graph_sync_digest") != checkpoint.checkpoint_sha256
+    ):
+        return None
+    return checkpoint
+
+
 def _vault_rel(vault_root: Path, path: Path | str) -> str | None:
     """Return a vault-relative path without opening the candidate."""
     try:
@@ -282,6 +315,20 @@ def _records_suppressed_path(vault_root: Path, rel_path: str) -> bool:
 
 
 GraphSourceSignature = tuple[int, int, int, str]
+
+
+@dataclass(frozen=True)
+class _GraphPublicationTicket:
+    """Private work proven before the short canonical replacement hold."""
+
+    epoch: graph_sync.GraphPublicationEpoch
+    recall: freshness.RecallPublicationState
+    policy_identity: tuple[str, str]
+    policy_snapshot: access.PublicationPolicySnapshot
+    direct_identity: str
+    metadata: tuple[tuple[str, str], ...]
+    temporary: Path
+    temporary_identity: tuple[int, int, int, int, int]
 
 
 def _source_signature(path: Path, source: str) -> GraphSourceSignature:
@@ -308,16 +355,43 @@ def _resolver_topology_fingerprint(
 
 
 class EpistemicGraphIndex:
-    def __init__(self, vault_root: Path):
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None,
+    ):
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
         self.registry = relation_registry.load_registry(self.vault_root)
         self.language_registry = semantic_language_registry.load_registry(self.vault_root)
-        self._mutation_coordinator = mutation_lock.VaultMutationCoordinator(
-            self.vault_root / kb_dirname() / GRAPH_COORDINATION_DIRNAME,
-            self.vault_root,
-            timeout_seconds=GRAPH_MUTATION_TIMEOUT_SECONDS,
-        )
+        if mutation_coordinator is None:
+            from .writer_lease import active_manager, get_manager
+
+            manager = active_manager()
+            coordinator_for = getattr(manager, "_mutation_coordinator_for", None)
+            if callable(coordinator_for):
+                mutation_coordinator = coordinator_for(self.vault_root)
+            else:
+                manager = get_manager()
+                mutation_coordinator = mutation_lock.VaultMutationCoordinator(
+                manager.config.state_dir,
+                self.vault_root,
+                timeout_seconds=manager._mutation_timeout_seconds,
+                poll_interval_seconds=manager._mutation_poll_interval_seconds,
+                )
+        self._mutation_coordinator = mutation_coordinator
+
+    def _canonical_mutation_coordinator(self) -> mutation_lock.VaultMutationCoordinator:
+        """Return the boundary bound when this graph work was registered.
+
+        Private graph construction stays outside this coordinator.  The short
+        final validation/publication hold must, however, contend with the
+        canonical writer that originated the work.  Capturing it is essential:
+        rebuild workers and post-guard joins do not inherit ``ContextVar``
+        state from ``LeaseManager.invoke()``.
+        """
+        return self._mutation_coordinator
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         target = path if path is not None else self.path
@@ -363,6 +437,14 @@ class EpistemicGraphIndex:
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
             )
         """)
+        conn.execute(
+            "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('instance', ?)",
+            (secrets.token_hex(16),),
+        )
+        # `_connect()` also backs a few direct inspection helpers.  Keep those
+        # connections transaction-free while giving each newly created sidecar
+        # (including every private rebuild result) a stable ABA discriminator.
+        conn.commit()
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_ref ON graph_nodes(unit_ref)")
         conn.execute(
@@ -422,6 +504,7 @@ class EpistemicGraphIndex:
         try:
             uri = f"{self.path.resolve().as_uri()}?mode=ro"
             conn = sqlite3.connect(uri, uri=True)
+            graph_sync.limit_graph_metadata_read(conn)
             conn.execute("BEGIN")
             # This marker validation MUST remain the first read in the transaction.
             values = dict(
@@ -430,7 +513,8 @@ class EpistemicGraphIndex:
                     "('schema_version', 'core_registry_version', 'extension_registry_hash', "
                     "'recall_policy_version', 'recall_access_fingerprint', "
                     "'recall_projection_identity', 'recall_projection_checkpoint', "
-                    "'recall_resolver_topology', 'read_barrier')"
+                    "'recall_resolver_topology', 'read_barrier', 'graph_sync_generation', "
+                    "'graph_sync_digest', 'graph_sync_checkpoint')"
                 ).fetchall()
             )
         except sqlite3.Error:
@@ -454,6 +538,24 @@ class EpistemicGraphIndex:
             # the event registry was cold or known stale.
             and (stored_checkpoint_value is None or stored_checkpoint is not None)
         )
+        graph_sync_state, required_graph_sync = graph_sync.checkpoint_state(self.vault_root)
+        graph_sync_current = graph_sync.status(self.vault_root)["state"] == "current"
+        if graph_sync_state == "malformed":
+            graph_sync_current = False
+        elif required_graph_sync is not None:
+            graph_sync_current = (
+                graph_sync_current
+                and _graph_sync_acknowledgement(values) == required_graph_sync
+            )
+        elif (
+            values.get("graph_sync_generation") is not None
+            or values.get("graph_sync_digest") is not None
+        ):
+            # A legacy sidecar may have no checkpoint. Once one has been
+            # acknowledged, a missing checkpoint is recovery state, not legacy.
+            graph_sync_current = False
+        if require_current_projection:
+            current = current and graph_sync_current
         if current and require_current_projection and values.get(_READ_BARRIER_KEY) is not None:
             current = False
         if current and require_current_projection:
@@ -586,17 +688,373 @@ class EpistemicGraphIndex:
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
-        # Attributed: a full rebuild is the longest holder of the vault mutation
-        # boundary at scale, and an unattributed "held too long" warning names
-        # neither the operation nor the holder -- which reads as a stalled write.
-        with self._mutation_coordinator.hold(
-            operation="epistemic_graph_rebuild_all", holder_kind="graph"
-        ):
-            return self._rebuild_all_locked()
+        return self._rebuild_all_off_boundary()
+
+    def _rebuild_all_off_boundary(
+        self, *, accept_stabilized_build: bool = False
+    ) -> dict[str, int]:
+        """Build and prove a private sidecar before its bounded replacement hold."""
+        live = self.path
+        attempts = 0
+        epoch_error: graph_sync.GraphEpochIncoherent | None = None
+        while attempts < REBUILD_PUBLICATION_ATTEMPTS:
+            attempts += 1
+            prepared_recall = freshness.prepare_recall_publication(self.vault_root, "vault")
+            if prepared_recall is None:
+                self._reconcile_recall_publication()
+                continue
+            try:
+                epoch = graph_sync.publication_epoch(self.vault_root)
+            except graph_sync.GraphEpochIncoherent as error:
+                epoch_error = error
+                # A canonical batch installs floor before checkpoint. Coalesce
+                # once through the same boundary so a writer already in that
+                # window can finish before the next bounded epoch sample.
+                with self._canonical_mutation_coordinator().hold(
+                    operation="epistemic_graph_coalesce_epoch", holder_kind="graph"
+                ):
+                    pass
+                continue
+            epoch_error = None
+            required = epoch.checkpoint
+            prior_acknowledgement = (
+                self._live_acknowledged_checkpoint() if required is None else None
+            )
+            temporary = graph_sync.temporary_sidecar_path(
+                live,
+                required
+                or graph_sync.GraphSyncCheckpoint.create(
+                    generation=1,
+                    mutation_id="0" * 24,
+                    paths=(),
+                    created_paths=(),
+                    scope="full",
+                ),
+            )
+            registered = False
+            registered_temporary: Path | None = None
+            owner_claimed = False
+            preserve_temporary = False
+            try:
+                temporary.unlink(missing_ok=True)
+                graph_sync.register_temporary(temporary)
+                registered_temporary = temporary.resolve()
+                registered = True
+                owner_claimed = graph_sync.claim_rebuild_owner(
+                    self.vault_root,
+                    temporary,
+                    state_root=self._mutation_coordinator.state_root,
+                )
+                if not owner_claimed:
+                    if required is None and self._wait_for_legacy_rebuild():
+                        return {"indexed_files": 0, "nodes": 0, "edges": 0, "joined": 1}
+                    if graph_sync.wait_for_current(
+                        self.vault_root, required, availability=self.available
+                    ):
+                        return {"indexed_files": 0, "nodes": 0, "edges": 0, "joined": 1}
+                    raise RuntimeError("another graph rebuild owner did not publish a current sidecar")
+                temporary_index = EpistemicGraphIndex(
+                    self.vault_root, mutation_coordinator=self._mutation_coordinator
+                )
+                temporary_index.path = temporary
+                # Test and instrumentation seams on the caller stay meaningful
+                # while the actual SQLite target remains private.
+                if "_index_path" in self.__dict__:
+                    temporary_index._index_path = self._index_path  # type: ignore[method-assign]
+                report = temporary_index._rebuild_all_locked()
+                ticket = self._prepare_publication_ticket(
+                    temporary,
+                    epoch=graph_sync.GraphPublicationEpoch(
+                        epoch.floor, epoch.checkpoint, None
+                    ),
+                    recall=prepared_recall,
+                    required=required,
+                    prior_acknowledgement=prior_acknowledgement,
+                    accept_stabilized_build=False,
+                )
+                if ticket is None:
+                    self._reconcile_recall_publication()
+                    prepared_recall = freshness.prepare_recall_publication(
+                        self.vault_root, "vault"
+                    )
+                    if prepared_recall is None:
+                        continue
+                    ticket = self._prepare_publication_ticket(
+                        temporary,
+                        epoch=graph_sync.GraphPublicationEpoch(
+                            epoch.floor, epoch.checkpoint, None
+                        ),
+                        recall=prepared_recall,
+                        required=required,
+                        prior_acknowledgement=prior_acknowledgement,
+                        accept_stabilized_build=accept_stabilized_build,
+                    )
+                    if ticket is None:
+                        continue
+                with self._mutation_coordinator.hold(
+                    operation="epistemic_graph_publish_rebuild", holder_kind="graph"
+                ):
+                    if not self._publication_ticket_matches(ticket):
+                        continue
+                    try:
+                        self._before_publish_replacement(temporary, live)
+                    except Exception:  # noqa: BLE001 - discard this ticket and retry boundedly
+                        continue
+                    if not self._publication_ticket_matches(ticket):
+                        continue
+                    try:
+                        graph_sync.replace_sidecar(temporary, live)
+                    except graph_sync.GraphSidecarReplaceUnavailable:
+                        # The complete private sidecar is recoverable after a
+                        # Windows reader releases the live file.
+                        preserve_temporary = True
+                        raise
+                    return report
+            finally:
+                if owner_claimed:
+                    graph_sync.release_rebuild_owner(
+                        self.vault_root,
+                        temporary,
+                        state_root=self._mutation_coordinator.state_root,
+                    )
+                if registered:
+                    assert registered_temporary is not None
+                    graph_sync.unregister_temporary(registered_temporary)
+                if not preserve_temporary:
+                    temporary.unlink(missing_ok=True)
+        if epoch_error is not None:
+            raise epoch_error
+        raise graph_sync.GraphRebuildRegistrationError(
+            "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+            "graph publication did not stabilize after "
+            f"{REBUILD_PUBLICATION_ATTEMPTS} attempts; run reconcile to recover the derived graph.",
+        )
+
+    def _reconcile_recall_publication(self) -> None:
+        """Seed/reconcile recall outside publication authority, then rebuild fresh."""
+        pending = freshness.external_pending_epoch(self.vault_root)
+        entries = (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(self.vault_root)
+        )
+        freshness.reconcile(self.vault_root, "vault", entries)
+        if pending is not None:
+            freshness.clear_external_pending(self.vault_root, through=pending)
+
+    @staticmethod
+    def _temporary_identity(path: Path) -> tuple[int, int, int, int, int]:
+        """Bind the exact temp directory entry without following substitutions."""
+        return mutation_lock.nofollow_regular_file_identity(path)
+
+    def _prepare_publication_ticket(
+        self,
+        temporary: Path,
+        *,
+        epoch: graph_sync.GraphPublicationEpoch,
+        recall: freshness.RecallPublicationState,
+        required: graph_sync.GraphSyncCheckpoint | None,
+        prior_acknowledgement: graph_sync.GraphSyncCheckpoint | None,
+        accept_stabilized_build: bool,
+    ) -> _GraphPublicationTicket | None:
+        """Finish and verify every temp-sidecar proof before canonical authority."""
+        try:
+            conn = sqlite3.connect(temporary)
+            try:
+                if required is not None:
+                    self._write_graph_sync_acknowledgement(conn, required)
+                elif prior_acknowledgement is not None:
+                    self._write_graph_sync_acknowledgement(conn, prior_acknowledgement)
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                if conn.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                    return None
+            finally:
+                conn.close()
+            direct = _recall_projection_identity(
+                self.vault_root, disk_freshness=_disk_vault_freshness(self.vault_root)
+            )
+            policy_snapshot = access.publication_policy_snapshot(self.vault_root)
+            policy_identity = (
+                None
+                if policy_snapshot is None
+                else (recall_policy.RECALL_POLICY_VERSION, policy_snapshot.fingerprint)
+            )
+            recall_identity = (
+                recall.triple,
+                recall.policy_version,
+                recall.access_policy_fingerprint,
+            )
+            if policy_identity != (recall.policy_version, recall.access_policy_fingerprint) or direct != recall_identity:
+                return None
+            assert policy_snapshot is not None
+            expected_identity = _availability_freshness_value(direct)
+            expected_meta = {
+                "schema_version": str(SCHEMA_VERSION),
+                "recall_policy_version": recall.policy_version,
+                "recall_access_fingerprint": recall.access_policy_fingerprint,
+                _AVAILABILITY_FRESHNESS_KEY: expected_identity,
+                _RECALL_CHECKPOINT_KEY: _checkpoint_value(recall.checkpoint),
+            }
+            if required is not None:
+                expected_meta.update(
+                    {
+                        "graph_sync_generation": str(required.generation),
+                        "graph_sync_digest": required.checkpoint_sha256,
+                        _GRAPH_SYNC_CHECKPOINT_KEY: required.render(),
+                    }
+                )
+            elif prior_acknowledgement is not None:
+                expected_meta.update(
+                    {
+                        "graph_sync_generation": str(prior_acknowledgement.generation),
+                        "graph_sync_digest": prior_acknowledgement.checkpoint_sha256,
+                        _GRAPH_SYNC_CHECKPOINT_KEY: prior_acknowledgement.render(),
+                    }
+                )
+            check = sqlite3.connect(f"{temporary.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                graph_sync.limit_graph_metadata_read(check)
+                metadata = dict(
+                    check.execute(
+                        "SELECT key, value FROM graph_meta WHERE key IN "
+                        "('schema_version', 'recall_policy_version', 'recall_access_fingerprint', "
+                        "'recall_projection_identity', 'recall_projection_checkpoint', "
+                        "'graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint', "
+                        "'read_barrier')"
+                    ).fetchall()
+                )
+            finally:
+                check.close()
+            metadata_mismatch = any(
+                metadata.get(key) != value for key, value in expected_meta.items()
+            )
+            reticketable_keys = {_AVAILABILITY_FRESHNESS_KEY, _RECALL_CHECKPOINT_KEY}
+            if (
+                accept_stabilized_build
+                and metadata_mismatch
+                and metadata.get(_READ_BARRIER_KEY) is None
+                and all(
+                    key in reticketable_keys or metadata.get(key) == value
+                    for key, value in expected_meta.items()
+                )
+            ):
+                conn = sqlite3.connect(temporary)
+                try:
+                    with conn:
+                        self._publish_available_marker_in_transaction(
+                            conn,
+                            direct,
+                            checkpoint=recall.checkpoint,
+                            graph_checkpoint=required or prior_acknowledgement,
+                        )
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    if conn.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                        return None
+                finally:
+                    conn.close()
+                check = sqlite3.connect(f"{temporary.resolve().as_uri()}?mode=ro", uri=True)
+                try:
+                    graph_sync.limit_graph_metadata_read(check)
+                    metadata = dict(
+                        check.execute(
+                            "SELECT key, value FROM graph_meta WHERE key IN "
+                            "('schema_version', 'recall_policy_version', 'recall_access_fingerprint', "
+                            "'recall_projection_identity', 'recall_projection_checkpoint', "
+                            "'graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint', "
+                            "'read_barrier')"
+                        ).fetchall()
+                    )
+                finally:
+                    check.close()
+                metadata_mismatch = any(
+                    metadata.get(key) != value for key, value in expected_meta.items()
+                )
+            if metadata_mismatch:
+                return None
+            if metadata.get(_READ_BARRIER_KEY) is not None:
+                return None
+            if freshness.external_pending(self.vault_root):
+                return None
+            return _GraphPublicationTicket(
+                epoch,
+                recall,
+                (recall.policy_version, recall.access_policy_fingerprint),
+                policy_snapshot,
+                expected_identity,
+                tuple(sorted(metadata.items())),
+                temporary,
+                self._temporary_identity(temporary),
+            )
+        except (OSError, sqlite3.Error):
+            return None
+
+    def _live_acknowledged_checkpoint(self) -> graph_sync.GraphSyncCheckpoint | None:
+        """Read one complete exact acknowledgement outside publication authority."""
+        if not self.path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                graph_sync.limit_graph_metadata_read(conn)
+                values = dict(
+                    conn.execute(
+                        "SELECT key, value FROM graph_meta WHERE key IN "
+                        "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint')"
+                    ).fetchall()
+                )
+            finally:
+                conn.close()
+            rendered = values.get(_GRAPH_SYNC_CHECKPOINT_KEY)
+            checkpoint = (
+                graph_sync.GraphSyncCheckpoint.parse(rendered)
+                if isinstance(rendered, str)
+                else None
+            )
+            if (
+                checkpoint is None
+                or values.get("graph_sync_generation") != str(checkpoint.generation)
+                or values.get("graph_sync_digest") != checkpoint.checkpoint_sha256
+            ):
+                return None
+            return checkpoint
+        except (OSError, sqlite3.Error):
+            return None
+
+    def _publication_ticket_matches(self, ticket: _GraphPublicationTicket) -> bool:
+        """The complete bounded publication gate; no walk, policy read, or SQLite."""
+        try:
+            return (
+                graph_sync.canonical_publication_epoch(self.vault_root) == ticket.epoch
+                and freshness.peek_recall_publication(
+                    self.vault_root,
+                    "vault",
+                    expected_policy_identity=ticket.policy_identity,
+                    ticket=ticket.recall,
+                )
+                == ticket.recall
+                and access.publication_policy_snapshot(self.vault_root) == ticket.policy_snapshot
+                and self._temporary_identity(ticket.temporary) == ticket.temporary_identity
+            )
+        except (OSError, graph_sync.GraphEpochIncoherent):
+            return False
+
+    def _before_publish_replacement(self, temporary: Path, live: Path) -> None:
+        """Original-index publication seam, intentionally after temp handles close."""
+        del temporary, live
+
+    def _wait_for_legacy_rebuild(self) -> bool:
+        """Wait for a competing legacy builder without requiring an epoch."""
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if self.available():
+                return True
+            time.sleep(0.025)
+        return False
 
     def _rebuild_all_locked(self) -> dict[str, int]:
         pass_started = False
         stable = False
+        proof_invalidated = False
         try:
             for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
                 before_disk = _disk_vault_freshness(self.vault_root)
@@ -615,6 +1073,7 @@ class EpistemicGraphIndex:
                     # resolver bytes (for example after a coarse-metadata edit).
                     # Clear both the resolver and page cache before retrying.
                     self._mark_unavailable()
+                    proof_invalidated = True
                     find_module.unload_ram_caches()
                     continue
                 pass_started = True
@@ -657,10 +1116,16 @@ class EpistemicGraphIndex:
                         stable = True
                         return report
                     self._mark_unavailable()
+                proof_invalidated = True
             raise RuntimeError("epistemic graph rebuild did not stabilize after 2 attempts")
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
+            if not stable and proof_invalidated:
+                # The private pass proved the live exact-checkpoint fast path
+                # stale, but publication never replaced it. Withdraw admission
+                # out of band without modifying the old live sidecar bytes.
+                freshness.mark_external_pending(self.vault_root)
 
     def _rebuild_all_pass(
         self,
@@ -814,34 +1279,59 @@ class EpistemicGraphIndex:
         identity: tuple[tuple[int, int, str], str, str],
         *,
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+        graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
     ) -> None:
         conn = sqlite3.connect(self.path)
         try:
             with conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                    (_AVAILABILITY_FRESHNESS_KEY, _availability_freshness_value(identity)),
+                self._publish_available_marker_in_transaction(
+                    conn,
+                    identity,
+                    checkpoint=checkpoint,
+                    graph_checkpoint=graph_checkpoint,
                 )
-                conn.execute(
-                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                    ("schema_version", str(SCHEMA_VERSION)),
-                )
-                conn.execute(
-                    "DELETE FROM graph_meta WHERE key = ?",
-                    (_READ_BARRIER_KEY,),
-                )
-                if checkpoint is None:
-                    conn.execute(
-                        "DELETE FROM graph_meta WHERE key = ?",
-                        (_RECALL_CHECKPOINT_KEY,),
-                    )
-                else:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                        (_RECALL_CHECKPOINT_KEY, _checkpoint_value(checkpoint)),
-                    )
         finally:
             conn.close()
+
+    def _publish_available_marker_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        identity: tuple[tuple[int, int, str], str, str],
+        *,
+        checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+        graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
+    ) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+            (_AVAILABILITY_FRESHNESS_KEY, _availability_freshness_value(identity)),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+            ("schema_version", str(SCHEMA_VERSION)),
+        )
+        conn.execute("DELETE FROM graph_meta WHERE key = ?", (_READ_BARRIER_KEY,))
+        if checkpoint is None:
+            conn.execute("DELETE FROM graph_meta WHERE key = ?", (_RECALL_CHECKPOINT_KEY,))
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                (_RECALL_CHECKPOINT_KEY, _checkpoint_value(checkpoint)),
+            )
+        if graph_checkpoint is not None:
+            self._write_graph_sync_acknowledgement(conn, graph_checkpoint)
+
+    @staticmethod
+    def _write_graph_sync_acknowledgement(
+        conn: sqlite3.Connection, checkpoint: graph_sync.GraphSyncCheckpoint
+    ) -> None:
+        conn.executemany(
+            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+            (
+                ("graph_sync_generation", str(checkpoint.generation)),
+                ("graph_sync_digest", checkpoint.checkpoint_sha256),
+                (_GRAPH_SYNC_CHECKPOINT_KEY, checkpoint.render()),
+            ),
+        )
 
     def _mark_available(
         self,
@@ -866,6 +1356,7 @@ class EpistemicGraphIndex:
         identity: tuple[tuple[int, int, str], str, str],
         *,
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+        graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
         source_versions: dict[str, GraphSourceSignature] | None = None,
         expected_membership: frozenset[str] | None = None,
     ) -> bool:
@@ -886,7 +1377,11 @@ class EpistemicGraphIndex:
             and freshness.recall_checkpoint(self.vault_root, "vault") != checkpoint
         ):
             return False
-        self._publish_available_marker(identity, checkpoint=checkpoint)
+        self._publish_available_marker(
+            identity,
+            checkpoint=checkpoint,
+            graph_checkpoint=graph_checkpoint,
+        )
         if freshness.external_pending(self.vault_root):
             return False
         if not self._source_versions_current(expected_sources):
@@ -913,7 +1408,7 @@ class EpistemicGraphIndex:
             if not recall_policy.is_recall_candidate(self.vault_root, path):
                 return False
             try:
-                raw = path.read_text(encoding="utf-8")
+                raw = path.read_bytes().decode("utf-8")
                 current = _source_signature(path, raw)
             except (OSError, UnicodeDecodeError):
                 return False
@@ -1006,6 +1501,31 @@ class EpistemicGraphIndex:
             "SELECT value FROM graph_meta WHERE key = ?", (_RECALL_CHECKPOINT_KEY,)
         ).fetchone()
         return _checkpoint_from_value(str(row[0])) if row is not None else None
+
+    def _graph_sync_predecessor_available(
+        self, checkpoint: graph_sync.GraphSyncCheckpoint
+    ) -> bool:
+        """Whether this sidecar can atomically advance the exact next epoch."""
+        snapshot = self._open_read_snapshot(require_current_projection=False)
+        if snapshot is None:
+            return False
+        try:
+            values = dict(
+                snapshot.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint')"
+                )
+            )
+        finally:
+            snapshot.close()
+        predecessor = checkpoint.generation - 1
+        if predecessor == 0:
+            return (
+                "graph_sync_generation" not in values
+                and "graph_sync_digest" not in values
+            )
+        acknowledged = _graph_sync_acknowledgement(values)
+        return acknowledged is not None and acknowledged.generation == predecessor
 
     def _delta_target_still_current(self, delta: freshness.RecallDelta) -> bool:
         """Prove files parsed for a bounded refresh still name ``delta.to``."""
@@ -1121,7 +1641,7 @@ class EpistemicGraphIndex:
         for rel in sorted(indexed_paths - changed_rels):
             path = self.vault_root / rel
             try:
-                raw = path.read_text(encoding="utf-8")
+                raw = path.read_bytes().decode("utf-8")
                 scanned_versions[rel] = _source_signature(path, raw)
             except (OSError, UnicodeDecodeError):
                 return None
@@ -1159,6 +1679,7 @@ class EpistemicGraphIndex:
         paths: list[Path],
         *,
         created_paths: Iterable[Path] = (),
+        graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
     ) -> dict[str, int]:
         if not graph_enabled():
             # Feature-off does not authorize a stale sidecar to retain sensitive
@@ -1190,26 +1711,108 @@ class EpistemicGraphIndex:
                     "edges": 0,
                     "deferred": 1,
                 }
-            return self._refresh_paths_locked(paths, created_paths=created_paths)
+            report = self._refresh_paths_locked(
+                paths,
+                created_paths=created_paths,
+                graph_checkpoint=graph_checkpoint,
+            )
+        if report.pop("_rebuild_after_release", False):
+            return self._rebuild_all_off_boundary(accept_stabilized_build=True)
+        # Standalone callers have already left the graph mutation hold. Command
+        # callers retain their exact registration for writer_lease to start and
+        # join only after canonical authority releases.
+        from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
+
+        if active_mutation_request_id() is None and not active_direct_mutation_guard(
+            self.vault_root, state_root=self._mutation_coordinator.state_root
+        ):
+            graph_sync.start_registered(
+                self.vault_root, state_root=self._mutation_coordinator.state_root
+            )
+            graph_sync.wait_for_registered(
+                self.vault_root, state_root=self._mutation_coordinator.state_root
+            )
+        return report
 
     def _refresh_paths_locked(
         self,
         paths: list[Path],
         *,
         created_paths: Iterable[Path] = (),
+        graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
     ) -> dict[str, int]:
+        def fallback() -> dict[str, int]:
+            if graph_checkpoint is None:
+                return {
+                    "indexed_files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                    "_rebuild_after_release": 1,
+                }
+            self._mark_unavailable()
+            graph_sync.register_rebuild(
+                self.vault_root,
+                graph_checkpoint,
+                lambda checkpoint: _rebuild_outcome(self, checkpoint),
+                state_root=self._mutation_coordinator.state_root,
+            )
+            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+
+        if graph_checkpoint is not None:
+            durable_checkpoint = graph_sync.read_checkpoint(self.vault_root)
+            expected_paths: list[tuple[str, str | None]] = []
+            for path in paths:
+                rel = _vault_rel(self.vault_root, path)
+                if rel is None:
+                    return fallback()
+                try:
+                    expected_paths.append(
+                        (rel, vault_module.content_hash(path.read_bytes().decode("utf-8")))
+                    )
+                except (OSError, UnicodeDecodeError):
+                    return fallback()
+            expected_created = sorted(
+                rel
+                for path in created_paths
+                if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+            )
+            if (
+                durable_checkpoint != graph_checkpoint
+                or graph_checkpoint.scope != "paths"
+                or graph_checkpoint.paths != tuple(sorted(expected_paths))
+                or graph_checkpoint.created_paths != tuple(expected_created)
+            ):
+                return fallback()
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
-            return self._rebuild_all_locked()
+            return fallback()
+        if graph_checkpoint is not None:
+            graph_values = dict(
+                snapshot.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint')"
+                )
+            )
+            predecessor = graph_checkpoint.generation - 1
+            if not (
+                predecessor == 0
+                and "graph_sync_generation" not in graph_values
+                and "graph_sync_digest" not in graph_values
+            ) and not (
+                (acknowledged := _graph_sync_acknowledgement(graph_values)) is not None
+                and acknowledged.generation == predecessor
+            ):
+                snapshot.close()
+                return fallback()
         stored_checkpoint = self._stored_recall_checkpoint(snapshot)
         if stored_checkpoint is None or not freshness.recall_is_live(self.vault_root, "vault"):
             snapshot.close()
-            return self._rebuild_all_locked()
+            return fallback()
         delta = freshness.recall_delta_since(self.vault_root, "vault", stored_checkpoint)
         if not delta.complete:
             snapshot.close()
             self._mark_unavailable()
-            return self._rebuild_all_locked()
+            return fallback()
         checkpoint = delta.to
         before = (
             checkpoint.triple,
@@ -1219,7 +1822,7 @@ class EpistemicGraphIndex:
         if not self._delta_target_still_current(delta):
             snapshot.close()
             self._mark_unavailable()
-            return self._rebuild_all_locked()
+            return fallback()
         created_rels = {
             rel
             for path in created_paths
@@ -1229,7 +1832,7 @@ class EpistemicGraphIndex:
         if stored_entries is None:
             snapshot.close()
             self._mark_unavailable()
-            return self._rebuild_all_locked()
+            return fallback()
         snapshot.close()
         resolver = find_module.recall_resolver_snapshot_at_checkpoint(
             self.vault_root,
@@ -1237,7 +1840,7 @@ class EpistemicGraphIndex:
         )
         if resolver is None:
             self._mark_unavailable()
-            return self._rebuild_all_locked()
+            return fallback()
         topology_changed = any(
             (
                 rel.removesuffix(".md") in resolver.full_paths,
@@ -1253,7 +1856,7 @@ class EpistemicGraphIndex:
         if topology_changed:
             topology_snapshot = self._open_read_snapshot(require_current_projection=False)
             if topology_snapshot is None:
-                return self._rebuild_all_locked()
+                return fallback()
             full_topology = self._stored_full_resolver_topology(
                 topology_snapshot,
                 set(stored_entries),
@@ -1261,7 +1864,7 @@ class EpistemicGraphIndex:
             topology_snapshot.close()
             if full_topology is None:
                 self._mark_unavailable()
-                return self._rebuild_all_locked()
+                return fallback()
             indexed_sources, linked_sources, stored_resolver_fingerprint = full_topology
             old_resolver = resolver.fork()
             old_resolver.on_entries_changed(
@@ -1274,7 +1877,7 @@ class EpistemicGraphIndex:
             )
             if _resolver_topology_fingerprint(old_resolver) != stored_resolver_fingerprint:
                 self._mark_unavailable()
-                return self._rebuild_all_locked()
+                return fallback()
             resolver_fingerprint = _resolver_topology_fingerprint(resolver)
 
         delta_paths = set(delta.changed | delta.deleted)
@@ -1284,7 +1887,7 @@ class EpistemicGraphIndex:
         # the event checkpoint.
         if any(str(path) not in delta_paths for path in paths):
             self._mark_unavailable()
-            return self._rebuild_all_locked()
+            return fallback()
 
         refresh_paths = set(delta_paths)
         topology_versions: dict[str, GraphSourceSignature] = {}
@@ -1326,7 +1929,7 @@ class EpistemicGraphIndex:
                 if resolver_version_result is None:
                     find_module.unload_ram_caches()
                 self._mark_unavailable()
-                return self._rebuild_all_locked()
+                return fallback()
             resolver_versions = resolver_version_result
             affected, topology_versions = affected_result
             refresh_paths.update(str(self.vault_root / rel) for rel in affected)
@@ -1336,29 +1939,43 @@ class EpistemicGraphIndex:
         try:
             pass_started = True
             indexed_versions: dict[str, GraphSourceSignature] = {}
-            report = self._refresh_paths_pass(
-                [Path(path) for path in sorted(refresh_paths)],
-                resolver=resolver,
-                indexed_versions=indexed_versions,
-                resolver_fingerprint=resolver_fingerprint,
-            )
             expected_refresh_rels = {
                 rel
                 for path in refresh_paths
                 if (rel := _vault_rel(self.vault_root, Path(path))) is not None
             }
-            publication = self._open_read_snapshot(require_current_projection=False)
-            if publication is None:
-                # A competing/failed rebuild withdrew the sidecar after this
-                # refresh was admitted. This older bounded pass may not restore
-                # availability over that newer withdrawal.
-                return report
-            publication.close()
-            if (
-                _incremental_projection_identity(self.vault_root) == before
-                and self._delta_target_still_current(delta)
-                and set(indexed_versions) == expected_refresh_rels
-                and self._mark_incremental_available(
+
+            def publish_incremental(conn: sqlite3.Connection) -> None:
+                if not (
+                    _incremental_projection_identity(self.vault_root) == before
+                    and self._delta_target_still_current(delta)
+                    and set(indexed_versions) == expected_refresh_rels
+                    and self._source_versions_current(
+                        {**resolver_versions, **topology_versions, **indexed_versions}
+                    )
+                    and (
+                        expected_membership is None
+                        or self._recall_membership() == expected_membership
+                    )
+                    and freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
+                ):
+                    raise RuntimeError("incremental graph publication proof changed")
+                self._publish_available_marker_in_transaction(
+                    conn,
+                    before,
+                    checkpoint=checkpoint,
+                    graph_checkpoint=graph_checkpoint,
+                )
+
+            report = self._refresh_paths_pass(
+                [Path(path) for path in sorted(refresh_paths)],
+                resolver=resolver,
+                indexed_versions=indexed_versions,
+                resolver_fingerprint=resolver_fingerprint,
+                before_commit=publish_incremental if graph_checkpoint is not None else None,
+            )
+            if graph_checkpoint is None:
+                if self._mark_incremental_available(
                     before,
                     checkpoint=checkpoint,
                     source_versions={
@@ -1367,14 +1984,18 @@ class EpistemicGraphIndex:
                         **indexed_versions,
                     },
                     expected_membership=expected_membership,
-                )
-            ):
+                ):
+                    stable = True
+                    return report
+                rebuilt = fallback()
                 stable = True
-                return report
+                return rebuilt
+            stable = True
+            return report
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
-        return self._rebuild_all_locked()
+        return fallback()
 
     def _refresh_paths_pass(
         self,
@@ -1383,6 +2004,7 @@ class EpistemicGraphIndex:
         resolver: vault_module.WikilinkResolver,
         indexed_versions: dict[str, GraphSourceSignature] | None = None,
         resolver_fingerprint: str | None = None,
+        before_commit=None,  # noqa: ANN001
     ) -> dict[str, int]:
         conn = self._connect()
         indexed = 0
@@ -1402,6 +2024,8 @@ class EpistemicGraphIndex:
                         "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                         (_RESOLVER_TOPOLOGY_KEY, resolver_fingerprint),
                     )
+                if before_commit is not None:
+                    before_commit(conn)
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
                 n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
         finally:
@@ -1567,11 +2191,18 @@ class EpistemicGraphIndex:
             self._delete_path(conn, rel, commit=commit)
             return False
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw_bytes = path.read_bytes()
+            raw = raw_bytes.decode("utf-8")
             source_signature = _source_signature(path, raw)
         except (OSError, UnicodeDecodeError):
             return False
-        page = find_module._parse_page(path, path.stat().st_mtime, self.vault_root)
+        page = find_module._parse_page(
+            path,
+            path.stat().st_mtime,
+            self.vault_root,
+            content=raw_bytes,
+            resolved_relative=rel,
+        )
         if page is None:
             return False
         state = semantic_index.current_parent_index_state(
@@ -1599,7 +2230,7 @@ class EpistemicGraphIndex:
             # transaction: do not momentarily publish rows for bytes that are
             # now raw Records (or merely newer ordinary content).
             try:
-                current = path.read_text(encoding="utf-8")
+                current = path.read_bytes().decode("utf-8")
                 current_signature = _source_signature(path, current)
             except (OSError, UnicodeDecodeError):
                 self._delete_path(conn, rel, commit=commit)
@@ -2391,11 +3022,13 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
 
 
 def cache_token(vault_root: Path) -> tuple | None:
-    """`(schema_version, extension_registry_hash, generation)` or None.
+    """`(schema_version, extension_registry_hash, generation, instance)` or None.
 
     None whenever the sidecar is unavailable (disabled, missing, or
     schema/registry drift), which the find freshness key maps to a stable
     absent-sentinel so typed-mode and fallback-mode entries never collide.
+    `generation` advances for in-place writes; `instance` changes when a full
+    rebuild atomically replaces the SQLite file, preventing generation ABA.
     """
     idx = EpistemicGraphIndex(vault_root)
     conn = idx._open_read_snapshot()
@@ -2405,7 +3038,7 @@ def cache_token(vault_root: Path) -> tuple | None:
         values = dict(
             conn.execute(
                 "SELECT key, value FROM graph_meta WHERE key IN "
-                "('schema_version', 'extension_registry_hash', 'generation')"
+                "('schema_version', 'extension_registry_hash', 'generation', 'instance')"
             ).fetchall()
         )
     except sqlite3.Error:
@@ -2416,6 +3049,7 @@ def cache_token(vault_root: Path) -> tuple | None:
         values.get("schema_version"),
         values.get("extension_registry_hash"),
         values.get("generation"),
+        values.get("instance"),
     )
 
 
@@ -2423,7 +3057,112 @@ _REBUILD_LOCK = threading.Lock()
 _REBUILDING: set[str] = set()
 
 
-def schedule_background_rebuild(vault_root: Path) -> bool:
+@dataclass(frozen=True)
+class GraphDispatchResult:
+    """Exact observable outcome of one post-commit graph dispatch."""
+
+    outcome: str
+    code: str
+    checkpoint: graph_sync.GraphSyncCheckpoint | None = None
+
+    def __post_init__(self) -> None:
+        if self.outcome not in {"completed", "registered", "deferred", "failed", "not_required"}:
+            raise ValueError("unsupported graph dispatch outcome")
+        if not self.code or not self.code.isascii() or len(self.code) > 64:
+            raise ValueError("graph dispatch code must be bounded ASCII")
+        if self.outcome in {"registered", "deferred"} and self.checkpoint is None:
+            raise ValueError("graph handoff outcome requires an exact checkpoint")
+
+    @classmethod
+    def not_required(cls) -> GraphDispatchResult:
+        return cls("not_required", "no_graph_input")
+
+
+def _registered_or_failure(
+    vault_root: Path,
+    checkpoint: graph_sync.GraphSyncCheckpoint,
+    index: EpistemicGraphIndex | None,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None,
+) -> GraphDispatchResult:
+    """Capture lazy exact work, replacing any registration error with a handle."""
+    try:
+        if mutation_coordinator is None:
+            from .writer_lease import active_manager
+
+            mutation_coordinator = active_manager()._mutation_coordinator_for(vault_root)
+        assert mutation_coordinator is not None
+
+        def rebuild(
+            required: graph_sync.GraphSyncCheckpoint,
+            bound_index: EpistemicGraphIndex | None = index,
+            bound_coordinator: mutation_lock.VaultMutationCoordinator = mutation_coordinator,
+        ) -> graph_sync.GraphBuildOutcome:
+            return _rebuild_outcome(
+                bound_index
+                or EpistemicGraphIndex(vault_root, mutation_coordinator=bound_coordinator),
+                required,
+            )
+
+        graph_sync.register_rebuild(
+            vault_root,
+            checkpoint,
+            rebuild,
+            state_root=mutation_coordinator.state_root,
+        )
+    except Exception:  # noqa: BLE001 - canonical bytes are already durable
+        log.warning("exact graph rebuild registration failed", exc_info=True)
+        try:
+            graph_sync.register_failure(
+                vault_root,
+                checkpoint,
+                code="GRAPH_SYNC_REGISTRATION_FAILED",
+                state_root=(
+                    mutation_coordinator.state_root if mutation_coordinator is not None else None
+                ),
+            )
+        except Exception:  # noqa: BLE001 - retain a stable terminal even on context failure
+            log.exception("exact graph failure handle registration failed")
+        return GraphDispatchResult(
+            "failed", "GRAPH_SYNC_REGISTRATION_FAILED", checkpoint
+        )
+    return GraphDispatchResult("registered", "graph_rebuild_registered", checkpoint)
+
+
+def _join_registered_standalone(
+    vault_root: Path,
+    result: GraphDispatchResult,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> GraphDispatchResult:
+    """Complete registered rebuilds for direct callers after their guard exits."""
+    if result.outcome != "registered":
+        return result
+    from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
+
+    if active_mutation_request_id() is not None or active_direct_mutation_guard(
+        vault_root, state_root=mutation_coordinator.state_root
+    ):
+        return result
+    assert result.checkpoint is not None
+    try:
+        graph_sync.start_registered(
+            vault_root, state_root=mutation_coordinator.state_root
+        )
+        graph_sync.wait_for_registered(
+            vault_root, state_root=mutation_coordinator.state_root
+        )
+    except graph_sync.GraphRebuildRegistrationError as error:
+        return GraphDispatchResult("failed", error.code, result.checkpoint)
+    except Exception:  # noqa: BLE001 - canonical bytes remain durable
+        log.warning("standalone graph rebuild failed", exc_info=True)
+        return GraphDispatchResult("failed", "GRAPH_SYNC_REBUILD_FAILED", result.checkpoint)
+    return GraphDispatchResult("completed", "graph_rebuild_completed", result.checkpoint)
+
+
+def schedule_background_rebuild(
+    vault_root: Path,
+    *,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None,
+) -> bool:
     """Kick a single-flight background rebuild of the sidecar and return whether
     one was started.
 
@@ -2432,9 +3171,13 @@ def schedule_background_rebuild(vault_root: Path) -> bool:
     a time (a second call while one is in flight is a no-op); the daemon thread
     swallows its own errors so a failed rebuild never surfaces on the request.
     """
-    if not graph_enabled():
+    if not graph_scheduling_enabled():
         return False
-    key = str(Path(vault_root).resolve())
+    if mutation_coordinator is None:
+        from .writer_lease import active_manager
+
+        mutation_coordinator = active_manager()._mutation_coordinator_for(vault_root)
+    key = f"{Path(vault_root).resolve()}\0{mutation_coordinator.state_root.resolve(strict=False)}"
     with _REBUILD_LOCK:
         if key in _REBUILDING:
             return False
@@ -2442,9 +3185,12 @@ def schedule_background_rebuild(vault_root: Path) -> bool:
 
     def _run() -> None:
         try:
-            EpistemicGraphIndex(vault_root).rebuild_all()
-        except Exception:  # noqa: BLE001 - a background rebuild must never raise
-            pass
+            EpistemicGraphIndex(
+                vault_root, mutation_coordinator=mutation_coordinator
+            ).rebuild_all()
+        except Exception:  # noqa: BLE001 - request path remains non-blocking
+            freshness.mark_external_pending(vault_root)
+            log.warning("background graph rebuild failed; graph remains unavailable", exc_info=True)
         finally:
             with _REBUILD_LOCK:
                 _REBUILDING.discard(key)
@@ -2458,40 +3204,158 @@ def upsert_after_write(
     written_paths: list[Path],
     *,
     created_paths: Iterable[Path] = (),
-) -> None:
+) -> GraphDispatchResult:
+    """Dispatch graph work without allowing a required checkpoint to vanish."""
+    if not written_paths:
+        return GraphDispatchResult.not_required()
+    required = graph_sync.read_checkpoint(vault_root)
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None
     try:
         created = list(created_paths)
-        index = EpistemicGraphIndex(vault_root)
+        from .writer_lease import active_manager
+
+        mutation_coordinator = active_manager()._mutation_coordinator_for(vault_root)
+        index = EpistemicGraphIndex(vault_root, mutation_coordinator=mutation_coordinator)
         if not graph_enabled():
             if index.path.exists():
                 index.suspend_reads()
-            return
-        if created:
+            if required is None:
+                return GraphDispatchResult.not_required()
+            graph_sync.register_deferred(vault_root, required, state_root=mutation_coordinator.state_root)
+            return GraphDispatchResult("deferred", "graph_index_disabled", required)
+        if not graph_scheduling_enabled():
+            if required is None:
+                return GraphDispatchResult.not_required()
+            graph_sync.register_deferred(
+                vault_root, required, state_root=mutation_coordinator.state_root
+            )
+            return GraphDispatchResult("deferred", "graph_scheduling_disabled", required)
+        if required is not None and not index.available():
+            if not index._graph_sync_predecessor_available(required):
+                result = _registered_or_failure(
+                    vault_root, required, index, mutation_coordinator
+                )
+                return _join_registered_standalone(vault_root, result, mutation_coordinator)
+            report = (
+                index.refresh_paths(written_paths, created_paths=created, graph_checkpoint=required)
+                if created
+                else index.refresh_paths(written_paths, graph_checkpoint=required)
+            )
+            if report.get("deferred"):
+                if graph_sync.registered_checkpoint(
+                    vault_root, state_root=mutation_coordinator.state_root
+                ) == required:
+                    return _join_registered_standalone(
+                        vault_root,
+                        GraphDispatchResult("registered", "graph_rebuild_registered", required),
+                        mutation_coordinator,
+                    )
+                if (acknowledged := graph_sync.acknowledged_checkpoint(vault_root)) and acknowledged.covers(
+                    required
+                ):
+                    return GraphDispatchResult("completed", "graph_rebuild_completed", required)
+                return _join_registered_standalone(
+                    vault_root,
+                    _registered_or_failure(vault_root, required, index, mutation_coordinator),
+                    mutation_coordinator,
+                )
+            return GraphDispatchResult("completed", "incremental_completed", required)
+        report = (
             index.refresh_paths(written_paths, created_paths=created)
-        else:
-            index.refresh_paths(written_paths)
+            if created
+            else index.refresh_paths(written_paths)
+        )
+        if required is not None and report.get("deferred"):
+            if graph_sync.registered_checkpoint(
+                vault_root, state_root=mutation_coordinator.state_root
+            ) == required:
+                return _join_registered_standalone(
+                    vault_root,
+                    GraphDispatchResult("registered", "graph_rebuild_registered", required),
+                    mutation_coordinator,
+                )
+            if (acknowledged := graph_sync.acknowledged_checkpoint(vault_root)) and acknowledged.covers(
+                required
+            ):
+                return GraphDispatchResult("completed", "graph_rebuild_completed", required)
+            return _join_registered_standalone(
+                vault_root,
+                _registered_or_failure(vault_root, required, index, mutation_coordinator),
+                mutation_coordinator,
+            )
+        return GraphDispatchResult("completed", "incremental_completed", required)
     except OpError:
         freshness.mark_external_pending(vault_root)
+        if required is not None:
+            assert mutation_coordinator is not None
+            return _join_registered_standalone(
+                vault_root,
+                _registered_or_failure(vault_root, required, None, mutation_coordinator),
+                mutation_coordinator,
+            )
         raise
-    except Exception:  # noqa: BLE001 - writer hooks must not break Markdown writes
+    except Exception:  # noqa: BLE001 - canonical bytes must still report graph failure exactly
         freshness.mark_external_pending(vault_root)
-        return
+        log.warning("graph post-commit dispatch failed", exc_info=True)
+        if required is not None:
+            assert mutation_coordinator is not None
+            return _join_registered_standalone(
+                vault_root,
+                _registered_or_failure(vault_root, required, None, mutation_coordinator),
+                mutation_coordinator,
+            )
+        return GraphDispatchResult("failed", "graph_dispatch_failed")
 
 
-def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
+def _rebuild_outcome(
+    index: EpistemicGraphIndex, checkpoint: graph_sync.GraphSyncCheckpoint
+) -> graph_sync.GraphBuildOutcome:
+    index._rebuild_all_off_boundary()
+    return graph_sync.GraphBuildOutcome.covering(checkpoint)
+
+
+def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> GraphDispatchResult:
+    if not removed_rel_paths:
+        return GraphDispatchResult.not_required()
+    required = graph_sync.read_checkpoint(vault_root)
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None
     try:
-        index = EpistemicGraphIndex(vault_root)
+        from .writer_lease import active_manager
+
+        mutation_coordinator = active_manager()._mutation_coordinator_for(vault_root)
+        index = EpistemicGraphIndex(vault_root, mutation_coordinator=mutation_coordinator)
         if not graph_enabled():
             if index.path.exists():
                 index.suspend_reads()
-            return
+            if required is None:
+                return GraphDispatchResult.not_required()
+            graph_sync.register_deferred(
+                vault_root, required, state_root=mutation_coordinator.state_root
+            )
+            return GraphDispatchResult("deferred", "graph_index_disabled", required)
         index.delete_paths(removed_rel_paths)
+        return GraphDispatchResult("completed", "delete_completed", required)
     except OpError:
         freshness.mark_external_pending(vault_root)
+        if required is not None:
+            assert mutation_coordinator is not None
+            return _join_registered_standalone(
+                vault_root,
+                _registered_or_failure(vault_root, required, None, mutation_coordinator),
+                mutation_coordinator,
+            )
         raise
-    except Exception:  # noqa: BLE001 - writer hooks must not break Markdown writes
+    except Exception:  # noqa: BLE001 - canonical bytes must still report graph failure exactly
         freshness.mark_external_pending(vault_root)
-        return
+        log.warning("graph post-remove dispatch failed", exc_info=True)
+        if required is not None:
+            assert mutation_coordinator is not None
+            return _join_registered_standalone(
+                vault_root,
+                _registered_or_failure(vault_root, required, None, mutation_coordinator),
+                mutation_coordinator,
+            )
+        return GraphDispatchResult("failed", "graph_dispatch_failed")
 
 
 def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
@@ -2522,7 +3386,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     for md in find_module._walk_md(kb):
         try:
             rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
-            raw = md.read_text(encoding="utf-8")
+            raw = md.read_bytes().decode("utf-8")
         except (OSError, ValueError, UnicodeDecodeError):
             continue
         disk_paths.add(rel)

@@ -536,7 +536,13 @@ def test_full_index_drain_keeps_work_when_embeddings_report_incomplete(
     monkeypatch.setattr(lexstore, "upsert_after_write", lambda *_a, **_kw: None)
     monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_a, **_kw: None)
     monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_a, **_kw: None)
-    monkeypatch.setattr(epistemic_graph, "upsert_after_write", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        epistemic_graph,
+        "upsert_after_write",
+        lambda *_a, **_kw: epistemic_graph.GraphDispatchResult(
+            "completed", "incremental_completed"
+        ),
+    )
     monkeypatch.setattr(
         embeddings,
         "upsert_after_write_status",

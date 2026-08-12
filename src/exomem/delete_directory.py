@@ -161,6 +161,7 @@ def delete_directory(
             md_rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
         except ValueError:
             continue
+
         # Skip inbound links from inside the doomed tree itself.
         hits = [
             h for h in find_inbound_wikilinks(vault_root, md_rel)
@@ -208,13 +209,6 @@ def delete_directory(
         i += 1
 
     trash_rel = trash_abs.relative_to(vault_root).as_posix()
-    try:
-        lifecycle_operation = lifecycle.begin_deletion(
-            vault_root, source_rel=rel_path, trash_rel=trash_rel
-        )
-    except lifecycle.LifecycleError as error:
-        raise DeleteDirectoryError(code=error.code, reason=error.reason) from error
-
     # Capture vault-relative paths for every .md file in the doomed tree —
     # before the move, while they still resolve under vault_root. Used to
     # purge the embedding sidecar after the trash move succeeds.
@@ -226,6 +220,29 @@ def delete_directory(
             )
         except ValueError:
             continue
+
+    from . import graph_sync
+
+    try:
+        transition = graph_sync.begin_deletion_transition(
+            vault_root,
+            source_rel=rel_path,
+            trash_rel=trash_rel,
+            removed_rel_paths=md_rels_to_unindex,
+        )
+    except lifecycle.LifecycleError as error:
+        raise DeleteDirectoryError(code=error.code, reason=error.reason) from error
+    except graph_sync.GraphLifecycleEpochSetupError as error:
+        raise DeleteDirectoryError(
+            code="GRAPH_SYNC_EPOCH_FAILED",
+            reason="could not establish the graph deletion epoch",
+        ) from error
+    except graph_sync.GraphLifecycleRollbackError as error:
+        raise DeleteDirectoryError(
+            code="GRAPH_SYNC_DELETION_ROLLBACK_FAILED",
+            reason="the staged trash transition could not be restored",
+        ) from error
+    lifecycle_operation = transition.operation
 
     # A doomed subtree may also contain CLIP-relevant media binaries (image/
     # video — the only kinds with derived-index residue: CLIP rows, and for a
@@ -264,18 +281,41 @@ def delete_directory(
             log.debug("self-delete suppression registration failed", exc_info=True)
 
     try:
-        lifecycle.atomic_rename(
-            lifecycle_operation, source=abs_path, destination=trash_abs
-        )
+        transition.rename()
     except lifecycle.LifecycleError as e:
-        lifecycle.abort_deletion(lifecycle_operation)
+        try:
+            transition.abort()
+        except graph_sync.GraphLifecycleRollbackError as rollback_error:
+            raise DeleteDirectoryError(
+                code="GRAPH_SYNC_DELETION_ROLLBACK_FAILED",
+                reason="the staged trash transition could not be restored",
+            ) from rollback_error
         raise DeleteDirectoryError(
             code=e.code,
             reason=e.reason,
         ) from e
 
+    try:
+        transition.publish_checkpoint()
+    except Exception as error:  # noqa: BLE001 - reverse caught transition
+        try:
+            transition.abort()
+        except graph_sync.GraphLifecycleRollbackError as rollback_error:
+            raise DeleteDirectoryError(
+                code="GRAPH_SYNC_DELETION_ROLLBACK_FAILED",
+                reason="graph checkpoint failed and the trash transition could not be restored",
+            ) from rollback_error
+        raise DeleteDirectoryError(
+            code="GRAPH_SYNC_CHECKPOINT_FAILED",
+            reason="graph checkpoint failed; the trash transition was restored",
+        ) from error
+    from .writer_lease import mark_active_mutation_committed
+
+    mark_active_mutation_committed()
+
     index_feedback: dict | None = None
     if fanout_rels:
+        fanout_unverified = False
         try:
             from . import index_sync
             raw_report = index_sync.delete_after_remove(
@@ -288,11 +328,16 @@ def delete_directory(
                     fanout_rels, degraded=False
                 )
             )
+            fanout_unverified = not isinstance(raw_report, index_sync.IndexSyncReport)
         except Exception:  # noqa: BLE001 — sidecars are best-effort
             log.exception(
                 "index delete failed for trashed tree %s; sidecar may be stale",
                 rel_path,
             )
+            try:
+                graph_sync.register_outer_fanout_failure(vault_root)
+            except Exception:  # noqa: BLE001 - retain the canonical deletion and report reconcile
+                log.exception("graph fanout failure handoff could not be registered")
             warnings.append(
                 "trash succeeded but derived-index cleanup failed; run reconcile"
             )
@@ -300,6 +345,21 @@ def delete_directory(
                 fanout_rels, degraded=True
             )
         index_feedback = report.as_dict()
+        if fanout_unverified:
+            index_feedback["derived_work"] = "unverified"
+    else:
+        index_feedback = lifecycle.exact_no_derived_index_report(lifecycle_operation)
+
+    from .writer_lease import active_mutation_request_id
+
+    if active_mutation_request_id() is None:
+        from . import graph_sync
+
+        if graph_sync.registered_checkpoint(vault_root) is not None:
+            try:
+                graph_sync.wait_for_registered(vault_root)
+            except Exception:  # noqa: BLE001 - preserve committed deletion for reconcile
+                warnings.append("trash succeeded but graph publication failed; run reconcile")
 
     # Metadata sidecar.
     meta = {

@@ -2277,13 +2277,16 @@ def _resolve_relation_filter(
                     "replaced_by": resolution.replacement,
                 }
             )
-    result = epistemic_graph.EpistemicGraphIndex(vault_root).relation_participants(
+    graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    result = graph_index.relation_participants(
         canonical, anchor=relation_of, direction=relation_direction
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(status="temporarily_unavailable")
     if result.status == "warming":
-        epistemic_graph.schedule_background_rebuild(vault_root)
+        epistemic_graph.schedule_background_rebuild(
+            vault_root, mutation_coordinator=graph_index._canonical_mutation_coordinator()
+        )
         raise RetrievalIndexWarming(status="warming")
     return result.paths, dict(result.provenance), tuple(findings)
 

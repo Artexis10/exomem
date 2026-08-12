@@ -1,88 +1,333 @@
 ## Context
 
-`EpistemicGraphIndex.refresh_paths` currently acquires the vault mutation boundary and escalates to `_rebuild_all_locked()` whenever the graph sidecar is unusable. The rebuild pass deletes and repopulates the live SQLite tables, so the wide boundary is also what prevents readers seeing an empty or partial graph. That produces the incident: a slow reconcile or first write can hold the shared boundary long after the client deadline.
+An unusable graph sidecar currently makes the canonical mutation boundary cover
+the full rebuild. That makes a vault-sized derived operation block unrelated
+canonical writes. A previous redesign released the boundary, but made
+`graph_pending` both an idempotency state and a graph-flight owner. Review found
+that this leaves terminal, retry, crash, and newer-checkpoint behaviour
+ambiguous. This design separates them.
 
-The current terminal contract remains correct: a write that encounters an unusable graph returns only after a whole-vault rebuild either publishes an available graph or reports an explicit derived failure. What is wrong is waiting while canonical writer authority remains held.
+The graph is derived. Canonical Markdown and the exact committed checkpoint are
+truth. The graph must still be available for the required checkpoint before a
+successful graph-available terminal is returned, but its work must be
+joinable/recomputable independently of the original mutation attempt.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Publish canonical files and durable graph handoff state together.
-- Release canonical writer authority before any full graph build or join.
-- Let a second writer publish while earlier callers wait on one per-vault rebuild.
-- Never expose a partial graph or claim a checkpoint was consumed when it was not.
-- Recover after process death without force-unlocking or losing a committed canonical write.
-- Preserve an idempotent terminal: retry never duplicates canonical state.
+- Commit canonical bytes exactly once or return an honest `outcome_unknown`
+  terminal classification.
+- Make a committed mutation independently identifiable by an exact receipt.
+- Release all canonical authority before any vault-sized build or join.
+- Require an acknowledgement, exact registered work handle, or durable failure
+  handle for every checkpoint that leaves writer authority.
+- Preserve public checkpoint v1 bytes/digest vectors and strict availability
+  parity.
+- Recover graph health without changing user-authored bytes or reusing an epoch.
 
 **Non-Goals:**
 
-- Change the user-authored vault schema or graph query API.
-- Make incremental available-graph refresh asynchronous.
-- Return success while the graph is silently unavailable.
-- Force-unlock a live mutation owner.
-- Reduce how often schema/registry changes invalidate the sidecar.
+- Make graph availability best-effort or silently asynchronous.
+- Infer an unreceipted canonical outcome from filesystem similarity.
+- Change user-authored schemas, query APIs, or the public checkpoint v1 shape.
+- Claim mutual exclusion across hostile replacement of a same-user trusted
+  runtime root; that root is an operator-controlled trust boundary.
 
 ## Decisions
 
-### Publish a durable checkpoint in the canonical batch
+### Canonical lifecycle and claim receipts
 
-Every graph-relevant guarded batch includes a replacement for the vault-local hidden graph-sync checkpoint sidecar at `<Knowledge Base>/.graph-sync.json` (resolved through the configured Knowledge Base directory name). Version 1 is a closed content-free object:
+The retry row is a non-owned canonical lifecycle record with exactly four
+states: `reserved`, `executing`, `canonically_committed`, and `completed`.
+`graph_pending` is retired. A bounded execution **attempt** may claim a
+`reserved` row and move it to `executing`; the attempt identity and its lease
+are attempt-scoped coordination data, not ownership carried by a later state.
+A dead `reserved` row is reclaimable. A dead `executing` row is not: absent
+valid authenticated evidence, its only recovery classification is
+`outcome_unknown`, because the leaf may have crossed the vault cut.
 
-`{version, generation, mutation_id, scope, paths, created_paths, checkpoint_sha256}`.
+`outcome_unknown` is not a fifth canonical lifecycle state and does not imply a
+canonical commit. It is a fail-closed terminal classification for the
+unprovable multi-store cut. The retry store retains that immutable
+classification in a `completed` row only as a terminal storage envelope; this
+keeps the state vocabulary closed without asserting that the canonical mutation
+completed. Exact retry receives readback guidance rather than permission to
+execute the leaf again.
 
-The public v1 checkpoint shape and digest stay unchanged. An internal content-free `<Knowledge Base>/.graph-sync-floor.json` stores the highest generation ever issued as the closed object `{version, generation, floor_sha256}` under the distinct `exomem-graph-sync-generation-floor:v1\0` digest domain. `generation` is one greater than the maximum valid floor, current checkpoint, and live graph acknowledgement, defaulting to 1 only for exact legacy state where all three are absent. This auxiliary floor is necessary because a deleted or corrupted unacknowledged checkpoint otherwise erases the only evidence of its issued generation. `mutation_id` is a normalized existing correlation when it yields exactly 24 lowercase hex characters, otherwise an independently generated 24-hex identifier. `scope` is `paths` while the sorted unique safe relative path/hash entries fit the fixed bound and `full` otherwise. Each path entry is `[relative_path, post_write_sha256_or_null]`; null represents deletion. `created_paths` is the sorted subset created by the batch. The checkpoint digest remains SHA-256 over `exomem-graph-sync-checkpoint:v1\0` plus its existing canonical JSON.
+Each claim receives a fresh lowercase 24-hex `commit_token` and a fresh private
+32-byte receipt secret. `GraphCommitReceipt` v2 is one atomically installed,
+hidden, portable, content-free receipt retained at least as long as its retry
+row. It binds all of:
 
-For graph-relevant ordinary writes, the staged guarded order is floor, caller canonical replacements, then checkpoint. Caught publication failure rolls the whole set back. The floor and checkpoint are excluded from semantic candidates, returned canonical paths, watcher fanout, and their own input. Graph-irrelevant writes do not advance either artifact. A malformed/missing checkpoint with a valid floor recovers by publishing a higher full-scope checkpoint; a missing/malformed floor after non-legacy state fails closed rather than inventing history. A direct human edit has no checkpoint, so full-vault freshness remains an independent backstop.
+- namespaced idempotency-key digest;
+- command and normalized payload digest;
+- claim/attempt identity and `commit_token`;
+- bounded canonical terminal projection; and
+- exact graph checkpoint generation and digest.
 
-Graph-relevant file and recursive-directory deletion use the same epoch through the existing lifecycle/trash transition: durable tombstone, floor publication, canonical rename, checkpoint publication, then the existing deletion commit point. Caught checkpoint failure reverses and fsyncs the rename and restores the prior floor. Abrupt failure leaves the tombstone and/or ahead floor as proof that reconcile must issue a higher full-scope recovery checkpoint.
+Receipt eligibility is not circular. “The complete ordinary protocol
+succeeded” means, before signing: the claimed leaf has returned its candidate
+terminal; the one guarded vault batch has successfully applied its selected
+floor, caller canonical replacements, and exact checkpoint; and every bounded
+canonical fanout precondition needed to select and validate that checkpoint's
+incremental-or-rebuild route has returned successfully. It excludes receipt
+installation/authentication, the local lifecycle CAS, durable derived-handle
+registration, `ensure_started`, every graph join, and completed-terminal
+persistence. Any failure before that point installs no receipt and follows the
+ordinary batch rollback/error path.
 
-### Schedule under the boundary, join only after release
+The terminal projection is a closed content-free object with only these
+permitted fields, each omitted when unavailable:
+`_terminal`, `version`, `ok`, `state`, `status`, `committed`, `mutated`,
+`terminal`, `request_id`, `receipt_id`, `operation_id`, `warnings_count`, and
+`result_sha256`. Scalar identifiers have their existing bounded formats;
+`result_sha256` is lowercase SHA-256 of an otherwise non-retained result
+summary. No other top-level or nested projection fields are permitted. In
+particular, `path`, `paths`, `affected_paths`, all vault-relative/absolute
+paths, file names, Markdown, metadata values, source text, and arbitrary leaf
+result/content are excluded. Graph outcome is attached only after receipt
+persistence and is not part of this projection.
 
-Post-commit fanout may synchronously refresh a usable graph when the exact new path-scoped checkpoint proves the live graph acknowledges its immediate predecessor. The incremental SQLite transaction publishes row changes, recall availability markers, and the new checkpoint acknowledgement together. If that narrow proof fails, dispatch only records the exact full-work requirement while under writer authority; it does not build or wait.
+Receipt v2 itself is closed. Its exact outer fields are `version`,
+`idempotency_key_digest`, `command_digest`, `attempt_id`, `commit_token`,
+`terminal_projection`, `terminal_projection_sha256`, `checkpoint_generation`,
+`checkpoint_sha256`, `canonical_disposition`, and `receipt_hmac_sha256`;
+`version` is literal integer `2`, `canonical_disposition` is exactly `success`
+or `committed_failure`, the two checkpoint fields are both null or a positive
+integer/lowercase SHA-256 pair, and every other digest is lowercase SHA-256.
+`canonical_disposition` is covered by the HMAC; it does not alter the closed
+terminal-projection allowlist. Its HMAC input is
+the UTF-8 bytes `exomem-graph-commit-receipt-auth:v2\0` concatenated with the
+canonical UTF-8 JSON of every v2 field except `receipt_hmac_sha256`. Canonical
+JSON uses no insignificant whitespace, lexicographically sorted object keys,
+and unescaped non-ASCII Unicode; duplicate keys, surplus keys, missing keys,
+wrong types, noncanonical values, and a mismatched terminal-projection digest
+are rejected before authentication. Verification recomputes the HMAC-SHA256 and
+uses a constant-time digest comparison. This is a complete definition, not a
+reference to the receipt parser or writer.
 
-After canonical commit is observed and while the operation guard remains held, writer coordination durably changes the idempotency row from owned `pending` to nonterminal `graph_pending`, storing the canonical committed terminal plus complete validated content-free checkpoint. The guard then releases before any full build/join. Concurrent exact retries wait; after proven owner death, a new owner may CAS-claim `graph_pending` and resume only graph work. It never runs the canonical leaf. Completion or explicit committed graph failure transitions the row to `completed`; no internal pending payload is publicly replayable.
+The receipt carries an HMAC-SHA256 over its canonical v2 bytes using that
+secret. The secret exists only in the matching owner-only local idempotency
+runtime row, never in a synced vault file, terminal, log, or diagnostic. On
+POSIX, the runtime directory is owner-only (`0700`) and its database, WAL/SHM
+files, and receipt-secret material are owner read/write only (`0600` or
+stricter). On Windows, the local SQLite BLOB is exactly
+`EXID | version=1 | provider=1(DPAPI_CURRENT_USER) | uint32be ciphertext_length | ciphertext`;
+both total BLOB and ciphertext are capped at 4096 bytes and declared length
+must exactly consume the remaining bytes. Truncation, trailing bytes, and
+unknown version/provider are rejected. DPAPI `CurrentUser` uses UTF-8 entropy
+`exomem-graph-commit-receipt-dpapi:v1\0<attempt_id>\0<commit_token>`; the clear
+secret is never serialized. The protected inheritable runtime DACL permits only
+the current service identity, `LocalSystem`, and `Administrators`. Before
+opening SQLite or unpickling any runtime row, the service rejects a
+reparse-point runtime path or an existing unsafe DACL. The database and its
+WAL/SHM therefore contain only the DPAPI ciphertext. An account/profile change,
+copied envelope, failed DPAPI unprotect, or raw legacy secret row is
+`outcome_unknown`, never authority to heal or replay.
+The private runtime root is a distinct trust boundary from the synced vault.
 
-The vault batch and idempotency SQLite store cannot share one atomic transaction. Process death after canonical commit but before `graph_pending` persistence therefore retains the existing committed-uncertain boundary: a dead ordinary `pending` row for that cut never expires into leaf re-execution, exact retry returns outcome-unknown/readback guidance, and the durable checkpoint still drives graph recovery. This is less convenient than graph-only resume but preserves the non-duplication invariant without fabricating a terminal.
+There is no mutable `commit_point` field and no second marker write. The one
+receipt is authoritative only after the defined pre-signing ordinary protocol
+succeeded. It is installed atomically before the local CAS from the matching
+`executing` row to `canonically_committed`. A post-install local CAS failure may
+be healed only by the exact receipt plus its matching trusted `executing` row,
+attempt/token binding, and retained private secret. A copied, valid-looking
+receipt without that row and secret is advisory and cannot suppress a mutation.
+No recovery path scans receipt directories: it reads only the exact receipt
+address named by the trusted row, with bounded artifact size and bounded parsing
+work. No state owns subsequent graph health. The exact graph coordinator can be
+joined or recreated from a committed row and its exact receipt/checkpoint by a
+later attempt, retry, readiness, or reconcile process. `completed` stores the
+returned graph-available or committed-derived-failure terminal and remains
+replayable byte-for-byte.
 
-This ordering applies to narrow and wide commands: no outer command guard may enclose the graph join. The join token is content-free and process-local; the durable checkpoint, not the token, is crash authority. A later writer can enter, commit generation N+1, and join the same flight while the builder that began at N restarts its stabilization pass to consume N+1.
+There is no transaction shared by the vault and retry store. The crash cuts are
+closed: before the leaf, a dead `reserved` claim may be reclaimed; after the
+leaf can change caller files, floor, or checkpoint but before receipt v2 atomic
+installation, the claim is `outcome_unknown`; after receipt installation but
+before local CAS, only the matching trusted executing row and secret may heal
+that CAS; and a failure while cleaning a committed attempt never reconstructs
+success from a receipt after trusted state is absent. No cut may replay the leaf,
+fabricate a committed terminal, or infer success from vault similarity. Exact
+retry returns stable readback guidance; epoch recovery may converge derived
+graph health but cannot turn an unproven claim into a receipt.
 
-### Build a temporary sidecar and publish one stable checkpoint
+An authenticated orphaned v2 receipt with `canonical_disposition: success` may
+heal only its matching trusted executing CAS and then resumes its ordinary
+derived graph path. An authenticated orphan with
+`canonical_disposition: committed_failure` suppresses leaf replay: if its exact
+retained local failure is present it is replayed, otherwise the row persists
+`outcome_unknown` while graph recovery proceeds independently. Missing,
+invalid, or fieldless v2 receipts never heal either disposition.
 
-One single-flight owner across threads and processes holds a persistent OS-locked regular file under the configured shared runtime-state root, keyed by the same canonical vault identity as writer coordination, before creating a unique reserved temporary database beside the live sidecar. The lock path is descriptor-bound, no-follow/no-symlink validated, permission-restricted, never placed in human/sync-writable vault content, and never unlinked. Kernel lock lifetime is the ownership proof; PID metadata is not authority. Reconcile acquires the same lock before sweeping well-formed abandoned temps.
+Synced vault receipt artifacts are untrusted/advisory even when their HMAC bytes
+look valid, because the private secret is not synced. Cross-replica exactly-once
+is explicitly deferred: without a shared pre-leaf CAS, independent replicas
+cannot use a copied receipt to suppress one another's mutation. Legacy v1
+boolean receipts are advisory only. Legacy `graph_pending` migration is local
+retry-row migration only; a validated local row may become
+`canonically_committed` and rejoin/recompute graph work, but vault artifacts
+alone never create that row or authorize a leaf decision.
 
-Each pass snapshots the coherent floor/checkpoint epoch and full vault freshness, fills and closes/checkpoints a self-contained temp database, and validates it. Under the mutation boundary it re-reads epoch and freshness, writes the exact acknowledgement to temp and closes it, invokes a stable publication test seam on the original index, then re-reads epoch and freshness immediately before replacement. If either check changes it retries. A platform sharing refusal leaves the previous live sidecar intact and returns explicit committed graph failure.
+### Epoch publication and exact ordering
 
-Readers continue using the previous usable sidecar during the build. If no usable sidecar exists, reads report graph unavailable until publish. They never open the temporary database. Replacement behavior is explicitly tested on the Windows service path as well as POSIX.
+The public `<Knowledge Base>/.graph-sync.json` remains closed v1, including its
+canonical bytes and existing digest vectors. The internal
+`.graph-sync-floor.json` remains a closed `{version, generation,
+floor_sha256}` object in its distinct digest domain. The checkpoint parser is
+strict before normalization: its `paths` array contains at most 1,000 entries;
+paths are unique, already NFC-normalized, safe canonical POSIX-relative paths
+(no absolute path, backslash, empty, dot/dotdot, or NUL component); hashes are
+null or lowercase 64-hex; duplicate
+paths cannot conflict; `created_paths` is a unique subset of non-null paths;
+and `full` has empty arrays. The parser accepts neither surplus fields nor
+relaxed legacy aliases.
 
-### Resolve waiters from checkpoint coverage
+For an ordinary graph-relevant claimed mutation, the canonical protocol is:
 
-A successful flight resolves every waiter whose required checkpoint identity is covered by observed monotonic lineage. If a newer checkpoint appears, the flight continues before resolving it. Same-generation/different-digest requirements fail explicitly; a stopped uncovered flight wakes all waiters with lineage failure. Exactly one builder runs per vault, and waiter registration is bounded.
+1. under canonical authority select one generation above the maximum valid
+   floor, checkpoint, and acknowledgement;
+2. publish floor;
+3. publish caller canonical replacements;
+4. publish the exact checkpoint; and
+5. after the vault batch succeeds, atomically install the exact authenticated
+   receipt v2, then compare-and-swap its matching trusted executing row to
+   `canonically_committed`.
 
-The triggering command preserves the existing semantic contract: it returns with graph availability proven for its checkpoint. If stabilization attempts are exhausted, canonical state remains committed and the terminal reports `state: committed`, `graph_sync: failed`, a stable failure code, the required checkpoint digest, and reconcile guidance. It never reports the mutation rejected or invites a blind write retry. Exact request retry replays that committed terminal; a later explicit recovery may satisfy the durable checkpoint.
+Caught failure rolls back the whole vault batch while authority remains held;
+the receipt is not installed. Graph-irrelevant batches advance neither floor
+nor checkpoint and create no graph receipt. Setup, floor seeding, reconcile
+repair, rollback, and cleanup explicitly run with `commit_point=False`: they
+may repair epoch state but never prove a command mutation. This API flag is not
+a receipt field or marker.
 
-### Recover from restart and sweep abandoned work
+Exact legacy is all floor, checkpoint, and acknowledgement absent. A valid
+checkpoint with absent floor and absent/exact acknowledgement is the only
+pre-floor migration state and may atomically seed the floor. A valid floor with
+missing, malformed, or older checkpoint recovers only with a higher full-scope
+checkpoint. Every other malformed/missing-floor or contradictory-ack state
+fails closed. Existing v1 acknowledgement metadata remains strict: availability
+requires every currently written exact metadata key, including
+`graph_sync_checkpoint`, and exact generation/digest parity. There is no
+defaulting-away of missing metadata in this change.
 
-Startup/readiness and reconcile compare the generation floor, checkpoint, and graph acknowledgement. A valid floor plus missing/malformed/contradictory checkpoint permits recovery only at a higher generation. Missing/corrupt floor state fails closed except for two exact cases: all three artifacts absent is legacy, while a valid checkpoint plus absent floor plus absent or exactly matching acknowledgement is the pre-floor migration state and seeds the floor at that checkpoint generation under mutation authority. Conflicting acknowledgement or acknowledgement without checkpoint/floor is ambiguous and refuses repair. Reconcile reports refreshed/current only after it re-reads both epoch coherence and graph availability.
+### Derived handoff, coordinator, and terminal outcomes
 
-Temporary databases use a reserved per-vault prefix and contain their target checkpoint digest plus a unique nonce. Reconcile removes them only while holding the same cross-process rebuild lock; it never removes the lock file, live sidecar, or a live builder's work.
+Before canonical authority releases, an ordinary graph-relevant checkpoint must
+have exactly one of these durable/provable fates:
+
+1. incremental SQLite work atomically acknowledges that exact checkpoint;
+2. a durable exact rebuild handle is registered; or
+3. a durable explicit graph failure handle is attached to the receipt.
+
+`accepted_unverified` is forbidden. Registration is the under-guard durable
+handoff only; after all canonical guards release, `ensure_started(handle)`
+atomically starts or joins its exact coordinator flight and does **not** consume
+a waiter slot. `join(handle)` is the separate bounded-waiter operation and
+releases its capacity in `finally`, including start, cancellation, and failure
+paths. A coordinator capacity/start/stopped-flight/lineage/platform failure
+becomes an explicit handle with stable code and recovery guidance; no waiter is
+orphaned. A later exact retry or reconcile can join or recompute any
+`canonically_committed` receipt's graph health without a leaf replay.
+
+Incremental refresh is eligible only when the current checkpoint still equals
+the committed receipt, the graph acknowledgement is its exact immediate
+predecessor, all existing freshness/recall/topology proofs hold, and rows,
+availability markers, and all acknowledgement metadata commit in one SQLite
+transaction. Otherwise the leaf only records the exact rebuild handle; it does
+not build or join while authority is held.
+
+The triggering request may join off-boundary. It returns a normal committed
+terminal only after exact availability; if its exact handle reaches a bounded
+derived failure, it returns committed-with-graph-failure, the exact checkpoint,
+and recovery guidance. This does not change the receipt's canonical proof. A
+later successful recovery changes live graph health but does not rewrite the
+original completed terminal.
+
+### Single-flight private build and publication
+
+For one configured trusted runtime root, POSIX rebuild single-flight is
+cooperative: the root must be operator-owned and neither group- nor
+world-writable, and the persistent per-vault lock file sits directly beneath it.
+The regular file is opened and validated no-follow with restrictive permissions
+and is never unlinked. The contract deliberately excludes a hostile same-user
+replacement of that trusted root. The lock serializes builders and scoped temp
+cleanup; it does not itself make reader-visible publication correct.
+
+Windows retains stronger semantics: the lock and live-sidecar replacement use
+no-delete-share handles. A sharing/rename refusal preserves the old live
+sidecar and the temporary result, records an explicit graph failure handle, and
+never falls back to delete-and-replace.
+
+A builder acquires the rebuild lock outside canonical authority, creates a
+unique reserved temp sidecar, snapshots coherent epoch plus real full-vault
+freshness, and performs all scalable work privately. The private phase commits
+exact acknowledgement/checkpoint metadata, truncates WAL, runs full integrity
+and direct source/membership/topology proof, warms the live
+`RecallFreshnessCheckpoint`, and captures the recall-policy version plus a
+bounded no-follow `_access.yaml` content snapshot/fingerprint. It then closes
+the temp and emits an immutable ticket binding exact graph publication epoch,
+direct projection identity, warmed checkpoint, policy/access snapshot,
+no-external-pending epoch, and exact closed temp-file/meta identity.
+
+Under canonical authority, publication performs only two O(1)/bounded ticket
+checks around the publication hook and then atomic replacement. It does not
+walk the vault or sidecar, warm caches, or run WAL, integrity, or projection
+proofs. A cold/dirty cache, changed epoch/access snapshot, observed external
+Markdown/access edit, hook failure, or ticket mismatch releases authority and
+causes reconcile/retry. Missed or unobserved direct edits are eventually
+caught by watcher-periodic reconcile; arbitrary-editor linearizability requires
+a broker/journal and is out of scope. Readers see only the old usable sidecar,
+the fully replaced sidecar, or unavailable—never a temp/partial database.
+
+Cleanup is scoped to a well-formed reserved temp for the exact vault identity;
+it runs only while holding the rebuild lock, never removes the persistent lock
+or live sidecar, and never sweeps a registered active flight. The same exact
+handle protocol makes a newer checkpoint joinable while an older pass retries.
+
+### Deletion, recovery, and rollback
+
+File and recursive-directory deletion use the existing lifecycle/trash
+transition under canonical authority: tombstone, floor, rename, exact null/full
+checkpoint, then the existing deletion commit point. A caught checkpoint or
+later batch failure reverses and fsyncs the rename and restores the epoch before
+returning failure. A crash after rename leaves lifecycle/floor evidence and
+requires a higher full recovery checkpoint; it neither restores nor duplicates
+the deletion. Restore follows the same guarded ordering. These lifecycle and
+recovery paths have `commit_point=False` unless they are the claimed caller
+leaf itself, so repair can never manufacture a retry receipt.
+
+Readiness/reconcile dynamically classify floor/checkpoint/ack and graph
+availability. They report current only after independent exact epoch parity and
+availability proof. A repair must produce an exact registered rebuild/failure
+handle before releasing authority. No recovery changes user-authored bytes
+except the original requested lifecycle operation.
 
 ## Risks / Trade-offs
 
-- [Checkpoint update adds one small write per graph-relevant batch] → Keep it content-free, bounded, excluded from recall, and whole-file atomic.
-- [The monotonic floor is another operational artifact] → Keep it closed, content-free, domain-separated, batch-guarded, and excluded from all semantic/index output; it exists solely to prevent generation reuse after lost unacknowledged state.
-- [Sustained writers prevent a stable pass] → Retain bounded stabilization; fail explicitly as committed-with-derived-failure rather than holding writers or publishing stale graph state.
-- [Many callers wait on one rebuild] → Bound waiter registration and expose current flight/checkpoint status; callers do not hold mutation authority.
-- [Crash after canonical replacement but before all batch artifacts] → Existing abrupt-batch inspection plus full-vault freshness detects the partial state; restart never trusts checkpoint metadata alone.
-- [Windows cannot replace an open SQLite file like POSIX] → Close publication handles, test the Windows path, and refuse publication without disturbing the previous sidecar when replacement is unsafe.
-- [A post-commit graph failure is mistaken for failed mutation] → Terminal state remains committed and names derived recovery separately; idempotent replay returns the same canonical receipt.
+- The multi-store cut remains observable as the fail-closed
+  `outcome_unknown` terminal classification; hiding it would risk duplicate
+  canonical writes.
+- Receipts add bounded durable state, but make retry and graph recovery auditable
+  without storing user content.
+- Coordinated POSIX locking needs an operator-controlled runtime root; Windows
+  may decline unsafe replacement rather than pretending it succeeded.
+- Sustained writes can exhaust bounded stabilization; that is a committed
+  derived failure with a recoverable handle, never a writer-bound deadlock.
 
 ## Migration Plan
 
-No user-data migration. On first graph-relevant mutation after upgrade, floor/checkpoint generation 1 is written and the graph records its acknowledgement. A valid pre-floor checkpoint initializes the floor at its generation. Exact legacy state—no floor, checkpoint, or acknowledgement—remains accepted until first publication. Any other missing/corrupt floor state fails closed.
+The public checkpoint v1 representation is unchanged, including its canonical
+bytes and digest vectors. Exact legacy remains valid until first graph-relevant
+publication. Valid pre-floor checkpoint states seed the floor; all other
+malformed migration states fail closed. Legacy v1 boolean receipts are advisory
+only. Existing `graph_pending` **local retry rows** are read as
+`canonically_committed`, retain their validated checkpoint binding, and cannot
+run the leaf again; no synced artifact can synthesize that migration.
 
-Rollback before any epoch exists may use the prior release. After publication, supported rollback uses a compatibility build that retains floor/checkpoint parsing, graph-pending idempotency semantics, and recovery while disabling newer scheduling if needed. Both hidden artifacts remain safe to preserve.
-
-## Open Questions
-
-None. The auxiliary generation floor resolves non-reuse after lost unacknowledged checkpoint state; the accepted pre-floor migration states are closed; the unavoidable cross-store crash cut returns committed-uncertain without re-execution; and private graph construction is explicitly reconciled with hosted mutation safety through an unreachable-work exception and fixed lock order.
+A rollback compatibility build retains strict v1 floor/checkpoint/ack parsing,
+NFC path admission, advisory receipt reading, local `graph_pending` migration,
+outcome-unknown behaviour, and recovery. It may disable new scheduling only
+behind the explicit rollback gate; it must not reintroduce a writer-held rebuild
+or relax acknowledgement parity.
