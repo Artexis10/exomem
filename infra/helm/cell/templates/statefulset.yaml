@@ -70,6 +70,10 @@ spec:
               value: {{ .Values.expectedRelease | quote }}
             - name: EXOMEM_HOSTED_WORKER_POLICY_DIGEST
               value: {{ .Values.workerPolicyDigest | quote }}
+            - name: EXOMEM_HOSTED_RECORDS_READER_VERSION
+              value: {{ printf "%.0f" .Values.recordsReaderVersion | quote }}
+            - name: EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED
+              value: {{ .Values.lifecycleActionsEnabled | quote }}
             - name: EXOMEM_HOSTED_STORAGE_LIMIT_BYTES
               value: {{ printf "%.0f" .Values.storageLimitBytes | quote }}
             - name: EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES

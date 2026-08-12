@@ -1007,6 +1007,46 @@ def _release_candidate_assets(gh_binary: str, tag: str) -> list[str]:
     return selected
 
 
+def _download_release_runtime_candidate(
+    *,
+    directory: Path,
+    release: str,
+    expected_sha256: str,
+    candidate_tool: Any,
+    gh_binary: str,
+) -> tuple[Path, Path, Path]:
+    """Download and bind one exact signed runtime candidate from its release."""
+
+    tag = f"v{release}"
+    assets = _release_candidate_assets(gh_binary, tag)
+    command = [
+        gh_binary,
+        "release",
+        "download",
+        tag,
+        "--repo",
+        "Artexis10/exomem",
+        "--dir",
+        os.fspath(directory),
+    ]
+    for asset in assets:
+        command.extend(["--pattern", asset])
+    _run(command)
+    candidate = _one_candidate(
+        list(directory.glob("*.candidate-v1.json")), expected_sha256, candidate_tool
+    )
+    stem = candidate.name.removesuffix(".candidate-v1.json")
+    image_bundle = directory / f"{stem}.sigstore.json"
+    candidate_bundle = directory / f"{stem}.candidate.sigstore.json"
+    for bundle in (image_bundle, candidate_bundle):
+        candidate_tool._read_regular(
+            bundle,
+            label="runtime candidate bundle",
+            maximum=candidate_tool.MAX_BUNDLE_BYTES,
+        )
+    return candidate, image_bundle, candidate_bundle
+
+
 def _pulled_candidate_paths(directory: Path, loader: Any) -> list[Path]:
     entries = list(directory.iterdir())
     if not 1 <= len(entries) <= _MAX_PULL_FILES:
@@ -1278,8 +1318,67 @@ def _verify_substrate_v1_consumer(commit: str, gh_binary: str) -> None:
         raise ValueError("rollback Substrate v1 consumer commit is unavailable")
 
 
+def verify_v3_rollback_runtime_candidate(
+    lock: dict[str, Any],
+    *,
+    candidate: Path,
+    candidate_sha256: str,
+    image_bundle: Path,
+    candidate_bundle: Path,
+) -> None:
+    """Require the v3 rollback identity to be independently reverified, never inferred."""
+
+    if lock.get("schemaVersion") != 3:
+        raise ValueError("Records rollback runtime verification requires a v3 lock")
+    compatibility = lock.get("recordsCompatibility")
+    if not isinstance(compatibility, dict):
+        raise ValueError("Records rollback compatibility is unavailable")
+    rollback = compatibility.get("rollbackRuntime")
+    if not isinstance(rollback, dict) or rollback.get("recordsReaderVersion") != 2:
+        raise ValueError("Records rollback runtime is not reader-two capable")
+    composer = _load_script("hosted_composition_lock.py")
+    verified, digest = composer._candidate(
+        composer.CandidateInput(candidate, candidate_sha256, image_bundle, candidate_bundle),
+        kind="runtime",
+    )
+    image = verified["image"]["reference"]
+    source = verified["source"]["commit"]
+    claim = composer.hosted_image_candidate.validate_records_compatibility_claim(
+        verified, require_fresh=True
+    )
+    expected_claim = rollback.get("readerStatusProof") if isinstance(rollback, dict) else None
+    expected_target = rollback.get("runtimeTarget") if isinstance(rollback, dict) else None
+    if (
+        digest != rollback.get("candidateSha256")
+        or image != rollback.get("image")
+        or source != rollback.get("sourceCommit")
+        or not isinstance(expected_claim, dict)
+        or not isinstance(expected_target, dict)
+        or claim != {
+            "profile": compatibility.get("rollbackProfile"),
+            "recordsReaderVersion": 2,
+            "lifecycleActionsEnabled": False,
+            "issuedAt": expected_claim["issuedAt"],
+            "expiresAt": expected_claim["expiresAt"],
+            "signerWorkflow": expected_claim["signerWorkflow"],
+            "signerWorkflowDigest": expected_claim["signerWorkflowDigest"],
+            "runtimeTarget": expected_target,
+        }
+    ):
+        raise ValueError("verified rollback runtime candidate differs from the v3 lock")
+
+
 def verify_selected_deployment_lock(
-    *, phase: str, repository: Path, oras_binary: str = "oras", gh_binary: str = "gh"
+    *,
+    phase: str,
+    repository: Path,
+    oras_binary: str = "oras",
+    gh_binary: str = "gh",
+    lock_pair_path: Path = _CANONICAL_DEPLOYMENT_LOCK_PAIR,
+    lock_evidence_directory: Path = _CANONICAL_DEPLOYMENT_LOCK_EVIDENCE,
+    rollback_runtime_candidate: Path | None = None,
+    rollback_runtime_image_bundle: Path | None = None,
+    rollback_runtime_candidate_bundle: Path | None = None,
 ) -> dict[str, Any]:
     """Reverify a selected member plus its candidate attestations and source closures."""
 
@@ -1287,9 +1386,21 @@ def verify_selected_deployment_lock(
     composer = _load_script("hosted_composition_lock.py")
     candidate_tool = _load_script("hosted_image_candidate.py")
     selected, _ = prepare._select_member(
-        prepare._load_pair(_CANONICAL_DEPLOYMENT_LOCK_PAIR), phase=phase, member_sha256=None
+        prepare._load_pair(lock_pair_path), phase=phase, member_sha256=None
     )
-    _verify_lock_evidence(selected, _CANONICAL_DEPLOYMENT_LOCK_EVIDENCE, composer)
+    rollback_runtime_artifacts = (
+        rollback_runtime_candidate,
+        rollback_runtime_image_bundle,
+        rollback_runtime_candidate_bundle,
+    )
+    if any(path is not None for path in rollback_runtime_artifacts) and any(
+        path is None for path in rollback_runtime_artifacts
+    ):
+        raise ValueError("rollback runtime candidate and both Sigstore bundles are required together")
+    is_v3 = selected.get("schemaVersion") == 3
+    if not is_v3 and any(path is not None for path in rollback_runtime_artifacts):
+        raise ValueError("rollback runtime candidate evidence is valid only for v3 deployment locks")
+    _verify_lock_evidence(selected, lock_evidence_directory, composer)
     components = selected["components"]
     target = selected["runtimeTarget"]
     closure = selected["composition"]["sourceClosure"]
@@ -1299,16 +1410,60 @@ def verify_selected_deployment_lock(
         root = Path(directory)
         runtime_dir = root / "runtime"
         runtime_dir.mkdir(mode=0o700)
-        tag = f"v{target['releaseVersion']}"
-        assets = _release_candidate_assets(gh_binary, tag)
-        command = [gh_binary, "release", "download", tag, "--repo", "Artexis10/exomem", "--dir", os.fspath(runtime_dir)]
-        for asset in assets:
-            command.extend(["--pattern", asset])
-        _run(command)
-        runtime_candidate = _one_candidate(list(runtime_dir.glob("*.candidate-v1.json")), components["runtime"]["candidateSha256"], candidate_tool)
+        runtime_candidate, runtime_image_bundle, runtime_candidate_bundle = (
+            _download_release_runtime_candidate(
+                directory=runtime_dir,
+                release=target["releaseVersion"],
+                expected_sha256=components["runtime"]["candidateSha256"],
+                candidate_tool=candidate_tool,
+                gh_binary=gh_binary,
+            )
+        )
         _candidate_matches_lock(candidate_tool.load_candidate(runtime_candidate), components["runtime"], kind="runtime", release=target["releaseVersion"])
-        runtime_stem = runtime_candidate.name.removesuffix(".candidate-v1.json")
-        candidate_tool.verify_candidate(runtime_candidate, bundle=runtime_dir / f"{runtime_stem}.sigstore.json", candidate_bundle=runtime_dir / f"{runtime_stem}.candidate.sigstore.json", gh_binary=gh_binary)
+        candidate_tool.verify_candidate(
+            runtime_candidate,
+            bundle=runtime_image_bundle,
+            candidate_bundle=runtime_candidate_bundle,
+            gh_binary=gh_binary,
+        )
+        if is_v3:
+            compatibility = selected.get("recordsCompatibility")
+            rollback_runtime = (
+                compatibility.get("rollbackRuntime") if isinstance(compatibility, dict) else None
+            )
+            if not isinstance(rollback_runtime, dict):
+                raise ValueError("v3 deployment lock rollback runtime is unavailable")
+            candidate_sha256 = rollback_runtime.get("candidateSha256")
+            if not isinstance(candidate_sha256, str):
+                raise ValueError("v3 deployment lock rollback candidate digest is unavailable")
+            if rollback_runtime_candidate is None:
+                rollback_dir = root / "rollback-runtime"
+                rollback_dir.mkdir(mode=0o700)
+                runtime_target = rollback_runtime.get("runtimeTarget")
+                if not isinstance(runtime_target, dict) or not isinstance(
+                    runtime_target.get("releaseVersion"), str
+                ):
+                    raise ValueError("v3 deployment lock rollback release is unavailable")
+                (
+                    rollback_runtime_candidate,
+                    rollback_runtime_image_bundle,
+                    rollback_runtime_candidate_bundle,
+                ) = _download_release_runtime_candidate(
+                    directory=rollback_dir,
+                    release=runtime_target["releaseVersion"],
+                    expected_sha256=candidate_sha256,
+                    candidate_tool=candidate_tool,
+                    gh_binary=gh_binary,
+                )
+            assert rollback_runtime_image_bundle is not None
+            assert rollback_runtime_candidate_bundle is not None
+            verify_v3_rollback_runtime_candidate(
+                selected,
+                candidate=rollback_runtime_candidate,
+                candidate_sha256=candidate_sha256,
+                image_bundle=rollback_runtime_image_bundle,
+                candidate_bundle=rollback_runtime_candidate_bundle,
+            )
         provisioner_dir = root / "provisioner"
         provisioner_dir.mkdir(mode=0o700)
         _verified_provisioner_candidate(
@@ -1369,6 +1524,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phase", choices=("expand", "contract"))
     parser.add_argument("--repository", type=Path)
     parser.add_argument("--oras-binary", default="oras")
+    parser.add_argument("--lock-pair", type=Path)
+    parser.add_argument("--lock-evidence", type=Path)
+    parser.add_argument("--rollback-runtime-candidate", type=Path)
+    parser.add_argument("--rollback-runtime-image-bundle", type=Path)
+    parser.add_argument("--rollback-runtime-candidate-bundle", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--runtime-gate", type=Path)
     parser.add_argument("--substrate-selection", type=Path)
@@ -1381,10 +1541,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.phase is not None:
         if args.repository is None:
             parser.error("--phase requires --repository")
+        selected_arguments: dict[str, Any] = {
+            "phase": args.phase,
+            "repository": args.repository,
+            "oras_binary": args.oras_binary,
+        }
+        if args.lock_pair is not None:
+            selected_arguments["lock_pair_path"] = args.lock_pair
+        if args.lock_evidence is not None:
+            selected_arguments["lock_evidence_directory"] = args.lock_evidence
+        if args.rollback_runtime_candidate is not None:
+            selected_arguments["rollback_runtime_candidate"] = args.rollback_runtime_candidate
+        if args.rollback_runtime_image_bundle is not None:
+            selected_arguments["rollback_runtime_image_bundle"] = args.rollback_runtime_image_bundle
+        if args.rollback_runtime_candidate_bundle is not None:
+            selected_arguments["rollback_runtime_candidate_bundle"] = args.rollback_runtime_candidate_bundle
         verify_selected_deployment_lock(
-            phase=args.phase,
-            repository=args.repository,
-            oras_binary=args.oras_binary,
+            **selected_arguments,
         )
         print("hosted deployment lock verified")
         return 0

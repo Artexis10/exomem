@@ -54,6 +54,13 @@ _LOCK_FIELDS = {
 }
 
 
+def _lock_fields(member: dict[str, Any]) -> set[str]:
+    fields = set(_LOCK_FIELDS)
+    if member.get("schemaVersion") == 3:
+        fields.add("recordsCompatibility")
+    return fields
+
+
 class ReleaseManifestError(RuntimeError):
     """The selected release is incomplete, mutable, or internally inconsistent."""
 
@@ -115,7 +122,7 @@ def _select_member(
         ),
         None,
     )
-    if not isinstance(selected, dict) or set(selected) != _LOCK_FIELDS:
+    if not isinstance(selected, dict) or set(selected) != _lock_fields(selected):
         raise ReleaseManifestError("selected deployment lock is invalid")
     digest = hashlib.sha256(_canonical(selected)).hexdigest()
     if member_sha256 is not None and (
@@ -280,6 +287,7 @@ def prepare_v2(
     values_path: Path,
     phase: str,
     member_sha256: str | None,
+    runtime_selection: str | None = None,
     control_hostname: str,
     transfer_hostname: str,
 ) -> None:
@@ -292,15 +300,25 @@ def prepare_v2(
     ):
         raise ReleaseManifestError("release hostnames are invalid or not distinct")
     selected, digest = _select_member(_load_pair(lock_pair_path), phase=phase, member_sha256=member_sha256)
+    schema_version = selected["schemaVersion"]
+    if schema_version == 2 and runtime_selection == "rollback":
+        raise ReleaseManifestError("deployment lock v2 does not support rollback runtime selection")
+    if schema_version == 3 and runtime_selection not in {"active", "rollback"}:
+        raise ReleaseManifestError("deployment lock v3 requires runtime selection")
+    if schema_version == 2 and runtime_selection not in {None, "active"}:
+        raise ReleaseManifestError("deployment runtime selection is invalid")
+    provisioner = {
+        "deploymentLockJson": _canonical(selected).decode("utf-8"),
+        "deploymentLockSha256": digest,
+        "controlHostname": control_hostname,
+        "transferHostname": transfer_hostname,
+    }
+    if schema_version == 3:
+        provisioner["runtimeSelection"] = runtime_selection
     _write_private_json(
         values_path,
         {
-            "provisioner": {
-                "deploymentLockJson": _canonical(selected).decode("utf-8"),
-                "deploymentLockSha256": digest,
-                "controlHostname": control_hostname,
-                "transferHostname": transfer_hostname,
-            }
+            "provisioner": provisioner
         },
     )
 
@@ -311,6 +329,7 @@ def main() -> int:
     parser.add_argument("--values-output", type=Path, required=True)
     parser.add_argument("--phase", choices=("expand", "contract"), required=True)
     parser.add_argument("--member-sha256")
+    parser.add_argument("--runtime-selection", choices=("active", "rollback"))
     parser.add_argument("--control-hostname", required=True)
     parser.add_argument("--transfer-hostname", required=True)
     args = parser.parse_args()
@@ -320,6 +339,7 @@ def main() -> int:
             values_path=args.values_output,
             phase=args.phase,
             member_sha256=args.member_sha256,
+            runtime_selection=args.runtime_selection,
             control_hostname=args.control_hostname,
             transfer_hostname=args.transfer_hostname,
         )

@@ -134,6 +134,8 @@ class HostedCellConfig:
     transfer_v1_compat_until: str | None = None
     signed_release_build_time: str | None = None
     enforce_transfer_v1_compatibility: bool = True
+    records_reader_version: int = 2
+    lifecycle_actions_enabled: bool = False
 
     @classmethod
     def from_env(
@@ -253,6 +255,33 @@ class HostedCellConfig:
                 "HOSTED_LIMIT_INVALID",
                 "hosted upload limit cannot exceed the hosted storage limit",
             )
+        records_reader_raw = str(values.get("EXOMEM_HOSTED_RECORDS_READER_VERSION", "")).strip()
+        records_reader_version = 2
+        if records_reader_raw:
+            try:
+                records_reader_version = int(records_reader_raw)
+            except ValueError as exc:
+                raise HostedConfigError(
+                    "HOSTED_RECORDS_READER_INVALID", "Records reader version is invalid"
+                ) from exc
+            if str(records_reader_version) != records_reader_raw or records_reader_version not in {1, 2}:
+                raise HostedConfigError(
+                    "HOSTED_RECORDS_READER_UNSUPPORTED", "Records reader version is unsupported"
+                )
+        lifecycle_actions_raw = str(
+            values.get("EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED", "false")
+        ).strip().lower()
+        if lifecycle_actions_raw not in _TRUE | _FALSE:
+            raise HostedConfigError(
+                "HOSTED_LIFECYCLE_ACTIONS_INVALID",
+                "lifecycle actions flag must be an explicit boolean",
+            )
+        lifecycle_actions_enabled = lifecycle_actions_raw in _TRUE
+        if lifecycle_actions_enabled and records_reader_version != 2:
+            raise HostedConfigError(
+                "HOSTED_RECORDS_READER_UNSUPPORTED",
+                "lifecycle actions require Records reader version 2",
+            )
         worker_policy_digest = (
             str(values.get("EXOMEM_HOSTED_WORKER_POLICY_DIGEST", "")).strip() or None
         )
@@ -311,6 +340,8 @@ class HostedCellConfig:
             signed_release_build_time=str(values.get("EXOMEM_RELEASE_BUILD_TIME", "")).strip()
             or None,
             enforce_transfer_v1_compatibility=True,
+            records_reader_version=records_reader_version,
+            lifecycle_actions_enabled=lifecycle_actions_enabled,
         )
         if require_provisioned:
             config.validate_provisioned()
@@ -342,6 +373,24 @@ class HostedCellConfig:
     @property
     def requires_dynamic_security(self) -> bool:
         return self.vault_id is not None
+
+    @property
+    def active_agent_profile(self) -> str:
+        """Return the one hosted agent profile coherent with this runtime."""
+        from . import commands as commands_module
+
+        if self.records_reader_version not in {1, 2}:
+            raise HostedConfigError(
+                "HOSTED_RECORDS_READER_UNSUPPORTED", "Records reader version is unsupported"
+            )
+        if self.lifecycle_actions_enabled:
+            if self.records_reader_version != 2:
+                raise HostedConfigError(
+                    "HOSTED_RECORDS_READER_UNSUPPORTED",
+                    "lifecycle actions require Records reader version 2",
+                )
+            return commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE
+        return commands_module.HOSTED_ALPHA_AGENT_PROFILE
 
     def has_feature(self, feature: str) -> bool:
         return _normalize_feature(feature) in self.feature_grants

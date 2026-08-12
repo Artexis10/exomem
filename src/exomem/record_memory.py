@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import query_data, record_governance, records
+from . import query_data, record_governance, records, structured_collections
 from .cli_ops import OpError
 from .structured_collections import CollectionError
 
@@ -219,6 +219,12 @@ def record_memory(
             assert manifest_path is not None
             assert manifest_text is not None
             assert why is not None
+            root = Path(vault_root)
+            record_governance.require_candidate_manifest_visibility(root, manifest_path)
+            manifest = structured_collections.parse_manifest_bytes(
+                root, root / manifest_path, manifest_text.encode("utf-8")
+            )
+            record_governance.require_records_profile(manifest)
             return records.create_collection(
                 vault_root,
                 manifest_path,

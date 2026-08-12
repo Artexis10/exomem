@@ -29,6 +29,7 @@ from exomem_provisioner.lifecycle import (
     RecordedVolume,
     VolumeLifecycleWorker,
     VolumeRegistrationDriver,
+    _fixed_helm_values,
 )
 from exomem_provisioner.models import OperationState
 from exomem_provisioner.provider_identity import (
@@ -153,6 +154,29 @@ def _config() -> LifecycleConfig:
             }
         },
     )
+
+
+def test_fixed_helm_values_use_one_selected_rollback_runtime_unit() -> None:
+    rollback_target = _runtime_target(
+        releaseVersion="0.21.0",
+        agentProfile="hosted-alpha-agent-v1",
+        gatewayContractDigest="e" * 64,
+    )
+    config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "f" * 64,
+        runtime_target=rollback_target,
+        records_reader_version=2,
+        lifecycle_actions_enabled=False,
+    )
+    request = _v2_request(runtimeTarget=rollback_target)
+    values = _fixed_helm_values(_metadata(), request, config)
+
+    assert values["image"] == config.image
+    assert values["expectedRelease"] == "0.21.0"
+    assert values["expectedProtocol"] == "1"
+    assert values["recordsReaderVersion"] == 2
+    assert values["lifecycleActionsEnabled"] is False
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@
 - [x] 1.2 Add failing reproducibility tests for canonical-definition, skill-set, command-surface, schema-contract, platform artifact, and package-lock digests, including stale-input and development-channel rejection.
 - [x] 1.3 Implement the canonical Hosted definition and typed loader under `plugins/hosted/`, plus deterministic compatibility-lock generation from the Exomem agent contract.
 - [x] 1.4 Publish a machine-readable candidate descriptor that the paired Substrate change can import without copying command membership or user-specific data.
-- [ ] 1.5 Add red-first versioned-profile tests and extend canonical candidate generation for additive `hosted-alpha-agent-v2`: retain v1 membership, identity, locks, and registered evidence byte-for-byte, expose the nine-action `record_memory` lifecycle surface only from v2, and bind its reader floor to 2.
+- [x] 1.5 Add red-first versioned-profile tests and extend canonical candidate generation for additive `hosted-alpha-agent-v2`: retain v1 membership, identity, locks, and registered evidence byte-for-byte, expose the nine-action `record_memory` lifecycle surface only from v2, and bind its reader floor to 2.
 
 ## 2. Author The Hosted-Safe Skill Set
 
@@ -27,9 +27,9 @@
 - [x] 4.2 Implement the promotion record and maintainer commands that bind platform/client version, plugin version, endpoint, profile fingerprint, contract digest, test identity, timestamp, and redacted result hashes.
 - [x] 4.3 Add content-bearing smoke assertions for seeded recall and citation, ordinary-conversation durable capture, and recall from a later fresh conversation.
 - [x] 4.4 Make release/distribution metadata expose only live platform artifacts and prohibit the cross-client-ready label until both platforms pass against one compatibility identity.
-- [ ] 4.5 Add red-first promotion tests for Records-affecting v2 surface detection and refusal of unsigned, stale, mismatched, wrong-profile, extra-field, incomplete, or unverifiable-readback Records evidence while preserving current v1 evidence unchanged.
-- [ ] 4.6 Extend the signed promotion verifier, platform records, and personal connector guardrail with the closed v2 Records acceptance object, profile/reader-floor binding, and byte-identical replay idempotency.
-- [ ] 4.7 Add red-first additive package/deployment-lock and readiness tests for `minimum_records_reader_version: 2`, then enforce the floor for lifecycle-capable v2 candidates and compatible rollback builds without mutating closed v1 locks.
+- [x] 4.5 Add red-first promotion tests for Records-affecting v2 surface detection and refusal of unsigned, stale, mismatched, wrong-profile, extra-field, incomplete, or unverifiable-readback Records evidence while preserving current v1 evidence unchanged.
+- [x] 4.6 Extend the signed promotion verifier, platform records, and personal connector guardrail with the closed v2 Records acceptance object, profile/reader-floor binding, and byte-identical replay idempotency.
+- [x] 4.7 Add red-first additive package/deployment-lock and readiness tests for `minimum_records_reader_version: 2`, then enforce the floor for lifecycle-capable v2 candidates and compatible rollback builds without mutating closed v1 locks.
 
 ## 5. Exercise The Paired Product Journey
 

@@ -321,7 +321,8 @@ def _hosted_mutation_error_details(
     *,
     context: gateway.TrustedGatewayContext,
 ) -> dict[str, Any]:
-    expected_shape = _HOSTED_MUTATION_ERROR_SHAPES.get(error.get("code"))
+    code = error.get("code")
+    expected_shape = _HOSTED_MUTATION_ERROR_SHAPES.get(code) if isinstance(code, str) else None
     if expected_shape is None:
         return {}
     expected_status, expected_committed = expected_shape
@@ -765,10 +766,7 @@ def register_hosted_routes(
         protocol_version=config.protocol_version,
         expose_tier2=expose_tier2,
     )
-    agent_profiles = (
-        commands_module.HOSTED_ALPHA_AGENT_PROFILE,
-        commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE,
-    )
+    agent_profiles = (config.active_agent_profile,)
     agent_commands_by_profile = {
         profile: {
             command.name: command
@@ -881,6 +879,41 @@ def register_hosted_routes(
             media_type="application/json",
         )
 
+    @mcp_app.custom_route(
+        "/private/exomem/v1/agent/{surface_profile}/reader-status",
+        methods=["GET"],
+    )
+    async def _reader_status(request: Request) -> HostedJSONResponse:
+        started = time.perf_counter()
+        context: gateway.TrustedGatewayContext | None = None
+        try:
+            context = _trusted_context(request, config, private_authenticator)
+            surface_profile = str(request.path_params.get("surface_profile", ""))
+            if surface_profile not in agent_surface_descriptors:
+                raise gateway.HostedGatewayError(
+                    "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+                    "hosted agent surface profile is not supported",
+                )
+        except gateway.HostedGatewayError as exc:
+            return _error_response(
+                exc.code,
+                config=config,
+                operation="reader-status",
+                request_id=context.request_id if context else None,
+                started=started,
+            )
+        assert context is not None
+        return _success_response(
+            {
+                "records_reader_version": config.records_reader_version,
+                "lifecycle_actions_enabled": config.lifecycle_actions_enabled,
+            },
+            config=config,
+            operation="reader-status",
+            request_id=context.request_id,
+            started=started,
+        )
+
     @mcp_app.custom_route("/private/exomem/v1/live", methods=["GET"])
     async def _live(request: Request) -> HostedJSONResponse:
         started = time.perf_counter()
@@ -968,6 +1001,15 @@ def register_hosted_routes(
                 guarded_fields=command.guarded_fields,
                 tool=command.name,
             )
+            if (
+                command.name == "record_memory"
+                and kwargs.get("action") in {"revise", "rebaseline"}
+                and not config.lifecycle_actions_enabled
+            ):
+                raise gateway.HostedGatewayError(
+                    "HOSTED_RECORDS_LIFECYCLE_DISABLED",
+                    "Records lifecycle mutations are disabled for this runtime",
+                )
             injected = (
                 (config.vault_root, source_schema) if command.needs_schema else (config.vault_root,)
             )

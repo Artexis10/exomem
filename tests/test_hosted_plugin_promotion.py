@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib.util
 import json
+import re
 import shutil
+import sys
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,7 @@ import pytest
 from exomem import hosted_plugins
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_HOSTED_PLUGIN_SCRIPT = REPO_ROOT / "scripts" / "hosted-plugin.py"
 
 
 def digest(value: str) -> str:
@@ -117,6 +121,147 @@ def signed_evidence(
     return evidence
 
 
+def _sign_evidence(evidence: dict[str, object], *, secret: str = "operator-secret") -> None:
+    evidence["operator_signature"] = hmac.new(
+        secret.encode(),
+        hosted_plugins._canonical_json(
+            {key: value for key, value in evidence.items() if key != "operator_signature"}
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def v2_expectation(root: Path) -> dict[str, object]:
+    cases = json.loads(
+        (
+            root / "plugins/hosted/candidates/hosted-alpha-agent-v2/selection-cases.json"
+        ).read_text(encoding="utf-8")
+    )
+    return {
+        "deployment_sha256": digest("deployed-v2"),
+        "vault_purpose": "records-live-acceptance",
+        "reset_epoch": "reset-v2",
+        "principal_hmac_sha256": digest("principal-v2"),
+        "audience_hmac_sha256": digest("audience-v2"),
+        "client_contracts": {
+            client: [
+                contract["client"],
+                contract["client_version"],
+                contract["model_version"],
+                contract["system_contract_version"],
+            ]
+            for client, contract in cases["client_contracts"].items()
+        },
+        "graph_proof_digest": digest("graph-v2"),
+        "prompt_cases": {case["id"]: case["prompt_sha256"] for case in cases["cases"]},
+        "selection_cases_sha256": hosted_plugins._sha256(hosted_plugins._canonical_json(cases)),
+    }
+
+
+def v2_signed_evidence(root: Path, expectation: dict[str, object]) -> dict[str, object]:
+    evidence = signed_evidence(root)
+    compatibility = hosted_plugins.compatibility_manifest(
+        root, candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+    )
+    definition = hosted_plugins.load_definition(root, candidate=hosted_plugins.LIFECYCLE_CANDIDATE)
+    generated = root / "plugins/hosted/generated/candidates/hosted-alpha-agent-v2"
+    lock = json.loads((generated / "claude.lock.json").read_text(encoding="utf-8"))
+    archive_lock = json.loads((generated / "claude.zip.lock.json").read_text(encoding="utf-8"))
+    now = datetime.now(UTC)
+    actions = [
+        {"action": action, "outcome": outcome}
+        for action, outcome in (
+            ("describe", "completed"),
+            ("validate", "completed"),
+            ("create", "committed"),
+            ("inspect", "completed"),
+            ("query", "completed"),
+            ("append", "committed"),
+            ("update", "committed"),
+            ("revise", "committed"),
+            ("rebaseline", "committed"),
+        )
+    ]
+    evidence.update(
+        {
+            "plugin_version": definition.version,
+            "profile": definition.profile,
+            "compatibility_sha256": compatibility["compatibility_sha256"],
+            "schema_contract_sha256": compatibility["schema_contract_sha256"],
+            "command_surface_sha256": compatibility["command_surface_sha256"],
+            "package_artifact_sha256": lock["artifact_sha256"],
+            "archive_sha256": archive_lock["archive_sha256"],
+            "records_acceptance": {
+                "schema_version": 1,
+                "deployment": {"sha256": expectation["deployment_sha256"]},
+                "release": {
+                    "package": "exomem",
+                    "version": definition.version,
+                    "profile": hosted_plugins.LIFECYCLE_CANDIDATE,
+                    "minimum_records_reader_version": 2,
+                },
+                "surface": {"mcp_digest": compatibility["schema_contract_sha256"]},
+                "run": {
+                    "nonce": "records-v2-run-20260812",
+                    "timestamp": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    "expires_at": (now + timedelta(hours=1))
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
+                },
+                "vault": {
+                    "purpose": expectation["vault_purpose"],
+                    "reset_epoch": expectation["reset_epoch"],
+                },
+                "identity": {
+                    "principal_hmac_sha256": expectation["principal_hmac_sha256"],
+                    "audience_hmac_sha256": expectation["audience_hmac_sha256"],
+                },
+                "client_contracts": {
+                    client: dict(contract)
+                    for client, contract in json.loads(
+                        (
+                            root
+                            / "plugins/hosted/candidates/hosted-alpha-agent-v2/selection-cases.json"
+                        ).read_text(encoding="utf-8")
+                    )["client_contracts"].items()
+                },
+                "actions": actions,
+                "mutations": [
+                    {
+                        "action": action,
+                        "request_id": f"request-{action}",
+                        "receipt_id": f"receipt-{action}",
+                        "terminal_outcome": "committed",
+                        "before_readback_sha256": digest(f"before-{action}"),
+                        "after_readback_sha256": digest(f"after-{action}"),
+                    }
+                    for action in ("create", "append", "update", "revise", "rebaseline")
+                ],
+                "restart": {"outcome": "completed", "readback_sha256": digest("restart-v2")},
+                "prompt_cases": [
+                    {
+                        "id": case["id"],
+                        "sha256": case["prompt_sha256"],
+                        "client": case["client"],
+                        "action": "append" if case["expected"] == "append" else "proposal",
+                        "outcome": "committed" if case["expected"] == "append" else "completed",
+                        "mutation": case["expected"] == "append",
+                    }
+                    for case in json.loads(
+                        (
+                            root
+                            / "plugins/hosted/candidates/hosted-alpha-agent-v2/selection-cases.json"
+                        ).read_text(encoding="utf-8")
+                    )["cases"]
+                ],
+                "graph_availability": {"proof_digest": expectation["graph_proof_digest"]},
+            },
+        }
+    )
+    _sign_evidence(evidence)
+    return evidence
+
+
 def test_promotion_rejects_discovery_only_or_mocked_evidence() -> None:
     with pytest.raises(ValueError, match="content-bearing"):
         hosted_plugins.promote(
@@ -132,6 +277,472 @@ def test_pending_records_are_not_distributed() -> None:
     distribution = hosted_plugins.distribution_manifest(REPO_ROOT)
 
     assert distribution == {"live_platforms": [], "cross_client_ready": False}
+
+
+def test_v2_selection_cases_are_fixed_and_content_free() -> None:
+    cases = json.loads(
+        (
+            REPO_ROOT
+            / "plugins/hosted/candidates/hosted-alpha-agent-v2/selection-cases.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert cases["schema_version"] == 1
+    assert set(cases["client_contracts"]) == {"codex", "claude-code"}
+    assert {(case["client"], case["expected"]) for case in cases["cases"]} == {
+        ("codex", "append"),
+        ("claude-code", "append"),
+        ("codex", "proposal"),
+        ("claude-code", "proposal"),
+    }
+    assert all(set(case) == {"id", "client", "expected", "prompt_sha256"} for case in cases["cases"])
+    assert all(re.fullmatch(r"[0-9a-f]{64}", case["prompt_sha256"]) for case in cases["cases"])
+
+
+def test_v2_promotion_refuses_unsigned_or_incomplete_records_evidence(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(root, candidate="hosted-alpha-agent-v2", platform="claude")
+    evidence = signed_evidence(root)
+    compatibility = hosted_plugins.compatibility_manifest(root, candidate="hosted-alpha-agent-v2")
+    generated = root / "plugins/hosted/generated/candidates/hosted-alpha-agent-v2"
+    lock = json.loads((generated / "claude.lock.json").read_text(encoding="utf-8"))
+    archive_lock = json.loads((generated / "claude.zip.lock.json").read_text(encoding="utf-8"))
+    evidence["profile"] = "hosted-alpha-agent-v2"
+    evidence["plugin_version"] = "0.2.0"
+    evidence["compatibility_sha256"] = compatibility["compatibility_sha256"]
+    evidence["schema_contract_sha256"] = compatibility["schema_contract_sha256"]
+    evidence["command_surface_sha256"] = compatibility["command_surface_sha256"]
+    evidence["package_artifact_sha256"] = lock["artifact_sha256"]
+    evidence["archive_sha256"] = archive_lock["archive_sha256"]
+    evidence["records_acceptance"] = {"prose": "trust me"}
+    evidence["operator_signature"] = hmac.new(
+        b"operator-secret",
+        hosted_plugins._canonical_json(
+            {key: value for key, value in evidence.items() if key != "operator_signature"}
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="lifecycle evidence"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            evidence,
+            candidate="hosted-alpha-agent-v2",
+                records_expectation=v2_expectation(root),
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(
+                root, "claude", candidate="hosted-alpha-agent-v2"
+            ),
+        )
+
+
+def test_v2_promotion_binds_candidate_lock_and_replays_exact_evidence_only(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(root, candidate=hosted_plugins.LIFECYCLE_CANDIDATE, platform="claude")
+    expectation = v2_expectation(root)
+    evidence = v2_signed_evidence(root, expectation)
+    v1_bytes = {
+        path.relative_to(root): path.read_bytes()
+        for path in (root / "plugins/hosted/promotion").glob("*.json")
+    }
+    pending_digest = hosted_plugins.promotion_record_sha256(
+        root, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+    )
+
+    hosted_plugins.promote(
+        root,
+        "claude",
+        evidence,
+        candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+        records_expectation=expectation,
+        trusted_key_id="operator-key",
+        trusted_secret="operator-secret",
+        expected_state="pending",
+        expected_record_sha256=pending_digest,
+    )
+
+    record_path = hosted_plugins.promotion_record(
+        root, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+    )
+    first_bytes = record_path.read_bytes()
+    record = json.loads(first_bytes)
+    expected_lock = json.loads(
+        (
+            root
+            / "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/claude.lock.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert record["state"] == "live"
+    assert record["candidate"] == hosted_plugins.LIFECYCLE_CANDIDATE
+    assert record["package_lock"] == expected_lock
+    assert record["evidence"] == evidence
+    assert {
+        path.relative_to(root): path.read_bytes()
+        for path in (root / "plugins/hosted/promotion").glob("*.json")
+    } == v1_bytes
+
+    live_digest = hosted_plugins.promotion_record_sha256(
+        root, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+    )
+    hosted_plugins.promote(
+        root,
+        "claude",
+        evidence,
+        candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+        records_expectation=expectation,
+        trusted_key_id="operator-key",
+        trusted_secret="operator-secret",
+        expected_state="live",
+        expected_record_sha256=live_digest,
+    )
+    assert record_path.read_bytes() == first_bytes
+
+    durable = json.loads(first_bytes)
+    durable["evidence"]["records_acceptance"]["run"] = {
+        "nonce": "records-v2-run-20200101",
+        "timestamp": "2020-01-01T00:00:00Z",
+        "expires_at": "2020-01-01T01:00:00Z",
+    }
+    _sign_evidence(durable["evidence"])
+    record_path.write_bytes(hosted_plugins._canonical_json(durable) + b"\n")
+    assert hosted_plugins.distribution_manifest(
+        root,
+        candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+        records_expectation=expectation,
+        trusted_key_id="operator-key",
+        trusted_secret="operator-secret",
+    ) == {"live_platforms": ["claude"], "cross_client_ready": False}
+
+    replay = json.loads(json.dumps(durable))
+    replay["evidence"]["timestamp"] = "2020-01-01T00:00:00Z"
+    _sign_evidence(replay["evidence"])
+    record_path.write_bytes(hosted_plugins._canonical_json(replay) + b"\n")
+    stale_live_digest = hosted_plugins.promotion_record_sha256(
+        root, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+    )
+    hosted_plugins.promote(
+        root,
+        "claude",
+        replay["evidence"],
+        candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+        records_expectation=expectation,
+        trusted_key_id="operator-key",
+        trusted_secret="operator-secret",
+        expected_state="live",
+        expected_record_sha256=stale_live_digest,
+    )
+    stale_changed = json.loads(json.dumps(replay["evidence"]))
+    stale_changed["result_sha256"] = "0" * 64
+    _sign_evidence(stale_changed)
+    with pytest.raises(ValueError, match="stale"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            stale_changed,
+            candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+            records_expectation=expectation,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="live",
+            expected_record_sha256=stale_live_digest,
+        )
+
+    changed_evidence = json.loads(json.dumps(evidence))
+    changed_evidence["result_sha256"] = "0" * 64
+    _sign_evidence(changed_evidence)
+    for candidate, expected_state, expected_digest in (
+        (hosted_plugins.LIFECYCLE_CANDIDATE, "live", live_digest),
+        (hosted_plugins.LIFECYCLE_CANDIDATE, "live", pending_digest),
+        (hosted_plugins.DEFAULT_CANDIDATE, "pending", live_digest),
+    ):
+        with pytest.raises(ValueError, match="changed"):
+            hosted_plugins.promote(
+                root,
+                "claude",
+                changed_evidence,
+                candidate=candidate,
+                records_expectation=expectation,
+                trusted_key_id="operator-key",
+                trusted_secret="operator-secret",
+                expected_state=expected_state,
+                expected_record_sha256=expected_digest,
+            )
+
+    cases_path = root / "plugins/hosted/candidates/hosted-alpha-agent-v2/selection-cases.json"
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    cases["cases"][0]["prompt_sha256"] = "0" * 64
+    cases_path.write_text(json.dumps(cases), encoding="utf-8")
+    with pytest.raises(ValueError, match="stale"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            replay["evidence"],
+            candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+            records_expectation=expectation,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="live",
+            expected_record_sha256=stale_live_digest,
+        )
+
+
+def test_promote_cli_preserves_v2_candidate_and_operator_expectation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    expectation_path = tmp_path / "expectation.json"
+    evidence_path.write_text("{}", encoding="utf-8")
+    expectation_path.write_text("{}", encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("hosted_plugin_script", _HOSTED_PLUGIN_SCRIPT)
+    assert spec and spec.loader
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(script.hosted_plugins, "promote", lambda *args, **kwargs: captured.update(kwargs))
+    monkeypatch.setenv("EXOMEM_HOSTED_PROMOTION_SECRET", "operator-secret")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hosted-plugin.py",
+            "promote",
+            "--platform",
+            "claude",
+            "--candidate",
+            hosted_plugins.LIFECYCLE_CANDIDATE,
+            "--evidence",
+            str(evidence_path),
+            "--records-expectation",
+            str(expectation_path),
+            "--operator-key-id",
+            "operator-key",
+            "--expected-state",
+            "pending",
+            "--expected-record-sha256",
+            "0" * 64,
+        ],
+    )
+
+    assert script.main() == 0
+    assert captured["candidate"] == hosted_plugins.LIFECYCLE_CANDIDATE
+    assert captured["records_expectation"] == {}
+
+
+def test_v2_archive_and_distribution_are_candidate_scoped(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(root, candidate=hosted_plugins.LIFECYCLE_CANDIDATE, platform="claude")
+
+    archived = hosted_plugins.archive(
+        root,
+        tmp_path / "archive",
+        platform="claude",
+        candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+    )
+
+    assert (archived / "claude.zip").read_bytes() == (
+        root / "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/claude.zip"
+    ).read_bytes()
+    assert hosted_plugins.distribution_manifest(
+        root, candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+    ) == {"live_platforms": [], "cross_client_ready": False}
+    assert hosted_plugins.distribution_manifest(root) == {
+        "live_platforms": [],
+        "cross_client_ready": False,
+    }
+
+
+@pytest.mark.parametrize("command", ["archive", "demote"])
+def test_cli_forwards_v2_candidate_to_archive_and_demote(
+    command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = importlib.util.spec_from_file_location("hosted_plugin_candidate_script", _HOSTED_PLUGIN_SCRIPT)
+    assert spec and spec.loader
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        script.hosted_plugins,
+        "archive" if command == "archive" else "demote",
+        lambda *args, **kwargs: captured.update(kwargs),
+    )
+    argv = ["hosted-plugin.py", command, "--candidate", hosted_plugins.LIFECYCLE_CANDIDATE]
+    if command == "archive":
+        argv.extend(("--platform", "claude"))
+    else:
+        argv.extend(
+            (
+                "--platform", "claude", "--reason", "client-regression", "--expected-state", "live",
+                "--expected-record-sha256", "0" * 64,
+            )
+        )
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert script.main() == 0
+    assert captured["candidate"] == hosted_plugins.LIFECYCLE_CANDIDATE
+
+
+def test_cli_status_reads_v2_pending_records_without_v1_identity(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    spec = importlib.util.spec_from_file_location("hosted_plugin_status_script", _HOSTED_PLUGIN_SCRIPT)
+    assert spec and spec.loader
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    monkeypatch.setattr(
+        script.hosted_plugins,
+        "check_compatibility_descriptor",
+        lambda *args: pytest.fail("v2 status must not inspect the v1 descriptor"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hosted-plugin.py", "status", "--candidate", hosted_plugins.LIFECYCLE_CANDIDATE],
+    )
+
+    assert script.main() == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["records"]["claude"] == hosted_plugins.promotion_record_sha256(
+        REPO_ROOT, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda item: item["records_acceptance"].pop("run"),
+        lambda item: item["records_acceptance"].__setitem__("prose", "trust me"),
+        lambda item: item.__setitem__("operator_signature", "0" * 64),
+        lambda item: item["records_acceptance"].__setitem__("prose", "trust me"),
+        lambda item: item.__setitem__("timestamp", "2020-01-01T00:00:00Z"),
+        lambda item: item["records_acceptance"]["run"].__setitem__(
+            "expires_at", "2020-01-01T00:00:00Z"
+        ),
+        lambda item: item["records_acceptance"]["vault"].__setitem__("reset_epoch", "wrong"),
+        lambda item: item["records_acceptance"]["client_contracts"]["codex"].__setitem__("client", "wrong"),
+        lambda item: item["records_acceptance"]["client_contracts"]["codex"].__setitem__(
+            "model_version", "wrong"
+        ),
+        lambda item: item["records_acceptance"]["client_contracts"]["codex"].__setitem__(
+            "system_contract_version", "wrong"
+        ),
+        lambda item: item["records_acceptance"]["release"].__setitem__("profile", "wrong"),
+        lambda item: item["records_acceptance"]["release"].__setitem__("version", "0.0.0"),
+        lambda item: item["records_acceptance"]["release"].__setitem__(
+            "minimum_records_reader_version", 1
+        ),
+        lambda item: item["records_acceptance"]["surface"].__setitem__("mcp_digest", "0" * 64),
+        lambda item: item["records_acceptance"]["mutations"][0].__setitem__(
+            "after_readback_sha256", item["records_acceptance"]["mutations"][0]["before_readback_sha256"]
+        ),
+        lambda item: item["records_acceptance"]["actions"].pop(),
+        lambda item: item["records_acceptance"]["restart"].__setitem__("outcome", "failed"),
+        lambda item: item["records_acceptance"]["graph_availability"].__setitem__(
+            "proof_digest", "0" * 64
+        ),
+        lambda item: item["records_acceptance"]["prompt_cases"][0].__setitem__("sha256", "0" * 64),
+        lambda item: item["records_acceptance"]["prompt_cases"][0].__setitem__("outcome", "completed"),
+        lambda item: item["records_acceptance"]["prompt_cases"][0].__setitem__("mutation", False),
+        lambda item: item["records_acceptance"]["prompt_cases"].append(
+            {
+                "id": "invented-case",
+                "sha256": "0" * 64,
+                "client": "codex",
+                "action": "append",
+                "outcome": "committed",
+                "mutation": True,
+            }
+        ),
+    ],
+)
+def test_v2_promotion_refuses_unbound_or_incomplete_live_evidence(
+    tmp_path: Path, mutate: object
+) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(root, candidate=hosted_plugins.LIFECYCLE_CANDIDATE, platform="claude")
+    expectation = v2_expectation(root)
+    evidence = v2_signed_evidence(root, expectation)
+    mutate(evidence)  # type: ignore[operator]
+    if evidence["operator_signature"] != "0" * 64:
+        _sign_evidence(evidence)
+
+    with pytest.raises(ValueError):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            evidence,
+            candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+            records_expectation=expectation,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(
+                root, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+            ),
+        )
+
+
+def test_v2_promotion_refuses_operator_selection_case_substitution(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(root, candidate=hosted_plugins.LIFECYCLE_CANDIDATE, platform="claude")
+    expectation = v2_expectation(root)
+    expectation["selection_cases_sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="selection cases"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            v2_signed_evidence(root, v2_expectation(root)),
+            candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+            records_expectation=expectation,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(
+                root, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+            ),
+        )
+
+
+def test_v2_promotion_refuses_missing_or_swapped_client_contracts(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    hosted_plugins.render(root, candidate=hosted_plugins.LIFECYCLE_CANDIDATE, platform="claude")
+    expectation = v2_expectation(root)
+    expectation["client_contracts"].pop("claude-code")  # type: ignore[index]
+    with pytest.raises(ValueError, match="expectations"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            v2_signed_evidence(root, v2_expectation(root)),
+            candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+            records_expectation=expectation,
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(
+                root, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+            ),
+        )
+
+    evidence = v2_signed_evidence(root, v2_expectation(root))
+    evidence["records_acceptance"]["client_contracts"]["codex"] = evidence["records_acceptance"]["client_contracts"]["claude-code"]  # type: ignore[index]
+    _sign_evidence(evidence)
+    with pytest.raises(ValueError, match="client contracts"):
+        hosted_plugins.promote(
+            root,
+            "claude",
+            evidence,
+            candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+            records_expectation=v2_expectation(root),
+            trusted_key_id="operator-key",
+            trusted_secret="operator-secret",
+            expected_state="pending",
+            expected_record_sha256=hosted_plugins.promotion_record_sha256(
+                root, "claude", candidate=hosted_plugins.LIFECYCLE_CANDIDATE
+            ),
+        )
 
 
 def test_promotion_requires_exact_signed_evidence_and_compare_and_swap(tmp_path: Path) -> None:

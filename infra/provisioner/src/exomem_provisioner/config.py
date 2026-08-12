@@ -9,13 +9,13 @@ import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROVISIONER_PROTOCOL = "exomem-cell-provisioner.v1"
+PROVISIONER_PROTOCOL: Literal["exomem-cell-provisioner.v1"] = "exomem-cell-provisioner.v1"
 _DATABASE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{2,62}$")
 _DISALLOWED_ROLES = {"postgres", "public", "neondb_owner"}
 _TRUSTED_IPV4_RANGES = tuple(
@@ -35,8 +35,17 @@ _PROVISIONER_IMAGE = r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64
 
 
 def _is_trusted_proxy_network(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
-    allowed = _TRUSTED_IPV4_RANGES if network.version == 4 else _TRUSTED_IPV6_RANGES
-    return any(network.subnet_of(candidate) for candidate in allowed)
+    if network.version == 4:
+        ipv4_network = cast(ipaddress.IPv4Network, network)
+        return any(
+            ipv4_network.subnet_of(cast(ipaddress.IPv4Network, candidate))
+            for candidate in _TRUSTED_IPV4_RANGES
+        )
+    ipv6_network = cast(ipaddress.IPv6Network, network)
+    return any(
+        ipv6_network.subnet_of(cast(ipaddress.IPv6Network, candidate))
+        for candidate in _TRUSTED_IPV6_RANGES
+    )
 
 
 class HostedReleaseCommand(BaseModel):
@@ -247,18 +256,79 @@ class DeploymentRollback(BaseModel):
     substrateV1ConsumerCommit: str = Field(pattern=_COMMIT)
 
 
+class DeploymentRecordsRollbackRuntime(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    image: str = Field(pattern=_RUNTIME_IMAGE)
+    sourceCommit: str = Field(pattern=_COMMIT)
+    candidateSha256: str = Field(pattern=_SHA256)
+    recordsReaderVersion: Literal[2]
+    readerStatusProof: DeploymentRecordsReaderStatusProof
+    runtimeTarget: DeploymentRuntimeTarget
+
+
+class DeploymentRecordsReaderStatusProof(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    profile: Literal["hosted-alpha-agent-v1"]
+    recordsReaderVersion: Literal[2]
+    lifecycleActionsEnabled: Literal[False]
+    issuedAt: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+    expiresAt: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+    signerWorkflow: Literal["Artexis10/exomem/.github/workflows/release-please.yml"]
+    signerWorkflowDigest: str = Field(pattern=_COMMIT)
+
+
+class DeploymentRecordsCompatibility(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    minimum_records_reader_version: Literal[2]
+    activeProfile: Literal["hosted-alpha-agent-v2"]
+    activeLifecycleActionsEnabled: Literal[True]
+    rollbackProfile: Literal["hosted-alpha-agent-v1"]
+    rollbackLifecycleActionsEnabled: Literal[False]
+    rollbackRuntime: DeploymentRecordsRollbackRuntime
+
+
+class SelectedDeploymentRuntime(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    image: str = Field(pattern=_RUNTIME_IMAGE)
+    runtimeTarget: DeploymentRuntimeTarget
+    recordsReaderVersion: Literal[2] | None = None
+    lifecycleActionsEnabled: bool = False
+
+
 class DeploymentLock(BaseModel):
     """One selected, independently composed deployment-lock member."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     artifact: Literal["exomem-hosted-deployment-lock"]
-    schemaVersion: Literal[2]
+    schemaVersion: Literal[2, 3]
     admissionMode: Literal["expand", "contract"]
     components: DeploymentComponents
     runtimeTarget: DeploymentRuntimeTarget
     composition: DeploymentComposition
     rollback: DeploymentRollback
+    recordsCompatibility: DeploymentRecordsCompatibility | None = None
+
+    @model_validator(mode="after")
+    def validate_records_compatibility(self) -> DeploymentLock:
+        if self.schemaVersion == 2 and self.recordsCompatibility is not None:
+            raise ValueError("deployment lock v2 cannot carry Records compatibility")
+        if self.schemaVersion == 3:
+            if self.recordsCompatibility is None:
+                raise ValueError("deployment lock v3 requires Records compatibility")
+            if self.runtimeTarget.agentProfile != self.recordsCompatibility.activeProfile:
+                raise ValueError("active Records profile does not match the runtime target")
+            rollback = self.recordsCompatibility.rollbackRuntime
+            if (
+                rollback.runtimeTarget.agentProfile != self.recordsCompatibility.rollbackProfile
+                or rollback.readerStatusProof.profile != self.recordsCompatibility.rollbackProfile
+            ):
+                raise ValueError("rollback Records profile does not match the runtime target")
+        return self
 
     @property
     def admission_mode(self) -> Literal["expand", "contract"]:
@@ -267,6 +337,38 @@ class DeploymentLock(BaseModel):
     @property
     def runtime_target(self) -> DeploymentRuntimeTarget:
         return self.runtimeTarget
+
+    def selected_runtime(self, selection: Literal["active", "rollback"] | None) -> SelectedDeploymentRuntime:
+        if self.schemaVersion == 2:
+            if selection == "rollback":
+                raise ValueError("deployment lock v2 does not support rollback runtime selection")
+            if selection not in {None, "active"}:
+                raise ValueError("deployment runtime selection is invalid")
+            return SelectedDeploymentRuntime(
+                image=self.components.runtime.image,
+                runtimeTarget=self.runtimeTarget,
+            )
+        if selection not in {"active", "rollback"}:
+            raise ValueError("deployment lock v3 requires an explicit runtime selection")
+        assert self.recordsCompatibility is not None
+        if selection == "active":
+            return SelectedDeploymentRuntime(
+                image=self.components.runtime.image,
+                runtimeTarget=self.runtimeTarget,
+                recordsReaderVersion=self.recordsCompatibility.minimum_records_reader_version,
+                lifecycleActionsEnabled=self.recordsCompatibility.activeLifecycleActionsEnabled,
+            )
+        rollback = self.recordsCompatibility.rollbackRuntime
+        return SelectedDeploymentRuntime(
+            image=rollback.image,
+            runtimeTarget=rollback.runtimeTarget,
+            recordsReaderVersion=rollback.recordsReaderVersion,
+            lifecycleActionsEnabled=self.recordsCompatibility.rollbackLifecycleActionsEnabled,
+        )
+
+    @property
+    def records_compatibility(self) -> DeploymentRecordsCompatibility | None:
+        return self.recordsCompatibility
 
     @property
     def legacy_catalog(self) -> frozenset[tuple[str, str]]:
@@ -278,7 +380,13 @@ class DeploymentLock(BaseModel):
     def authoritative_legacy_release_set_sha256(self) -> str:
         return self.composition.authoritativeLegacyReleaseSetSha256
 
-    def matches_runtime_request(self, request: dict[str, object], *, wire_protocol: str) -> bool:
+    def matches_runtime_request(
+        self,
+        request: dict[str, object],
+        *,
+        wire_protocol: str,
+        selection: Literal["active", "rollback"] | None = None,
+    ) -> bool:
         from .wire_protocol import WIRE_PROTOCOL_V2, runtime_identity
 
         try:
@@ -286,7 +394,11 @@ class DeploymentLock(BaseModel):
         except (KeyError, ValueError):
             return False
         if wire_protocol == WIRE_PROTOCOL_V2:
-            return target == self.runtime_target.model_dump(mode="json")
+            try:
+                selected = self.selected_runtime(selection)
+            except ValueError:
+                return False
+            return target == selected.runtimeTarget.model_dump(mode="json")
         return (target["releaseVersion"], target["protocolVersion"]) in self.legacy_catalog
 
 
@@ -332,6 +444,7 @@ class ProvisionerSettings(BaseSettings):
     trusted_proxy_ips: str = Field(min_length=1, max_length=1024)
     protocol: Literal["exomem-cell-provisioner.v1"] = PROVISIONER_PROTOCOL
     deployment_lock_path: str | None = Field(default=None, min_length=1, max_length=4096)
+    runtime_selection: Literal["active", "rollback"] | None = None
     request_max_bytes: int = Field(default=65_536, ge=1024, le=1_048_576)
     response_max_bytes: int = Field(default=1_048_576, ge=1024, le=1_048_576)
     claim_seconds: int = Field(default=30, ge=5, le=300)
@@ -402,7 +515,9 @@ class ProvisionerSettings(BaseSettings):
     def deployment_lock(self) -> DeploymentLock | None:
         if self.deployment_lock_path is None:
             return None
-        return load_deployment_lock(self.deployment_lock_path)
+        lock = load_deployment_lock(self.deployment_lock_path)
+        lock.selected_runtime(self.runtime_selection)
+        return lock
 
     @model_validator(mode="after")
     def validate_independent_secrets(self) -> ProvisionerSettings:
@@ -427,6 +542,7 @@ class ProviderWorkerSettings(BaseSettings):
     )
 
     deployment_lock_path: str = Field(min_length=1, max_length=4096)
+    runtime_selection: Literal["active", "rollback"] | None = None
     cell_chart_path: str = Field(min_length=1, max_length=4096)
     cell_chart_version: str = Field(min_length=1, max_length=64)
     helm_binary: str = Field(min_length=1, max_length=4096)
@@ -472,7 +588,9 @@ class ProviderWorkerSettings(BaseSettings):
 
     @property
     def deployment_lock(self) -> DeploymentLock:
-        return load_deployment_lock(self.deployment_lock_path)
+        lock = load_deployment_lock(self.deployment_lock_path)
+        lock.selected_runtime(self.runtime_selection)
+        return lock
 
     @field_validator("capacity_contract_path")
     @classmethod

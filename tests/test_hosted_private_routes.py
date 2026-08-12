@@ -242,6 +242,8 @@ def _cell(
     guard_events: list[str] | None = None,
     private_authenticator: Any | None = None,
     expose_tier2: bool = True,
+    records_reader_version: int = 2,
+    lifecycle_actions_enabled: bool = False,
 ) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
     vault_root = tmp_path / cell_id / "vault"
     from exomem.init import init_vault
@@ -256,6 +258,8 @@ def _cell(
         vault_id=f"vault-{cell_id}" if private_authenticator is not None else None,
         worker_policy_digest="a" * 64 if private_authenticator is not None else None,
         enforce_transfer_v1_compatibility=False,
+        records_reader_version=records_reader_version,
+        lifecycle_actions_enabled=lifecycle_actions_enabled,
         resource_limits=HostedResourceLimits(
             storage_bytes=1024 * 1024,
             upload_bytes=4096,
@@ -751,19 +755,23 @@ def test_hosted_agent_v2_routes_expose_records_without_expanding_v1(
         tmp_path,
         cell_id="cell-agent-v2",
         credential="agent-v2-private-service-credential-0001",
+        lifecycle_actions_enabled=True,
     )
     headers = _headers(config)
     v1 = commands_module.HOSTED_ALPHA_AGENT_PROFILE
     v2 = commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE
 
-    v1_contract = client.get(f"/private/exomem/v1/agent/{v1}/contract", headers=headers)
     v2_contract = client.get(f"/private/exomem/v1/agent/{v2}/contract", headers=headers)
 
-    assert v1_contract.status_code == 200, v1_contract.text
     assert v2_contract.status_code == 200, v2_contract.text
-    assert "record_memory" not in {entry["name"] for entry in v1_contract.json()["commands"]}
-    assert "record_memory" in {entry["name"] for entry in v2_contract.json()["commands"]}
+    assert tuple(entry["name"] for entry in v2_contract.json()["commands"]) == tuple(
+        command.name for command in commands_module.product_commands_for_profile(v2, "rest")
+    )
     assert v2_contract.json()["agent_profile"]["profile"] == v2
+
+    v1_contract = client.get(f"/private/exomem/v1/agent/{v1}/contract", headers=headers)
+    assert v1_contract.status_code == 400
+    assert v1_contract.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
 
     described = client.post(
         f"/private/exomem/v1/agent/{v2}/command/record_memory",
@@ -781,6 +789,61 @@ def test_hosted_agent_v2_routes_expose_records_without_expanding_v1(
     )
     assert unknown.status_code == 400
     assert unknown.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+
+
+def test_hosted_v1_runtime_refuses_v2_records_routes_before_the_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hosted_runtime_temp,
+        "ensure_hosted_runtime_temp",
+        lambda *_args, **_kwargs: tmp_path / "runtime-temp",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_temp,
+        "HostedRuntimeTempAuthority",
+        lambda *_args, **_kwargs: object(),
+    )
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-agent-v1-runtime",
+        credential="agent-v1-private-service-credential-0001",
+        records_reader_version=2,
+        lifecycle_actions_enabled=False,
+    )
+    headers = _headers(config)
+    v1 = commands_module.HOSTED_ALPHA_AGENT_PROFILE
+    v2 = commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE
+
+    v1_contract = client.get(f"/private/exomem/v1/agent/{v1}/contract", headers=headers)
+    assert v1_contract.status_code == 200, v1_contract.text
+    assert v1_contract.content == gateway.canonical_contract_json(
+        gateway.build_agent_gateway_contract(profile=v1, protocol_version=config.protocol_version)
+    )
+
+    v2_contract = client.get(f"/private/exomem/v1/agent/{v2}/contract", headers=headers)
+    assert v2_contract.status_code == 400
+    assert v2_contract.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+
+    for action in ("revise", "rebaseline"):
+        refused = client.post(
+            f"/private/exomem/v1/agent/{v2}/command/record_memory",
+            headers=headers,
+            json={"action": action},
+        )
+        assert refused.status_code == 400
+        assert refused.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+        assert invoker.calls == []
+
+        generic_refused = client.post(
+            "/private/exomem/v1/command/record_memory",
+            headers=headers,
+            json={"action": action},
+        )
+        assert generic_refused.status_code == 400
+        assert generic_refused.json()["error"]["code"] == "HOSTED_RECORDS_LIFECYCLE_DISABLED"
+        assert invoker.calls == []
 
 
 def _remember_body(sentinel: str) -> dict[str, str]:
@@ -853,6 +916,47 @@ def test_private_readiness_is_a_complete_control_plane_binding_proof(tmp_path: P
         "writeAdmission": True,
         "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
         "code": "CELL_READY",
+    }
+
+
+def test_authenticated_reader_status_reports_the_active_runtime_configuration(tmp_path: Path) -> None:
+    v1_client, v1_config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-reader-status",
+        credential="reader-status-service-credential-0001",
+        records_reader_version=2,
+        lifecycle_actions_enabled=False,
+    )
+    v1 = v1_client.get(
+        "/private/exomem/v1/agent/hosted-alpha-agent-v1/reader-status",
+        headers=_headers(v1_config),
+    )
+    v1_wrong_profile = v1_client.get(
+        "/private/exomem/v1/agent/hosted-alpha-agent-v2/reader-status",
+        headers=_headers(v1_config),
+    )
+    v2_client, v2_config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-reader-status-v2",
+        credential="reader-status-v2-service-credential-0001",
+        records_reader_version=2,
+        lifecycle_actions_enabled=True,
+    )
+    v2 = v2_client.get(
+        "/private/exomem/v1/agent/hosted-alpha-agent-v2/reader-status",
+        headers=_headers(v2_config),
+    )
+
+    assert v1.status_code == v2.status_code == 200
+    assert v1_wrong_profile.status_code == 400
+    assert v1_wrong_profile.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+    assert v1.json()["data"] == {
+        "records_reader_version": 2,
+        "lifecycle_actions_enabled": False,
+    }
+    assert v2.json()["data"] == {
+        "records_reader_version": 2,
+        "lifecycle_actions_enabled": True,
     }
 
 

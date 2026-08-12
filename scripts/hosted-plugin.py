@@ -37,6 +37,11 @@ def main() -> int:
         ),
     )
     parser.add_argument("--openai-app-id")
+    parser.add_argument(
+        "--candidate",
+        choices=(hosted_plugins.DEFAULT_CANDIDATE, hosted_plugins.LIFECYCLE_CANDIDATE),
+        default=hosted_plugins.DEFAULT_CANDIDATE,
+    )
     parser.add_argument("--platform", choices=(*hosted_plugins.PLATFORMS, "all"))
     parser.add_argument("--channel", choices=(*hosted_plugins.DIRECTORY_CHANNELS, "all"))
     parser.add_argument("--output", type=Path)
@@ -47,6 +52,7 @@ def main() -> int:
     parser.add_argument("--expected-active-submission-sha256")
     parser.add_argument("--directory-state", choices=tuple(hosted_plugins.DIRECTORY_STATES))
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--records-expectation", type=Path)
     parser.add_argument("--reason")
     parser.add_argument("--operator-key-id")
     parser.add_argument(
@@ -154,7 +160,10 @@ def main() -> int:
         elif args.command == "render":
             print(
                 hosted_plugins.render(
-                    REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
+                    REPO_ROOT,
+                    openai_app_id=args.openai_app_id,
+                    platform=args.platform or "claude",
+                    candidate=args.candidate,
                 )
             )
         elif args.command == "regenerate":
@@ -163,20 +172,34 @@ def main() -> int:
             print(hosted_plugins.regenerate_claude(REPO_ROOT))
         elif args.command == "check":
             hosted_plugins.check(
-                REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
+                REPO_ROOT,
+                openai_app_id=args.openai_app_id,
+                platform=args.platform or "claude",
+                candidate=args.candidate,
             )
             print("Hosted generated artifacts are current")
         elif args.command == "archive":
             print(
                 hosted_plugins.archive(
-                    REPO_ROOT, openai_app_id=args.openai_app_id, platform=args.platform or "claude"
+                    REPO_ROOT,
+                    openai_app_id=args.openai_app_id,
+                    platform=args.platform or "claude",
+                    candidate=args.candidate,
                 )
             )
         elif args.command == "status":
-            hosted_plugins.check_compatibility_descriptor(REPO_ROOT)
+            if args.candidate == hosted_plugins.DEFAULT_CANDIDATE:
+                hosted_plugins.check_compatibility_descriptor(REPO_ROOT)
+            records_expectation = (
+                json.loads(args.records_expectation.read_text(encoding="utf-8"))
+                if args.records_expectation
+                else None
+            )
             records = {
                 platform: json.loads(
-                    hosted_plugins.promotion_record(REPO_ROOT, platform).read_text(encoding="utf-8")
+                    hosted_plugins.promotion_record(
+                        REPO_ROOT, platform, candidate=args.candidate
+                    ).read_text(encoding="utf-8")
                 )
                 for platform in hosted_plugins.PLATFORMS
             }
@@ -188,9 +211,13 @@ def main() -> int:
                             trusted_key_id=args.operator_key_id
                             or os.environ.get("EXOMEM_HOSTED_PROMOTION_KEY_ID"),
                             trusted_secret=os.environ.get("EXOMEM_HOSTED_PROMOTION_SECRET"),
+                            candidate=args.candidate,
+                            records_expectation=records_expectation,
                         ),
                         "records": {
-                            platform: hosted_plugins.promotion_record_sha256(REPO_ROOT, platform)
+                            platform: hosted_plugins.promotion_record_sha256(
+                                REPO_ROOT, platform, candidate=args.candidate
+                            )
                             for platform in records
                         },
                         "oauth_client_config_sha256": {
@@ -216,6 +243,11 @@ def main() -> int:
         elif args.command == "promote":
             if args.platform not in hosted_plugins.PLATFORMS or not args.evidence:
                 parser.error("promote requires --platform and --evidence")
+            records_expectation = (
+                json.loads(args.records_expectation.read_text(encoding="utf-8"))
+                if args.records_expectation
+                else None
+            )
             hosted_plugins.promote(
                 REPO_ROOT,
                 args.platform,
@@ -224,6 +256,8 @@ def main() -> int:
                 trusted_secret=os.environ.get("EXOMEM_HOSTED_PROMOTION_SECRET"),
                 expected_state=args.expected_state,
                 expected_record_sha256=args.expected_record_sha256,
+                candidate=args.candidate,
+                records_expectation=records_expectation,
             )
         else:
             if args.platform not in hosted_plugins.PLATFORMS or not args.reason:
@@ -234,6 +268,7 @@ def main() -> int:
                 args.reason,
                 expected_state=args.expected_state,
                 expected_record_sha256=args.expected_record_sha256,
+                candidate=args.candidate,
             )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(error, file=sys.stderr)

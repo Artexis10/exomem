@@ -1076,7 +1076,6 @@ def _preflight_collection_create(
             "CREATE_ONLY_CONFLICT", "collection manifest already exists"
         )
     manifest = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
-    record_governance.require_records_profile(manifest)
     if manifest.view_diagnostics:
         diagnostic = manifest.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)

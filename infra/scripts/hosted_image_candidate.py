@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, cast
 
@@ -19,6 +20,7 @@ MAX_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_CANDIDATE_BYTES = 128 * 1024
 VERIFY_TIMEOUT_SECONDS = 120
 SCHEMA_VERSION = 1
+RECORDS_COMPATIBILITY_SCHEMA_VERSION = 2
 SOURCE_REPOSITORY = "Artexis10/exomem"
 SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
 RUNTIME_SIGNER_WORKFLOW = f"{SOURCE_REPOSITORY}/.github/workflows/release-please.yml"
@@ -28,6 +30,12 @@ _DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
 _SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 _TAG_REF = re.compile(r"^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$")
 _RUN_NUMBER = re.compile(r"^[1-9][0-9]*$")
+_RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_RECORDS_COMPATIBILITY_MAX_TTL = timedelta(hours=24)
+_RUNTIME_TARGET_FIELDS = {
+    "releaseVersion", "protocolVersion", "agentProfile", "gatewayContractDigest",
+    "commandFingerprint", "schemaDigest",
+}
 
 
 class CandidateError(ValueError):
@@ -119,6 +127,73 @@ def _run_number(value: object, *, label: str) -> str:
     return result
 
 
+def _rfc3339_utc(value: object, *, label: str) -> datetime:
+    raw = _string(value, label=label)
+    if not _RFC3339_UTC.fullmatch(raw):
+        _error(f"{label} must be canonical RFC3339 UTC")
+    try:
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise CandidateError(f"{label} must be canonical RFC3339 UTC") from exc
+
+
+def _runtime_target(value: object, *, label: str) -> dict[str, object]:
+    target = _mapping(value, label=label, fields=_RUNTIME_TARGET_FIELDS)
+    for field in ("releaseVersion", "protocolVersion", "agentProfile"):
+        _string(target[field], label=f"{label}.{field}")
+    for field in ("gatewayContractDigest", "commandFingerprint", "schemaDigest"):
+        digest = _string(target[field], label=f"{label}.{field}")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            _error(f"{label}.{field} must be a sha256 hex hash")
+    return target
+
+
+def validate_records_compatibility_claim(
+    candidate: dict[str, object], *, require_fresh: bool = False, now: datetime | None = None
+) -> dict[str, object]:
+    """Validate the signed v2 reader-status claim bound to its candidate workflow."""
+
+    workflow = _mapping(
+        candidate.get("workflow"),
+        label="workflow",
+        fields={
+            "producerRepository", "signerWorkflow", "signerWorkflowDigest", "oidcSourceRef",
+            "oidcSourceCommit", "event", "runId", "runAttempt",
+        },
+    )
+    records = _mapping(
+        candidate.get("recordsCompatibility"),
+        label="recordsCompatibility",
+        fields={
+            "profile", "recordsReaderVersion", "lifecycleActionsEnabled", "issuedAt", "expiresAt",
+            "signerWorkflow", "signerWorkflowDigest", "runtimeTarget",
+        },
+    )
+    target = _runtime_target(records["runtimeTarget"], label="recordsCompatibility.runtimeTarget")
+    issued_at = _rfc3339_utc(records["issuedAt"], label="recordsCompatibility.issuedAt")
+    expires_at = _rfc3339_utc(records["expiresAt"], label="recordsCompatibility.expiresAt")
+    if (
+        records["profile"] != "hosted-alpha-agent-v1"
+        or records["recordsReaderVersion"] != 2
+        or records["lifecycleActionsEnabled"] is not False
+        or records["signerWorkflow"] != workflow["signerWorkflow"]
+        or records["signerWorkflowDigest"] != workflow["signerWorkflowDigest"]
+        or expires_at <= issued_at
+        or expires_at - issued_at > _RECORDS_COMPATIBILITY_MAX_TTL
+        or target["releaseVersion"] != candidate["release"]["version"]
+        or target["agentProfile"] != records["profile"]
+    ):
+        _error("runtime Records compatibility is invalid")
+    if require_fresh:
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            _error("Records compatibility freshness time is invalid")
+        current = current.astimezone(UTC)
+        if not issued_at <= current <= expires_at:
+            _error("runtime Records compatibility is stale")
+    return records
+
+
 def _image_reference(value: object) -> tuple[str, str]:
     reference = _string(value, label="image.reference")
     repository, separator, digest = reference.partition("@")
@@ -138,7 +213,7 @@ def _candidate_from_flags(args: argparse.Namespace) -> dict[str, object]:
         release = {"tag": f"v{args.release}", "version": args.release}
     elif args.release is not None:
         _error("provisioner candidates must not supply --release")
-    return {
+    candidate: dict[str, object] = {
         "schemaVersion": SCHEMA_VERSION,
         "kind": component,
         "image": {
@@ -175,16 +250,62 @@ def _candidate_from_flags(args: argparse.Namespace) -> dict[str, object]:
             "uri": args.storage_uri,
         },
     }
+    records_values = (
+        args.records_profile,
+        args.records_reader_version,
+        args.lifecycle_actions_enabled,
+        args.records_issued_at,
+        args.records_expires_at,
+        args.records_runtime_target_json,
+    )
+    if any(value is not None for value in records_values):
+        if any(value is None for value in records_values):
+            _error("Records compatibility flags must be supplied together")
+        if component != "runtime":
+            _error("Records compatibility flags are valid only for runtime candidates")
+        candidate["schemaVersion"] = RECORDS_COMPATIBILITY_SCHEMA_VERSION
+        candidate["recordsCompatibility"] = {
+            "profile": args.records_profile,
+            "recordsReaderVersion": args.records_reader_version,
+            "lifecycleActionsEnabled": args.lifecycle_actions_enabled == "true",
+            "issuedAt": args.records_issued_at,
+            "expiresAt": args.records_expires_at,
+            "signerWorkflow": args.producer_workflow,
+            "signerWorkflowDigest": args.producer_workflow_commit,
+            "runtimeTarget": _json_object_from_string(
+                args.records_runtime_target_json, label="Records runtime target"
+            ),
+        }
+        validate_records_compatibility_claim(candidate, require_fresh=True)
+    return candidate
+
+
+def _json_object_from_string(value: str, *, label: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError as exc:
+        _error(f"{label} must be JSON: {exc}")
+    if not isinstance(parsed, dict):
+        _error(f"{label} must be a JSON object")
+    return cast(dict[str, object], parsed)
 
 
 def validate_candidate(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        _error("candidate must be an object")
+    schema_version = value.get("schemaVersion")
+    fields = {
+        "schemaVersion", "kind", "image", "source", "release", "workflow", "attestation", "storage"
+    }
+    if schema_version == RECORDS_COMPATIBILITY_SCHEMA_VERSION:
+        fields.add("recordsCompatibility")
     candidate = _mapping(
         value,
         label="candidate",
-        fields={"schemaVersion", "kind", "image", "source", "release", "workflow", "attestation", "storage"},
+        fields=fields,
     )
-    if candidate["schemaVersion"] != SCHEMA_VERSION:
-        _error("candidate.schemaVersion must be 1")
+    if candidate["schemaVersion"] not in {SCHEMA_VERSION, RECORDS_COMPATIBILITY_SCHEMA_VERSION}:
+        _error("candidate.schemaVersion is unsupported")
     kind = _string(candidate["kind"], label="candidate.kind")
     if kind not in {"runtime", "provisioner"}:
         _error("candidate.kind must be runtime or provisioner")
@@ -284,6 +405,10 @@ def validate_candidate(value: object) -> dict[str, object]:
         )
         if storage_kind != "github-release" or not release_asset_pattern.fullmatch(storage_uri):
             _error("runtime storage is not approved")
+        if candidate["schemaVersion"] == RECORDS_COMPATIBILITY_SCHEMA_VERSION:
+            validate_records_compatibility_claim(candidate)
+        elif "recordsCompatibility" in candidate:
+            _error("legacy runtime candidate cannot carry Records compatibility")
     else:
         expected_repository = "ghcr.io/artexis10/exomem-provisioner"
         if repository != expected_repository:
@@ -302,6 +427,8 @@ def validate_candidate(value: object) -> dict[str, object]:
             storage_kind != "oci-referrer" or storage_uri != f"oci://{repository}@{digest}"
         ):
             _error("provisioner storage is not approved")
+        if candidate["schemaVersion"] != SCHEMA_VERSION:
+            _error("Records compatibility candidates must be runtime candidates")
     return candidate
 
 
@@ -499,6 +626,12 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument("--bundle", type=Path, required=True)
     record.add_argument("--storage-kind", required=True)
     record.add_argument("--storage-uri", required=True)
+    record.add_argument("--records-profile")
+    record.add_argument("--records-reader-version", type=int)
+    record.add_argument("--lifecycle-actions-enabled", choices=("true", "false"))
+    record.add_argument("--records-issued-at")
+    record.add_argument("--records-expires-at")
+    record.add_argument("--records-runtime-target-json")
     record.add_argument("--output", type=Path, required=True)
     verify = commands.add_parser("verify", help="verify one recorded candidate")
     verify.add_argument("--candidate", type=Path, required=True)

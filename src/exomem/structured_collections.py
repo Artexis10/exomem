@@ -23,6 +23,7 @@ from .collection_profiles import profile_for
 
 COLLECTION_VERSION = 1
 STORAGE_FORMAT_VERSION = 1
+RECORDS_READER_VERSION = 2
 RECORD_REF_PREFIX = "exomem://record/"
 PLAN_REF_PREFIX = "exomem://plan/"
 _SUPPORTED_PROFILES = frozenset({"records", "planning"})
@@ -535,7 +536,13 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
     )
 
 
-def parse_manifest_bytes(vault_root: Path, path: Path | str, data: bytes) -> CollectionManifest:
+def parse_manifest_bytes(
+    vault_root: Path,
+    path: Path | str,
+    data: bytes,
+    *,
+    records_reader_version: int = RECORDS_READER_VERSION,
+) -> CollectionManifest:
     """Parse a manifest from caller-held bytes bound by a guarded read."""
     root = Path(vault_root)
     manifest_path = Path(path)
@@ -574,6 +581,7 @@ def parse_manifest_bytes(vault_root: Path, path: Path | str, data: bytes) -> Col
         frontmatter,
         SourceVersion(path=rel, hash=hashlib.sha256(data).hexdigest()),
         manifest_stable_hash=_manifest_stable_hash(text),
+        records_reader_version=records_reader_version,
     )
 
 
@@ -871,6 +879,7 @@ def _manifest_from_frontmatter(
     frontmatter: Mapping[str, Any],
     manifest_version: SourceVersion,
     manifest_stable_hash: str = "",
+    records_reader_version: int = RECORDS_READER_VERSION,
 ) -> CollectionManifest:
     if frontmatter.get("type") != "collection":
         raise CollectionError(
@@ -942,6 +951,8 @@ def _manifest_from_frontmatter(
         )
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
     audit_head = _audit_head(frontmatter, "record_audit" if profile == "records" else "plan_audit")
+    if profile == "records":
+        _require_records_reader_version(frontmatter, records_reader_version)
     templates = _parse_templates(root, manifest_rel, frontmatter.get("templates", []))
     views, normalized_views, view_diagnostics = _parse_saved_views(
         frontmatter.get("views", {}), schema, storage, profile
@@ -1182,6 +1193,18 @@ def _normalize_saved_view_aggregate(value: object, fields: set[str]) -> str:
 def record_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
     """Validate the optional manifest audit mapping and return its head."""
     return _audit_head(frontmatter, "record_audit")
+
+
+def _require_records_reader_version(frontmatter: Mapping[str, Any], reader_version: int) -> None:
+    if type(reader_version) is not int or reader_version < 1:
+        raise CollectionError(
+            "RECORDS_READER_VERSION_UNSUPPORTED", "Records reader version is unsupported"
+        )
+    audit = frontmatter.get("record_audit")
+    if isinstance(audit, Mapping) and type(audit.get("version")) is int and audit["version"] > reader_version:
+        raise CollectionError(
+            "RECORDS_READER_VERSION_UNSUPPORTED", "Records reader version is unsupported"
+        )
 
 
 def plan_audit_head(frontmatter: Mapping[str, Any]) -> str | None:

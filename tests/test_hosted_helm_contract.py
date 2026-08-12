@@ -5,7 +5,9 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -31,28 +33,58 @@ def _render(
     extra_args: tuple[str, ...] = (),
     release_name: str = "contract-test",
 ) -> list[dict]:
-    if HELM is None:
-        pytest.skip("set HELM_BIN to run pinned Helm rendering")
-    result = subprocess.run(
-        [
-            str(HELM),
-            "template",
-            release_name,
-            str(chart),
-            "--namespace",
-            namespace,
-            "--values",
-            str(values),
-            "--include-crds",
-            *extra_args,
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+    result = _render_process(
+        chart,
+        values,
+        namespace=namespace,
+        extra_args=extra_args,
+        release_name=release_name,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return _documents(result.stdout)
+
+
+def _render_process(
+    chart: Path,
+    values: Path,
+    *,
+    namespace: str,
+    extra_args: tuple[str, ...] = (),
+    release_name: str = "contract-test",
+) -> subprocess.CompletedProcess[str]:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    with tempfile.TemporaryDirectory(prefix="exomem-helm-") as directory:
+        staged_chart = Path(directory) / chart.name
+        shutil.copytree(chart, staged_chart)
+        build = subprocess.run(
+            [str(HELM), "dependency", "build", str(staged_chart)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert build.returncode == 0, build.stdout + build.stderr
+        staged_values = staged_chart / values.relative_to(chart)
+        result = subprocess.run(
+            [
+                str(HELM),
+                "template",
+                release_name,
+                str(staged_chart),
+                "--namespace",
+                namespace,
+                "--values",
+                str(staged_values),
+                "--include-crds",
+                *extra_args,
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return result
 
 
 def _find(documents: list[dict], kind: str, name: str) -> dict:
@@ -124,23 +156,12 @@ def test_platform_rejects_mutable_or_partial_deployment_lock_overrides(
             ),
             encoding="utf-8",
         )
-        result = subprocess.run(
-            [
-                str(HELM),
-                "template",
-                "exomem-platform",
-                str(PLATFORM),
-                "--namespace",
-                "exomem-platform",
-                "--values",
-                str(PLATFORM / "values.validation.yaml"),
-                "--values",
-                str(override),
-            ],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
+        result = _render_process(
+            PLATFORM,
+            PLATFORM / "values.validation.yaml",
+            namespace="exomem-platform",
+            release_name="exomem-platform",
+            extra_args=("--values", str(override)),
         )
         assert result.returncode != 0
         assert "deployment lock" in result.stderr
@@ -156,26 +177,131 @@ def test_platform_rejects_deployment_lock_hash_drift(
         yaml.safe_dump({"provisioner": {"deploymentLockSha256": "0" * 64}}),
         encoding="utf-8",
     )
-    result = subprocess.run(
-        [
-            str(HELM),
-            "template",
-            "exomem-platform",
-            str(PLATFORM),
-            "--namespace",
-            "exomem-platform",
-            "--values",
-            str(PLATFORM / "values.validation.yaml"),
-            "--values",
-            str(override),
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+        extra_args=("--values", str(override)),
     )
     assert result.returncode != 0
     assert "deployment lock SHA-256 mismatch" in result.stderr
+
+
+def _v3_lock(lock: dict[str, object]) -> dict[str, object]:
+    v3 = json.loads(json.dumps(lock))
+    v3["schemaVersion"] = 3
+    v3["runtimeTarget"]["agentProfile"] = "hosted-alpha-agent-v2"
+    v3["recordsCompatibility"] = {
+        "minimum_records_reader_version": 2,
+        "activeProfile": "hosted-alpha-agent-v2",
+        "activeLifecycleActionsEnabled": True,
+        "rollbackProfile": "hosted-alpha-agent-v1",
+        "rollbackLifecycleActionsEnabled": False,
+        "rollbackRuntime": {
+            "image": "ghcr.io/artexis10/exomem@sha256:" + "c" * 64,
+            "sourceCommit": "d" * 40,
+            "candidateSha256": "e" * 64,
+            "recordsReaderVersion": 2,
+            "readerStatusProof": {
+                "profile": "hosted-alpha-agent-v1",
+                "recordsReaderVersion": 2,
+                "lifecycleActionsEnabled": False,
+                "issuedAt": "2026-08-12T10:00:00Z",
+                "expiresAt": "2026-08-12T11:00:00Z",
+                "signerWorkflow": "Artexis10/exomem/.github/workflows/release-please.yml",
+                "signerWorkflowDigest": "d" * 40,
+            },
+            "runtimeTarget": {
+                "releaseVersion": "0.35.0",
+                "protocolVersion": "1",
+                "agentProfile": "hosted-alpha-agent-v1",
+                "gatewayContractDigest": "6" * 64,
+                "commandFingerprint": "7" * 64,
+                "schemaDigest": "8" * 64,
+            },
+        },
+    }
+    return v3
+
+
+def _lock_override(tmp_path: Path, lock: dict[str, object]) -> Path:
+    raw = json.dumps(lock, separators=(",", ":")) + "\n"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    override = tmp_path / "lock.yaml"
+    override.write_text(
+        yaml.safe_dump(
+            {"provisioner": {
+                "deploymentLockJson": raw,
+                "deploymentLockSha256": hashlib.sha256(raw.encode()).hexdigest(),
+                **({"runtimeSelection": "active"} if lock["schemaVersion"] == 3 else {}),
+            }}
+        ),
+        encoding="utf-8",
+    )
+    return override
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "provisioner-surplus",
+        "runtime-target-missing",
+        "closure-missing-paths",
+        "closure-surplus",
+        "legacy-contract-surplus",
+        "rollback-missing",
+        "rollback-surplus",
+        "rollback-target-missing",
+        "rollback-target-surplus",
+        "records-proof-surplus",
+    ),
+)
+def test_platform_fully_validates_v2_inherited_and_v3_records_lock_shapes(
+    tmp_path: Path, mutation: str
+) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock = _v3_lock(json.loads(values["provisioner"]["deploymentLockJson"]))
+    valid = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(_lock_override(tmp_path, lock))),
+    )
+    assert valid.returncode == 0, valid.stdout + valid.stderr
+
+    invalid = json.loads(json.dumps(lock))
+    if mutation == "provisioner-surplus":
+        invalid["components"]["provisioner"]["surplus"] = True
+    elif mutation == "runtime-target-missing":
+        invalid["runtimeTarget"].pop("schemaDigest")
+    elif mutation == "closure-missing-paths":
+        invalid["composition"]["sourceClosure"]["runtime"].pop("paths")
+    elif mutation == "closure-surplus":
+        invalid["composition"]["sourceClosure"]["provisioner"]["surplus"] = True
+    elif mutation == "legacy-contract-surplus":
+        invalid["composition"]["legacyCatalog"][0]["contract"]["surplus"] = True
+    elif mutation == "rollback-missing":
+        invalid["rollback"].pop("v1CorpusSha256")
+    elif mutation == "rollback-surplus":
+        invalid["rollback"]["surplus"] = True
+    elif mutation == "rollback-target-missing":
+        invalid["recordsCompatibility"]["rollbackRuntime"]["runtimeTarget"].pop("schemaDigest")
+    elif mutation == "rollback-target-surplus":
+        invalid["recordsCompatibility"]["rollbackRuntime"]["runtimeTarget"]["surplus"] = True
+    else:
+        invalid["recordsCompatibility"]["rollbackRuntime"]["readerStatusProof"]["surplus"] = True
+
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(_lock_override(tmp_path, invalid))),
+    )
+    assert result.returncode != 0
+    assert "deployment lock" in result.stderr
 
 
 def test_platform_admission_policies_admit_each_governed_legacy_runtime_image(
@@ -281,23 +407,12 @@ def test_platform_rejects_wrong_provisioner_image_repository(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
-    result = subprocess.run(
-        [
-            str(HELM),
-            "template",
-            "exomem-platform",
-            str(PLATFORM),
-            "--namespace",
-            "exomem-platform",
-            "--values",
-            str(PLATFORM / "values.validation.yaml"),
-            "--values",
-            str(override),
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+        extra_args=("--values", str(override)),
     )
     assert result.returncode != 0
 
@@ -424,6 +539,111 @@ def test_platform_renders_real_provisioner_composition() -> None:
     for action in actions:
         assert f"Path(`/cells/{action}`)" in rule["match"]
     assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
+
+
+def test_platform_uses_the_selected_v3_rollback_runtime_everywhere(tmp_path: Path) -> None:
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock = _v3_lock(json.loads(values["provisioner"]["deploymentLockJson"]))
+    raw = json.dumps(lock, separators=(",", ":")) + "\n"
+    override = tmp_path / "rollback.yaml"
+    override.write_text(
+        yaml.safe_dump(
+            {
+                "provisioner": {
+                    "deploymentLockJson": raw,
+                    "deploymentLockSha256": hashlib.sha256(raw.encode()).hexdigest(),
+                    "runtimeSelection": "rollback",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(override)),
+    )
+    rollback = lock["recordsCompatibility"]["rollbackRuntime"]
+    rollback_target = rollback["runtimeTarget"]
+    rollback_image = rollback["image"]
+
+    api = _find(documents, "Deployment", "exomem-provisioner-api")
+    worker = _find(documents, "Deployment", "exomem-provisioner-worker")
+    for deployment in (api, worker):
+        pod = deployment["spec"]["template"]
+        env = {item["name"]: item for item in pod["spec"]["containers"][0]["env"]}
+        assert pod["metadata"]["annotations"]["exomem.io/runtime-selection"] == "rollback"
+        assert env["EXOMEM_PROVISIONER_RUNTIME_SELECTION"]["value"] == "rollback"
+    worker_env = {item["name"]: item for item in worker["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(worker_env["EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON"]["value"]) == rollback_target
+
+    deletion_job = json.loads(
+        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
+    )
+    workloads = {
+        "actions": _find(documents, "CronJob", "exomem-durability-actions")["spec"]["jobTemplate"]["spec"]["template"]["spec"],
+        "backup": _find(documents, "CronJob", "exomem-durability-backup")["spec"]["jobTemplate"]["spec"]["template"]["spec"],
+        "deletion": deletion_job["spec"]["template"]["spec"],
+    }
+    for name, pod in workloads.items():
+        env = {item["name"]: item for item in pod["containers"][0]["env"]}
+        selector = (
+            "EXOMEM_PROVISIONER_RUNTIME_SELECTION"
+            if name == "deletion"
+            else "EXOMEM_DURABILITY_RUNTIME_SELECTION"
+        )
+        assert env[selector]["value"] == "rollback"
+
+    policies = "\n".join(
+        validation["expression"]
+        for name in (
+            "exomem-tenant-boundary",
+            "exomem-tenant-restore-candidate",
+            "exomem-provisioner-scope",
+            "exomem-durability-actions-scope",
+        )
+        for validation in _find(documents, "ValidatingAdmissionPolicy", name)["spec"]["validations"]
+    )
+    assert rollback_image in policies
+
+
+@pytest.mark.parametrize(
+    ("lock_kind", "selection", "message"),
+    (
+        ("v3", "", "v3 requires runtimeSelection"),
+        ("v3", "unknown", "value must be one of"),
+        ("v2", "rollback", "v2 does not support rollback"),
+    ),
+)
+def test_platform_refuses_an_invalid_runtime_selection(
+    tmp_path: Path, lock_kind: str, selection: str, message: str
+) -> None:
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    source_lock = json.loads(values["provisioner"]["deploymentLockJson"])
+    lock = _v3_lock(source_lock) if lock_kind == "v3" else source_lock
+    raw = json.dumps(lock, separators=(",", ":")) + "\n"
+    override = tmp_path / f"{lock_kind}-{selection or 'unset'}.yaml"
+    override.write_text(
+        yaml.safe_dump(
+            {
+                "provisioner": {
+                    "deploymentLockJson": raw,
+                    "deploymentLockSha256": hashlib.sha256(raw.encode()).hexdigest(),
+                    "runtimeSelection": selection,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(override)),
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
 
 
 def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -> None:
@@ -1070,7 +1290,9 @@ def test_platform_deletion_dispatcher_is_credential_free_and_worker_is_job_only(
     assert "exomem-deletion-worker" in rendered_admission
 
 
-def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfaces() -> None:
+def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfaces(
+    tmp_path: Path,
+) -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     admission = _find(
         documents,
@@ -1123,18 +1345,33 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert "size(dyn(object.spec.template.spec.containers[0].resources).limits) == 2" in expressions
     assert "!has(dyn(object.spec.template.spec).resources)" in expressions
     assert "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH" in expressions
-    assert (
-        f"{container}.env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json'"
-        in expressions
-    )
-    assert (
-        'volumes[1].configMap.name == "exomem-hosted-deployment-lock-v2-97c1fc1bf93e0492"'
-        in expressions
-    )
-    assert (
-        "volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json'"
-        in expressions
-    )
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    v2_lock = json.loads(values["provisioner"]["deploymentLockJson"])
+    for version, lock in ((2, v2_lock), (3, _v3_lock(v2_lock))):
+        override = _lock_override(tmp_path / f"v{version}", lock)
+        variant_documents = _render(
+            PLATFORM,
+            PLATFORM / "values.validation.yaml",
+            namespace="exomem-platform",
+            extra_args=("--values", str(override)),
+        )
+        variant_admission = _find(
+            variant_documents,
+            "ValidatingAdmissionPolicy",
+            "exomem-deletion-dispatcher-job-scope",
+        )
+        variant_expressions = "\n".join(
+            validation["expression"] for validation in variant_admission["spec"]["validations"]
+        )
+        lock_file = f"exomem-hosted-deployment-lock-v{version}.json"
+        lock_name = (
+            f"exomem-hosted-deployment-lock-v{version}-"
+            f"{hashlib.sha256((json.dumps(lock, separators=(',', ':')) + chr(10)).encode()).hexdigest()[:16]}"
+        )
+        assert f'{container}.env[14].value == "/etc/exomem/deployment-lock/{lock_file}"' in variant_expressions
+        assert f'volumes[1].configMap.name == "{lock_name}"' in variant_expressions
+        assert f'volumes[1].configMap.items[0].key == "{lock_file}"' in variant_expressions
+        assert f'volumes[1].configMap.items[0].path == "{lock_file}"' in variant_expressions
     assert "volumes[1].configMap.defaultMode == 292" in expressions
     assert "!has(dyn(object.spec.template.spec.volumes[1].configMap.items[0]).mode)" in expressions
     assert "!has(object.spec.template.spec.volumes[1].configMap.defaultMode)" not in expressions
@@ -1158,7 +1395,7 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
         in expressions
     )
     assert "object.spec.template.spec.serviceAccount == 'exomem-deletion-worker'" in expressions
-    assert f"{container}.env[16].valueFrom.fieldRef.apiVersion == 'v1'" in expressions
+    assert f"{container}.env[17].valueFrom.fieldRef.apiVersion == 'v1'" in expressions
     assert f"{container}.volumeMounts[1].readOnly == true" in expressions
 
 
@@ -1767,23 +2004,11 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
 def test_platform_rejects_scheduler_contract_sha_drift() -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
-    result = subprocess.run(
-        [
-            str(HELM),
-            "template",
-            "contract-test",
-            str(PLATFORM),
-            "--namespace",
-            "exomem-platform",
-            "--values",
-            str(PLATFORM / "values.validation.yaml"),
-            "--set",
-            f"scheduler.contractSha256={'0' * 64}",
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--set", f"scheduler.contractSha256={'0' * 64}"),
     )
     assert result.returncode != 0
     assert "scheduler contract SHA-256 mismatch" in result.stderr
@@ -2407,23 +2632,13 @@ def test_no_rendered_value_uses_scientific_notation() -> None:
 
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
-    rendered = subprocess.run(
-        [
-            str(HELM),
-            "template",
-            "contract-test",
-            str(PLATFORM),
-            "--namespace",
-            "exomem-platform",
-            "--values",
-            str(PLATFORM / "values.validation.yaml"),
-            "--include-crds",
-        ],
-        capture_output=True,
-        check=True,
-        text=True,
-    ).stdout
-    offenders = re.findall(r"\d+\.\d+e[+-]\d+", rendered)
+    rendered = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    offenders = re.findall(r"\d+\.\d+e[+-]\d+", rendered.stdout)
     assert not offenders, (
         f"rendered manifests contain float-formatted numbers: {sorted(set(offenders))}"
     )

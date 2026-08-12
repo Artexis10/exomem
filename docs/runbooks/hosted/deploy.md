@@ -6,8 +6,24 @@ The canonical v2 deployment-lock pair and its fixed evidence directory, real HCP
 ciphertexts, and owner-only invitation gate must be green. Production mutation
 always uses a saved plan; a second plan is never computed during apply. The
 pair is committed at `infra/contracts/exomem-hosted-deployment-lock-pair-v2.json`.
+
+## Records reader-floor rollout
+
+Deployment-lock v3 is additive. It binds `minimum_records_reader_version: 2`, the
+`hosted-alpha-agent-v2` lifecycle profile, and a separately verified immutable rollback
+runtime that still understands reader version 2 while exposing the v1 profile without
+`revise` or `rebaseline`. Do not derive the rollback identity from a v2 pair or publish a
+v3 pair before both runtime image attestations exist. The v2 pair and its evidence bytes
+remain the rollback reference until that external evidence is available.
 It binds both immutable images, the six-field runtime target, candidate evidence,
 source closures, legacy catalog, admission phase, and D0 rollback tuple.
+
+To create the rollback candidate, dispatch `release-please.yml` for the existing release
+tag and supply `records_rollback_runtime_target_json` as the reviewed canonical six-field
+target for that exact release. The trusted workflow adds the fixed v1 profile, reader-v2,
+lifecycle-disabled, and bounded freshness claims before signing and retaining the
+candidate with the release. An omitted target continues to produce the unchanged v1
+candidate shape; the workflow never invents a cross-repository runtime target.
 
 ```bash
 infra/scripts/validate.sh
@@ -56,12 +72,14 @@ jq -e '
 ```
 
 ```bash
-lock_pair="infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
+lock_pair="${EXOMEM_DEPLOYMENT_LOCK_PAIR:-infra/contracts/exomem-hosted-deployment-lock-pair-v2.json}"
 test -f "$lock_pair" && test ! -L "$lock_pair" || { echo "canonical deployment lock pair is missing" >&2; exit 2; }
-lock_evidence="infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
+lock_evidence="${EXOMEM_DEPLOYMENT_LOCK_EVIDENCE:-infra/contracts/exomem-hosted-deployment-lock-evidence-v2}"
 test -d "$lock_evidence" && test ! -L "$lock_evidence" || { echo "canonical deployment lock evidence is missing" >&2; exit 2; }
 : "${EXOMEM_DEPLOYMENT_PHASE:?set expand or contract}"
 case "$EXOMEM_DEPLOYMENT_PHASE" in expand|contract) ;; *) exit 2 ;; esac
+runtime_selection="${EXOMEM_RUNTIME_SELECTION:-active}"
+case "$runtime_selection" in active|rollback) ;; *) exit 2 ;; esac
 : "${GH_TOKEN:?set a token permitted to verify hosted attestations and the pinned Substrate commit}"
 command -v oras >/dev/null || { echo "oras is required for deployment-lock proof" >&2; exit 2; }
 control_hostname="$(terraform -chdir=infra/terraform/foundation output -raw control_hostname)"
@@ -69,11 +87,14 @@ transfer_hostname="$(terraform -chdir=infra/terraform/foundation output -raw tra
 infra/scripts/prepare_hosted_release.py \
   --lock-pair "$lock_pair" \
   --phase "$EXOMEM_DEPLOYMENT_PHASE" \
+  --runtime-selection "$runtime_selection" \
   --values-output "${deploy_work_dir}/release-values.json" \
   --control-hostname "$control_hostname" \
   --transfer-hostname "$transfer_hostname"
 infra/scripts/verify_hosted_release.py \
   --phase "$EXOMEM_DEPLOYMENT_PHASE" \
+  --lock-pair "$lock_pair" \
+  --lock-evidence "$lock_evidence" \
   --repository .
 
 : "${EXOMEM_B2_S3_ENDPOINT:?set the exact HTTPS B2 S3 origin}"

@@ -428,12 +428,13 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact["idempotency_key"] = result["idempotency_key"]
     leaf = result["leaf_result"]
     if _is_record_receipt(leaf):
-        compact.update(
-            {
-                "_record_receipt": leaf["_record_receipt"],
-                "receipt_version": leaf["receipt_version"],
-            }
-        )
+        if leaf["receipt_version"] == _LIFECYCLE_RECEIPT_VERSION:
+            compact.update(
+                {
+                    "_record_receipt": leaf["_record_receipt"],
+                    "receipt_version": leaf["receipt_version"],
+                }
+            )
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})

@@ -129,7 +129,7 @@ def create_app(
         AdmissionPolicy(
             mode=lock.admission_mode,
             legacy_catalog=lock.legacy_catalog,
-            forward_target=lock.runtime_target.model_dump(mode="json"),
+            forward_target=lock.selected_runtime(settings.runtime_selection).runtimeTarget.model_dump(mode="json"),
         )
         if lock is not None
         else None
