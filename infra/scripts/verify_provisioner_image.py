@@ -12,21 +12,22 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 _IMAGE_PATTERN = re.compile(r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$")
-_ENTRYPOINTS = (
-    "exomem-provisioner-database-bootstrap",
-    "exomem-provisioner-database-migrate",
-    "exomem-provisioner-database-validate",
-    "exomem-provisioner-api",
-    "exomem-provisioner-worker",
-    "exomem-provisioner-volume-rebind",
-    "exomem-durability-actions",
-    "exomem-restore-fetch",
-    "exomem-export-gc",
-    "exomem-durability-backup-worker",
-    "exomem-database-backup-worker",
-    "exomem-deletion-worker",
-    "exomem-volume-worker",
-)
+_ENTRYPOINTS = {
+    "exomem-provisioner-database-bootstrap": "exomem_provisioner.database_bootstrap:run_bootstrap",
+    "exomem-provisioner-database-migrate": "exomem_provisioner.database_bootstrap:run_migrate",
+    "exomem-provisioner-database-validate": "exomem_provisioner.database_bootstrap:run_validate",
+    "exomem-provisioner-api": "exomem_provisioner.main:run_api",
+    "exomem-provisioner-worker": "exomem_provisioner.production:run_worker",
+    "exomem-provisioner-volume-rebind": "exomem_provisioner.volume:run_volume_rebind",
+    "exomem-durability-actions": "exomem_provisioner.durability_actions:run_durability_actions",
+    "exomem-restore-fetch": "exomem_provisioner.restore_fetch:run_restore_fetch",
+    "exomem-export-gc": "exomem_provisioner.durability_jobs:run_export_gc",
+    "exomem-durability-backup-worker": "exomem_provisioner.durability_jobs:run_durability_backup",
+    "exomem-database-backup-worker": "exomem_provisioner.durability_jobs:run_database_backup",
+    "exomem-deletion-worker": "exomem_provisioner.durability_jobs:run_deletion_worker",
+    "exomem-volume-worker": "exomem_provisioner.volume:run_volume_worker",
+    "exomem-provisioner-recover-init-retry": "exomem_provisioner.operation_recovery:main",
+}
 _MIGRATION_ROOT = "/opt/exomem/provisioner-migrations"
 _PROVISIONER_ROOT = Path(__file__).resolve().parents[1] / "provisioner"
 _EXPECTED_MIGRATION_FILES = {
@@ -64,12 +65,14 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from exomem_provisioner.database import DATABASE_REVISION
 
-required = {set(_ENTRYPOINTS)!r}
+required = {_ENTRYPOINTS!r}
 installed = {{entry.name: entry for entry in metadata.distribution('exomem-provisioner').entry_points}}
-if not required.issubset(installed):
+if set(required).difference(installed):
     raise SystemExit(11)
-for name in required:
+for name, expected_value in required.items():
     entry = installed[name]
+    if entry.value != expected_value:
+        raise SystemExit(18)
     if not callable(entry.load()):
         raise SystemExit(13)
 for path in {_POSTGRES_BINARIES!r}:

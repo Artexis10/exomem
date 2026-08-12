@@ -26,6 +26,20 @@ _RECORD_RECEIPT_FIELDS = (
 )
 _RECORD_RECEIPT_MARKER = "exomem.records-mutation"
 _RECORD_RECEIPT_VERSION = 1
+_PLAN_RECEIPT_MARKER = "exomem.planning-mutation"
+_PLAN_RECEIPT_FIELDS = (
+    "operation",
+    "collection_id",
+    "plan_id",
+    "before_item_hash",
+    "after_item_hash",
+    "before_container_hash",
+    "after_container_hash",
+    "affected_paths",
+    "payload_hash",
+    "outcome",
+    "audit_correlation",
+)
 
 #: The closed mutation state machine. A client may branch on exactly these values and
 #: MUST NOT infer any other. `needs_review` is explicitly NONTERMINAL: it means the
@@ -75,6 +89,13 @@ def _operation_id(result: Any) -> str | None:
 def _warning_count(result: Any) -> int:
     if not isinstance(result, Mapping):
         return 0
+    artifact_receipt = _artifact_receipt_projection(result)
+    if artifact_receipt:
+        return sum(
+            len(item.get("warnings", []))
+            for item in artifact_receipt["files"]
+            if item["outcome"] == "stored"
+        )
     warnings = result.get("warnings")
     if isinstance(warnings, (list, tuple)):
         return len(warnings)
@@ -93,11 +114,22 @@ def _path_projection(result: Any) -> dict[str, Any]:
     """Adapt only the small set of explicit mutation path shapes we own."""
     if not isinstance(result, Mapping):
         return {"paths": []}
+    artifact_receipt = _artifact_receipt_projection(result)
+    if artifact_receipt:
+        paths = [
+            item["stored_path"]
+            for item in artifact_receipt["files"]
+            if item["outcome"] == "stored"
+        ]
+        if len(paths) == 1:
+            return {"path": paths[0]}
+        if paths:
+            return {"paths": paths}
     path = result.get("path")
     if isinstance(path, str):
         return {"path": path}
     affected_paths = result.get("affected_paths")
-    if valid_record_receipt(result) and isinstance(affected_paths, (list, tuple)) and all(
+    if valid_collection_receipt(result) and isinstance(affected_paths, (list, tuple)) and all(
         isinstance(item, str) for item in affected_paths
     ):
         return {"paths": list(affected_paths)}
@@ -138,6 +170,92 @@ def _path_projection(result: Any) -> dict[str, Any]:
     if isinstance(restored_path, str):
         return {"path": restored_path}
     return {"paths": []}
+
+
+def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
+    """Keep the bounded client-artifact outcome visible in compact terminals."""
+    def string(value: Any, *, limit: int, allow_none: bool = False) -> bool:
+        return (allow_none and value is None) or (isinstance(value, str) and 0 < len(value) <= limit)
+
+    def nonnegative_int(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    def sha256(value: Any) -> bool:
+        return isinstance(value, str) and len(value) == 64 and all(
+            character in "0123456789abcdef" for character in value
+        )
+
+    if not isinstance(result, Mapping):
+        return {}
+    files = result.get("files")
+    summary = result.get("summary")
+    if not isinstance(files, (list, tuple)) or not 1 <= len(files) <= 8 or not isinstance(summary, Mapping):
+        return {}
+    def invalid_row(item: Any, index: int) -> dict[str, str]:
+        file_id = item.get("file_id") if isinstance(item, Mapping) else None
+        return {
+            "file_id": file_id if string(file_id, limit=256) else f"invalid-file-{index + 1}",
+            "outcome": "failed",
+            "code": "INVALID_ARTIFACT_RECEIPT",
+            "reason": "artifact result was invalid",
+        }
+
+    projected: list[dict[str, Any]] = []
+    for index, item in enumerate(files):
+        if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
+            projected.append(invalid_row(item, index))
+            continue
+        outcome = item.get("outcome")
+        if outcome == "stored":
+            if not (
+                string(item.get("stored_path"), limit=2048)
+                and nonnegative_int(item.get("size"))
+                and sha256(item.get("hash"))
+                and item.get("hash_algorithm") == "sha256"
+                and string(item.get("content_type"), limit=255, allow_none=True)
+                and string(item.get("media_id"), limit=512, allow_none=True)
+                and isinstance(item.get("warnings"), list)
+                and len(item["warnings"]) <= 8
+                and all(string(warning, limit=300) for warning in item["warnings"])
+            ):
+                projected.append(invalid_row(item, index))
+                continue
+            row = {
+                key: item[key]
+                for key in (
+                    "file_id",
+                    "outcome",
+                    "stored_path",
+                    "size",
+                    "hash",
+                    "hash_algorithm",
+                    "media_id",
+                    "content_type",
+                    "warnings",
+                )
+                if key in item
+            }
+        elif outcome == "failed" and string(item.get("code"), limit=64) and string(
+            item.get("reason"), limit=300
+        ):
+            row = {key: item[key] for key in ("file_id", "outcome", "code", "reason")}
+        else:
+            projected.append(invalid_row(item, index))
+            continue
+        projected.append(row)
+    stored = sum(item["outcome"] == "stored" for item in projected)
+    failed = len(projected) - stored
+    return {"files": projected, "summary": {"stored": stored, "failed": failed}}
+
+
+def receipt_leaf_projection(leaf_result: Any) -> dict[str, Any]:
+    """Portable graph receipts never retain collection paths or content metadata."""
+    # Collection receipts are public API results, not portable graph protocol
+    # authority: both shapes include affected paths.  A local exact retry can
+    # reconstruct only the envelope after a SQLite cut, which is preferable
+    # to copying user paths into a synced hidden file.
+    del leaf_result
+    return {}
 
 
 def committed_terminal(
@@ -182,8 +300,8 @@ def replayed_terminal(
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     """Present a verified Records no-op replay without fabricating a commit."""
-    if not valid_record_receipt(leaf_result) or leaf_result.get("outcome") != "replayed":
-        raise ValueError("replayed terminal requires a valid replayed record receipt")
+    if not valid_collection_receipt(leaf_result) or leaf_result.get("outcome") != "replayed":
+        raise ValueError("replayed terminal requires a valid replayed collection receipt")
 
     terminal: dict[str, Any] = {
         "_terminal": _TERMINAL_MARKER,
@@ -292,6 +410,19 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     leaf = result["leaf_result"]
     if _is_record_receipt(leaf):
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
+    elif valid_planning_receipt(leaf):
+        compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+    compact.update(_artifact_receipt_projection(leaf))
+    if isinstance(leaf, Mapping) and leaf.get("graph_sync") in {"completed", "failed"}:
+        compact["graph_sync"] = leaf["graph_sync"]
+        for key in (
+            "graph_sync_code",
+            "graph_sync_checkpoint",
+            "graph_sync_remediation",
+        ):
+            value = leaf.get(key)
+            if isinstance(value, str):
+                compact[key] = value
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
         compact["diagnostics"] = result["leaf_result"]
@@ -380,6 +511,68 @@ def valid_record_receipt(value: Any) -> bool:
     if operation == "create":
         return True
     return False
+
+
+def valid_planning_receipt(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    operation = value.get("operation")
+    if (
+        value.get("_plan_receipt") != _PLAN_RECEIPT_MARKER
+        or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
+        or operation not in {"create", "add", "update", "triage"}
+        or not _normalized_uuid(value.get("collection_id"))
+        or not isinstance(value.get("affected_paths"), list)
+        or len(value["affected_paths"]) > 16
+        or not all(
+            isinstance(path, str) and 0 < len(path) <= 1024 for path in value["affected_paths"]
+        )
+        or value.get("outcome") not in {"committed", "replayed"}
+    ):
+        return False
+    if operation == "create":
+        if value.get("plan_id") is not None or value.get("outcome") != "committed":
+            return False
+    elif not _normalized_uuid(value.get("plan_id")):
+        return False
+    for name in _PLAN_RECEIPT_FIELDS[3:7]:
+        hash_value = value.get(name)
+        if hash_value is not None and not _hash(hash_value):
+            return False
+    correlation = value.get("audit_correlation")
+    if not (
+        isinstance(correlation, str)
+        and len(correlation) == 24
+        and all(character in "0123456789abcdef" for character in correlation)
+    ):
+        return False
+    if operation == "create":
+        return (
+            value.get("before_item_hash") is None
+            and value.get("before_container_hash") is None
+            and value.get("payload_hash") is None
+            and _hash(value.get("after_container_hash"))
+        )
+    if operation == "add":
+        return (
+            _hash(value.get("before_item_hash"))
+            if value.get("outcome") == "replayed"
+            else value.get("before_item_hash") is None
+        ) and _hash(value.get("after_item_hash")) and _hash(
+            value.get("before_container_hash")
+        ) and _hash(value.get("after_container_hash")) and _hash(value.get("payload_hash"))
+    return (
+        value.get("outcome") == "committed"
+        and _hash(value.get("before_item_hash"))
+        and _hash(value.get("after_item_hash"))
+        and _hash(value.get("before_container_hash"))
+        and _hash(value.get("after_container_hash"))
+        and value.get("payload_hash") is None
+    )
+
+
+def valid_collection_receipt(value: Any) -> bool:
+    return valid_record_receipt(value) or valid_planning_receipt(value)
 
 
 _is_record_receipt = valid_record_receipt

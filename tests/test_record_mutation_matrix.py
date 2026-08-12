@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from record_fixtures import copy_vehicle_maintenance_fixture, copy_x3_fixture
 
-from exomem import record_formats, vault, writer_lease
+from exomem import graph_sync, mutation_lock, record_formats, vault, writer_lease
 from exomem import structured_collections as collections
 
 
@@ -57,6 +58,10 @@ def _item_update_context(root: Path) -> tuple[Path, collections.CollectionManife
     return fixture, manifest, record, log
 
 
+def _is_caller_target(root: Path, target: Path) -> bool:
+    return target not in {graph_sync.floor_path(root), graph_sync.checkpoint_path(root)}
+
+
 @pytest.mark.parametrize("prefix", [1, 2, 3])
 def test_bom_crlf_item_update_caught_prefixes_restore_exact_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: int
@@ -75,8 +80,9 @@ def test_bom_crlf_item_update_caught_prefixes_restore_exact_bytes(
 
     def deny(workspace, artifact, target):  # noqa: ANN001
         nonlocal calls
-        calls += 1
-        if calls == prefix:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == prefix:
             raise PermissionError(13, "Access is denied", str(target))
         return real_replace(workspace, artifact, target)
 
@@ -116,8 +122,9 @@ def test_bom_crlf_item_update_abrupt_prefixes_report_audit_gap(
     def interrupt(workspace, artifact, target):  # noqa: ANN001
         nonlocal calls
         result = real_replace(workspace, artifact, target)
-        calls += 1
-        if calls == prefix:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == prefix:
             raise KeyboardInterrupt("abrupt markdown item publication")
         return result
 
@@ -140,7 +147,7 @@ def test_bom_crlf_item_update_abrupt_prefixes_report_audit_gap(
 def test_record_boundaries_are_per_vault_but_serialize_same_vault(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Barriers prove independent vaults enter together and one vault enters in order."""
+    """Admission events prove per-vault independence and same-vault serialization."""
     from exomem import records
 
     first_root, second_root = tmp_path / "first", tmp_path / "second"
@@ -150,13 +157,13 @@ def test_record_boundaries_are_per_vault_but_serialize_same_vault(
     first_manifest = collections.load_manifest(first_root, first_fixture / "_collection.md")
     second_manifest = collections.load_manifest(second_root, second_fixture / "_collection.md")
     real_load = records._load_guarded_manifest
-    independent_entry = threading.Barrier(2)
-    independent_progress = threading.Barrier(3)
+    independent_admission = threading.Barrier(3)
+    independent_release = threading.Event()
 
     def together(root, collection):  # noqa: ANN001
         if root in {first_root, second_root}:
-            independent_entry.wait(timeout=2)
-            independent_progress.wait(timeout=2)
+            independent_admission.wait(timeout=10)
+            assert independent_release.wait(10.0)
         return real_load(root, collection)
 
     monkeypatch.setattr(records, "_load_guarded_manifest", together)
@@ -174,33 +181,48 @@ def test_record_boundaries_are_per_vault_but_serialize_same_vault(
                 ((first_root, first_manifest), (second_root, second_manifest))
             )
         ]
-        independent_progress.wait(timeout=2)
-        assert {future.result(timeout=2)["outcome"] for future in futures} == {"committed"}
+        independent_admission.wait(timeout=10)
+        independent_release.set()
+        assert {future.result(timeout=10)["outcome"] for future in futures} == {"committed"}
 
     same_root = tmp_path / "same"
     same_fixture = copy_x3_fixture(same_root)
     _activity_log(same_root)
     same_manifest = collections.load_manifest(same_root, same_fixture / "_collection.md")
-    first_entry = threading.Barrier(2)
+    first_admitted = threading.Event()
     release_first = threading.Event()
-    second_entry = threading.Event()
+    second_blocked = threading.Event()
+    second_admitted = threading.Event()
     calls = 0
     calls_lock = threading.Lock()
+    real_guard = writer_lease.LeaseManager.mutation_guard
 
-    def serialized(root, collection):  # noqa: ANN001
+    @contextmanager
+    def observed_guard(self, root, **metadata):  # noqa: ANN001
         nonlocal calls
-        if root == same_root:
-            with calls_lock:
-                calls += 1
-                ordinal = calls
+        if Path(root) != same_root:
+            with real_guard(self, root, **metadata):
+                yield
+            return
+        with calls_lock:
+            calls += 1
+            ordinal = calls
+        if ordinal == 2:
+            probe = mutation_lock.VaultMutationCoordinator(self.config.state_dir, root)
+            state = mutation_lock._state_for(probe.lock_path)
+            if state.guard.acquire(blocking=False):
+                state.guard.release()
+                raise AssertionError("same-vault second mutation guard was not blocked")
+            second_blocked.set()
+        with real_guard(self, root, **metadata):
             if ordinal == 1:
-                first_entry.wait(timeout=2)
-                assert release_first.wait(timeout=2)
+                first_admitted.set()
+                assert release_first.wait(10.0)
             else:
-                second_entry.set()
-        return real_load(root, collection)
+                second_admitted.set()
+            yield
 
-    monkeypatch.setattr(records, "_load_guarded_manifest", serialized)
+    monkeypatch.setattr(writer_lease.LeaseManager, "mutation_guard", observed_guard)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(
             records.append_record,
@@ -210,7 +232,8 @@ def test_record_boundaries_are_per_vault_but_serialize_same_vault(
             item_key="11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             why="hold the same vault boundary",
         )
-        first_entry.wait(timeout=2)
+        assert first_admitted.wait(10.0)
+
         second = pool.submit(
             records.append_record,
             same_root,
@@ -219,11 +242,12 @@ def test_record_boundaries_are_per_vault_but_serialize_same_vault(
             item_key="22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             why="wait for the same vault boundary",
         )
-        assert not second_entry.wait(timeout=0.2)
+        assert second_blocked.wait(10.0)
+        assert not second_admitted.is_set()
         release_first.set()
-        assert first.result(timeout=2)["outcome"] == "committed"
-        assert second.result(timeout=2)["outcome"] == "committed"
-        assert second_entry.is_set()
+        assert first.result(timeout=10)["outcome"] == "committed"
+        assert second.result(timeout=10)["outcome"] == "committed"
+        assert second_admitted.is_set()
 
 
 @pytest.mark.parametrize("race", ["content", "duplicate"])

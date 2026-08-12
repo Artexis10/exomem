@@ -220,6 +220,32 @@ def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
     return normalized
 
 
+def _inspection_plan_descriptor(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or set(value) != {"reference", "query"}:
+        return None
+    reference = _opaque_plan_reference(value.get("reference"))
+    query = value.get("query")
+    if reference is None or not isinstance(query, Mapping) or not query or set(query) - {"filters", "limit"}:
+        return None
+    limit = query.get("limit")
+    if type(limit) is not int or not 1 <= limit <= query_data.HARD_ROW_CAP:
+        return None
+    normalized_query: dict[str, Any] = {"limit": limit}
+    if "filters" in query:
+        filters = query["filters"]
+        if not isinstance(filters, Mapping) or len(filters) > 128:
+            return None
+        normalized_filters: dict[str, Any] = {}
+        for name, filter_value in filters.items():
+            field = _inspection_field_name(name)
+            projected = _inspection_json(filter_value)
+            if field is None or projected is _INSPECTION_INVALID:
+                return None
+            normalized_filters[field] = projected
+        normalized_query = {"filters": normalized_filters, "limit": limit}
+    return {"reference": reference, "query": normalized_query}
+
+
 def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Reconstruct the report-only inspection union before it reaches egress."""
     kind = payload.get("kind")
@@ -275,7 +301,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     if kind == "collection":
         if legacy is not None or not isinstance(contract, Mapping):
             return None
-        if set(contract) != {"collection_id", "path", "title", "semantic_profile", "schema_version", "storage"}:
+        if set(contract) != {"collection_id", "path", "title", "semantic_profile", "schema_version", "storage", "plans"}:
             return None
         collection_id = _inspection_identifier(contract.get("collection_id"))
         path, title = _inspection_path(contract.get("path")), _inspection_string(contract.get("title"), maximum=512)
@@ -296,6 +322,12 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         strategy, source, format_version = storage.get("strategy"), _inspection_path(storage.get("source")), storage.get("format_version")
         if type(strategy) is not str or strategy not in {"markdown-log", "markdown-items", "dataset"} or source is None or format_version != 1:
             return None
+        plans = contract.get("plans")
+        if not isinstance(plans, list) or len(plans) > 32:
+            return None
+        normalized_plans = [_inspection_plan_descriptor(plan) for plan in plans]
+        if any(plan is None for plan in normalized_plans):
+            return None
         normalized_contract: dict[str, Any] | None = {
             "collection_id": collection_id,
             "path": path,
@@ -303,6 +335,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "semantic_profile": profile,
             "schema_version": version,
             "storage": {"strategy": strategy, "source": source, "format_version": format_version},
+            "plans": [plan for plan in normalized_plans if plan is not None],
         }
         normalized_legacy: dict[str, Any] | None = None
         if status == "not_applicable":
@@ -648,13 +681,24 @@ def _resolve_released_collection(
 def query_collection(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
+    *,
+    semantic_profile: str = "records",
     **kwargs: Any,
 ) -> record_formats.RecordQueryResult:
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
         manifest = _resolve_released_collection(root, collection, receipt=True)
-        require_records_profile(manifest)
+        if manifest.semantic_profile != semantic_profile:
+            error_code = (
+                "RECORDS_PROFILE_REQUIRED"
+                if semantic_profile == "records"
+                else "PLANNING_PROFILE_REQUIRED"
+            )
+            raise collections.CollectionError(
+                error_code,
+                "collection profile is not available",
+            )
         if not _authorize(
             root, manifest.storage.source, receipt=True
         ):
@@ -765,7 +809,15 @@ def inspect_collection(
             {
                 "kind": "collection",
                 "report_only": True,
-                "contract": _inspection_contract(manifest),
+                "contract": {
+                    **_inspection_contract(manifest),
+                    "plans": [
+                        projected
+                        for plan in manifest.links.plans
+                        if (projected := _project_plan_link(root, manifest, plan, links=links))
+                        is not None
+                    ],
+                },
                 "legacy": None,
                 "snapshot": inspection.snapshot,
                 "source_versions": [
@@ -780,6 +832,49 @@ def inspect_collection(
         projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
         egress.emit_boundary_receipt(collector)
         return projected
+
+
+def inventory_collections(vault_root: Path) -> dict[str, Any]:
+    """Return a bounded authorized inventory without opening canonical item data."""
+    root = Path(vault_root)
+    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
+        def authorize(path: str) -> bool:
+            return _authorize(root, path, receipt=True)
+
+        manifests = [
+            manifest
+            for manifest in collections.discover_collections(root, authorize_path=authorize)
+            if manifest.semantic_profile == "records" and authorize(manifest.storage.source)
+        ]
+        legacy, legacy_truncated = collections.discover_legacy_trackers(
+            root, authorize_path=authorize
+        )
+        payload = {
+            "kind": "records_inventory",
+            "report_only": True,
+            "collections": [
+                {
+                    "collection_id": manifest.collection_id,
+                    "title": manifest.title,
+                    "manifest_path": manifest.path,
+                    "semantic_profile": manifest.semantic_profile,
+                    "lifecycle": manifest.lifecycle,
+                    "storage_strategy": manifest.storage.strategy,
+                }
+                for manifest in manifests
+            ],
+            "legacy_trackers": [
+                {"path": tracker.path, "inspect_only": tracker.inspect_only}
+                for tracker in legacy
+            ],
+            "truncated": {"collections": False, "legacy_trackers": legacy_truncated},
+            "contract_route": {
+                "tool": "record_memory",
+                "arguments": {"action": "describe"},
+            },
+        }
+        egress.emit_boundary_receipt(collector)
+        return payload
 
 
 def inspect_legacy_tracker(vault_root: Path, path: str | Path) -> dict[str, Any]:
@@ -823,6 +918,7 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             "source": manifest.storage.source,
             "format_version": manifest.storage.format_version,
         },
+        "plans": [],
     }
 
 

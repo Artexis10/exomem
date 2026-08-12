@@ -19,10 +19,12 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from . import memory_refs, vault
+from .collection_profiles import profile_for
 
 COLLECTION_VERSION = 1
 STORAGE_FORMAT_VERSION = 1
 RECORD_REF_PREFIX = "exomem://record/"
+PLAN_REF_PREFIX = "exomem://plan/"
 _SUPPORTED_PROFILES = frozenset({"records", "planning"})
 _SUPPORTED_STORAGE = frozenset({"markdown-log", "markdown-items", "dataset"})
 _SUPPORTED_FIELD_TYPES = frozenset(
@@ -64,8 +66,8 @@ _SAVED_VIEW_QUERY_KEYS = frozenset(
         "limit",
     }
 )
-_SAVED_VIEW_SYSTEM_FIELDS = frozenset(
-    {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
+_SAVED_VIEW_SHARED_SYSTEM_FIELDS = frozenset(
+    {"collection_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
 _SAVED_VIEW_QUERY_OPS = frozenset(
     {
@@ -84,18 +86,282 @@ _SAVED_VIEW_QUERY_OPS = frozenset(
         "missing",
     }
 )
-_SAVED_VIEW_AGGREGATES = frozenset(
-    {"min", "max", "sum", "avg", "latest", "distinct", "group"}
-)
+_SAVED_VIEW_AGGREGATES = frozenset({"min", "max", "sum", "avg", "latest", "distinct", "group"})
 
 
 @dataclass(slots=True)
 class CollectionError(ValueError):
     code: str
     reason: str
+    details: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.details = dict(self.details)
         ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+
+def manifest_authoring_contract() -> dict[str, Any]:
+    """Return the deterministic agent-facing contract for collection manifests."""
+    field_types = sorted(_SUPPORTED_FIELD_TYPES)
+    profiles = sorted(_SUPPORTED_PROFILES)
+    storage_strategies = sorted(_SUPPORTED_STORAGE)
+    view_operators = sorted(_SAVED_VIEW_QUERY_OPS)
+    aggregate_forms = [
+        "count",
+        "profile",
+        *[f"{name}:<field>" for name in sorted(_SAVED_VIEW_AGGREGATES)],
+    ]
+    field_schema: dict[str, Any] = {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+            "type": {"enum": field_types},
+            "required": {"type": "boolean", "default": False},
+            "enum": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {"type": ["string", "integer", "number", "boolean"]},
+            },
+            "items": {"$ref": "#/$defs/field"},
+            "units": {"type": "array", "items": {"type": "string"}},
+            "link_kind": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
+    manifest_schema: dict[str, Any] = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://exomem.dev/contracts/collection-manifest-v1.schema.json",
+        "title": "Exomem collection manifest frontmatter",
+        "type": "object",
+        "required": [
+            "type",
+            "exomem_id",
+            "title",
+            "semantic_profile",
+            "collection_version",
+            "schema_version",
+            "lifecycle",
+            "storage",
+            "item_schema",
+        ],
+        "properties": {
+            "type": {"const": "collection"},
+            "exomem_id": {"type": "string", "format": "uuid"},
+            "title": {"type": "string", "minLength": 1},
+            "semantic_profile": {"enum": profiles},
+            "collection_version": {"enum": [COLLECTION_VERSION]},
+            "schema_version": {"type": "integer", "minimum": 1},
+            "lifecycle": {"type": "string", "minLength": 1, "examples": ["active"]},
+            "storage": {
+                "type": "object",
+                "required": ["strategy", "source", "format_version"],
+                "properties": {
+                    "strategy": {"enum": storage_strategies},
+                    "source": {"type": "string", "minLength": 1},
+                    "format_version": {"enum": [STORAGE_FORMAT_VERSION]},
+                },
+                "additionalProperties": True,
+            },
+            "item_schema": {
+                "type": "object",
+                "required": ["natural_key", "fields"],
+                "properties": {
+                    "natural_key": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "items": {"type": "string"},
+                    },
+                    "fields": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "maxProperties": _MAX_SCHEMA_FIELDS,
+                        "additionalProperties": {"$ref": "#/$defs/field"},
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "templates": {"type": "array", "maxItems": 32},
+            "views": {"type": "object", "maxProperties": _MAX_SAVED_VIEWS},
+            "governance": {"type": "object"},
+            "links": {"type": "object"},
+            "record_audit": {"type": "object", "readOnly": True},
+        },
+        "additionalProperties": True,
+        "$defs": {"field": field_schema},
+    }
+    return {
+        "contract_version": COLLECTION_VERSION,
+        "manifest_filename": "_collection.md",
+        "records_path": f"{vault.kb_dirname()}/Records/",
+        "records_action_constraint": {"semantic_profile": "records"},
+        "closed_values": {
+            "semantic_profile": profiles,
+            "collection_version": [COLLECTION_VERSION],
+            "storage.strategy": storage_strategies,
+            "storage.format_version": [STORAGE_FORMAT_VERSION],
+            "item_schema.fields.*.type": field_types,
+            "views.*.filters.*.op": view_operators,
+            "views.*.aggregate": aggregate_forms,
+        },
+        "constraints": {
+            "lifecycle": {
+                "type": "string",
+                "min_length": 1,
+                "example": "active",
+                "closed_enum": False,
+            },
+            "schema_version": {"type": "integer", "minimum": 1},
+            "natural_key": {"declared_fields_only": True, "minimum_items": 1, "maximum_items": 16},
+            "records_paths": "manifest and canonical source must stay under Knowledge Base/Records",
+        },
+        "storage_strategies": {
+            "markdown-items": {
+                "canonical_source": "directory containing one Markdown file per item",
+                "required_storage_fields": ["strategy", "source", "format_version"],
+                "append": True,
+                "update": True,
+            },
+            "markdown-log": {
+                "canonical_source": "one chronological Markdown log",
+                "required_descriptor_fields": ["section", "item_heading", "insertion"],
+                "insertion_values": ["newest-first", "oldest-first"],
+                "child_rows": {
+                    "required_fields": ["prefix", "delimiter", "fields", "container_field"],
+                    "container_field": "declared array-of-object item field",
+                },
+                "append": True,
+                "update": True,
+            },
+            "dataset": {
+                "canonical_source": "CSV, TSV, or JSON file",
+                "descriptor_fields": ["key", "record_path"],
+                "append": False,
+                "update": False,
+            },
+        },
+        "views": {
+            "definition_keys": ["query", "sort", "source_snapshot"],
+            "query_keys": sorted(_SAVED_VIEW_QUERY_KEYS),
+            "filter_operators": view_operators,
+            "aggregate_forms": aggregate_forms,
+            "sort_directions": ["asc", "desc"],
+            "limit": {"minimum": 1, "maximum": 1_000},
+        },
+        "json_schema": manifest_schema,
+        "examples": _manifest_authoring_examples(),
+    }
+
+
+def _manifest_authoring_examples() -> dict[str, dict[str, Any]]:
+    minimal_text = """---
+type: collection
+exomem_id: 15dd81cd-9ae2-488c-bd9e-14771d86343e
+title: Observed events
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on, label]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+    label:
+      type: string
+      required: true
+    source:
+      type: link
+---
+
+One ordinary Markdown file per observed event.
+"""
+    laboratory_text = """---
+type: collection
+exomem_id: 372ff95a-36f0-4859-9e11-9e487dd94f4b
+title: Laboratory panels
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Panels
+  format_version: 1
+item_schema:
+  natural_key: [panel_on, specimen_id]
+  fields:
+    panel_on:
+      type: date
+      required: true
+    panel_at:
+      type: datetime
+    specimen_id:
+      type: string
+      required: true
+    source:
+      type: link
+      required: true
+    analytes:
+      type: array
+      required: true
+      items:
+        type: object
+---
+
+Each panel is one observed event. Child analytes preserve reported values and provenance without interpretation.
+"""
+    return {
+        "minimal": {
+            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Events/_collection.md",
+            "manifest_text": minimal_text,
+            "append_item": {"occurred_on": "2026-01-01", "label": "Example event"},
+        },
+        "laboratory_panel": {
+            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Laboratory/_collection.md",
+            "manifest_text": laboratory_text,
+            "child_item_shape": {
+                "name": "string",
+                "reported_value": "source-preserved string, including inequality text",
+                "numeric_value": "optional derived number",
+                "comparator": "optional source-preserved comparator such as <",
+                "unit": "source-preserved string",
+                "reference_range": "source-preserved string",
+                "cancelled": "boolean",
+                "qualifier": "optional source-preserved string",
+            },
+            "append_item": {
+                "panel_on": "2026-01-01",
+                "specimen_id": "SPECIMEN-EXAMPLE",
+                "source": "Knowledge Base/Sources/Examples/laboratory-report.md",
+                "analytes": [
+                    {
+                        "name": "Example analyte",
+                        "reported_value": "<18.4",
+                        "numeric_value": 18.4,
+                        "comparator": "<",
+                        "unit": "unit/L",
+                        "reference_range": "20-80 unit/L",
+                        "cancelled": False,
+                        "qualifier": "mild haemolysis",
+                    },
+                    {
+                        "name": "Cancelled assay",
+                        "reported_value": "cancelled",
+                        "unit": "unit/L",
+                        "reference_range": "not reported",
+                        "cancelled": True,
+                        "qualifier": "insufficient specimen",
+                    },
+                ],
+            },
+        },
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +514,9 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "collection manifest is not UTF-8"
         ) from error
-    _validate_record_audit_source(text)
+    audit_name = _profile_owned_audit_name(text)
+    if audit_name is not None:
+        _validate_audit_source(text, audit_name)
     try:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except vault.FrontmatterError as error:
@@ -288,7 +556,9 @@ def parse_manifest_bytes(vault_root: Path, path: Path | str, data: bytes) -> Col
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8") from error
-    _validate_record_audit_source(text)
+    audit_name = _profile_owned_audit_name(text)
+    if audit_name is not None:
+        _validate_audit_source(text, audit_name)
     try:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except vault.FrontmatterError as error:
@@ -335,17 +605,29 @@ def discover_collections(
         return ()
     authorize = authorize_path or (lambda _path: True)
     manifests: list[CollectionManifest] = []
-    candidates = list(itertools.islice(kb.rglob("_collection.md"), max_raw_candidates + 1))
-    if len(candidates) > max_raw_candidates:
-        raise CollectionError(
-            "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
-        )
+    if authorize_path is None:
+        candidates = list(itertools.islice(kb.rglob("_collection.md"), max_raw_candidates + 1))
+        if len(candidates) > max_raw_candidates:
+            raise CollectionError(
+                "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
+            )
+    else:
+        candidates = []
+        for candidate in kb.rglob("_collection.md"):
+            safe = _safe_candidate_rel(root, candidate)
+            if safe is None or not authorize(safe[1]):
+                continue
+            candidates.append(candidate)
+            if len(candidates) > max_raw_candidates:
+                raise CollectionError(
+                    "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
+                )
     for candidate in sorted(candidates):
         safe = _safe_candidate_rel(root, candidate)
         if safe is None:
             continue
         _candidate_path, rel = safe
-        if not authorize(rel):
+        if authorize_path is None and not authorize(rel):
             continue
         if len(manifests) >= max_candidates:
             raise CollectionError(
@@ -355,6 +637,52 @@ def discover_collections(
     if reject_duplicates:
         _raise_duplicate_ids(manifests)
     return tuple(manifests)
+
+
+def discover_legacy_trackers(
+    vault_root: Path,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
+    max_raw_candidates: int = 4_096,
+) -> tuple[tuple[LegacyCollection, ...], bool]:
+    """Discover bounded exact-Records-layer tracker manifests without parsing items."""
+    if type(max_raw_candidates) is not int or not 1 <= max_raw_candidates <= 16_384:
+        raise CollectionError(
+            "INVALID_DISCOVERY_LIMIT", "legacy discovery limit is outside supported bounds"
+        )
+    root = Path(vault_root)
+    records_root = vault.kb_root(root) / "Records"
+    if not records_root.is_dir():
+        return (), False
+    authorize = authorize_path or (lambda _path: True)
+    if authorize_path is None:
+        candidates = list(itertools.islice(records_root.rglob("*.md"), max_raw_candidates + 1))
+    else:
+        candidates = []
+        for candidate in records_root.rglob("*.md"):
+            safe = _safe_candidate_rel(root, candidate)
+            if safe is None or not authorize(safe[1]):
+                continue
+            candidates.append(candidate)
+            if len(candidates) > max_raw_candidates:
+                break
+    truncated = len(candidates) > max_raw_candidates
+    trackers: list[LegacyCollection] = []
+    for candidate in sorted(candidates[:max_raw_candidates]):
+        if candidate.name == "_collection.md":
+            continue
+        safe = _safe_candidate_rel(root, candidate)
+        if safe is None:
+            continue
+        _safe_path, relative = safe
+        if authorize_path is None and not authorize(relative):
+            continue
+        try:
+            tracker = inspect_legacy_tracker(root, candidate, authorize_path=authorize)
+        except CollectionError:
+            continue
+        trackers.append(tracker)
+    return tuple(trackers), truncated
 
 
 def resolve_collection(
@@ -395,18 +723,36 @@ def resolve_collection(
 
 
 def record_ref(collection_id: str, item_key: str) -> str:
+    return _item_ref(RECORD_REF_PREFIX, collection_id, item_key)
+
+
+def plan_ref(collection_id: str, item_key: str) -> str:
+    """Return a canonical collection-scoped Planning item reference."""
+    return _item_ref(PLAN_REF_PREFIX, collection_id, item_key)
+
+
+def _item_ref(prefix: str, collection_id: str, item_key: str) -> str:
     normalized = memory_refs.normalize_id(collection_id)
     if normalized is None:
         raise ValueError(f"invalid collection id: {collection_id!r}")
     _validate_item_key(item_key)
-    return f"{RECORD_REF_PREFIX}{normalized}/{quote(item_key, safe='')}"
+    return f"{prefix}{normalized}/{quote(item_key, safe='')}"
 
 
 def parse_record_ref(value: str) -> tuple[str, str] | None:
+    return _parse_item_ref(RECORD_REF_PREFIX, value)
+
+
+def parse_plan_ref(value: str) -> tuple[str, str] | None:
+    """Parse only a canonical Planning item reference."""
+    return _parse_item_ref(PLAN_REF_PREFIX, value)
+
+
+def _parse_item_ref(prefix: str, value: str) -> tuple[str, str] | None:
     raw = str(value or "").strip()
-    if not raw.lower().startswith(RECORD_REF_PREFIX):
+    if not raw.lower().startswith(prefix):
         return None
-    remainder = raw[len(RECORD_REF_PREFIX) :]
+    remainder = raw[len(prefix) :]
     collection_id, separator, encoded_key = remainder.partition("/")
     normalized = memory_refs.normalize_id(collection_id)
     if not separator or normalized is None:
@@ -524,33 +870,75 @@ def _manifest_from_frontmatter(
     manifest_stable_hash: str = "",
 ) -> CollectionManifest:
     if frontmatter.get("type") != "collection":
-        raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest type must be collection")
+        raise CollectionError(
+            "INVALID_COLLECTION_MANIFEST",
+            "manifest type must be collection",
+            {
+                "field": "type",
+                "received": frontmatter.get("type"),
+                "allowed": ["collection"],
+                "example": "type: collection",
+            },
+        )
     collection_id = memory_refs.normalize_id(frontmatter.get("exomem_id"))
     if collection_id is None:
-        raise CollectionError("INVALID_COLLECTION_ID", "manifest requires a UUID exomem_id")
+        raise CollectionError(
+            "INVALID_COLLECTION_ID",
+            "manifest requires a UUID exomem_id",
+            {
+                "field": "exomem_id",
+                "received": frontmatter.get("exomem_id"),
+                "expected": "UUID string",
+                "example": "exomem_id: 15dd81cd-9ae2-488c-bd9e-14771d86343e",
+            },
+        )
     title = _nonempty_string(frontmatter.get("title"), "title")
     profile = _nonempty_string(frontmatter.get("semantic_profile"), "semantic_profile")
     if profile not in _SUPPORTED_PROFILES:
-        raise CollectionError("UNSUPPORTED_COLLECTION_PROFILE", "semantic profile is not supported")
+        raise CollectionError(
+            "UNSUPPORTED_COLLECTION_PROFILE",
+            "semantic profile is not supported",
+            {
+                "field": "semantic_profile",
+                "received": profile,
+                "allowed": sorted(_SUPPORTED_PROFILES),
+                "example": "semantic_profile: records",
+            },
+        )
     version = frontmatter.get("collection_version")
     if version != COLLECTION_VERSION:
         raise CollectionError(
-            "UNSUPPORTED_COLLECTION_VERSION", "collection version is not supported"
+            "UNSUPPORTED_COLLECTION_VERSION",
+            "collection version is not supported",
+            {
+                "field": "collection_version",
+                "received": version,
+                "allowed": [COLLECTION_VERSION],
+                "example": f"collection_version: {COLLECTION_VERSION}",
+            },
         )
     lifecycle = _nonempty_string(frontmatter.get("lifecycle"), "lifecycle")
     schema_version = frontmatter.get("schema_version")
     if type(schema_version) is not int or schema_version < 1:
-        raise CollectionError("INVALID_SCHEMA_VERSION", "schema_version must be a positive integer")
+        raise CollectionError(
+            "INVALID_SCHEMA_VERSION",
+            "schema_version must be a positive integer",
+            {
+                "field": "schema_version",
+                "received": schema_version,
+                "expected": "positive integer",
+                "example": "schema_version: 1",
+            },
+        )
     storage = _parse_storage(root, manifest_rel, frontmatter.get("storage"))
-    if profile == "records":
-        _require_records_layer(manifest_rel, "manifest")
-        _require_records_layer(storage.source, "storage.source")
+    _require_profile_layer(profile, manifest_rel, "manifest")
+    _require_profile_layer(profile, storage.source, "storage.source")
     if _portable_path_key(storage.source) == _portable_path_key(manifest_rel):
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "storage.source must not alias the collection manifest"
         )
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
-    audit_head = record_audit_head(frontmatter)
+    audit_head = _audit_head(frontmatter, "record_audit" if profile == "records" else "plan_audit")
     templates = _parse_templates(root, manifest_rel, frontmatter.get("templates", []))
     views = _parse_saved_views(frontmatter.get("views", {}), schema, storage)
     links = _parse_links(frontmatter.get("links", {}))
@@ -585,7 +973,8 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
     plain_definition = _plain_json_value(definition)
     assert isinstance(plain_definition, dict)
     normalized_definition = _normalize_saved_view(
-        plain_definition, _saved_view_fields(manifest.schema, manifest.storage)
+        plain_definition,
+        _saved_view_fields(manifest.schema, manifest.storage, manifest.semantic_profile),
     )
     canonical = json.dumps(
         {
@@ -615,8 +1004,11 @@ def _parse_saved_views(
     return _freeze_mapping(views, "views")
 
 
-def _saved_view_fields(schema: ItemSchema, storage: StorageSpec) -> set[str]:
-    fields = set(schema.fields) | set(_SAVED_VIEW_SYSTEM_FIELDS)
+def _saved_view_fields(
+    schema: ItemSchema, storage: StorageSpec, semantic_profile: str
+) -> set[str]:
+    fields = set(schema.fields) | set(_SAVED_VIEW_SHARED_SYSTEM_FIELDS)
+    fields.add(profile_for(semantic_profile).item_id_property)
     if storage.strategy != "markdown-log":
         return fields
     heading = storage.descriptor.get("item_heading")
@@ -763,21 +1155,66 @@ def _normalize_saved_view_aggregate(value: object, fields: set[str]) -> str:
 
 def record_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
     """Validate the optional manifest audit mapping and return its head."""
-    audit = frontmatter.get("record_audit")
+    return _audit_head(frontmatter, "record_audit")
+
+
+def plan_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
+    """Validate the optional Planning manifest audit mapping and return its head."""
+    return _audit_head(frontmatter, "plan_audit")
+
+
+def _audit_head(frontmatter: Mapping[str, Any], name: str) -> str | None:
+    code = "INVALID_RECORD_AUDIT" if name == "record_audit" else "INVALID_COLLECTION_AUDIT"
+    audit = frontmatter.get(name)
     if audit is None:
         return None
     if not isinstance(audit, Mapping) or set(audit) != {"version", "head"}:
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        raise CollectionError(code, "collection audit state is invalid")
     head = audit.get("head")
     if type(audit.get("version")) is not int or audit["version"] != 1 or not isinstance(head, str):
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        raise CollectionError(code, "collection audit state is invalid")
     if re.fullmatch(r"[0-9a-f]{24}", head) is None:
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit head is invalid")
+        raise CollectionError(code, "collection audit head is invalid")
     return head
 
 
 def _validate_record_audit_source(text: str) -> vault.yaml.nodes.MappingNode | None:
     """Require an audit mapping's keys to be authored rather than YAML-merged."""
+    return _validate_audit_source(text, "record_audit")
+
+
+def _profile_owned_audit_name(text: str) -> str | None:
+    """Find the declared profile without constructing YAML audit mappings."""
+    text = text.removeprefix("\ufeff")
+    opening = re.match(r"\A---\r?\n", text)
+    if opening is None:
+        return None
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :])
+    if closing is None:
+        return None
+    try:
+        document = vault.yaml.compose(text[opening.end() : opening.end() + closing.start()])
+    except vault.yaml.YAMLError:
+        return None
+    if not isinstance(document, vault.yaml.nodes.MappingNode):
+        return None
+    for key, value in document.value:
+        if (
+            isinstance(key, vault.yaml.nodes.ScalarNode)
+            and key.value == "semantic_profile"
+            and isinstance(value, vault.yaml.nodes.ScalarNode)
+        ):
+            if value.value == "records":
+                return "record_audit"
+            if value.value == "planning":
+                return "plan_audit"
+    return None
+
+
+def _validate_audit_source(
+    text: str, expected_name: str | None = None
+) -> vault.yaml.nodes.MappingNode | None:
+    """Validate profile audit mappings without assuming Records semantics."""
     text = text.removeprefix("\ufeff")
     opening = re.match(r"\A---\r?\n", text)
     if opening is None:
@@ -793,29 +1230,42 @@ def _validate_record_audit_source(text: str) -> vault.yaml.nodes.MappingNode | N
         ) from error
     if not isinstance(document, vault.yaml.nodes.MappingNode):
         return None
-    return _validate_record_audit_document(document)
+    names = (expected_name,) if expected_name is not None else ("record_audit", "plan_audit")
+    result = None
+    for name in names:
+        node = _validate_audit_document(document, name)
+        if node is not None:
+            result = node
+    return result
 
 
 def _validate_record_audit_document(
     document: vault.yaml.nodes.MappingNode,
 ) -> vault.yaml.nodes.MappingNode | None:
+    return _validate_audit_document(document, "record_audit")
+
+
+def _validate_audit_document(
+    document: vault.yaml.nodes.MappingNode, name: str
+) -> vault.yaml.nodes.MappingNode | None:
+    code = "INVALID_RECORD_AUDIT" if name == "record_audit" else "INVALID_COLLECTION_AUDIT"
     matches = [
         value
         for key, value in document.value
-        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == "record_audit"
+        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == name
     ]
     if len(matches) > 1:
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is duplicated")
+        raise CollectionError(code, "collection audit state is duplicated")
     if not matches:
         return None
     audit = matches[0]
     if not isinstance(audit, vault.yaml.nodes.MappingNode):
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        raise CollectionError(code, "collection audit state is invalid")
     keys = [
         key.value for key, _value in audit.value if isinstance(key, vault.yaml.nodes.ScalarNode)
     ]
     if len(keys) != 2 or set(keys) != {"version", "head"}:
-        raise CollectionError("INVALID_RECORD_AUDIT", "record audit state is invalid")
+        raise CollectionError(code, "collection audit state is invalid")
     return audit
 
 
@@ -836,10 +1286,21 @@ def _manifest_stable_hash(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
     if not isinstance(document, vault.yaml.nodes.MappingNode):
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    profile = next(
+        (
+            value.value
+            for key, value in document.value
+            if isinstance(key, vault.yaml.nodes.ScalarNode)
+            and key.value == "semantic_profile"
+            and isinstance(value, vault.yaml.nodes.ScalarNode)
+        ),
+        None,
+    )
+    audit_name = "plan_audit" if profile == "planning" else "record_audit"
     matches = [
         (key, value)
         for key, value in document.value
-        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == "record_audit"
+        if isinstance(key, vault.yaml.nodes.ScalarNode) and key.value == audit_name
     ]
     if len(matches) != 1:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -859,11 +1320,27 @@ def _parse_storage(root: Path, manifest_rel: str, value: object) -> StorageSpec:
     storage = _mapping(value, "storage")
     strategy = _nonempty_string(storage.get("strategy"), "storage.strategy")
     if strategy not in _SUPPORTED_STORAGE:
-        raise CollectionError("UNSUPPORTED_STORAGE_STRATEGY", "storage strategy is not supported")
+        raise CollectionError(
+            "UNSUPPORTED_STORAGE_STRATEGY",
+            "storage strategy is not supported",
+            {
+                "field": "storage.strategy",
+                "received": strategy,
+                "allowed": sorted(_SUPPORTED_STORAGE),
+                "example": "strategy: markdown-items",
+            },
+        )
     format_version = storage.get("format_version")
     if format_version != STORAGE_FORMAT_VERSION:
         raise CollectionError(
-            "UNSUPPORTED_STORAGE_FORMAT_VERSION", "storage format version is not supported"
+            "UNSUPPORTED_STORAGE_FORMAT_VERSION",
+            "storage format version is not supported",
+            {
+                "field": "storage.format_version",
+                "received": format_version,
+                "allowed": [STORAGE_FORMAT_VERSION],
+                "example": f"format_version: {STORAGE_FORMAT_VERSION}",
+            },
         )
     source = _vault_relative_path(root, manifest_rel, storage.get("source"), "storage.source")
     descriptor = {
@@ -901,7 +1378,16 @@ def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
     raw = _mapping(value, "item_schema field")
     kind = _nonempty_string(raw.get("type"), "item_schema field type")
     if kind not in _SUPPORTED_FIELD_TYPES:
-        raise CollectionError("UNSUPPORTED_FIELD_TYPE", "item schema field type is not supported")
+        raise CollectionError(
+            "UNSUPPORTED_FIELD_TYPE",
+            "item schema field type is not supported",
+            {
+                "field": "item_schema.fields.*.type",
+                "received": kind,
+                "allowed": sorted(_SUPPORTED_FIELD_TYPES),
+                "example": "type: string",
+            },
+        )
     required = raw.get("required", False)
     if type(required) is not bool:
         raise CollectionError("INVALID_ITEM_SCHEMA", "required must be boolean")
@@ -1176,6 +1662,15 @@ def _require_records_layer(path: str, name: str) -> None:
         )
 
 
+def _require_profile_layer(profile: str, path: str, name: str) -> None:
+    layer = profile_for(profile).placement_layer
+    parts = path.split("/")
+    if len(parts) < 3 or parts[0] != vault.kb_dirname() or parts[1] != layer:
+        raise CollectionError(
+            "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/{layer}"
+        )
+
+
 def _portable_path_key(path: str) -> str:
     return "/".join(unicodedata.normalize("NFC", part).casefold() for part in path.split("/"))
 
@@ -1287,7 +1782,22 @@ def _plain_json_value(value: Any) -> Any:
 
 def _nonempty_string(value: object, name: str) -> str:
     if type(value) is not str or not value.strip():
-        raise CollectionError("INVALID_COLLECTION_MANIFEST", f"{name} must be a non-empty string")
+        examples = {
+            "title": "title: Observed events",
+            "semantic_profile": "semantic_profile: records",
+            "lifecycle": "lifecycle: active",
+            "storage.strategy": "strategy: markdown-items",
+        }
+        raise CollectionError(
+            "INVALID_COLLECTION_MANIFEST",
+            f"{name} must be a non-empty string",
+            {
+                "field": name,
+                "received": value,
+                "expected": "non-empty string",
+                "example": examples.get(name, f"{name}: <value>"),
+            },
+        )
     return value
 
 

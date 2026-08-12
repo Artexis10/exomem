@@ -245,6 +245,7 @@ def test_record_inspection_egress_rejects_nested_untyped_payloads(section: str) 
                 "source": "Knowledge Base/Records/vehicle-maintenance/Events",
                 "format_version": 1,
             },
+            "plans": [],
         },
         "legacy": None,
         "snapshot": None,
@@ -302,6 +303,7 @@ def test_record_inspection_egress_fails_closed_on_unhashable_hostile_scalars(
                 "source": "Knowledge Base/Records/vehicle-maintenance/Events",
                 "format_version": 1,
             },
+            "plans": [],
         },
         "legacy": None,
         "snapshot": None,
@@ -387,6 +389,7 @@ def test_record_inspection_egress_keeps_a_valid_null_saved_view_filter_value() -
                 "source": "Knowledge Base/Records/vehicle-maintenance/Events",
                 "format_version": 1,
             },
+            "plans": [],
         },
         "legacy": None,
         "snapshot": None,
@@ -420,7 +423,12 @@ def test_record_inspection_egress_accepts_collection_field_names_with_spaces_and
             "title": "Vehicle maintenance",
             "semantic_profile": "records",
             "schema_version": 1,
-            "storage": {"strategy": "markdown-items", "source": "Knowledge Base/Records/events", "format_version": 1},
+            "storage": {
+                "strategy": "markdown-items",
+                "source": "Knowledge Base/Records/events",
+                "format_version": 1,
+            },
+            "plans": [],
         },
         "legacy": None,
         "snapshot": None,
@@ -787,6 +795,185 @@ One ordinary""",
         with pytest.raises(collections.CollectionError) as raised:
             record_governance.project_manifest(tmp_path, manifest)
     assert raised.value.code == "COLLECTION_NOT_FOUND"
+
+
+def test_governed_inspection_round_trips_opaque_plans_without_resolving_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    reference = "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "\n---\n\nOne ordinary",
+            f"""
+links:
+  plans:
+    - reference: {reference}
+      query: {{filters: {{status: completed}}, limit: 12}}
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+
+    def unexpected_resolution(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("opaque planning references must not be resolved")
+
+    monkeypatch.setattr(memory_refs, "resolve_identifier_read_only", unexpected_resolution)
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert inspection["contract"]["plans"] == [
+        {"reference": reference, "query": {"filters": {"status": "completed"}, "limit": 12}}
+    ]
+
+
+def test_governed_inspection_refuses_a_denied_source_before_plan_or_format_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    reference = "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "\n---\n\nOne ordinary",
+            f"""
+links:
+  plans:
+    - reference: {reference}
+      query: {{limit: 12}}
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(
+        tmp_path,
+        name="blocked",
+        paths="Records/vehicle-maintenance/Events",
+    )
+
+    def unexpected_format_read(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a denied storage source must not be inspected")
+
+    monkeypatch.setattr(record_formats, "inspect_collection", unexpected_format_read)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            record_governance.inspect_collection(tmp_path, manifest)
+
+    assert raised.value.code == "COLLECTION_NOT_FOUND"
+    disclosed = str(raised.value)
+    assert reference not in disclosed
+    assert manifest.path not in disclosed
+    assert manifest.storage.source not in disclosed
+
+
+def test_record_inspection_validator_accepts_only_bounded_exact_plan_descriptors(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    payload = record_governance.inspect_collection(tmp_path, manifest)
+    contract = dict(payload["contract"])
+    contract["plans"] = [
+        {
+            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
+            "query": {"filters": {"status": "completed"}, "limit": 12},
+        }
+    ]
+    payload["contract"] = contract
+
+    accepted = record_governance._validate_record_inspection(payload)
+    assert accepted is not None
+    assert accepted["contract"]["plans"] == contract["plans"]
+
+    contract["plans"][0]["extra"] = "must-not-escape"
+    assert record_governance._validate_record_inspection(payload) is None
+
+
+def test_governed_inspection_plans_keep_hidden_targets_opaque_and_filter_query_links(
+    tmp_path: Path,
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    reference = "exomem://vault/Planning/private.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8")
+        .replace("items:\n        type: string", "items:\n        type: link")
+        .replace(
+            "\n---\n\nOne ordinary",
+            f"""
+links:
+  plans:
+    - reference: {reference}
+      query: {{filters: {{asset: "[[Knowledge Base/Evidence/Secret.md]]", status: completed}}, limit: 12}}
+---
+
+One ordinary""",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="private", paths="Planning/**")
+    _write_l0_rule(tmp_path, name="secret", paths="Evidence/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        missing = record_governance.inspect_collection(tmp_path, manifest)
+    target = tmp_path / "Knowledge Base" / "Planning" / "private.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("private", encoding="utf-8")
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        hidden = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert hidden["contract"]["plans"] == missing["contract"]["plans"] == [
+        {"reference": reference, "query": {"filters": {"status": "completed"}, "limit": 12}}
+    ]
+
+
+def test_record_inspection_validator_refuses_more_than_thirty_two_plan_descriptors(
+    tmp_path: Path,
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    payload = record_governance.inspect_collection(tmp_path, manifest)
+    contract = dict(payload["contract"])
+    contract["plans"] = [
+        {"reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7", "query": {"limit": 12}}
+    ] * 33
+    payload["contract"] = contract
+
+    assert record_governance._validate_record_inspection(payload) is None
+
+
+@pytest.mark.parametrize(
+    "plan",
+    (
+        {"reference": "exomem://vault/Planning/../private.md", "query": {"limit": 12}},
+        {
+            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
+            "query": {"limit": 12, "extra": "must-not-escape"},
+        },
+        {
+            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
+            "query": {"filters": {"status": object()}, "limit": 12},
+        },
+    ),
+)
+def test_record_inspection_validator_refuses_hostile_plan_values(
+    tmp_path: Path, plan: dict[str, object]
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    payload = record_governance.inspect_collection(tmp_path, manifest)
+    contract = dict(payload["contract"])
+    contract["plans"] = [plan]
+    payload["contract"] = contract
+
+    assert record_governance._validate_record_inspection(payload) is None
 
 
 def test_opaque_plan_reference_has_missing_and_hidden_target_parity(tmp_path: Path) -> None:

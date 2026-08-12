@@ -234,3 +234,43 @@ def test_runtime_readiness_uses_vault_path_identity_for_a_real_held_boundary(
     assert boundary["state"] == "held"
     assert boundary["verified"] is True
     assert boundary["request_id"] == "req-readiness-held"
+
+
+def test_coordination_graph_health_requires_a_readable_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Epoch state alone must not make readiness claim the graph is current."""
+    from exomem import epistemic_graph, vault as vault_module, writer_lease
+
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert manager.status(empty)["graph_sync"] == {"state": "unavailable", "generation": 0}
+    from exomem import runtime_readiness as readiness_module
+
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(empty))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    readiness = readiness_module.runtime_readiness(mcp_tool_surface_sha256="a" * 64)
+    assert readiness["coordination"]["graph_sync"] == {
+        "state": "unavailable",
+        "generation": 0,
+    }
+    assert str(empty) not in repr(readiness)
+
+    missing = tmp_path / "missing"
+    note = missing / "Knowledge Base/Notes/health.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "# Health\n")],
+        vault_root=missing,
+        post_commit_fanout=False,
+    )
+    assert manager.status(missing)["graph_sync"] == {"state": "recovery_required", "generation": 1}
+
+    index = epistemic_graph.EpistemicGraphIndex(missing)
+    index.rebuild_all()
+    assert manager.status(missing)["graph_sync"] == {"state": "current", "generation": 1}
+
+    epistemic_graph.sidecar_path(missing).write_bytes(b"not sqlite")
+    snapshot = manager.status(missing)
+    assert snapshot["graph_sync"] == {"state": "unavailable", "generation": 1}
+    assert str(missing) not in repr(snapshot)

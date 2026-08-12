@@ -12,6 +12,7 @@ import re
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,14 @@ from .provider_identity import (
     chunk_hcloud_identity_envelope,
     decode_hcloud_identity_envelope,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class BoundVolumeRecoveryObservation:
+    """Authenticated bound-volume identity with no raw Kubernetes identifiers."""
+
+    recorded: RecordedVolume
+    stability_digest: str
 
 
 def _api_status(error: Exception) -> int | None:
@@ -116,6 +125,8 @@ class KubernetesVolumeAdapter:
                 return None
             raise
         pvc_annotations = dict(getattr(pvc.metadata, "annotations", None) or {})
+        if getattr(pvc.metadata, "deletion_timestamp", None) is not None:
+            raise MetadataConflict("PVC is terminating")
         _require_annotations(pvc_annotations, metadata)
         pvc_envelope = str(pvc_annotations.get("exomem.io/recovery-envelope", ""))
         if self._identity_verifier is not None:
@@ -143,6 +154,8 @@ class KubernetesVolumeAdapter:
         if not isinstance(pv_name, str) or not pv_name:
             return None
         pv = await asyncio.to_thread(self._core.read_persistent_volume, pv_name)
+        if getattr(pv.metadata, "deletion_timestamp", None) is not None:
+            raise MetadataConflict("PV is terminating")
         csi = getattr(pv.spec, "csi", None)
         handle = getattr(csi, "volume_handle", None)
         if not isinstance(handle, str) or not handle:
@@ -152,12 +165,6 @@ class KubernetesVolumeAdapter:
         identity_keys = set(metadata.kubernetes_annotations)
         if identity_keys.intersection(annotations):
             _require_annotations(annotations, metadata)
-        else:
-            await asyncio.to_thread(
-                self._core.patch_persistent_volume,
-                pv_name,
-                {"metadata": {"annotations": metadata.kubernetes_annotations}},
-            )
         pv_envelope = str(annotations.get("exomem.io/recovery-envelope", ""))
         if self._identity_verifier is not None and pv_envelope:
             try:
@@ -189,6 +196,54 @@ class KubernetesVolumeAdapter:
             pvc_recovery_envelope=pvc_envelope,
         )
 
+    async def observe_recovery_bound_volume(
+        self, metadata: OpaqueProviderMetadata
+    ) -> BoundVolumeRecoveryObservation | None:
+        """Bind recovery to the exact authenticated PV object and its version."""
+        recorded = await self.discover_bound_volume(metadata)
+        if recorded is None:
+            return None
+        pv = await asyncio.to_thread(self._core.read_persistent_volume, recorded.pv_name)
+        if getattr(pv.metadata, "deletion_timestamp", None) is not None:
+            raise MetadataConflict("PV is terminating")
+        annotations = dict(getattr(pv.metadata, "annotations", None) or {})
+        _require_annotations(annotations, metadata)
+        if not recorded.pv_recovery_envelope:
+            raise MetadataConflict("PV provider recovery identity is absent")
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    recorded.pv_recovery_envelope,
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="PersistentVolume",
+                        namespace="",
+                        name=recorded.pv_name,
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict("PV provider recovery identity did not authenticate") from error
+        return BoundVolumeRecoveryObservation(
+            recorded=recorded,
+            stability_digest=hashlib.sha256(
+                json.dumps(
+                    {
+                        "name": recorded.pv_name,
+                        "uid": str(getattr(pv.metadata, "uid", "")),
+                        "resourceVersion": str(getattr(pv.metadata, "resource_version", "")),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+
     async def label_bound_volume(self, recorded: RecordedVolume, recovery_envelope: str) -> None:
         annotations = {
             **recorded.metadata.kubernetes_annotations,
@@ -197,7 +252,12 @@ class KubernetesVolumeAdapter:
         await asyncio.to_thread(
             self._core.patch_persistent_volume,
             recorded.pv_name,
-            {"metadata": {"annotations": annotations}},
+            {
+                "metadata": {
+                    "labels": {"exomem.io/resource-name": recorded.metadata.resource_name},
+                    "annotations": annotations,
+                }
+            },
         )
 
     @staticmethod
@@ -447,7 +507,10 @@ class KubernetesCellAdapter:
                 "name": "exomem-cell-credentials",
                 "namespace": metadata.resource_name,
                 "annotations": annotations,
-                "labels": {"exomem.io/resource-name": metadata.resource_name},
+                "labels": {
+                    "exomem.io/cell": metadata.resource_name,
+                    "exomem.io/resource-name": metadata.resource_name,
+                },
             },
             "type": "Opaque",
             "immutable": False,
@@ -1082,6 +1145,8 @@ class HCloudVolumeAdapter:
         volume = await self._get(handle)
         if volume is None:
             return False
+        if getattr(volume, "status", None) == "deleting":
+            return False
         labels = dict(getattr(volume, "labels", {}) or {})
         actual_location = getattr(getattr(volume, "location", None), "name", None)
         if actual_location != location:
@@ -1103,6 +1168,29 @@ class HCloudVolumeAdapter:
                     "HCloud provider recovery identity did not authenticate"
                 ) from error
         return True
+
+    async def verify_recovery_volume(
+        self,
+        handle: str,
+        metadata: OpaqueProviderMetadata,
+        location: str,
+        recovery_envelope: str,
+    ) -> bool:
+        """Authenticate the durable HCloud envelope before reading live state."""
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    recovery_envelope,
+                    provider="hcloud",
+                    provider_reference=ProviderReference.hcloud(kind="volume", resource_id=handle),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict("HCloud provider recovery identity did not authenticate") from error
+        return await self.verify_volume(handle, metadata, location)
 
     async def delete_volume(self, handle: str) -> None:
         volume = await self._get(handle)

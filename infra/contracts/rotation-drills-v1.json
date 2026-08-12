@@ -36,6 +36,19 @@
         "unrelated_routes_reject_both_versions"
       ]
     },
+    "provisioner-database": {
+      "retirement_requires": [
+        "ready_cell_baseline_verified",
+        "three_deployments_and_five_cronjobs_quiesced",
+        "transient_database_consumers_drained",
+        "new_sops_ciphertext_and_exact_registry_verified",
+        "new_database_secret_applied_before_provider_cutover",
+        "new_database_credential_accepts",
+        "old_database_credential_rejected",
+        "three_deployments_and_five_cronjobs_restored",
+        "ready_cell_health_reverified"
+      ]
+    },
     "cell-credential": {
       "retirement_requires": [
         "pending_cell_version_staged",

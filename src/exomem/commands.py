@@ -34,7 +34,7 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt
+from pydantic import Field, StrictInt, StringConstraints
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -75,6 +75,7 @@ from . import multi_edit as multi_edit_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
+from . import plan_memory as plan_memory_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
@@ -146,7 +147,6 @@ _RerankCandidateLimit = Annotated[
         ),
     ),
 ]
-
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
 # and tests while the implementation lives in command_surface.py.
 _COMMAND_SURFACE_EXPORTS = (
@@ -181,6 +181,25 @@ class SearchResult(TypedDict):
     title: str
     url: str
     metadata: dict[str, str]
+
+
+class ClientArtifactFile(TypedDict):
+    """Client-neutral temporary remote file handle used by ``preserve_artifacts``."""
+
+    download_url: str
+    file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    mime_type: NotRequired[Annotated[str, Field(max_length=255)]]
+    file_name: NotRequired[str]
+
+
+_ClientArtifactFiles = Annotated[
+    list[ClientArtifactFile],
+    Field(
+        min_length=1,
+        max_length=8,
+        description="One to eight temporary client file handles.",
+    ),
+]
 
 
 class SearchResponse(TypedDict):
@@ -324,8 +343,26 @@ def op_bootstrap(
             "available": True,
             "route": {
                 "tool": "record_memory",
-                "actions": ["inspect", "create", "query", "append", "update"],
+                "actions": [
+                    "describe",
+                    "validate",
+                    "inspect",
+                    "create",
+                    "query",
+                    "append",
+                    "update",
+                ],
             },
+            "manifest": {
+                "filename": "_collection.md",
+                "collection_versions": [1],
+                "semantic_profiles": ["planning", "records"],
+            },
+            "contract_route": {
+                "tool": "record_memory",
+                "arguments": {"action": "describe"},
+            },
+            "agent_workflow": ["describe", "validate", "create", "inspect", "append"],
             "intent_boundary": {
                 "records": (
                     "observed events, measurements, transactions, sessions, and state changes"
@@ -364,8 +401,48 @@ def op_bootstrap(
             "available": False,
             "unavailable_reason": "The active surface does not export the Records command.",
         }
+    planning_contract = {
+        "available": "plan_memory" in active_product_names,
+        "route": {
+            "tool": "plan_memory",
+            "actions": ["inspect", "create", "query", "add", "update", "triage"],
+        },
+        "kinds": ["area", "outcome", "initiative", "work-item"],
+        "horizons": ["inbox", "week", "month", "quarter", "year", "multi-year"],
+        "lifecycle": ["active", "archived"],
+        "priorities": ["critical", "high", "medium", "low", "none"],
+        "commitments": ["uncommitted", "considering", "committed"],
+        "default_capture": (
+            "Default capture creates an active candidate work-item with none priority, "
+            "uncommitted commitment, unknown health, and inbox horizon."
+        ),
+        "manual_first": (
+            "Canonical Planning remains ordinary editable Markdown; direct human edits and "
+            "work without an agent are supported product paths."
+        ),
+        "template_independence": (
+            "Templates are optional editable scaffolds; Planning schema and validation do not "
+            "depend on template content."
+        ),
+        "horizon_semantics": (
+            "Horizon is an authored bucket, not a computed deadline; use explicit date filters "
+            "for calendar windows."
+        ),
+        "intent_first_routing": (
+            "Route goals, priorities, commitments, candidate work, and future-state intent to "
+            "plan_memory before treating them as observed Records."
+        ),
+        "evidence_execution_boundary": (
+            "Progress evidence is an opaque Records pointer and execution is a thin opaque pointer; "
+            "neither resolves, evaluates, or updates Planning automatically."
+        ),
+        "execution_truth_boundary": (
+            "Planning owns durable intent and prioritisation. OpenSpec defines accepted product "
+            "contracts; repositories, git, tests, and code own software execution truth."
+        ),
+    }
     payload: dict = {
-        "contract_version": "2026-08-02.1",
+        "contract_version": "2026-08-11.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -402,6 +479,7 @@ def op_bootstrap(
         },
         "semantic_authoring": semantic_authoring_projection,
         "records": records_contract,
+        "planning": planning_contract,
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -489,7 +567,11 @@ def op_bootstrap(
                 "draft the smallest durable compiled conclusion",
                 "identify the Sources/ or Evidence/ pages this conclusion draws from; they become `sources:` and each receives an `ingested_into:` back-reference",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
-                "write accepted note-level edges under `## Relations` as `- relation_type [[Target]]`",
+                (
+                    "write accepted note-level edges under `## Relations`, for example "
+                    "`- supports [[Knowledge Base/Notes/Research/example-target]]`; "
+                    "Dataview-style `supports:: [[...]]` fields are not relation syntax"
+                ),
                 "write with remember, observe_memory, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
                 "inspect warnings, suggestions, and write_feedback from the write result",
                 "apply any accepted links through edit_memory",
@@ -497,7 +579,7 @@ def op_bootstrap(
             ],
             "route_by_intent": {
                 "raw_material": "capture_source",
-                "raw_evidence_or_artifact": "preserve_evidence or transfer_artifact",
+                "raw_evidence_or_artifact": "preserve_evidence, preserve_artifacts, or transfer_artifact",
                 "new_durable_conclusion": "remember",
                 "conclusion_drawn_from_captured_material": "remember(sources=[...]) naming those pages, which links the conclusion to its provenance and marks the source processed",
                 "small_correction": "edit_memory",
@@ -567,6 +649,44 @@ def op_bootstrap(
                     "it, then call remember() so normal semantic precommit still applies"
                 ),
             },
+            "reviewed_existing_edit": {
+                "validate_call": {
+                    "tool": "edit_memory",
+                    "arguments": {
+                        "path": "Knowledge Base/Notes/Research/example.md",
+                        "why": "refresh relation review",
+                        "operation": {
+                            "kind": "replace_string",
+                            "old_string": "before",
+                            "new_string": "after",
+                            "validate_only": True,
+                        },
+                    },
+                },
+                "commit_call": {
+                    "tool": "edit_memory",
+                    "arguments": {
+                        "path": "Knowledge Base/Notes/Research/example.md",
+                        "why": "refresh relation review",
+                        "operation": {
+                            "kind": "replace_string",
+                            "old_string": "before",
+                            "new_string": "after",
+                            "transition_token": "<returned transition_token>",
+                            "relation_disposition": "reviewed_none",
+                            "relation_review_hash": "<returned relation_review_hash>",
+                            "relation_review_reason": (
+                                "No honest typed relation applies."
+                            ),
+                        },
+                    },
+                },
+                "rule": (
+                    "retain semantic.transition_token and "
+                    "semantic.relation_review_hash from validation; commit the "
+                    "identical proposed edit with a bounded reason"
+                ),
+            },
         },
         "tool_defaults": {
             "normal_lookup": {
@@ -611,9 +731,15 @@ def op_bootstrap(
                 "when": "substantial rewrite of compiled material",
             },
             "binary_upload": {
-                "tool": "transfer_artifact",
-                "endpoint": "/upload",
-                "fields": ["file", "scope", "category", "description", "text"],
+                "tool": "preserve_artifacts",
+                "fields": ["files", "scope", "category"],
+                "when": "the client can supply temporary file handles",
+                "fallback": {
+                    "tool": "transfer_artifact",
+                    "args": {"operation": "upload"},
+                    "endpoint": "/upload",
+                    "when": "the client cannot supply file handles",
+                },
             },
         },
         "performance_profiles": {
@@ -693,6 +819,7 @@ def op_bootstrap(
             "observe_memory",
             "replace_memory",
             "connect_memory",
+            "preserve_artifacts",
             "transfer_artifact",
             "read_media",
         ],
@@ -715,6 +842,21 @@ def op_bootstrap(
             {
                 "goal": "capture a durable conclusion",
                 "call": "remember(note_type='research-note'|'insight'|..., title='...', content='...')",
+            },
+            {
+                "goal": "preserve attached binary files when the client supplies file handles",
+                "call": (
+                    "preserve_artifacts(scope='...', category='...', files=["
+                    "{'download_url': 'https://...', 'file_id': '...', "
+                    "'mime_type': 'image/png', 'file_name': 'receipt.png'}])"
+                ),
+            },
+            {
+                "goal": "preserve binaries when the client cannot supply file handles",
+                "call": (
+                    "transfer_artifact(operation='upload') then POST multipart bytes to /upload; "
+                    "success requires stored_path, size, and hash"
+                ),
             },
         ]
     if profile == "diagnostics":
@@ -2270,14 +2412,13 @@ def op_edit(
         expected_hash: Optional drift guard. Pass the `content_hash` you
             got from `get`; the edit refuses (STALE_EDIT) if the file
             changed on disk since, so you never clobber another writer.
-        validate_only: Preview a surgical match without writing. Needs
-            `old_string`. Reports how many rows would be hit instead of
-            committing — use it before a `replace_all` to avoid an
-            ambiguous match silently touching more rows than intended.
+        validate_only: Validate the exact proposed bytes without writing for
+            every edit mode. Surgical edits also report match counts and lines.
         transition_token: Exact semantic transition token returned by a
             validate-only preflight.
         relation_disposition: Reviewed relation outcome for the commit.
-        relation_review_hash: Transition hash covered by reviewed-none.
+        relation_review_hash: Exact `relation_review_hash` returned by the
+            validate-only semantic preflight.
         relation_review_reason: Audit reason for reviewed-none.
 
     Returns:
@@ -2317,20 +2458,22 @@ def op_edit(
                 relation_review_reason=relation_review_reason,
             )
         elif row_key is not None:
-            if validate_only:
-                raise ValueError(
-                    "INVALID_EDIT: validate_only is not supported for row_key mode"
-                )
             if take is None:
                 raise ValueError("INVALID_EDIT: row_key mode requires `take`")
             result = set_take_module.set_take(
                 vault_root, path=path, row_key=row_key, take=take,
-                why=why, overwrite=overwrite,
+                why=why, overwrite=overwrite, expected_hash=expected_hash,
+                validate_only=validate_only,
+                semantic_transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
             )
         elif field is not None:
             result = set_frontmatter_field_module.set_frontmatter_field(
                 vault_root, path=path, field=field, value=value,
-                why=why, allow_curated=allow_curated, validate_only=validate_only,
+                why=why, allow_curated=allow_curated,
+                expected_hash=expected_hash, validate_only=validate_only,
                 semantic_transition_token=transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
@@ -4093,6 +4236,19 @@ def op_edit_memory(
     fills, or one frontmatter field. Substantial rewrites should use
     `replace_memory` so history stays explicit.
 
+    When `RELATION_DISPOSITION_STALE` or `RELATION_DISPOSITION_MISSING` blocks
+    an edit, first call the identical operation with `validate_only=true`.
+    Then commit it unchanged with `transition_token=<returned transition_token>`,
+    `relation_disposition="reviewed_none"`,
+    `relation_review_hash=<returned relation_review_hash>`, and an explicit
+    `relation_review_reason`. The validate response uses the exact field name
+    required by the commit; do not substitute the page content hash.
+
+    Alternatively, author a typed page relation in the body exactly as:
+    `## Relations` followed by
+    `- supports [[Knowledge Base/Notes/Research/example-target]]`.
+    Dataview-style `supports:: [[...]]` fields are not supported relation syntax.
+
     Args:
         path: Page to edit.
         why: One-line rationale recorded in the log.
@@ -4417,8 +4573,9 @@ def op_preserve_evidence(
     """Preserve text evidence as append-only proof material.
 
     Use for receipts, letters, transcripts, warranty records, legal/dispute
-    material, and other factual artifacts. Binary files use `transfer_artifact`
-    plus the `/upload` endpoint so bytes do not pass through the model.
+    material, and other factual artifacts. For binary files supplied as client
+    file handles, use `preserve_artifacts`; otherwise use `transfer_artifact`
+    plus `/upload`. Bytes never pass through the model.
 
     Args:
         scope: Incident, case, project, or domain key.
@@ -4437,12 +4594,40 @@ def op_preserve_evidence(
     )
 
 
+def op_preserve_artifacts(
+    vault_root: Path,
+    scope: str,
+    category: str,
+    files: _ClientArtifactFiles,
+) -> dict:
+    """Preserve client-provided binary file handles as append-only Evidence.
+
+    Use this canonical binary-preservation command when the client can supply
+    temporary HTTPS file handles. Exomem retrieves each handle server-side and
+    returns one stored or failed outcome per file; no binary data is passed as
+    base64 through model-visible arguments. Clients without file handles keep
+    using `transfer_artifact(operation="upload")` followed by `/upload`.
+
+    Args:
+        scope: Incident, case, project, or domain key.
+        category: Evidence category within the scope.
+        files: Ordered temporary file handles. Each object requires `download_url`
+            and `file_id`; `mime_type` and `file_name` are optional.
+    """
+    from . import client_artifacts
+
+    return client_artifacts.preserve_artifacts(
+        vault_root, scope=scope, category=category, files=files
+    )
+
+
 def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
     """Prepare out-of-band binary artifact transfer.
 
-    Returns a short-lived token and URL for uploading evidence binaries or
-    downloading a vault file into a sandbox. The long-lived server secret never
-    leaves the server.
+    Compatibility transport for clients that cannot supply file handles to
+    `preserve_artifacts`. Returns a short-lived token and URL for uploading
+    evidence binaries or downloading a vault file into a sandbox. Minting an
+    upload token does not mean bytes were stored.
 
     Args:
         operation: upload or download.
@@ -5825,7 +6010,7 @@ def op_manage_memory_file(
 
 def op_record_memory(
     vault_root: Path,
-    action: Literal["inspect", "create", "query", "append", "update"],
+    action: Literal["describe", "validate", "inspect", "create", "query", "append", "update"],
     collection: str | None = None,
     manifest_path: str | None = None,
     manifest_text: str | None = None,
@@ -5852,13 +6037,13 @@ def op_record_memory(
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect, create, query, append, or update a governed Record collection.
+    """Describe, validate, inspect, create, query, append, or update Records.
 
     Args:
-        action: inspect, create, query, append, or update.
-        collection: Collection manifest reference for inspect, query, append, or update.
-        manifest_path: New manifest path for create.
-        manifest_text: Complete manifest text for create.
+        action: describe, validate, inspect, create, query, append, or update.
+        collection: Optional for inventory inspect; required for targeted reads/writes.
+        manifest_path: Proposed manifest path for validate or create.
+        manifest_text: Complete proposed manifest text for validate or create.
         why: Audit reason for create, append, or update.
         scaffold: Create the initial canonical source for create.
         view: Saved query view; cannot be combined with inline shaping.
@@ -6161,11 +6346,7 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return True
         operation = kwargs.get("operation")
         if isinstance(operation, dict):
-            return (
-                operation.get("kind")
-                in {"replace_string", "batch_replace", "patch_frontmatter"}
-                and operation.get("validate_only") is True
-            )
+            return operation.get("validate_only") is True
         return False
     if command.name in {"remember", "replace_memory"}:
         # A validate-only remember builds and returns an immutable draft and
@@ -6294,6 +6475,11 @@ _PRODUCT_METADATA: dict[str, dict] = {
         "actions": ("ask", "review", "save", "update"),
         "first_run_safe": False,
     },
+    "plan_memory": {
+        "surface": "primary",
+        "actions": ("ask", "review", "save", "update"),
+        "first_run_safe": False,
+    },
 }
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
@@ -6340,6 +6526,7 @@ _SPEC: tuple[tuple, ...] = (
     ("list_inbound_links", op_list_inbound_links, 2, False, False, "target", _MCRC),
     ("schema_memory", op_schema_memory, 1, True, False, None, _MCRC),
     ("record_memory", op_record_memory, 1, True, False, None, _MCRC),
+    ("plan_memory", plan_memory_module.plan_memory, 1, True, False, None, _MCRC),
     ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
 )
 
@@ -6514,7 +6701,27 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("preserve",),
-        {"surface": "primary", "actions": ("prove", "save"), "first_run_safe": False},
+        {
+            "surface": "primary",
+            "actions": ("prove", "save"),
+            "first_run_safe": False,
+        },
+    ),
+    (
+        "preserve_artifacts",
+        op_preserve_artifacts,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("preserve",),
+        {
+            "surface": "primary",
+            "actions": ("prove", "save"),
+            "first_run_safe": False,
+            "mcp_meta": {"openai/fileParams": ("files",)},
+        },
     ),
     (
         "transfer_artifact",
@@ -6676,6 +6883,21 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         },
     ),
     (
+        "plan_memory",
+        plan_memory_module.plan_memory,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("plan_memory",),
+        {
+            "surface": "primary",
+            "actions": ("ask", "review", "save", "update"),
+            "first_run_safe": False,
+        },
+    ),
+    (
         "query_dataset",
         op_query_dataset,
         2,
@@ -6739,6 +6961,18 @@ def _build_product_commands() -> tuple[Command, ...]:
                     choices=("compact", "full", "legacy"),
                 ),
             )
+        if name == "preserve_artifacts":
+            params = tuple(
+                Param(
+                    name=param.name,
+                    type="client_artifact_files" if param.name == "files" else param.type,
+                    required=param.required,
+                    help=param.help,
+                    cli_positional=param.cli_positional,
+                    choices=param.choices,
+                )
+                for param in params
+            )
         if name == "remember":
             generic_hint = "(any slug; unknown keys auto-register on first use)"
             desc = desc.replace("__PROJECT_KEYS_HINT__", generic_hint)
@@ -6798,6 +7032,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 routes=tuple(routes),
                 response_detail=response_detail,
+                mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
             )
         )
     return tuple(cmds)

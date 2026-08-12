@@ -114,6 +114,7 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         ".obsidian",
         ".git",
         ".graph-coordination",
+        ".graph-commit-receipts",
         ".trash",
         "_attachments",
         "_archive",
@@ -2779,6 +2780,46 @@ def post_commit_batch_fanout(
         if semantic_states:
             kwargs["semantic_states"] = semantic_states
         report = index_sync.upsert_after_write(vault_root, replaced, **kwargs)
+        # A graph-relevant epoch is a canonical promise, not a best-effort
+        # side effect.  The graph leaf returns an exact result, but keep this
+        # final boundary check here so a future fanout branch cannot return a
+        # committed batch with an unacknowledged checkpoint and no joinable
+        # handle.
+        graph = next(
+            (
+                item
+                for item in getattr(report, "components", ())
+                if getattr(item, "component", None) == "epistemic_graph"
+            ),
+            None,
+        )
+        if graph is not None and graph.outcome != "not_required":
+            from . import graph_sync
+
+            required = graph_sync.read_checkpoint(vault_root)
+            handoff_missing = required is not None and (
+                (
+                    graph.outcome == "completed"
+                    and graph_sync.status(vault_root).get("state") != "current"
+                )
+                or (
+                    graph.outcome in {"registered", "deferred", "failed"}
+                    and graph_sync.registered_checkpoint(vault_root) != required
+                )
+            )
+            if handoff_missing:
+                assert required is not None
+                graph_sync.register_failure(
+                    vault_root,
+                    required,
+                    code="GRAPH_SYNC_HANDOFF_MISSING",
+                )
+                report = index_sync.with_component(
+                    report,
+                    index_sync.IndexComponentOutcome(
+                        "epistemic_graph", "failed", "GRAPH_SYNC_HANDOFF_MISSING"
+                    ),
+                )
         if index_reports is not None:
             index_reports.append(report)
         if report is False or getattr(report, "reconcile_required", False):
@@ -2788,6 +2829,14 @@ def post_commit_batch_fanout(
                 "durable full-index refresh recorded"
             )
     except Exception:  # noqa: BLE001 — embeddings are best-effort
+        try:
+            from . import graph_sync
+
+            graph_sync.register_outer_fanout_failure(vault_root)
+        except Exception:  # noqa: BLE001 - canonical commit must still survive
+            logging.getLogger(__name__).exception(
+                "failed to register graph handoff after dispatch failure"
+            )
         try:
             from . import index_sync as failed_index_sync
 
@@ -2859,6 +2908,7 @@ def batch_atomic_write(
     index_reports: list[Any] | None = None,
     semantic_states: Mapping[str, Any] | None = None,
     post_commit_fanout: bool = True,
+    commit_point: bool = True,
 ) -> list[Path]:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -2875,6 +2925,7 @@ def batch_atomic_write(
             index_reports=index_reports,
             semantic_states=semantic_states,
             post_commit_fanout=post_commit_fanout,
+            commit_point=commit_point,
         )
 
 
@@ -2886,6 +2937,7 @@ def _batch_atomic_write_locked(
     index_reports: list[Any] | None = None,
     semantic_states: Mapping[str, Any] | None = None,
     post_commit_fanout: bool = True,
+    commit_point: bool = True,
 ) -> list[Path]:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -2905,7 +2957,19 @@ def _batch_atomic_write_locked(
     opt-in ``index_reports`` collector receives the report from that same
     fan-out; requesting feedback never dispatches indexes a second time.
     """
-    writes = list(writes)
+    caller_writes = list(writes)
+    writes = list(caller_writes)
+    graph_checkpoint_path: Path | None = None
+    graph_floor_path: Path | None = None
+    if vault_root is not None:
+        from . import graph_sync
+
+        epoch_writes = graph_sync.epoch_writes(Path(vault_root), writes)
+        if epoch_writes is not None:
+            floor_write, checkpoint_write = epoch_writes
+            writes = [floor_write, *writes, checkpoint_write]
+            graph_floor_path = floor_write.path
+            graph_checkpoint_path = checkpoint_write.path
     destinations: set[str] = set()
     for write in writes:
         destination = os.path.abspath(write.path)
@@ -3075,9 +3139,13 @@ def _batch_atomic_write_locked(
                     snapshot = snapshots[pending_index]
                     if snapshot is None:  # pragma: no cover - guard implies a snapshot
                         raise PathGuardError("PATH_GUARD_CHANGED", "batch snapshot is unavailable")
-                    _reset_restored_timestamps(
-                        staged[pending_index][0], source_guard.identity, snapshot
-                    )
+                    if staged[pending_index][0] not in {
+                        graph_floor_path,
+                        graph_checkpoint_path,
+                    }:
+                        _reset_restored_timestamps(
+                            staged[pending_index][0], source_guard.identity, snapshot
+                        )
             for guard in final_guards.values():
                 guard.recheck()
             if vault_root is not None:
@@ -3125,7 +3193,7 @@ def _batch_atomic_write_locked(
         for guard in final_guards.values():
             guard.recheck()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
-        if replaced:
+        if replaced and commit_point:
             mark_active_mutation_committed()
     except Exception as commit_error:
         rollback_errors: list[BaseException] = []
@@ -3213,9 +3281,12 @@ def _batch_atomic_write_locked(
             )
             if snapshot is None
         ]
+        graph_epoch_paths = {graph_floor_path, graph_checkpoint_path}
+        fanout_replaced = [path for path in replaced if path not in graph_epoch_paths]
+        created_paths = [path for path in created_paths if path not in graph_epoch_paths]
         post_commit_batch_fanout(
             vault_root,
-            replaced,
+            fanout_replaced,
             index_reports,
             semantic_states,
             created_paths=created_paths,
@@ -3226,7 +3297,7 @@ def _batch_atomic_write_locked(
             target_summary,
             True,
         )
-    return replaced
+    return [write.path for write in caller_writes]
 
 
 def _validate_batch_write_access(
@@ -3778,8 +3849,11 @@ def _format_yaml_line(key: str, value: Any) -> str:
         if not value:
             return f"{key}: []"
         # Inline form for short string lists; matches add.py's tags rendering.
-        items = ", ".join(_yaml_scalar(v) for v in value)
-        return f"{key}: [{items}]"
+        if all(not isinstance(item, (dict, list)) for item in value):
+            items = ", ".join(_yaml_scalar(item) for item in value)
+            return f"{key}: [{items}]"
+        block = yaml.safe_dump({key: value}, default_flow_style=False, sort_keys=False)
+        return block.rstrip("\n")
     if isinstance(value, dict):
         # Fall back to PyYAML block-style for nested dicts.
         block = yaml.safe_dump({key: value}, default_flow_style=False, sort_keys=False)

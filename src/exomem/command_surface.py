@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
@@ -216,6 +216,7 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "replace_memory": ("content",),
     "manage_memory_file": ("content",),
     "record_memory": ("manifest_text", "body"),
+    "plan_memory": ("manifest_text", "body"),
 }
 
 
@@ -252,6 +253,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "maintain_memory",
         "schema_memory",
         "record_memory",
+        "plan_memory",
         *({"govern_memory"} if governance_tool_is_destructive() else set()),
     }
 )
@@ -297,6 +299,9 @@ class Command:
     first_run_safe: bool = False
     routes: tuple[str, ...] = ()
     response_detail: ResponseDetail | None = None
+    mcp_meta: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: types.MappingProxyType({}), hash=False
+    )
 
     @property
     def doc(self) -> str:

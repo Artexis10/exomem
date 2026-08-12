@@ -21,14 +21,14 @@ def test_audit_and_reconcile_import_in_fresh_process() -> None:
     assert imported.returncode == 0, imported.stderr
 
 
-def test_audit_findings_have_non_empty_path(vault: Path) -> None:
+def test_forward_reference_findings_have_non_empty_path(vault: Path) -> None:
     """Regression: every finding must carry the path of the file it concerns.
 
     Previously _parse_page set rel_path="" and relied on find() to fill it.
     audit called _parse_page directly, so every finding's `path` was empty —
     making the report un-triagable.
     """
-    # Plant a broken wikilink in an existing fixture file.
+    # Plant a forward reference in an existing fixture file.
     insight = (
         vault / "Knowledge Base" / "Notes" / "Insights"
         / "progressive-disclosure-without-mode-fragmentation.md"
@@ -39,11 +39,54 @@ def test_audit_findings_have_non_empty_path(vault: Path) -> None:
         encoding="utf-8",
     )
 
-    report = audit_module.audit(vault, categories=["broken_wikilink"])
-    assert report.findings, "expected at least one broken_wikilink finding"
+    report = audit_module.audit(vault, categories=["forward_reference"])
+    assert report.findings, "expected at least one forward_reference finding"
     for f in report.findings:
         assert f.path, f"finding has empty path: {f.as_dict()}"
         assert f.path.startswith("Knowledge Base/"), f.path
+
+
+def test_missing_note_is_forward_reference_not_broken(vault: Path) -> None:
+    insight = (
+        vault / "Knowledge Base" / "Notes" / "Insights"
+        / "progressive-disclosure-without-mode-fragmentation.md"
+    )
+    insight.write_text(
+        insight.read_text(encoding="utf-8")
+        + "\n\nPlanned: [[Knowledge Base/Notes/Patterns/future-pattern]]\n",
+        encoding="utf-8",
+    )
+
+    report = audit_module.audit(
+        vault, categories=["broken_wikilink", "forward_reference"]
+    )
+    hits = [f for f in report.findings if "future-pattern" in f.detail]
+
+    assert len(hits) == 1, [f.as_dict() for f in hits]
+    assert hits[0].category == "forward_reference"
+    assert hits[0].severity == "info"
+
+
+def test_forward_reference_clears_when_target_is_created(vault: Path) -> None:
+    insight = (
+        vault / "Knowledge Base" / "Notes" / "Insights"
+        / "progressive-disclosure-without-mode-fragmentation.md"
+    )
+    insight.write_text(
+        insight.read_text(encoding="utf-8")
+        + "\n\nPlanned: [[Knowledge Base/Notes/Patterns/future-pattern]]\n",
+        encoding="utf-8",
+    )
+
+    before = audit_module.audit(vault, categories=["forward_reference"])
+    assert any("future-pattern" in f.detail for f in before.findings)
+
+    target = vault / "Knowledge Base" / "Notes" / "Patterns" / "future-pattern.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Future pattern\n", encoding="utf-8")
+
+    after = audit_module.audit(vault, categories=["forward_reference"])
+    assert not any("future-pattern" in f.detail for f in after.findings)
 
 
 def test_audit_does_not_flag_parent_vault_wikilinks(vault: Path, tmp_path: Path) -> None:
@@ -143,10 +186,58 @@ def test_audit_flags_extensionless_link_even_if_nonmd_file_exists(vault: Path) -
     assert bad, "extension-less link to a .eml must stay flagged (Obsidian parity)"
 
 
-def test_broken_link_in_append_only_file_is_info_not_warn(vault: Path) -> None:
-    """Broken wikilinks inside append-only trees (Sources/, Evidence/) can't be
-    repaired in place, so audit surfaces them at `info` severity + meta.immutable
-    — keeping them out of the actionable (`warn`) set."""
+def test_audit_keeps_duplicate_stem_ambiguity_broken(vault: Path) -> None:
+    for folder in ("Patterns", "Research"):
+        target = vault / "Knowledge Base" / "Notes" / folder / "shared-name.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# {folder} target\n", encoding="utf-8")
+    insight = (
+        vault / "Knowledge Base" / "Notes" / "Insights"
+        / "progressive-disclosure-without-mode-fragmentation.md"
+    )
+    insight.write_text(
+        insight.read_text(encoding="utf-8") + "\n\n[[shared-name]]\n",
+        encoding="utf-8",
+    )
+
+    report = audit_module.audit(
+        vault, categories=["broken_wikilink", "forward_reference"]
+    )
+    hits = [finding for finding in report.findings if "shared-name" in finding.detail]
+
+    assert len(hits) == 1, [finding.as_dict() for finding in hits]
+    assert hits[0].category == "broken_wikilink"
+
+
+def test_non_markdown_collision_probe_never_enumerates_outside_vault(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    outside = tmp_path / "outside-target.eml"
+    outside.write_text("not part of the vault", encoding="utf-8")
+    insight = (
+        vault / "Knowledge Base" / "Notes" / "Insights"
+        / "progressive-disclosure-without-mode-fragmentation.md"
+    )
+    insight.write_text(
+        insight.read_text(encoding="utf-8") + "\n\n[[../outside-target]]\n",
+        encoding="utf-8",
+    )
+    original_iterdir = Path.iterdir
+    vault_resolved = vault.resolve()
+
+    def contained_iterdir(path: Path):
+        path.resolve().relative_to(vault_resolved)
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", contained_iterdir)
+
+    audit_module.audit(vault, categories=["broken_wikilink", "forward_reference"])
+
+
+def test_forward_reference_in_append_only_file_is_info(vault: Path) -> None:
+    """Forward references remain informational in append-only captured material."""
     src = (
         vault / "Knowledge Base" / "Sources" / "Articles"
         / "2026-05-31-immutable-link-src.md"
@@ -159,16 +250,17 @@ def test_broken_link_in_append_only_file_is_info_not_warn(vault: Path) -> None:
         encoding="utf-8",
     )
 
-    report = audit_module.audit(vault, categories=["broken_wikilink"])
+    report = audit_module.audit(vault, categories=["forward_reference"])
     hits = [f for f in report.findings if "immutable-link-src" in f.path]
-    assert hits, "expected the source's broken link to be flagged"
+    assert hits, "expected the source's forward reference to be surfaced"
     f = hits[0]
+    assert f.category == "forward_reference", f.as_dict()
     assert f.severity == "info", f.as_dict()
     assert f.meta and f.meta.get("immutable") is True, f.as_dict()
 
 
-def test_broken_link_in_editable_file_stays_warn(vault: Path) -> None:
-    """Guard: broken links in editable compiled notes remain actionable `warn`."""
+def test_forward_reference_in_editable_file_is_info(vault: Path) -> None:
+    """A missing Markdown page is informational in editable notes too."""
     insight = (
         vault / "Knowledge Base" / "Notes" / "Insights"
         / "progressive-disclosure-without-mode-fragmentation.md"
@@ -179,10 +271,11 @@ def test_broken_link_in_editable_file_stays_warn(vault: Path) -> None:
         encoding="utf-8",
     )
 
-    report = audit_module.audit(vault, categories=["broken_wikilink"])
+    report = audit_module.audit(vault, categories=["forward_reference"])
     hits = [f for f in report.findings if "no-such-target-abc" in f.detail]
-    assert hits, "expected the broken link to be flagged"
-    assert hits[0].severity == "warn", hits[0].as_dict()
+    assert hits, "expected the forward reference to be surfaced"
+    assert hits[0].category == "forward_reference", hits[0].as_dict()
+    assert hits[0].severity == "info", hits[0].as_dict()
     assert not (hits[0].meta or {}).get("immutable"), hits[0].as_dict()
 
 

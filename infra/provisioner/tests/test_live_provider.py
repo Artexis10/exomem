@@ -12,14 +12,20 @@ from pydantic import ValidationError
 from exomem_provisioner.capacity import CapacityConflict
 from exomem_provisioner.config import (
     ProviderWorkerSettings,
+    load_deployment_lock,
     load_hosted_release_manifest,
 )
-from exomem_provisioner.lifecycle import MetadataConflict, OpaqueProviderMetadata
+from exomem_provisioner.driver import DriverPending, EffectContext
+from exomem_provisioner.lifecycle import (
+    CellLifecycleDriver,
+    MetadataConflict,
+    OpaqueProviderMetadata,
+)
 from exomem_provisioner.live import (
     KubernetesProviderRegistry,
     LiveLifecyclePlane,
 )
-from exomem_provisioner.models import CapacityReservationClass
+from exomem_provisioner.models import CapacityReservationClass, ResourceKind
 from exomem_provisioner.production import build_live_provider_components
 from exomem_provisioner.provider_identity import (
     ProviderRecoveryIdentityCodec,
@@ -175,6 +181,41 @@ def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(tmp
         _ = missing.deployment_lock
 
 
+def test_deployment_lock_requires_exact_legacy_v1_or_exact_forward_v2_target(tmp_path: Path) -> None:
+    path = _deployment_lock(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["runtimeTarget"]["releaseVersion"] = "0.39.2"
+    payload["composition"]["legacyCatalog"][0]["releaseVersion"] = "0.39.2"
+    payload["composition"]["legacyCatalog"][0]["protocolVersion"] = "1"
+    payload["composition"]["legacyCatalog"][0]["contract"]["releaseVersion"] = "0.39.2"
+    payload["composition"]["legacyCatalog"][0]["contract"]["protocolVersion"] = "1"
+    payload["composition"]["legacyCatalog"][0]["contractSha256"] = _canonical_sha256(
+        payload["composition"]["legacyCatalog"][0]["contract"]
+    )
+    payload["composition"]["legacyReleaseSetSha256"] = _canonical_sha256(
+        [{"releaseVersion": "0.39.2", "protocolVersion": "1"}]
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    lock = load_deployment_lock(path)
+    target = lock.runtime_target.model_dump(mode="json")
+
+    assert lock.matches_runtime_request(
+        {"releaseVersion": "0.39.2", "protocolVersion": "1"},
+        wire_protocol="exomem-cell-provisioner.v1",
+    )
+    assert not lock.matches_runtime_request(
+        {"releaseVersion": "0.39.1", "protocolVersion": "1"},
+        wire_protocol="exomem-cell-provisioner.v1",
+    )
+    assert lock.matches_runtime_request(
+        {"runtimeTarget": target}, wire_protocol="exomem-cell-provisioner.v2"
+    )
+    assert not lock.matches_runtime_request(
+        {"runtimeTarget": {**target, "releaseVersion": "0.39.1"}},
+        wire_protocol="exomem-cell-provisioner.v2",
+    )
+
+
 def test_release_manifest_is_complete_strict_and_immutable(tmp_path: Path) -> None:
     manifest = load_hosted_release_manifest(RELEASE_FIXTURE)
 
@@ -269,7 +310,18 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
         identity_verifier=IDENTITY_CODEC.verifier(),
     )
 
-    await registry.ensure_namespace(metadata, envelopes["namespace"], "serve")
+    await registry.ensure_namespace(
+        metadata,
+        envelopes["namespace"],
+        "serve",
+        {
+            "vaultId": metadata.tenant_id,
+            "expectedRelease": "0.22.0",
+            "workerPolicyDigest": "a" * 64,
+            "browserOrigin": "https://substratesystems.io",
+            "transferHostname": "transfer.example.invalid",
+        },
+    )
     await registry.record_operation(metadata, envelopes["providerOperationConfigMap"])
 
     assert core.namespace.metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
@@ -282,6 +334,99 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
     }
     assert await registry.observed_fence("tenant-alpha") == 7
     assert core.namespace_selectors == ["exomem.io/tenant-cell=true"]
+
+
+@pytest.mark.asyncio
+async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations() -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    class Core:
+        namespace_body = None
+
+        def create_namespace(self, body):
+            self.namespace_body = body
+            self.namespace = SimpleNamespace(metadata=SimpleNamespace(**body["metadata"]))
+
+        def read_namespace(self, name):
+            return self.namespace
+
+        def create_namespaced_config_map(self, namespace, body):
+            self.config_map = SimpleNamespace(metadata=SimpleNamespace(**body["metadata"]))
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            raise _NotFound()
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            return SimpleNamespace(items=[])
+
+    class Missing:
+        def __getattr__(self, name):
+            def missing(*args, **kwargs):
+                raise _NotFound()
+
+            return missing
+
+    class Capacity:
+        async def require_active(self, **kwargs):
+            return None
+
+    core = Core()
+    registry = KubernetesProviderRegistry(
+        core_v1=core,
+        apps_v1=Missing(),
+        batch_v1=Missing(),
+        custom_objects=Missing(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=registry,
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=Capacity(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=SimpleNamespace(
+            image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+            browser_origin="https://substratesystems.io",
+            control_hostname="control.example.invalid",
+            transfer_hostname="transfer.example.invalid",
+            protocol_version="1",
+            release_version="0.22.0",
+        ),  # type: ignore[arg-type]
+    )
+    key = plane._key(metadata)
+    plane._operation_ids[key] = "internal-operation-alpha"
+    plane._recovery_envelopes[key] = envelopes
+
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+    }
+    await plane.ensure_namespace(metadata, request)
+
+    expected = {
+        "exomem.io/vault-id": "tenant-alpha",
+        "exomem.io/expected-release": "0.22.0",
+        "exomem.io/worker-policy-digest": hashlib.sha256(
+            b'{"media":false,"semantic":true,"workerCount":2}'
+        ).hexdigest(),
+        "exomem.io/browser-origin": "https://substratesystems.io",
+        "exomem.io/transfer-hostname": "transfer.example.invalid",
+    }
+    annotations = core.namespace_body["metadata"]["annotations"]
+    assert {key: annotations.get(key) for key in expected} == expected
 
 
 def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
@@ -536,7 +681,18 @@ async def test_registry_rejects_unowned_existing_namespace() -> None:
         identity_verifier=IDENTITY_CODEC.verifier(),
     )
     with pytest.raises(MetadataConflict):
-        await registry.ensure_namespace(metadata, "forged", "serve")
+        await registry.ensure_namespace(
+            metadata,
+            "forged",
+            "serve",
+            {
+                "vaultId": metadata.tenant_id,
+                "expectedRelease": "0.22.0",
+                "workerPolicyDigest": "a" * 64,
+                "browserOrigin": "https://substratesystems.io",
+                "transferHostname": "transfer.example.invalid",
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -603,6 +759,424 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job", "present", "complete", "failed"),
+    (
+        (None, False, False, False),
+        (SimpleNamespace(status=SimpleNamespace(conditions=(), failed=0)), True, False, False),
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    conditions=(SimpleNamespace(type="Complete", status="True"),), failed=0
+                )
+            ),
+            True,
+            True,
+            False,
+        ),
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    conditions=(SimpleNamespace(type="Complete", status="True"),), failed=1
+                )
+            ),
+            True,
+            True,
+            False,
+        ),
+        (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    conditions=(SimpleNamespace(type="Failed", status="True"),), failed=1
+                )
+            ),
+            True,
+            False,
+            True,
+        ),
+    ),
+)
+async def test_registry_distinguishes_absent_running_complete_and_failed_init_job(
+    job, present: bool, complete: bool, failed: bool
+) -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    class Core:
+        def read_namespace(self, name):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["namespace"],
+                    }
+                )
+            )
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["vaultPvc"],
+                    }
+                )
+            )
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            return SimpleNamespace(items=[object()])
+
+    class Batch:
+        def read_namespaced_job(self, name, namespace):
+            if job is None:
+                raise _NotFound()
+            return job
+
+    class Missing:
+        def __getattr__(self, name):
+            def missing(*args, **kwargs):
+                raise _NotFound()
+
+            return missing
+
+    registry = KubernetesProviderRegistry(
+        core_v1=Core(),
+        apps_v1=Missing(),
+        batch_v1=Batch(),
+        custom_objects=Missing(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+
+    snapshot = await registry.inspect(metadata, metadata)
+
+    assert snapshot.init_job_present is present
+    assert snapshot.init_complete is complete
+    assert snapshot.init_failed is failed
+
+
+@pytest.mark.asyncio
+async def test_recovery_reader_authenticates_init_job_and_stabilizes_helm_record() -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    def resource(*, name: str, annotations: dict[str, str], uid: str, version: str, labels=None):
+        return SimpleNamespace(
+            metadata=SimpleNamespace(
+                name=name,
+                namespace=metadata.resource_name,
+                annotations=annotations,
+                labels=labels or {},
+                uid=uid,
+                resource_version=version,
+                deletion_timestamp=None,
+            )
+        )
+
+    class Core:
+        helm = resource(
+            name="helm-release",
+            annotations={},
+            uid="helm-one",
+            version="1",
+            labels={"owner": "helm", "name": metadata.resource_name, "status": "deployed"},
+        )
+
+        def read_namespace(self, name):
+            return resource(
+                name=name,
+                annotations={
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": envelopes["namespace"],
+                },
+                uid="namespace-one",
+                version="1",
+            )
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            return resource(
+                name=name,
+                annotations={
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": envelopes["vaultPvc"],
+                },
+                uid="pvc-one",
+                version="1",
+            )
+
+        def read_namespaced_config_map(self, name, namespace):
+            return resource(
+                name=name,
+                annotations={
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": envelopes["providerOperationConfigMap"],
+                },
+                uid="operation-one",
+                version="1",
+            )
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            return SimpleNamespace(items=[self.helm])
+
+    class Batch:
+        job = resource(
+            name=metadata.resource_name + "-init",
+            annotations={
+                **metadata.kubernetes_annotations,
+                "exomem.io/recovery-envelope": envelopes["initJob"],
+            },
+            uid="job-one",
+            version="1",
+        )
+
+        def read_namespaced_job(self, name, namespace):
+            return self.job
+
+    core = Core()
+    batch = Batch()
+    registry = KubernetesProviderRegistry(
+        core_v1=core,
+        apps_v1=SimpleNamespace(),
+        batch_v1=batch,
+        custom_objects=SimpleNamespace(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+
+    first = await registry.authenticate_recovery_record(metadata)
+    core.helm.metadata.uid = "helm-two"
+    assert first != await registry.authenticate_recovery_record(metadata)
+    batch.job.metadata.annotations["exomem.io/recovery-envelope"] = "forged"
+    with pytest.raises(MetadataConflict):
+        await registry.authenticate_recovery_record(metadata)
+
+
+def _init_snapshot(*, present: bool, complete: bool = False, failed: bool = False, serving: bool = False):
+    return SimpleNamespace(
+        namespace=True,
+        release=True,
+        init_job_present=present,
+        init_complete=complete,
+        init_failed=failed,
+        serving=serving,
+        runtime_admitted=False,
+        routes=(False, False),
+    )
+
+
+def _init_recovery_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+        browser_origin="https://substratesystems.io",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        protocol_version="1",
+        release_version="0.22.0",
+    )
+
+
+def _init_recovery_request(*, envelope: str, worker_count: int = 2) -> dict[str, object]:
+    return {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": worker_count, "semantic": True, "media": False},
+        "_providerRecoveryEnvelopes": {"initJob": envelope},
+    }
+
+
+def _init_recovery_plane(snapshots: list[SimpleNamespace]):
+    metadata = _metadata()
+    original_owner = OpaqueProviderMetadata(
+        metadata.tenant_id, metadata.subject_id, "original-operation", 6
+    )
+    helm_calls: list[tuple[OpaqueProviderMetadata, dict[str, object]]] = []
+
+    class Registry:
+        async def inspect(self, current, owner):
+            assert current == metadata
+            assert owner == original_owner
+            return snapshots.pop(0)
+
+        async def observed_fence(self, tenant_id):
+            assert tenant_id == metadata.tenant_id
+            return 0
+
+        async def record_operation(self, current, envelope):
+            assert current == metadata
+            assert isinstance(envelope, str)
+
+    class Helm:
+        async def ensure_release(self, owner, values):
+            helm_calls.append((owner, values))
+
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=_init_recovery_config(),  # type: ignore[arg-type]
+    )
+    key = plane._key(metadata)
+    plane._owned[key] = original_owner
+    plane._helm_requests[key] = _init_recovery_request(envelope="original-init-envelope")
+    return plane, metadata, original_owner, helm_calls
+
+
+@pytest.mark.asyncio
+async def test_initialize_replays_absent_init_job_with_original_authenticated_release() -> None:
+    plane, metadata, original_owner, helm_calls = _init_recovery_plane(
+        [
+            _init_snapshot(present=False),
+            _init_snapshot(present=True, complete=True),
+            _init_snapshot(present=False, serving=True),
+        ]
+    )
+
+    initialized = await plane.initialize(
+        metadata,
+        _init_recovery_request(envelope="current-untrusted-envelope", worker_count=1),
+        _init_recovery_config(),  # type: ignore[arg-type]
+    )
+
+    assert initialized is True
+    assert [owner for owner, _values in helm_calls] == [original_owner, original_owner]
+    assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize", "serve"]
+    assert helm_calls[0][1]["workerPolicyDigest"] == helm_calls[1][1]["workerPolicyDigest"]
+    assert helm_calls[0][1]["providerRecoveryEnvelopes"] == {
+        "initJob": "original-init-envelope"
+    }
+    assert helm_calls[1][1]["providerRecoveryEnvelopes"] == {
+        "initJob": "original-init-envelope"
+    }
+
+
+@pytest.mark.asyncio
+async def test_initialize_keeps_present_running_init_job_pending_without_helm_replay() -> None:
+    plane, metadata, _original_owner, helm_calls = _init_recovery_plane(
+        [_init_snapshot(present=True)]
+    )
+
+    initialized = await plane.initialize(
+        metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+    )
+
+    assert initialized is False
+    assert helm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_initialize_keeps_replayed_pending_init_job_pending_without_serving() -> None:
+    plane, metadata, _original_owner, helm_calls = _init_recovery_plane(
+        [_init_snapshot(present=False), _init_snapshot(present=True)]
+    )
+
+    initialized = await plane.initialize(
+        metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+    )
+
+    assert initialized is False
+    assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize"]
+
+
+@pytest.mark.asyncio
+async def test_initialize_raises_for_failed_replayed_init_job_without_serving() -> None:
+    plane, metadata, _original_owner, helm_calls = _init_recovery_plane(
+        [_init_snapshot(present=False), _init_snapshot(present=True, failed=True)]
+    )
+
+    with pytest.raises(MetadataConflict, match="cell storage initialization failed"):
+        await plane.initialize(
+            metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+        )
+
+    assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize"]
+
+
+@pytest.mark.asyncio
+async def test_initializing_checkpoint_recovers_deleted_init_job_without_looping() -> None:
+    plane, metadata, original_owner, helm_calls = _init_recovery_plane(
+        [
+            _init_snapshot(present=False),
+            _init_snapshot(present=False),
+            _init_snapshot(present=True, complete=True),
+            _init_snapshot(present=False, serving=True),
+        ]
+    )
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+    original_request = _init_recovery_request(envelope="original-init-envelope")
+    original_request["_providerRecoveryEnvelopes"] = envelopes
+
+    class Repository:
+        async def list_resources(self, *, tenant_id, cell_id):
+            assert (tenant_id, cell_id) == (metadata.tenant_id, metadata.subject_id)
+            return [
+                SimpleNamespace(
+                    kind=ResourceKind.KUBERNETES_NAMESPACE,
+                    operation_id="original-database-operation",
+                    provider_operation_id=original_owner.operation_id,
+                    provider_fence_generation=original_owner.fence_generation,
+                )
+            ]
+
+        async def load_request(self, operation_id):
+            assert operation_id == "original-database-operation"
+            return original_request
+
+    class Cell:
+        async def volume_claim_bound(self, owner):
+            assert owner == original_owner
+            return True
+
+    plane._repository = Repository()  # type: ignore[assignment]
+    plane._cell = Cell()  # type: ignore[assignment]
+    driver = CellLifecycleDriver(
+        plane=plane, volume_worker=None, config=_init_recovery_config()  # type: ignore[arg-type]
+    )
+
+    outcome = await driver.execute(
+        "provision",
+        original_request,
+        EffectContext(
+            operation_id="current-database-operation",
+            provider_operation_id=metadata.operation_id,
+            tenant_id=metadata.tenant_id,
+            cell_id=metadata.subject_id,
+            fence_generation=metadata.fence_generation,
+            checkpoint="initializing",
+        ),
+    )
+
+    assert outcome == DriverPending("initialized", 1)
+    assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize", "serve"]
+
+
+@pytest.mark.asyncio
 async def test_live_plane_requires_exact_reservation_before_namespace_or_release() -> None:
     metadata = _metadata()
     calls: list[tuple[str, object]] = []
@@ -616,7 +1190,7 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
             calls.append(("capacity", identity))
 
     class Registry:
-        async def ensure_namespace(self, owner, envelope, mode):
+        async def ensure_namespace(self, owner, envelope, mode, helm_values):
             calls.append(("namespace", (owner, envelope, mode)))
 
         async def record_operation(self, owner, envelope):
@@ -644,7 +1218,14 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
         maintenance=SimpleNamespace(),  # type: ignore[arg-type]
         capacity=capacity,  # type: ignore[arg-type]
         identity_verifier=IDENTITY_CODEC.verifier(),
-        config=SimpleNamespace(),  # type: ignore[arg-type]
+        config=SimpleNamespace(
+            image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+            browser_origin="https://substratesystems.io",
+            control_hostname="control.example.invalid",
+            transfer_hostname="transfer.example.invalid",
+            protocol_version="1",
+            release_version="0.22.0",
+        ),  # type: ignore[arg-type]
     )
     key = plane._key(metadata)
     plane._operation_ids[key] = "internal-operation-alpha"
@@ -653,7 +1234,13 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
         "providerOperationConfigMap": "signed-operation",
     }
 
-    await plane.ensure_namespace(metadata, {"provisionMode": "serve"})
+    await plane.ensure_namespace(
+        metadata,
+        {
+            "provisionMode": "serve",
+            "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        },
+    )
 
     assert calls[0] == (
         "capacity",

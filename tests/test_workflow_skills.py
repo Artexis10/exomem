@@ -37,6 +37,7 @@ PRODUCT_COMMAND_HINTS = [
     "capture_source",
     "compile_source",
     "preserve_evidence",
+    "preserve_artifacts",
     "transfer_artifact",
     "review_memory",
     "connect_memory",
@@ -200,6 +201,7 @@ def test_core_skill_tool_loading_mentions_current_product_surface() -> None:
         "capture_source",
         "compile_source",
         "preserve_evidence",
+        "preserve_artifacts",
         "transfer_artifact",
         "record_memory",
         "review_memory",
@@ -216,7 +218,7 @@ def test_core_skill_tool_loading_mentions_current_product_surface() -> None:
     assert (
         'ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,'
         'observe_memory,edit_memory,replace_memory,capture_source,compile_source,'
-        'preserve_evidence,transfer_artifact,record_memory,review_memory,triage_memory,'
+        'preserve_evidence,preserve_artifacts,transfer_artifact,record_memory,review_memory,triage_memory,'
         'connect_memory,adopt_vault,maintain_memory,schema_memory,govern_memory,'
         'process_media,query_dataset,read_media")'
     ) in loading_section

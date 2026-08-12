@@ -382,6 +382,186 @@ its independent version sequence. Then redeploy and repeat acceptance,
 old-version rejection, cross-route denial, and cadence checks. Never retire an
 old value on receipt evidence alone.
 
+## Signed active-secret registry
+
+The registry signer is a release-custodian operation. It produces an immutable
+registry/public-key pair for every one of the 34 active K3s destinations; it
+does not decrypt an artifact or apply anything. Disable tracing and use the
+pre-created private directory `/secure/operator/exomem-hosted/active-secret-registry/`.
+It must be owned by the current operator, mode `0700`, and contain neither a
+symlink nor mutable `latest` pointer. Do not use a temporary directory for the
+pair.
+
+```bash
+set +x
+registry_dir=/secure/operator/exomem-hosted/active-secret-registry/
+test -d "$registry_dir" && test ! -L "$registry_dir"
+test "$(stat -c %U "$registry_dir")" = "$(id -un)"
+test "$(stat -c %a "$registry_dir")" = 700
+pair_id="$(date -u +%Y%m%dT%H%M%SZ)-reviewed-change"
+registry="$registry_dir/active-secret-registry-$pair_id.json"
+public_key="$registry_dir/active-secret-registry-$pair_id.public.pem"
+test ! -e "$registry" && test ! -e "$public_key"
+
+BWS_PROJECT_ID=69843186-5161-40a2-951f-b487011122ce \
+  bwsx-run EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY -- sh -c \
+  'printf "%s\\n" "$EXOMEM_HOSTED_ACTIVE_SECRET_REGISTRY_SIGNING_KEY"' \
+  | infra/scripts/sign_active_secret_registry.py \
+      --matrix infra/contracts/secret-destinations-v1.json \
+      --selection infra/contracts/active-secret-selection-v1.json \
+      --trust-contract infra/contracts/active-secret-registry-v1.json \
+      --private-key-stdin \
+      --registry-output "$registry" \
+      --public-key-output "$public_key"
+```
+
+The shell builtin `printf` is the only key transport in this command. The BWS
+project is used only for that named item: do not enumerate its contents. Keep
+the retained all-v1 pair when making a later v2 pair. Before any application,
+verify the pair without a subprocess that can mutate K3s:
+
+```bash
+infra/scripts/apply_active_sops_secrets.py \
+  --matrix infra/contracts/secret-destinations-v1.json \
+  --registry "$registry" \
+  --registry-public-key "$public_key" \
+  --trust-contract infra/contracts/active-secret-registry-v1.json \
+  --verify-only
+```
+
+## Future provisioner database rotation
+
+This procedure is deliberately future-only. Do not start it until an
+authenticated operation is `succeeded/bound` and its tenant/cell remains active
+and ready. Preserve the old role password, v1 ciphertext, signed v1 registry
+pair, exact controller snapshot, and the authenticated pre-change SQL session
+until final health is proven.
+
+Capture content-free controller state before stopping work; this snapshot is the
+only restoration input and is retained with the rotation receipts:
+
+```bash
+set -euo pipefail
+set +x
+namespace=exomem-platform
+rotation_root=/secure/operator/exomem-hosted/rotation-runs
+rotation_run="$rotation_root/$(date -u +%Y%m%dT%H%M%SZ)-database-v2"
+rotation_snapshot="$rotation_run/controller-snapshot.json"
+rotation_phase=pre_password_cutover
+rollback() {
+  set +x
+  if test "$rotation_phase" = post_password_cutover && ! test "${DATABASE_PASSWORD_ROLLBACK_VERIFIED:-}" = yes; then
+    echo 'leave consumers stopped; perform the verified database-password rollback, set DATABASE_PASSWORD_ROLLBACK_VERIFIED=yes, then rerun recovery' >&2
+    trap - ERR
+    return 1
+  fi
+  if test -f "$rotation_snapshot"; then
+    infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-destinations-v1.json --registry "$registry_v1" --registry-public-key "$public_key_v1" --trust-contract infra/contracts/active-secret-registry-v1.json --verify-only
+    infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-destinations-v1.json --registry "$registry_v1" --registry-public-key "$public_key_v1" --trust-contract infra/contracts/active-secret-registry-v1.json
+    jq -r '.deployments[] | [.name, .replicas] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name replicas; do kubectl -n exomem-platform scale deployment "$name" --replicas="$replicas"; done
+    jq -r '.cronjobs[] | [.name, .suspend] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name suspend; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p "{\"spec\":{\"suspend\":$suspend}}"; done
+  fi
+}
+trap 'rollback' ERR
+umask 077
+install -d -m 0700 "$rotation_root"
+mkdir -m 0700 "$rotation_run"
+set -o noclobber
+kubectl -n exomem-platform get deployment -o json | jq '[.items[] | select(.metadata.name | IN("exomem-provisioner-api","exomem-provisioner-worker","exomem-volume-worker")) | {kind:"Deployment",name:.metadata.name,replicas:(.spec.replicas // 1)}]' > "$rotation_run/deployments.json"
+kubectl -n exomem-platform get cronjob -o json | jq --slurpfile deployments "$rotation_run/deployments.json" '{schema_version:1,deployments:$deployments[0],cronjobs:[.items[] | select(.metadata.name | IN("exomem-durability-actions","exomem-export-gc","exomem-durability-backup","exomem-database-backup","exomem-deletion-dispatcher","exomem-hosted-scheduler-exomem-reconcile")) | {name:.metadata.name,suspend:(.spec.suspend // false)}]}' > "$rotation_snapshot"
+rm "$rotation_run/deployments.json"
+set +o noclobber
+jq -e '(.deployments | length == 3 and ([.deployments[].name] | sort) == ["exomem-provisioner-api","exomem-provisioner-worker","exomem-volume-worker"]) and (.cronjobs | length == 6 and ([.cronjobs[].name] | sort) == ["exomem-database-backup","exomem-deletion-dispatcher","exomem-durability-actions","exomem-durability-backup","exomem-export-gc","exomem-hosted-scheduler-exomem-reconcile"])' "$rotation_snapshot" >/dev/null
+chmod 0600 "$rotation_snapshot"
+for name in exomem-durability-actions exomem-export-gc exomem-durability-backup exomem-database-backup exomem-deletion-dispatcher exomem-hosted-scheduler-exomem-reconcile; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p '{"spec":{"suspend":true}}'; done
+for name in exomem-provisioner-api exomem-provisioner-worker exomem-volume-worker; do kubectl -n exomem-platform scale deployment "$name" --replicas=0; done
+kubectl -n exomem-platform get jobs -o json
+kubectl -n exomem-platform get jobs -o json | jq '[.items[] | select(any(.metadata.ownerReferences[]?; .controller == true and .kind == "CronJob" and (.name | IN("exomem-durability-actions","exomem-export-gc","exomem-durability-backup","exomem-database-backup","exomem-deletion-dispatcher")))) | {name:.metadata.name,uid:.metadata.uid}]' > "$rotation_run/cronjob-jobs.json"
+kubectl -n exomem-platform get jobs -l exomem.io/deletion-job=true -o json | jq '[.items[] | {name:.metadata.name,uid:.metadata.uid}]' > "$rotation_run/deletion-jobs.json"
+jq -r '.[].name' "$rotation_run/cronjob-jobs.json" | while read -r name; do kubectl -n exomem-platform delete job "$name" --wait=false; done
+jq -r '.[].name' "$rotation_run/deletion-jobs.json" | while read -r name; do kubectl -n exomem-platform delete job "$name" --wait=false; done
+drain_attempt=0
+while :; do
+  drain_attempt=$((drain_attempt + 1))
+  test "$drain_attempt" -le 60 || { echo 'captured Jobs did not drain; leave consumers stopped' >&2; exit 1; }
+  kubectl -n exomem-platform get jobs -o json > "$rotation_run/jobs-current.json"
+  remaining_jobs="$(jq -r --slurpfile cron "$rotation_run/cronjob-jobs.json" --slurpfile deletion "$rotation_run/deletion-jobs.json" '[.items[].metadata.uid] as $live | [($cron[0][]?, $deletion[0][]?) | select(.uid as $uid | $live | index($uid))] | length' "$rotation_run/jobs-current.json")"
+  test "$remaining_jobs" -eq 0 && break
+  sleep 2
+done
+! kubectl -n exomem-platform get job exomem-provisioner-database-migration 2>/dev/null
+! kubectl -n exomem-platform get job exomem-provisioner-database-bootstrap 2>/dev/null
+! kubectl -n exomem-platform get secret exomem-provisioner-database-bootstrap-admin 2>/dev/null
+kubectl -n exomem-platform get pods -o json | jq -e '[.items[] | select(.status.phase == "Pending" or .status.phase == "Running") | select([((.spec.initContainers // []) + (.spec.containers // []))[] | .env[]? | select(.valueFrom.secretKeyRef.name == "exomem-provisioner-database")] | length > 0)] | length == 0'
+```
+
+Apply the reviewed complete v2 registry with PostgreSQL still accepting v1;
+the command reads no Secret data. Use an interactive, non-echoing provider SQL
+session for the password change and authentication probes—never put either DSN
+or password in argv or output. The old probe must fail specifically with
+`password authentication failed`.
+
+```bash
+infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-destinations-v1.json --registry "$registry_v2" --registry-public-key "$public_key_v2" --trust-contract infra/contracts/active-secret-registry-v1.json --verify-only
+infra/scripts/apply_active_sops_secrets.py --matrix infra/contracts/secret-destinations-v1.json --registry "$registry_v2" --registry-public-key "$public_key_v2" --trust-contract infra/contracts/active-secret-registry-v1.json
+# The governed applier invokes kubectl -n exomem-platform apply -f only after registry verification.
+kubectl -n exomem-platform get secret exomem-provisioner-database -o jsonpath='{.metadata.labels.exomem\.io/secret-version}{"\n"}'
+echo 'rotation SQL session remains open; consumers stay stopped until v2 acceptance and v1 password authentication failed proof are recorded' >&2
+rotation_phase=post_password_cutover
+: "${ROTATION_AUTH_PROOFS_RECORDED:?record v2 acceptance and v1 password-authentication rejection before restore}"
+for name in exomem-durability-actions exomem-export-gc exomem-durability-backup exomem-database-backup exomem-deletion-dispatcher; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p "{\"spec\":{\"jobTemplate\":{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"exomem.io/restarted-at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}}}}}}"; done
+jq -r '.deployments[] | [.name, .replicas] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name replicas; do kubectl -n exomem-platform scale deployment "$name" --replicas="$replicas"; done
+jq -r '.cronjobs[] | select(.name != "exomem-hosted-scheduler-exomem-reconcile") | [.name, .suspend] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name suspend; do kubectl -n exomem-platform patch cronjob "$name" --type merge -p "{\"spec\":{\"suspend\":$suspend}}"; done
+kubectl -n exomem-platform rollout status deployment/exomem-provisioner-api --timeout=180s
+kubectl -n exomem-platform rollout status deployment/exomem-provisioner-worker --timeout=180s
+kubectl -n exomem-platform rollout status deployment/exomem-volume-worker --timeout=180s
+reconcile_suspend="$(jq -r '.cronjobs[] | select(.name == "exomem-hosted-scheduler-exomem-reconcile") | .suspend' "$rotation_snapshot")"
+kubectl -n exomem-platform patch cronjob "exomem-hosted-scheduler-exomem-reconcile" --type merge -p "{\"spec\":{\"suspend\":$reconcile_suspend}}"
+jq -r '.cronjobs[] | [.name, .suspend] | @tsv' "$rotation_snapshot" | while IFS=$'\t' read -r name suspend; do test "$(kubectl -n exomem-platform get cronjob "$name" -o jsonpath='{.spec.suspend}')" = "$suspend"; done
+trap - ERR
+```
+
+1. Record `ready_cell_baseline_verified`: authenticate the existing ready cell
+   and retain a content-free operation/cell health receipt. Block concurrent
+   Helm work and snapshot the exact Deployment replicas, CronJob suspend states,
+   and exact `exomem-hosted-scheduler-exomem-reconcile` suspend state.
+2. Only after that baseline, generate the v2 password and
+   `database-url.v2.sops.json`. Review, merge, and verify its ciphertext plus
+   the one-line selection promotion. Produce and retain immutable signed all-v1
+   and v2 registry/public-key pairs, proving the other 33 entries are unchanged.
+3. Record `three_deployments_and_five_cronjobs_quiesced`: preserve and suspend
+   `exomem-durability-actions`, `exomem-export-gc`,
+   `exomem-durability-backup`, `exomem-database-backup`, and
+   `exomem-deletion-dispatcher`; scale `exomem-provisioner-api`,
+   `exomem-provisioner-worker`, and `exomem-volume-worker` to zero; suspend the external reconcile CronJob `exomem-hosted-scheduler-exomem-reconcile`.
+4. Drain CronJob Jobs and dynamic `exomem-deletion-*` Jobs. Require migration
+   and bootstrap Jobs and the bootstrap Secret to be absent. Discover every
+   Pending or Running Pod whose normal or init container references
+   `exomem-provisioner-database`; drain it and require zero before continuing.
+   Record `transient_database_consumers_drained`.
+5. Apply the complete 34-entry v2 registry while PostgreSQL still accepts v1.
+   Verify only `exomem-provisioner-database` metadata changed to
+   `exomem.io/secret-version=v2`, then record
+   `new_sops_ciphertext_and_exact_registry_verified` and
+   `new_database_secret_applied_before_provider_cutover`.
+6. Keep the pre-change authenticated SQL session open, change the role password,
+   and prove v2 authenticates with the exact role, schema, and revision. Keep
+   DSNs and passwords out of argv and output. Record
+   `new_database_credential_accepts`; prove v1 fails specifically due to
+   password authentication and record `old_database_credential_rejected`.
+7. Patch all five CronJob JobTemplate restart annotations. Restore the exact
+   CronJob suspend states and Deployment replicas, wait for all three rollouts,
+   and restore the external reconcile state. Record
+   `three_deployments_and_five_cronjobs_restored`.
+8. Re-run authenticated baseline-cell health and record
+   `ready_cell_health_reverified`. Produce every rotation receipt and pass
+   `rotation_gate.py` before retiring v1.
+
+On any failure, keep consumers stopped, restore the old password through the
+still-authenticated pre-change SQL session, reapply the complete v1 registry,
+verify its version label, then restore the exact controller state. If production
+rolls back, a follow-up PR reconciles the committed selection.
+
 ## Break glass
 
 The offline age identity may decrypt only the specific SOPS artifact needed for

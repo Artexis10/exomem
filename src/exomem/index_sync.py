@@ -49,6 +49,7 @@ def _withdraw_unbridgeable_corpus_consumers(vault_root: Path) -> None:
     from . import find, freshness, semantic_contract, vault
 
     freshness.invalidate(vault_root)
+    freshness.mark_external_pending(vault_root)
     semantic_contract.evict_corpus_context(vault_root)
     find.evict_resolver_caches(vault_root)
     vault.evict_inbound_index(vault_root)
@@ -118,7 +119,10 @@ class IndexComponentOutcome:
         if type(self.outcome) is not str or self.outcome not in {
             "accepted",
             "completed",
+            "registered",
             "deferred",
+            "failed",
+            "not_required",
             "degraded",
         }:
             raise ValueError("unsupported index component outcome")
@@ -170,7 +174,7 @@ class IndexSyncReport:
 
     @property
     def reconcile_required(self) -> bool:
-        return any(item.outcome == "degraded" for item in self.components)
+        return any(item.outcome in {"degraded", "failed"} for item in self.components)
 
     @property
     def reconcile_guidance(self) -> str | None:
@@ -334,6 +338,21 @@ def _legacy_component(component: str, callback) -> IndexComponentOutcome:
     return IndexComponentOutcome(component, "completed", "dispatch_completed")
 
 
+def _graph_component(callback) -> IndexComponentOutcome:
+    """Preserve the graph's exact handoff outcome outside legacy best effort."""
+    from .epistemic_graph import GraphDispatchResult
+
+    try:
+        result = callback()
+    except Exception:  # noqa: BLE001 - defensive boundary for external callers
+        log.warning("epistemic graph dispatch escaped", exc_info=True)
+        return IndexComponentOutcome("epistemic_graph", "failed", "graph_dispatch_failed")
+    if not isinstance(result, GraphDispatchResult):
+        log.warning("epistemic graph dispatch returned no exact outcome")
+        return IndexComponentOutcome("epistemic_graph", "failed", "graph_outcome_missing")
+    return IndexComponentOutcome("epistemic_graph", result.outcome, result.code)
+
+
 def _resolver_component(callback) -> IndexComponentOutcome:
     try:
         callback()
@@ -344,6 +363,10 @@ def _resolver_component(callback) -> IndexComponentOutcome:
 
 
 def _embedding_component(status) -> IndexComponentOutcome:
+    return _embedding_status_component("embeddings", status)
+
+
+def _embedding_status_component(component: str, status) -> IndexComponentOutcome:
     if status.code == "no_eligible_paths":
         outcome = "accepted"
     elif status.status == "completed":
@@ -354,7 +377,7 @@ def _embedding_component(status) -> IndexComponentOutcome:
         outcome = "degraded"
     else:
         outcome = "accepted"
-    return IndexComponentOutcome("embeddings", outcome, status.code)
+    return IndexComponentOutcome(component, outcome, status.code)
 
 
 def _rel_md_paths(vault_root: Path, paths: list[Path]) -> list[str]:
@@ -408,7 +431,15 @@ def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
         return True
     # Keep the first event spelling/order but avoid redundant sqlite writes.
     rels = list(dict.fromkeys(rels))
-    from . import claims, embedding_index, embeddings, epistemic_graph, index_paths, lexstore
+    from . import (
+        claims,
+        embedding_index,
+        embeddings,
+        epistemic_graph,
+        index_paths,
+        lexstore,
+        recall_policy,
+    )
 
     def _purge(component: str, callback) -> bool:
         try:
@@ -427,10 +458,13 @@ def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
             "embeddings",
             lambda: embedding_index.EmbeddingIndex(vault_root).purge_paths_if_present(rels),
         )
-    if epistemic_graph.sidecar_path(vault_root).exists():
+    graph_rels = [
+        rel for rel in rels if recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+    ]
+    if graph_rels and epistemic_graph.sidecar_path(vault_root).exists():
         succeeded &= _purge(
             "epistemic_graph",
-            lambda: epistemic_graph.EpistemicGraphIndex(vault_root).delete_paths(rels),
+            lambda: epistemic_graph.EpistemicGraphIndex(vault_root).delete_paths(graph_rels),
         )
     if claims.sidecar_path(vault_root).exists():
         succeeded &= _purge(
@@ -480,6 +514,53 @@ def deferred_work_status(vault_root: Path | None = None) -> dict:
 def record_failed_refresh(vault_root: Path, paths: list[Path]) -> int:
     """Persist a failed all-index dispatch without importing model modules."""
     return deferred_index.add_full(vault_root, _rel_md_paths(vault_root, paths))
+
+
+def _publication_failed_report(
+    operation: str,
+    requested_paths: tuple[str, ...],
+    eligible_paths: tuple[str, ...],
+    *,
+    paths_truncated: bool,
+) -> IndexSyncReport:
+    """Report a failed canonical publication without advancing any consumer."""
+    components = tuple(
+        IndexComponentOutcome(component, "failed", "publication_failed")
+        for component in (
+            ("lexstore", "memory_refs", "resolver", "epistemic_graph", "embeddings")
+            if operation == "upsert"
+            else (
+                "lexstore",
+                "memory_refs",
+                "epistemic_graph",
+                "clip",
+                "embeddings",
+                "claims",
+                "semantic_purge",
+                "resolver",
+            )
+        )
+    )
+    return IndexSyncReport(
+        operation,
+        requested_paths,
+        eligible_paths,
+        components,
+        paths_truncated,
+    )
+
+
+def _register_publication_failure_graph_handle(vault_root: Path) -> None:
+    """Keep a committed graph epoch joinable when corpus publication failed."""
+    from . import graph_sync
+
+    required = graph_sync.read_checkpoint(vault_root)
+    if required is None:
+        return
+    try:
+        graph_sync.register_failure(vault_root, required, code="CORPUS_PUBLICATION_FAILED")
+    except Exception:  # noqa: BLE001 - the failed publication report remains authoritative
+        log.warning("graph publication-failure handoff registration failed", exc_info=True)
 
 
 def clear_deferred_work(
@@ -557,9 +638,9 @@ def drain_deferred_work(
     receipts = deferred_index.snapshot(vault_root, limit=remaining_limit)
     if not receipts:
         return processed
-    paths = [vault_root / receipt.rel_path for receipt in receipts]
+    semantic_paths = [vault_root / receipt.rel_path for receipt in receipts]
     try:
-        status = replay_deferred_embedding(vault_root, paths, receipts)
+        status = replay_deferred_embedding(vault_root, semantic_paths, receipts)
     except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
         log.warning("deferred semantic dispatch failed; work remains queued", exc_info=True)
         return processed
@@ -608,17 +689,20 @@ def _dispatch_upsert_components(
             "lexstore", lambda: lexstore.upsert_after_write(vault_root, semantic_paths)
         )
     )
-    def graph_upsert() -> None:
+    def graph_upsert():
         if created_semantic_paths:
-            epistemic_graph.upsert_after_write(
+            return epistemic_graph.upsert_after_write(
                 vault_root,
                 semantic_paths,
                 created_paths=created_semantic_paths,
             )
-        else:
-            epistemic_graph.upsert_after_write(vault_root, semantic_paths)
+        return epistemic_graph.upsert_after_write(vault_root, semantic_paths)
 
-    components.append(_legacy_component("epistemic_graph", graph_upsert))
+    components.append(
+        _graph_component(graph_upsert)
+        if semantic_paths
+        else IndexComponentOutcome("epistemic_graph", "not_required", "no_graph_input")
+    )
     if defer_semantic or mode.defer_expensive_indexes():
         try:
             semantic_count, added = _record_deferred_semantic_upserts(
@@ -764,6 +848,18 @@ def upsert_after_write(
         vault_root,
         changed=identity_paths,
     )
+    if not publication_current:
+        _register_publication_failure_graph_handle(vault_root)
+        try:
+            record_failed_refresh(vault_root, identity_paths)
+        except Exception:  # noqa: BLE001 - the failed publication report remains authoritative
+            log.warning("durable full-index retry recording failed", exc_info=True)
+        return _publication_failed_report(
+            "upsert",
+            requested_report,
+            eligible_report,
+            paths_truncated=requested_truncated or eligible_truncated,
+        )
     admitted_rels = {item.rel_path for item in batch.admitted_paths}
     states = {rel: state for rel, state in (semantic_states or {}).items() if rel in admitted_rels}
     for path, rel in zip(semantic_paths, semantic_rels, strict=True):
@@ -812,16 +908,7 @@ def upsert_after_write(
         tuple(components),
         requested_truncated or eligible_truncated,
     )
-    if publication_current:
-        return report
-    try:
-        record_failed_refresh(vault_root, identity_paths)
-    except Exception:  # noqa: BLE001 - the degraded report remains authoritative
-        log.warning("durable full-index retry recording failed", exc_info=True)
-    return with_component(
-        report,
-        IndexComponentOutcome("epistemic_graph", "degraded", "publication_failed"),
-    )
+    return report
 
 
 def delete_after_remove(
@@ -855,14 +942,21 @@ def delete_after_remove(
         vault_root,
         deleted=[vault_root / rel for rel in md_rels],
     )
+    if not publication_current:
+        _register_publication_failure_graph_handle(vault_root)
+        return _publication_failed_report(
+            "delete",
+            requested_report,
+            requested_report,
+            paths_truncated=paths_truncated,
+        )
     components = [
         _legacy_component("lexstore", lambda: lexstore.delete_after_remove(vault_root, safe_paths)),
         _legacy_component(
             "memory_refs",
             lambda: memory_refs.delete_after_remove(vault_root, safe_paths),
         ),
-        _legacy_component(
-            "epistemic_graph",
+        _graph_component(
             # The exact deletion delta is already published above. Refreshing
             # through that checkpoint removes the vanished file and repairs
             # every affected source edge before marking the graph current.
@@ -874,9 +968,8 @@ def delete_after_remove(
                 else epistemic_graph.delete_after_remove(vault_root, safe_paths)
             ),
         ),
-        _legacy_component(
-            "clip",
-            lambda: embeddings.delete_clip_after_remove(vault_root, safe_paths),
+        _embedding_status_component(
+            "clip", embeddings.delete_clip_after_remove(vault_root, safe_paths)
         ),
     ]
     try:
@@ -920,9 +1013,4 @@ def delete_after_remove(
         tuple(components),
         paths_truncated,
     )
-    if publication_current:
-        return report
-    return with_component(
-        report,
-        IndexComponentOutcome("epistemic_graph", "degraded", "publication_failed"),
-    )
+    return report

@@ -79,6 +79,7 @@ class _KubernetesCore:
         self.created_pvcs: list[tuple[str, dict[str, object]]] = []
         self.deleted_pvcs: list[tuple[str, str]] = []
         self.deleted_pvs: list[str] = []
+        self.persistent_volume_patches: list[tuple[str, dict[str, object]]] = []
 
     def read_namespaced_persistent_volume_claim(self, name: str, namespace: str):
         assert name.endswith("-data")
@@ -95,6 +96,7 @@ class _KubernetesCore:
 
     def patch_persistent_volume(self, name: str, body: dict[str, object]):
         assert name == "pv-alpha"
+        self.persistent_volume_patches.append((name, body))
         self.pv.metadata.annotations.update(body["metadata"]["annotations"])
 
     def create_persistent_volume(self, body: dict[str, object]):
@@ -123,7 +125,7 @@ class _ApiConflict(Exception):
 
 
 @pytest.mark.asyncio
-async def test_kubernetes_adapter_discovers_csi_handle_tags_pv_and_rebinds_original() -> None:
+async def test_kubernetes_adapter_discovers_csi_handle_then_labels_with_full_identity() -> None:
     metadata = _metadata()
     core = _KubernetesCore(metadata)
     adapter = KubernetesVolumeAdapter(
@@ -136,7 +138,26 @@ async def test_kubernetes_adapter_discovers_csi_handle_tags_pv_and_rebinds_origi
     recorded = await adapter.discover_bound_volume(metadata)
 
     assert recorded == RecordedVolume("42", "pv-alpha", "fsn1", metadata)
-    assert core.pv.metadata.annotations == metadata.kubernetes_annotations
+    assert core.pv.metadata.annotations == {}
+    assert core.persistent_volume_patches == []
+
+    await adapter.label_bound_volume(recorded, "sealed-pv-envelope")
+    assert core.persistent_volume_patches == [
+        (
+            "pv-alpha",
+            {
+                "metadata": {
+                    "labels": {
+                        "exomem.io/resource-name": metadata.resource_name,
+                    },
+                    "annotations": {
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": "sealed-pv-envelope",
+                    }
+                }
+            },
+        )
+    ]
 
     await adapter.create_static_binding(recorded)
     assert core.created_pvs[0]["spec"]["csi"]["volumeHandle"] == "42"
@@ -172,6 +193,33 @@ async def test_kubernetes_adapter_rejects_pvc_identity_or_location_without_mutat
     with pytest.raises(MetadataConflict):
         await adapter.discover_bound_volume(metadata)
     assert core.pv.metadata.annotations == {}
+
+
+@pytest.mark.asyncio
+async def test_recovery_bound_volume_digest_changes_for_pv_replacement() -> None:
+    metadata = _metadata()
+    core = _KubernetesCore(metadata)
+    core.pv.metadata.annotations = {
+        **metadata.kubernetes_annotations,
+        "exomem.io/recovery-envelope": "sealed-pv-envelope",
+    }
+    core.pv.metadata.uid = "pv-uid-one"
+    core.pv.metadata.resource_version = "11"
+    adapter = KubernetesVolumeAdapter(
+        core_v1=core,
+        storage_class_name="encrypted-retain",
+        encryption_secret_name="volume-encryption",
+        encryption_secret_namespace="exomem-platform",
+    )
+
+    first = await adapter.observe_recovery_bound_volume(metadata)
+    assert first is not None
+    core.pv.metadata.uid = "pv-uid-two"
+    core.pv.metadata.resource_version = "12"
+    second = await adapter.observe_recovery_bound_volume(metadata)
+
+    assert second is not None
+    assert first.stability_digest != second.stability_digest
 
 
 @pytest.mark.asyncio
@@ -211,6 +259,10 @@ async def test_cell_adapter_creates_external_secret_then_reads_the_exact_bundle(
         def create_namespaced_secret(self, namespace, body):
             assert namespace == metadata.resource_name
             assert body["metadata"]["name"] == "exomem-cell-credentials"
+            assert body["metadata"]["labels"] == {
+                "exomem.io/cell": metadata.resource_name,
+                "exomem.io/resource-name": metadata.resource_name,
+            }
             self.patch_namespaced_secret = lambda name, namespace, update: setattr(
                 self,
                 "secret",

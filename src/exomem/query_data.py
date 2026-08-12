@@ -68,6 +68,7 @@ _OPS = frozenset(
 _NUM_PREFIX = re.compile(r"^[<>≤≥=~\s]+")
 _DATE_LIKE = re.compile(r"\d{1,4}[-/]\d")  # 2024-07, 9/2024 → not a number
 _LEADING_NUM = re.compile(r"[+-]?\d+(?:[.,]\d+)?")  # leading number, comma or dot decimal
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 @dataclass
@@ -164,7 +165,7 @@ def _coerce_num(v: Any) -> float | None:
     if not isinstance(v, str):
         return None
     s = _NUM_PREFIX.sub("", v.strip())
-    if not s or _DATE_LIKE.match(s):
+    if not s or _DATE_LIKE.match(s) or _UUID.fullmatch(s):
         return None
     m = _LEADING_NUM.match(s)
     if not m:

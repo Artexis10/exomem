@@ -100,6 +100,15 @@ def _raw_zip(
         ("Knowledge Base/_Schema/project-keys.yaml", "canonical"),
         ("Knowledge Base/_trash/2026-07-12/note.md", "canonical"),
         ("Knowledge Base/.review-state.json", "portable-derived"),
+        (
+            "Knowledge Base/.graph-commit-receipts/0123456789abcdef01234567.json",
+            "portable-derived",
+        ),
+        ("Knowledge Base/.graph-commit-receipts/0123456789abcdef01234567.json.bak", "disposable-runtime"),
+        ("Knowledge Base/.graph-commit-receipts/0123456789ABCDEF01234567.json", "disposable-runtime"),
+        ("Secrets/.graph-commit-receipts/.env", "disposable-runtime"),
+        (".graph-commit-receipts/private.pem", "disposable-runtime"),
+        ("Knowledge Base/Notes/.graph-commit-receipts/secret.txt", "disposable-runtime"),
         ("Knowledge Base/.embeddings.sqlite", "disposable-runtime"),
         ("Knowledge Base/.embeddings.sqlite-wal", "disposable-runtime"),
         ("Knowledge Base/.lexical.sqlite-shm", "disposable-runtime"),
@@ -135,6 +144,29 @@ def test_versioned_artifact_classification_registry(path: str, expected: str) ->
     assert classification.artifact_class.value == expected
     assert portability.classification_registry()["version"] == 1
     assert portability.classification_registry()["rules"]
+
+
+def test_graph_commit_receipt_classification_uses_configured_kb_dirname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
+
+    assert (
+        portability.classify_artifact(
+            "Brain/.graph-commit-receipts/0123456789abcdef01234567.json"
+        ).artifact_class
+        is portability.ArtifactClass.PORTABLE_DERIVED
+    )
+    assert (
+        portability.classify_artifact(
+            "Knowledge Base/.graph-commit-receipts/0123456789abcdef01234567.json"
+        ).artifact_class
+        is portability.ArtifactClass.DISPOSABLE_RUNTIME
+    )
+    assert (
+        portability.classify_artifact("Brain/.graph-commit-receipts/private.pem").artifact_class
+        is portability.ArtifactClass.DISPOSABLE_RUNTIME
+    )
 
 
 @pytest.mark.parametrize(

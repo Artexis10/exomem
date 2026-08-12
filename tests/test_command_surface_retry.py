@@ -62,9 +62,13 @@ def test_nested_edit_validate_only_is_read_only_only_for_supported_variants() ->
     )
 
     for kind, fields in (
+        ("replace_body", {"new_body": "b"}),
+        ("replace_tags", {"tags": ["b"]}),
         ("replace_string", {"old_string": "a", "new_string": "b"}),
         ("batch_replace", {"edits": [{"old_string": "a", "new_string": "b"}]}),
+        ("edit_section", {"heading": "Notes", "new_string": "b"}),
         ("patch_frontmatter", {"field": "domain", "value": "memory"}),
+        ("fill_row", {"row_key": "Film", "take": "b"}),
     ):
         assert invocation_is_read_only(
             command, {"operation": {"kind": kind, **fields, "validate_only": True}}
@@ -176,7 +180,7 @@ def test_invalid_edit_fails_before_manager_or_mutation_boundary(monkeypatch) -> 
         lambda: pytest.fail("invalid edit reached the writer manager"),
     )
 
-    with pytest.raises(ValueError, match=r"INVALID_EDIT.*fill_row.*expected_hash"):
+    with pytest.raises(ValueError, match=r"INVALID_EDIT.*fill_row.*unsupported"):
         writer_lease.invoke_command(
             command,
             Path("/unused"),
@@ -186,7 +190,7 @@ def test_invalid_edit_fails_before_manager_or_mutation_boundary(monkeypatch) -> 
                 "kind": "fill_row",
                 "row_key": "Example",
                 "take": "A view",
-                "expected_hash": "not-supported",
+                "unsupported": "not-supported",
             },
         )
 
@@ -440,21 +444,22 @@ def test_manage_memory_file_validate_only_is_read_only(operation: str) -> None:
     ) is False
 
 
-def test_validate_only_row_edit_refuses_instead_of_mutating(vault: Path) -> None:
+def test_validate_only_row_edit_previews_without_mutating(vault: Path) -> None:
     from exomem.commands import op_edit_memory
 
     path = _write_editable_note(vault, body="- Example [take: ]")
 
-    with pytest.raises(ValueError, match=r"INVALID_EDIT.*fill_row.*validate_only"):
-        op_edit_memory(
-            vault,
-            path=path,
-            why="preview take",
-            row_key="Example",
-            take="A view",
-            validate_only=True,
-        )
+    result = op_edit_memory(
+        vault,
+        path=path,
+        why="preview take",
+        row_key="Example",
+        take="A view",
+        validate_only=True,
+    )
 
+    assert result["validate_only"] is True
+    assert result["row"] == "- Example [take: A view]"
     assert "[take: ]" in (vault / path).read_text(encoding="utf-8")
 
 
@@ -521,6 +526,7 @@ def test_identical_pending_retry_waits_outside_mutation_boundary_and_replays(
         return {"value": value}
 
     command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
+    (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
         mutation_timeout_seconds=0.05,

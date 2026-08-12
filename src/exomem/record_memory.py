@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
@@ -9,10 +12,12 @@ from . import query_data, record_governance, records
 from .cli_ops import OpError
 from .structured_collections import CollectionError, parse_manifest_bytes
 
-ACTIONS = frozenset({"inspect", "create", "query", "append", "update"})
+ACTIONS = frozenset({"describe", "validate", "inspect", "create", "query", "append", "update"})
 
 _ACTION_FIELDS = {
+    "describe": frozenset(),
     "inspect": frozenset({"collection"}),
+    "validate": frozenset({"manifest_path", "manifest_text", "scaffold"}),
     "create": frozenset({"manifest_path", "manifest_text", "why", "scaffold"}),
     "query": frozenset(
         {
@@ -33,7 +38,9 @@ _ACTION_FIELDS = {
             "output_format",
         }
     ),
-    "append": frozenset({"collection", "item", "why", "item_key", "expected_container_hash", "body"}),
+    "append": frozenset(
+        {"collection", "item", "why", "item_key", "expected_container_hash", "body"}
+    ),
     "update": frozenset(
         {
             "collection",
@@ -46,12 +53,21 @@ _ACTION_FIELDS = {
     ),
 }
 _REQUIRED_FIELDS = {
-    "inspect": frozenset({"collection"}),
+    "describe": frozenset(),
+    "inspect": frozenset(),
+    "validate": frozenset({"manifest_path", "manifest_text"}),
     "create": frozenset({"manifest_path", "manifest_text", "why"}),
     "query": frozenset({"collection"}),
     "append": frozenset({"collection", "item", "why"}),
     "update": frozenset(
-        {"collection", "item_key", "changes", "expected_container_hash", "expected_item_version", "why"}
+        {
+            "collection",
+            "item_key",
+            "changes",
+            "expected_container_hash",
+            "expected_item_version",
+            "why",
+        }
     ),
 }
 _QUERY_SHAPING_FIELDS = frozenset(
@@ -72,7 +88,7 @@ _QUERY_SHAPING_FIELDS = frozenset(
 
 def record_memory(
     vault_root: Path,
-    action: Literal["inspect", "create", "query", "append", "update"],
+    action: Literal["describe", "validate", "inspect", "create", "query", "append", "update"],
     collection: str | None = None,
     manifest_path: str | None = None,
     manifest_text: str | None = None,
@@ -99,17 +115,17 @@ def record_memory(
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect, create, query, append, or update one governed Record collection.
+    """Describe, validate, inspect, create, query, append, or update Records.
 
     Records are human-owned event and state histories.  This command keeps the
-    five user actions on one product surface while routing mutations to the
-    guarded Records writers and reads through governance-aware projections.
+    complete workflow on one product surface while routing mutations to guarded
+    writers and reads through governance-aware projections.
 
     Args:
-        action: inspect, create, query, append, or update.
-        collection: Collection manifest reference for inspect, query, append, or update.
-        manifest_path: New collection manifest path for create.
-        manifest_text: Complete new manifest text for create.
+        action: describe, validate, inspect, create, query, append, or update.
+        collection: Optional for inventory inspect; required for targeted reads/writes.
+        manifest_path: Proposed manifest path for validate or create.
+        manifest_text: Complete proposed manifest text for validate or create.
         why: Concise audit reason for create, append, or update.
         scaffold: Create an initial canonical source for create; defaults to true.
         view: Saved query view for query; cannot be combined with inline shaping.
@@ -162,8 +178,20 @@ def record_memory(
     }
     _validate_arguments(action, values)
     try:
+        if action == "describe":
+            return parse_manifest_contract()
+        if action == "validate":
+            assert manifest_path is not None
+            assert manifest_text is not None
+            return records.validate_collection_create(
+                vault_root,
+                manifest_path,
+                manifest_text,
+                scaffold=True if scaffold is None else scaffold,
+            )
         if action == "inspect":
-            assert collection is not None
+            if collection is None:
+                return record_governance.inventory_collections(vault_root)
             if _is_direct_legacy_tracker_selector(collection):
                 return record_governance.inspect_legacy_tracker(vault_root, collection)
             return record_governance.inspect_collection(vault_root, collection)
@@ -250,7 +278,39 @@ def record_memory(
             why=why,
         )
     except (CollectionError, query_data.QueryDataError) as error:
-        raise OpError(error.code, error.reason) from error
+        raise OpError(
+            error.code,
+            error.reason,
+            details=_json_safe_details(getattr(error, "details", None)),
+        ) from error
+
+
+def parse_manifest_contract() -> dict[str, Any]:
+    """Project the parser-owned collection contract without vault content."""
+    from .structured_collections import manifest_authoring_contract
+
+    return manifest_authoring_contract()
+
+
+def _json_safe_details(value: object) -> dict[str, Any] | None:
+    """Normalize parser-owned remediation facts for every public JSON surface."""
+    if not isinstance(value, Mapping):
+        return None
+
+    def normalize(item: object) -> Any:
+        if item is None or isinstance(item, (str, bool, int)):
+            return item
+        if isinstance(item, float):
+            return item if math.isfinite(item) else str(item)
+        if isinstance(item, (dt.date, dt.datetime)):
+            return item.isoformat()
+        if isinstance(item, Mapping):
+            return {str(key): normalize(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [normalize(child) for child in item]
+        return str(item)
+
+    return {str(key): normalize(item) for key, item in value.items()}
 
 
 def _validate_arguments(action: object, values: dict[str, Any]) -> None:

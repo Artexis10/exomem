@@ -1,5 +1,4 @@
-{{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
-{{- $runtimeImage := $lock.components.runtime.image -}}
+{{- $runtimeImages := include "exomem.hostedRuntimeImages" . | mustFromJson -}}
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -150,7 +149,7 @@ spec:
         (variables.target.spec.accessModes == ['ReadWriteOnce'] &&
           variables.target.spec.volumeMode == 'Filesystem' &&
           variables.target.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
-          variables.target.spec.resources.requests.storage == quantity('10Gi'))
+          quantity(dyn(variables.target.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0)
       message: The hosted provisioner may manage only the exact encrypted 10 GiB tenant PVC.
     - expression: >-
         request.resource.resource != 'services' || request.operation == 'DELETE' ||
@@ -177,7 +176,7 @@ spec:
             variables.target.spec.selector.matchLabels &&
           variables.target.spec.template.spec.serviceAccountName == request.namespace &&
           size(variables.target.spec.template.spec.containers) == 1 &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}')
+          variables.target.spec.template.spec.containers[0].image in {{ $runtimeImages | toJson }})
       message: The hosted provisioner may manage only the exact pinned single-cell StatefulSet.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation != 'DELETE'
@@ -193,7 +192,7 @@ spec:
                 'exomem.io/cell': request.namespace
               } &&
               variables.target.spec.policyTypes == ['Ingress'] &&
-              size(variables.target.spec.ingress) == 2 &&
+              size(variables.target.spec.ingress) == 3 &&
               size(variables.target.spec.ingress[0].from) == 1 &&
               variables.target.spec.ingress[0].from[0].namespaceSelector.matchLabels == {
                 'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'
@@ -215,6 +214,16 @@ spec:
               size(variables.target.spec.ingress[1].ports) == 1 &&
               variables.target.spec.ingress[1].ports[0].protocol == 'TCP' &&
               variables.target.spec.ingress[1].ports[0].port == 8765 &&
+              size(variables.target.spec.ingress[2].from) == 1 &&
+              variables.target.spec.ingress[2].from[0].namespaceSelector.matchLabels == {
+                'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'
+              } &&
+              variables.target.spec.ingress[2].from[0].podSelector.matchLabels == {
+                'app.kubernetes.io/name': 'exomem-provisioner-worker'
+              } &&
+              size(variables.target.spec.ingress[2].ports) == 1 &&
+              variables.target.spec.ingress[2].ports[0].protocol == 'TCP' &&
+              variables.target.spec.ingress[2].ports[0].port == 8765 &&
               !has(variables.target.spec.egress)))
       message: The hosted provisioner may manage only the exact default-deny and platform ingress policies.
     - expression: >-
@@ -502,7 +511,8 @@ spec:
                 'exomem.io/cell': variables.resourceName
               } &&
               variables.target.spec.policyTypes == ['Ingress'] &&
-              size(variables.target.spec.ingress) == 2 &&
+              size(variables.target.spec.ingress) == 3 &&
+              size(variables.target.spec.ingress[0].from) == 1 &&
               variables.target.spec.ingress[0].from[0].namespaceSelector.matchLabels ==
                 {'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'} &&
               variables.target.spec.ingress[0].from[0].podSelector.matchLabels == {
@@ -511,6 +521,7 @@ spec:
               size(variables.target.spec.ingress[0].ports) == 1 &&
               variables.target.spec.ingress[0].ports[0].protocol == 'TCP' &&
               variables.target.spec.ingress[0].ports[0].port == 8765 &&
+              size(variables.target.spec.ingress[1].from) == 1 &&
               variables.target.spec.ingress[1].from[0].namespaceSelector.matchLabels ==
                 {'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'} &&
               variables.target.spec.ingress[1].from[0].podSelector.matchLabels ==
@@ -518,6 +529,14 @@ spec:
               size(variables.target.spec.ingress[1].ports) == 1 &&
               variables.target.spec.ingress[1].ports[0].protocol == 'TCP' &&
               variables.target.spec.ingress[1].ports[0].port == 8765 &&
+              size(variables.target.spec.ingress[2].from) == 1 &&
+              variables.target.spec.ingress[2].from[0].namespaceSelector.matchLabels ==
+                {'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'} &&
+              variables.target.spec.ingress[2].from[0].podSelector.matchLabels ==
+                {'app.kubernetes.io/name': 'exomem-provisioner-worker'} &&
+              size(variables.target.spec.ingress[2].ports) == 1 &&
+              variables.target.spec.ingress[2].ports[0].protocol == 'TCP' &&
+              variables.target.spec.ingress[2].ports[0].port == 8765 &&
               !has(variables.target.spec.egress))
           : (variables.target.spec.podSelector.matchLabels == variables.labels &&
           variables.target.spec.policyTypes == ['Egress'] &&
@@ -581,7 +600,7 @@ spec:
     - expression: >-
         request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
         (variables.target.spec.template.spec.containers[0].name == 'restore-candidate' &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}' &&
+          variables.target.spec.template.spec.containers[0].image in {{ $runtimeImages | toJson }} &&
           variables.target.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
           variables.target.spec.template.spec.containers[0].command ==
             ['exomem', 'hosted', 'restore-candidate', '--contract-version', '1',
@@ -633,7 +652,7 @@ spec:
           variables.target.spec.accessModes == ['ReadWriteOnce'] &&
           variables.target.spec.volumeMode == 'Filesystem' &&
           variables.target.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
-          variables.target.spec.resources.requests.storage == quantity('10Gi'))
+          quantity(dyn(variables.target.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0)
       message: Durability actions may reconcile only the exact retained encrypted tenant PVC.
     - expression: >-
         request.resource.resource != 'serviceaccounts' ||
@@ -697,7 +716,7 @@ spec:
           variables.target.spec.template.spec.serviceAccountName == variables.resourceName &&
           variables.target.spec.template.spec.automountServiceAccountToken == false &&
           size(variables.target.spec.template.spec.containers) == 1 &&
-          variables.target.spec.template.spec.containers[0].image == '{{ $runtimeImage }}')
+          variables.target.spec.template.spec.containers[0].image in {{ $runtimeImages | toJson }})
       message: Durability actions may promote only the exact pinned candidate StatefulSet.
     - expression: >-
         request.resource.resource != 'services' ||

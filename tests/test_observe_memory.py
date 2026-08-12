@@ -67,9 +67,10 @@ def test_add_compact_observation_is_canonical_addressable_and_indexed(
     assert state.document.resolve_unit(result["unit_ref"]).status == "found"
     assert result["semantic"]["index"]["requested_paths"][-1] == PAGE
     assert all(
-        component["outcome"] in {"accepted", "completed", "deferred", "degraded"}
+        component["outcome"]
+        in {"accepted", "completed", "registered", "deferred", "degraded"}
         for component in result["semantic"]["index"]["components"]
-    )
+    ), result["semantic"]["index"]
 
 
 def test_validate_assigns_anchor_from_canonical_rendered_fields(tmp_path: Path) -> None:

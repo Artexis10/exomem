@@ -57,9 +57,7 @@ class ProvisionerDatabase:
                 insert(self._revision_table).values(version_num=DATABASE_REVISION)
             )
             if (
-                await connection.scalar(
-                    select(CapacityLedger.id).where(CapacityLedger.id == 1)
-                )
+                await connection.scalar(select(CapacityLedger.id).where(CapacityLedger.id == 1))
                 is None
             ):
                 await connection.execute(insert(CapacityLedger).values(id=1, revision=0))

@@ -814,7 +814,7 @@ def catalog_cache_token(vault_root: Path) -> str:
 # ------------------------------------------------------------------ write seams
 
 
-def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
+def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     """Keep the lexical index in lockstep with a writer's markdown change.
 
     Deliberately NOT gated behind the embeddings extra or its env switches —
@@ -824,26 +824,30 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
     first search builds it whole.
     """
     if not _catalog_usable():
-        return
+        return True
     md = [p for p in written_paths if p.suffix.lower() == ".md" and ".sync-conflict-" not in p.name]
     if not md or not lexical_path(vault_root).exists():
-        return
+        return True
     try:
         get_store(vault_root).upsert_paths(md)
     except Exception as e:  # noqa: BLE001
         log.warning("lexical sidecar upsert skipped (%s)", e)
+        return False
+    return True
 
 
-def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
+def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
     """Drop lexical rows for removed files. Same gates as the upsert hook."""
     if not _catalog_usable():
-        return
+        return True
     if not removed_rel_paths or not lexical_path(vault_root).exists():
-        return
+        return True
     try:
         get_store(vault_root).delete_rel_paths(removed_rel_paths)
     except Exception as e:  # noqa: BLE001
         log.warning("lexical sidecar delete skipped (%s)", e)
+        return False
+    return True
 
 
 def purge_exact_persisted_rows(

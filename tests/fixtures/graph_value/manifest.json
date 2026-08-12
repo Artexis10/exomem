@@ -100,6 +100,7 @@
         "capture_source": {"classification": "probe", "probe": "cli-import"},
         "compile_source": {"classification": "probe", "probe": "provenance"},
         "preserve_evidence": {"classification": "probe", "probe": "provenance"},
+        "preserve_artifacts": {"classification": "excluded", "reason": "remote file-handle retrieval is transport-specific and outside the local knowledge-behavior comparison"},
         "transfer_artifact": {"classification": "excluded", "reason": "the local stdio benchmark pre-seeds deterministic binary fixtures; HTTP upload transport is outside the knowledge-behavior comparison"},
         "process_media": {"classification": "probe", "probe": "media-pdf"},
         "govern_memory": {"classification": "probe", "probe": "governance-review"},
@@ -114,6 +115,7 @@
         "manage_memory_file": {"classification": "probe", "probe": "lifecycle-mutations"},
         "query_dataset": {"classification": "probe", "probe": "dataset-query"},
         "record_memory": {"classification": "excluded", "reason": "raw Records are intentionally structured-only and the graph-value corpus has no Record collection; dedicated Records acceptance tests cover this command"},
+        "plan_memory": {"classification": "excluded", "reason": "raw Planning is intentionally structured-only and the graph-value corpus has no Planning collection; dedicated Planning acceptance tests cover this command"},
         "read_media": {"classification": "probe", "probe": "media-video"}
       },
       "cli": {
@@ -129,6 +131,7 @@
         "capture_source": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "compile_source": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "preserve_evidence": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "preserve_artifacts": {"classification": "excluded", "reason": "remote file-handle retrieval is transport-specific and outside the local knowledge-behavior comparison"},
         "transfer_artifact": {"classification": "excluded", "reason": "the local stdio benchmark pre-seeds deterministic binary fixtures; HTTP upload transport is outside the knowledge-behavior comparison"},
         "process_media": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "govern_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
@@ -142,7 +145,8 @@
         "schema_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "manage_memory_file": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
         "query_dataset": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
-        "record_memory": {"classification": "excluded", "reason": "raw Records are intentionally structured-only and the graph-value corpus has no Record collection; dedicated Records acceptance tests cover this command"}
+        "record_memory": {"classification": "excluded", "reason": "raw Records are intentionally structured-only and the graph-value corpus has no Record collection; dedicated Records acceptance tests cover this command"},
+        "plan_memory": {"classification": "excluded", "reason": "raw Planning is intentionally structured-only and the graph-value corpus has no Planning collection; dedicated Planning acceptance tests cover this command"}
       }
     },
     "basic_memory": {

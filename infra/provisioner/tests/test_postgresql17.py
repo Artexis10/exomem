@@ -23,7 +23,9 @@ PROVISIONER_ROOT = Path(__file__).resolve().parents[1]
 PROVISIONER_TEST_IMAGE = os.environ.get("PROVISIONER_TEST_IMAGE")
 if PROVISIONER_TEST_IMAGE is None:
     from sqlalchemy import func, select, text, update
+    from sqlalchemy.ext.asyncio import create_async_engine
 
+    import exomem_provisioner.database_bootstrap as database_bootstrap
     import exomem_provisioner.repository as repository_module
     from exomem_provisioner.capacity import (
         CapacityBlocked,
@@ -39,15 +41,25 @@ if PROVISIONER_TEST_IMAGE is None:
         CapacityDestructiveFence,
         CapacityLedger,
         CapacityReservation,
+        CapacityReservationClass,
         Operation,
         OperationAction,
+        OperationState,
+        Resource,
+        ResourceKind,
         TenantFence,
     )
+    from exomem_provisioner.operation_recovery import (
+        LiveObservation,
+        RecoveryRefusal,
+        RecoveryService,
+    )
+    from exomem_provisioner.provider_identity import cell_resource_name
     from exomem_provisioner.repository import OperationRepository, StaleFence
 else:
-    database_source = (
-        PROVISIONER_ROOT / "src/exomem_provisioner/database.py"
-    ).read_text(encoding="utf-8")
+    database_source = (PROVISIONER_ROOT / "src/exomem_provisioner/database.py").read_text(
+        encoding="utf-8"
+    )
     revision_match = re.search(r'^DATABASE_REVISION = "([^"]+)"$', database_source, re.MULTILINE)
     assert revision_match is not None
     DATABASE_REVISION = revision_match.group(1)
@@ -99,7 +111,7 @@ def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProce
 @pytest.fixture(scope="module")
 def postgresql17() -> Iterator[PostgreSQL17]:
     if shutil.which("docker") is None:
-        pytest.skip("Docker is required for the PostgreSQL 17 integration gates")
+        pytest.fail("Docker is required when RUN_POSTGRESQL17_TEST=1")
     container = f"exomem-provisioner-pg17-{uuid.uuid4().hex[:12]}"
     network = f"exomem-provisioner-pg17-{uuid.uuid4().hex[:12]}"
     admin_password = f"admin-{uuid.uuid4().hex}"
@@ -185,9 +197,12 @@ def other_postgresql17(postgresql17: PostgreSQL17) -> Iterator[PostgreSQL17]:
             port=0,
             admin_password=admin_password,
         )
-        assert _psql(server, "SHOW server_version_num;").stdout.strip().splitlines()[
-            -1
-        ].startswith("17")
+        assert (
+            _psql(server, "SHOW server_version_num;")
+            .stdout.strip()
+            .splitlines()[-1]
+            .startswith("17")
+        )
         yield server
     finally:
         _run(["docker", "rm", "--force", container], check=False)
@@ -231,9 +246,7 @@ def _new_database(server: PostgreSQL17, label: str) -> ProvisionerTestDatabase:
         settings = ProvisionerSettings(
             bearer="b" * 32,
             envelope_key="k" * 32,
-            database_url=(
-                f"postgresql+asyncpg://{role}:{password}@127.0.0.1:{server.port}/{name}"
-            ),
+            database_url=(f"postgresql+asyncpg://{role}:{password}@127.0.0.1:{server.port}/{name}"),
             database_schema=schema,
             database_role=role,
             trusted_proxy_ips="127.0.0.1",
@@ -377,6 +390,408 @@ def _repository(
 
 
 @ASYNCIO_POSTGRESQL17
+async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
+    postgresql17: PostgreSQL17,
+) -> None:
+    target = _new_database(postgresql17, "recovery")
+    migrated = _migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    assert target.settings is not None
+    database = ProvisionerDatabase(target.settings)
+
+    class Lock:
+        def matches_runtime_request(
+            self, request: dict[str, object], *, wire_protocol: str
+        ) -> bool:
+            return (
+                wire_protocol == "exomem-cell-provisioner.v1"
+                and request["provisionMode"] == "serve"
+                and request["releaseVersion"] == "0.39.2"
+                and request["protocolVersion"] == "1"
+            )
+
+    class Observer:
+        async def observe(
+            self, operation: Operation, resources: tuple[Resource, ...]
+        ) -> LiveObservation:
+            assert len(resources) == 4
+            return LiveObservation(
+                namespace_present=True,
+                release_present=True,
+                pvc_bound=True,
+                volume_present=True,
+                init_job_present=False,
+                init_complete=False,
+                init_failed_only=False,
+                terminating=False,
+                runtime_admitted=False,
+                routes_present=0,
+            )
+
+    request: dict[str, object] = {
+        "operationId": "provider-recovery-postgresql",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "tenantId": "tenant-recovery-postgresql",
+        "cellId": "cell-recovery-postgresql",
+        "protocolVersion": "1",
+        "releaseVersion": "0.39.2",
+        "provisionMode": "serve",
+    }
+    codec = AesGcmEnvelopeCodec.from_secret(target.settings.envelope_key.get_secret_value())
+    operation_id = str(uuid.uuid4())
+    try:
+        async with database.session_factory.begin() as session:
+            operation = Operation(
+                id=operation_id,
+                action=OperationAction.PROVISION,
+                idempotency_key="recovery-postgresql-key",
+                canonical_request_sha256=repository_module.canonical_request_sha256(request),
+                tenant_id="tenant-recovery-postgresql",
+                cell_id="cell-recovery-postgresql",
+                external_operation_id="provider-recovery-postgresql",
+                provider_operation_id="provider-recovery-postgresql",
+                fence_generation=7,
+                provider_fence_generation=7,
+                state=OperationState.ERROR,
+                caller_checkpoint="requested",
+                checkpoint="failed",
+                request_ciphertext=codec.encrypt_json(
+                    request, purpose="operation-request:provision:recovery-postgresql-key"
+                ),
+                error_code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+                finalized_at=datetime.now(UTC),
+            )
+            session.add(operation)
+            session.add(TenantFence(tenant_id=operation.tenant_id, fence_generation=7))
+            await session.flush()
+            for kind in (
+                ResourceKind.HELM_RELEASE,
+                ResourceKind.KUBERNETES_NAMESPACE,
+                ResourceKind.PVC,
+                ResourceKind.VOLUME,
+            ):
+                reference = f"recovery-reference-{kind.value}"
+                session.add(
+                    Resource(
+                        operation_id=operation_id,
+                        tenant_id=operation.tenant_id,
+                        cell_id=operation.cell_id,
+                        kind=kind,
+                        reference_digest=hashlib.sha256(reference.encode()).hexdigest(),
+                        reference_ciphertext=codec.encrypt_json(
+                            {"reference": reference},
+                            purpose=f"resource-reference:{operation_id}:{kind.value}",
+                        ),
+                        provider_operation_id=operation.external_operation_id,
+                        provider_fence_generation=operation.fence_generation,
+                    )
+                )
+            session.add(
+                CapacityReservation(
+                    tenant_id=operation.tenant_id,
+                    cell_id=operation.cell_id,
+                    resource_name=cell_resource_name(operation.cell_id),
+                    reservation_class=CapacityReservationClass.USER,
+                    reserving_operation_id=operation_id,
+                    reserving_provider_operation_id=operation.external_operation_id,
+                    reserving_fence_generation=operation.fence_generation,
+                )
+            )
+        denied = RecoveryService(
+            sessions=database.session_factory,
+            codec=codec,
+            database_name=target.name,
+            database_role=target.role,
+            database_schema=target.schema,
+            database_lock_timeout_seconds=1,
+            deployment_lock=object(),  # type: ignore[arg-type]
+            observer=Observer(),
+        )
+        with pytest.raises(RecoveryRefusal, match="preflight-failed"):
+            await denied.preflight(operation_id)
+        service = RecoveryService(
+            sessions=database.session_factory,
+            codec=codec,
+            database_name=target.name,
+            database_role=target.role,
+            database_schema=target.schema,
+            database_lock_timeout_seconds=1,
+            deployment_lock=Lock(),  # type: ignore[arg-type]
+            observer=Observer(),
+        )
+
+        async def refuse_after(
+            model: type[Operation] | type[Resource] | type[CapacityReservation],
+            identity: object,
+            field: str,
+            value: object,
+        ) -> None:
+            async with database.session_factory.begin() as session:
+                row = await session.get(model, identity)
+                assert row is not None
+                original = getattr(row, field)
+                setattr(row, field, value)
+            with pytest.raises(RecoveryRefusal):
+                await service.preflight(operation_id)
+            async with database.session_factory.begin() as session:
+                row = await session.get(model, identity)
+                assert row is not None
+                setattr(row, field, original)
+
+        # These are all independent real-PostgreSQL refusal cases; restoring each
+        # row proves a rejected preflight has not progressed the operation.
+        await refuse_after(Operation, operation_id, "action", OperationAction.HEALTH)
+        await refuse_after(Operation, operation_id, "state", OperationState.PENDING)
+        await refuse_after(Operation, operation_id, "checkpoint", "volume-owned")
+        await refuse_after(Operation, operation_id, "error_code", "OTHER")
+        await refuse_after(Operation, operation_id, "claim_owner", "other-worker")
+        await refuse_after(Operation, operation_id, "result_redacted", {"completed": True})
+        await refuse_after(Operation, operation_id, "finalized_at", None)
+        await refuse_after(Operation, operation_id, "provider_operation_id", "other-provider")
+        await refuse_after(Operation, operation_id, "provider_fence_generation", 8)
+        await refuse_after(Operation, operation_id, "canonical_request_sha256", "0" * 64)
+        async with database.session_factory() as session:
+            resource = await session.scalar(
+                select(Resource).where(Resource.operation_id == operation_id)
+            )
+            reservation = await session.scalar(
+                select(CapacityReservation).where(
+                    CapacityReservation.reserving_operation_id == operation_id
+                )
+            )
+            assert resource is not None and reservation is not None
+            resource_id = resource.id
+            reservation_id = reservation.id
+        await refuse_after(Resource, resource_id, "reference_digest", "0" * 64)
+        await refuse_after(Resource, resource_id, "provider_operation_id", "other-provider")
+        await refuse_after(CapacityReservation, reservation_id, "resource_name", "wrong-name")
+
+        async def delete_then_refuse(model, identity: object) -> None:
+            async with database.session_factory.begin() as session:
+                row = await session.get(model, identity)
+                assert row is not None
+                values = {
+                    column.name: getattr(row, column.name) for column in row.__table__.columns
+                }
+                await session.delete(row)
+            with pytest.raises(RecoveryRefusal):
+                await service.preflight(operation_id)
+            async with database.session_factory.begin() as session:
+                session.add(model(**values))
+
+        await delete_then_refuse(Resource, resource_id)
+        await delete_then_refuse(CapacityReservation, reservation_id)
+        async with database.session_factory.begin() as session:
+            ledger = await session.get(CapacityLedger, 1)
+            assert ledger is not None
+            ledger_values = {
+                column.name: getattr(ledger, column.name) for column in ledger.__table__.columns
+            }
+            await session.delete(ledger)
+        with pytest.raises(RecoveryRefusal):
+            await service.preflight(operation_id)
+        async with database.session_factory.begin() as session:
+            session.add(CapacityLedger(**ledger_values))
+        async with database.session_factory.begin() as session:
+            session.add(
+                CapacityDestructiveFence(
+                    tenant_id=operation.tenant_id,
+                    cell_id=operation.cell_id,
+                    release_reason="DISCARD",
+                    destructive_operation_id=operation_id,
+                    provider_operation_id=operation.external_operation_id,
+                    fence_generation=operation.fence_generation,
+                    completed_at=datetime.now(UTC),
+                )
+            )
+        with pytest.raises(RecoveryRefusal):
+            await service.preflight(operation_id)
+        async with database.session_factory.begin() as session:
+            fence = await session.scalar(
+                select(CapacityDestructiveFence).where(
+                    CapacityDestructiveFence.destructive_operation_id == operation_id
+                )
+            )
+            assert fence is not None
+            await session.delete(fence)
+        foreign_operation_id = str(uuid.uuid4())
+        async with database.session_factory.begin() as session:
+            current = await session.get(Operation, operation_id)
+            assert current is not None
+            values = {
+                column.name: getattr(current, column.name) for column in current.__table__.columns
+            }
+            values.update(
+                id=foreign_operation_id,
+                idempotency_key="recovery-postgresql-conflict-key",
+                state=OperationState.PENDING,
+                checkpoint="requested",
+                error_code=None,
+                finalized_at=None,
+                available_at=datetime.now(UTC),
+            )
+            session.add(Operation(**values))
+        with pytest.raises(RecoveryRefusal):
+            await service.preflight(operation_id)
+        async with database.session_factory.begin() as session:
+            foreign = await session.get(Operation, foreign_operation_id)
+            assert foreign is not None
+            await session.delete(foreign)
+        async with database.session_factory.begin() as session:
+            current = await session.get(Operation, operation_id)
+            resource = await session.get(Resource, resource_id)
+            assert current is not None and resource is not None
+            session.add(
+                Resource(
+                    id=str(uuid.uuid4()),
+                    operation_id=foreign_operation_id,
+                    tenant_id=current.tenant_id,
+                    cell_id=current.cell_id,
+                    kind=ResourceKind.ROUTE,
+                    reference_digest=resource.reference_digest,
+                    reference_ciphertext=resource.reference_ciphertext,
+                    provider_operation_id=current.external_operation_id,
+                    provider_fence_generation=current.fence_generation,
+                )
+            )
+            values = {
+                column.name: getattr(current, column.name) for column in current.__table__.columns
+            }
+            values.update(
+                id=foreign_operation_id,
+                idempotency_key="recovery-postgresql-foreign-key",
+                state=OperationState.ERROR,
+            )
+            session.add(Operation(**values))
+        with pytest.raises(RecoveryRefusal):
+            await service.preflight(operation_id)
+        async with database.session_factory.begin() as session:
+            foreign_resource = await session.scalar(
+                select(Resource).where(Resource.operation_id == foreign_operation_id)
+            )
+            foreign = await session.get(Operation, foreign_operation_id)
+            assert foreign_resource is not None and foreign is not None
+            await session.delete(foreign_resource)
+            await session.flush()
+            await session.delete(foreign)
+        async with database.session_factory.begin() as session:
+            await session.execute(
+                text(
+                    "CREATE FUNCTION recovery_marker_test_refusal() RETURNS trigger "
+                    "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced marker rollback'; END $$"
+                )
+            )
+            await session.execute(
+                text(
+                    "CREATE TRIGGER recovery_marker_test_refusal BEFORE UPDATE "
+                    "ON operations FOR EACH ROW EXECUTE FUNCTION recovery_marker_test_refusal()"
+                )
+            )
+        with pytest.raises(RecoveryRefusal, match="recovery-failed"):
+            await service.reopen(operation_id)
+        async with database.session_factory() as session:
+            rolled_back = await session.get(Operation, operation_id)
+            assert rolled_back is not None and rolled_back.state is OperationState.ERROR
+            assert "_init_retry_recovery_v1" not in rolled_back.progress
+        async with database.session_factory.begin() as session:
+            await session.execute(text("DROP TRIGGER recovery_marker_test_refusal ON operations"))
+            await session.execute(text("DROP FUNCTION recovery_marker_test_refusal()"))
+        first, second = await asyncio.gather(
+            service.reopen(operation_id), service.reopen(operation_id)
+        )
+        assert {first["status"], second["status"]} == {"reopened", "already-recovered"}
+        result = first if first["status"] == "reopened" else second
+        assert isinstance(result["recovery_digest"], str) and len(result["recovery_digest"]) == 64
+        async with database.session_factory() as session:
+            operation = await session.get(Operation, operation_id)
+            assert operation is not None and operation.state is OperationState.PENDING
+            assert operation.checkpoint == "volume-owned"
+            assert operation.error_code is None and operation.finalized_at is None
+            assert set(operation.progress["_init_retry_recovery_v1"]) == {
+                "schema",
+                "preflight_sha256",
+                "helper_source_sha256",
+                "claim_generation",
+                "committed_at",
+            }
+        for role, schema in (("wrong-role", target.schema), (target.role, "wrong_schema")):
+            wrong_identity = RecoveryService(
+                sessions=database.session_factory,
+                codec=codec,
+                database_name=target.name,
+                database_role=role,
+                database_schema=schema,
+                database_lock_timeout_seconds=1,
+                deployment_lock=Lock(),  # type: ignore[arg-type]
+                observer=Observer(),
+            )
+            for method in (
+                wrong_identity.inspect,
+                wrong_identity.verify_recovery,
+                wrong_identity.reopen,
+            ):
+                with pytest.raises(RecoveryRefusal, match="database identity is invalid"):
+                    await method(operation_id)
+        async with database.session_factory.begin() as session:
+            await session.execute(text("UPDATE alembic_version SET version_num='wrong_revision'"))
+        with pytest.raises(RecoveryRefusal, match="database revision is invalid"):
+            await service.verify_recovery(operation_id)
+        async with database.session_factory.begin() as session:
+            await session.execute(
+                text("UPDATE alembic_version SET version_num=:revision"),
+                {"revision": DATABASE_REVISION},
+            )
+    finally:
+        await database.dispose()
+
+
+@ASYNCIO_POSTGRESQL17
+async def test_postgresql17_recovery_and_migration_share_one_bounded_lock_domain(
+    postgresql17: PostgreSQL17,
+) -> None:
+    target = _new_database(postgresql17, "recovery_lock")
+    migrated = _migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    assert target.settings is not None
+    database = ProvisionerDatabase(target.settings)
+    service = RecoveryService(
+        sessions=database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret(target.settings.envelope_key.get_secret_value()),
+        database_name=target.name,
+        database_role=target.role,
+        database_schema=target.schema,
+        database_lock_timeout_seconds=1,
+        deployment_lock=object(),  # type: ignore[arg-type]
+        observer=object(),  # type: ignore[arg-type]
+    )
+    engine = create_async_engine(target.settings.database_url.get_secret_value())
+    key = database_bootstrap.database_lock_key(target.name, target.schema)
+    try:
+        async with engine.connect() as migration_connection:
+            await database_bootstrap._acquire_lock(migration_connection, key=key, timeout_seconds=1)
+            try:
+                async with database.session_factory.begin() as session:
+                    with pytest.raises(RecoveryRefusal, match="database recovery lock timed out"):
+                        await service._require_database_identity(session)
+            finally:
+                await database_bootstrap._release_lock(migration_connection, key=key)
+        async with database.session_factory.begin() as session:
+            await service._require_database_identity(session)
+            async with engine.connect() as migration_connection:
+                with pytest.raises(
+                    database_bootstrap.DatabaseBootstrapError,
+                    match="database command lock timed out",
+                ):
+                    await database_bootstrap._acquire_lock(
+                        migration_connection, key=key, timeout_seconds=1
+                    )
+    finally:
+        await database.dispose()
+        await engine.dispose()
+
+
+@ASYNCIO_POSTGRESQL17
 async def test_fresh_postgresql17_bootstrap_creates_owned_schema_before_version_table(
     postgresql17: PostgreSQL17,
 ) -> None:
@@ -448,7 +863,7 @@ def test_postgresql17_migration_rejects_existing_schema_with_wrong_owner(
     target = _new_database(postgresql17, "owner")
     _psql(
         postgresql17,
-        f'CREATE ROLE "{target.role}" LOGIN PASSWORD \'{target.runtime_password}\';',
+        f"CREATE ROLE \"{target.role}\" LOGIN PASSWORD '{target.runtime_password}';",
         database=target.name,
     )
     wrong_owner = f"wrong_owner_{uuid.uuid4().hex[:8]}"
@@ -528,7 +943,10 @@ print(json.dumps({
     )
     payload = json.loads(inspected.stdout)
     expected: dict[str, str] = {}
-    for source in [PROVISIONER_ROOT / "alembic.ini", *sorted((PROVISIONER_ROOT / "alembic").rglob("*"))]:
+    for source in [
+        PROVISIONER_ROOT / "alembic.ini",
+        *sorted((PROVISIONER_ROOT / "alembic").rglob("*")),
+    ]:
         if source.is_file() and "__pycache__" not in source.parts:
             expected[str(source.relative_to(PROVISIONER_ROOT))] = hashlib.sha256(
                 source.read_bytes()
@@ -568,8 +986,12 @@ def test_built_image_bootstrap_is_concurrent_retryable_and_runtime_exact(
         PROVISIONER_TEST_IMAGE,
         "exomem-provisioner-database-bootstrap",
     ]
-    first = subprocess.Popen(base, cwd=PROVISIONER_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    second = subprocess.Popen(base, cwd=PROVISIONER_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    first = subprocess.Popen(
+        base, cwd=PROVISIONER_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    second = subprocess.Popen(
+        base, cwd=PROVISIONER_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     first_stdout, first_stderr = first.communicate(timeout=30)
     second_stdout, second_stderr = second.communicate(timeout=30)
     assert first.returncode == 0, first_stdout + first_stderr
@@ -600,7 +1022,7 @@ def test_built_image_bootstrap_is_concurrent_retryable_and_runtime_exact(
 
     _psql(
         postgresql17,
-        f'UPDATE "{target.schema}".alembic_version SET version_num = \'0003_cell_operation_lock\';',
+        f"UPDATE \"{target.schema}\".alembic_version SET version_num = '0003_cell_operation_lock';",
         database=target.name,
     )
     refused = _image_command(
@@ -609,11 +1031,14 @@ def test_built_image_bootstrap_is_concurrent_retryable_and_runtime_exact(
         "exomem-provisioner-database-validate",
     )
     assert refused.returncode != 0
-    assert "0003_cell_operation_lock" in _psql(
-        postgresql17,
-        f'SELECT version_num FROM "{target.schema}".alembic_version;',
-        database=target.name,
-    ).stdout
+    assert (
+        "0003_cell_operation_lock"
+        in _psql(
+            postgresql17,
+            f'SELECT version_num FROM "{target.schema}".alembic_version;',
+            database=target.name,
+        ).stdout
+    )
 
 
 @pytest.mark.skipif(
@@ -760,8 +1185,7 @@ def test_built_image_rejects_incoming_runtime_role_membership(
     inherited_reader = f"inherited_reader_{uuid.uuid4().hex[:8]}"
     _psql(
         postgresql17,
-        f'CREATE ROLE "{inherited_reader}" LOGIN; '
-        f'GRANT "{target.role}" TO "{inherited_reader}";',
+        f'CREATE ROLE "{inherited_reader}" LOGIN; GRANT "{target.role}" TO "{inherited_reader}";',
         database=target.name,
     )
 
@@ -794,7 +1218,7 @@ def test_built_image_bootstrap_rejects_runtime_authority_drift(
     attributes = "SUPERUSER" if drift == "attributes" else "NOSUPERUSER"
     _psql(
         postgresql17,
-        f'CREATE ROLE "{target.role}" LOGIN {attributes} PASSWORD \'{target.runtime_password}\';',
+        f"CREATE ROLE \"{target.role}\" LOGIN {attributes} PASSWORD '{target.runtime_password}';",
         database=target.name,
     )
     schema_owner = target.role
@@ -816,17 +1240,23 @@ def test_built_image_bootstrap_rejects_runtime_authority_drift(
 
     assert completed.returncode != 0
     if drift == "owner":
-        assert schema_owner in _psql(
-            postgresql17,
-            f"SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='{target.schema}';",
-            database=target.name,
-        ).stdout
+        assert (
+            schema_owner
+            in _psql(
+                postgresql17,
+                f"SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='{target.schema}';",
+                database=target.name,
+            ).stdout
+        )
     else:
-        assert _psql(
-            postgresql17,
-            f"SELECT rolsuper FROM pg_roles WHERE rolname='{target.role}';",
-            database=target.name,
-        ).stdout.strip() == "t"
+        assert (
+            _psql(
+                postgresql17,
+                f"SELECT rolsuper FROM pg_roles WHERE rolname='{target.role}';",
+                database=target.name,
+            ).stdout.strip()
+            == "t"
+        )
 
 
 @ASYNCIO_POSTGRESQL17
@@ -1002,9 +1432,7 @@ async def test_postgresql17_capacity_ledger_serializes_two_sixth_slot_attempts(
         )
         async with database.session_factory() as blocker_session:
             async with blocker_session.begin():
-                locked_ledger = await blocker_session.get(
-                    CapacityLedger, 1, with_for_update=True
-                )
+                locked_ledger = await blocker_session.get(CapacityLedger, 1, with_for_update=True)
                 assert locked_ledger is not None
                 waiting = asyncio.create_task(
                     authority.reserve(
@@ -1026,9 +1454,9 @@ async def test_postgresql17_capacity_ledger_serializes_two_sixth_slot_attempts(
 
         async with database.session_factory() as session:
             active = await session.scalar(
-                select(func.count()).select_from(CapacityReservation).where(
-                    CapacityReservation.released_at.is_(None)
-                )
+                select(func.count())
+                .select_from(CapacityReservation)
+                .where(CapacityReservation.released_at.is_(None))
             )
             revision = await session.scalar(
                 select(CapacityLedger.revision).where(CapacityLedger.id == 1)
@@ -1229,19 +1657,14 @@ async def test_postgresql17_destructive_and_reservation_orders_linearize(
                 await session.scalar(
                     select(func.count())
                     .select_from(CapacityDestructiveFence)
-                    .where(
-                        CapacityDestructiveFence.tenant_id
-                        == "tenant-reservation-first"
-                    )
+                    .where(CapacityDestructiveFence.tenant_id == "tenant-reservation-first")
                 )
                 == 0
             )
             tables = set(
                 (
                     await session.execute(
-                        text(
-                            "SELECT tablename FROM pg_tables WHERE schemaname=:schema"
-                        ),
+                        text("SELECT tablename FROM pg_tables WHERE schemaname=:schema"),
                         {"schema": target.schema},
                     )
                 ).scalars()

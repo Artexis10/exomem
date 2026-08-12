@@ -30,6 +30,7 @@ PRODUCT_ROUTES = [
     "capture_source",
     "compile_source",
     "preserve_evidence",
+    "preserve_artifacts",
     "transfer_artifact",
     "review_memory",
     "review_item_context",
@@ -95,6 +96,47 @@ def test_all_product_routes_exist(vault, monkeypatch: pytest.MonkeyPatch) -> Non
     for name in PRODUCT_ROUTES:
         r = client.post(f"/api/{name}", json={}, headers=_auth())
         assert r.status_code != 404, f"/api/{name} missing: {r.status_code} {r.text}"
+
+
+def test_preserve_artifacts_rest_schema_and_malformed_file_error(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    schema = client.get("/api/openapi.json").json()["paths"]["/api/preserve_artifacts"]["post"][
+        "requestBody"
+    ]["content"]["application/json"]["schema"]["properties"]["files"]
+
+    assert schema["minItems"] == 1
+    assert schema["maxItems"] == 8
+    assert list(schema["items"]["properties"]) == [
+        "download_url",
+        "file_id",
+        "mime_type",
+        "file_name",
+    ]
+    assert schema["items"]["required"] == ["download_url", "file_id"]
+    assert "additionalProperties" not in schema["items"]
+    assert schema["items"]["properties"]["file_id"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+    }
+    assert schema["items"]["properties"]["mime_type"] == {
+        "type": "string",
+        "maxLength": 255,
+    }
+
+    response = client.post(
+        "/api/preserve_artifacts",
+        json={
+            "scope": "case",
+            "category": "raw",
+            "files": [{"download_url": "https://files.example/?signature=secret"}],
+        },
+        headers=_auth(),
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "INVALID_FILE"
+    assert "signature" not in error["message"]
 
 
 def test_ask_memory_route_calls_the_same_find_leaf(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -561,13 +603,26 @@ def test_edit_memory_rest_and_openapi_use_discriminated_primary_shape(
         "patch_frontmatter",
         "fill_row",
     }
-    assert set(branches["fill_row"]["properties"]) == {
+    guarded_fields = {
+        "kind",
+        "validate_only",
+        "transition_token",
+        "relation_disposition",
+        "relation_review_hash",
+        "relation_review_reason",
+        "expected_hash",
+    }
+    assert set(branches["fill_row"]["properties"]) == guarded_fields | {
         "kind",
         "row_key",
         "take",
         "overwrite",
     }
-    assert "expected_hash" not in branches["patch_frontmatter"]["properties"]
+    assert set(branches["patch_frontmatter"]["properties"]) == guarded_fields | {
+        "field",
+        "value",
+        "allow_curated",
+    }
     edits = branches["batch_replace"]["properties"]["edits"]
     assert edits["minItems"] == 1
     assert set(edits["items"]["required"]) == {"old_string", "new_string"}

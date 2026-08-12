@@ -40,6 +40,7 @@ from . import (
     corpus_aware,
     indexes,
     memory_refs,
+    relation_registry,
     relation_review,
     semantic_units,
     semantic_writes,
@@ -263,6 +264,7 @@ class _PreparedNote:
 
 def _build_write_feedback(
     *,
+    vault_root: Path,
     note_type: str,
     sources_norm: list[str],
     body_clean: str,
@@ -271,12 +273,22 @@ def _build_write_feedback(
     backrefs_planned: int,
     suggestions_count: int,
 ) -> dict:
-    document = semantic_units.parse_semantic_units(body_clean)
+    registry = relation_registry.load_registry(vault_root)
+    document = semantic_units.parse_semantic_units(
+        body_clean,
+        relation_registry=registry,
+        retain_unknown_relations=True,
+    )
     by_kind: dict[str, int] = {}
     for unit in document.rich_units:
         by_kind[unit.kind] = by_kind.get(unit.kind, 0) + 1
 
-    note_relation_lines = {relation.line for relation in document.note_relations}
+    registered_note_relations = tuple(
+        relation
+        for relation in document.note_relations
+        if registry.resolve(relation.kind).status != "unregistered"
+    )
+    note_relation_lines = {relation.line for relation in registered_note_relations}
     block_relation_lines = {
         relation.line
         for unit in document.rich_units
@@ -298,8 +310,19 @@ def _build_write_feedback(
             seen_generic_targets.add(target)
             generic_targets.append(target)
 
-    typed_note_relations = len(document.note_relations)
+    typed_note_relations = len(registered_note_relations)
     typed_block_relations = sum(len(unit.relations) for unit in document.rich_units)
+    relation_kinds = {
+        relation.kind
+        for relation in document.note_relations
+    } | {
+        relation.kind
+        for unit in document.rich_units
+        for relation in unit.relations
+    }
+    unregistered_labels = sorted(
+        kind for kind in relation_kinds if registry.resolve(kind).status == "unregistered"
+    )
     relation_debt = not (
         typed_note_relations
         or typed_block_relations
@@ -314,6 +337,11 @@ def _build_write_feedback(
     if suggestions_count:
         next_actions.append(
             "review related-page suggestions and add accepted note edges under `## Relations`"
+        )
+    if unregistered_labels:
+        next_actions.append(
+            "review recurring relation vocabulary with "
+            "`schema_memory(operation='infer', subject='relations')`"
         )
     if not sources_norm:
         if not body_targets:
@@ -334,6 +362,22 @@ def _build_write_feedback(
         )
     if not next_actions:
         next_actions.append("no immediate structural follow-up")
+
+    relation_feedback: dict[str, object] = {
+        "typed_note": typed_note_relations,
+        "typed_block": typed_block_relations,
+        "errors": [error.as_dict() for error in document.note_relation_errors],
+        "relation_debt": relation_debt,
+    }
+    if unregistered_labels:
+        relation_feedback["unregistered"] = {
+            "count": len(unregistered_labels),
+            "labels": unregistered_labels,
+            "promotion_route": {
+                "tool": "schema_memory",
+                "args": {"operation": "infer", "subject": "relations"},
+            },
+        }
 
     return {
         "contract": "compiled-note",
@@ -359,12 +403,7 @@ def _build_write_feedback(
             "unresolved_count": len(unresolved),
             "unresolved": unresolved,
         },
-        "relations": {
-            "typed_note": typed_note_relations,
-            "typed_block": typed_block_relations,
-            "errors": [error.as_dict() for error in document.note_relation_errors],
-            "relation_debt": relation_debt,
-        },
+        "relations": relation_feedback,
         "suggestions": {
             "related_pages": suggestions_count,
         },
@@ -644,6 +683,7 @@ def _legacy_note(
 
     kb = kb_root(vault_root)
     write_feedback = _build_write_feedback(
+        vault_root=vault_root,
         note_type=note_type,
         sources_norm=sources_norm,
         body_clean=body_clean,
@@ -1867,6 +1907,7 @@ def note(
         suggestions,
     )
     feedback = _build_write_feedback(
+        vault_root=root,
         note_type=note_type,
         sources_norm=sources_norm,
         body_clean=body_clean,

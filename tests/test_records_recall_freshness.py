@@ -6,6 +6,115 @@ from exomem import find as find_module
 from exomem import freshness, recall_policy
 
 
+def test_peek_recall_publication_is_cold_and_never_reprojects(
+    tmp_path: Path, monkeypatch
+) -> None:
+    assert freshness.peek_recall_publication(tmp_path, "vault") is None
+
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    freshness.seed(tmp_path, "vault", [(str(page), freshness.stat_signature(page))])
+    prepared = freshness.prepare_recall_publication(tmp_path, "vault")
+    assert prepared is not None
+
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_policy_identity",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("peek must not call policy")),
+    )
+    monkeypatch.setattr(
+        freshness,
+        "triple_from_entries",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("peek must not compute triple")),
+    )
+
+    assert freshness.peek_recall_publication(tmp_path, "vault") == prepared
+
+
+def test_prepare_recall_publication_requires_live_map_and_no_pending(tmp_path: Path) -> None:
+    assert freshness.prepare_recall_publication(tmp_path, "vault") is None
+
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    freshness.seed(tmp_path, "vault", [(str(page), freshness.stat_signature(page))])
+    assert freshness.prepare_recall_publication(tmp_path, "vault") is not None
+
+    freshness.mark_external_pending(tmp_path)
+    assert freshness.prepare_recall_publication(tmp_path, "vault") is None
+    assert freshness.peek_recall_publication(tmp_path, "vault") is None
+
+
+def test_prepare_recall_publication_refuses_policy_identity_race(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    freshness.seed(tmp_path, "vault", [(str(page), freshness.stat_signature(page))])
+    prepared = freshness.prepare_recall_publication(tmp_path, "vault")
+    assert prepared is not None
+
+    assert (
+        freshness.prepare_recall_publication(
+            tmp_path,
+            "vault",
+            expected_policy_identity=(prepared.policy_version, "not-current"),
+    )
+    is None
+    )
+
+
+def test_peek_recall_publication_uses_the_key_prepared_outside_the_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    freshness.seed(tmp_path, "vault", [(str(page), freshness.stat_signature(page))])
+
+    monkeypatch.chdir(tmp_path.parent)
+    prepared = freshness.prepare_recall_publication(Path(tmp_path.name), "vault")
+
+    assert prepared is not None
+    assert freshness.peek_recall_publication(Path("not-the-vault"), "vault", ticket=prepared) == prepared
+
+
+def test_prepare_recall_publication_bounds_sustained_policy_churn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    freshness.seed(tmp_path, "vault", [(str(page), freshness.stat_signature(page))])
+    publication_calls = 0
+    checkpoint_calls = 0
+
+    def churning_publication_identity(_root: Path) -> tuple[str, str]:
+        nonlocal publication_calls
+        publication_calls += 1
+        return "test-policy", str(publication_calls)
+
+    def churning_checkpoint_identity(_root: Path) -> tuple[str, str]:
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        return "test-policy", str(checkpoint_calls)
+
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_publication_policy_identity",
+        churning_publication_identity,
+    )
+    monkeypatch.setattr(recall_policy, "recall_policy_identity", churning_checkpoint_identity)
+
+    assert freshness.prepare_recall_publication(tmp_path, "vault") is None
+    assert publication_calls <= freshness.RECALL_PUBLICATION_PREPARE_ATTEMPTS
+    # One bounded checkpoint admission takes an initial and a stability policy
+    # observation; neither can restart the outer publication budget.
+    assert checkpoint_calls <= freshness.RECALL_PUBLICATION_PREPARE_ATTEMPTS * 2
+
+
 def test_cold_checkpoint_retries_when_access_policy_changes_during_projection(
     tmp_path: Path, monkeypatch
 ) -> None:
