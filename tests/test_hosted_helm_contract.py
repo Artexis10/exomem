@@ -456,6 +456,7 @@ def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
     )
     runbook = (ROOT / "docs/runbooks/hosted/cell.md").read_text(encoding="utf-8")
     assert "exomem-init-retry-recovery" in runbook
+    assert "spec:\n  enableServiceLinks: false\n  serviceAccountName: exomem-init-retry-recovery" in runbook
     assert 'exomem-provisioner-recover-init-retry "$mode" --stdin < "$recovery_identity"' in runbook
     assert 'kubectl -n exomem-platform exec -i "$operator_pod" --' in runbook
     assert "--identity-file" not in runbook

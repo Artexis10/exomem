@@ -161,6 +161,7 @@ metadata:
   labels:
     app.kubernetes.io/name: exomem-init-retry-recovery
 spec:
+  enableServiceLinks: false
   serviceAccountName: exomem-init-retry-recovery
   automountServiceAccountToken: true
   restartPolicy: Never
