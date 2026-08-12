@@ -148,7 +148,7 @@ lock_json="$(kubectl -n exomem-platform get configmap "$lock_name" \
 test "$(printf %s "$lock_json" | sha256sum | awk '{print $1}')" = "$lock_digest"
 helm_manifest="$(helm -n "$helm_release" get manifest "$helm_release")"
 printf '%s\n' "$helm_manifest" | grep -F -- "name: $lock_name" >/dev/null
-printf '%s\n' "$helm_manifest" | grep -F -- "exomem.io/deployment-lock-sha256: $lock_digest" >/dev/null
+printf '%s\n' "$helm_manifest" | grep -F -- "exomem.io/deployment-lock-sha256: \"$lock_digest\"" >/dev/null
 operator_image="$(kubectl -n exomem-platform get configmap "$lock_name" \
   -o jsonpath='{.data.exomem-hosted-deployment-lock-v2\.json}' | jq -r '.components.provisioner.image')"
 [[ "$operator_image" =~ ^ghcr\.io/artexis10/exomem-provisioner@sha256:[a-f0-9]{64}$ ]] || exit 1
@@ -236,7 +236,7 @@ final=false
 for attempt in $(seq 1 20); do
   inspect_output="$(run_recovery inspect)"
   if printf '%s' "$inspect_output" | jq -e \
-    '.state == "final" and .checkpoint == "complete"' >/dev/null; then
+    '.state == "final" and .checkpoint == "complete" and .final_proof == true' >/dev/null; then
     final=true
     break
   fi
