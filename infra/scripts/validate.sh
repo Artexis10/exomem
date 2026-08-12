@@ -97,6 +97,8 @@ done
 TERRAFORM_BIN="${terraform_bin}" \
 ANSIBLE_PLAYBOOK_BIN="${ansible_playbook_bin}" \
 HELM_BIN="${helm_bin}" \
+HELM_REPOSITORY_CONFIG="${helm_repository_config}" \
+HELM_REPOSITORY_CACHE="${helm_repository_cache}" \
 uv run --frozen pytest -q "${repo_root}"/tests/test_hosted_*.py
 uvx --from "ruff==${RUFF_VERSION}" ruff check \
   "${repo_root}"/tests/test_hosted_*.py "${infra_dir}"/scripts/*.py \

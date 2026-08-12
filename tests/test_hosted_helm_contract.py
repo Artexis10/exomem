@@ -1877,6 +1877,11 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         in admission_text
     )
     assert "batch.kubernetes.io/job-tracking" in admission_text
+    assert "size(object.spec.containers[0].env) == 24" in admission_text
+    assert "EXOMEM_HOSTED_RECORDS_READER_VERSION" in admission_text
+    assert "exomem.io/records-reader-version" in admission_text
+    assert "EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED" in admission_text
+    assert "exomem.io/lifecycle-actions-enabled" in admission_text
     assert "exact approved serving command and environment" in admission_text
     assert "exact approved serving ports, probes, and interactive surface" in admission_text
     for forbidden_surface in (
@@ -2245,6 +2250,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "exomem.io/vault-id": "vault-alpha-original",
         "exomem.io/expected-release": "0.1.0-alpha",
         "exomem.io/worker-policy-digest": "b" * 64,
+        "exomem.io/records-reader-version": "2",
+        "exomem.io/lifecycle-actions-enabled": "false",
         "exomem.io/browser-origin": "https://substratesystems.io",
         "exomem.io/transfer-hostname": "transfer.example.test",
     }
@@ -2289,6 +2296,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert env["EXOMEM_HOSTED_RUNTIME_UID"] == "10001"
         assert env["EXOMEM_HOSTED_RUNTIME_GID"] == "10001"
         assert env["EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN"] == "https://substratesystems.io"
+        assert env["EXOMEM_HOSTED_RECORDS_READER_VERSION"] == "2"
+        assert env["EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED"] == "false"
         assert "EXOMEM_HOSTED_BROWSER_ORIGIN" not in env
         assert env["EXOMEM_HOSTED_STORAGE_LIMIT_BYTES"] == "5368709120"
         assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
