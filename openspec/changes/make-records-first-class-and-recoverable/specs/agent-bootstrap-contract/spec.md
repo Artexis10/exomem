@@ -8,6 +8,10 @@ Bootstrap SHALL expose `record` as a beginner-facing and product-front-door acti
 - **WHEN** a client asks bootstrap how to handle a new durable measurement, session, transaction, or maintenance event without explicit save/log/Records wording
 - **THEN** bootstrap points to `record_memory`, teaches compatible-collection resolution, and does not route the fact into a compiled conclusion, raw Source, Evidence artifact, or Planning item
 
+#### Scenario: Log intent routes to Records
+- **WHEN** a client asks bootstrap how to handle “log this session”, “record this measurement”, “add this transaction”, or “update this maintenance event”
+- **THEN** bootstrap points to `record_memory` and does not route the fact into a compiled conclusion, raw Source, or Evidence unless the user’s intent matches those layers
+
 #### Scenario: Planning intent does not become a Record
 - **WHEN** a client asks where a future goal, priority, commitment, or candidate task belongs
 - **THEN** bootstrap identifies it as Planning intent and explains that Records can later supply observed progress evidence without mirroring the plan
@@ -19,6 +23,15 @@ Bootstrap SHALL expose `record` as a beginner-facing and product-front-door acti
 ### Requirement: Bootstrap exposes collection guidance compactly
 
 Bootstrap SHALL expose all finite Records actions and a bounded product-facing collection-authoring summary. Compact bootstrap SHALL identify `_collection.md`, supported Records collection versions and profiles, the `describe -> validate -> create -> inspect -> append` authoring workflow, and the `validate -> revise` plus `inspect -> rebaseline` maintenance workflows. It SHALL route clients to `record_memory(action="describe")` for the complete technical contract and SHALL NOT embed the full manifest JSON Schema, parser field table, or worked manifest. It SHALL teach intent before storage vocabulary and SHALL NOT imply that guidance activates a collection or migration.
+
+#### Scenario: Compact bootstrap routes without exposing parser internals
+- **WHEN** a generic client calls compact bootstrap
+- **THEN** it can identify the exact route for agent-facing manifest discovery and read-only validation
+- **AND** the payload does not contain the complete JSON Schema or complete manifest example
+
+#### Scenario: Bootstrap guidance is not mutation
+- **WHEN** bootstrap includes Records authoring guidance
+- **THEN** no collection, folder, template, migration, or canonical data is activated merely by reading bootstrap
 
 #### Scenario: Pack guidance is not mutation
 - **WHEN** bootstrap includes health or personal-records Records guidance
@@ -32,7 +45,7 @@ Bootstrap SHALL expose all finite Records actions and a bounded product-facing c
 
 ### Requirement: Records routing is salient in compact bootstrap
 
-Compact bootstrap SHALL serialize beginner/front-door actions and the bounded Records route before the large semantic-authoring projection. It SHALL enforce a total compact-size budget and a maximum byte position for the `record` route so Records cannot remain technically present but practically buried. Full parser/schema detail SHALL remain opt-in through `record_memory(action="describe")`.
+Compact bootstrap SHALL serialize beginner/front-door actions and the bounded Records route before the large semantic-authoring projection. The first byte of the `record` route SHALL occur before byte 8,192 of the compact payload, and the complete compact payload SHALL be no larger than 57,344 UTF-8 bytes. Full parser/schema detail SHALL remain opt-in through `record_memory(action="describe")`.
 
 #### Scenario: Record route appears before semantic authoring detail
 - **WHEN** compact bootstrap is serialized with the full active MCP product surface

@@ -16,11 +16,15 @@ Every pull request that changes Records parsing, lifecycle actions, audit behavi
 
 A changed Records surface SHALL NOT be promoted as connector-registered until a dedicated disposable HTTP/OAuth vault completes the full applicable lifecycle against the deployed release. The runner MAY produce unsigned content-free facts, but promotion SHALL require those facts inside the existing operator-signed live-evidence envelope and SHALL verify that signature with operator-held trust configuration rather than a key supplied by the evidence.
 
-The exact closed evidence contract SHALL bind deployment SHA, release/package identities, canonical MCP surface digest, a run nonce, timestamp and expiry, disposable-vault purpose and reset epoch, principal and audience HMACs, exact client/model/system-contract versions, required action coverage, fixed prompt-case identifiers and hashes, restart result, per-mutation request/receipt identifiers and committed terminal outcomes, independent before/after readback hashes, and the coordinated graph-availability proof digest. Evidence from another digest, release, vault purpose, reset, principal, audience, or client contract; expired evidence; unverified readback; extra fields; or an incomplete action/case set SHALL refuse promotion. Exact byte-identical signed replay against the unchanged candidate SHALL be an idempotent no-op returning the same promotion result.
+The exact closed evidence contract SHALL be sufficient to generate an executable schema. Its top-level and nested objects SHALL reject unknown fields and bind only deployment SHA; release/package identities; canonical MCP surface digest; run nonce, timestamp, and expiry; disposable-vault purpose and reset epoch; principal and audience HMACs; exact client/model/system-contract versions; required action coverage; fixed prompt-case identifiers and hashes; restart result; per-mutation request/receipt identifiers and committed terminal outcomes; independent before/after readback hashes; and the coordinated graph-availability proof digest. Evidence from another digest, release, vault purpose, reset, principal, audience, or client contract; expired evidence; unverified readback; extra fields; or an incomplete action/case set SHALL refuse promotion. Exact byte-identical signed replay against the unchanged candidate SHALL be an idempotent no-op returning the same promotion result.
 
 #### Scenario: Current deployed lifecycle authorizes promotion
 - **WHEN** the disposable live runner completes every required action and both agent-selection clients against the deployed release and current surface digest
 - **THEN** a promotion PR may record that exact structured evidence and clear the pending connector state
+
+#### Scenario: Local proof cannot manufacture promotion evidence
+- **WHEN** a pull request has only installed-wheel or other local code-gate results
+- **THEN** it cannot fabricate live HTTP/OAuth or client evidence, current hosted v1 registered evidence remains unchanged, and the changed surface remains pending until post-deploy v2 proof is verified
 
 #### Scenario: Stale or prose-only evidence refuses promotion
 - **WHEN** promotion metadata contains only free-form verification prose, tool-callability claims, unsigned runner output, or signed evidence for a different release, surface digest, run/reset identity, or client contract

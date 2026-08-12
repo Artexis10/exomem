@@ -8,6 +8,10 @@ The product surface SHALL expose one `record_memory` command rather than separat
 - **WHEN** an agent needs to create a first Record collection without prior manifest knowledge
 - **THEN** it uses `describe` and `validate` through the same `record_memory` front door before `create`
 
+#### Scenario: Natural log intent uses one front door
+- **WHEN** an agent receives “Log this training session”, “Record today’s symptoms”, “Update the car mileage”, or “Show the last three months”
+- **THEN** bootstrap routes the intent through `record_memory` with the appropriate finite action rather than advertising a family of narrow tools
+
 #### Scenario: Existing manifest uses the same front door
 - **WHEN** an agent needs to validate, revise, or explicitly rebaseline an existing collection manifest
 - **THEN** it uses the finite lifecycle actions on `record_memory` rather than a generic file editor or storage-specific tool
@@ -16,21 +20,40 @@ The product surface SHALL expose one `record_memory` command rather than separat
 - **WHEN** the selected collection uses a Markdown log, Markdown items, or a dataset
 - **THEN** the same product command resolves the manifest and adapter without making the agent select a storage-specific public command
 
+#### Scenario: Dataset mutation refuses through the same front door
+- **WHEN** `append` or `update` resolves a dataset-backed collection
+- **THEN** the command refuses that action as unsupported in this delivery and does not accept a caller-supplied replacement file
+
 ### Requirement: Records actions validate arguments explicitly
 
-Each action SHALL define required and forbidden arguments. `describe` SHALL accept no collection or mutation arguments. Collection-less `inspect` SHALL inventory Records and targeted `inspect` SHALL remain report-only. Create-mode `validate` SHALL require `manifest_path` and `manifest_text`; revision-mode `validate` SHALL require `collection` and `manifest_text`; the two forms SHALL be mutually exclusive and read-only. `create` SHALL use create-only guards and SHALL NOT adopt or rewrite an existing tracker implicitly. `query` SHALL support bounded filters, `include_agent_history`, saved-view selection, and `output_format` without writing exports. `append` and `update` SHALL require structured item data and a concise reason; `update` SHALL additionally require the collection-scoped item key and current stale-write guards. `revise` SHALL require collection, complete manifest text, current manifest/container guards, and rationale. `rebaseline` SHALL require collection, current manifest/container guards, exact acknowledged gap codes, and rationale.
+Each action SHALL define required and forbidden arguments. `describe` SHALL accept no collection or mutation arguments. Collection-less `inspect` SHALL inventory Records and targeted `inspect` SHALL remain report-only. Create-mode `validate` SHALL require `manifest_path` and `manifest_text`; revision-mode `validate` SHALL require `collection` and `manifest_text`; the two forms SHALL be mutually exclusive and read-only. `create` SHALL use create-only guards and SHALL NOT adopt or rewrite an existing tracker implicitly. `query` SHALL support bounded filters, `include_agent_history`, saved-view selection, and `output_format` without writing exports. `append` and `update` SHALL require structured item data and a concise reason; `update` SHALL additionally require the collection-scoped item key and current stale-write guards. `revise` SHALL require `collection`, complete `manifest_text`, `expected_manifest_hash`, `expected_container_hash`, and `why`. `rebaseline` SHALL require `collection`, `expected_manifest_hash`, `expected_container_hash`, `acknowledged_gap_codes`, and `why`; alternate lifecycle guard or acknowledgement argument names SHALL be refused.
+
+Targeted `inspect` and revision-mode `validate` SHALL return lifecycle guards only as the closed object `{"expected_manifest_hash":"<sha256>","expected_container_hash":"<sha256>"}`. It SHALL contain exactly those two non-null SHA-256 values, or be omitted when the collection cannot be safely exposed.
 
 #### Scenario: Read action rejects mutation payload
 - **WHEN** `describe`, `inspect`, `validate`, or `query` receives an argument outside its declared shape
 - **THEN** validation refuses the invocation rather than ignoring ambiguous input
+
+#### Scenario: Validate needs no mutation rationale
+- **WHEN** a client submits a manifest through either read-only `validate` form without `why`
+- **THEN** argument validation accepts the read-only preflight
+- **AND** supplying `why` to `validate` is refused as a cross-action argument
+
+#### Scenario: Create does not silently adopt tracker
+- **WHEN** `create` targets a path that already contains a tracker, manifest, or canonical source
+- **THEN** create-only guards refuse and direct the user to add an explicit reviewed manifest instead
 
 #### Scenario: Validate forms cannot be mixed
 - **WHEN** `validate` receives both `manifest_path` and `collection`, or receives neither selector form
 - **THEN** it refuses with actionable argument guidance and performs no mutation
 
 #### Scenario: Revision guards are mandatory
-- **WHEN** `revise` or `rebaseline` omits a current manifest/container guard, exact required acknowledgement, or rationale
+- **WHEN** `revise` or `rebaseline` omits `expected_manifest_hash`, `expected_container_hash`, exact required `acknowledged_gap_codes`, or `why`
 - **THEN** argument validation refuses before writer authority can publish canonical state
+
+#### Scenario: Inspection returns a closed lifecycle guard object
+- **WHEN** targeted `inspect` or revision-mode `validate` can safely expose a selected collection
+- **THEN** it returns exactly `expected_manifest_hash` and `expected_container_hash` and no alternate guard aliases or audit fields
 
 ### Requirement: Records command parity and selector safety
 
@@ -43,6 +66,10 @@ Each action SHALL define required and forbidden arguments. `describe` SHALL acce
 #### Scenario: Every mutation enters writer authority
 - **WHEN** `record_memory` runs `create`, `append`, `update`, `revise`, or `rebaseline`
 - **THEN** it uses the existing same-vault writer lease, idempotency, committed terminal envelope, and content-safe projector
+
+#### Scenario: Mutations enter writer authority
+- **WHEN** `record_memory` runs `create`, `append`, or `update`
+- **THEN** it uses the existing same-vault writer lease, idempotency, and committed terminal envelope
 
 #### Scenario: Unknown selector cannot bypass coverage
 - **WHEN** an unregistered Records action reaches the command boundary
