@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.48.0](https://github.com/Artexis10/exomem/compare/v0.47.0...v0.48.0) (2026-08-12)
+
+
+### Features
+
+* **hosted:** compose ready recovery deployment lock ([3dc2c54](https://github.com/Artexis10/exomem/commit/3dc2c549c410f4a798c48e2a58c6cedc47a42506))
+* **records:** add first-class lifecycle and hosted release ([#452](https://github.com/Artexis10/exomem/issues/452)) ([b49ad33](https://github.com/Artexis10/exomem/commit/b49ad338dc3bbff213af5c3f81fd1ba8e3a0fd6a))
+
+
+### Bug Fixes
+
+* **hosted:** disable recovery pod service links ([#451](https://github.com/Artexis10/exomem/issues/451)) ([d5c128a](https://github.com/Artexis10/exomem/commit/d5c128a3000ff3071596784ffb23869e221538e5))
+
 ## [0.47.0](https://github.com/Artexis10/exomem/compare/v0.46.0...v0.47.0) (2026-08-12)
 
 
