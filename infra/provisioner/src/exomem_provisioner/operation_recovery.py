@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Never, Protocol
 
 from sqlalchemy import cast, func, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -63,7 +63,7 @@ class RecoveryRefusal(RuntimeError):
 
 
 class _RecoveryArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> Never:
         del message
         raise RecoveryRefusal("command arguments are invalid")
 
@@ -283,6 +283,7 @@ class RecoveryService:
         database_lock_timeout_seconds: int,
         deployment_lock: DeploymentLock,
         observer: RecoveryLiveObserver,
+        runtime_selection: Literal["active", "rollback"] | None = None,
     ) -> None:
         self._sessions = sessions
         self._codec = codec
@@ -291,6 +292,7 @@ class RecoveryService:
         self._database_schema = database_schema
         self._database_lock_timeout_seconds = database_lock_timeout_seconds
         self._deployment_lock = deployment_lock
+        self._runtime_selection = runtime_selection
         self._observer = observer
         self._helper_source_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
@@ -526,7 +528,9 @@ class RecoveryService:
             or request.get("checkpoint") != operation.caller_checkpoint
             or request.get("provisionMode") != "serve"
             or not self._deployment_lock.matches_runtime_request(
-                request, wire_protocol=operation.wire_protocol.value
+                request,
+                wire_protocol=operation.wire_protocol.value,
+                selection=self._runtime_selection,
             )
         ):
             raise RecoveryRefusal("recovery preflight failed")
@@ -902,6 +906,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             database_schema=settings.database_schema,
             database_lock_timeout_seconds=settings.database_lock_timeout_seconds,
             deployment_lock=settings.deployment_lock,
+            runtime_selection=settings.runtime_selection,
             observer=observer,
         )
         operation_id = read_operation_identity(stdin=sys.stdin.read())

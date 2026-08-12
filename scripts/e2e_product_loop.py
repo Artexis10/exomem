@@ -51,11 +51,52 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
     return env
 
 
-def _write_records_fixture(vault: Path) -> dict[str, str]:
-    """Create the ordinary X3 files used only by the installed-product journey."""
+def _write_records_fixture(_vault: Path) -> dict[str, str]:
+    """Describe Records authoring inputs without pre-writing canonical files."""
     collection = "Knowledge Base/Records/Health/X3/_collection.md"
-    log = "Knowledge Base/Records/Health/X3/Training Log.md"
-    template = "Knowledge Base/Templates/Records/Health/X3/X3 Push.md"
+    source = "Knowledge Base/Records/Health/X3/Items"
+    manifest_text = """---
+type: collection
+exomem_id: 9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8
+title: X3 training sessions
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Items
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on, title]
+  fields:
+    occurred_on: {type: date, required: true}
+    title: {type: string, required: true}
+    status: {type: enum, enum: [completed, partial, aborted]}
+    movements: {type: array, items: {type: object}}
+views:
+  completed-sessions:
+    query:
+      columns: [occurred_on, title, status]
+---
+
+Human-owned X3 sessions remain ordinary Markdown.
+"""
+    return {
+        "collection": collection,
+        "source": source,
+        "manifest_text": manifest_text,
+        "revised_manifest_text": manifest_text.replace(
+            "title: X3 training sessions", "title: X3 training sessions (revised)", 1
+        ),
+    }
+
+
+def _write_manual_records_fixture(vault: Path) -> dict[str, str]:
+    """Create the separate human-authored markdown-log/template journey."""
+    collection = "Knowledge Base/Records/Health/Manual X3/_collection.md"
+    log = "Knowledge Base/Records/Health/Manual X3/Training Log.md"
+    template = "Knowledge Base/Templates/Records/Health/Manual X3/X3 Push.md"
     manifest_path = vault / collection
     log_path = vault / log
     template_path = vault / template
@@ -64,8 +105,8 @@ def _write_records_fixture(vault: Path) -> dict[str, str]:
     manifest_path.write_text(
         """---
 type: collection
-exomem_id: 9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8
-title: X3 training sessions
+exomem_id: 8ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8
+title: Manual X3 training sessions
 semantic_profile: records
 collection_version: 1
 schema_version: 1
@@ -86,10 +127,6 @@ storage:
       - name: title
         type: string
     separator: " · "
-    note:
-      field: note
-      open: " ("
-      close: ")"
   defaults:
     status: completed
   insertion: newest-first
@@ -106,14 +143,12 @@ item_schema:
     status: {type: enum, enum: [completed, partial, aborted]}
     movements: {type: array, items: {type: object}}
 templates:
-  - path: Knowledge Base/Templates/Records/Health/X3/X3 Push.md
+  - path: Knowledge Base/Templates/Records/Health/Manual X3/X3 Push.md
 links:
   plans:
     - reference: exomem://memory/81947000-4c22-46e4-9874-23fed028314b
       query: {filters: {status: completed}, limit: 24}
 ---
-
-Human-owned X3 sessions remain ordinary Markdown.
 """,
         encoding="utf-8",
     )
@@ -380,16 +415,42 @@ async def _assert_relation_contexts(
             raise RuntimeError(f"installed edge {canonical} lost raw observation identity")
 
 
-def _record_source_hash(result: dict[str, Any], suffix: str) -> str:
-    versions = result.get("source_versions")
-    if not isinstance(versions, list):
-        raise RuntimeError(f"record query omitted source versions: {result!r}")
-    for version in versions:
-        if isinstance(version, dict) and str(version.get("path", "")).endswith(suffix):
-            digest = version.get("hash")
-            if isinstance(digest, str):
-                return digest
-    raise RuntimeError(f"record query omitted source hash for {suffix!r}")
+def _record_snapshot(result: dict[str, Any]) -> str:
+    snapshot = result.get("snapshot")
+    if not isinstance(snapshot, str) or not re.fullmatch(r"[0-9a-f]{64}", snapshot):
+        raise RuntimeError(f"record query omitted exact snapshot hash: {result!r}")
+    return snapshot
+
+
+def _assert_records_rebaseline(inspection: dict[str, Any], history: dict[str, Any]) -> None:
+    audit = inspection.get("audit")
+    guards = inspection.get("lifecycle_guards")
+    if not isinstance(audit, dict) or audit.get("status") != "acknowledged_gap":
+        raise RuntimeError("installed Records rebaseline did not retain an acknowledged audit gap")
+    discontinuity = audit.get("discontinuity")
+    if (
+        not isinstance(discontinuity, dict)
+        or discontinuity.get("provenance_continuity") is not False
+        or not isinstance(discontinuity.get("acknowledged_gap_codes"), list)
+        or not discontinuity["acknowledged_gap_codes"]
+    ):
+        raise RuntimeError("installed Records rebaseline did not retain its discontinuity")
+    if (
+        not isinstance(guards, dict)
+        or not all(
+            isinstance(guards.get(key), str) and len(guards[key]) == 64
+            for key in ("expected_manifest_hash", "expected_container_hash")
+        )
+    ):
+        raise RuntimeError("installed Records inspection omitted exact lifecycle hashes")
+    events = history.get("events") if isinstance(history, dict) else None
+    if not isinstance(events, list) or not any(
+        isinstance(event, dict)
+        and event.get("operation") == "rebaseline"
+        and event.get("minimum_reader_version") == 2
+        for event in events
+    ):
+        raise RuntimeError("installed Records rebaseline did not retain reader marker 2")
 
 
 async def _planning_first_session(client, state: dict[str, Any], timeout: float) -> None:
@@ -625,6 +686,39 @@ async def _planning_restart_session(client, state: dict[str, Any], timeout: floa
 async def _records_first_session(client, state: dict[str, Any], timeout: float) -> None:
     fixture = state["records"]
     collection = fixture["collection"]
+    described = await _call(client, "record_memory", {"action": "describe"}, timeout)
+    if not isinstance(described, dict):
+        raise RuntimeError("installed Records describe did not return a contract")
+    validated = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "validate",
+            "manifest_path": collection,
+            "manifest_text": fixture["manifest_text"],
+        },
+        timeout,
+    )
+    if not isinstance(validated, dict) or validated.get("valid") is not True:
+        raise RuntimeError("installed Records create-mode validation failed")
+    created = await _call_mutation(
+        client,
+        "record_memory",
+        {
+            "action": "create",
+            "manifest_path": collection,
+            "manifest_text": fixture["manifest_text"],
+            "why": "author installed Records collection",
+        },
+        timeout,
+    )
+    if created.get("operation") != "create":
+        raise RuntimeError("installed Records create did not commit")
+    inspected = await _call(
+        client, "record_memory", {"action": "inspect", "collection": collection}, timeout
+    )
+    if not isinstance(inspected.get("contract"), dict):
+        raise RuntimeError("installed Records inspect did not return the created contract")
     before = await _call(
         client,
         "record_memory",
@@ -636,8 +730,8 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
         },
         timeout,
     )
-    if not any(row.get("occurred_on") == "2026-08-03" for row in before.get("rows", [])):
-        raise RuntimeError("installed Records query did not return the manual template session")
+    if before.get("rows"):
+        raise RuntimeError("installed Records fixture bypassed collection authoring")
     item_key = "77777777-7777-4777-8777-777777777777"
     appended = await _call_mutation(
         client,
@@ -652,13 +746,18 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
                 "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}],
             },
             "item_key": item_key,
-            "expected_container_hash": _record_source_hash(before, "Training Log.md"),
+            "expected_container_hash": _record_snapshot(before),
+            "body": "e2e record row-only sentinel",
             "why": "record installed product session",
         },
         timeout,
     )
     if appended.get("operation") != "append":
         raise RuntimeError(f"installed Records append returned unexpected data: {appended!r}")
+    affected_paths = appended.get("affected_paths")
+    if not isinstance(affected_paths, list) or len(affected_paths) != 1:
+        raise RuntimeError("installed Records append did not identify its canonical item")
+    fixture["item_path"] = affected_paths[0]
     after_append = await _call(
         client,
         "record_memory",
@@ -684,7 +783,7 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
             "collection": collection,
             "item_key": item_key,
             "changes": {"title": "Push corrected"},
-            "expected_container_hash": _record_source_hash(after_append, "Training Log.md"),
+            "expected_container_hash": _record_snapshot(after_append),
             "expected_item_version": item["item_version"],
             "why": "correct installed product session",
         },
@@ -698,16 +797,89 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
         {
             "action": "query",
             "collection": collection,
-            "columns": ["occurred_on", "title", "movements"],
-            "limit": 20,
+            "view": "completed-sessions",
             "output_format": "markdown",
         },
         timeout,
     )
     if derived.get("derived") is not True or "| occurred_on" not in derived.get("rendered", ""):
         raise RuntimeError("installed Records query did not return a bounded derived Markdown view")
-    inspection = await _call(
+    await _call(
         client, "record_memory", {"action": "inspect", "collection": collection}, timeout
+    )
+    revision = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "validate",
+            "collection": collection,
+            "manifest_text": fixture["revised_manifest_text"],
+        },
+        timeout,
+    )
+    guards = revision.get("lifecycle_guards") if isinstance(revision, dict) else None
+    if not isinstance(guards, dict):
+        raise RuntimeError("installed Records revision validation did not return guards")
+    revised = await _call_mutation(
+        client,
+        "record_memory",
+        {
+            "action": "revise",
+            "collection": collection,
+            "manifest_text": fixture["revised_manifest_text"],
+            **guards,
+            "why": "confirm installed Records lifecycle",
+        },
+        timeout,
+    )
+    if revised.get("operation") != "revise":
+        raise RuntimeError("installed Records revise did not commit")
+    revised_inspection = await _call(
+        client, "record_memory", {"action": "inspect", "collection": collection}, timeout
+    )
+    if revised_inspection.get("contract", {}).get("title") != "X3 training sessions (revised)":
+        raise RuntimeError("installed Records inspection did not retain the revised manifest")
+    revised_view = await _call(
+        client,
+        "record_memory",
+        {"action": "query", "collection": collection, "view": "completed-sessions"},
+        timeout,
+    )
+    if not any(
+        row.get("record_id") == item_key and row.get("title") == "Push corrected"
+        for row in revised_view.get("rows", [])
+        if isinstance(row, dict)
+    ):
+        raise RuntimeError("installed Records saved view lost revised manifest/item parity")
+    recalled = await _call(
+        client,
+        "ask_memory",
+        {"query": "e2e record row-only sentinel", "mode": "keyword"},
+        timeout,
+    )
+    hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
+    if fixture["item_path"] in {hit.get("path") for hit in hits if isinstance(hit, dict)}:
+        raise RuntimeError("ordinary recall exposed the raw Records log")
+    state["records"].update({"item_key": item_key})
+
+
+async def _manual_records_session(client, state: dict[str, Any], timeout: float) -> None:
+    fixture = state["manual_records"]
+    queried = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": fixture["collection"],
+            "columns": ["occurred_on", "title", "movements"],
+            "limit": 20,
+        },
+        timeout,
+    )
+    if not any(row.get("occurred_on") == "2026-08-03" for row in queried.get("rows", [])):
+        raise RuntimeError("installed Records query did not return the manual template session")
+    inspection = await _call(
+        client, "record_memory", {"action": "inspect", "collection": fixture["collection"]}, timeout
     )
     expected_plan = {
         "reference": "exomem://memory/81947000-4c22-46e4-9874-23fed028314b",
@@ -717,16 +889,6 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
         raise RuntimeError(
             "installed Records inspection did not round-trip the Planning descriptor"
         )
-    recalled = await _call(
-        client,
-        "ask_memory",
-        {"query": "e2e record row-only sentinel", "mode": "keyword"},
-        timeout,
-    )
-    hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
-    if fixture["log"] in {hit.get("path") for hit in hits if isinstance(hit, dict)}:
-        raise RuntimeError("ordinary recall exposed the raw Records log")
-    state["records"].update({"item_key": item_key})
 
 
 async def _records_restart_session(client, state: dict[str, Any], timeout: float) -> None:
@@ -743,18 +905,19 @@ async def _records_restart_session(client, state: dict[str, Any], timeout: float
         timeout,
     )
     rows = result.get("rows", [])
-    if not any(row.get("occurred_on") == "2026-08-03" for row in rows):
-        raise RuntimeError("manual Records state did not survive restart")
+    if not any(row.get("occurred_on") == "2026-08-04" for row in rows):
+        raise RuntimeError("created Records state did not survive restart")
     if not any(
-        row.get("record_id") == fixture["item_key"] and row.get("title") == "Push corrected"
+        row.get("record_id") == fixture["item_key"]
+        and row.get("title") == "Push corrected (human edit)"
         for row in rows
     ):
         raise RuntimeError("guarded Records mutation did not survive restart")
     if not any(
-        movement.get("repetitions") == "23"
+        row.get("record_id") == fixture["item_key"]
+        and row.get("title") == "Push corrected (human edit)"
         for row in rows
-        for movement in row.get("movements", [])
-        if isinstance(movement, dict)
+        if isinstance(row, dict)
     ):
         raise RuntimeError("direct Records edit was not visible after restart")
     inspection = await _call(
@@ -763,9 +926,77 @@ async def _records_restart_session(client, state: dict[str, Any], timeout: float
         {"action": "inspect", "collection": fixture["collection"]},
         timeout,
     )
-    audit = inspection.get("audit", {})
-    if audit.get("status") != "gap" or not audit.get("gaps"):
-        raise RuntimeError("direct Records edit did not retain a positive audit gap")
+    history = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": fixture["collection"],
+            "view": "completed-sessions",
+            "include_agent_history": True,
+        },
+        timeout,
+    )
+    _assert_records_rebaseline(inspection, history.get("agent_history", {}))
+
+
+async def _records_rebaseline_session(client, state: dict[str, Any], timeout: float) -> None:
+    fixture = state["records"]
+    inspection = await _call(
+        client,
+        "record_memory",
+        {"action": "inspect", "collection": fixture["collection"]},
+        timeout,
+    )
+    audit = inspection.get("audit")
+    guards = inspection.get("lifecycle_guards")
+    if (
+        not isinstance(audit, dict)
+        or audit.get("status") != "gap"
+        or not isinstance(audit.get("gaps"), list)
+        or not audit["gaps"]
+        or not isinstance(guards, dict)
+    ):
+        raise RuntimeError("direct Records edit did not produce an inspectable guarded audit gap")
+    rebaselined = await _call_mutation(
+        client,
+        "record_memory",
+        {
+            "action": "rebaseline",
+            "collection": fixture["collection"],
+            **guards,
+            "acknowledged_gap_codes": audit["gaps"],
+            "why": "acknowledge direct installed edit",
+        },
+        timeout,
+    )
+    if rebaselined.get("operation") != "rebaseline":
+        raise RuntimeError("installed Records rebaseline did not commit")
+    readback = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": fixture["collection"],
+            "view": "completed-sessions",
+            "include_agent_history": True,
+        },
+        timeout,
+    )
+    if not any(
+        row.get("record_id") == fixture["item_key"]
+        and row.get("title") == "Push corrected (human edit)"
+        for row in readback.get("rows", [])
+        if isinstance(row, dict)
+    ):
+        raise RuntimeError("installed Records rebaseline readback lost the governed item")
+    rebaselined_inspection = await _call(
+        client,
+        "record_memory",
+        {"action": "inspect", "collection": fixture["collection"]},
+        timeout,
+    )
+    _assert_records_rebaseline(rebaselined_inspection, readback.get("agent_history", {}))
 
 
 async def _stdio_session(
@@ -777,6 +1008,7 @@ async def _stdio_session(
     timeout: float,
     first_run: bool,
     state: dict[str, Any],
+    records_rebaseline: bool = False,
 ) -> dict[str, Any]:
     from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
@@ -1025,6 +1257,7 @@ async def _stdio_session(
                     }
                 )
                 await _records_first_session(client, state, timeout)
+                await _manual_records_session(client, state, timeout)
                 await _planning_first_session(client, state, timeout)
             else:
                 reconcile = await _call_maintenance(
@@ -1064,7 +1297,11 @@ async def _stdio_session(
                     relation_ref=state["relation_ref"],
                     timeout=timeout,
                 )
-                await _records_restart_session(client, state, timeout)
+                if records_rebaseline:
+                    await _records_rebaseline_session(client, state, timeout)
+                else:
+                    await _records_restart_session(client, state, timeout)
+                await _manual_records_session(client, state, timeout)
                 await _planning_restart_session(client, state, timeout)
                 from exomem import epistemic_graph
 
@@ -1088,8 +1325,9 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     env = _clean_env(home, vault)
     state: dict[str, Any] = {}
     state["records"] = _write_records_fixture(vault)
+    state["manual_records"] = _write_manual_records_fixture(vault)
     state["planning"] = _write_planning_fixtures(vault)
-    _insert_manual_x3_session(vault, state["records"])
+    _insert_manual_x3_session(vault, state["manual_records"])
     asyncio.run(
         _stdio_session(
             executable,
@@ -1105,13 +1343,14 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     refs_sidecar.unlink(missing_ok=True)
     graph_sidecar = vault / "Knowledge Base" / ".graph.sqlite"
     graph_sidecar.unlink(missing_ok=True)
-    log = vault / state["records"]["log"]
-    log.write_text(
-        log.read_text(encoding="utf-8")
-        + "\n### 2026-08-06 · Pull (human restart edit)\n"
-        + "- Deadlift | grey | 23\n",
-        encoding="utf-8",
+    record_item = vault / state["records"]["item_path"]
+    item_text = record_item.read_text(encoding="utf-8")
+    updated_item_text = item_text.replace(
+        "title: Push corrected", "title: Push corrected (human edit)", 1
     )
+    if updated_item_text == item_text:
+        raise RuntimeError("installed Records item did not preserve a direct-editable title")
+    record_item.write_text(updated_item_text, encoding="utf-8")
     planning_item = vault / state["planning"]["software"]["work_item_path"]
     planning_item.write_text(
         planning_item.read_text(encoding="utf-8").replace(
@@ -1127,6 +1366,18 @@ def _installed_stdio(args: argparse.Namespace) -> int:
             env,
             work,
             work / "stdio-restart.log",
+            timeout=args.request_timeout,
+            first_run=False,
+            records_rebaseline=True,
+            state=state,
+        )
+    )
+    asyncio.run(
+        _stdio_session(
+            executable,
+            env,
+            work,
+            work / "stdio-readback-restart.log",
             timeout=args.request_timeout,
             first_run=False,
             state=state,

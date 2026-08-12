@@ -7,6 +7,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ def _write_json(path: Path, value: object) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _candidate(kind: str, image: str) -> dict[str, object]:
+def _candidate(kind: str, image: str, *, records_compatibility: bool = False) -> dict[str, object]:
     repository = image.split("@", 1)[0]
     source_ref = "refs/tags/v0.35.1" if kind == "runtime" else "refs/heads/main"
     workflow = (
@@ -54,8 +55,8 @@ def _candidate(kind: str, image: str) -> dict[str, object]:
         release = None
         storage = {"kind": "oci-referrer", "subject": image, "uri": f"oci://{image}"}
         discovery_tag = f"{repository}:{COMMIT}"
-    return {
-        "schemaVersion": 1,
+    candidate: dict[str, object] = {
+        "schemaVersion": 2 if records_compatibility else 1,
         "kind": kind,
         "image": {
             "repository": repository,
@@ -83,6 +84,26 @@ def _candidate(kind: str, image: str) -> dict[str, object]:
         },
         "storage": storage,
     }
+    if records_compatibility:
+        issued_at = datetime.now(UTC).replace(microsecond=0)
+        candidate["recordsCompatibility"] = {
+            "profile": "hosted-alpha-agent-v1",
+            "recordsReaderVersion": 2,
+            "lifecycleActionsEnabled": False,
+            "issuedAt": issued_at.isoformat().replace("+00:00", "Z"),
+            "expiresAt": (issued_at + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+            "signerWorkflow": "Artexis10/exomem/.github/workflows/release-please.yml",
+            "signerWorkflowDigest": COMMIT,
+            "runtimeTarget": {
+                "releaseVersion": "0.35.1",
+                "protocolVersion": "1",
+                "agentProfile": "hosted-alpha-agent-v1",
+                "gatewayContractDigest": "c" * 64,
+                "commandFingerprint": "d" * 64,
+                "schemaDigest": "e" * 64,
+            },
+        }
+    return candidate
 
 
 def _contract(image: str) -> dict[str, str]:
@@ -222,6 +243,126 @@ def test_composer_verifies_candidates_and_writes_deterministic_lock_pair(
     assert expand["components"]["runtime"]["candidateSha256"] == hashlib.sha256(
         request.runtime.candidate.read_bytes()
     ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "valid", "missing", "unverified", "reader", "profile", "lifecycle", "claim_reader",
+        "claim_profile", "claim_action", "claim_signer", "claim_substitution", "claim_stale",
+    ],
+)
+def test_v3_composition_requires_an_explicit_verified_reader_two_rollback_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    rollback_runtime = tmp_path / "rollback-runtime-candidate.json"
+    rollback_runtime_candidate = _candidate(
+        "runtime",
+        f"ghcr.io/artexis10/exomem@sha256:{'d' * 64}",
+        records_compatibility=failure.startswith("claim_") or failure == "valid",
+    )
+    rollback_runtime_claim = rollback_runtime_candidate.get("recordsCompatibility", {})
+    if failure == "claim_reader":
+        rollback_runtime_claim["recordsReaderVersion"] = 1
+    elif failure == "claim_profile":
+        rollback_runtime_claim["profile"] = "hosted-alpha-agent-v2"
+    elif failure == "claim_action":
+        rollback_runtime_claim["lifecycleActionsEnabled"] = True
+    elif failure == "claim_signer":
+        rollback_runtime_claim["signerWorkflowDigest"] = "0" * 40
+    elif failure == "claim_substitution":
+        rollback_runtime_claim["signerWorkflow"] = "Artexis10/exomem/.github/workflows/other.yml"
+    elif failure == "claim_stale":
+        rollback_runtime_claim["issuedAt"] = "2000-01-01T00:00:00Z"
+        rollback_runtime_claim["expiresAt"] = "2000-01-01T01:00:00Z"
+    rollback_runtime_sha = _write_json(rollback_runtime, rollback_runtime_candidate)
+    rollback_bundle = tmp_path / "rollback-runtime.bundle"
+    rollback_candidate_bundle = tmp_path / "rollback-runtime.candidate.bundle"
+    rollback_bundle.write_bytes(b"bundle")
+    rollback_candidate_bundle.write_bytes(b"bundle")
+    compatibility = {
+        "minimum_records_reader_version": 2,
+        "activeProfile": "hosted-alpha-agent-v2",
+        "activeLifecycleActionsEnabled": True,
+        "rollbackProfile": "hosted-alpha-agent-v1",
+        "rollbackLifecycleActionsEnabled": False,
+    }
+    if failure == "reader":
+        compatibility["minimum_records_reader_version"] = 1
+    elif failure == "profile":
+        compatibility["rollbackProfile"] = "hosted-alpha-agent-v2"
+    elif failure == "lifecycle":
+        compatibility["rollbackLifecycleActionsEnabled"] = True
+    compatibility_path = tmp_path / "records-compatibility.json"
+    compatibility_sha = _write_json(compatibility_path, compatibility)
+    forward = json.loads(request.forward_contract.path.read_text())
+    forward["agentProfile"] = "hosted-alpha-agent-v2"
+    request = replace(
+        request,
+        forward_contract=replace(
+            request.forward_contract,
+            sha256=_write_json(request.forward_contract.path, forward),
+        ),
+        records_compatibility=composer.HashedInput(compatibility_path, compatibility_sha),
+        rollback_runtime=composer.CandidateInput(
+            rollback_runtime, rollback_runtime_sha, rollback_bundle, rollback_candidate_bundle
+        ),
+    )
+    verified: list[Path] = []
+    monkeypatch.setattr(
+        composer.hosted_image_candidate,
+        "verify_candidate",
+        lambda path, **_kwargs: verified.append(path),
+    )
+    monkeypatch.setattr(
+        composer,
+        "verify_source_closure",
+        lambda _repository, candidate, composition, paths: {
+            "candidateCommit": candidate, "compositionCommit": composition, "paths": list(paths)
+        },
+    )
+    if failure == "missing":
+        request = replace(request, rollback_runtime=None)
+    if failure == "unverified":
+        monkeypatch.setattr(
+            composer.hosted_image_candidate,
+            "verify_candidate",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(composer.CompositionError("unverified")),
+        )
+
+    if failure == "valid":
+        pair = composer.compose_locks(request)
+        assert pair["schemaVersion"] == 3
+        assert pair["locks"][0]["recordsCompatibility"] == {
+            **compatibility,
+            "rollbackRuntime": {
+                "image": f"ghcr.io/artexis10/exomem@sha256:{'d' * 64}",
+                "sourceCommit": COMMIT,
+                "candidateSha256": rollback_runtime_sha,
+                "recordsReaderVersion": 2,
+                "readerStatusProof": {
+                    "profile": "hosted-alpha-agent-v1",
+                    "recordsReaderVersion": 2,
+                    "lifecycleActionsEnabled": False,
+                    "issuedAt": rollback_runtime_claim["issuedAt"],
+                    "expiresAt": rollback_runtime_claim["expiresAt"],
+                    "signerWorkflow": "Artexis10/exomem/.github/workflows/release-please.yml",
+                    "signerWorkflowDigest": COMMIT,
+                },
+                "runtimeTarget": rollback_runtime_claim["runtimeTarget"],
+            },
+        }
+        assert [path.name for path in verified] == [
+            request.runtime.candidate.name,
+            request.provisioner.candidate.name,
+            rollback_runtime.name,
+        ]
+    else:
+        with pytest.raises(composer.CompositionError):
+            composer.compose_locks(request)
+        assert not request.output.exists()
 
 
 @pytest.mark.parametrize("failure", ["duplicate", "missing", "sha", "extra", "stale"])

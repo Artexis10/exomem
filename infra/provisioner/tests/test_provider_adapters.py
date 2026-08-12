@@ -875,6 +875,14 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
                 },
                 raw=True,
             )
+        if url.endswith("/agent/hosted-alpha-agent-v1/reader-status"):
+            return _Response(
+                200,
+                {
+                    "records_reader_version": 2,
+                    "lifecycle_actions_enabled": False,
+                },
+            )
         if url.endswith("/contract"):
             return _Response(200, {"digest": {"algorithm": "sha256", "value": "b" * 64}}, raw=True)
         if url.endswith("/ready"):
@@ -919,6 +927,8 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
             "commandFingerprint": "c" * 64,
             "schemaDigest": "d" * 64,
         },
+        records_reader_version=2,
+        lifecycle_actions_enabled=True,
     )
     adapter = PrivateCellApiAdapter(request=request, internal_origin="http://cells.invalid")
 
@@ -935,9 +945,12 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
     assert health.agent_profile == "hosted-alpha-agent-v1"
     assert health.command_fingerprint == "c" * 64
     assert health.schema_digest == "d" * 64
+    assert health.records_reader_version == 2
+    assert health.lifecycle_actions_enabled is False
     assert calls == [
         "http://cells.invalid/private/exomem/v1/live",
         "http://cells.invalid/private/exomem/v1/ready",
         "http://cells.invalid/private/exomem/v1/contract",
         "http://cells.invalid/private/exomem/v1/agent/hosted-alpha-agent-v1/contract",
+        "http://cells.invalid/private/exomem/v1/agent/hosted-alpha-agent-v1/reader-status",
     ]

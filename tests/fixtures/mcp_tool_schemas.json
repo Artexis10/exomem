@@ -3549,20 +3549,22 @@
     }
   },
   "record_memory": {
-    "description": "Describe, validate, inspect, create, query, append, or update Records.",
+    "description": "Capture, inspect, and govern durable observed state in one Records command.\n\nRecords hold observed events and current state, not future Planning intent,\nreceived Sources, proof-bearing Evidence, or compiled Note conclusions. Route\na sufficiently identified observation to one compatible existing collection;\nif none fits, describe and propose a concise collection before explicit create.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "describe, validate, inspect, create, query, append, or update.",
+          "description": "Exactly one of describe, validate, inspect, query, create, append, update, revise, or rebaseline.",
           "enum": [
             "describe",
             "validate",
             "inspect",
-            "create",
             "query",
+            "create",
             "append",
-            "update"
+            "update",
+            "revise",
+            "rebaseline"
           ],
           "type": "string"
         },
@@ -3576,7 +3578,7 @@
             }
           ],
           "default": null,
-          "description": "Optional for inventory inspect; required for targeted reads/writes."
+          "description": "Optional for inventory inspect; required for targeted inspect, query, revision validate, append, update, revise, and rebaseline."
         },
         "manifest_path": {
           "anyOf": [
@@ -3588,7 +3590,7 @@
             }
           ],
           "default": null,
-          "description": "Proposed manifest path for validate or create."
+          "description": "Proposed manifest path for create-mode validate or create."
         },
         "manifest_text": {
           "anyOf": [
@@ -3600,7 +3602,7 @@
             }
           ],
           "default": null,
-          "description": "Complete proposed manifest text for validate or create."
+          "description": "Complete proposed manifest text for validate, create, or revise."
         },
         "why": {
           "anyOf": [
@@ -3612,7 +3614,7 @@
             }
           ],
           "default": null,
-          "description": "Audit reason for create, append, or update."
+          "description": "Audit reason for create, append, update, revise, or rebaseline."
         },
         "scaffold": {
           "anyOf": [
@@ -3841,7 +3843,34 @@
             }
           ],
           "default": null,
-          "description": "Exact current container hash for append or update."
+          "description": "Exact current container hash for append, update, revise, or rebaseline."
+        },
+        "expected_manifest_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact current manifest hash for revise or rebaseline."
+        },
+        "acknowledged_gap_codes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact inspect-reported gap codes for rebaseline."
         },
         "body": {
           "anyOf": [

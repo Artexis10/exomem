@@ -31,6 +31,11 @@ _ITEM_AUDIT_MARKER = re.compile(rb"#\s*exomem-record-audit:\s*([0-9a-f]{24})\s*"
 _MAX_AUDIT_SOURCE_BYTES = 2 * 1024 * 1024
 _MAX_AUDIT_MARKERS = 10_000
 _MAX_AGENT_AUDIT_HISTORY = 50
+_LIFECYCLE_EVENT_VERSION = 2
+_LIFECYCLE_RECEIPT_VERSION = 2
+_LIFECYCLE_REQUEST_DOMAIN = b"exomem-record-lifecycle-request:v2\0"
+_LIFECYCLE_GAP_DOMAIN = b"exomem-record-gap:v2\0"
+_LIFECYCLE_CHECKPOINT_DOMAIN = b"exomem-record-checkpoint:v2\0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +49,7 @@ class _AuditMarker:
 class _AuditEvents:
     events: tuple[dict[str, Any], ...]
     parsed: bool
+    required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +58,78 @@ class _AuditChain:
     gaps: tuple[str, ...]
     events: tuple[dict[str, Any], ...]
     complete: bool
+    discontinuity: Mapping[str, Any] | None = None
+    discontinuities: tuple[Mapping[str, Any], ...] = ()
+    required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+    ).encode("utf-8")
+
+
+def lifecycle_request_hash(
+    *,
+    action: str,
+    collection_id: str,
+    before_manifest_hash: str,
+    before_container_hash: str,
+    proposed_manifest_hash: str | None,
+    acknowledged_gap_codes: tuple[str, ...],
+    rationale: str,
+) -> str:
+    """Hash the closed lifecycle request domain without user record values."""
+    return hashlib.sha256(
+        _LIFECYCLE_REQUEST_DOMAIN
+        + _canonical_json(
+            {
+                "acknowledged_gap_codes": list(acknowledged_gap_codes),
+                "action": action,
+                "before_container_hash": before_container_hash,
+                "before_manifest_hash": before_manifest_hash,
+                "collection_id": collection_id,
+                "proposed_manifest_hash": proposed_manifest_hash,
+                "rationale": rationale,
+            }
+        )
+    ).hexdigest()
+
+
+def lifecycle_gap_fingerprint(
+    *,
+    prior_head: str,
+    acknowledged_gap_codes: tuple[str, ...],
+    before_manifest_hash: str,
+    before_container_hash: str,
+) -> str:
+    return hashlib.sha256(
+        _LIFECYCLE_GAP_DOMAIN
+        + _canonical_json(
+            {
+                "acknowledged_gap_codes": list(acknowledged_gap_codes),
+                "before_container_hash": before_container_hash,
+                "before_manifest_hash": before_manifest_hash,
+                "prior_head": prior_head,
+            }
+        )
+    ).hexdigest()
+
+
+def lifecycle_checkpoint_fingerprint(paths_and_hashes: tuple[tuple[str, str], ...]) -> str:
+    return hashlib.sha256(
+        _LIFECYCLE_CHECKPOINT_DOMAIN + _canonical_json([list(item) for item in sorted(paths_and_hashes)])
+    ).hexdigest()
+
+
+def lifecycle_guards(
+    manifest: collections.CollectionManifest, snapshot: record_formats.AdapterSnapshot
+) -> dict[str, str]:
+    """Return the only public stale-write guards for a selected collection."""
+    return {
+        "expected_manifest_hash": manifest.manifest_version.hash,
+        "expected_container_hash": _container_hash(manifest, snapshot),
+    }
 
 
 def append_record(
@@ -605,6 +683,385 @@ def validate_collection_create(
     }
 
 
+def validate_collection_revision(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    manifest_text: str,
+) -> dict[str, Any]:
+    """Validate a proposed existing manifest without acquiring writer authority."""
+    root = Path(vault_root)
+    current = record_governance.resolve_collection(root, collection)
+    record_governance.require_mutation_visibility(root, current)
+    snapshot = record_formats.load_adapter(root, current).read()
+    _current_text, current_guard = _read_record_bytes(root, current.path)
+    try:
+        current_text = _current_text.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8") from error
+    current_guard.recheck(root)
+    proposed = _validate_revision_manifest(root, current, current_text, manifest_text, snapshot)
+    return {
+        "valid": True,
+        "lifecycle_guards": lifecycle_guards(current, snapshot),
+        "normalized_contract": _normalized_manifest_contract(proposed),
+    }
+
+
+def revise_collection(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    manifest_text: str,
+    expected_manifest_hash: str,
+    expected_container_hash: str,
+    why: str,
+) -> dict[str, Any]:
+    """Atomically publish a guarded Records manifest revision and v2 audit event."""
+    return _lifecycle_mutation(
+        vault_root,
+        collection,
+        action="revise",
+        manifest_text=manifest_text,
+        expected_manifest_hash=expected_manifest_hash,
+        expected_container_hash=expected_container_hash,
+        acknowledged_gap_codes=(),
+        why=why,
+    )
+
+
+def rebaseline_collection(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    expected_manifest_hash: str,
+    expected_container_hash: str,
+    acknowledged_gap_codes: tuple[str, ...] | list[str],
+    why: str,
+) -> dict[str, Any]:
+    """Acknowledge an exact valid direct-edit gap without rewriting canonical items."""
+    if not isinstance(acknowledged_gap_codes, (tuple, list)) or not all(
+        isinstance(code, str) for code in acknowledged_gap_codes
+    ):
+        raise collections.CollectionError("INVALID_RECORD_GAPS", "gap acknowledgement is invalid")
+    return _lifecycle_mutation(
+        vault_root,
+        collection,
+        action="rebaseline",
+        manifest_text=None,
+        expected_manifest_hash=expected_manifest_hash,
+        expected_container_hash=expected_container_hash,
+        acknowledged_gap_codes=tuple(acknowledged_gap_codes),
+        why=why,
+    )
+
+
+def _lifecycle_mutation(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    action: str,
+    manifest_text: str | None,
+    expected_manifest_hash: str,
+    expected_container_hash: str,
+    acknowledged_gap_codes: tuple[str, ...],
+    why: str,
+) -> dict[str, Any]:
+    root = Path(vault_root)
+    _validate_why(why)
+    if action not in {"revise", "rebaseline"}:
+        raise collections.CollectionError("INVALID_RECORD_ACTION", "lifecycle action is invalid")
+    with writer_lease.active_manager().mutation_guard(root, operation=f"record_{action}"):
+        current, current_text, manifest_guard = _load_guarded_manifest(root, collection)
+        if current.semantic_profile != "records":
+            raise collections.CollectionError("RECORDS_PROFILE_REQUIRED", "Records collection is required")
+        record_governance.require_mutation_visibility(root, current)
+        snapshot = record_formats.load_adapter(root, current).read()
+        _require_unambiguous_snapshot(snapshot)
+        if current.view_diagnostics:
+            diagnostic = current.view_diagnostics[0]
+            raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+        record_formats.validate_storage_contract(current)
+        record_governance.require_proposed_manifest_visibility(root, current)
+        for record in snapshot.records:
+            _validate_values(current, record.values)
+        guards = lifecycle_guards(current, snapshot)
+        _expect_hash(expected_manifest_hash, guards["expected_manifest_hash"], "manifest")
+        _expect_hash(expected_container_hash, guards["expected_container_hash"], "container")
+        chain = _inspect_audit_chain(root, current, authorize_path=record_governance.full_release_filter(root))
+        if action == "revise":
+            if chain.status not in {"baseline", "ok"}:
+                raise collections.CollectionError("RECORD_AUDIT_GAP", "revision requires continuous audit history")
+            assert manifest_text is not None
+            proposed = _validate_revision_manifest(root, current, current_text, manifest_text, snapshot)
+            candidate_text = manifest_text
+            codes: tuple[str, ...] = ()
+            continuity = True
+            gap_fingerprint = None
+            checkpoint_fingerprint = None
+        else:
+            if chain.status != "gap" or not chain.gaps or not _acknowledgeable_gap_codes(chain.gaps):
+                raise collections.CollectionError("RECORD_AUDIT_GAP", "rebaseline requires an inspectable audit gap")
+            codes = _validate_gap_codes(acknowledged_gap_codes)
+            if codes != chain.gaps:
+                raise collections.CollectionError("STALE_RECORD", "gap acknowledgement is stale")
+            proposed = current
+            candidate_text = current_text
+            continuity = False
+            prior_head = current.audit_head or "baseline"
+            gap_fingerprint = lifecycle_gap_fingerprint(
+                prior_head=prior_head,
+                acknowledged_gap_codes=codes,
+                before_manifest_hash=guards["expected_manifest_hash"],
+                before_container_hash=guards["expected_container_hash"],
+            )
+            checkpoint_fingerprint = lifecycle_checkpoint_fingerprint(
+                tuple((version.path, version.hash) for version in snapshot.source_versions)
+            )
+        transition_id = _transition_id()
+        marked_text = record_formats.render_manifest_audit_head(
+            candidate_text,
+            transition_id,
+            semantic_profile="records",
+            reader_version=2,
+        )
+        after = collections.parse_manifest_bytes(root, root / current.path, marked_text.encode("utf-8"))
+        after_container_hash = _container_hash(after, snapshot)
+        payload_hash = lifecycle_request_hash(
+            action=action,
+            collection_id=current.collection_id,
+            before_manifest_hash=guards["expected_manifest_hash"],
+            before_container_hash=guards["expected_container_hash"],
+            proposed_manifest_hash=(proposed.manifest_version.hash if action == "revise" else None),
+            acknowledged_gap_codes=codes,
+            rationale=why,
+        )
+        event = _lifecycle_audit_body(
+            transition_id=transition_id,
+            parent_id=current.audit_head or "baseline",
+            operation=action,
+            manifest=current,
+            before_manifest_hash=guards["expected_manifest_hash"],
+            after_manifest_hash=after.manifest_version.hash,
+            before_container_hash=guards["expected_container_hash"],
+            after_container_hash=after_container_hash,
+            payload_hash=payload_hash,
+            why=why,
+            continuity=continuity,
+            acknowledged_gap_codes=codes,
+            gap_fingerprint=gap_fingerprint,
+            checkpoint_snapshot_hash=checkpoint_fingerprint,
+        )
+        log_plan = _plan_required_audit(root, current, "collection", event, after_container_hash)
+        # The activity plan pins the exact log bytes it will replace.  Re-read
+        # the chain after planning so an out-of-band fork between the initial
+        # audit decision and that guarded plan cannot be blessed by publication.
+        rechecked_chain = _inspect_audit_chain(
+            root, current, authorize_path=record_governance.full_release_filter(root)
+        )
+        if rechecked_chain.status != chain.status or rechecked_chain.gaps != chain.gaps:
+            raise collections.CollectionError("STALE_RECORD", "audit history changed before publication")
+        record_governance.precommit_authorize_mutation(
+            root,
+            current,
+            snapshot,
+            planned_paths=(
+                current.path,
+                *(write.path.relative_to(root).as_posix() for write in log_plan.writes),
+            ),
+        )
+        try:
+            vault.batch_atomic_write(
+                [
+                    vault.PlannedWrite(root / current.path, marked_text, guard=manifest_guard),
+                    *log_plan.writes,
+                ],
+                vault_root=root,
+                required_guards=(
+                    *snapshot.path_guards,
+                    *snapshot.directory_guards,
+                    *rechecked_chain.required_guards,
+                ),
+            )
+        except vault.BatchWriteError:
+            raise
+        except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
+            raise _publication_error(error) from error
+        return _lifecycle_result(
+            operation=action,
+            manifest=current,
+            before_manifest_hash=guards["expected_manifest_hash"],
+            after_manifest_hash=after.manifest_version.hash,
+            before_container_hash=guards["expected_container_hash"],
+            after_container_hash=after_container_hash,
+            payload_hash=payload_hash,
+            audit_correlation=transition_id,
+            continuity=continuity,
+            acknowledged_gap_codes=codes,
+            gap_fingerprint=gap_fingerprint,
+            checkpoint_snapshot_hash=checkpoint_fingerprint,
+        )
+
+
+def _validate_revision_manifest(
+    root: Path,
+    current: collections.CollectionManifest,
+    current_text: str,
+    manifest_text: str,
+    snapshot: record_formats.AdapterSnapshot,
+) -> collections.CollectionManifest:
+    if not isinstance(manifest_text, str) or not manifest_text:
+        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest text is required")
+    proposed = collections.parse_manifest_bytes(root, root / current.path, manifest_text.encode("utf-8"))
+    if proposed.view_diagnostics:
+        diagnostic = proposed.view_diagnostics[0]
+        raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+    if proposed.semantic_profile != "records" or (
+        proposed.collection_id != current.collection_id
+        or proposed.semantic_profile != current.semantic_profile
+        or proposed.storage.strategy != current.storage.strategy
+        or proposed.storage.source != current.storage.source
+        or proposed.storage.format_version != current.storage.format_version
+        or dict(proposed.storage.descriptor) != dict(current.storage.descriptor)
+        or proposed.schema.version != current.schema.version
+        or proposed.schema.natural_key != current.schema.natural_key
+    ):
+        raise collections.CollectionError("IMMUTABLE_COLLECTION_REPRESENTATION", "revision cannot migrate collection representation")
+    proposed_audit = _record_audit_mapping(manifest_text)
+    current_audit = _record_audit_mapping(current_text)
+    if proposed_audit is not None and proposed_audit != current_audit:
+        raise collections.CollectionError("INVALID_RECORD_AUDIT", "proposed audit state must match current state")
+    record_formats.validate_storage_contract(proposed)
+    record_governance.require_proposed_manifest_visibility(root, proposed)
+    for record in snapshot.records:
+        _validate_values(proposed, record.values)
+    return proposed
+
+
+def _record_audit_mapping(text: str) -> dict[str, Any] | None:
+    try:
+        frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
+    except vault.FrontmatterError as error:
+        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires valid frontmatter") from error
+    if marker is None:
+        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter")
+    audit = frontmatter.get("record_audit")
+    return dict(audit) if isinstance(audit, Mapping) else None
+
+
+def _validate_gap_codes(value: tuple[str, ...]) -> tuple[str, ...]:
+    codes = tuple(sorted(set(value)))
+    if not codes or len(codes) != len(value) or any(
+        not code or len(code.encode("utf-8")) > 256 for code in codes
+    ):
+        raise collections.CollectionError("INVALID_RECORD_GAPS", "gap acknowledgement is invalid")
+    return codes
+
+
+def _acknowledgeable_gap_codes(codes: tuple[str, ...]) -> bool:
+    return set(codes) <= {"current-container-mismatch", "current-manifest-mismatch"}
+
+
+def _require_unambiguous_snapshot(snapshot: record_formats.AdapterSnapshot) -> None:
+    if snapshot.diagnostics or any(record.ambiguous for record in snapshot.records):
+        raise collections.CollectionError("INVALID_RECORD_COLLECTION", "collection items are not structurally valid")
+
+
+def _container_hash(
+    manifest: collections.CollectionManifest, snapshot: record_formats.AdapterSnapshot
+) -> str:
+    if manifest.storage.strategy == "markdown-log":
+        return snapshot.source_versions[-1].hash
+    pairs = [(manifest.manifest_version.path, manifest.manifest_version.hash)] + [
+        (f"{kind}:{path}", digest) for path, kind, digest in snapshot.source_inventory
+    ]
+    return hashlib.sha256(_canonical_json(pairs)).hexdigest()
+
+
+def _lifecycle_audit_body(
+    *,
+    transition_id: str,
+    parent_id: str,
+    operation: str,
+    manifest: collections.CollectionManifest,
+    before_manifest_hash: str,
+    after_manifest_hash: str,
+    before_container_hash: str,
+    after_container_hash: str,
+    payload_hash: str,
+    why: str,
+    continuity: bool,
+    acknowledged_gap_codes: tuple[str, ...],
+    gap_fingerprint: str | None,
+    checkpoint_snapshot_hash: str | None,
+) -> str:
+    event = {
+        "version": _LIFECYCLE_EVENT_VERSION,
+        "transition_id": transition_id,
+        "parent_id": parent_id,
+        "operation": operation,
+        "collection_id": manifest.collection_id,
+        "manifest_path": manifest.path,
+        "source_path": manifest.storage.source,
+        "canonical_path": manifest.path,
+        "item_key": None,
+        "before_manifest_hash": before_manifest_hash,
+        "after_manifest_hash": after_manifest_hash,
+        "before_item_hash": None,
+        "after_item_hash": None,
+        "before_container_hash": before_container_hash,
+        "after_container_hash": after_container_hash,
+        "payload_hash": payload_hash,
+        "rationale": why,
+        "continuity": continuity,
+        "acknowledged_gap_codes": list(acknowledged_gap_codes),
+        "gap_fingerprint": gap_fingerprint,
+        "checkpoint_snapshot_hash": checkpoint_snapshot_hash,
+        "minimum_reader_version": 2,
+    }
+    return profile_for("records").activity_prefix + json.dumps(
+        event, ensure_ascii=False, separators=(",", ":"), allow_nan=False, sort_keys=True
+    )
+
+
+def _lifecycle_result(
+    *,
+    operation: str,
+    manifest: collections.CollectionManifest,
+    before_manifest_hash: str,
+    after_manifest_hash: str,
+    before_container_hash: str,
+    after_container_hash: str,
+    payload_hash: str,
+    audit_correlation: str,
+    continuity: bool,
+    acknowledged_gap_codes: tuple[str, ...],
+    gap_fingerprint: str | None,
+    checkpoint_snapshot_hash: str | None,
+) -> dict[str, Any]:
+    return {
+        "_record_receipt": _RECEIPT_MARKER,
+        "receipt_version": _LIFECYCLE_RECEIPT_VERSION,
+        "operation": operation,
+        "collection_id": manifest.collection_id,
+        "item_key": None,
+        "before_item_hash": None,
+        "after_item_hash": None,
+        "before_manifest_hash": before_manifest_hash,
+        "after_manifest_hash": after_manifest_hash,
+        "before_container_hash": before_container_hash,
+        "after_container_hash": after_container_hash,
+        "affected_paths": [manifest.path],
+        "payload_hash": payload_hash,
+        "outcome": "committed",
+        "audit_correlation": audit_correlation,
+        "continuity": continuity,
+        "acknowledged_gap_codes": list(acknowledged_gap_codes),
+        "gap_fingerprint": gap_fingerprint,
+        "checkpoint_snapshot_hash": checkpoint_snapshot_hash,
+        "minimum_reader_version": 2,
+    }
+
+
 def _preflight_collection_create(
     root: Path,
     path: Path,
@@ -612,12 +1069,16 @@ def _preflight_collection_create(
     *,
     scaffold: bool,
 ) -> collections.CollectionManifest:
+    record_governance.require_candidate_manifest_visibility(root, path.relative_to(root).as_posix())
     _assert_portable_absent(root, path)
     if path.exists() or _casefold_alias(path):
         raise collections.CollectionError(
             "CREATE_ONLY_CONFLICT", "collection manifest already exists"
         )
     manifest = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
+    if manifest.view_diagnostics:
+        diagnostic = manifest.view_diagnostics[0]
+        raise collections.CollectionError(diagnostic.code, diagnostic.reason)
     record_formats.validate_storage_contract(manifest)
     source = root / manifest.storage.source
     _assert_portable_absent(root, source)
@@ -656,6 +1117,10 @@ def _normalized_manifest_contract(
             }
             for name, spec in manifest.schema.fields.items()
         },
+        "views": {
+            name: dict(collections.resolve_saved_view(manifest, name).definition)
+            for name in manifest.views
+        },
     }
 
 
@@ -667,7 +1132,12 @@ def inspect_audit_gap(
 ) -> dict[str, Any]:
     """Report, without repair, whether current bytes prove an audit transition chain."""
     chain = _inspect_audit_chain(Path(vault_root), collection, authorize_path=authorize_path)
-    return {"status": chain.status, "gaps": list(chain.gaps)}
+    payload: dict[str, Any] = {"status": chain.status, "gaps": list(chain.gaps)}
+    if chain.discontinuity is not None:
+        payload["discontinuity"] = dict(chain.discontinuity)
+    if chain.discontinuities:
+        payload["discontinuities"] = [dict(item) for item in chain.discontinuities]
+    return payload
 
 
 def agent_audit_history(
@@ -684,6 +1154,8 @@ def agent_audit_history(
         "complete": chain.complete,
         "truncated": len(chain.events) > len(events),
         "events": [_project_agent_audit_event(event) for event in events],
+        **({"discontinuity": dict(chain.discontinuity)} if chain.discontinuity is not None else {}),
+        **({"discontinuities": [dict(item) for item in chain.discontinuities]} if chain.discontinuities else {}),
     }
 
 
@@ -794,8 +1266,11 @@ def _audit_chain(
     events: tuple[dict[str, Any], ...],
     *,
     complete: bool,
+    discontinuity: Mapping[str, Any] | None = None,
+    discontinuities: tuple[Mapping[str, Any], ...] = (),
+    required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
 ) -> _AuditChain:
-    return _AuditChain(status, gaps, events, complete)
+    return _AuditChain(status, gaps, events, complete, discontinuity, discontinuities, required_guards)
 
 
 def _reconstruct_audit_chain(
@@ -853,6 +1328,7 @@ def _reconstruct_audit_chain(
         if len(transition_ids) > 1:
             gaps.append("transition-fork:" + fork_parent)
     reachable: set[str] = set()
+    discontinuities: list[Mapping[str, Any]] = []
     if head is None:
         gaps.append("missing-manifest-head")
     current = by_id.get(head or "")
@@ -884,7 +1360,17 @@ def _reconstruct_audit_chain(
             if predecessor is None:
                 gaps.append("missing-parent:" + cursor["parent_id"])
                 break
-            if (
+            if cursor.get("operation") == "rebaseline" and cursor.get("continuity") is False:
+                discontinuities.append({
+                    "provenance_continuity": False,
+                    "prior_head": cursor["parent_id"],
+                    "acknowledged_gap_codes": list(cursor["acknowledged_gap_codes"]),
+                    "rationale": cursor["rationale"],
+                    "checkpoint_transition": cursor["transition_id"],
+                    "gap_fingerprint": cursor["gap_fingerprint"],
+                    "checkpoint_snapshot_hash": cursor["checkpoint_snapshot_hash"],
+                })
+            elif (
                 cursor["before_container_hash"] != predecessor["after_container_hash"]
                 or cursor["before_manifest_hash"] != predecessor["after_manifest_hash"]
             ):
@@ -908,10 +1394,13 @@ def _reconstruct_audit_chain(
         ):
             gaps.append("unmatched-marker:" + marker.transition_id)
     return _audit_chain(
-        "gap" if gaps else "ok",
+        "gap" if gaps else ("acknowledged_gap" if discontinuities else "ok"),
         tuple(sorted(set(gaps))[:32]),
         tuple(chain),
         complete=not gaps,
+        discontinuity=discontinuities[0] if discontinuities else None,
+        discontinuities=tuple(discontinuities[:16]),
+        required_guards=history.required_guards,
     )
 
 
@@ -952,9 +1441,7 @@ def _audit_influencing_events(
 
 
 def _project_agent_audit_event(event: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        name: event[name]
-        for name in (
+    names: tuple[str, ...] = (
             "transition_id",
             "parent_id",
             "operation",
@@ -967,8 +1454,16 @@ def _project_agent_audit_event(event: Mapping[str, Any]) -> dict[str, Any]:
             "before_container_hash",
             "after_container_hash",
             "rationale",
+    )
+    if event.get("version") == _LIFECYCLE_EVENT_VERSION:
+        names += (
+            "continuity",
+            "acknowledged_gap_codes",
+            "gap_fingerprint",
+            "checkpoint_snapshot_hash",
+            "minimum_reader_version",
         )
-    }
+    return {name: event[name] for name in names}
 
 
 def _audit_markers(
@@ -1034,6 +1529,13 @@ def _event_matches_transition(
             and event["before_manifest_hash"] is None
             and event["before_item_hash"] is None
             and event["before_container_hash"] is None
+        )
+    if operation in {"revise", "rebaseline"}:
+        return (
+            item_key is None
+            and event["canonical_path"] == manifest.path
+            and event["before_item_hash"] is None
+            and event["after_item_hash"] is None
         )
     if not isinstance(item_key, str) or _validate_audit_item_key(item_key) is None:
         return False
@@ -1218,10 +1720,19 @@ def _audit_events(
             file_guard.recheck(root)
     except vault.PathGuardError:
         return _AuditEvents((), False)
-    return _AuditEvents(tuple(events), True)
+    return _AuditEvents(
+        tuple(events),
+        True,
+        tuple(
+            (*((archive_guard,) if archive_guard is not None else ()),
+             *(guard for guard in file_guards if guard.target != live))
+        ),
+    )
 
 
 def _valid_audit_event(event: Any, semantic_profile: str = "records") -> bool:
+    if isinstance(event, dict) and event.get("version") == _LIFECYCLE_EVENT_VERSION:
+        return _valid_lifecycle_audit_event(event, semantic_profile)
     if not _audit_event_syntax(event, semantic_profile):
         return False
     profile = profile_for(semantic_profile)
@@ -1325,6 +1836,85 @@ def _audit_event_syntax(event: Any, semantic_profile: str = "records") -> bool:
         )
     )
     return common
+
+
+def _valid_lifecycle_audit_event(event: Mapping[str, Any], semantic_profile: str) -> bool:
+    if semantic_profile != "records" or set(event) != {
+        "version",
+        "transition_id",
+        "parent_id",
+        "operation",
+        "collection_id",
+        "manifest_path",
+        "source_path",
+        "canonical_path",
+        "item_key",
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_item_hash",
+        "after_item_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "payload_hash",
+        "rationale",
+        "continuity",
+        "acknowledged_gap_codes",
+        "gap_fingerprint",
+        "checkpoint_snapshot_hash",
+        "minimum_reader_version",
+    }:
+        return False
+    hashes = (
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "payload_hash",
+    )
+    if not (
+        type(event["version"]) is int
+        and event["version"] == _LIFECYCLE_EVENT_VERSION
+        and event["operation"] in {"revise", "rebaseline"}
+        and isinstance(event["transition_id"], str)
+        and re.fullmatch(r"[0-9a-f]{24}", event["transition_id"]) is not None
+        and isinstance(event["parent_id"], str)
+        and (event["parent_id"] == "baseline" or re.fullmatch(r"[0-9a-f]{24}", event["parent_id"]) is not None)
+        and _validate_audit_item_key(event["collection_id"]) is not None
+        and all(_safe_audit_path(event[name]) for name in ("manifest_path", "source_path", "canonical_path"))
+        and event["canonical_path"] == event["manifest_path"]
+        and event["item_key"] is None
+        and event["before_item_hash"] is None
+        and event["after_item_hash"] is None
+        and all(isinstance(event[name], str) and re.fullmatch(r"[0-9a-f]{64}", event[name]) for name in hashes)
+        and isinstance(event["rationale"], str)
+        and bool(event["rationale"].strip())
+        and "\n" not in event["rationale"]
+        and "\r" not in event["rationale"]
+        and len(event["rationale"].encode("utf-8")) <= _MAX_WHY_BYTES
+        and type(event["continuity"]) is bool
+        and isinstance(event["acknowledged_gap_codes"], list)
+        and all(type(code) is str and code and len(code.encode("utf-8")) <= 256 for code in event["acknowledged_gap_codes"])
+        and type(event["minimum_reader_version"]) is int
+        and event["minimum_reader_version"] == 2
+    ):
+        return False
+    codes = event["acknowledged_gap_codes"]
+    if event["operation"] == "revise":
+        return (
+            event["continuity"] is True
+            and codes == []
+            and event["gap_fingerprint"] is None
+            and event["checkpoint_snapshot_hash"] is None
+        )
+    return (
+        event["continuity"] is False
+        and codes == sorted(set(codes))
+        and bool(codes)
+        and all(
+            isinstance(event[name], str) and re.fullmatch(r"[0-9a-f]{64}", event[name])
+            for name in ("gap_fingerprint", "checkpoint_snapshot_hash")
+        )
+    )
 
 
 def _safe_audit_path(value: Any) -> bool:

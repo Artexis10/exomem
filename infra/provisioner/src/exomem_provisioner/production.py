@@ -133,12 +133,13 @@ def build_live_provider_components(
     """Build only real adapters; production has no emulator selection flag."""
 
     lock = settings.deployment_lock
-    target = lock.runtime_target
+    selected = lock.selected_runtime(settings.runtime_selection)
+    target = selected.runtimeTarget
     identity_verifier = ProviderRecoveryIdentityVerifier.from_public_key(
         settings.provider_recovery_public_key
     )
     lifecycle_config = LifecycleConfig(
-        image=lock.components.runtime.image,
+        image=selected.image,
         chart_path=settings.cell_chart_path,
         chart_version=settings.cell_chart_version,
         helm_version=settings.helm_version,
@@ -154,6 +155,8 @@ def build_live_provider_components(
             (unit.releaseVersion, unit.protocolVersion): unit.contract.model_dump(mode="json")
             for unit in lock.composition.legacyCatalog
         },
+        records_reader_version=selected.recordsReaderVersion,
+        lifecycle_actions_enabled=selected.lifecycleActionsEnabled,
     )
     cell = KubernetesCellAdapter(
         core_v1=core_v1,

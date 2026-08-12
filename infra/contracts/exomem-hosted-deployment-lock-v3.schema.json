@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://exomem.substratesystems.io/contracts/exomem-hosted-deployment-lock-v3.schema.json",
+  "title": "Exomem Hosted deployment lock pair v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "schemaVersion", "locks"],
+  "properties": {
+    "artifact": {"const": "exomem-hosted-deployment-lock-pair"},
+    "schemaVersion": {"const": 3},
+    "locks": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/lock"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "runtimeImage": {"type": "string", "pattern": "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"},
+    "runtime": {
+      "type": "object", "additionalProperties": false,
+      "required": ["image", "sourceCommit", "candidateSha256"],
+      "properties": {"image": {"$ref": "#/$defs/runtimeImage"}, "sourceCommit": {"$ref": "#/$defs/commit"}, "candidateSha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "readerStatusProof": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "recordsReaderVersion", "lifecycleActionsEnabled", "issuedAt", "expiresAt", "signerWorkflow", "signerWorkflowDigest"],
+      "properties": {
+        "profile": {"const": "hosted-alpha-agent-v1"}, "recordsReaderVersion": {"const": 2}, "lifecycleActionsEnabled": {"const": false},
+        "issuedAt": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"}, "expiresAt": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"},
+        "signerWorkflow": {"const": "Artexis10/exomem/.github/workflows/release-please.yml"}, "signerWorkflowDigest": {"$ref": "#/$defs/commit"}
+      }
+    },
+    "rollbackRuntime": {
+      "type": "object", "additionalProperties": false,
+      "required": ["image", "sourceCommit", "candidateSha256", "recordsReaderVersion", "readerStatusProof", "runtimeTarget"],
+      "properties": {"image": {"$ref": "#/$defs/runtimeImage"}, "sourceCommit": {"$ref": "#/$defs/commit"}, "candidateSha256": {"$ref": "#/$defs/sha256"}, "recordsReaderVersion": {"const": 2}, "readerStatusProof": {"$ref": "#/$defs/readerStatusProof"}, "runtimeTarget": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/runtimeTarget"}}
+    },
+    "recordsCompatibility": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimum_records_reader_version", "activeProfile", "activeLifecycleActionsEnabled", "rollbackProfile", "rollbackLifecycleActionsEnabled", "rollbackRuntime"],
+      "properties": {
+        "minimum_records_reader_version": {"const": 2},
+        "activeProfile": {"const": "hosted-alpha-agent-v2"},
+        "activeLifecycleActionsEnabled": {"const": true},
+        "rollbackProfile": {"const": "hosted-alpha-agent-v1"},
+        "rollbackLifecycleActionsEnabled": {"const": false},
+        "rollbackRuntime": {"$ref": "#/$defs/rollbackRuntime"}
+      }
+    },
+    "lock": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget", "composition", "rollback", "recordsCompatibility"],
+      "properties": {
+        "artifact": {"const": "exomem-hosted-deployment-lock"}, "schemaVersion": {"const": 3}, "admissionMode": {"enum": ["expand", "contract"]},
+        "components": {"type": "object", "additionalProperties": false, "required": ["runtime", "provisioner"], "properties": {"runtime": {"$ref": "#/$defs/runtime"}, "provisioner": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/provisionerComponent"}}},
+        "runtimeTarget": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/runtimeTarget"}, "composition": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/composition"}, "rollback": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/rollback"}, "recordsCompatibility": {"$ref": "#/$defs/recordsCompatibility"}
+      }
+    }
+  }
+}

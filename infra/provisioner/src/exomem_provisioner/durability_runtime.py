@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -26,6 +26,7 @@ from .driver import (
     EffectContext,
 )
 from .durability_repository import DurabilityRepository
+from .lifecycle import MetadataConflict
 from .models import (
     CellOperationLock,
     Operation,
@@ -33,27 +34,11 @@ from .models import (
     OperationState,
     TenantFence,
 )
-from .provider_identity import ProviderRecoveryIdentityVerifier
+from .provider_deletion import DeletionLeaseBusy
+from .provider_identity import ProviderIdentityConflict, ProviderRecoveryIdentityVerifier
 from .repository import OperationRepository
 from .worker import ProvisionerWorker
 from .worker_ownership import DELETION_OPERATION_ACTIONS
-
-try:
-    from .lifecycle import MetadataConflict
-    from .provider_deletion import DeletionLeaseBusy
-    from .provider_identity import ProviderIdentityConflict
-except ModuleNotFoundError:
-    # Provider-lane modules are merged alongside this lane in production. The
-    # fallbacks keep this independently testable without weakening the merged
-    # runtime, where the canonical exception classes are imported above.
-    class MetadataConflict(RuntimeError):
-        pass
-
-    class DeletionLeaseBusy(RuntimeError):
-        pass
-
-    class ProviderIdentityConflict(RuntimeError):
-        pass
 
 
 def _utc(value: datetime) -> datetime:
@@ -92,6 +77,7 @@ class DeletionRuntimeSettings(BaseSettings):
     user_export_delete_key_id: SecretStr = Field(min_length=1, max_length=4096)
     user_export_delete_key: SecretStr = Field(min_length=1, max_length=4096)
     deployment_lock_path: Path = Field(validation_alias="EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH")
+    runtime_selection: Literal["active", "rollback"] | None = None
 
     @field_validator("database_url")
     @classmethod
@@ -117,7 +103,9 @@ class DeletionRuntimeSettings(BaseSettings):
 
     @property
     def deployment_lock(self) -> DeploymentLock:
-        return load_deployment_lock(self.deployment_lock_path)
+        lock = load_deployment_lock(self.deployment_lock_path)
+        lock.selected_runtime(self.runtime_selection)
+        return lock
 
     @model_validator(mode="after")
     def validate_boundaries(self) -> DeletionRuntimeSettings:
@@ -545,7 +533,7 @@ async def live_deletion_worker() -> AsyncIterator[ProvisionerWorker]:
             authority=authority,
             worker_id=settings.worker_id,
             runtime_target_validator=lambda request, context: lock.matches_runtime_request(
-                request, wire_protocol=context.wire_protocol
+                request, wire_protocol=context.wire_protocol, selection=settings.runtime_selection
             ),
         )
     finally:

@@ -154,7 +154,7 @@ def hosted_agent_surface_descriptor(
 ) -> capabilities.ActiveSurfaceDescriptor:
     """Return the immutable descriptor for one supported Hosted agent profile."""
 
-    if profile != commands_module.HOSTED_ALPHA_AGENT_PROFILE:
+    if profile not in commands_module.PRODUCT_SURFACE_PROFILES:
         raise HostedGatewayError(
             "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
             "hosted agent surface profile is not supported",

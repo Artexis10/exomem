@@ -1764,6 +1764,21 @@ class IdempotencyStore:
         if on_replay is not None:
             on_replay()
         if disposition == "completed":
+            if isinstance(stored, Mapping):
+                leaf = stored.get("leaf_result")
+                if (
+                    isinstance(leaf, Mapping)
+                    and leaf.get("receipt_version") == 2
+                    and valid_collection_receipt(leaf)
+                    and leaf.get("outcome") == "committed"
+                ):
+                    stored_request_id = stored.get("request_id")
+                    return replayed_terminal(
+                        leaf,
+                        request_id=(stored_request_id if isinstance(stored_request_id, str) else str(uuid.uuid4())),
+                        receipt_id=stored.get("receipt_id") if isinstance(stored.get("receipt_id"), str) else None,
+                        idempotency_key=stored.get("idempotency_key") if isinstance(stored.get("idempotency_key"), str) else None,
+                    )
             return stored
         if disposition == "committed_failure":
             raise stored
@@ -2426,7 +2441,7 @@ class LeaseManager:
                 return result
             terminal = {**result, **outcome}
             leaf = result.get("leaf_result")
-            if isinstance(leaf, Mapping):
+            if isinstance(leaf, Mapping) and not valid_collection_receipt(leaf):
                 terminal["leaf_result"] = {**leaf, **outcome}
             return terminal
 

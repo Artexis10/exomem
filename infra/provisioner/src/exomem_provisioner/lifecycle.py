@@ -191,6 +191,8 @@ class LifecycleConfig:
     location: str
     runtime_target: dict[str, str] | None = None
     legacy_runtime_units: dict[tuple[str, str], dict[str, str]] | None = None
+    records_reader_version: int | None = None
+    lifecycle_actions_enabled: bool = False
 
     def runtime_target_for(self, request: dict[str, Any], *, v2: bool) -> dict[str, str]:
         if v2:
@@ -235,6 +237,8 @@ class HealthObservation:
     agent_profile: str | None = None
     command_fingerprint: str | None = None
     schema_digest: str | None = None
+    records_reader_version: int | None = None
+    lifecycle_actions_enabled: bool | None = None
 
     @classmethod
     def ready_for(
@@ -263,6 +267,17 @@ class HealthObservation:
             agent_profile=target.get("agentProfile") if v2 else None,
             command_fingerprint=target.get("commandFingerprint") if v2 else None,
             schema_digest=target.get("schemaDigest") if v2 else None,
+            records_reader_version=(
+                config.records_reader_version if config.records_reader_version is not None else None
+            ),
+            lifecycle_actions_enabled=(
+                bool(
+                    config.lifecycle_actions_enabled
+                    and target.get("agentProfile") == "hosted-alpha-agent-v2"
+                )
+                if config.records_reader_version is not None
+                else None
+            ),
         )
 
     def replace(self, **changes: Any) -> HealthObservation:
@@ -1547,6 +1562,16 @@ def _fixed_helm_values(
             "restore" if request["provisionMode"] == "restore-candidate" else "initialize"
         ),
     }
+    records_reader_version = getattr(config, "records_reader_version", None)
+    if records_reader_version is not None:
+        if records_reader_version < 2:
+            raise MetadataConflict("Records reader compatibility is not admitted")
+        values["recordsReaderVersion"] = records_reader_version
+        target = config.runtime_target_for(request, v2=has_runtime_target)
+        values["lifecycleActionsEnabled"] = bool(
+            getattr(config, "lifecycle_actions_enabled", False)
+            and target.get("agentProfile") == "hosted-alpha-agent-v2"
+        )
     recovery_envelopes = request.get("_providerRecoveryEnvelopes")
     if recovery_envelopes is not None:
         if not isinstance(recovery_envelopes, dict):

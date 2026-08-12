@@ -34,6 +34,7 @@ def _recovery_environment(**overrides: str) -> dict[str, str]:
         "EXOMEM_RECOVERY_ENVELOPE_KEY": "e" * 32,
         "EXOMEM_RECOVERY_PROVIDER_RECOVERY_PUBLIC_KEY": "p" * 43,
         "EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON": _selected_deployment_lock_json(),
+        "EXOMEM_RECOVERY_RUNTIME_SELECTION": "active",
         "EXOMEM_RECOVERY_HCLOUD_TOKEN": "h" * 32,
         "EXOMEM_RECOVERY_HCLOUD_LOCATION": "fsn1",
     }
@@ -48,6 +49,7 @@ def test_recovery_settings_accept_only_the_exact_minimal_environment() -> None:
 
     assert settings.database_name == "recovery_db"
     assert settings.deployment_lock.components.provisioner.image.endswith("b" * 64)
+    assert settings.runtime_selection == "active"
     assert settings.hcloud_location == "fsn1"
     for name, value in (
         (
@@ -58,6 +60,7 @@ def test_recovery_settings_accept_only_the_exact_minimal_environment() -> None:
         ("EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS", "0"),
         ("EXOMEM_RECOVERY_HCLOUD_TOKEN", "short"),
         ("EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON", "{}"),
+        ("EXOMEM_RECOVERY_RUNTIME_SELECTION", "rollback"),
         ("EXOMEM_RECOVERY_UNRELATED_SECRET", "forbidden"),
         ("EXOMEM_PROVISIONER_BEARER", "b" * 32),
         ("EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY", "s" * 43),

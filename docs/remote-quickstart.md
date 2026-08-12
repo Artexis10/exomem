@@ -248,12 +248,20 @@ the new packaged digest as `pending_tool_surface_sha256` with
 `refresh_required: true`; do not claim it is already registered. After the new
 service is deployed, confirm `/health/ready.mcp_tool_surface_sha256` matches the
 pending digest, refresh or recreate the Personal Plugin, and verify from a fresh
-conversation that `bootstrap` and `ask_memory` both invoke. Only then promote
-the pending digest to `registered_tool_surface_sha256`, clear the pending value,
-and set `refresh_required: false`. The release gate accepts an explicit pending
-rollout but blocks an unacknowledged schema change. The post-deploy promotion is
-a manual attestation because ChatGPT exposes no API for reading its registered
-plugin snapshot.
+conversation that `bootstrap` and `ask_memory` both invoke. If that verified
+digest is still the current packaged surface, promote it to
+`registered_tool_surface_sha256`, clear the pending value, and set
+`refresh_required: false`. If a newer surface landed meanwhile, promote only
+the verified digest as the last registered snapshot while preserving the newest
+pending digest and `refresh_required: true`. The release gate accepts an
+explicit pending rollout but blocks an unacknowledged schema change. The
+post-deploy promotion is a manual attestation because ChatGPT exposes no API
+for reading its registered plugin snapshot.
+
+Disconnecting and reconnecting the app only renews its OAuth connection; it does
+not rescan MCP action schemas. Use the app's action refresh/rescan control when
+available, or delete and recreate the app definition, then verify the callable
+schema from a fresh conversation.
 
 `bootstrap.server.published_mcp_tool_surface_sha256` identifies the packaged
 canonical surface; `/health/ready` fingerprints the tools actually registered
