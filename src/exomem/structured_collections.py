@@ -368,6 +368,7 @@ Each panel is one observed event. Child analytes preserve reported values and pr
 class CollectionDiagnostic:
     code: str
     reason: str
+    location: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,6 +444,8 @@ class CollectionManifest:
     manifest_stable_hash: str = ""
     templates: tuple[TemplateSpec, ...] = ()
     views: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    normalized_views: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    view_diagnostics: tuple[CollectionDiagnostic, ...] = ()
     governance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     links: CollectionLinks = field(default_factory=CollectionLinks)
 
@@ -940,7 +943,9 @@ def _manifest_from_frontmatter(
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
     audit_head = _audit_head(frontmatter, "record_audit" if profile == "records" else "plan_audit")
     templates = _parse_templates(root, manifest_rel, frontmatter.get("templates", []))
-    views = _parse_saved_views(frontmatter.get("views", {}), schema, storage)
+    views, normalized_views, view_diagnostics = _parse_saved_views(
+        frontmatter.get("views", {}), schema, storage, profile
+    )
     links = _parse_links(frontmatter.get("links", {}))
     return CollectionManifest(
         collection_id=collection_id,
@@ -956,6 +961,8 @@ def _manifest_from_frontmatter(
         manifest_stable_hash=manifest_stable_hash,
         templates=templates,
         views=views,
+        normalized_views=normalized_views,
+        view_diagnostics=view_diagnostics,
         governance=_freeze_mapping(frontmatter.get("governance", {}), "governance"),
         links=links,
     )
@@ -965,7 +972,12 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
     """Resolve one manifest view into the exact definition used for query provenance."""
     if type(name) is not str or not name or len(name.encode("utf-8")) > _MAX_SAVED_VIEW_NAME_BYTES:
         raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
-    definition = manifest.views.get(name)
+    for diagnostic in manifest.view_diagnostics:
+        if diagnostic.location == f"views.{name}":
+            raise CollectionError(diagnostic.code, diagnostic.reason)
+    definition = manifest.normalized_views.get(name)
+    if definition is None:
+        definition = manifest.views.get(name)
     if definition is None:
         raise CollectionError("SAVED_VIEW_NOT_FOUND", "saved view was not found")
     if not isinstance(definition, Mapping):  # Defensive: manifests normalize this on load.
@@ -996,12 +1008,26 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
 
 
 def _parse_saved_views(
-    value: object, schema: ItemSchema, storage: StorageSpec
-) -> Mapping[str, Any]:
+    value: object, schema: ItemSchema, storage: StorageSpec, semantic_profile: str
+) -> tuple[Mapping[str, Any], Mapping[str, Any], tuple[CollectionDiagnostic, ...]]:
     views = _mapping(value, "views")
     if len(views) > _MAX_SAVED_VIEWS:
         raise CollectionError("INVALID_SAVED_VIEW", "too many saved views")
-    return _freeze_mapping(views, "views")
+    fields = _saved_view_fields(schema, storage, semantic_profile)
+    accepted: dict[str, Any] = {}
+    normalized: dict[str, Any] = {}
+    diagnostics: list[CollectionDiagnostic] = []
+    for name, definition in views.items():
+        location = f"views.{name}" if type(name) is str else "views"
+        try:
+            if type(name) is not str or not name or len(name.encode("utf-8")) > _MAX_SAVED_VIEW_NAME_BYTES:
+                raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
+            normalized_view = _freeze_mapping(_normalize_saved_view(definition, fields))
+            accepted[name] = definition
+            normalized[name] = normalized_view
+        except CollectionError as error:
+            diagnostics.append(CollectionDiagnostic(error.code, error.reason, location))
+    return _freeze_mapping(accepted, "views"), _freeze_mapping(normalized, "views"), tuple(diagnostics)
 
 
 def _saved_view_fields(
@@ -1032,7 +1058,7 @@ def _normalize_saved_view(value: object, fields: set[str]) -> dict[str, Any]:
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query is invalid")
     if not _mapping_has_only_keys(raw_query, _SAVED_VIEW_QUERY_KEYS):
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query has unknown fields")
-    query: dict[str, Any] = {}
+    query: dict[str, Any] = {"filters": []}
     if "filters" in raw_query:
         query["filters"] = _normalize_saved_view_filters(raw_query["filters"], fields)
     if "columns" in raw_query:
@@ -1171,7 +1197,12 @@ def _audit_head(frontmatter: Mapping[str, Any], name: str) -> str | None:
     if not isinstance(audit, Mapping) or set(audit) != {"version", "head"}:
         raise CollectionError(code, "collection audit state is invalid")
     head = audit.get("head")
-    if type(audit.get("version")) is not int or audit["version"] != 1 or not isinstance(head, str):
+    supported_versions = {1, 2} if name == "record_audit" else {1}
+    if (
+        type(audit.get("version")) is not int
+        or audit["version"] not in supported_versions
+        or not isinstance(head, str)
+    ):
         raise CollectionError(code, "collection audit state is invalid")
     if re.fullmatch(r"[0-9a-f]{24}", head) is None:
         raise CollectionError(code, "collection audit head is invalid")

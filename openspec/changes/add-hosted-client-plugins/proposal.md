@@ -6,7 +6,7 @@ Exomem Hosted needs to feel like a product, not an MCP integration project: an i
 
 - Add one canonical Hosted plugin definition that renders installable Claude and OpenAI packages for the versioned shared Exomem Hosted MCP resource, including OpenAI's `.app.json` registered-app mapping.
 - Bundle a Hosted-safe core skill and compatible workflow skills that teach automatic recall, capture, continuation, and governance without requiring explicit "use Exomem" prompts.
-- Make every bundled skill declare its required Exomem tools and fail packaging when a dependency is absent from `hosted-alpha-agent-v1`.
+- Keep the immutable `hosted-alpha-agent-v1` package/profile intact, and add a separately versioned `hosted-alpha-agent-v2` lifecycle-capable candidate when Records selectors are advertised; fail packaging when a dependency is absent from that candidate's exact profile.
 - Bind each package to the Hosted endpoint, profile identifier, command-surface fingerprint, full contract digest, skill-content hash, and plugin version without embedding tenant identifiers, credentials, vault paths, or local runtime configuration.
 - Add deterministic package generation, static safety/drift gates, and per-platform pending-to-live promotion records.
 - Require real installation plus fresh-client, content-bearing recall and durable capture/recall smoke tests before a Claude or OpenAI artifact is marked ready for distribution.
@@ -27,6 +27,6 @@ None.
 
 - Affected areas: plugin source and generators, Hosted-safe skill projections, package metadata/assets, release and promotion records, contract tests, and live client smoke tooling.
 - Records-affecting candidates additionally consume the `records-release-acceptance` evidence contract and coordinated `graph-rebuild-availability` proof.
-- External dependency: the paired Substrate change `add-exomem-hosted-mcp-oauth` supplies the public MCP endpoint, Exomem-owned OAuth lifecycle, invite admission, tenant provisioning, and pinned `hosted-alpha-agent-v1` routing.
+- External dependency: the paired Substrate change `add-exomem-hosted-mcp-oauth` supplies the public MCP endpoint, Exomem-owned OAuth lifecycle, invite admission, tenant provisioning, immutable `hosted-alpha-agent-v1` routing, and the additive `hosted-alpha-agent-v2` lifecycle-capable routing.
 - Compatibility: local stdio/MCP installs, the current Claude Code plugin, personal connectors, and the full private Hosted control-plane surface remain unchanged.
 - Distribution starts private or unlisted for the friends cohort; public directory submission is a later promotion decision, not a requirement for this change.

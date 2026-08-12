@@ -14,7 +14,7 @@ commands.
 | `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
 | `plan` | Capture, inspect, query, update, or triage intended future state | `plan_memory` for a configured Planning collection |
-| `record` | Log, correct, inspect, or query an observed event or current state | `record_memory` for a configured Record collection |
+| `record` | Capture, correct, inspect, or query a durable observed event or current state | `record_memory` for a configured Record collection |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
@@ -38,12 +38,25 @@ opaque. Review, dashboards, and UI workflows are separate product work.
 ## Records
 
 `record_memory` is the one public product command for human-owned observed
-state. It has exactly five actions: `inspect`, `create`, `query`, `append`, and
-`update`. Do not replace it with storage-specific tools. `inspect` is report-only;
-`create` explicitly creates a reviewed collection contract; `query` returns a
-bounded current view; `append` adds a new event; and `update` changes one item
-with current stale-write guards and a concise reason. Generic derived-index repair
-remains `maintain_memory(mode="reconcile")`.
+state. It has exactly nine actions: `describe`, `validate`, `inspect`, and
+`query`; `create`, `append`, `update`, `revise`, and `rebaseline`. Do not replace
+it with storage-specific tools. `describe` returns the complete contract;
+`validate` is read-only preflight; `inspect` is report-only; `query` returns a
+bounded current view; `create` explicitly creates a reviewed collection contract;
+`append` adds a new event; `update` changes one item with current stale-write
+guards and a concise reason; `revise` changes a validated manifest under its
+current guards; and `rebaseline` explicitly records a valid direct-edit audit
+gap. Generic derived-index repair remains `maintain_memory(mode="reconcile")`.
+
+Route durable observed events or current state here without waiting for a magic
+verb. When exactly one compatible existing collection accepts a sufficiently
+identified observation, the active engagement policy may append or update it and
+the agent reports the mutation. If collections compete or identity, date,
+provenance, or ownership is unclear, ask one focused question. If no collection
+fits, start with `describe`, then propose a concise collection and validate it;
+the agent must not silently create a long-lived schema. For a new collection use
+`describe -> validate -> create -> inspect -> append`; for maintenance use
+`validate -> revise` or `inspect -> rebaseline`.
 
 Records are intentionally manual-first. Canonical data remains ordinary files:
 an append-heavy chronological Markdown log, one Markdown file per item, or a

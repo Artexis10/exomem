@@ -733,6 +733,56 @@ def test_hosted_agent_profile_routes_enforce_contract_and_bootstrap(
     assert len(invoker.calls) == calls_before_exclusion
 
 
+def test_hosted_agent_v2_routes_expose_records_without_expanding_v1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hosted_runtime_temp,
+        "ensure_hosted_runtime_temp",
+        lambda *_args, **_kwargs: tmp_path / "runtime-temp",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_temp,
+        "HostedRuntimeTempAuthority",
+        lambda *_args, **_kwargs: object(),
+    )
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-agent-v2",
+        credential="agent-v2-private-service-credential-0001",
+    )
+    headers = _headers(config)
+    v1 = commands_module.HOSTED_ALPHA_AGENT_PROFILE
+    v2 = commands_module.HOSTED_ALPHA_AGENT_V2_PROFILE
+
+    v1_contract = client.get(f"/private/exomem/v1/agent/{v1}/contract", headers=headers)
+    v2_contract = client.get(f"/private/exomem/v1/agent/{v2}/contract", headers=headers)
+
+    assert v1_contract.status_code == 200, v1_contract.text
+    assert v2_contract.status_code == 200, v2_contract.text
+    assert "record_memory" not in {entry["name"] for entry in v1_contract.json()["commands"]}
+    assert "record_memory" in {entry["name"] for entry in v2_contract.json()["commands"]}
+    assert v2_contract.json()["agent_profile"]["profile"] == v2
+
+    described = client.post(
+        f"/private/exomem/v1/agent/{v2}/command/record_memory",
+        headers=headers,
+        json={"action": "describe"},
+    )
+
+    assert described.status_code == 200, described.text
+    assert "closed_values" in described.json()["data"]
+    assert invoker.calls[-1]["command"] == "record_memory"
+
+    unknown = client.get(
+        "/private/exomem/v1/agent/hosted-alpha-agent-v999/contract",
+        headers=headers,
+    )
+    assert unknown.status_code == 400
+    assert unknown.json()["error"]["code"] == "HOSTED_SURFACE_PROFILE_UNSUPPORTED"
+
+
 def _remember_body(sentinel: str) -> dict[str, str]:
     return {
         "note_type": "insight",

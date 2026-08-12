@@ -23,6 +23,7 @@ from exomem import writer_lease as writer_lease_module
 from exomem.cli_ops import OpError, error_dict, http_status_for
 from exomem.lease_coordinator import SQLiteLeaseStore
 from exomem.mutation_lock import VaultMutationCoordinator
+from exomem.mutation_terminal import committed_terminal
 from exomem.vault import PlannedWrite, batch_atomic_write
 from exomem.writer_lease import (
     IdempotencyStore,
@@ -507,6 +508,26 @@ def test_record_replay_receipt_has_a_noop_terminal(tmp_path: Path) -> None:
     assert result["status"] == "replayed"
     assert result["mutated"] is False
     assert result["outcome"] == "replayed"
+
+
+def test_lifecycle_idempotency_replay_keeps_committed_receipt_and_replays_terminal(tmp_path: Path) -> None:
+    receipt = {
+        "_record_receipt": "exomem.records-mutation", "receipt_version": 2,
+        "operation": "revise", "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": None, "before_item_hash": None, "after_item_hash": None,
+        "before_manifest_hash": "a" * 64, "after_manifest_hash": "b" * 64,
+        "before_container_hash": "c" * 64, "after_container_hash": "d" * 64,
+        "affected_paths": ["Knowledge Base/Records/Test/_collection.md"], "payload_hash": "e" * 64,
+        "outcome": "committed", "audit_correlation": "f" * 24, "continuity": True,
+        "acknowledged_gap_codes": [], "gap_fingerprint": None, "checkpoint_snapshot_hash": None,
+        "minimum_reader_version": 2,
+    }
+    terminal = committed_terminal(receipt, request_id="first", receipt_id="r", idempotency_key="same")
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    assert store.run("same", "digest", lambda: terminal) == terminal
+    replay = store.run("same", "digest", lambda: pytest.fail("lifecycle leaf reran"))
+    assert replay["status"] == "replayed" and replay["mutated"] is False
+    assert replay["leaf_result"] == receipt
 
 
 def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:

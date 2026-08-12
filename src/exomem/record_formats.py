@@ -864,7 +864,11 @@ def render_markdown_item_update(
 
 
 def render_manifest_audit_head(
-    source: str, transition_id: str, *, semantic_profile: str = "records"
+    source: str,
+    transition_id: str,
+    *,
+    semantic_profile: str = "records",
+    reader_version: int | None = None,
 ) -> str:
     """Replace only the ordinary manifest audit state while retaining all other bytes."""
     if not re.fullmatch(r"[0-9a-f]{24}", transition_id):
@@ -904,26 +908,32 @@ def render_manifest_audit_head(
                 "INVALID_COLLECTION_MANIFEST", "manifest keys are invalid"
             )
     collections._audit_head(parsed, profile.manifest_audit_property)
+    if reader_version is not None and (
+        type(reader_version) is not int
+        or reader_version not in ({1, 2} if semantic_profile == "records" else {1})
+    ):
+        raise collections.CollectionError("INVALID_RECORD_AUDIT", "audit reader version is invalid")
     if audit_node is None:
         frontmatter += (
-            f"{profile.manifest_audit_property}: {{version: 1, head: {transition_id}}}{newline}"
+            f"{profile.manifest_audit_property}: {{version: {reader_version or 1}, head: {transition_id}}}{newline}"
         )
     else:
-        heads = [
-            value_node
+        values = {
+            key_node.value: value_node
             for key_node, value_node in audit_node.value
-            if isinstance(key_node, vault.yaml.nodes.ScalarNode) and key_node.value == "head"
-        ]
-        if len(heads) != 1:
+            if isinstance(key_node, vault.yaml.nodes.ScalarNode)
+        }
+        head = values.get("head")
+        version = values.get("version")
+        if head is None or version is None:
             raise collections.CollectionError(
                 "INVALID_RECORD_AUDIT", "record audit head is invalid"
             )
-        head = heads[0]
-        frontmatter = (
-            frontmatter[: head.start_mark.index]
-            + transition_id
-            + frontmatter[head.end_mark.index :]
-        )
+        replacements = [(head.start_mark.index, head.end_mark.index, transition_id)]
+        if reader_version is not None:
+            replacements.append((version.start_mark.index, version.end_mark.index, str(reader_version)))
+        for start_index, end_index, replacement in sorted(replacements, reverse=True):
+            frontmatter = frontmatter[:start_index] + replacement + frontmatter[end_index:]
     return bom + text[:start] + frontmatter + text[end:]
 
 
@@ -983,10 +993,12 @@ def inspect_collection(
             source_hashes={version.path: version.hash for version in versions},
             diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
         )
-    diagnostics = list(parsed.diagnostics[:64])
+    diagnostics = list((*manifest.view_diagnostics, *parsed.diagnostics)[:64])
     for name in manifest.views:
         if len(diagnostics) >= 64:
             break
+        if any(diagnostic.location == f"views.{name}" for diagnostic in manifest.view_diagnostics):
+            continue
         try:
             view = collections.resolve_saved_view(manifest, name)
         except collections.CollectionError as error:

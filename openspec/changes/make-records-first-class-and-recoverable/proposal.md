@@ -11,6 +11,7 @@ Records are technically callable but still easy for agents to miss, and the curr
 - Preserve direct human editing: out-of-band manifest edits remain canonical, inspectable audit gaps, while `rebaseline` records the discontinuity before establishing a new checkpoint.
 - Replace fixture-first Records release proof with a complete installed-wheel lifecycle and require structured disposable-vault live MCP evidence before a changed Records surface can be promoted.
 - Supersede connector promotion evidence that proves only schema visibility or tool callability.
+- Deliver lifecycle capability through an additive `hosted-alpha-agent-v2` candidate/profile with reader floor 2; retain `hosted-alpha-agent-v1` membership, identity, clients, locks, and registered evidence unchanged.
 - Keep mutation-boundary availability work in the existing `rebuild-graph-without-blocking-writes` change; this change consumes its acceptance result but does not duplicate its implementation.
 
 ## Capabilities
@@ -33,4 +34,4 @@ Records are technically callable but still easy for agents to miss, and the curr
 - Adds fields and selector values to the public `record_memory` schema; existing seven-action callers remain compatible.
 - Adds no hidden database, storage migration, server-side reasoning model, or automatic interpretation of observed values.
 - Requires coordinated delivery with `rebuild-graph-without-blocking-writes` before claiming the reported reconcile-blocking incident is fully resolved.
-- The existing active `add-hosted-client-plugins` change owns the corresponding platform-promotion extension and enforcement artifacts; this change defines the Records proof it consumes without creating a second delta over that not-yet-canonical capability.
+- The existing active `add-hosted-client-plugins` change owns the corresponding additive v2 Hosted profile/candidate, platform-promotion extension, and enforcement artifacts; this change defines the Records proof it consumes without creating a second delta over that not-yet-canonical capability. V1 is not a lifecycle deployment target and is never silently mutated.

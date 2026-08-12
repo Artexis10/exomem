@@ -92,3 +92,17 @@ Every MCP capability profile that reports Records as available in bootstrap SHAL
 #### Scenario: Disabled profile is honest
 - **WHEN** an operator profile intentionally excludes `record_memory`
 - **THEN** bootstrap marks Records unavailable and omits any instruction that tells the agent to call it
+
+### Requirement: Hosted lifecycle capability uses an additive profile
+
+The disposable Hosted lifecycle surface SHALL use `hosted-alpha-agent-v2`, a separately versioned profile/candidate that retains `hosted-alpha-agent-v1` membership unchanged and adds the canonical nine-action `record_memory` surface. The v2 candidate package and additive deployment lock SHALL bind `minimum_records_reader_version: 2` before advertising `revise` or `rebaseline`. Existing v1 packages, clients, locks, and registered evidence SHALL remain valid and unchanged; v1 SHALL NOT be silently relabelled or mutated to advertise lifecycle selectors.
+
+#### Scenario: Disposable lifecycle runs on v2
+- **WHEN** the disposable hosted acceptance runner requests lifecycle capability
+- **THEN** discovery reports `hosted-alpha-agent-v2`, `record_memory`, and the exact nine-action selector
+- **AND** its candidate and deployment lock bind Records reader version 2
+
+#### Scenario: Existing v1 client remains unchanged
+- **WHEN** an existing v1 client connects while a v2 lifecycle candidate is pending or live
+- **THEN** it remains bound to its unchanged v1 profile and compatibility identity
+- **AND** it is neither required nor allowed to claim `revise` or `rebaseline` availability

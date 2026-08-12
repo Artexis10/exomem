@@ -2,13 +2,19 @@
 
 ### Requirement: One Canonical Definition Renders Supported Hosted Packages
 
-The system SHALL maintain one canonical Exomem Hosted plugin definition and SHALL deterministically render installable Claude and OpenAI artifacts from it. The OpenAI artifact MUST include `.app.json` with its registered-app mapping. Both artifacts MUST represent the same product identity, versioned production Hosted MCP resource, `hosted-alpha-agent-v1` profile, Hosted skill set, and release version while using only manifest fields and file layouts accepted by the target platform.
+The system SHALL maintain one canonical Exomem Hosted plugin definition and SHALL deterministically render installable Claude and OpenAI artifacts from it. The OpenAI artifact MUST include `.app.json` with its registered-app mapping. Every artifact MUST represent one immutable versioned Hosted profile, Hosted skill set, and release version while using only manifest fields and file layouts accepted by the target platform. `hosted-alpha-agent-v1` remains the existing immutable profile; lifecycle-capable packages SHALL use a separately versioned `hosted-alpha-agent-v2` profile and candidate.
 
 #### Scenario: Claude and OpenAI candidates are rendered
 
 - **WHEN** maintainers render one Hosted plugin release for the supported platforms
 - **THEN** the output contains a validator-clean Claude package and a validator-clean OpenAI package
 - **AND** both packages bind the same endpoint, profile, skills, and release identity through their platform-specific formats
+
+#### Scenario: Lifecycle package is additive to v1
+
+- **WHEN** maintainers render a candidate that advertises `revise` or `rebaseline`
+- **THEN** it binds `hosted-alpha-agent-v2`, a new candidate identity, and its own package and deployment locks
+- **AND** no v1 package, lock, profile membership, or registered evidence is rewritten or relabelled
 
 #### Scenario: The same inputs are rendered twice
 
@@ -71,13 +77,19 @@ The package SHALL include a generic Hosted core skill and compatible workflow sk
 
 ### Requirement: Every Hosted Skill Is Executable On The Pinned Profile
 
-Every bundled Hosted skill SHALL declare its exact required Exomem command set. Package validation MUST extract callable Exomem references from the complete skill content and require both declared and extracted commands to be subsets of `hosted-alpha-agent-v1`; it MUST also require every declared command to be used or explicitly justified. The initial package MUST omit workflows whose promised behavior depends on transfer, media, adoption, broad page editing/replacement, maintenance, schema administration, coordination internals, or Tier-2 commands.
+Every bundled Hosted skill SHALL declare its exact required Exomem command set. Package validation MUST extract callable Exomem references from the complete skill content and require both declared and extracted commands to be subsets of that candidate's exact pinned profile; it MUST also require every declared command to be used or explicitly justified. The v1 package MUST retain its existing dependency closure. A v2 lifecycle package MAY add only the canonical `record_memory` dependency needed for its advertised lifecycle surface. Both profiles MUST omit workflows whose promised behavior depends on transfer, media, adoption, broad page editing/replacement, maintenance, schema administration, coordination internals, or Tier-2 commands.
 
 #### Scenario: Initial Hosted workflow set is validated
 
 - **WHEN** the core, capture, continue, reflect, research, and review Hosted skills are packaged
 - **THEN** every declared and referenced Exomem command belongs to the exact alpha profile
 - **AND** each workflow remains complete for the behavior named by its description
+
+#### Scenario: V1 dependency closure remains immutable
+
+- **WHEN** a v2 lifecycle candidate is generated
+- **THEN** its `record_memory` dependency is validated against `hosted-alpha-agent-v2`
+- **AND** the pre-existing v1 package still validates only against the unchanged `hosted-alpha-agent-v1` command membership
 
 #### Scenario: Skill references an excluded command
 
@@ -109,7 +121,7 @@ A production package SHALL contain only public product metadata, public document
 
 ### Requirement: Release Identity Detects Contract And Skill Drift
 
-Every package candidate SHALL have an immutable lock binding plugin ID/version, target platform/schema, Hosted MCP resource, profile ID, ordered command-surface fingerprint, full schema-contract digest, gateway OAuth discovery-overlay digest, canonical-definition digest, aggregate skill-content digest, final artifact digest, and the minimum Records reader contract required by the advertised surface. A candidate exposing `revise` or `rebaseline` SHALL record `minimum_records_reader_version: 2` in its package and deployment locks. Readiness, promotion, and rollback SHALL verify the active runtime meets that floor before serving the candidate. Live evidence MUST NOT be included in this compatibility identity. Any mismatch MUST fail generation, validation, installation evidence recording, readiness, or promotion before distribution.
+Every package candidate SHALL have an immutable lock binding plugin ID/version, target platform/schema, Hosted MCP resource, profile ID, ordered command-surface fingerprint, full schema-contract digest, gateway OAuth discovery-overlay digest, canonical-definition digest, aggregate skill-content digest, final artifact digest, and the minimum Records reader contract required by the advertised surface. A candidate exposing `revise` or `rebaseline` SHALL bind `hosted-alpha-agent-v2` and record `minimum_records_reader_version: 2` in its package and additive deployment locks. Readiness, promotion, and rollback SHALL verify the active runtime meets that floor before serving the candidate. Existing v1 package/deployment locks remain valid and immutable. Live evidence MUST NOT be included in this compatibility identity. Any mismatch MUST fail generation, validation, installation evidence recording, readiness, or promotion before distribution.
 
 #### Scenario: Skill content changes without a release rebuild
 
@@ -132,6 +144,12 @@ Every package candidate SHALL have an immutable lock binding plugin ID/version, 
 - **WHEN** a package advertises `revise` or `rebaseline` but its package lock, deployment lock, or active runtime omits Records reader version 2
 - **THEN** generation, readiness, promotion, or rollback refuses the candidate before it can serve the vault
 
+#### Scenario: V1 clients remain valid
+
+- **WHEN** a pre-existing v1 package and client connect after a v2 lifecycle candidate is introduced
+- **THEN** they continue to use the unchanged v1 profile and compatibility identity
+- **AND** promotion does not require them to advertise lifecycle selectors or reader version 2
+
 ### Requirement: Promotion Requires Real Content-Bearing Client Use
 
 Every rendered platform artifact SHALL begin in a non-public `pending` state. Promotion to `live` SHALL require static validation plus a real clean installation on the target host that proves OAuth connection, exact tool discovery, content-bearing recall, citation, governed durable capture, and recall from a later fresh conversation. A manifest validator, successful OAuth callback, MCP initialization, `tools/list`, bootstrap, frontmatter-only read, or mocked client SHALL NOT independently satisfy promotion.
@@ -153,7 +171,7 @@ OpenAI promotion evidence SHALL additionally contain
 to the value in both the current OpenAI package lock and archive lock. Claude
 promotion evidence SHALL NOT contain this OpenAI-only field.
 
-When canonical surface-diff metadata proves that a candidate changes Records parsing, lifecycle actions, audit behavior, routing metadata, bootstrap placement, generated Records schemas, or connector promotion rules, the same operator-signed evidence SHALL additionally contain the exact closed Records acceptance object defined by `records-release-acceptance`. The verifier SHALL bind it to the deployment SHA, disposable reset, current command surface, graph-availability proof, exact client/model/system contracts, prompt-case hashes, action coverage, mutation request/receipt terminals, and independent readbacks. Missing, unsigned, stale, mismatched, extra-field, or incomplete Records proof SHALL refuse promotion. Exact byte-identical signed replay for an unchanged candidate SHALL return the existing result without a second acceptance or record mutation. A candidate proven not to change Records SHALL remain governed by the existing real-client journey without an unrelated Records rerun.
+When canonical surface-diff metadata proves that a candidate changes Records parsing, lifecycle actions, audit behavior, routing metadata, bootstrap placement, generated Records schemas, or connector promotion rules, that v2 candidate's operator-signed evidence SHALL additionally contain the exact closed Records acceptance object defined by `records-release-acceptance`. The verifier SHALL bind it to the deployment SHA, disposable reset, `hosted-alpha-agent-v2` profile, reader floor, current command surface, graph-availability proof, exact client/model/system contracts, prompt-case hashes, action coverage, mutation request/receipt terminals, and independent readbacks. Missing, unsigned, stale, mismatched, extra-field, or incomplete Records proof SHALL refuse promotion. Exact byte-identical signed replay for an unchanged candidate SHALL return the existing result without a second acceptance or record mutation. A candidate proven not to change Records SHALL remain governed by the existing real-client journey without an unrelated Records rerun. Current v1 registered evidence remains unchanged and cannot promote a v2 candidate.
 
 #### Scenario: Shared Claude CIMD digest vector
 

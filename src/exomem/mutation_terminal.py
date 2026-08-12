@@ -17,15 +17,23 @@ _RECORD_RECEIPT_FIELDS = (
     "item_key",
     "before_item_hash",
     "after_item_hash",
+    "before_manifest_hash",
+    "after_manifest_hash",
     "before_container_hash",
     "after_container_hash",
     "affected_paths",
     "payload_hash",
     "outcome",
     "audit_correlation",
+    "continuity",
+    "acknowledged_gap_codes",
+    "gap_fingerprint",
+    "checkpoint_snapshot_hash",
+    "minimum_reader_version",
 )
 _RECORD_RECEIPT_MARKER = "exomem.records-mutation"
 _RECORD_RECEIPT_VERSION = 1
+_LIFECYCLE_RECEIPT_VERSION = 2
 _PLAN_RECEIPT_MARKER = "exomem.planning-mutation"
 _PLAN_RECEIPT_FIELDS = (
     "operation",
@@ -133,9 +141,11 @@ def _path_projection(result: Any) -> dict[str, Any]:
         isinstance(item, str) for item in affected_paths
     ):
         return {"paths": list(affected_paths)}
-    paths = result.get("paths")
-    if isinstance(paths, (list, tuple)) and all(isinstance(item, str) for item in paths):
-        return {"paths": list(paths)}
+    raw_paths = result.get("paths")
+    if isinstance(raw_paths, (list, tuple)) and all(
+        isinstance(item, str) for item in raw_paths
+    ):
+        return {"paths": list(raw_paths)}
     source = result.get("source")
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
         return {"path": source["path"]}
@@ -194,7 +204,9 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     def invalid_row(item: Any, index: int) -> dict[str, str]:
         file_id = item.get("file_id") if isinstance(item, Mapping) else None
         return {
-            "file_id": file_id if string(file_id, limit=256) else f"invalid-file-{index + 1}",
+            "file_id": file_id
+            if isinstance(file_id, str) and string(file_id, limit=256)
+            else f"invalid-file-{index + 1}",
             "outcome": "failed",
             "code": "INVALID_ARTIFACT_RECEIPT",
             "reason": "artifact result was invalid",
@@ -300,7 +312,14 @@ def replayed_terminal(
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     """Present a verified Records no-op replay without fabricating a commit."""
-    if not valid_collection_receipt(leaf_result) or leaf_result.get("outcome") != "replayed":
+    lifecycle_replay = (
+        isinstance(leaf_result, Mapping)
+        and leaf_result.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION
+        and leaf_result.get("outcome") == "committed"
+    )
+    if not valid_collection_receipt(leaf_result) or (
+        leaf_result.get("outcome") != "replayed" and not lifecycle_replay
+    ):
         raise ValueError("replayed terminal requires a valid replayed collection receipt")
 
     terminal: dict[str, Any] = {
@@ -409,18 +428,25 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact["idempotency_key"] = result["idempotency_key"]
     leaf = result["leaf_result"]
     if _is_record_receipt(leaf):
+        compact.update(
+            {
+                "_record_receipt": leaf["_record_receipt"],
+                "receipt_version": leaf["receipt_version"],
+            }
+        )
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
     compact.update(_artifact_receipt_projection(leaf))
-    if isinstance(leaf, Mapping) and leaf.get("graph_sync") in {"completed", "failed"}:
-        compact["graph_sync"] = leaf["graph_sync"]
+    graph_result = result if result.get("graph_sync") in {"completed", "failed"} else leaf
+    if isinstance(graph_result, Mapping) and graph_result.get("graph_sync") in {"completed", "failed"}:
+        compact["graph_sync"] = graph_result["graph_sync"]
         for key in (
             "graph_sync_code",
             "graph_sync_checkpoint",
             "graph_sync_remediation",
         ):
-            value = leaf.get(key)
+            value = graph_result.get(key)
             if isinstance(value, str):
                 compact[key] = value
     compact["warnings_count"] = result["warnings_count"]
@@ -432,6 +458,8 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
 def valid_record_receipt(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
+    if type(value.get("receipt_version")) is int and value.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION:
+        return _valid_lifecycle_record_receipt(value)
     operation = value.get("operation")
     if (
         value.get("_record_receipt") != _RECORD_RECEIPT_MARKER
@@ -511,6 +539,72 @@ def valid_record_receipt(value: Any) -> bool:
     if operation == "create":
         return True
     return False
+
+
+def _valid_lifecycle_record_receipt(value: Mapping[str, Any]) -> bool:
+    if set(value) != {
+        "_record_receipt",
+        "receipt_version",
+        "operation",
+        "collection_id",
+        "item_key",
+        "before_item_hash",
+        "after_item_hash",
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "affected_paths",
+        "payload_hash",
+        "outcome",
+        "audit_correlation",
+        "continuity",
+        "acknowledged_gap_codes",
+        "gap_fingerprint",
+        "checkpoint_snapshot_hash",
+        "minimum_reader_version",
+    }:
+        return False
+    if not (
+        value.get("_record_receipt") == _RECORD_RECEIPT_MARKER
+        and type(value.get("receipt_version")) is int
+        and value.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION
+        and value.get("operation") in {"revise", "rebaseline"}
+        and _normalized_uuid(value.get("collection_id"))
+        and value.get("item_key") is None
+        and value.get("before_item_hash") is None
+        and value.get("after_item_hash") is None
+        and all(_hash(value.get(name)) for name in ("before_manifest_hash", "after_manifest_hash", "before_container_hash", "after_container_hash", "payload_hash"))
+    ):
+        return False
+    paths = value.get("affected_paths")
+    correlation = value.get("audit_correlation")
+    codes = value.get("acknowledged_gap_codes")
+    if not (
+        isinstance(paths, list)
+        and len(paths) == 1
+        and isinstance(paths[0], str)
+        and 0 < len(paths[0]) <= 1024
+        and value.get("outcome") == "committed"
+        and isinstance(correlation, str)
+        and len(correlation) == 24
+        and all(character in "0123456789abcdef" for character in correlation)
+        and type(value.get("continuity")) is bool
+        and isinstance(codes, list)
+        and all(type(code) is str and code and len(code.encode("utf-8")) <= 256 for code in codes)
+        and type(value.get("minimum_reader_version")) is int
+        and value.get("minimum_reader_version") == 2
+    ):
+        return False
+    if value["operation"] == "revise":
+        return value["continuity"] is True and codes == [] and value.get("gap_fingerprint") is None and value.get("checkpoint_snapshot_hash") is None
+    return (
+        value["continuity"] is False
+        and codes == sorted(set(codes))
+        and bool(codes)
+        and _hash(value.get("gap_fingerprint"))
+        and _hash(value.get("checkpoint_snapshot_hash"))
+    )
 
 
 def valid_planning_receipt(value: Any) -> bool:

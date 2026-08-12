@@ -342,6 +342,42 @@ def test_saved_view_normalizes_legacy_shapes_and_binds_its_definition(tmp_path: 
     ).identity != original_identity
 
 
+def test_manifest_eagerly_normalizes_views_and_keeps_one_located_diagnostic_per_invalid_view(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Maintenance/_collection.md",
+        _manifest().replace(
+            "  latest:\n    sort: [occurred_on, desc]",
+            "  recent:\n"
+            "    query:\n"
+            "      columns: [occurred_on]\n"
+            "    sort: [occurred_on, desc]\n"
+            "  broken:\n"
+            "    query:\n"
+            "      columns: [unknown]",
+        ),
+    )
+
+    manifest = collections.load_manifest(vault, path)
+
+    assert collections.resolve_saved_view(manifest, "recent").definition == {
+        "query": {
+            "filters": [],
+            "columns": ["occurred_on"],
+            "sort_by": "occurred_on",
+            "descending": True,
+        }
+    }
+    assert manifest.view_diagnostics == (
+        collections.CollectionDiagnostic(
+            "INVALID_SAVED_VIEW", "saved view columns are invalid", "views.broken"
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "replacement",
     (

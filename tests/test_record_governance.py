@@ -694,7 +694,9 @@ One ordinary""",
     inspection = record_governance.inspect_collection(tmp_path, manifest)
 
     assert inspection["report_only"] is True
-    assert {item["code"] for item in inspection["diagnostics"]} >= {"INVALID_SAVED_VIEW"}
+    assert inspection["diagnostics"] == [
+        {"code": "INVALID_SAVED_VIEW", "reason": "saved view filters are invalid"}
+    ]
     assert inspection["saved_views"] == []
 
 
@@ -725,6 +727,58 @@ def test_governed_inspection_reports_hidden_and_missing_templates_the_same(tmp_p
         "code": "TEMPLATE_UNAVAILABLE",
         "reason": "declared template is unavailable",
     }
+
+
+def test_inspection_guard_reload_does_not_read_withheld_item_or_expose_its_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    hidden = fixture / "Events" / "withheld" / "2026-06-01-inspection.md"
+    hidden_rel = hidden.relative_to(tmp_path).as_posix()
+    read = record_formats.vault.read_bounded_guarded_bytes
+
+    def deny_hidden_read(root: Path, relative: str, **kwargs: object):
+        assert relative != hidden_rel
+        return read(root, relative, **kwargs)
+
+    monkeypatch.setattr(record_formats.vault, "read_bounded_guarded_bytes", deny_hidden_read)
+    authorize = record_governance._authorize
+    monkeypatch.setattr(
+        record_governance,
+        "_authorize",
+        lambda root, path, *, receipt: path != hidden_rel and authorize(root, path, receipt=receipt),
+    )
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert hidden_rel not in json.dumps(inspection)
+
+
+def test_withheld_template_omits_inspection_lifecycle_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "---\n\nOne ordinary", "templates: [{path: Templates/session.md}]\n---\n\nOne ordinary"
+        ), encoding="utf-8"
+    )
+    template = fixture / "Templates" / "session.md"
+    template.parent.mkdir()
+    template.write_text("private", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    template_rel = template.relative_to(tmp_path).as_posix()
+    authorize = record_governance._authorize
+    monkeypatch.setattr(
+        record_governance,
+        "_authorize",
+        lambda root, path, *, receipt: path != template_rel and authorize(root, path, receipt=receipt),
+    )
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert inspection["diagnostics"][-1]["code"] == "TEMPLATE_UNAVAILABLE"
+    assert "lifecycle_guards" not in inspection
 
 
 def test_manifest_projector_round_trips_opaque_plan_descriptor_without_resolution(
