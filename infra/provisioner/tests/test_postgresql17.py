@@ -795,6 +795,56 @@ async def test_postgresql17_recovery_and_migration_share_one_bounded_lock_domain
 
 
 @ASYNCIO_POSTGRESQL17
+async def test_postgresql17_forward_migration_accepts_only_the_exact_0006_to_0007_edge(
+    postgresql17: PostgreSQL17,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _new_database(postgresql17, "forward_migration")
+    migrated = _migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    assert target.settings is not None
+    database = ProvisionerDatabase(target.settings)
+    monkeypatch.setenv(
+        "EXOMEM_PROVISIONER_DATABASE_URL", target.settings.database_url.get_secret_value()
+    )
+    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_SCHEMA", target.schema)
+    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_ROLE", target.role)
+    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_LOCK_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(database_bootstrap, "_MIGRATION_ROOT", PROVISIONER_ROOT)
+    try:
+        async with database.session_factory.begin() as session:
+            await session.execute(text(f'DROP TABLE "{target.schema}".operation_recovery_receipts'))
+            await session.execute(
+                text(
+                    f'DROP FUNCTION "{target.schema}".prevent_operation_recovery_receipt_mutation()'
+                )
+            )
+            await session.execute(
+                text(f'UPDATE "{target.schema}".alembic_version SET version_num=:revision'),
+                {"revision": "0006_operation_wire_protocol"},
+            )
+        with pytest.raises(database_bootstrap.DatabaseBootstrapError, match="forward migration"):
+            await database_bootstrap.forward_migrate(
+                from_revision="", to_revision=DATABASE_REVISION
+            )
+        await database_bootstrap.forward_migrate(
+            from_revision="0006_operation_wire_protocol", to_revision=DATABASE_REVISION
+        )
+        async with database.session_factory() as session:
+            revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
+            receipt_table = await session.scalar(
+                text(
+                    "SELECT to_regclass(:table)",
+                ),
+                {"table": f"{target.schema}.operation_recovery_receipts"},
+            )
+        assert revision == DATABASE_REVISION
+        assert receipt_table is not None
+    finally:
+        await database.dispose()
+
+
+@ASYNCIO_POSTGRESQL17
 async def test_fresh_postgresql17_bootstrap_creates_owned_schema_before_version_table(
     postgresql17: PostgreSQL17,
 ) -> None:

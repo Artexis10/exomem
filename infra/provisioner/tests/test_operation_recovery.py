@@ -65,6 +65,21 @@ def test_recovery_settings_accept_only_the_exact_minimal_environment() -> None:
         environment = _recovery_environment(**{name: value})
         with pytest.raises(ValueError):
             load_recovery_settings(environment)
+
+
+def test_recovery_settings_retain_the_sanitized_session_pool_url() -> None:
+    from exomem_provisioner.recovery_settings import load_recovery_settings
+
+    settings = load_recovery_settings(
+        _recovery_environment(
+            EXOMEM_RECOVERY_DATABASE_URL=(
+                "postgresql+asyncpg://recovery_role:password@session-pooler.example/"
+                "recovery_db?pool_mode=session"
+            )
+        )
+    )
+
+    assert "pool_mode" not in settings.database_url.get_secret_value()
     for absent in _recovery_environment():
         environment = _recovery_environment()
         environment.pop(absent)

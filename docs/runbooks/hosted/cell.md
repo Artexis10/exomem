@@ -133,9 +133,22 @@ the manifest, argv, a Secret, an annotation, logs, shell history, or a remote
 file.
 
 ```bash
+set -euo pipefail
 operator_pod=exomem-init-retry-recovery
-lock_name="$(kubectl -n exomem-platform get configmap -l app.kubernetes.io/name=exomem-hosted-deployment-lock \
-  -o jsonpath='{.items[0].metadata.name}')"
+helm_release=exomem-platform
+mapfile -t lock_names < <(kubectl -n exomem-platform get configmap \
+  -l app.kubernetes.io/name=exomem-hosted-deployment-lock \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+test "${#lock_names[@]}" -eq 1
+lock_name="${lock_names[0]}"
+lock_digest="$(kubectl -n exomem-platform get configmap "$lock_name" \
+  -o jsonpath='{.metadata.annotations.exomem\.io/deployment-lock-sha256}')"
+lock_json="$(kubectl -n exomem-platform get configmap "$lock_name" \
+  -o jsonpath='{.data.exomem-hosted-deployment-lock-v2\.json}')"
+test "$(printf %s "$lock_json" | sha256sum | awk '{print $1}')" = "$lock_digest"
+helm_manifest="$(helm -n "$helm_release" get manifest "$helm_release")"
+printf '%s\n' "$helm_manifest" | grep -F -- "name: $lock_name" >/dev/null
+printf '%s\n' "$helm_manifest" | grep -F -- "exomem.io/deployment-lock-sha256: $lock_digest" >/dev/null
 operator_image="$(kubectl -n exomem-platform get configmap "$lock_name" \
   -o jsonpath='{.data.exomem-hosted-deployment-lock-v2\.json}' | jq -r '.components.provisioner.image')"
 [[ "$operator_image" =~ ^ghcr\.io/artexis10/exomem-provisioner@sha256:[a-f0-9]{64}$ ]] || exit 1
@@ -159,7 +172,7 @@ spec:
     - name: recovery
       image: $operator_image
       imagePullPolicy: IfNotPresent
-      command: ["/bin/sh", "-c", "sleep 600"]
+      command: ["/bin/sh", "-c", "sleep 1200"]
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -187,12 +200,20 @@ volume-encryption configuration. Use the approved operator secret projection
 mechanism for those references; its Secret names/keys are never recorded in
 the identity input or output.
 
+Run the next commands in the same Bash shell; each helper step must return
+success before the next one starts.
+
 ```bash
-for mode in preflight reopen verify-receipt; do
-  kubectl -n exomem-platform exec -i "$operator_pod" -- \
+set -euo pipefail
+run_recovery() {
+  local mode="$1"
+  timeout 75s kubectl -n exomem-platform exec -i "$operator_pod" -- \
     exomem-provisioner-recover-init-retry "$mode" --stdin < "$recovery_identity"
-  test "$mode" != reopen || :
-done
+}
+run_recovery preflight
+run_recovery reopen
+run_recovery verify-receipt
+receipt_verified=true
 ```
 
 Any refusal, conflict, resource drift, receipt-verification failure, or timeout
@@ -200,16 +221,28 @@ is a stop condition. In particular, if the `reopen` acknowledgement is uncertain
 run `verify-receipt` first; never issue another `reopen`. Never reverse the
 checkpoint manually. Preserve only content-free JSON output and the receipt digest.
 
-After a committed receipt, restore only the routine worker and bounded-poll the
-content-free `inspect` result for at most ten minutes until `FINAL / complete`.
-Stop on terminal error or unexpected resource mutation. Restore the API only
+Only after `verify-receipt` returns successfully may the routine worker be
+restored. Keep this Pod alive through the complete ten-minute inspection window;
+its 20-minute sleep gives the bounded command and cleanup margin. Bounded-poll
+the content-free `inspect` result until `FINAL / complete`; stop on terminal
+error, unexpected resource mutation, refusal, or timeout. Restore the API only
 after provider finalization, run one manual Substrate reconcile Job at a time
 until the original control operation succeeds and the cell is ready, then
 restore the volume worker/durability state and scheduled reconciliation last.
 
 ```bash
-kubectl -n exomem-platform exec -i "$operator_pod" -- \
-  exomem-provisioner-recover-init-retry inspect --stdin < "$recovery_identity"
+test "$receipt_verified" = true
+final=false
+for attempt in $(seq 1 20); do
+  inspect_output="$(run_recovery inspect)"
+  if printf '%s' "$inspect_output" | jq -e \
+    '.state == "final" and .checkpoint == "complete"' >/dev/null; then
+    final=true
+    break
+  fi
+  sleep 30
+done
+test "$final" = true
 ```
 
 When inspection is complete or any stop condition occurs, delete the Pod and

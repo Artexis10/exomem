@@ -462,6 +462,14 @@ def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
     assert "kubectl -n exomem-platform exec -i \"$operator_pod\" --" in runbook
     assert "--identity-file" not in runbook
     assert "another `reopen`" in runbook
+    assert "set -euo pipefail" in runbook
+    assert "test \"$mode\" != reopen || :" not in runbook
+    assert "run_recovery preflight\nrun_recovery reopen\nrun_recovery verify-receipt" in runbook
+    assert ".items[0]" not in runbook
+    assert "test \"${#lock_names[@]}\" -eq 1" in runbook
+    assert "helm -n \"$helm_release\" get manifest \"$helm_release\"" in runbook
+    assert "sleep 1200" in runbook
+    assert "verify-receipt" in runbook
 def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))

@@ -57,10 +57,10 @@ class RecoverySettings(BaseModel):
     @classmethod
     def validate_database_url(cls, value: SecretStr) -> SecretStr:
         try:
-            validate_runtime_database_url(value.get_secret_value())
+            sanitized = validate_runtime_database_url(value.get_secret_value())
         except DatabaseBootstrapError as error:
             raise ValueError("recovery database URL is invalid") from error
-        return value
+        return SecretStr(sanitized.render_as_string(hide_password=False))
 
     @field_validator("database_schema", "database_role")
     @classmethod

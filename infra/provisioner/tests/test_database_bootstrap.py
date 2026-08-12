@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,38 @@ def test_bootstrap_lock_key_is_deterministic_and_database_schema_specific() -> N
     assert first != module.database_lock_key("hosted_control_shadow", "exomem_provisioner")
     assert first != module.database_lock_key("hosted_control", "exomem_provisioner_shadow")
     assert -(2**63) <= first < 2**63
+
+
+def test_forward_migration_binds_the_only_supported_0006_to_0007_edge() -> None:
+    module = _bootstrap_module()
+
+    assert (
+        module.validate_forward_migration_request(
+            "0006_operation_wire_protocol", "0007_operation_recovery_receipt"
+        )
+        is None
+    )
+    for source, target in (
+        ("", "0007_operation_recovery_receipt"),
+        ("0005_capacity_reservations", "0007_operation_recovery_receipt"),
+        ("0006_operation_wire_protocol", "0008_future"),
+    ):
+        with pytest.raises(module.DatabaseBootstrapError, match="forward migration"):
+            module.validate_forward_migration_request(source, target)
+
+
+def test_forward_migration_is_an_installed_image_entrypoint() -> None:
+    root = Path(__file__).resolve().parents[1]
+    scripts = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "scripts"
+    ]
+
+    assert scripts["exomem-provisioner-database-forward-migrate"] == (
+        "exomem_provisioner.database_bootstrap:run_forward_migrate"
+    )
+    assert "exomem-provisioner-database-forward-migrate" in (root / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.parametrize(
@@ -267,13 +300,11 @@ def test_database_commands_accept_explicit_session_stable_pooler(
     module = _bootstrap_module()
     monkeypatch.setenv(
         "EXOMEM_PROVISIONER_DATABASE_ADMIN_URL",
-        "postgresql+asyncpg://operator:admin@session-pooler.internal/control"
-        "?pool_mode=session",
+        "postgresql+asyncpg://operator:admin@session-pooler.internal/control?pool_mode=session",
     )
     monkeypatch.setenv(
         "EXOMEM_PROVISIONER_DATABASE_URL",
-        "postgresql+asyncpg://runtime:runtime@session-pooler.internal/control"
-        "?pool_mode=session",
+        "postgresql+asyncpg://runtime:runtime@session-pooler.internal/control?pool_mode=session",
     )
     monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_SCHEMA", "provisioner_data")
     monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_ROLE", "runtime")

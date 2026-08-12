@@ -33,6 +33,7 @@ exomem-restore-fetch = "exomem_provisioner.restore_fetch:run_restore_fetch"
 exomem-provisioner-database-bootstrap = "exomem_provisioner.database_bootstrap:run_bootstrap"
 exomem-provisioner-database-migrate = "exomem_provisioner.database_bootstrap:run_migrate"
 exomem-provisioner-database-validate = "exomem_provisioner.database_bootstrap:run_validate"
+exomem-provisioner-database-forward-migrate = "exomem_provisioner.database_bootstrap:run_forward_migrate"
 exomem-provisioner-recover-init-retry = "exomem_provisioner.operation_recovery:main"
 
 [dependency-groups]
