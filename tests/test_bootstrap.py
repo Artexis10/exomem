@@ -162,7 +162,17 @@ def test_bootstrap_routes_observed_state_to_records_without_activating_state(
     assert contract["available"] is True
     assert contract["route"] == {
         "tool": "record_memory",
-        "actions": ["describe", "validate", "inspect", "create", "query", "append", "update"],
+        "actions": [
+            "describe",
+            "validate",
+            "inspect",
+            "query",
+            "create",
+            "append",
+            "update",
+            "revise",
+            "rebaseline",
+        ],
     }
     assert contract["manifest"] == {
         "filename": "_collection.md",
@@ -501,6 +511,7 @@ def test_simple_action_catalog_is_registry_routed() -> None:
         "connect",
         "adopt",
         "maintain",
+        "record",
     }
     assert catalog["ask"]["route"] == {
         "tool": "ask_memory",
@@ -514,6 +525,10 @@ def test_simple_action_catalog_is_registry_routed() -> None:
     assert catalog["connect"]["relations_route"]["tool"] == "connect_memory"
     assert catalog["adopt"]["route"] == {"tool": "adopt_vault", "args": {"mode": "scan-only"}}
     assert catalog["maintain"]["fix_route"]["tool"] == "maintain_memory"
+    assert catalog["record"]["route"] == {
+        "tool": "record_memory",
+        "args": {"action": "inspect"},
+    }
 
     known = {command.name for command in commands.PRODUCT_COMMANDS} | {"doctor"}
     for action, item in catalog.items():

@@ -1,0 +1,1 @@
+{"interface":{"displayName":"Exomem Hosted"},"name":"exomem-hosted-records","plugins":[{"category":"productivity","name":"exomem-hosted-records","policy":{"authentication":"ON_INSTALL","installation":"AVAILABLE"},"source":{"path":"./plugins/exomem-hosted","source":"local"}}]}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import zipfile
@@ -91,6 +92,51 @@ def test_candidate_file_map_is_deterministic_without_staging_directory() -> None
     assert first == second
     assert "claude/.claude-plugin/plugin.json" in first
     assert "claude.zip" in first
+
+
+def test_lifecycle_candidate_is_additive_and_binds_records_reader_v2() -> None:
+    v1 = hosted_plugins.candidate_files(REPO_ROOT, platform="claude")
+    v2 = hosted_plugins.candidate_files(
+        REPO_ROOT, platform="claude", candidate="hosted-alpha-agent-v2"
+    )
+
+    assert v1["claude/.claude-plugin/plugin.json"] == (
+        REPO_ROOT / "plugins/hosted/generated/claude/.claude-plugin/plugin.json"
+    ).read_bytes()
+    lock = json.loads(v2["claude.lock.json"])
+    compatibility = json.loads(v2["compatibility.json"])
+    assert lock["profile"] == "hosted-alpha-agent-v2"
+    assert lock["minimum_records_reader_version"] == 2
+    assert compatibility["commands"][:-1] == json.loads(v1["compatibility.json"])["commands"]
+    assert compatibility["commands"][-1] == "record_memory"
+
+
+def test_lifecycle_source_privacy_gate_refuses_before_rendering_output(tmp_path: Path) -> None:
+    root = copy_hosted_tree(tmp_path / "repo")
+    source = root / "plugins/hosted/candidates/hosted-alpha-agent-v2/selection-cases.json"
+    source.write_text('{"api_secret":"private"}', encoding="utf-8")
+    output = tmp_path / "rendered"
+
+    with pytest.raises(ValueError, match="credential value"):
+        hosted_plugins.render(
+            root,
+            output,
+            platform="claude",
+            candidate=hosted_plugins.LIFECYCLE_CANDIDATE,
+            staging_root=tmp_path,
+        )
+
+    assert not output.exists()
+
+
+def test_v1_hosted_release_identity_fixture_remains_immutable() -> None:
+    fixture = json.loads(
+        (REPO_ROOT / "tests/fixtures/hosted/v1-release-identities.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for relative, expected in fixture.items():
+        assert hashlib.sha256((REPO_ROOT / relative).read_bytes()).hexdigest() == expected
 
 
 def test_openai_locks_bind_but_do_not_expose_the_registered_app_id() -> None:

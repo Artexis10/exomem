@@ -9,6 +9,11 @@ on:
         description: Existing release tag to re-publish (PyPI and/or GHCR), for example v0.2.1
         required: true
         type: string
+      records_rollback_runtime_target_json:
+        description: Optional reviewed six-field runtime target to sign this image as a Records reader-v2 rollback unit
+        required: false
+        default: ""
+        type: string
 
 # Prefer the same GitHub App-token pattern as the Endstate repos. A non-GITHUB_TOKEN
 # credential lets Release Please PRs and releases trigger normal CI/release events.
@@ -559,6 +564,7 @@ jobs:
           SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
           HOSTED_DIGEST: ${{ steps.hosted-build.outputs.digest }}
           ATTESTATION_BUNDLE: ${{ steps.hosted-attestation.outputs.bundle-path }}
+          RECORDS_RUNTIME_TARGET_JSON: ${{ inputs.records_rollback_runtime_target_json }}
         run: |
           set -euo pipefail
           digest_hex=${HOSTED_DIGEST#sha256:}
@@ -569,6 +575,19 @@ jobs:
           immutable_image="ghcr.io/artexis10/exomem@${HOSTED_DIGEST}"
           discovery_tag="ghcr.io/artexis10/exomem:${SOURCE_COMMIT}-hosted"
           storage_uri="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${bundle}"
+          records_compatibility_args=()
+          if [[ -n "$RECORDS_RUNTIME_TARGET_JSON" ]]; then
+            records_issued_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            records_expires_at="$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)"
+            records_compatibility_args=(
+              --records-profile hosted-alpha-agent-v1
+              --records-reader-version 2
+              --lifecycle-actions-enabled false
+              --records-issued-at "$records_issued_at"
+              --records-expires-at "$records_expires_at"
+              --records-runtime-target-json "$RECORDS_RUNTIME_TARGET_JSON"
+            )
+          fi
           python3 infra/scripts/hosted_image_candidate.py record \
             --component runtime \
             --source-repository "$GITHUB_REPOSITORY" \
@@ -588,6 +607,7 @@ jobs:
             --bundle "$bundle" \
             --storage-kind github-release \
             --storage-uri "$storage_uri" \
+            "${records_compatibility_args[@]}" \
             --output "$candidate"
           {
             echo "candidate=$candidate"

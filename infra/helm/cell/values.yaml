@@ -7,6 +7,9 @@ image: ""
 expectedRelease: ""
 expectedProtocol: "1"
 workerPolicyDigest: ""
+# Every cell boots the current reader; profile selection controls writes.
+recordsReaderVersion: 2
+lifecycleActionsEnabled: false
 runtimeUid: 10001
 runtimeGid: 10001
 storageClassName: exomem-hcloud-encrypted-retain

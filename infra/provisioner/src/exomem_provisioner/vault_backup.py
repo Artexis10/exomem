@@ -12,9 +12,9 @@ import re
 import secrets
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
@@ -35,6 +35,7 @@ from .durability import (
 from .durability_crypto import AesGcmKeyWrapper, ChunkedArchiveCipher
 from .durability_repository import DurabilityRepository
 from .durability_store import B2UploadOnlyObjectStore
+from .lifecycle import OpaqueProviderMetadata
 from .models import CredentialMetadata, Operation, OperationAction, OperationState, TenantFence
 from .provider_recovery import (
     ProviderRecoveryIdentityCodec,
@@ -48,61 +49,6 @@ _PRINCIPAL_SCOPE = (
     .rstrip(b"=")
     .decode("ascii")
 )
-
-try:
-    from .lifecycle import OpaqueProviderMetadata
-except ModuleNotFoundError:
-    # The durability lane can be tested before the provider lane is merged.
-    # Integrated/production builds always take the canonical shared class.
-    @dataclass(frozen=True, slots=True)
-    class OpaqueProviderMetadata:  # type: ignore[no-redef]
-        tenant_id: str = field(repr=False)
-        subject_id: str = field(repr=False)
-        operation_id: str = field(repr=False)
-        fence_generation: int
-
-        @property
-        def resource_name(self) -> str:
-            digest = hashlib.sha256(self.subject_id.encode()).hexdigest()[:20]
-            return f"exo-{digest}"
-
-        @property
-        def kubernetes_annotations(self) -> dict[str, str]:
-            def digest(value: str) -> str:
-                return hashlib.sha256(value.encode()).hexdigest()
-
-            return {
-                "exomem.io/tenant-id": self.tenant_id,
-                "exomem.io/cell-id": self.subject_id,
-                "exomem.io/operation-id": self.operation_id,
-                "exomem.io/tenant-digest": digest(self.tenant_id),
-                "exomem.io/subject-digest": digest(self.subject_id),
-                "exomem.io/operation-digest": digest(self.operation_id),
-                "exomem.io/fence": str(self.fence_generation),
-            }
-
-        @classmethod
-        def from_kubernetes_annotations(cls, annotations: dict[str, str]) -> OpaqueProviderMetadata:
-            fence = annotations.get("exomem.io/fence", "")
-            if not fence.isdigit():
-                raise RuntimeError("Kubernetes provider fence annotation is invalid")
-            value = cls(
-                annotations.get("exomem.io/tenant-id", ""),
-                annotations.get("exomem.io/cell-id", ""),
-                annotations.get("exomem.io/operation-id", ""),
-                int(fence),
-            )
-            if any(
-                annotations.get(key) != expected
-                for key, expected in value.kubernetes_annotations.items()
-            ):
-                raise RuntimeError("Kubernetes provider identity digest differs")
-            return value
-
-        def require_same(self, other: OpaqueProviderMetadata) -> None:
-            if self != other:
-                raise RuntimeError("provider identity metadata is immutable")
-
 
 class VaultBackupSettings(BaseSettings):
     """Exact environment consumed by the isolated vault-backup CronJob."""
@@ -129,6 +75,9 @@ class VaultBackupSettings(BaseSettings):
     recovery_upload_key_id: SecretStr = Field(min_length=1, max_length=4096)
     recovery_upload_key: SecretStr = Field(min_length=1, max_length=4096)
     deployment_lock_path: Path = Field(validation_alias="EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH")
+    runtime_selection: Literal["active", "rollback"] | None = Field(
+        default=None, validation_alias="EXOMEM_DURABILITY_RUNTIME_SELECTION"
+    )
     max_concurrency: int = Field(default=4, ge=1, le=32)
     scratch_root: Path
     worker_id: str = Field(
@@ -160,7 +109,9 @@ class VaultBackupSettings(BaseSettings):
 
     @property
     def deployment_lock(self) -> DeploymentLock:
-        return load_deployment_lock(self.deployment_lock_path)
+        lock = load_deployment_lock(self.deployment_lock_path)
+        lock.selected_runtime(self.runtime_selection)
+        return lock
 
     @model_validator(mode="after")
     def require_exact_trust_root(self) -> VaultBackupSettings:
@@ -642,7 +593,7 @@ class HttpPortableRuntimePort:
 async def run_live_vault_backup(settings: VaultBackupSettings) -> None:
     from kubernetes import client, config
 
-    target = settings.deployment_lock.runtime_target
+    target = settings.deployment_lock.selected_runtime(settings.runtime_selection).runtimeTarget
     database = ProvisionerDatabase(settings)
     api_client: Any | None = None
     try:
@@ -741,7 +692,7 @@ def _container_environment(stateful_set: Any) -> dict[str, str]:
     containers = getattr(
         getattr(getattr(stateful_set, "spec", None), "template", None), "spec", None
     )
-    values = getattr(containers, "containers", ()) or ()
+    values = getattr(containers, "containers", None) or []
     if len(values) != 1:
         raise RuntimeError("backup target runtime container is ambiguous")
     result: dict[str, str] = {}

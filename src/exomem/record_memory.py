@@ -8,16 +8,18 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import query_data, record_governance, records
+from . import query_data, record_governance, records, structured_collections
 from .cli_ops import OpError
-from .structured_collections import CollectionError, parse_manifest_bytes
+from .structured_collections import CollectionError
 
-ACTIONS = frozenset({"describe", "validate", "inspect", "create", "query", "append", "update"})
+ACTIONS = frozenset(
+    {"describe", "validate", "inspect", "create", "query", "append", "update", "revise", "rebaseline"}
+)
 
 _ACTION_FIELDS = {
     "describe": frozenset(),
     "inspect": frozenset({"collection"}),
-    "validate": frozenset({"manifest_path", "manifest_text", "scaffold"}),
+    "validate": frozenset({"collection", "manifest_path", "manifest_text", "scaffold"}),
     "create": frozenset({"manifest_path", "manifest_text", "why", "scaffold"}),
     "query": frozenset(
         {
@@ -51,11 +53,17 @@ _ACTION_FIELDS = {
             "why",
         }
     ),
+    "revise": frozenset(
+        {"collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why"}
+    ),
+    "rebaseline": frozenset(
+        {"collection", "expected_manifest_hash", "expected_container_hash", "acknowledged_gap_codes", "why"}
+    ),
 }
 _REQUIRED_FIELDS = {
     "describe": frozenset(),
     "inspect": frozenset(),
-    "validate": frozenset({"manifest_path", "manifest_text"}),
+    "validate": frozenset({"manifest_text"}),
     "create": frozenset({"manifest_path", "manifest_text", "why"}),
     "query": frozenset({"collection"}),
     "append": frozenset({"collection", "item", "why"}),
@@ -68,6 +76,12 @@ _REQUIRED_FIELDS = {
             "expected_item_version",
             "why",
         }
+    ),
+    "revise": frozenset(
+        {"collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why"}
+    ),
+    "rebaseline": frozenset(
+        {"collection", "expected_manifest_hash", "expected_container_hash", "acknowledged_gap_codes", "why"}
     ),
 }
 _QUERY_SHAPING_FIELDS = frozenset(
@@ -88,7 +102,7 @@ _QUERY_SHAPING_FIELDS = frozenset(
 
 def record_memory(
     vault_root: Path,
-    action: Literal["describe", "validate", "inspect", "create", "query", "append", "update"],
+    action: Literal["describe", "validate", "inspect", "create", "query", "append", "update", "revise", "rebaseline"],
     collection: str | None = None,
     manifest_path: str | None = None,
     manifest_text: str | None = None,
@@ -111,11 +125,13 @@ def record_memory(
     item: dict[str, Any] | None = None,
     item_key: str | None = None,
     expected_container_hash: str | None = None,
+    expected_manifest_hash: str | None = None,
+    acknowledged_gap_codes: list[str] | None = None,
     body: str | None = None,
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Describe, validate, inspect, create, query, append, or update Records.
+    """Describe, validate, inspect, create, query, append, update, revise, or rebaseline Records.
 
     Records are human-owned event and state histories.  This command keeps the
     complete workflow on one product surface while routing mutations to guarded
@@ -172,6 +188,8 @@ def record_memory(
         "item": item,
         "item_key": item_key,
         "expected_container_hash": expected_container_hash,
+        "expected_manifest_hash": expected_manifest_hash,
+        "acknowledged_gap_codes": acknowledged_gap_codes,
         "body": body,
         "changes": changes,
         "expected_item_version": expected_item_version,
@@ -181,8 +199,10 @@ def record_memory(
         if action == "describe":
             return parse_manifest_contract()
         if action == "validate":
-            assert manifest_path is not None
             assert manifest_text is not None
+            if collection is not None:
+                return records.validate_collection_revision(vault_root, collection, manifest_text)
+            assert manifest_path is not None
             return records.validate_collection_create(
                 vault_root,
                 manifest_path,
@@ -199,9 +219,12 @@ def record_memory(
             assert manifest_path is not None
             assert manifest_text is not None
             assert why is not None
-            record_governance.require_records_profile(
-                parse_manifest_bytes(vault_root, manifest_path, manifest_text.encode("utf-8"))
+            root = Path(vault_root)
+            record_governance.require_candidate_manifest_visibility(root, manifest_path)
+            manifest = structured_collections.parse_manifest_bytes(
+                root, root / manifest_path, manifest_text.encode("utf-8")
             )
+            record_governance.require_records_profile(manifest)
             return records.create_collection(
                 vault_root,
                 manifest_path,
@@ -257,6 +280,34 @@ def record_memory(
                 item_key=item_key,
                 expected_container_hash=expected_container_hash,
                 body="" if body is None else body,
+                why=why,
+            )
+        if action == "revise":
+            assert collection is not None
+            assert manifest_text is not None
+            assert expected_manifest_hash is not None
+            assert expected_container_hash is not None
+            assert why is not None
+            return records.revise_collection(
+                vault_root,
+                collection,
+                manifest_text=manifest_text,
+                expected_manifest_hash=expected_manifest_hash,
+                expected_container_hash=expected_container_hash,
+                why=why,
+            )
+        if action == "rebaseline":
+            assert collection is not None
+            assert expected_manifest_hash is not None
+            assert expected_container_hash is not None
+            assert acknowledged_gap_codes is not None
+            assert why is not None
+            return records.rebaseline_collection(
+                vault_root,
+                collection,
+                expected_manifest_hash=expected_manifest_hash,
+                expected_container_hash=expected_container_hash,
+                acknowledged_gap_codes=acknowledged_gap_codes,
                 why=why,
             )
         assert collection is not None
@@ -318,6 +369,10 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments()
     supplied = {name for name, value in values.items() if value is not None}
     if not _REQUIRED_FIELDS[action] <= supplied or not supplied <= _ACTION_FIELDS[action]:
+        _invalid_arguments()
+    if action == "validate" and ((values["collection"] is None) == (values["manifest_path"] is None)):
+        _invalid_arguments()
+    if action == "validate" and values["collection"] is not None and values["scaffold"] is not None:
         _invalid_arguments()
     if action == "query" and values["view"] is not None and supplied & _QUERY_SHAPING_FIELDS:
         _invalid_arguments()

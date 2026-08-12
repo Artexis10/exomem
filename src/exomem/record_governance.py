@@ -44,6 +44,7 @@ _INSPECTION_KEYS = frozenset(
         "diagnostics",
         "audit",
         "saved_views",
+        "lifecycle_guards",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -249,7 +250,7 @@ def _inspection_plan_descriptor(value: Any) -> dict[str, Any] | None:
 def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Reconstruct the report-only inspection union before it reaches egress."""
     kind = payload.get("kind")
-    if set(payload) != _INSPECTION_KEYS or type(kind) is not str or kind not in {"collection", "legacy_tracker"}:
+    if set(payload) - _INSPECTION_KEYS or type(kind) is not str or kind not in {"collection", "legacy_tracker"}:
         return None
     if payload.get("report_only") is not True or not isinstance(payload.get("source_versions"), list):
         return None
@@ -278,15 +279,22 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             return None
         normalized_diagnostics.append({"code": code, "reason": reason})
     audit = payload.get("audit")
-    if not isinstance(audit, Mapping) or set(audit) != {"status", "gaps"}:
+    if not isinstance(audit, Mapping) or set(audit) - {"status", "gaps", "discontinuity", "discontinuities"}:
         return None
     status, gaps = audit.get("status"), audit.get("gaps")
-    if type(status) is not str or status not in {"baseline", "ok", "gap", "history_incomplete", "not_applicable"} or not isinstance(gaps, list) or len(gaps) > 32:
+    if type(status) is not str or status not in {"baseline", "ok", "gap", "acknowledged_gap", "history_incomplete", "not_applicable"} or not isinstance(gaps, list) or len(gaps) > 32:
         return None
     if status in {"history_incomplete", "not_applicable"} and gaps:
         return None
     normalized_gaps = [_inspection_string(gap, maximum=256) for gap in gaps]
     if any(gap is None for gap in normalized_gaps):
+        return None
+    guards = payload.get("lifecycle_guards")
+    if guards is not None and (
+        not isinstance(guards, Mapping)
+        or set(guards) != {"expected_manifest_hash", "expected_container_hash"}
+        or any(_inspection_hash(guards.get(name)) is None for name in guards)
+    ):
         return None
     views = payload.get("saved_views")
     if not isinstance(views, list) or len(views) > 32:
@@ -348,7 +356,33 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             return None
         normalized_contract = None
         normalized_legacy = {"collection_id": collection_id, "path": path, "inspect_only": True}
-    return {
+    normalized_audit: dict[str, Any] = {
+        "status": status,
+        "gaps": [gap for gap in normalized_gaps if gap is not None],
+    }
+    if status == "acknowledged_gap" and isinstance(audit.get("discontinuity"), Mapping):
+        discontinuity = audit["discontinuity"]
+        required = {
+            "provenance_continuity",
+            "prior_head",
+            "acknowledged_gap_codes",
+            "rationale",
+            "checkpoint_transition",
+            "gap_fingerprint",
+            "checkpoint_snapshot_hash",
+        }
+        if set(discontinuity) != required or discontinuity.get("provenance_continuity") is not False:
+            return None
+        normalized_audit["discontinuity"] = dict(discontinuity)
+        discontinuities = audit.get("discontinuities", [discontinuity])
+        if not isinstance(discontinuities, list) or not 1 <= len(discontinuities) <= 16:
+            return None
+        normalized_audit["discontinuities"] = [dict(item) for item in discontinuities if isinstance(item, Mapping)]
+        if len(normalized_audit["discontinuities"]) != len(discontinuities):
+            return None
+    elif status == "acknowledged_gap":
+        return None
+    result: dict[str, Any] = {
         "kind": kind,
         "report_only": True,
         "contract": normalized_contract,
@@ -356,9 +390,11 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         "snapshot": snapshot,
         "source_versions": normalized_versions,
         "diagnostics": normalized_diagnostics,
-        "audit": {"status": status, "gaps": [gap for gap in normalized_gaps if gap is not None]},
+        "audit": normalized_audit,
         "saved_views": [view for view in normalized_views if view is not None],
+        **({"lifecycle_guards": dict(guards)} if guards is not None else {}),
     }
+    return result
 
 
 egress.register_projector(
@@ -392,6 +428,7 @@ egress.register_projector(
         "diagnostics",
         "audit",
         "saved_views",
+        "lifecycle_guards",
     ),
     validator=_validate_record_inspection,
 )
@@ -408,11 +445,19 @@ egress.register_projector(
         "item_key",
         "before_item_hash",
         "after_item_hash",
+        "before_manifest_hash",
+        "after_manifest_hash",
         "before_container_hash",
         "after_container_hash",
         "affected_paths",
+        "payload_hash",
         "outcome",
         "audit_correlation",
+        "continuity",
+        "acknowledged_gap_codes",
+        "gap_fingerprint",
+        "checkpoint_snapshot_hash",
+        "minimum_reader_version",
     ),
 )
 
@@ -805,6 +850,20 @@ def inspect_collection(
             )
         except collections.CollectionError:
             audit = {"status": "history_incomplete", "gaps": []}
+        guards = None
+        if not diagnostics:
+            try:
+                snapshot = record_formats.load_adapter(
+                    root,
+                    manifest,
+                    authorize_path=lambda path: _authorize(root, path, receipt=True),
+                ).read()
+                if not snapshot.diagnostics and all(
+                    _authorize(root, version.path, receipt=True) for version in snapshot.source_versions
+                ):
+                    guards = records.lifecycle_guards(manifest, snapshot)
+            except collections.CollectionError:
+                pass
         payload = _RecordEnvelope(
             {
                 "kind": "collection",
@@ -827,6 +886,7 @@ def inspect_collection(
                 "diagnostics": diagnostics,
                 "audit": _inspection_audit(audit),
                 "saved_views": saved_views,
+                "lifecycle_guards": guards,
             }
         )
         projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
@@ -984,12 +1044,17 @@ def _inspection_audit(audit: Any) -> dict[str, Any]:
         return {"status": "history_incomplete", "gaps": []}
     status = audit.get("status")
     gaps = audit.get("gaps")
-    if status not in {"baseline", "ok", "gap", "history_incomplete"} or not isinstance(gaps, list):
+    if status not in {"baseline", "ok", "gap", "acknowledged_gap", "history_incomplete"} or not isinstance(gaps, list):
         return {"status": "history_incomplete", "gaps": []}
-    return {
+    result: dict[str, Any] = {
         "status": status,
         "gaps": [gap for gap in gaps[:32] if type(gap) is str and len(gap) <= 256],
     }
+    if status == "acknowledged_gap" and isinstance(audit.get("discontinuity"), Mapping):
+        result["discontinuity"] = dict(audit["discontinuity"])
+        if isinstance(audit.get("discontinuities"), list):
+            result["discontinuities"] = [dict(item) for item in audit["discontinuities"] if isinstance(item, Mapping)]
+    return result
 
 
 _QUERY_KEYS = frozenset(
@@ -1395,9 +1460,9 @@ def _valid_saved_view(value: Any, manifest: collections.CollectionManifest) -> b
 def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
     if value is None:
         return True
-    if set(value) != {"status", "complete", "truncated", "events"}:
+    if set(value) - {"status", "complete", "truncated", "events", "discontinuity", "discontinuities"}:
         return False
-    if value["status"] not in ("baseline", "ok", "gap", "history_incomplete"):
+    if value["status"] not in ("baseline", "ok", "gap", "acknowledged_gap", "history_incomplete"):
         return False
     if type(value["complete"]) is not bool or type(value["truncated"]) is not bool:
         return False
@@ -1418,10 +1483,15 @@ def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
         "after_container_hash",
         "rationale",
     }
+    lifecycle = allowed | {
+        "continuity", "acknowledged_gap_codes", "gap_fingerprint", "checkpoint_snapshot_hash", "minimum_reader_version"
+    }
     for event in events:
-        if not isinstance(event, Mapping) or set(event) != allowed:
+        if not isinstance(event, Mapping) or (
+            set(event) != allowed and set(event) != lifecycle
+        ):
             return False
-        if event["operation"] not in ("create", "append", "update"):
+        if event["operation"] not in ("create", "append", "update", "revise", "rebaseline"):
             return False
         if type(event["transition_id"]) is not str or not re.fullmatch(
             r"[0-9a-f]{24}", event["transition_id"]
@@ -1445,6 +1515,8 @@ def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
             "after_manifest_hash",
             "before_item_hash",
             "after_item_hash",
+            "before_manifest_hash",
+            "after_manifest_hash",
             "before_container_hash",
             "after_container_hash",
         ):
@@ -1454,6 +1526,34 @@ def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
                 return False
         if type(event["rationale"]) is not str or len(event["rationale"].encode("utf-8")) > 512:
             return False
+    def valid_discontinuity(item: Any) -> bool:
+        return (
+            isinstance(item, Mapping)
+            and set(item) == {
+                "provenance_continuity", "prior_head", "acknowledged_gap_codes", "rationale",
+                "checkpoint_transition", "gap_fingerprint", "checkpoint_snapshot_hash",
+            }
+            and item["provenance_continuity"] is False
+            and type(item["prior_head"]) is str
+            and (item["prior_head"] == "baseline" or re.fullmatch(r"[0-9a-f]{24}", item["prior_head"]) is not None)
+            and isinstance(item["acknowledged_gap_codes"], list)
+            and item["acknowledged_gap_codes"] == sorted(set(item["acknowledged_gap_codes"]))
+            and all(type(code) is str and 0 < len(code.encode("utf-8")) <= 256 for code in item["acknowledged_gap_codes"])
+            and type(item["rationale"]) is str and 0 < len(item["rationale"].encode("utf-8")) <= 512
+            and type(item["checkpoint_transition"]) is str and re.fullmatch(r"[0-9a-f]{24}", item["checkpoint_transition"]) is not None
+            and all(type(item[name]) is str and re.fullmatch(r"[0-9a-f]{64}", item[name]) is not None for name in ("gap_fingerprint", "checkpoint_snapshot_hash"))
+        )
+    discontinuity = value.get("discontinuity")
+    discontinuities = value.get("discontinuities")
+    if discontinuity is not None and not valid_discontinuity(discontinuity):
+        return False
+    if discontinuities is not None and (
+        not isinstance(discontinuities, list)
+        or len(discontinuities) > 16
+        or not all(valid_discontinuity(item) for item in discontinuities)
+        or (discontinuity is not None and (not discontinuities or discontinuity != discontinuities[0]))
+    ):
+        return False
     return True
 
 
@@ -1469,14 +1569,23 @@ def project_mutation_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
             "item_key",
             "before_item_hash",
             "after_item_hash",
+            "before_manifest_hash",
+            "after_manifest_hash",
             "before_container_hash",
             "after_container_hash",
             "affected_paths",
             "outcome",
             "audit_correlation",
+            "continuity",
+            "acknowledged_gap_codes",
+            "gap_fingerprint",
+            "checkpoint_snapshot_hash",
+            "minimum_reader_version",
         )
         if key in receipt
     }
+    if receipt.get("receipt_version") == 2:
+        allowed["payload_hash"] = receipt["payload_hash"]
     return egress.project(_RecordEnvelope(allowed), egress.LEVEL_FULL, kind="record_mutation") or {}
 
 
@@ -1811,3 +1920,31 @@ def require_mutation_visibility(
                 pending.append(
                     vault.DirectoryCensusGuard.capture(root, entry.relative_path, max_entries=2_000)
                 )
+
+
+def require_candidate_manifest_visibility(vault_root: Path, manifest_path: str) -> None:
+    """Gate create preflight before caller-controlled manifest bytes are parsed."""
+    if not full_release_filter(Path(vault_root))(manifest_path):
+        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+
+
+def require_proposed_manifest_visibility(
+    vault_root: Path, manifest: collections.CollectionManifest
+) -> None:
+    """Admit every path directly declared by a revised manifest before publication."""
+    allowed = full_release_filter(Path(vault_root))
+    paths = [manifest.path, manifest.storage.source, *(template.path for template in manifest.templates)]
+    if not all(allowed(path) for path in paths):
+        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    links = _LinkProjector.create(Path(vault_root), manifest)
+    for view_name in manifest.views:
+        _authorize_saved_view(Path(vault_root), manifest, view_name, links)
+    if any(
+        (reference := _opaque_plan_reference(plan.reference)) is None
+        or (
+            reference.lower().startswith(("exomem://vault/", "exomem://source/"))
+            and not links._allowed(reference)
+        )
+        for plan in manifest.links.plans
+    ):
+        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")

@@ -844,6 +844,8 @@ class PrivateCellApiAdapter:
         agent_profile: str | None = None
         command_fingerprint: str | None = None
         schema_digest: str | None = None
+        records_reader_version: int | None = None
+        lifecycle_actions_enabled: bool | None = None
         if require_runtime_identity:
             if config.runtime_target is None:
                 raise MetadataConflict("selected runtime identity is unavailable")
@@ -875,6 +877,31 @@ class PrivateCellApiAdapter:
             agent_profile = agent_metadata["profile"]
             command_fingerprint = agent_metadata["active_capability_sha256"]
             schema_digest = agent_digest["value"]
+            if config.records_reader_version is not None:
+                reader_response = await self._request(
+                    "GET",
+                    self._url(metadata, f"agent/{selected_profile}/reader-status"),
+                    headers=self._headers(
+                        metadata,
+                        credential=credential,
+                        protocol_version=protocol_version,
+                    ),
+                    json=None,
+                )
+                if reader_response.status_code != 200:
+                    raise MetadataConflict("private cell reader status request failed")
+                reader_envelope = reader_response.json()
+                reader_status = reader_envelope.get("data") if isinstance(reader_envelope, dict) else None
+                if not isinstance(reader_status, dict) or set(reader_status) != {
+                    "records_reader_version", "lifecycle_actions_enabled"
+                }:
+                    raise MetadataConflict("private cell reader status is incomplete")
+                version = reader_status["records_reader_version"]
+                actions = reader_status["lifecycle_actions_enabled"]
+                if type(version) is not int or type(actions) is not bool:
+                    raise MetadataConflict("private cell reader status is invalid")
+                records_reader_version = version
+                lifecycle_actions_enabled = actions
         expected_policy_digest = hashlib.sha256(
             json.dumps(
                 expected_worker_policy,
@@ -927,6 +954,8 @@ class PrivateCellApiAdapter:
                 agent_profile=agent_profile,
                 command_fingerprint=command_fingerprint,
                 schema_digest=schema_digest,
+                records_reader_version=records_reader_version,
+                lifecycle_actions_enabled=lifecycle_actions_enabled,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise MetadataConflict("private cell health response is incomplete") from error

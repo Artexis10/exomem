@@ -22,6 +22,23 @@ def test_plan_memory_exposes_exactly_the_six_planning_actions() -> None:
     assert ACTIONS == frozenset({"inspect", "create", "query", "add", "update", "triage"})
 
 
+def test_plan_memory_create_uses_shared_preflight_for_planning(tmp_path: Path) -> None:
+    from exomem.plan_memory import plan_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+
+    created = plan_memory(
+        tmp_path,
+        "create",
+        manifest_path="Knowledge Base/Planning/Work/_collection.md",
+        manifest_text=_manifest(),
+        why="create planning collection",
+    )
+
+    assert created["operation"] == "create"
+
+
 def test_plan_memory_saved_view_composes_with_hierarchy_controls(tmp_path: Path) -> None:
     from exomem import planning
     from exomem.plan_memory import plan_memory

@@ -121,6 +121,33 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
         assert "substrate-gateway-contract-selection" not in job
 
 
+def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
+
+    assert "records_rollback_runtime_target_json" not in automatic
+    assert "records_rollback_runtime_target_json:" in text
+    assert "required: false" in text.split(
+        "records_rollback_runtime_target_json:", 1
+    )[1].split("publish_pypi:", 1)[0]
+    assert (
+        "RECORDS_RUNTIME_TARGET_JSON: "
+        "${{ inputs.records_rollback_runtime_target_json }}"
+    ) in manual
+    for flag in (
+        "--records-profile hosted-alpha-agent-v1",
+        "--records-reader-version 2",
+        "--lifecycle-actions-enabled false",
+        "--records-issued-at",
+        "--records-expires-at",
+        "--records-runtime-target-json",
+    ):
+        assert flag in manual
+    assert 'if [[ -n "$RECORDS_RUNTIME_TARGET_JSON" ]]' in manual
+    assert '"${records_compatibility_args[@]}"' in manual
+
+
 def test_release_workflow_binds_automatic_and_manual_builds_to_the_tag_commit() -> None:
     text = _read(".github/workflows/release-please.yml")
     automatic = _workflow_job(text, "publish-image", "publish-existing-image")

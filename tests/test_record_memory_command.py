@@ -6,12 +6,122 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_record_memory_exposes_the_seven_declared_actions() -> None:
+def _records_manifest(*, views: str = "") -> str:
+    return f"""---
+type: collection
+exomem_id: 44444444-4444-4444-8444-444444444444
+title: New records
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Events
+  format_version: 1
+item_schema:
+  natural_key: [occurred_on]
+  fields:
+    occurred_on:
+      type: date
+      required: true
+{views}---
+"""
+
+
+def _activity_log(vault: Path) -> None:
+    log = vault / "Knowledge Base/log.md"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("# Activity\n", encoding="utf-8")
+
+
+def test_record_memory_exposes_the_nine_declared_actions() -> None:
     from exomem import record_memory
 
     assert record_memory.ACTIONS == frozenset(
-        {"describe", "validate", "inspect", "create", "query", "append", "update"}
+        {
+            "describe",
+            "validate",
+            "inspect",
+            "create",
+            "query",
+            "append",
+            "update",
+            "revise",
+            "rebaseline",
+        }
     )
+
+
+def test_record_memory_saved_view_validation_create_inspect_and_query_share_normalization(
+    tmp_path: Path,
+) -> None:
+    from exomem.record_memory import record_memory
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    manifest_text = _records_manifest(
+        views="""views:
+  recent:
+    query:
+      columns: [occurred_on]
+    sort: [occurred_on, desc]
+"""
+    )
+
+    validated = record_memory(
+        tmp_path,
+        action="validate",
+        manifest_path=manifest_path,
+        manifest_text=manifest_text,
+    )
+    assert validated["normalized_contract"]["views"]["recent"]["query"]["filters"] == []
+
+    record_memory(
+        tmp_path,
+        action="create",
+        manifest_path=manifest_path,
+        manifest_text=manifest_text,
+        why="create the collection",
+    )
+    inspected = record_memory(tmp_path, action="inspect", collection=manifest_path)
+    queried = record_memory(tmp_path, action="query", collection=manifest_path, view="recent")
+
+    assert inspected["saved_views"][0]["definition"]["query"]["filters"] == []
+    assert queried["view"]["definition"]["query"]["filters"] == []
+
+
+def test_record_memory_rejects_invalid_saved_view_before_create(tmp_path: Path) -> None:
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    manifest_text = _records_manifest(
+        views="""views:
+  broken:
+    query:
+      columns: [unknown]
+"""
+    )
+
+    with pytest.raises(OpError, match="^INVALID_SAVED_VIEW:"):
+        record_memory(
+            tmp_path,
+            action="validate",
+            manifest_path=manifest_path,
+            manifest_text=manifest_text,
+        )
+    with pytest.raises(OpError, match="^INVALID_SAVED_VIEW:"):
+        record_memory(
+            tmp_path,
+            action="create",
+            manifest_path=manifest_path,
+            manifest_text=manifest_text,
+            why="reject malformed view",
+        )
+
+    assert not (tmp_path / manifest_path).exists()
 
 
 @pytest.mark.parametrize(
@@ -250,7 +360,7 @@ def test_record_memory_registry_is_selector_gated_and_conservatively_annotated()
     command = next(command for command in product_commands_for("mcp") if command.name == "record_memory")
     canonical = next(command for command in commands_for("mcp") if command.name == "record_memory")
 
-    assert command.product_actions == ("ask", "review", "save", "update")
+    assert command.product_actions == ("ask", "review", "save", "update", "record")
     assert canonical.tier == 1
     assert canonical.product_surface == "primary"
     assert canonical.product_actions == command.product_actions

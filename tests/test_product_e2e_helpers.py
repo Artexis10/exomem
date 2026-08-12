@@ -61,28 +61,61 @@ def test_port_reservations_close_a_socket_that_fails_to_bind(
     assert reservation.closed
 
 
-def test_records_fixture_is_self_contained_and_preserves_manual_template_ownership(
-    tmp_path: Path,
-) -> None:
+def test_records_fixture_cannot_prewrite_collection_or_source(tmp_path: Path) -> None:
     fixture = e2e_product_loop._write_records_fixture(tmp_path)
 
     assert fixture["collection"] == "Knowledge Base/Records/Health/X3/_collection.md"
     manifest = tmp_path / fixture["collection"]
+    source = tmp_path / fixture["source"]
+    assert not manifest.exists()
+    assert not source.exists()
+    assert "semantic_profile: records" in fixture["manifest_text"]
+    assert "views:" in fixture["manifest_text"]
+
+
+def test_manual_records_fixture_preserves_template_ownership(tmp_path: Path) -> None:
+    fixture = e2e_product_loop._write_manual_records_fixture(tmp_path)
+
+    manifest = tmp_path / fixture["collection"]
     log = tmp_path / fixture["log"]
     template = tmp_path / fixture["template"]
+    before_template = template.read_bytes()
+
+    e2e_product_loop._insert_manual_x3_session(tmp_path, fixture)
+
     assert manifest.is_file()
-    assert log.is_file()
-    assert template.is_file()
     assert "semantic_profile: records" in manifest.read_text(encoding="utf-8")
     assert "exomem://memory/81947000-4c22-46e4-9874-23fed028314b" in manifest.read_text(
         encoding="utf-8"
     )
-    assert "{{date}}" in template.read_text(encoding="utf-8")
-
-    e2e_product_loop._insert_manual_x3_session(tmp_path, fixture)
-
     assert "2026-08-03 · Push" in log.read_text(encoding="utf-8")
-    assert "{{date}}" in template.read_text(encoding="utf-8")
+    assert template.read_bytes() == before_template
+
+
+def test_records_rebaseline_assertion_requires_reader_v2_and_discontinuity() -> None:
+    inspection = {
+        "audit": {
+            "status": "acknowledged_gap",
+            "gaps": [],
+            "discontinuity": {
+                "provenance_continuity": False,
+                "prior_head": "a" * 24,
+                "acknowledged_gap_codes": ["current-container-mismatch"],
+                "rationale": "acknowledge direct installed edit",
+            },
+        },
+        "lifecycle_guards": {
+            "expected_manifest_hash": "b" * 64,
+            "expected_container_hash": "c" * 64,
+        },
+    }
+    history = {"events": [{"operation": "rebaseline", "minimum_reader_version": 2}]}
+
+    e2e_product_loop._assert_records_rebaseline(inspection, history)
+
+    history["events"][0]["minimum_reader_version"] = 1
+    with pytest.raises(RuntimeError, match="reader marker 2"):
+        e2e_product_loop._assert_records_rebaseline(inspection, history)
 
 
 def test_planning_fixtures_cover_software_and_nonsoftware_journeys(tmp_path: Path) -> None:

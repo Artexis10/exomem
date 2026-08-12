@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -37,6 +38,7 @@ _PROVISIONER_CLOSURE = (
     "infra/helm/cell/**",
     ".dockerignore",
 )
+_RECORDS_COMPATIBILITY_MAX_TTL = timedelta(hours=24)
 
 
 class CompositionError(ValueError):
@@ -88,6 +90,8 @@ class CompositionRequest:
     legacy_contracts: tuple[HashedInput, ...]
     rollback: HashedInput
     output: Path
+    records_compatibility: HashedInput | None = None
+    rollback_runtime: CandidateInput | None = None
 
 
 def _canonical(value: object) -> bytes:
@@ -177,6 +181,15 @@ def _image(value: object, *, label: str, pattern: re.Pattern[str]) -> str:
     if not isinstance(value, str) or not pattern.fullmatch(value):
         _error(f"{label} must be an immutable approved image digest")
     return value
+
+
+def _rfc3339_utc(value: object, *, label: str) -> datetime:
+    if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value) is None:
+        _error(f"{label} must be canonical RFC3339 UTC")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise CompositionError(f"{label} must be canonical RFC3339 UTC") from exc
 
 
 def _target(value: object, *, label: str) -> dict[str, str]:
@@ -561,6 +574,9 @@ def _write_pair_atomic(path: Path, data: bytes) -> None:
 
 
 def validate_deployment_lock(value: object) -> None:
+    if isinstance(value, dict) and value.get("schemaVersion") == 3:
+        _validate_deployment_lock_v3(value)
+        return
     lock = _exact_object(
         value,
         label="deployment lock",
@@ -661,9 +677,78 @@ def validate_deployment_lock(value: object) -> None:
         _error("deployment lock contains a placeholder")
 
 
+def _validate_deployment_lock_v3(value: dict[str, Any]) -> None:
+    lock = _exact_object(
+        value,
+        label="deployment lock",
+        fields={
+            "artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget",
+            "composition", "rollback", "recordsCompatibility",
+        },
+    )
+    v2 = dict(lock)
+    compatibility = cast(dict[str, Any], v2.pop("recordsCompatibility"))
+    v2["schemaVersion"] = 2
+    validate_deployment_lock(v2)
+    records = _exact_object(
+        compatibility,
+        label="Records compatibility",
+        fields={
+            "minimum_records_reader_version", "activeProfile", "activeLifecycleActionsEnabled",
+            "rollbackProfile", "rollbackLifecycleActionsEnabled", "rollbackRuntime",
+        },
+    )
+    if (
+        records["minimum_records_reader_version"] != 2
+        or records["activeProfile"] != "hosted-alpha-agent-v2"
+        or records["activeLifecycleActionsEnabled"] is not True
+        or records["rollbackProfile"] != "hosted-alpha-agent-v1"
+        or records["rollbackLifecycleActionsEnabled"] is not False
+    ):
+        _error("Records compatibility is invalid")
+    target = _target(lock["runtimeTarget"], label="deployment lock runtime target")
+    if target["agentProfile"] != records["activeProfile"]:
+        _error("Records active profile does not match runtime target")
+    rollback_runtime = _exact_object(
+        records["rollbackRuntime"],
+        label="Records rollback runtime",
+        fields={"image", "sourceCommit", "candidateSha256", "recordsReaderVersion", "readerStatusProof", "runtimeTarget"},
+    )
+    _image(rollback_runtime["image"], label="Records rollback image", pattern=_RUNTIME_IMAGE)
+    _commit(rollback_runtime["sourceCommit"], label="Records rollback source")
+    _sha256(rollback_runtime["candidateSha256"], label="Records rollback candidate")
+    if rollback_runtime["recordsReaderVersion"] != 2:
+        _error("Records rollback reader version is invalid")
+    rollback_target = _target(
+        rollback_runtime["runtimeTarget"], label="Records rollback runtime target"
+    )
+    proof = _exact_object(
+        rollback_runtime["readerStatusProof"],
+        label="Records rollback reader status proof",
+        fields={
+            "profile", "recordsReaderVersion", "lifecycleActionsEnabled", "issuedAt", "expiresAt",
+            "signerWorkflow", "signerWorkflowDigest",
+        },
+    )
+    issued_at = _rfc3339_utc(proof["issuedAt"], label="Records rollback proof issuedAt")
+    expires_at = _rfc3339_utc(proof["expiresAt"], label="Records rollback proof expiresAt")
+    if (
+        proof["profile"] != records["rollbackProfile"]
+        or rollback_target["agentProfile"] != records["rollbackProfile"]
+        or proof["recordsReaderVersion"] != 2
+        or proof["lifecycleActionsEnabled"] is not False
+        or proof["signerWorkflow"] != hosted_image_candidate.RUNTIME_SIGNER_WORKFLOW
+        or not isinstance(proof["signerWorkflowDigest"], str)
+        or _COMMIT.fullmatch(proof["signerWorkflowDigest"]) is None
+        or expires_at <= issued_at
+        or expires_at - issued_at > _RECORDS_COMPATIBILITY_MAX_TTL
+    ):
+        _error("Records rollback reader status proof is invalid")
+
+
 def validate_deployment_lock_pair(value: object) -> None:
     pair = _exact_object(value, label="deployment lock pair", fields={"artifact", "schemaVersion", "locks"})
-    if pair["artifact"] != "exomem-hosted-deployment-lock-pair" or pair["schemaVersion"] != 2:
+    if pair["artifact"] != "exomem-hosted-deployment-lock-pair" or pair["schemaVersion"] not in {2, 3}:
         _error("deployment lock pair identity is invalid")
     if not isinstance(pair["locks"], list) or len(pair["locks"]) != 2:
         _error("deployment lock pair must contain exactly two locks")
@@ -671,6 +756,8 @@ def validate_deployment_lock_pair(value: object) -> None:
     for member in pair["locks"]:
         validate_deployment_lock(member)
         lock = cast(dict[str, object], member)
+        if lock["schemaVersion"] != pair["schemaVersion"]:
+            _error("deployment lock pair schema versions differ")
         mode = cast(str, lock["admissionMode"])
         if mode in members:
             _error("deployment lock pair has duplicate admission modes")
@@ -703,6 +790,59 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
     legacy_catalog, release_set_sha = _legacy_catalog(catalog, authority, request.legacy_contracts)
     rollback_evidence, _ = _load_hashed(request.rollback, label="rollback evidence")
     rollback = _rollback(rollback_evidence)
+    if (request.records_compatibility is None) != (request.rollback_runtime is None):
+        _error("Records v3 composition requires compatibility and rollback runtime evidence together")
+    records_compatibility: dict[str, object] | None = None
+    schema_version = 2
+    if request.records_compatibility is not None and request.rollback_runtime is not None:
+        evidence, _ = _load_hashed(request.records_compatibility, label="Records compatibility")
+        records = _exact_object(
+            evidence,
+            label="Records compatibility",
+            fields={
+                "minimum_records_reader_version", "activeProfile", "activeLifecycleActionsEnabled",
+                "rollbackProfile", "rollbackLifecycleActionsEnabled",
+            },
+        )
+        if (
+            records["minimum_records_reader_version"] != 2
+            or records["activeProfile"] != "hosted-alpha-agent-v2"
+            or records["activeLifecycleActionsEnabled"] is not True
+            or records["rollbackProfile"] != "hosted-alpha-agent-v1"
+            or records["rollbackLifecycleActionsEnabled"] is not False
+            or runtime_target["agentProfile"] != records["activeProfile"]
+        ):
+            _error("Records compatibility is invalid")
+        rollback_candidate, rollback_candidate_sha = _candidate(
+            request.rollback_runtime, kind="runtime"
+        )
+        rollback_image, rollback_source = _candidate_identity(rollback_candidate, kind="runtime")
+        try:
+            claim = hosted_image_candidate.validate_records_compatibility_claim(
+                rollback_candidate, require_fresh=True
+            )
+        except Exception as exc:
+            raise CompositionError("verified rollback Records compatibility is invalid") from exc
+        if (
+            claim["profile"] != records["rollbackProfile"]
+            or claim["recordsReaderVersion"] != 2
+            or claim["lifecycleActionsEnabled"] is not False
+        ):
+            _error("verified rollback Records compatibility is invalid")
+        records_compatibility = {
+            **records,
+            "rollbackRuntime": {
+                "image": rollback_image,
+                "sourceCommit": rollback_source,
+                "candidateSha256": rollback_candidate_sha,
+                "recordsReaderVersion": 2,
+                "readerStatusProof": {
+                    key: value for key, value in claim.items() if key != "runtimeTarget"
+                },
+                "runtimeTarget": claim["runtimeTarget"],
+            },
+        }
+        schema_version = 3
     closure = {
         "runtime": verify_source_closure(
             request.repository, runtime_source, composition_commit, _RUNTIME_CLOSURE
@@ -713,7 +853,7 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
     }
     common: dict[str, object] = {
         "artifact": "exomem-hosted-deployment-lock",
-        "schemaVersion": 2,
+        "schemaVersion": schema_version,
         "components": {
             "runtime": {
                 "image": runtime_image,
@@ -738,9 +878,11 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
         },
         "rollback": rollback,
     }
+    if records_compatibility is not None:
+        common["recordsCompatibility"] = records_compatibility
     expand = {**copy.deepcopy(common), "admissionMode": "expand"}
     contract = {**copy.deepcopy(common), "admissionMode": "contract"}
-    pair = {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 2, "locks": [expand, contract]}
+    pair = {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": schema_version, "locks": [expand, contract]}
     validate_deployment_lock_pair(pair)
     _write_pair_atomic(request.output, _canonical(pair))
     return pair
@@ -762,6 +904,13 @@ def _candidate_arguments(parser: argparse.ArgumentParser, name: str) -> None:
     evidence.add_argument(f"--{name}-bundle-from-oci", action="store_true")
 
 
+def _optional_candidate_arguments(parser: argparse.ArgumentParser, name: str) -> None:
+    parser.add_argument(f"--{name}-candidate", type=Path)
+    parser.add_argument(f"--{name}-candidate-sha256")
+    parser.add_argument(f"--{name}-candidate-bundle", type=Path)
+    parser.add_argument(f"--{name}-bundle", type=Path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
@@ -773,8 +922,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--legacy-catalog", type=_hashed_argument, required=True)
     parser.add_argument("--legacy-contract", type=_hashed_argument, action="append", required=True)
     parser.add_argument("--rollback", type=_hashed_argument, required=True)
+    parser.add_argument("--records-compatibility", type=_hashed_argument)
+    _optional_candidate_arguments(parser, "rollback-runtime")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    rollback_runtime_values = (
+        args.rollback_runtime_candidate,
+        args.rollback_runtime_candidate_sha256,
+        args.rollback_runtime_bundle,
+        args.rollback_runtime_candidate_bundle,
+    )
+    rollback_runtime = (
+        CandidateInput(*rollback_runtime_values)
+        if all(value is not None for value in rollback_runtime_values)
+        else None
+    )
+    if any(value is not None for value in rollback_runtime_values) and rollback_runtime is None:
+        parser.error("rollback runtime candidate requires candidate, digest, image bundle, and candidate bundle")
     request = CompositionRequest(
         repository=args.repository,
         composition_commit=args.composition_commit,
@@ -798,6 +962,8 @@ def main(argv: list[str] | None = None) -> int:
         legacy_contracts=tuple(args.legacy_contract),
         rollback=args.rollback,
         output=args.output,
+        records_compatibility=args.records_compatibility,
+        rollback_runtime=rollback_runtime,
     )
     try:
         compose_locks(request)

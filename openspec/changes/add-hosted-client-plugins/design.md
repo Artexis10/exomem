@@ -1,6 +1,6 @@
 ## Context
 
-Exomem already ships a generated Claude Code plugin for local stdio use, and the completed `add-hosted-agent-surface-profile` change defines the immutable, thirteen-command `hosted-alpha-agent-v1` private agent contract. Neither is the Hosted product experience. The local plugin assumes `uvx`, `EXOMEM_VAULT_PATH`, hooks, and the broad local skill scaffold; the Hosted product needs remote MCP, Exomem-owned OAuth, no local runtime, and skills that mention only the alpha profile.
+Exomem already ships a generated Claude Code plugin for local stdio use, and the completed `add-hosted-agent-surface-profile` change defines the immutable, thirteen-command `hosted-alpha-agent-v1` private agent contract. Neither is the Hosted product experience. The local plugin assumes `uvx`, `EXOMEM_VAULT_PATH`, hooks, and the broad local skill scaffold; the Hosted product needs remote MCP, Exomem-owned OAuth, no local runtime, and skills that mention only their selected alpha profile. Lifecycle-capable Records packages use an additive `hosted-alpha-agent-v2` profile and candidate; they never alter v1 membership, identity, locks, or registered evidence.
 
 The paired Substrate change `add-exomem-hosted-mcp-oauth` owns the public MCP resource, OAuth lifecycle, invite admission, tenant provisioning, and authenticated routing. This repository owns what the clients install and what the assistant learns about when and how to use Exomem. The package must work in chat surfaces where hooks are unavailable, so automatic behavior must come from client-native plugin discovery, tool descriptions, and skill instructions, then be proven in the real clients.
 
@@ -15,7 +15,7 @@ The release target is exact:
 - Publish one Exomem identity as native Claude and OpenAI plugin artifacts backed by the same canonical definition.
 - Require only native installation and one Exomem authorization per client installation.
 - Make recall and durable capture happen naturally in relevant fresh conversations without `@Exomem`, a bootstrap prompt, or custom instructions.
-- Keep every bundled instruction executable on exactly `hosted-alpha-agent-v1`.
+- Keep every v1 bundled instruction executable on exactly `hosted-alpha-agent-v1`, while making the lifecycle-capable v2 candidate executable on its separately pinned profile.
 - Make package identity reproducible and bind it to the exact remote tool contract plus the gateway-owned OAuth discovery overlay; live evidence remains outside that immutable identity.
 - Treat successful real installation and content-bearing use as release gates, not manual follow-up.
 - Start with private or unlisted friends-cohort distribution while preserving a clean path to public directories.
@@ -32,12 +32,14 @@ The release target is exact:
 
 ### 1. One canonical Hosted definition renders two platform packages
 
-A new Hosted plugin source owns the product identity, production MCP resource URL, semantic plugin version, `hosted-alpha-agent-v1` binding, package policy, shared assets, and Hosted skill set. Deterministic renderers produce:
+A new Hosted plugin source owns the product identity, production MCP resource URL, semantic plugin version, versioned Hosted-profile binding, package policy, shared assets, and Hosted skill set. Deterministic renderers produce:
 
 - a Claude package using the currently supported Claude plugin/connector manifest and bundled skills; and
 - an OpenAI package with `.codex-plugin/plugin.json`, `.mcp.json`, required `.app.json` registered-app mapping, `skills/`, and assets, plus marketplace metadata whose authentication policy is `ON_INSTALL`.
 
 The generated artifacts are checked and validated, but the canonical definition and Hosted skill sources are hand-authored. Platform adapters may change syntax without creating independent product behavior. A generic zip with setup prose was rejected because it recreates the configuration burden this change exists to remove. Hand-maintaining two unrelated packages was rejected because endpoint, skills, and contract identity would drift.
+
+`hosted-alpha-agent-v1` remains the immutable original profile and continues to render and validate its existing candidates unchanged. A Records lifecycle candidate SHALL use a new `hosted-alpha-agent-v2` profile, a new plugin candidate/version and locks, and a separately generated package. V2 preserves the v1 command membership unchanged and adds the canonical nine-action `record_memory` surface; it is the only Hosted profile allowed to advertise `revise` or `rebaseline`.
 
 The published MCP URL is a release input selected by maintainers and rendered as one literal HTTPS endpoint: `https://substratesystems.io/api/exomem/mcp/v1`. It is never a user input. Development endpoints may be rendered only into non-distributable fixtures with an explicit development channel. The registered OpenAI app ID is a separate operator release input; discovering a developer app proves package shape only, not supported distribution.
 
@@ -51,7 +53,7 @@ The initial bundle contains one Hosted core skill plus Hosted variants of:
 4. `exomem-research`
 5. `exomem-review`
 
-These variants are authored against the alpha profile rather than mechanically deleting lines from the local skills. `exomem-curate` and `exomem-defrag` depend on broad `edit_memory`/`replace_memory`; `exomem-ingest` and `exomem-media` teach transfer or media paths. They remain absent until a future profile and purpose-built Hosted variant make their full promise executable.
+These variants are authored against their selected alpha profile rather than mechanically deleting lines from the local skills. `exomem-curate` and `exomem-defrag` depend on broad `edit_memory`/`replace_memory`; `exomem-ingest` and `exomem-media` teach transfer or media paths. They remain absent until a future profile and purpose-built Hosted variant make their full promise executable. V1 skill sources and dependency closure remain unchanged; a v2 lifecycle candidate separately declares and validates its `record_memory` dependency.
 
 Each Hosted skill declares its exact required command set in canonical metadata. Package generation parses callable references from the full skill content and requires both the declaration and every reference to be a subset of the selected profile. It also exercises `bootstrap` under the same profile and rejects unavailable recommendations. Silently stripping unsupported calls was rejected because it can leave plausible but unsafe workflows behind.
 
@@ -77,14 +79,15 @@ The immutable compatibility manifest contains the canonical definition and exact
 - plugin ID and semantic version;
 - target platform and package schema version;
 - canonical Hosted MCP resource URL;
-- `hosted-alpha-agent-v1` profile ID;
+- exact versioned profile ID (`hosted-alpha-agent-v1` or `hosted-alpha-agent-v2`);
 - ordered command-surface fingerprint;
 - full schema-contract digest;
 - canonical Hosted definition digest;
 - aggregate Hosted skill-content digest; and
+- minimum Records reader contract required by the advertised surface (`minimum_records_reader_version: 2` when lifecycle actions are exposed); and
 - artifact digest.
 
-The platform manifest contains only fields accepted by that platform; unsupported compatibility metadata lives in the package lock rather than being smuggled into manifests. Live evidence is deliberately excluded from the compatibility digest so promotion cannot form a dependency cycle. The build fails if the agent contract, skill content, endpoint, generated artifacts, or lock disagree. Any profile membership change requires a new profile identifier and a new plugin candidate; a silent profile change under an existing package is forbidden.
+The platform manifest contains only fields accepted by that platform; unsupported compatibility metadata lives in the package lock rather than being smuggled into manifests. Live evidence is deliberately excluded from the compatibility digest so promotion cannot form a dependency cycle. The build fails if the agent contract, skill content, endpoint, generated artifacts, reader floor, or lock disagree. Readiness and rollback additionally bind the deployment's active Records reader version and refuse a runtime below the candidate's floor. A v2 lifecycle candidate and its additive deployment-lock schema record `minimum_records_reader_version: 2`; existing v1 locks and deployments remain valid and are never rewritten to claim v2. Any profile membership change requires a new profile identifier and a new plugin candidate; a silent profile change under an existing package is forbidden.
 
 The package never contains an access token, refresh token, invite token, user/tenant/cell identifier, private cell endpoint, service credential, vault path, `EXOMEM_VAULT_PATH`, or local executable command. OAuth state belongs to the client and Substrate, not the archive.
 
@@ -104,6 +107,8 @@ Promotion to `live` requires evidence from an actual clean installation in the s
 This deliberately treats discovery-only success as a failure. The existing personal ChatGPT connector demonstrated that bootstrap and metadata can work while content-bearing reads are blocked, and the Claude plugin history demonstrated that CI-valid manifests can still fail at real installation.
 
 A platform can be withheld independently when its live gate fails. The overall release may be described as cross-client ready only when both Claude and OpenAI records are live against the same compatibility identity.
+
+For a Records-affecting command-surface change, only the v2 candidate's operator-signed promotion envelope additionally carries the exact closed `records-release-acceptance` object. That object binds the deployed release/surface, v2 profile and reader floor, disposable reset, client/model/system contracts, prompt hashes, complete lifecycle actions, mutation terminals/receipts, independent readbacks, and current graph-availability proof. Unsigned runner output cannot promote. Exact replay of byte-identical signed evidence for the unchanged candidate is an idempotent no-op returning the current promotion result; stale, mismatched, extra-field, or incomplete proof refuses. Current v1 registered evidence remains unchanged and cannot be relabelled as v2 evidence. `src/exomem/hosted_plugins.py`, the platform promotion records, and the personal connector guardrail are the enforcement points.
 
 ### 6. Private friends-cohort distribution precedes directory submission
 
@@ -131,14 +136,15 @@ The paired test also covers duplicate callbacks, concurrent first authorization,
 
 ## Migration Plan
 
-1. Land and archive `add-hosted-agent-surface-profile`; record its immutable profile and schema digests.
-2. Add the canonical Hosted definition, Hosted skill set, renderers, validators, and pending promotion records without publishing them.
-3. Land and deploy the paired Substrate MCP/OAuth change with the same contract identity.
-4. Render release candidates, complete static validation, and install them into clean Claude and OpenAI test accounts.
-5. Run the paired live matrix, promote passing artifacts, and expose private/unlisted install actions to invited friends.
-6. Observe cohort activation and reliability before submitting the unchanged package identity to public directories.
+1. Land and archive `add-hosted-agent-surface-profile`; record the immutable v1 profile and schema digests.
+2. Add the canonical Hosted definition, Hosted skill set, renderers, validators, and pending v1 promotion records without publishing them.
+3. For Records lifecycle, define the additive v2 profile/candidate and reader-v2 deployment lock without mutating any v1 package, lock, or evidence.
+4. Land and deploy the paired Substrate MCP/OAuth change with the same contract identity.
+5. Render release candidates, complete static validation, and install them into clean Claude and OpenAI test accounts.
+6. Run the paired live matrix, promote passing artifacts, and expose private/unlisted install actions to invited friends.
+7. Observe cohort activation and reliability before submitting the unchanged package identity to public directories.
 
-Rollback demotes or unlists the affected platform artifact and revokes its OAuth client admission. Existing tenants and vault data remain intact and accessible through Home or another live client. Rollback does not delete tenant data or restore a broader tool profile.
+Rollback demotes or unlists the affected platform artifact and revokes its OAuth client admission. A v2 rollback retains reader-v2 status semantics while disabling `revise` and `rebaseline`; it never serves a lifecycle-marked vault through a predecessor reader. Existing v1 packages, clients, evidence, tenants, and vault data remain intact. Rollback does not delete tenant data or restore a broader tool profile.
 
 ## Open Questions
 

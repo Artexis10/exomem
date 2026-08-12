@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -10,10 +12,11 @@ from record_fixtures import (
     copy_x3_fixture,
 )
 
-from exomem import memory_refs
+from exomem import memory_refs, record_formats, records
 from exomem import structured_collections as collections
 
 COLLECTION_ID = "bf7d5ef7-2e68-4b5f-8e4e-f0f58eb9ccaf"
+READER_V2_FIXTURE = Path(__file__).parent / "fixtures/records/reader-v2"
 
 
 def _manifest(
@@ -99,6 +102,82 @@ def test_load_manifest_keeps_profile_neutral_contract_and_opaque_plan_link(tmp_p
         "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7"
     )
     assert manifest.links.plans[0].query == {"filters": {"asset": "car"}, "limit": 12}
+
+
+def test_records_reader_floor_refuses_a_v2_marker_for_a_predecessor_reader(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    shutil.copytree(READER_V2_FIXTURE / "Knowledge Base", vault / "Knowledge Base")
+    expected = json.loads((READER_V2_FIXTURE / "expected.json").read_text(encoding="utf-8"))
+    relative = "Knowledge Base/Records/ReaderV2/_collection.md"
+    before = {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in sorted(vault.rglob("*"))
+        if path.is_file()
+    }
+    path = vault / relative
+    fixture = path.read_bytes()
+    manifest = collections.load_manifest(vault, path)
+    history = records.agent_audit_history(vault, manifest.path)
+    status = records.inspect_audit_gap(vault, manifest.path)
+
+    assert manifest.audit_head is not None
+    assert history["status"] == "ok"
+    assert history["events"][0]["operation"] == "revise"
+    assert collections.resolve_saved_view(manifest, "latest").definition == {
+        "query": {"descending": True, "filters": [], "sort_by": "occurred_on"}
+    }
+    assert hashlib.sha256(json.dumps(history, sort_keys=True, separators=(",", ":")).encode()).hexdigest() == expected["history_sha256"]
+    assert hashlib.sha256(json.dumps(status, sort_keys=True, separators=(",", ":")).encode()).hexdigest() == expected["status_sha256"]
+    assert {path: hashlib.sha256(value).hexdigest() for path, value in before.items()} == expected["fixture_sha256"]
+    with pytest.raises(collections.CollectionError) as raised:
+        collections.parse_manifest_bytes(vault, relative, fixture, records_reader_version=1)
+
+    assert raised.value.code == "RECORDS_READER_VERSION_UNSUPPORTED"
+    assert {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in sorted(vault.rglob("*"))
+        if path.is_file()
+    } == before
+
+
+def test_reader_two_lifecycle_transition_is_never_traversed_by_reader_one(tmp_path: Path) -> None:
+    """The v2 marker is emitted by the real revise path, not fixture decoration."""
+    fixture = copy_x3_fixture(tmp_path)
+    log = tmp_path / "Knowledge Base/log.md"
+    log.write_text("# Activity\n", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item={
+            "occurred_on": "2026-08-03", "title": "Pull", "status": "completed",
+            "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}],
+        },
+        item_key="11111111-1111-4111-8111-111111111111",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="record a session",
+    )
+    current = collections.load_manifest(tmp_path, manifest.path)
+    current_snapshot = record_formats.load_adapter(tmp_path, current).read()
+    records.revise_collection(
+        tmp_path,
+        current.path,
+        manifest_text=(tmp_path / current.path).read_text(encoding="utf-8").replace(
+            "title:", "title: Revised", 1
+        ),
+        expected_manifest_hash=current.manifest_version.hash,
+        expected_container_hash=records.lifecycle_guards(current, current_snapshot)["expected_container_hash"],
+        why="clarify title",
+    )
+    produced = (tmp_path / current.path).read_bytes()
+    assert collections.load_manifest(tmp_path, current.path).audit_head is not None
+    assert "revise" in {
+        event["operation"] for event in records.agent_audit_history(tmp_path, current.path)["events"]
+    }
+    with pytest.raises(collections.CollectionError, match="RECORDS_READER_VERSION_UNSUPPORTED"):
+        collections.parse_manifest_bytes(tmp_path, current.path, produced, records_reader_version=1)
+    assert (tmp_path / current.path).read_bytes() == produced
 
 
 def test_records_manifest_ignores_an_unowned_legacy_plan_audit_mapping(tmp_path: Path) -> None:
@@ -340,6 +419,42 @@ def test_saved_view_normalizes_legacy_shapes_and_binds_its_definition(tmp_path: 
     assert collections.resolve_saved_view(
         collections.load_manifest(vault, path), "focused"
     ).identity != original_identity
+
+
+def test_manifest_eagerly_normalizes_views_and_keeps_one_located_diagnostic_per_invalid_view(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Maintenance/_collection.md",
+        _manifest().replace(
+            "  latest:\n    sort: [occurred_on, desc]",
+            "  recent:\n"
+            "    query:\n"
+            "      columns: [occurred_on]\n"
+            "    sort: [occurred_on, desc]\n"
+            "  broken:\n"
+            "    query:\n"
+            "      columns: [unknown]",
+        ),
+    )
+
+    manifest = collections.load_manifest(vault, path)
+
+    assert collections.resolve_saved_view(manifest, "recent").definition == {
+        "query": {
+            "filters": [],
+            "columns": ["occurred_on"],
+            "sort_by": "occurred_on",
+            "descending": True,
+        }
+    }
+    assert manifest.view_diagnostics == (
+        collections.CollectionDiagnostic(
+            "INVALID_SAVED_VIEW", "saved view columns are invalid", "views.broken"
+        ),
+    )
 
 
 @pytest.mark.parametrize(

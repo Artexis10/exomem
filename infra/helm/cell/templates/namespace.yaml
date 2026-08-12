@@ -24,5 +24,7 @@ metadata:
     exomem.io/vault-id: {{ .Values.vaultId | quote }}
     exomem.io/expected-release: {{ .Values.expectedRelease | quote }}
     exomem.io/worker-policy-digest: {{ .Values.workerPolicyDigest | quote }}
+    exomem.io/records-reader-version: {{ printf "%.0f" .Values.recordsReaderVersion | quote }}
+    exomem.io/lifecycle-actions-enabled: {{ .Values.lifecycleActionsEnabled | quote }}
     exomem.io/browser-origin: {{ .Values.browserOrigin | quote }}
     exomem.io/transfer-hostname: {{ .Values.transferHostname | quote }}

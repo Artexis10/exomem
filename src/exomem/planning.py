@@ -113,12 +113,15 @@ def create_collection(
 ) -> dict[str, Any]:
     """Create one Planning collection through the shared guarded writer."""
     _validate_public_text(why, "why")
-    manifest = collections.parse_manifest_bytes(
-        vault_root, manifest_path, manifest_text.encode("utf-8")
-    )
+    root = Path(vault_root)
+    record_governance.require_candidate_manifest_visibility(root, manifest_path)
+    manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode("utf-8"))
     require_planning_profile(manifest)
     if scaffold and not manifest.views:
         manifest_text = _with_default_views(manifest_text)
+        manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode("utf-8"))
+        require_planning_profile(manifest)
+    record_governance.require_proposed_manifest_visibility(root, manifest)
     return records.create_collection(
         vault_root, manifest_path, manifest_text, why=why, scaffold=scaffold
     )

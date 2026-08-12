@@ -1,5 +1,7 @@
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 {{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
+{{- $lockFile := include "exomem.hostedDeploymentLockFileName" . -}}
+{{- $runtimeSelection := include "exomem.hostedRuntimeSelection" . -}}
 {{- $workloadsRaw := .Files.Get "files/durability-workloads-v1.json" -}}
 {{- $storageRaw := .Files.Get "files/durability-storage-v1.json" -}}
 {{- if ne .Values.durability.contractSha256 ($workloadsRaw | sha256sum) -}}
@@ -383,7 +385,9 @@ spec:
                   valueFrom:
                     secretKeyRef: {name: exomem-user-export-delivery-key, key: application-key}
                 - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
-                  value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
+                  value: {{ printf "/etc/exomem/deployment-lock/%s" $lockFile | quote }}
+                - name: EXOMEM_DURABILITY_RUNTIME_SELECTION
+                  value: {{ $runtimeSelection | quote }}
                 - name: EXOMEM_DURABILITY_PROVISIONER_IMAGE
                   value: {{ $provisionerImage | quote }}
                 - name: EXOMEM_PROVISIONER_CELL_CHART_PATH
@@ -434,7 +438,7 @@ spec:
               configMap:
                 name: {{ $lockName }}
                 items:
-                  - {key: exomem-hosted-deployment-lock-v2.json, path: exomem-hosted-deployment-lock-v2.json}
+                  - {key: {{ $lockFile }}, path: {{ $lockFile }}}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -589,7 +593,9 @@ spec:
                   valueFrom:
                     secretKeyRef: {name: exomem-recovery-upload-key, key: application-key}
                 - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
-                  value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
+                  value: {{ printf "/etc/exomem/deployment-lock/%s" $lockFile | quote }}
+                - name: EXOMEM_DURABILITY_RUNTIME_SELECTION
+                  value: {{ $runtimeSelection | quote }}
                 - name: EXOMEM_DURABILITY_MAX_CONCURRENCY
                   value: {{ $backup.maxConcurrency | quote }}
                 - name: EXOMEM_DURABILITY_WORKER_ID
@@ -620,7 +626,7 @@ spec:
               configMap:
                 name: {{ $lockName }}
                 items:
-                  - {key: exomem-hosted-deployment-lock-v2.json, path: exomem-hosted-deployment-lock-v2.json}
+                  - {key: {{ $lockFile }}, path: {{ $lockFile }}}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -837,7 +843,8 @@ data:
                 {"name": "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-recovery-delete-key", "key": "application-key"}}},
                 {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key-id", "key": "application-key-id"}}},
                 {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key", "key": "application-key"}}},
-                {"name": "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH", "value": "/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json"},
+                {"name": "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH", "value": {{ printf "/etc/exomem/deployment-lock/%s" $lockFile | quote }}},
+                {"name": "EXOMEM_PROVISIONER_RUNTIME_SELECTION", "value": {{ $runtimeSelection | quote }}},
                 {"name": "EXOMEM_DELETION_BATCH_SIZE", "value": {{ $deletion.maxOperations | quote }}},
                 {"name": "EXOMEM_PROVISIONER_WORKER_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"}}},
                 {"name": "HOME", "value": "/tmp"}
@@ -857,7 +864,7 @@ data:
             }],
             "volumes": [
               {"name": "temporary", "emptyDir": {"sizeLimit": "64Mi"}},
-              {"name": "deployment-lock", "configMap": {"name": {{ $lockName | quote }}, "defaultMode": 292, "items": [{"key": "exomem-hosted-deployment-lock-v2.json", "path": "exomem-hosted-deployment-lock-v2.json"}]}}
+              {"name": "deployment-lock", "configMap": {"name": {{ $lockName | quote }}, "defaultMode": 292, "items": [{"key": {{ $lockFile | quote }}, "path": {{ $lockFile | quote }}}]}}
             ]
           }
         }

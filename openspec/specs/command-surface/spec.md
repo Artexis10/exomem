@@ -157,7 +157,11 @@ The system SHALL expose Adoption Studio as one product command, `adoption_studio
 - **AND** the regenerated fixture is committed with an explicit intentional-change note and the gate passes
 
 ### Requirement: One multiplexed Records product command
-The product surface SHALL expose one `record_memory` command rather than separate storage- or action-specific tools. Its finite selector SHALL contain exactly five first-delivery actions: `inspect`, `create`, `query`, `append`, and `update`. Query SHALL cover bounded list/history/render/export-shaped responses through explicit arguments; generic derived-index repair SHALL remain under `maintain_memory`.
+The product surface SHALL expose one `record_memory` command rather than separate storage- or action-specific tools. Its finite selector SHALL contain seven actions: read-only `describe`, `validate`, and `inspect`, plus `create`, `query`, `append`, and `update`. Query SHALL cover bounded list/history/render/export-shaped responses through explicit arguments; generic derived-index repair SHALL remain under `maintain_memory`.
+
+#### Scenario: Agent discovers before creating
+- **WHEN** an agent needs to create a first Record collection without prior manifest knowledge
+- **THEN** it uses `describe` and `validate` through the same `record_memory` front door before `create`
 
 #### Scenario: Natural log intent uses one front door
 - **WHEN** an agent receives “Log this training session”, “Record today’s symptoms”, “Update the car mileage”, or “Show the last three months”
@@ -172,24 +176,29 @@ The product surface SHALL expose one `record_memory` command rather than separat
 - **THEN** the command refuses that action as unsupported in this delivery and does not accept a caller-supplied replacement file
 
 ### Requirement: Records actions validate arguments explicitly
-Each action SHALL define required and forbidden arguments. `create` SHALL use create-only guards and SHALL NOT adopt or rewrite an existing tracker implicitly. `inspect` SHALL be report-only. `query` SHALL support bounded filters, `include_agent_history`, saved-view selection, and `output_format` without writing exports. `append` and `update` SHALL require structured item data and a concise reason; `update` SHALL additionally require the collection-scoped item key and current stale-write guards.
+Each action SHALL define required and forbidden arguments. `describe` SHALL accept no collection or mutation arguments. Collection-less `inspect` SHALL inventory Records and targeted `inspect` SHALL remain report-only. `validate` SHALL require `manifest_path` and `manifest_text`, MAY accept `scaffold`, and SHALL reject `why` and every mutation argument. `create` SHALL use create-only guards and SHALL NOT adopt or rewrite an existing tracker implicitly. `query` SHALL support bounded filters, `include_agent_history`, saved-view selection, and `output_format` without writing exports. `append` and `update` SHALL require structured item data and a concise reason; `update` SHALL additionally require the collection-scoped item key and current stale-write guards.
 
 #### Scenario: Read action rejects mutation payload
-- **WHEN** `inspect` or `query` receives item changes, a mutation reason, or another write-only argument
+- **WHEN** `describe`, `inspect`, `validate`, or `query` receives an argument outside its declared shape
 - **THEN** validation refuses the invocation rather than ignoring ambiguous input
+
+#### Scenario: Validate needs no mutation rationale
+- **WHEN** a client submits a manifest through `validate` without `why`
+- **THEN** argument validation accepts the read-only preflight
+- **AND** supplying `why` to `validate` is refused as a cross-action argument
 
 #### Scenario: Create does not silently adopt tracker
 - **WHEN** `create` targets a path that already contains a tracker, manifest, or canonical source
 - **THEN** create-only guards refuse and direct the user to add an explicit reviewed manifest instead
 
 ### Requirement: Records command parity and selector safety
-`record_memory` SHALL be generated from the canonical command registry across MCP, REST, and CLI. Read-only actions SHALL remain read-only at invocation classification; mutating actions SHALL enter writer authority, idempotency, terminal-response, governance-projector, and retry coverage. Unknown or unclassified actions SHALL fail closed at startup or invocation.
+`record_memory` SHALL be generated from the canonical command registry across MCP, REST, and CLI. `describe`, `validate`, `inspect`, and `query` SHALL be read-only at invocation classification; mutating actions SHALL enter writer authority, idempotency, terminal-response, governance-projector, and retry coverage. Unknown or unclassified actions SHALL fail closed at startup or invocation.
 
-#### Scenario: Query does not acquire writer authority
-- **WHEN** `record_memory` runs `query` or `inspect`
+#### Scenario: Discovery and validation do not acquire writer authority
+- **WHEN** `record_memory` runs `describe`, `validate`, collection-less or targeted `inspect`, or `query`
 - **THEN** invocation classification treats it as read-only and does not contact the writer coordinator
 
-#### Scenario: Append enters writer authority
+#### Scenario: Mutations enter writer authority
 - **WHEN** `record_memory` runs `create`, `append`, or `update`
 - **THEN** it uses the existing same-vault writer lease, idempotency, and committed terminal envelope
 

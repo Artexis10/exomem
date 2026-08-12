@@ -325,6 +325,27 @@ def test_inspection_keeps_adapter_evidence_when_one_saved_view_is_malformed(tmp_
     assert "INVALID_SAVED_VIEW" in {diagnostic.code for diagnostic in inspected.diagnostics}
 
 
+def test_inspection_reports_one_located_diagnostic_per_invalid_saved_view(tmp_path: Path) -> None:
+    manifest = _log_collection(tmp_path)
+    path = tmp_path / manifest.path
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "item_schema:",
+            "views:\n  broken:\n    query:\n      columns: [[title]]\nitem_schema:",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, path)
+
+    diagnostics = record_formats.inspect_collection(tmp_path, manifest).diagnostics
+
+    assert diagnostics == (
+        collections.CollectionDiagnostic(
+            "INVALID_SAVED_VIEW", "saved view columns are invalid", "views.broken"
+        ),
+    )
+
+
 def test_report_only_inspection_returns_typed_diagnostics_without_repair(tmp_path: Path) -> None:
     manifest = _log_collection(tmp_path)
     source = tmp_path / manifest.storage.source

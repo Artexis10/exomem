@@ -143,16 +143,21 @@ test "${#lock_names[@]}" -eq 1
 lock_name="${lock_names[0]}"
 lock_digest="$(kubectl -n exomem-platform get configmap "$lock_name" \
   -o jsonpath='{.metadata.annotations.exomem\.io/deployment-lock-sha256}')"
-lock_json="$(kubectl -n exomem-platform get configmap "$lock_name" \
-  -o jsonpath='{.data.exomem-hosted-deployment-lock-v2\.json}')"
+lock_key="$(kubectl -n exomem-platform get configmap "$lock_name" -o json | jq -r \
+  '.data | keys[] | select(test("^exomem-hosted-deployment-lock-v[23]\\.json$"))')"
+[[ "$lock_key" =~ ^exomem-hosted-deployment-lock-v[23]\.json$ ]] || exit 1
+lock_json="$(kubectl -n exomem-platform get configmap "$lock_name" -o json | \
+  jq -r --arg key "$lock_key" '.data[$key]')"
 test "$(printf %s "$lock_json" | sha256sum | awk '{print $1}')" = "$lock_digest"
 helm_manifest="$(helm -n "$helm_release" get manifest "$helm_release")"
 printf '%s\n' "$helm_manifest" | yq -e --arg name "$lock_name" --arg digest "$lock_digest" \
   'select(.kind == "ConfigMap" and .metadata.name == $name and
           .metadata.annotations."exomem.io/deployment-lock-sha256" == $digest)' >/dev/null
-operator_image="$(kubectl -n exomem-platform get configmap "$lock_name" \
-  -o jsonpath='{.data.exomem-hosted-deployment-lock-v2\.json}' | jq -r '.components.provisioner.image')"
+operator_image="$(printf %s "$lock_json" | jq -r '.components.provisioner.image')"
 [[ "$operator_image" =~ ^ghcr\.io/artexis10/exomem-provisioner@sha256:[a-f0-9]{64}$ ]] || exit 1
+runtime_selection="$(kubectl -n exomem-platform get deployment exomem-provisioner-api \
+  -o jsonpath='{.spec.template.metadata.annotations.exomem\.io/runtime-selection}')"
+case "$runtime_selection" in active|rollback) ;; *) exit 1 ;; esac
 kubectl -n exomem-platform apply -f - <<EOF
 apiVersion: v1
 kind: Pod
@@ -185,7 +190,8 @@ spec:
         - {name: EXOMEM_RECOVERY_ENVELOPE_KEY, valueFrom: {secretKeyRef: {name: exomem-provisioner-wrapping-key, key: key-material}}}
         - {name: EXOMEM_RECOVERY_PROVIDER_RECOVERY_PUBLIC_KEY, valueFrom: {secretKeyRef: {name: exomem-provider-recovery-verifier, key: public-key}}}
         - {name: EXOMEM_RECOVERY_HCLOUD_TOKEN, valueFrom: {secretKeyRef: {name: exomem-hcloud-capacity-reader, key: token}}}
-        - {name: EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON, valueFrom: {configMapKeyRef: {name: $lock_name, key: exomem-hosted-deployment-lock-v2.json}}}
+        - {name: EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON, valueFrom: {configMapKeyRef: {name: $lock_name, key: $lock_key}}}
+        - {name: EXOMEM_RECOVERY_RUNTIME_SELECTION, value: $runtime_selection}
         - {name: EXOMEM_RECOVERY_DATABASE_SCHEMA, value: exomem_provisioner}
         - {name: EXOMEM_RECOVERY_DATABASE_ROLE, value: exomem_provisioner_runtime}
         - {name: EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS, value: "60"}

@@ -176,6 +176,74 @@ def test_record_replay_terminal_is_not_presented_as_a_new_commit() -> None:
     }
 
 
+def test_compact_lifecycle_record_receipt_retains_its_closed_receipt_fields() -> None:
+    mutation_terminal = _terminal_module()
+    receipt = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 2,
+        "operation": "revise",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": None,
+        "before_item_hash": None,
+        "after_item_hash": None,
+        "before_manifest_hash": "a" * 64,
+        "after_manifest_hash": "b" * 64,
+        "before_container_hash": "c" * 64,
+        "after_container_hash": "d" * 64,
+        "affected_paths": ["Knowledge Base/Records/log/_collection.md"],
+        "payload_hash": "e" * 64,
+        "outcome": "committed",
+        "audit_correlation": "f" * 24,
+        "continuity": True,
+        "acknowledged_gap_codes": [],
+        "gap_fingerprint": None,
+        "checkpoint_snapshot_hash": None,
+        "minimum_reader_version": 2,
+    }
+
+    projected = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(
+            receipt,
+            request_id="11111111-1111-4111-8111-111111111111",
+            receipt_id="receipt-1",
+            idempotency_key="same-call",
+        )
+    )
+
+    assert projected == {
+        "ok": True,
+        "state": "committed",
+        "terminal": True,
+        "status": "committed",
+        "mutated": True,
+        "paths": ["Knowledge Base/Records/log/_collection.md"],
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "receipt_id": "receipt-1",
+        "idempotency_key": "same-call",
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 2,
+        "operation": "revise",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": None,
+        "before_item_hash": None,
+        "after_item_hash": None,
+        "before_manifest_hash": "a" * 64,
+        "after_manifest_hash": "b" * 64,
+        "before_container_hash": "c" * 64,
+        "after_container_hash": "d" * 64,
+        "affected_paths": ["Knowledge Base/Records/log/_collection.md"],
+        "payload_hash": "e" * 64,
+        "outcome": "committed",
+        "audit_correlation": "f" * 24,
+        "continuity": True,
+        "acknowledged_gap_codes": [],
+        "gap_fingerprint": None,
+        "checkpoint_snapshot_hash": None,
+        "minimum_reader_version": 2,
+        "warnings_count": 0,
+    }
+
+
 def test_unvalidated_affected_paths_do_not_become_terminal_paths() -> None:
     mutation_terminal = _terminal_module()
 

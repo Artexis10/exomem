@@ -6,6 +6,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from sqlalchemy.engine import make_url
@@ -22,6 +23,7 @@ _RECOVERY_ENVIRONMENT = {
     "EXOMEM_RECOVERY_ENVELOPE_KEY": "envelope_key",
     "EXOMEM_RECOVERY_PROVIDER_RECOVERY_PUBLIC_KEY": "provider_recovery_public_key",
     "EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON": "deployment_lock",
+    "EXOMEM_RECOVERY_RUNTIME_SELECTION": "runtime_selection",
     "EXOMEM_RECOVERY_HCLOUD_TOKEN": "hcloud_token",
     "EXOMEM_RECOVERY_HCLOUD_LOCATION": "hcloud_location",
 }
@@ -50,6 +52,7 @@ class RecoverySettings(BaseModel):
         min_length=40, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"
     )
     deployment_lock: DeploymentLock
+    runtime_selection: Literal["active", "rollback"]
     hcloud_token: SecretStr = Field(min_length=32, max_length=4096)
     hcloud_location: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")
 
@@ -74,6 +77,11 @@ class RecoverySettings(BaseModel):
         url = make_url(self.database_url.get_secret_value())
         if url.username != self.database_role or self.database_schema == "public":
             raise ValueError("recovery database identity is invalid")
+        return self
+
+    @model_validator(mode="after")
+    def validate_selected_runtime(self) -> RecoverySettings:
+        self.deployment_lock.selected_runtime(self.runtime_selection)
         return self
 
     @property
