@@ -32,7 +32,6 @@ from .models import (
     CellOperationLock,
     Operation,
     OperationAction,
-    OperationRecoveryReceipt,
     OperationState,
     Resource,
     ResourceKind,
@@ -41,31 +40,10 @@ from .models import (
 from .provider_identity import cell_resource_name
 from .repository import canonical_request_sha256
 
-_FIXED_MODES = ("preflight", "reopen", "inspect", "verify-receipt")
-_RECEIPT_PAYLOAD_KEYS = frozenset(
-    {
-        "schema_version",
-        "helper_source_sha256",
-        "old_state",
-        "old_checkpoint",
-        "new_state",
-        "new_checkpoint",
-        "resource_count",
-        "route_count",
-        "init_job_present",
-        "init_job_complete",
-        "operation_sha256",
-        "preserved_sha256",
-        "request_sha256",
-        "request_ciphertext_sha256",
-        "resources_sha256",
-        "reservation_sha256",
-        "tenant_fence_sha256",
-        "first_observation_sha256",
-        "second_observation_sha256",
-        "committed_operation_sha256",
-        "committed_at",
-    }
+_FIXED_MODES = ("preflight", "reopen", "inspect", "verify-recovery")
+_RECOVERY_MARKER = "_init_retry_recovery_v1"
+_RECOVERY_MARKER_KEYS = frozenset(
+    {"schema", "preflight_sha256", "helper_source_sha256", "claim_generation", "committed_at"}
 )
 _OUTPUT_KEYS = frozenset(
     {
@@ -77,7 +55,7 @@ _OUTPUT_KEYS = frozenset(
         "resource_kind_counts",
         "active_reservation",
         "final_proof",
-        "receipt_digest",
+        "recovery_digest",
     }
 )
 
@@ -118,56 +96,6 @@ def canonical_sha256(value: object) -> str:
     if not isinstance(value, dict):
         raise TypeError("recovery hashes require object values")
     return hashlib.sha256(canonical_receipt_bytes(value)).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryReceiptPayload:
-    schema_version: int
-    helper_source_sha256: str
-    old_state: str
-    old_checkpoint: str
-    new_state: str
-    new_checkpoint: str
-    resource_count: int
-    route_count: int
-    init_job_present: bool
-    init_job_complete: bool
-    operation_sha256: str
-    preserved_sha256: str
-    request_sha256: str
-    request_ciphertext_sha256: str
-    resources_sha256: str
-    reservation_sha256: str
-    tenant_fence_sha256: str
-    first_observation_sha256: str
-    second_observation_sha256: str
-    committed_operation_sha256: str
-    committed_at: datetime
-
-    def to_payload(self) -> dict[str, object]:
-        return {
-            "schema_version": self.schema_version,
-            "helper_source_sha256": self.helper_source_sha256,
-            "old_state": self.old_state,
-            "old_checkpoint": self.old_checkpoint,
-            "new_state": self.new_state,
-            "new_checkpoint": self.new_checkpoint,
-            "resource_count": self.resource_count,
-            "route_count": self.route_count,
-            "init_job_present": self.init_job_present,
-            "init_job_complete": self.init_job_complete,
-            "operation_sha256": self.operation_sha256,
-            "preserved_sha256": self.preserved_sha256,
-            "request_sha256": self.request_sha256,
-            "request_ciphertext_sha256": self.request_ciphertext_sha256,
-            "resources_sha256": self.resources_sha256,
-            "reservation_sha256": self.reservation_sha256,
-            "tenant_fence_sha256": self.tenant_fence_sha256,
-            "first_observation_sha256": self.first_observation_sha256,
-            "second_observation_sha256": self.second_observation_sha256,
-            "committed_operation_sha256": self.committed_operation_sha256,
-            "committed_at": self.committed_at,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +193,7 @@ def validate_live_observation(observation: LiveObservation) -> None:
         or not observation.release_present
         or not observation.pvc_bound
         or not observation.volume_present
+        or (observation.init_job_present and not observation.init_complete)
         or observation.init_failed_only
         or observation.terminating
         or observation.runtime_admitted
@@ -298,6 +227,44 @@ def recovery_transition_values(before: OperationPreState) -> dict[str, object]:
     }
 
 
+def recovery_marker(
+    *,
+    preflight_sha256: str,
+    helper_source_sha256: str,
+    claim_generation: int,
+    committed_at: datetime,
+) -> dict[str, object]:
+    marker = {
+        "schema": 1,
+        "preflight_sha256": preflight_sha256,
+        "helper_source_sha256": helper_source_sha256,
+        "claim_generation": claim_generation,
+        "committed_at": _json_value(committed_at),
+    }
+    return parse_recovery_marker(marker)
+
+
+def parse_recovery_marker(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != _RECOVERY_MARKER_KEYS:
+        raise RecoveryRefusal("recovery marker is invalid")
+    if (
+        value.get("schema") != 1
+        or not isinstance(value.get("claim_generation"), int)
+        or value["claim_generation"] < 0
+        or not isinstance(value.get("committed_at"), str)
+        or any(
+            not isinstance(value.get(key), str) or len(value[key]) != 64
+            for key in ("preflight_sha256", "helper_source_sha256")
+        )
+    ):
+        raise RecoveryRefusal("recovery marker is invalid")
+    try:
+        datetime.fromisoformat(value["committed_at"].replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RecoveryRefusal("recovery marker is invalid") from error
+    return dict(value)
+
+
 def _hash_model(model: object, *, excluded: frozenset[str] = frozenset()) -> str:
     table = model.__table__  # type: ignore[attr-defined]
     return canonical_sha256(
@@ -309,34 +276,8 @@ def _hash_model(model: object, *, excluded: frozenset[str] = frozenset()) -> str
     )
 
 
-def _receipt_payload(receipt: OperationRecoveryReceipt) -> RecoveryReceiptPayload:
-    return RecoveryReceiptPayload(
-        schema_version=receipt.schema_version,
-        helper_source_sha256=receipt.helper_source_sha256,
-        old_state=receipt.old_state,
-        old_checkpoint=receipt.old_checkpoint,
-        new_state=receipt.new_state,
-        new_checkpoint=receipt.new_checkpoint,
-        resource_count=receipt.resource_count,
-        route_count=receipt.route_count,
-        init_job_present=receipt.init_job_present,
-        init_job_complete=receipt.init_job_complete,
-        operation_sha256=receipt.operation_sha256,
-        preserved_sha256=receipt.preserved_sha256,
-        request_sha256=receipt.request_sha256,
-        request_ciphertext_sha256=receipt.request_ciphertext_sha256,
-        resources_sha256=receipt.resources_sha256,
-        reservation_sha256=receipt.reservation_sha256,
-        tenant_fence_sha256=receipt.tenant_fence_sha256,
-        first_observation_sha256=receipt.first_observation_sha256,
-        second_observation_sha256=receipt.second_observation_sha256,
-        committed_operation_sha256=receipt.committed_operation_sha256,
-        committed_at=receipt.committed_at,
-    )
-
-
 class RecoveryService:
-    """The only recovery mutation, bound to one immutable receipt row."""
+    """The only recovery mutation, bound to a one-way operation progress marker."""
 
     _CHANGED_COLUMNS = frozenset(
         {
@@ -349,6 +290,7 @@ class RecoveryService:
             "finalized_at",
             "available_at",
             "updated_at",
+            "progress",
         }
     )
 
@@ -408,11 +350,12 @@ class RecoveryService:
         try:
             async with self._sessions.begin() as session:
                 await self._require_database_identity(session)
-                existing = await session.get(
-                    OperationRecoveryReceipt, operation_id, with_for_update=True
-                )
-                if existing is not None:
-                    return self._receipt_result(existing, "already-recovered")
+                current = await session.get(Operation, operation_id, with_for_update=True)
+                if current is None:
+                    raise RecoveryRefusal("operation is unavailable")
+                marker = current.progress.get(_RECOVERY_MARKER)
+                if marker is not None:
+                    return self._recovery_result(current, marker, "already-recovered")
                 snapshot = await self._preflight(session, operation_id)
                 first = await self._observer.observe(snapshot.operation, snapshot.resources)
                 validate_live_observation(first)
@@ -424,6 +367,16 @@ class RecoveryService:
                 if not isinstance(now, datetime):
                     raise RecoveryRefusal("database clock is unavailable")
                 before = snapshot.operation
+                evidence_digest = self._preflight_evidence_digest(snapshot, first, second)
+                progress = {
+                    **before.progress,
+                    _RECOVERY_MARKER: recovery_marker(
+                        preflight_sha256=evidence_digest,
+                        helper_source_sha256=self._helper_source_sha256,
+                        claim_generation=before.claim_generation,
+                        committed_at=now,
+                    ),
+                }
                 updated = await session.scalar(
                     update(Operation)
                     .where(
@@ -443,6 +396,8 @@ class RecoveryService:
                         Operation.canonical_request_sha256 == before.canonical_request_sha256,
                         Operation.claim_generation == before.claim_generation,
                         Operation.updated_at == before.updated_at,
+                        cast(Operation.progress, JSONB) == cast(before.progress, JSONB),
+                        ~cast(Operation.progress, JSONB).has_key(_RECOVERY_MARKER),
                     )
                     .values(
                         state=OperationState.PENDING,
@@ -454,35 +409,22 @@ class RecoveryService:
                         finalized_at=None,
                         available_at=now,
                         updated_at=now,
+                        progress=progress,
                     )
                     .returning(Operation)
                 )
                 if updated is None:
+                    reread = await session.get(Operation, operation_id, with_for_update=True)
+                    if reread is not None and _RECOVERY_MARKER in reread.progress:
+                        return self._recovery_result(
+                            reread, reread.progress[_RECOVERY_MARKER], "already-recovered"
+                        )
                     raise RecoveryRefusal("already progressed")
                 await session.flush()
-                receipt = OperationRecoveryReceipt(
-                    operation_id=before.id,
-                    helper_source_sha256=self._helper_source_sha256,
-                    init_job_present=first.init_job_present,
-                    init_job_complete=first.init_complete,
-                    operation_sha256=snapshot.operation_sha256,
-                    preserved_sha256=snapshot.preserved_sha256,
-                    request_sha256=snapshot.request_sha256,
-                    request_ciphertext_sha256=snapshot.request_ciphertext_sha256,
-                    resources_sha256=snapshot.resources_sha256,
-                    reservation_sha256=snapshot.reservation_sha256,
-                    tenant_fence_sha256=snapshot.tenant_fence_sha256,
-                    first_observation_sha256=canonical_sha256(asdict(first)),
-                    second_observation_sha256=canonical_sha256(asdict(second)),
-                    committed_operation_sha256=_hash_model(updated),
-                    committed_at=now,
-                )
-                session.add(receipt)
-                await session.flush()
-                return self._receipt_result(receipt, "reopened")
+                return self._recovery_result(updated, progress[_RECOVERY_MARKER], "reopened")
         except RecoveryRefusal:
             raise
-        except Exception as error:  # receipt and transition roll back together
+        except Exception as error:  # marker and transition roll back together
             raise RecoveryRefusal("recovery-failed") from error
 
     async def inspect(self, operation_id: str) -> dict[str, object]:
@@ -520,18 +462,29 @@ class RecoveryService:
         except Exception as error:
             raise RecoveryRefusal("inspect-failed") from error
 
-    async def verify_receipt(self, operation_id: str) -> dict[str, object]:
+    async def verify_recovery(self, operation_id: str) -> dict[str, object]:
         try:
             async with self._sessions.begin() as session:
                 await self._require_database_identity(session)
-                receipt = await session.get(OperationRecoveryReceipt, operation_id)
-                if receipt is None:
-                    raise RecoveryRefusal("receipt is unavailable")
-                return self._receipt_result(receipt, "verified")
+                operation = await session.get(Operation, operation_id)
+                if operation is None:
+                    raise RecoveryRefusal("operation is unavailable")
+                marker = operation.progress.get(_RECOVERY_MARKER)
+                if marker is not None:
+                    return self._recovery_result(operation, marker, "verified")
+                try:
+                    recovery_transition_values(self._operation_pre_state(operation))
+                except RecoveryRefusal as error:
+                    raise RecoveryRefusal("recovery attribution is unavailable") from error
+                return {
+                    "status": "not-run",
+                    "state": operation.state.value,
+                    "checkpoint": operation.checkpoint,
+                }
         except RecoveryRefusal:
             raise
         except Exception as error:
-            raise RecoveryRefusal("receipt-verification-failed") from error
+            raise RecoveryRefusal("recovery-verification-failed") from error
 
     async def _preflight(self, session: AsyncSession, operation_id: str) -> _RecoverySnapshot:
         await self._require_database_identity(session)
@@ -571,26 +524,9 @@ class RecoveryService:
     async def _preflight_locked(
         self, session: AsyncSession, operation: Operation, fence: TenantFence
     ) -> _RecoverySnapshot:
-        transition = recovery_transition_values(
-            OperationPreState(
-                action=operation.action.value,
-                state=operation.state.value,
-                checkpoint=operation.checkpoint,
-                error_code=operation.error_code,
-                has_claim=any(
-                    value is not None
-                    for value in (
-                        operation.claim_owner,
-                        operation.claim_token,
-                        operation.claim_expires_at,
-                    )
-                ),
-                has_result=(
-                    operation.result_ciphertext is not None or operation.result_redacted != {}
-                ),
-                finalized=operation.finalized_at is not None,
-            )
-        )
+        transition = recovery_transition_values(self._operation_pre_state(operation))
+        if _RECOVERY_MARKER in operation.progress:
+            raise RecoveryRefusal("already progressed")
         if (
             operation.cell_id is None
             or operation.external_operation_id != operation.provider_operation_id
@@ -633,6 +569,43 @@ class RecoveryService:
             ),
             reservation_sha256=_hash_model(reservation),
             tenant_fence_sha256=_hash_model(fence),
+        )
+
+    @staticmethod
+    def _operation_pre_state(operation: Operation) -> OperationPreState:
+        return OperationPreState(
+            action=operation.action.value,
+            state=operation.state.value,
+            checkpoint=operation.checkpoint,
+            error_code=operation.error_code,
+            has_claim=any(
+                value is not None
+                for value in (
+                    operation.claim_owner,
+                    operation.claim_token,
+                    operation.claim_expires_at,
+                )
+            ),
+            has_result=(operation.result_ciphertext is not None or operation.result_redacted != {}),
+            finalized=operation.finalized_at is not None,
+        )
+
+    @staticmethod
+    def _preflight_evidence_digest(
+        snapshot: _RecoverySnapshot, first: LiveObservation, second: LiveObservation
+    ) -> str:
+        return canonical_sha256(
+            {
+                "operation_sha256": snapshot.operation_sha256,
+                "preserved_sha256": snapshot.preserved_sha256,
+                "request_sha256": snapshot.request_sha256,
+                "request_ciphertext_sha256": snapshot.request_ciphertext_sha256,
+                "resources_sha256": snapshot.resources_sha256,
+                "reservation_sha256": snapshot.reservation_sha256,
+                "tenant_fence_sha256": snapshot.tenant_fence_sha256,
+                "first_observation_sha256": canonical_sha256(asdict(first)),
+                "second_observation_sha256": canonical_sha256(asdict(second)),
+            }
         )
 
     async def _lock_conflicts(self, session: AsyncSession, operation: Operation) -> None:
@@ -761,10 +734,29 @@ class RecoveryService:
         )
 
     @staticmethod
-    def _receipt_result(receipt: OperationRecoveryReceipt, status: str) -> dict[str, object]:
+    def _recovery_result(
+        operation: Operation, marker_value: object, status: str
+    ) -> dict[str, object]:
+        marker = parse_recovery_marker(marker_value)
+        if operation.state is OperationState.ERROR:
+            return {
+                "status": "recovered-then-failed",
+                "state": operation.state.value,
+                "checkpoint": operation.checkpoint,
+                "error_code": operation.error_code,
+                "recovery_digest": canonical_sha256(marker),
+            }
+        if operation.state not in {
+            OperationState.PENDING,
+            OperationState.CLAIMED,
+            OperationState.FINAL,
+        }:
+            raise RecoveryRefusal("recovery attribution is unavailable")
         return {
             "status": status,
-            "receipt_digest": canonical_sha256(_receipt_payload(receipt).to_payload()),
+            "state": operation.state.value,
+            "checkpoint": operation.checkpoint,
+            "recovery_digest": canonical_sha256(marker),
         }
 
 
@@ -947,8 +939,8 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 return await service.reopen(operation_id)
             case "inspect":
                 return await service.inspect(operation_id)
-            case "verify-receipt":
-                return await service.verify_receipt(operation_id)
+            case "verify-recovery":
+                return await service.verify_recovery(operation_id)
         raise RecoveryRefusal("recovery mode is invalid")
     except RecoveryRefusal:
         raise

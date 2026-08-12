@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import hashlib
 import inspect
@@ -27,7 +26,6 @@ _MIGRATION_ROOT = Path("/opt/exomem/provisioner-migrations")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{2,62}$")
 _DISALLOWED_ROLES = {"postgres", "public", "neondb_owner"}
 _LOCK_POLL_SECONDS = 0.2
-FORWARD_MIGRATION_FROM_REVISION = "0006_operation_wire_protocol"
 
 
 class DatabaseBootstrapError(RuntimeError):
@@ -257,13 +255,6 @@ def validate_revision_state(
         raise DatabaseBootstrapError("database revision is invalid")
     if exact and revisions != (head,):
         raise DatabaseBootstrapError("database is not at the packaged revision")
-
-
-def validate_forward_migration_request(from_revision: str, to_revision: str) -> None:
-    """Bind the only reviewed forward edge before opening the migration boundary."""
-
-    if from_revision != FORWARD_MIGRATION_FROM_REVISION or to_revision != DATABASE_REVISION:
-        raise DatabaseBootstrapError("forward migration revision is invalid")
 
 
 async def _acquire_lock(
@@ -642,67 +633,6 @@ async def validate() -> None:
     )
 
 
-async def forward_migrate(*, from_revision: str, to_revision: str) -> None:
-    """Upgrade only the reviewed 0006-to-0007 boundary under the database lock."""
-
-    validate_forward_migration_request(from_revision, to_revision)
-    configuration = load_configuration(require_admin=False)
-    packaged = load_packaged_migrations()
-    if packaged.head != to_revision or to_revision not in packaged.known:
-        raise DatabaseBootstrapError("forward migration target is invalid")
-    engine = create_async_engine(
-        configuration.runtime_url,
-        pool_pre_ping=True,
-        connect_args={
-            "server_settings": {
-                "search_path": f"{configuration.schema},pg_catalog",
-                "application_name": "exomem-provisioner-forward-migration",
-            }
-        },
-    )
-    key = database_lock_key(configuration.database, configuration.schema)
-    try:
-        async with engine.connect() as connection:
-            await _acquire_lock(
-                connection, key=key, timeout_seconds=configuration.lock_timeout_seconds
-            )
-            try:
-                current_database = await connection.scalar(text("SELECT current_database()"))
-                current_user = await connection.scalar(text("SELECT current_user"))
-                await _validate_runtime_identity(
-                    connection,
-                    configuration,
-                    admin_role="__operator_identity_must_be_distinct__",
-                )
-                if (
-                    current_database != configuration.database
-                    or current_user != configuration.runtime_role
-                ):
-                    raise DatabaseBootstrapError("runtime database identity is invalid")
-                if await _revisions(connection, configuration.schema) != (from_revision,):
-                    raise DatabaseBootstrapError("forward migration source is invalid")
-                try:
-                    await connection.run_sync(_upgrade, packaged, configuration)
-                    await connection.commit()
-                except Exception:
-                    await connection.rollback()
-                    raise
-                validate_revision_state(
-                    await _revisions(connection, configuration.schema),
-                    known=packaged.known,
-                    head=to_revision,
-                    exact=True,
-                )
-                if await connection.scalar(text("SELECT current_schema")) != configuration.schema:
-                    raise DatabaseBootstrapError("runtime database schema is invalid")
-            finally:
-                if connection.in_transaction():
-                    await connection.rollback()
-                await _release_lock(connection, key=key)
-    finally:
-        await engine.dispose()
-
-
 def _run(command_function: Callable[[], Awaitable[None]], failure: str) -> None:
     try:
         asyncio.run(command_function())
@@ -722,17 +652,3 @@ def run_migrate() -> None:
 
 def run_validate() -> None:
     _run(validate, "database validation failed")
-
-
-def run_forward_migrate() -> None:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--from-revision", required=True)
-    parser.add_argument("--to-revision", required=True)
-    arguments = parser.parse_args()
-    _run(
-        lambda: forward_migrate(
-            from_revision=arguments.from_revision,
-            to_revision=arguments.to_revision,
-        ),
-        "database forward migration failed",
-    )

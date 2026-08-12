@@ -23,7 +23,6 @@ PROVISIONER_ROOT = Path(__file__).resolve().parents[1]
 PROVISIONER_TEST_IMAGE = os.environ.get("PROVISIONER_TEST_IMAGE")
 if PROVISIONER_TEST_IMAGE is None:
     from sqlalchemy import func, select, text, update
-    from sqlalchemy.exc import DBAPIError
     from sqlalchemy.ext.asyncio import create_async_engine
 
     import exomem_provisioner.database_bootstrap as database_bootstrap
@@ -45,7 +44,6 @@ if PROVISIONER_TEST_IMAGE is None:
         CapacityReservationClass,
         Operation,
         OperationAction,
-        OperationRecoveryReceipt,
         OperationState,
         Resource,
         ResourceKind,
@@ -680,15 +678,14 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
         async with database.session_factory.begin() as session:
             await session.execute(
                 text(
-                    "CREATE FUNCTION recovery_receipt_test_refusal() RETURNS trigger "
-                    "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced receipt rollback'; END $$"
+                    "CREATE FUNCTION recovery_marker_test_refusal() RETURNS trigger "
+                    "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced marker rollback'; END $$"
                 )
             )
             await session.execute(
                 text(
-                    "CREATE TRIGGER recovery_receipt_test_refusal BEFORE INSERT "
-                    "ON operation_recovery_receipts FOR EACH ROW "
-                    "EXECUTE FUNCTION recovery_receipt_test_refusal()"
+                    "CREATE TRIGGER recovery_marker_test_refusal BEFORE UPDATE "
+                    "ON operations FOR EACH ROW EXECUTE FUNCTION recovery_marker_test_refusal()"
                 )
             )
         with pytest.raises(RecoveryRefusal, match="recovery-failed"):
@@ -696,28 +693,28 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
         async with database.session_factory() as session:
             rolled_back = await session.get(Operation, operation_id)
             assert rolled_back is not None and rolled_back.state is OperationState.ERROR
-            assert await session.get(OperationRecoveryReceipt, operation_id) is None
+            assert "_init_retry_recovery_v1" not in rolled_back.progress
         async with database.session_factory.begin() as session:
-            await session.execute(
-                text("DROP TRIGGER recovery_receipt_test_refusal ON operation_recovery_receipts")
-            )
-            await session.execute(text("DROP FUNCTION recovery_receipt_test_refusal()"))
+            await session.execute(text("DROP TRIGGER recovery_marker_test_refusal ON operations"))
+            await session.execute(text("DROP FUNCTION recovery_marker_test_refusal()"))
         first, second = await asyncio.gather(
             service.reopen(operation_id), service.reopen(operation_id)
         )
         assert {first["status"], second["status"]} == {"reopened", "already-recovered"}
         result = first if first["status"] == "reopened" else second
-        assert isinstance(result["receipt_digest"], str) and len(result["receipt_digest"]) == 64
+        assert isinstance(result["recovery_digest"], str) and len(result["recovery_digest"]) == 64
         async with database.session_factory() as session:
             operation = await session.get(Operation, operation_id)
-            receipt = await session.get(OperationRecoveryReceipt, operation_id)
             assert operation is not None and operation.state is OperationState.PENDING
             assert operation.checkpoint == "volume-owned"
             assert operation.error_code is None and operation.finalized_at is None
-            assert receipt is not None
-            with pytest.raises(DBAPIError):
-                receipt.resource_count = 5
-                await session.commit()
+            assert set(operation.progress["_init_retry_recovery_v1"]) == {
+                "schema",
+                "preflight_sha256",
+                "helper_source_sha256",
+                "claim_generation",
+                "committed_at",
+            }
         for role, schema in (("wrong-role", target.schema), (target.role, "wrong_schema")):
             wrong_identity = RecoveryService(
                 sessions=database.session_factory,
@@ -731,7 +728,7 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
             )
             for method in (
                 wrong_identity.inspect,
-                wrong_identity.verify_receipt,
+                wrong_identity.verify_recovery,
                 wrong_identity.reopen,
             ):
                 with pytest.raises(RecoveryRefusal, match="database identity is invalid"):
@@ -739,7 +736,7 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
         async with database.session_factory.begin() as session:
             await session.execute(text("UPDATE alembic_version SET version_num='wrong_revision'"))
         with pytest.raises(RecoveryRefusal, match="database revision is invalid"):
-            await service.verify_receipt(operation_id)
+            await service.verify_recovery(operation_id)
         async with database.session_factory.begin() as session:
             await session.execute(
                 text("UPDATE alembic_version SET version_num=:revision"),
@@ -792,56 +789,6 @@ async def test_postgresql17_recovery_and_migration_share_one_bounded_lock_domain
     finally:
         await database.dispose()
         await engine.dispose()
-
-
-@ASYNCIO_POSTGRESQL17
-async def test_postgresql17_forward_migration_accepts_only_the_exact_0006_to_0007_edge(
-    postgresql17: PostgreSQL17,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = _new_database(postgresql17, "forward_migration")
-    migrated = _migrate(postgresql17, target)
-    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
-    assert target.settings is not None
-    database = ProvisionerDatabase(target.settings)
-    monkeypatch.setenv(
-        "EXOMEM_PROVISIONER_DATABASE_URL", target.settings.database_url.get_secret_value()
-    )
-    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_SCHEMA", target.schema)
-    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_ROLE", target.role)
-    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_LOCK_TIMEOUT_SECONDS", "1")
-    monkeypatch.setattr(database_bootstrap, "_MIGRATION_ROOT", PROVISIONER_ROOT)
-    try:
-        async with database.session_factory.begin() as session:
-            await session.execute(text(f'DROP TABLE "{target.schema}".operation_recovery_receipts'))
-            await session.execute(
-                text(
-                    f'DROP FUNCTION "{target.schema}".prevent_operation_recovery_receipt_mutation()'
-                )
-            )
-            await session.execute(
-                text(f'UPDATE "{target.schema}".alembic_version SET version_num=:revision'),
-                {"revision": "0006_operation_wire_protocol"},
-            )
-        with pytest.raises(database_bootstrap.DatabaseBootstrapError, match="forward migration"):
-            await database_bootstrap.forward_migrate(
-                from_revision="", to_revision=DATABASE_REVISION
-            )
-        await database_bootstrap.forward_migrate(
-            from_revision="0006_operation_wire_protocol", to_revision=DATABASE_REVISION
-        )
-        async with database.session_factory() as session:
-            revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-            receipt_table = await session.scalar(
-                text(
-                    "SELECT to_regclass(:table)",
-                ),
-                {"table": f"{target.schema}.operation_recovery_receipts"},
-            )
-        assert revision == DATABASE_REVISION
-        assert receipt_table is not None
-    finally:
-        await database.dispose()
 
 
 @ASYNCIO_POSTGRESQL17

@@ -462,14 +462,15 @@ def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
     assert "another `reopen`" in runbook
     assert "set -euo pipefail" in runbook
     assert 'test "$mode" != reopen || :' not in runbook
-    assert "run_recovery preflight\nrun_recovery reopen\nrun_recovery verify-receipt" in runbook
+    assert "run_recovery preflight\nrun_recovery reopen\nrun_recovery verify-recovery" in runbook
     assert ".items[0]" not in runbook
     assert 'test "${#lock_names[@]}" -eq 1' in runbook
     assert 'helm -n "$helm_release" get manifest "$helm_release"' in runbook
     assert "sleep 1200" in runbook
-    assert "verify-receipt" in runbook
+    assert "verify-recovery" in runbook
+    assert "0006_operation_wire_protocol" in runbook
     assert ".final_proof == true" in runbook
-    assert 'exomem.io/deployment-lock-sha256: \\"$lock_digest\\"' in runbook
+    assert 'metadata.annotations."exomem.io/deployment-lock-sha256" == $digest' in runbook
     lock = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))[
         "provisioner"
     ]["deploymentLockSha256"]

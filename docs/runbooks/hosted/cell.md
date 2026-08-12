@@ -147,8 +147,9 @@ lock_json="$(kubectl -n exomem-platform get configmap "$lock_name" \
   -o jsonpath='{.data.exomem-hosted-deployment-lock-v2\.json}')"
 test "$(printf %s "$lock_json" | sha256sum | awk '{print $1}')" = "$lock_digest"
 helm_manifest="$(helm -n "$helm_release" get manifest "$helm_release")"
-printf '%s\n' "$helm_manifest" | grep -F -- "name: $lock_name" >/dev/null
-printf '%s\n' "$helm_manifest" | grep -F -- "exomem.io/deployment-lock-sha256: \"$lock_digest\"" >/dev/null
+printf '%s\n' "$helm_manifest" | yq -e --arg name "$lock_name" --arg digest "$lock_digest" \
+  'select(.kind == "ConfigMap" and .metadata.name == $name and
+          .metadata.annotations."exomem.io/deployment-lock-sha256" == $digest)' >/dev/null
 operator_image="$(kubectl -n exomem-platform get configmap "$lock_name" \
   -o jsonpath='{.data.exomem-hosted-deployment-lock-v2\.json}' | jq -r '.components.provisioner.image')"
 [[ "$operator_image" =~ ^ghcr\.io/artexis10/exomem-provisioner@sha256:[a-f0-9]{64}$ ]] || exit 1
@@ -192,6 +193,18 @@ EOF
 kubectl -n exomem-platform wait --for=condition=Ready "pod/$operator_pod" --timeout=60s
 ```
 
+Before the preflight, scale the routine provisioner worker to zero and leave it
+there through reopen and recovery verification. This is not a global database
+quiesce: do not run a migration, backup, hold, or schema operation. Confirm the
+production database revision is exactly `0006_operation_wire_protocol`; an
+unknown revision or `0007` refuses. v0.46's 0007 provisioner candidate was
+never deployed.
+
+```bash
+kubectl -n exomem-platform scale deployment/exomem-provisioner-worker --replicas=0
+kubectl -n exomem-platform rollout status deployment/exomem-provisioner-worker --timeout=60s
+```
+
 The dedicated recovery environment is supplied only as the exact set of
 read-only references below: database URL, envelope key, recovery public key,
 read-only HCloud token, deterministic location/schema/role/timeout, and the
@@ -212,16 +225,16 @@ run_recovery() {
 }
 run_recovery preflight
 run_recovery reopen
-run_recovery verify-receipt
-receipt_verified=true
+run_recovery verify-recovery
+recovery_verified=true
 ```
 
-Any refusal, conflict, resource drift, receipt-verification failure, or timeout
+Any refusal, conflict, resource drift, recovery-verification failure, or timeout
 is a stop condition. In particular, if the `reopen` acknowledgement is uncertain,
-run `verify-receipt` first; never issue another `reopen`. Never reverse the
-checkpoint manually. Preserve only content-free JSON output and the receipt digest.
+run `verify-recovery` first; never issue another `reopen`. Never reverse the
+checkpoint manually. Preserve only content-free JSON output and the recovery digest.
 
-Only after `verify-receipt` returns successfully may the routine worker be
+Only after `verify-recovery` returns successfully may the routine worker be
 restored. Keep this Pod alive through the complete ten-minute inspection window;
 its 20-minute sleep gives the bounded command and cleanup margin. Bounded-poll
 the content-free `inspect` result until `FINAL / complete`; stop on terminal
@@ -231,7 +244,8 @@ until the original control operation succeeds and the cell is ready, then
 restore the volume worker/durability state and scheduled reconciliation last.
 
 ```bash
-test "$receipt_verified" = true
+test "$recovery_verified" = true
+kubectl -n exomem-platform scale deployment/exomem-provisioner-worker --replicas=1
 final=false
 for attempt in $(seq 1 20); do
   inspect_output="$(run_recovery inspect)"

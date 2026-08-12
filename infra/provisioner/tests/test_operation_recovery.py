@@ -109,7 +109,7 @@ def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
     )
     parser = recovery._parser()
     assert parser.parse_args(["preflight", "--stdin"]).mode == "preflight"
-    for mode in ("reopen", "inspect", "verify-receipt"):
+    for mode in ("reopen", "inspect", "verify-recovery"):
         assert parser.parse_args([mode, "--stdin"]).mode == mode
     with pytest.raises(recovery.RecoveryRefusal):
         parser.parse_args(["anything-else", "--stdin"])
@@ -193,131 +193,50 @@ def test_canonical_hash_is_order_stable_and_never_serializes_secret_fields() -> 
     second = dict(reversed(tuple(first.items())))
 
     assert recovery.canonical_sha256(first) == recovery.canonical_sha256(second)
-    receipt = recovery.RecoveryReceiptPayload(
-        schema_version=1,
-        helper_source_sha256="9" * 64,
-        old_state="error",
-        old_checkpoint="failed",
-        new_state="pending",
-        new_checkpoint="volume-owned",
-        resource_count=4,
-        route_count=0,
-        init_job_present=False,
-        init_job_complete=False,
-        operation_sha256="a" * 64,
-        preserved_sha256="a" * 64,
-        request_sha256="b" * 64,
-        request_ciphertext_sha256="b" * 64,
-        resources_sha256="c" * 64,
-        reservation_sha256="d" * 64,
-        tenant_fence_sha256="e" * 64,
-        first_observation_sha256="f" * 64,
-        second_observation_sha256="0" * 64,
-        committed_operation_sha256="1" * 64,
+    marker = recovery.recovery_marker(
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=7,
         committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
     )
-    encoded = recovery.canonical_receipt_bytes(receipt.to_payload())
-    assert b"operation_sha256" in encoded
-    assert b"request_ciphertext_sha256" in encoded
+    encoded = recovery.canonical_receipt_bytes(marker)
+    assert b"preflight_sha256" in encoded
+    assert b"helper_source_sha256" in encoded
     assert b"reference" not in encoded
 
 
-def test_transactional_receipt_payload_is_content_free_and_hashable() -> None:
+def test_recovery_marker_is_content_free_and_exact() -> None:
     recovery = _module()
-    receipt = recovery.RecoveryReceiptPayload(
-        schema_version=1,
-        helper_source_sha256="9" * 64,
-        old_state="error",
-        old_checkpoint="failed",
-        new_state="pending",
-        new_checkpoint="volume-owned",
-        resource_count=4,
-        route_count=0,
-        init_job_present=False,
-        init_job_complete=False,
-        operation_sha256="a" * 64,
-        preserved_sha256="a" * 64,
-        request_sha256="b" * 64,
-        request_ciphertext_sha256="b" * 64,
-        resources_sha256="c" * 64,
-        reservation_sha256="d" * 64,
-        tenant_fence_sha256="e" * 64,
-        first_observation_sha256="f" * 64,
-        second_observation_sha256="0" * 64,
-        committed_operation_sha256="1" * 64,
+    marker = recovery.recovery_marker(
+        preflight_sha256="a" * 64,
+        helper_source_sha256="b" * 64,
+        claim_generation=7,
         committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
     )
 
-    encoded = recovery.canonical_receipt_bytes(receipt.to_payload())
-    assert set(json.loads(encoded)) == recovery._RECEIPT_PAYLOAD_KEYS
-    assert b"request_ciphertext_sha256" in encoded and b"reference" not in encoded
-
-
-def test_receipt_digest_binds_every_content_free_receipt_field() -> None:
-    recovery = _module()
-    receipt = recovery.RecoveryReceiptPayload(
-        schema_version=1,
-        helper_source_sha256="9" * 64,
-        old_state="error",
-        old_checkpoint="failed",
-        new_state="pending",
-        new_checkpoint="volume-owned",
-        resource_count=4,
-        route_count=0,
-        init_job_present=False,
-        init_job_complete=False,
-        operation_sha256="a" * 64,
-        preserved_sha256="b" * 64,
-        request_sha256="c" * 64,
-        request_ciphertext_sha256="d" * 64,
-        resources_sha256="e" * 64,
-        reservation_sha256="f" * 64,
-        tenant_fence_sha256="0" * 64,
-        first_observation_sha256="1" * 64,
-        second_observation_sha256="2" * 64,
-        committed_operation_sha256="3" * 64,
-        committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
-    )
-
-    assert set(receipt.to_payload()) == recovery._RECEIPT_PAYLOAD_KEYS
-    assert recovery.canonical_sha256(receipt.to_payload()) != recovery.canonical_sha256(
-        replace(receipt, init_job_complete=True).to_payload()
-    )
-
-
-def test_recovery_receipt_model_is_one_to_one_content_free_and_immutable() -> None:
-    from exomem_provisioner.database import DATABASE_REVISION
-    from exomem_provisioner.models import OperationRecoveryReceipt
-
-    assert DATABASE_REVISION == "0007_operation_recovery_receipt"
-    table = OperationRecoveryReceipt.__table__
-    assert set(table.c.keys()) == {
-        "operation_id",
-        "schema_version",
-        "helper_source_sha256",
-        "old_state",
-        "old_checkpoint",
-        "new_state",
-        "new_checkpoint",
-        "resource_count",
-        "route_count",
-        "init_job_present",
-        "init_job_complete",
-        "operation_sha256",
-        "preserved_sha256",
-        "request_sha256",
-        "request_ciphertext_sha256",
-        "resources_sha256",
-        "reservation_sha256",
-        "tenant_fence_sha256",
-        "first_observation_sha256",
-        "second_observation_sha256",
-        "committed_operation_sha256",
-        "committed_at",
+    assert marker == {
+        "schema": 1,
+        "preflight_sha256": "a" * 64,
+        "helper_source_sha256": "b" * 64,
+        "claim_generation": 7,
+        "committed_at": "2030-01-02T03:04:05Z",
     }
-    assert table.c.operation_id.primary_key is True
-    assert table.c.operation_id.foreign_keys
-    assert {"tenant_id", "cell_id", "provider_operation_id"}.isdisjoint(table.c.keys())
+    assert recovery.parse_recovery_marker(marker) == marker
+    for changed in (
+        {"schema": 2},
+        {"preflight_sha256": "short"},
+        {"reference": "secret"},
+    ):
+        with pytest.raises(recovery.RecoveryRefusal):
+            recovery.parse_recovery_marker({**marker, **changed})
+
+
+def test_database_stays_at_0006_without_recovery_receipt_table() -> None:
+    from exomem_provisioner.database import DATABASE_REVISION
+    from exomem_provisioner.models import Base
+
+    assert DATABASE_REVISION == "0006_operation_wire_protocol"
+    assert "operation_recovery_receipts" not in Base.metadata.tables
 
 
 def test_recovery_refusal_output_is_fixed_and_content_free(
@@ -366,6 +285,7 @@ def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_
         is None
     )
     for changed in (
+        {"init_job_present": True},
         {"init_job_present": True, "init_failed_only": True},
         {"pvc_bound": False},
         {"terminating": True},
