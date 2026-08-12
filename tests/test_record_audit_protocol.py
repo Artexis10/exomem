@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from record_fixtures import copy_vehicle_maintenance_fixture, copy_x3_fixture
 
-from exomem import record_formats, vault, writer_lease
+from exomem import graph_sync, record_formats, vault, writer_lease
 from exomem import structured_collections as collections
 
 
@@ -17,6 +17,10 @@ def _activity_log(vault: Path) -> None:
     path = vault / "Knowledge Base/log.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("# Activity\n", encoding="utf-8")
+
+
+def _is_caller_target(root: Path, target: Path) -> bool:
+    return target not in {graph_sync.floor_path(root), graph_sync.checkpoint_path(root)}
 
 
 @pytest.fixture(autouse=True)
@@ -576,8 +580,9 @@ def test_caught_and_abrupt_publication_prefixes_leave_rollback_or_gap(
 
     def fail_first(workspace, artifact, target):
         nonlocal calls
-        calls += 1
-        if calls == 1:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == 1:
             raise PermissionError(13, "Access is denied", str(target))
         return real_replace(workspace, artifact, target)
 
@@ -603,8 +608,9 @@ def test_caught_and_abrupt_publication_prefixes_leave_rollback_or_gap(
     def interrupt_after_canonical(workspace, artifact, target):
         nonlocal calls
         result = real_replace(workspace, artifact, target)
-        calls += 1
-        if calls == 1:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == 1:
             raise KeyboardInterrupt("simulated abrupt publication")
         return result
 
@@ -656,8 +662,9 @@ def test_later_log_update_publication_prefixes_roll_back_or_report_gap(
 
     def fail(workspace, artifact, target):
         nonlocal calls
-        calls += 1
-        if calls == prefix:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == prefix:
             raise PermissionError(13, "Access is denied", str(target))
         return real_replace(workspace, artifact, target)
 
@@ -709,8 +716,9 @@ def test_later_log_update_abrupt_prefixes_are_not_normalized(
     def interrupt(workspace, artifact, target):
         nonlocal calls
         result = real_replace(workspace, artifact, target)
-        calls += 1
-        if calls == prefix:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == prefix:
             raise KeyboardInterrupt("later abrupt prefix")
         return result
 
@@ -748,8 +756,9 @@ def test_item_append_caught_prefixes_restore_exact_files(
 
     def deny(workspace, artifact, target):
         nonlocal calls
-        calls += 1
-        if calls == prefix:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == prefix:
             raise PermissionError(13, "Access is denied", str(target))
         return real_replace(workspace, artifact, target)
 
@@ -795,8 +804,9 @@ def test_item_append_abrupt_prefixes_remain_inspectable(
     def interrupt(workspace, artifact, target):
         nonlocal calls
         result = real_replace(workspace, artifact, target)
-        calls += 1
-        if calls == prefix:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == prefix:
             raise KeyboardInterrupt("item abrupt prefix")
         return result
 
@@ -856,8 +866,9 @@ item_schema:
 
     def fail_scaffold(workspace, artifact, target):
         nonlocal calls
-        calls += 1
-        if calls == 2:
+        if _is_caller_target(tmp_path, Path(target)):
+            calls += 1
+        if _is_caller_target(tmp_path, Path(target)) and calls == 2:
             raise PermissionError(13, "Access is denied", str(target))
         return real_replace(workspace, artifact, target)
 
@@ -868,13 +879,10 @@ item_schema:
     assert not (tmp_path / "Knowledge Base/Records/New/Events").exists()
 
     monkeypatch.setattr(vault._BatchWorkspace, "replace_artifact", real_replace)
-    calls = 0
 
     def interrupt_after_manifest(workspace, artifact, target):
-        nonlocal calls
         result = real_replace(workspace, artifact, target)
-        calls += 1
-        if calls == 1:
+        if Path(target) == tmp_path / manifest_path:
             raise KeyboardInterrupt("simulated abrupt create")
         return result
 

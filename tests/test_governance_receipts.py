@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from exomem import audit, delete_directory, delete_file, embeddings, recover_from_trash
+from exomem import audit, delete_directory, delete_file, embeddings, index_sync, recover_from_trash
 from exomem import reconcile as reconcile_module
 from exomem.governance import egress, receipts, store
 
@@ -2092,6 +2092,188 @@ def test_repeat_delete_recover_delete_cycles_have_distinct_persisted_identity(
     assert deletion_records[0]["causation_id"] != deletion_records[1]["causation_id"]
 
 
+def test_governed_delete_retains_tombstone_when_graph_failure_handle_is_returned(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/failed-graph-delete.md"
+    target = vault / rel
+    target.write_text("---\ntype: insight\nstatus: draft\n---\n# Hold evidence\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/failed-graph-delete.md")
+    failed = index_sync.IndexSyncReport(
+        "delete",
+        (rel,),
+        (rel,),
+        (index_sync.IndexComponentOutcome("epistemic_graph", "failed", "graph_handle_failed"),),
+    )
+    monkeypatch.setattr(index_sync, "delete_after_remove", lambda *_args, **_kwargs: failed)
+
+    result = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    assert any("remains tombstoned" in warning for warning in result.warnings)
+    markers = list((vault / "Knowledge Base/_Governance/deletion-tombstones").glob("*.json"))
+    assert len(markers) == 1
+    assert json.loads(markers[0].read_text(encoding="utf-8"))["state"] == "pending"
+    assert not any(item["event_type"] == "deletion" for item in _receipt_records(vault))
+    assert lifecycle.is_tombstoned(vault, rel)
+
+
+def test_governed_recovery_retains_markers_when_graph_failure_handle_is_returned(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/failed-graph-recovery.md"
+    target = vault / rel
+    target.write_text("---\ntype: insight\nstatus: draft\n---\n# Hold recovery evidence\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/failed-graph-recovery.md")
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    failed = index_sync.IndexSyncReport(
+        "upsert",
+        (rel,),
+        (rel,),
+        (index_sync.IndexComponentOutcome("epistemic_graph", "failed", "graph_handle_failed"),),
+    )
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_args, **_kwargs: failed)
+
+    result = recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+
+    assert target.exists()
+    assert any("remains tombstoned" in warning for warning in result.warnings)
+    tombstones = list((vault / "Knowledge Base/_Governance/deletion-tombstones").glob("*.json"))
+    recovery = list((vault / "Knowledge Base/_Governance/deletion-tombstones/recovery").glob("*.json"))
+    assert len(tombstones) == 1
+    assert len(recovery) == 1
+    assert not any(item["event_type"] == "recovery" for item in _receipt_records(vault))
+
+
+def _coerce_legacy_void_index_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the production fan-out's legacy void-callback adaptation."""
+    from exomem import claims, deferred_index, epistemic_graph, graph_sync, lexstore, memory_refs
+
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a" * 24,
+        paths=(),
+        created_paths=(),
+        scope="full",
+    )
+    monkeypatch.setattr(index_sync, "publish_corpus_delta", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(lexstore, "delete_after_remove", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(memory_refs, "delete_after_remove", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(claims, "delete_after_remove", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        deferred_index, "clear_semantic_receipts", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        epistemic_graph,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: epistemic_graph.GraphDispatchResult(
+            "registered", "graph_rebuild_registered", checkpoint
+        ),
+    )
+
+
+def test_governed_delete_keeps_tombstone_for_legacy_void_index_callbacks(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/unverified-legacy-delete.md"
+    target = vault / rel
+    target.write_text("---\ntype: insight\nstatus: draft\n---\n# Hold evidence\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/unverified-legacy-delete.md")
+    _coerce_legacy_void_index_callbacks(monkeypatch)
+
+    result = delete_file.delete_file(vault, path=rel, confirm=True)
+
+    assert any("remains tombstoned" in warning for warning in result.warnings)
+    assert result.index is not None
+    assert any(item["code"] == "accepted_unverified" for item in result.index["components"])
+    assert {
+        (item["outcome"], item["code"])
+        for item in result.index["components"]
+    } >= {("registered", "graph_rebuild_registered")}
+    assert not any(item["event_type"] == "deletion" for item in _receipt_records(vault))
+    assert lifecycle.is_tombstoned(vault, rel)
+
+
+def test_governed_recovery_keeps_markers_for_legacy_void_index_callbacks(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/unverified-legacy-recovery.md"
+    target = vault / rel
+    target.write_text("---\ntype: insight\nstatus: draft\n---\n# Hold recovery\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/unverified-legacy-recovery.md")
+    monkeypatch.setattr(
+        index_sync,
+        "delete_after_remove",
+        lambda *_args, **_kwargs: index_sync.IndexSyncReport(
+            "delete",
+            (rel,),
+            (rel,),
+            (index_sync.IndexComponentOutcome("epistemic_graph", "registered", "graph_rebuild_registered"),),
+        ),
+    )
+    deleted = delete_file.delete_file(vault, path=rel, confirm=True)
+    assert any(item["event_type"] == "deletion" for item in _receipt_records(vault))
+    _coerce_legacy_void_index_callbacks(monkeypatch)
+
+    result = recover_from_trash.recover_from_trash(vault, trash_path=deleted.trash_path)
+
+    assert target.exists()
+    assert any("remains tombstoned" in warning for warning in result.warnings)
+    assert result.index is not None
+    assert any(item["code"] == "accepted_unverified" for item in result.index["components"])
+    assert {
+        (item["outcome"], item["code"])
+        for item in result.index["components"]
+    } >= {("registered", "graph_rebuild_registered")}
+    tombstones = list((vault / "Knowledge Base/_Governance/deletion-tombstones").glob("*.json"))
+    recovery = list((vault / "Knowledge Base/_Governance/deletion-tombstones/recovery").glob("*.json"))
+    assert len(tombstones) == 1
+    assert len(recovery) == 1
+    assert not any(item["event_type"] == "recovery" for item in _receipt_records(vault))
+
+
+def test_index_report_exactness_requires_closed_accepted_codes() -> None:
+    from exomem.governance import lifecycle
+
+    assert lifecycle._index_report_is_exact(
+        {
+            "components": [
+                {"outcome": "registered", "code": "graph_rebuild_registered"},
+                {"outcome": "accepted", "code": "no_eligible_paths"},
+            ],
+            "paths_truncated": False,
+            "reconcile_required": False,
+        }
+    )
+    assert lifecycle._index_report_is_exact(
+        {
+            "components": [],
+            "derived_work": "not_required",
+            "paths_truncated": False,
+            "reconcile_required": False,
+        }
+    )
+    assert not lifecycle._index_report_is_exact(
+        {
+            "components": [{"outcome": "accepted", "code": "accepted_unverified"}],
+            "paths_truncated": False,
+            "reconcile_required": False,
+        }
+    )
+    assert not lifecycle._index_report_is_exact(
+        {
+            "components": [{"outcome": "accepted", "code": "opaque_acceptance"}],
+            "paths_truncated": False,
+            "reconcile_required": False,
+        }
+    )
+
+
 def test_same_cycle_retry_reuses_persisted_operation_identity(vault: Path) -> None:
     from exomem.governance import lifecycle
 
@@ -2396,6 +2578,12 @@ def test_media_recovery_can_activate_when_clip_is_explicitly_disabled(
     )
 
     assert not any("remains tombstoned" in warning for warning in recovered.warnings)
+    assert recovered.index == {
+        "components": [],
+        "derived_work": "not_required",
+        "paths_truncated": False,
+        "reconcile_required": False,
+    }
     assert any(item["event_type"] == "recovery" for item in _receipt_records(vault))
 
 

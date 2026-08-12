@@ -12,6 +12,7 @@ import pytest
 
 from exomem import (
     activation_manifest,
+    graph_sync,
     memory_refs,
     metrics,
     relation_review,
@@ -408,6 +409,11 @@ def test_reviewed_none_commit_writes_artifact_then_auxiliaries_then_primary(
         ]
     assert commit.resumed_prepared is False
     assert commit.written_paths == captured[0][0]
+    assert all(
+        path
+        not in {"Knowledge Base/.graph-sync-floor.json", "Knowledge Base/.graph-sync.json"}
+        for path in commit.written_paths
+    )
     committed_auxiliary = captured_writes[0][1]
     assert committed_auxiliary.create_only is True
     assert committed_auxiliary.expected_hash == vault.MISSING_CONTENT_HASH
@@ -735,6 +741,10 @@ def test_process_crash_before_primary_resumes_exact_prepared_commit(
     assert commit.resumed_prepared is True
     assert artifact.read_bytes() == artifact_bytes
     assert (tmp_path / _PAGE_B).exists()
+    checkpoint = graph_sync.read_checkpoint(tmp_path)
+    assert checkpoint is not None
+    assert checkpoint.generation >= 2
+    assert checkpoint.scope == "full"
 
 
 def test_successful_replay_and_same_identity_copy_have_exact_precedence(

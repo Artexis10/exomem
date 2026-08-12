@@ -8,6 +8,7 @@ file mtime (a WAL checkpoint moves mtime without a content change).
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -84,3 +85,32 @@ def test_availability_flip_separates_cache_entries(vault: Path, monkeypatch) -> 
     monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
     find_module.find(vault, query="metabolism")
     assert calls["n"] == 2
+
+
+def test_full_rebuild_replacement_invalidates_a_retained_relation_cache(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    notes.mkdir(parents=True)
+    (notes / "source.md").write_text(
+        "# Source\n\n## Relations\n\n- supports [[Knowledge Base/Notes/Insights/target]]\n",
+        encoding="utf-8",
+    )
+    (notes / "target.md").write_text("# Target\n", encoding="utf-8")
+
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    sidecar = epistemic_graph.sidecar_path(vault)
+    with sqlite3.connect(sidecar) as conn:
+        conn.execute("DELETE FROM graph_edges")
+
+    broken_token = epistemic_graph.cache_token(vault)
+    request = {"query": "", "mode": "keyword", "relations": ["supports"]}
+    assert find_module.find(vault, **request) == []
+
+    index.rebuild_all()
+
+    assert epistemic_graph.cache_token(vault) != broken_token
+    assert {hit.path for hit in find_module.find(vault, **request)} == {
+        "Knowledge Base/Notes/Insights/source.md",
+        "Knowledge Base/Notes/Insights/target.md",
+    }

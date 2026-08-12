@@ -838,9 +838,10 @@ def _delete_claim_rows_if_present(vault_root: Path, rel_paths: list[str]) -> int
     return ClaimIndex(vault_root).delete_many(rel_paths)
 
 
-def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
+def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
     """Generic delete-routing seam: purge claim rows regardless of feature gates."""
     _delete_claim_rows_if_present(vault_root, removed_rel_paths)
+    return True
 
 
 def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> None:

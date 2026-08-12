@@ -976,7 +976,12 @@ def test_non_markdown_trash_does_not_register_markdown_self_delete(
 
     assert watcher_calls == []
     assert cleanup_calls == []
-    assert result.index is None
+    assert result.index == {
+        "components": [],
+        "derived_work": "not_required",
+        "paths_truncated": False,
+        "reconcile_required": False,
+    }
 
 
 def test_trash_legacy_none_is_accepted_unverified(
