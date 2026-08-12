@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.0](https://github.com/Artexis10/exomem/compare/v0.46.0...v0.47.0) (2026-08-12)
+
+
+### Features
+
+* **graph:** rebuild outside the mutation boundary ([2e6cfbc](https://github.com/Artexis10/exomem/commit/2e6cfbceed5adf804bc1f658760fa374a0e30092))
+
+
+### Bug Fixes
+
+* **hosted:** recover successful init retry at revision 0006 ([#448](https://github.com/Artexis10/exomem/issues/448)) ([17ba4d3](https://github.com/Artexis10/exomem/commit/17ba4d39f5d56177c4242ef4ece03b53c60b5649))
+
 ## [0.46.0](https://github.com/Artexis10/exomem/compare/v0.45.0...v0.46.0) (2026-08-11)
 
 
