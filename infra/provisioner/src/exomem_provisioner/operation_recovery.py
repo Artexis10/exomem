@@ -218,9 +218,7 @@ class _RecoverySnapshot:
     tenant_fence_sha256: str
 
 
-def read_operation_identity(
-    *, stdin: str | None = None, identity_file: Path | None = None
-) -> str:
+def read_operation_identity(*, stdin: str | None = None, identity_file: Path | None = None) -> str:
     if (stdin is None) == (identity_file is None):
         raise RecoveryRefusal("operation identity source is invalid")
     if identity_file is not None:
@@ -359,15 +357,19 @@ class RecoveryService:
         *,
         sessions: async_sessionmaker[AsyncSession],
         codec: EnvelopeCodec,
+        database_name: str,
         database_role: str,
         database_schema: str,
+        database_lock_timeout_seconds: int,
         deployment_lock: DeploymentLock,
         observer: RecoveryLiveObserver,
     ) -> None:
         self._sessions = sessions
         self._codec = codec
+        self._database_name = database_name
         self._database_role = database_role
         self._database_schema = database_schema
+        self._database_lock_timeout_seconds = database_lock_timeout_seconds
         self._deployment_lock = deployment_lock
         self._observer = observer
         self._helper_source_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -406,7 +408,9 @@ class RecoveryService:
         try:
             async with self._sessions.begin() as session:
                 await self._require_database_identity(session)
-                existing = await session.get(OperationRecoveryReceipt, operation_id, with_for_update=True)
+                existing = await session.get(
+                    OperationRecoveryReceipt, operation_id, with_for_update=True
+                )
                 if existing is not None:
                     return self._receipt_result(existing, "already-recovered")
                 snapshot = await self._preflight(session, operation_id)
@@ -547,9 +551,15 @@ class RecoveryService:
 
     async def _require_database_identity(self, session: AsyncSession) -> None:
         require_postgresql(session.get_bind().dialect.name)
-        await session.scalar(
-            select(func.pg_advisory_xact_lock(database_lock_key(self._database_schema, self._database_role)))
-        )
+        key = database_lock_key(self._database_name, self._database_schema)
+        deadline = asyncio.get_running_loop().time() + self._database_lock_timeout_seconds
+        while True:
+            acquired = await session.scalar(select(func.pg_try_advisory_xact_lock(key)))
+            if acquired is True:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RecoveryRefusal("database recovery lock timed out")
+            await asyncio.sleep(0.2)
         revision_rows = list(await session.scalars(text("SELECT version_num FROM alembic_version")))
         if revision_rows != [DATABASE_REVISION]:
             raise RecoveryRefusal("database revision is invalid")
@@ -569,13 +579,23 @@ class RecoveryService:
                 error_code=operation.error_code,
                 has_claim=any(
                     value is not None
-                    for value in (operation.claim_owner, operation.claim_token, operation.claim_expires_at)
+                    for value in (
+                        operation.claim_owner,
+                        operation.claim_token,
+                        operation.claim_expires_at,
+                    )
                 ),
-                has_result=(operation.result_ciphertext is not None or operation.result_redacted != {}),
+                has_result=(
+                    operation.result_ciphertext is not None or operation.result_redacted != {}
+                ),
                 finalized=operation.finalized_at is not None,
             )
         )
-        if operation.cell_id is None or operation.external_operation_id != operation.provider_operation_id or operation.fence_generation != operation.provider_fence_generation:
+        if (
+            operation.cell_id is None
+            or operation.external_operation_id != operation.provider_operation_id
+            or operation.fence_generation != operation.provider_fence_generation
+        ):
             raise RecoveryRefusal("recovery preflight failed")
         del transition
         await self._lock_conflicts(session, operation)
@@ -605,7 +625,9 @@ class RecoveryService:
             operation_sha256=_hash_model(operation),
             preserved_sha256=_hash_model(operation, excluded=self._CHANGED_COLUMNS),
             request_sha256=operation.canonical_request_sha256,
-            request_ciphertext_sha256=hashlib.sha256(operation.request_ciphertext.encode()).hexdigest(),
+            request_ciphertext_sha256=hashlib.sha256(
+                operation.request_ciphertext.encode()
+            ).hexdigest(),
             resources_sha256=canonical_sha256(
                 {item.id: _hash_model(item) for item in sorted(resources, key=lambda item: item.id)}
             ),
@@ -650,7 +672,9 @@ class RecoveryService:
         scoped = tuple(
             await session.scalars(
                 select(Resource)
-                .where(Resource.tenant_id == operation.tenant_id, Resource.cell_id == operation.cell_id)
+                .where(
+                    Resource.tenant_id == operation.tenant_id, Resource.cell_id == operation.cell_id
+                )
                 .order_by(Resource.created_at, Resource.id)
                 .with_for_update()
             )
@@ -678,7 +702,10 @@ class RecoveryService:
                 resource.reference_ciphertext,
                 purpose=f"resource-reference:{resource.operation_id}:{resource.kind.value}",
             ).get("reference")
-            if not isinstance(reference, str) or hashlib.sha256(reference.encode()).hexdigest() != resource.reference_digest:
+            if (
+                not isinstance(reference, str)
+                or hashlib.sha256(reference.encode()).hexdigest() != resource.reference_digest
+            ):
                 raise RecoveryRefusal("recovery preflight failed")
         return resources
 
@@ -725,7 +752,8 @@ class RecoveryService:
             operation.state is OperationState.FINAL
             and operation.checkpoint == "complete"
             and operation.result_ciphertext is not None
-            and result == {
+            and result
+            == {
                 "completed": True,
                 "fields": ["privateEndpoint", "providerRef"],
             }
@@ -803,8 +831,10 @@ class _ProductionRecoveryObserver:
                 == expected_volume.pvc_recovery_envelope
             )
             and await self.hcloud.verify_recovery_volume(  # type: ignore[attr-defined]
-            expected_volume.volume_handle, metadata, self.location
-            , expected_volume.hcloud_recovery_envelope
+                expected_volume.volume_handle,
+                metadata,
+                self.location,
+                expected_volume.hcloud_recovery_envelope,
             )
         )
         return LiveObservation(
@@ -852,25 +882,21 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     from kubernetes import client, config
 
     from .adapters import HCloudVolumeAdapter, KubernetesCellAdapter, KubernetesVolumeAdapter
-    from .config import ProviderWorkerSettings, ProvisionerSettings, VolumeWorkerSettings
     from .crypto import AesGcmEnvelopeCodec
     from .database import ProvisionerDatabase
     from .live import KubernetesProviderRegistry
-    from .main import _require_production_database
     from .provider_identity import ProviderRecoveryIdentityVerifier
+    from .recovery_settings import RecoverySettings, load_recovery_settings
 
     database: ProvisionerDatabase | None = None
     api_client: object | None = None
     try:
-        settings = ProvisionerSettings()  # type: ignore[call-arg]
-        provider = ProviderWorkerSettings()  # type: ignore[call-arg]
-        volume = VolumeWorkerSettings()  # type: ignore[call-arg]
-        _require_production_database(settings)
+        settings: RecoverySettings = load_recovery_settings()
         database = ProvisionerDatabase(settings)
         config.load_incluster_config()
         api_client = client.ApiClient()
         identity = ProviderRecoveryIdentityVerifier.from_public_key(
-            provider.provider_recovery_public_key
+            settings.provider_recovery_public_key
         )
         core = client.CoreV1Api(api_client)
         observer = _ProductionRecoveryObserver(
@@ -889,23 +915,25 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             volumes=KubernetesVolumeAdapter(
                 core_v1=core,
                 storage_class_name="exomem-hcloud-encrypted-retain",
-                encryption_secret_name=volume.volume_encryption_secret_name,
-                encryption_secret_namespace=volume.volume_encryption_secret_namespace,
+                encryption_secret_name="recovery-observer-does-not-read-secrets",
+                encryption_secret_namespace="recovery-observer-does-not-read-secrets",
                 identity_verifier=identity,
             ),
             hcloud=HCloudVolumeAdapter(
-                client=HCloudClient(token=volume.hcloud_token.get_secret_value()),
+                client=HCloudClient(token=settings.hcloud_token.get_secret_value()),
                 identity_verifier=identity,
             ),
-            location=volume.location,
+            location=settings.hcloud_location,
             codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
         )
         service = RecoveryService(
             sessions=database.session_factory,
             codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+            database_name=settings.database_name,
             database_role=settings.database_role,
             database_schema=settings.database_schema,
-            deployment_lock=provider.deployment_lock,
+            database_lock_timeout_seconds=settings.database_lock_timeout_seconds,
+            deployment_lock=settings.deployment_lock,
             observer=observer,
         )
         operation_id = read_operation_identity(

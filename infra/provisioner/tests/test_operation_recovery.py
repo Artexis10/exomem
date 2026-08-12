@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -13,6 +14,72 @@ def _module():
     import exomem_provisioner.operation_recovery as recovery
 
     return recovery
+
+
+def _selected_deployment_lock_json() -> str:
+    values = (
+        Path(__file__).resolve().parents[3] / "infra/helm/platform/values.validation.yaml"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"^  deploymentLockJson: \|\n    (?P<lock>\{.*\})$", values, re.MULTILINE)
+    assert match is not None
+    return match.group("lock")
+
+
+def _recovery_environment(**overrides: str) -> dict[str, str]:
+    values = {
+        "EXOMEM_RECOVERY_DATABASE_URL": "postgresql+asyncpg://recovery_role:password@db.example/recovery_db",
+        "EXOMEM_RECOVERY_DATABASE_SCHEMA": "recovery_schema",
+        "EXOMEM_RECOVERY_DATABASE_ROLE": "recovery_role",
+        "EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS": "1",
+        "EXOMEM_RECOVERY_ENVELOPE_KEY": "e" * 32,
+        "EXOMEM_RECOVERY_PROVIDER_RECOVERY_PUBLIC_KEY": "p" * 43,
+        "EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON": _selected_deployment_lock_json(),
+        "EXOMEM_RECOVERY_HCLOUD_TOKEN": "h" * 32,
+        "EXOMEM_RECOVERY_HCLOUD_LOCATION": "fsn1",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_recovery_settings_accept_only_the_exact_minimal_environment() -> None:
+    from exomem_provisioner.recovery_settings import load_recovery_settings
+
+    settings = load_recovery_settings(_recovery_environment())
+
+    assert settings.database_name == "recovery_db"
+    assert settings.deployment_lock.components.provisioner.image.endswith("b" * 64)
+    assert settings.hcloud_location == "fsn1"
+    for name, value in (
+        (
+            "EXOMEM_RECOVERY_DATABASE_URL",
+            "postgresql+asyncpg://recovery_role:password@db-pooler.example/recovery_db",
+        ),
+        ("EXOMEM_RECOVERY_DATABASE_SCHEMA", "public"),
+        ("EXOMEM_RECOVERY_DATABASE_LOCK_TIMEOUT_SECONDS", "0"),
+        ("EXOMEM_RECOVERY_HCLOUD_TOKEN", "short"),
+        ("EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON", "{}"),
+        ("EXOMEM_RECOVERY_UNRELATED_SECRET", "forbidden"),
+        ("EXOMEM_PROVISIONER_BEARER", "b" * 32),
+        ("EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY", "s" * 43),
+    ):
+        environment = _recovery_environment(**{name: value})
+        with pytest.raises(ValueError):
+            load_recovery_settings(environment)
+    for absent in _recovery_environment():
+        environment = _recovery_environment()
+        environment.pop(absent)
+        with pytest.raises(ValueError):
+            load_recovery_settings(environment)
+
+
+def test_recovery_command_constructs_only_dedicated_recovery_settings() -> None:
+    recovery = _module()
+    source = Path(recovery.__file__).read_text(encoding="utf-8")
+
+    assert "RecoverySettings" in source
+    assert "ProvisionerSettings()" not in source
+    assert "ProviderWorkerSettings()" not in source
+    assert "VolumeWorkerSettings()" not in source
 
 
 def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
@@ -259,7 +326,9 @@ def test_sqlite_is_refused_before_any_recovery_work() -> None:
         recovery.require_postgresql("sqlite")
 
 
-def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_or_terminating() -> None:
+def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_or_terminating() -> (
+    None
+):
     recovery = _module()
 
     absent = recovery.LiveObservation(
@@ -275,9 +344,12 @@ def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_
         routes_present=0,
     )
     assert recovery.validate_live_observation(absent) is None
-    assert recovery.validate_live_observation(
-        replace(absent, init_job_present=True, init_complete=True)
-    ) is None
+    assert (
+        recovery.validate_live_observation(
+            replace(absent, init_job_present=True, init_complete=True)
+        )
+        is None
+    )
     for changed in (
         {"init_job_present": True, "init_failed_only": True},
         {"pvc_bound": False},
@@ -286,9 +358,7 @@ def test_live_init_observation_allows_absent_or_complete_job_but_refuses_failed_
         {"routes_present": 1},
     ):
         with pytest.raises(recovery.RecoveryRefusal, match="live recovery preflight failed"):
-            recovery.validate_live_observation(
-                replace(absent, **changed)
-            )
+            recovery.validate_live_observation(replace(absent, **changed))
 
 
 def test_reopen_is_single_exact_cas_and_a_second_invocation_is_noop() -> None:
@@ -364,7 +434,20 @@ async def test_production_observer_compares_live_volume_fields_not_absent_hcloud
 
     class Registry:
         async def inspect(self, current, owned):
-            return type("Snapshot", (), {"namespace": True, "release": True, "init_job_present": False, "init_complete": False, "init_failed": False, "serving": False, "runtime_admitted": False, "routes": (False, False)})()
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "namespace": True,
+                    "release": True,
+                    "init_job_present": False,
+                    "init_complete": False,
+                    "init_failed": False,
+                    "serving": False,
+                    "runtime_admitted": False,
+                    "routes": (False, False),
+                },
+            )()
 
         async def authenticate_recovery_record(self, current):
             return "a" * 64
@@ -375,16 +458,36 @@ async def test_production_observer_compares_live_volume_fields_not_absent_hcloud
 
     class HCloud:
         async def verify_recovery_volume(self, handle, current, location, envelope):
-            return (handle, current, location, envelope) == ("42", metadata, "fsn1", "hcloud-envelope")
+            return (handle, current, location, envelope) == (
+                "42",
+                metadata,
+                "fsn1",
+                "hcloud-envelope",
+            )
 
     class Cell:
         async def volume_claim_bound(self, current):
             return current == metadata
 
-    observer = recovery._ProductionRecoveryObserver(Registry(), Cell(), Volumes(), HCloud(), "fsn1", Codec())
-    operation = type("Operation", (), {"cell_id": "cell-alpha", "tenant_id": "tenant-alpha", "external_operation_id": "provider-alpha", "fence_generation": 7})()
+    observer = recovery._ProductionRecoveryObserver(
+        Registry(), Cell(), Volumes(), HCloud(), "fsn1", Codec()
+    )
+    operation = type(
+        "Operation",
+        (),
+        {
+            "cell_id": "cell-alpha",
+            "tenant_id": "tenant-alpha",
+            "external_operation_id": "provider-alpha",
+            "fence_generation": 7,
+        },
+    )()
     resources = tuple(
-        type("Resource", (), {"kind": kind, "reference_ciphertext": kind.value, "operation_id": "internal"})()
+        type(
+            "Resource",
+            (),
+            {"kind": kind, "reference_ciphertext": kind.value, "operation_id": "internal"},
+        )()
         for kind in references
     )
 
@@ -392,7 +495,9 @@ async def test_production_observer_compares_live_volume_fields_not_absent_hcloud
     assert observed.volume_present is True
 
 
-def test_main_converts_refusals_to_content_free_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_converts_refusals_to_content_free_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     recovery = _module()
 
     async def refuse(_: object) -> dict[str, object]:

@@ -426,6 +426,42 @@ def test_platform_renders_real_provisioner_composition() -> None:
     assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
 
 
+def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+
+    service_account = _find(documents, "ServiceAccount", "exomem-init-retry-recovery")
+    assert service_account["automountServiceAccountToken"] is True
+    role = _find(documents, "ClusterRole", "exomem-init-retry-recovery")
+    for rule in role["rules"]:
+        assert set(rule["verbs"]) <= {"get", "list", "watch"}
+        assert "secrets" not in rule["resources"]
+    expected_resources = {
+        ("", "namespaces"),
+        ("", "persistentvolumeclaims"),
+        ("", "persistentvolumes"),
+        ("", "configmaps"),
+        ("apps", "statefulsets"),
+        ("batch", "jobs"),
+        ("traefik.io", "ingressroutes"),
+    }
+    observed_resources = {
+        (rule["apiGroups"][0], resource)
+        for rule in role["rules"]
+        for resource in rule["resources"]
+    }
+    assert observed_resources == expected_resources
+    _find(documents, "ClusterRoleBinding", "exomem-init-retry-recovery")
+    assert not any(
+        document.get("kind") == "Service"
+        and document.get("metadata", {}).get("name") == "exomem-init-retry-recovery"
+        for document in documents
+    )
+    runbook = (ROOT / "docs/runbooks/hosted/cell.md").read_text(encoding="utf-8")
+    assert "exomem-init-retry-recovery" in runbook
+    assert "exomem-provisioner-recover-init-retry \"$mode\" --stdin < \"$recovery_identity\"" in runbook
+    assert "kubectl -n exomem-platform exec -i \"$operator_pod\" --" in runbook
+    assert "--identity-file" not in runbook
+    assert "another `reopen`" in runbook
 def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
