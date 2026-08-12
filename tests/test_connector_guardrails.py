@@ -94,7 +94,10 @@ def test_chatgpt_personal_plugin_keeps_v2_records_acceptance_pending() -> None:
     plugin = json.loads(CHATGPT_PLUGIN_CONTRACT.read_text(encoding="utf-8"))
     app = json.loads(OPENAI_PLUGIN_MANIFEST.read_text(encoding="utf-8"))
 
-    assert {key: plugin[key] for key in _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION} == _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION
+    registered_attestation = {
+        key: plugin[key] for key in _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION
+    }
+    assert registered_attestation == _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION
     assert app["apps"]["exomem"]["id"] == _REGISTERED_OPENAI_APP_ID
     assert plugin["rollout_state"] == "awaiting-post-deploy-refresh"
     _assert_records_pending_acceptance(plugin, surface)
