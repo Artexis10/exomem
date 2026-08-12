@@ -101,6 +101,17 @@ def test_load_manifest_keeps_profile_neutral_contract_and_opaque_plan_link(tmp_p
     assert manifest.links.plans[0].query == {"filters": {"asset": "car"}, "limit": 12}
 
 
+def test_records_manifest_ignores_an_unowned_legacy_plan_audit_mapping(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    path = _write_manifest(
+        vault,
+        "Knowledge Base/Records/Maintenance/_collection.md",
+        _manifest().replace("lifecycle: active\n", "lifecycle: active\nplan_audit: broken\n"),
+    )
+
+    assert collections.load_manifest(vault, path).semantic_profile == "records"
+
+
 def test_load_manifest_uses_the_bounded_descriptor_reader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -149,6 +149,68 @@ def _insert_manual_x3_session(vault: Path, fixture: dict[str, str]) -> None:
     )
 
 
+def _write_planning_fixtures(_vault: Path) -> dict[str, dict[str, Any]]:
+    """Describe the two Planning manifests created through the public product command."""
+    fields = """    title: {type: string, required: true}
+    kind: {type: string}
+    status: {type: string}
+    lifecycle: {type: string}
+    priority: {type: string}
+    commitment: {type: string}
+    horizon: {type: string}
+    health: {type: string}
+    window_start: {type: date}
+    window_end: {type: date}
+    area: {type: string}
+    parent: {type: string}
+    progress_evidence: {type: array, items: {type: object}}
+    execution: {type: array, items: {type: object}}
+    tags: {type: array, items: {type: string}}
+"""
+
+    def manifest(collection_id: str, title: str, *, domain: str | None = None) -> str:
+        domain_line = f"domain: {domain}\n" if domain is not None else ""
+        domain_field = "    domain: {type: string}\n" if domain is not None else ""
+        return f"""---
+type: collection
+exomem_id: {collection_id}
+title: {title}
+semantic_profile: planning
+collection_version: 1
+schema_version: 1
+lifecycle: active
+{domain_line}storage:
+  strategy: markdown-items
+  source: Items
+  format_version: 1
+item_schema:
+  natural_key: [title]
+  fields:
+{fields}{domain_field}---
+Planning remains ordinary human-owned Markdown.
+"""
+
+    return {
+        "software": {
+            "collection": "Knowledge Base/Planning/Software/_collection.md",
+            "manifest_text": manifest(
+                "6dd5763e-cabe-4aed-9b9b-fcb0a372e4c5", "Software delivery intent"
+            ),
+        },
+        "nonsoftware": {
+            "collection": "Knowledge Base/Planning/Home/_collection.md",
+            "manifest_text": manifest(
+                "1b2d04d7-0748-41da-b4f3-cb5313f38cbe", "Home resilience intent", domain="home"
+            ),
+            "records_view": {
+                "collection": "exomem://memory/9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8",
+                "role": "progress",
+                "view": "completed-sessions",
+            },
+        },
+    }
+
+
 def _run(
     command: list[str],
     *,
@@ -224,7 +286,11 @@ def _mutation_diagnostics(result: Any, *, operation: str) -> Any:
         raise RuntimeError(
             f"{operation} mutation did not return a committed full terminal: {result!r}"
         )
-    return result["diagnostics"]
+    diagnostics = result["diagnostics"]
+    if isinstance(diagnostics, dict) and diagnostics.get("graph_sync") == "failed":
+        code = diagnostics.get("graph_sync_code", "unspecified graph synchronization error")
+        raise RuntimeError(f"{operation} graph synchronization failed: {code}")
+    return diagnostics
 
 
 def _maintenance_diagnostics(result: Any, *, operation: str) -> Any:
@@ -291,8 +357,15 @@ async def _assert_relation_contexts(
             timeout,
         )
         graph = context.get("graph", {})
-        if graph.get("profile", {}).get("name") != profile:
-            raise RuntimeError(f"installed context did not resolve {profile!r} profile")
+        if not isinstance(graph, dict):
+            raise RuntimeError(
+                f"installed context returned no graph for {profile!r}: {context!r}"
+            )
+        profile_data = graph.get("profile", {})
+        if not isinstance(profile_data, dict) or profile_data.get("name") != profile:
+            raise RuntimeError(
+                f"installed context did not resolve {profile!r} profile: {context!r}"
+            )
         edge = next(
             (item for item in graph.get("edges", []) if item.get("relation_type") == canonical),
             None,
@@ -317,6 +390,236 @@ def _record_source_hash(result: dict[str, Any], suffix: str) -> str:
             if isinstance(digest, str):
                 return digest
     raise RuntimeError(f"record query omitted source hash for {suffix!r}")
+
+
+async def _planning_first_session(client, state: dict[str, Any], timeout: float) -> None:
+    fixtures = state["planning"]
+    software = fixtures["software"]
+    nonsoftware = fixtures["nonsoftware"]
+    for fixture in (software, nonsoftware):
+        created = await _call_mutation(
+            client,
+            "plan_memory",
+            {
+                "action": "create",
+                "manifest_path": fixture["collection"],
+                "manifest_text": fixture["manifest_text"],
+                "why": "create installed Planning product collection",
+            },
+            timeout,
+        )
+        if created.get("operation") != "create":
+            raise RuntimeError(f"installed Planning create returned unexpected data: {created!r}")
+
+    software_collection = software["collection"]
+    outcome_id = "b4596ce9-10fd-4856-a26e-89d8be72b0db"
+    initiative_id = "3f578f1c-49ba-4c37-a2e7-90a5114e4e23"
+    work_item_id = "d8d3f3c1-1601-4b1d-9a5d-694dc9dc2ed3"
+    bug_id = "95a51c93-7873-4262-a9ba-bc3ae7ed362b"
+    await _call_mutation(
+        client,
+        "plan_memory",
+        {
+            "action": "add",
+            "collection": software_collection,
+            "plan_id": outcome_id,
+            "item": {
+                "title": "Reliable Planning delivery",
+                "kind": "outcome",
+                "status": "planned",
+                "priority": "high",
+                "commitment": "considering",
+                "horizon": "year",
+            },
+            "why": "capture software delivery outcome",
+        },
+        timeout,
+    )
+    await _call_mutation(
+        client,
+        "plan_memory",
+        {
+            "action": "add",
+            "collection": software_collection,
+            "plan_id": initiative_id,
+            "item": {
+                "title": "Planning v1 initiative",
+                "kind": "initiative",
+                "status": "planned",
+                "priority": "high",
+                "commitment": "considering",
+                "horizon": "quarter",
+                "parent": f"exomem://plan/6dd5763e-cabe-4aed-9b9b-fcb0a372e4c5/{outcome_id}",
+            },
+            "why": "capture software Planning initiative",
+        },
+        timeout,
+    )
+    await _call_mutation(
+        client,
+        "plan_memory",
+        {
+            "action": "add",
+            "collection": software_collection,
+            "plan_id": bug_id,
+            "item": {"title": "Investigate planning query edge case", "tags": ["bug"]},
+            "why": "capture software bug candidate",
+        },
+        timeout,
+    )
+    await _call_mutation(
+        client,
+        "plan_memory",
+        {
+            "action": "add",
+            "collection": software_collection,
+            "plan_id": work_item_id,
+            "item": {
+                "title": "Ship Planning query surface",
+                "status": "planned",
+                "priority": "high",
+                "commitment": "considering",
+                "horizon": "quarter",
+                "parent": f"exomem://plan/6dd5763e-cabe-4aed-9b9b-fcb0a372e4c5/{initiative_id}",
+                "tags": ["feature"],
+            },
+            "why": "capture software feature candidate",
+        },
+        timeout,
+    )
+    snapshot = await _call(
+        client,
+        "plan_memory",
+        {"action": "query", "collection": software_collection, "limit": 20, "lifecycle": "all"},
+        timeout,
+    )
+    item = next(
+        (row for row in snapshot.get("rows", []) if row.get("plan_id") == work_item_id), None
+    )
+    if not isinstance(item, dict) or not isinstance(item.get("item_version"), str):
+        raise RuntimeError("installed Planning query did not return the feature item version")
+    updated = await _call_mutation(
+        client,
+        "plan_memory",
+        {
+            "action": "update",
+            "collection": software_collection,
+            "plan_id": work_item_id,
+            "changes": {
+                "execution": [
+                    {
+                        "kind": "openspec",
+                        "ref": "openspec/changes/add-multi-horizon-planning",
+                        "label": "Planning v1 contract",
+                    },
+                    {"kind": "repository", "ref": "exomem"},
+                ]
+            },
+            "expected_container_hash": snapshot["snapshot"],
+            "expected_item_version": item["item_version"],
+            "why": "link thin software execution pointers",
+        },
+        timeout,
+    )
+    if updated.get("operation") != "update":
+        raise RuntimeError("installed Planning update did not commit")
+    quarter = await _call(
+        client,
+        "plan_memory",
+        {
+            "action": "query",
+            "collection": software_collection,
+            "view": "quarter",
+        },
+        timeout,
+    )
+    if not any(row.get("plan_id") == work_item_id for row in quarter.get("rows", [])):
+        raise RuntimeError("installed Planning quarter view omitted the feature item")
+
+    home_collection = nonsoftware["collection"]
+    home_outcome_id = "aeab0d41-bbfe-4f40-9b04-cd7ab79d1a6c"
+    home_initiative_id = "d6e67537-1ea4-4733-b4eb-4ae26f770eee"
+    await _call_mutation(
+        client,
+        "plan_memory",
+        {
+            "action": "add",
+            "collection": home_collection,
+            "plan_id": home_outcome_id,
+            "item": {
+                "title": "Resilient home over five years",
+                "kind": "outcome",
+                "status": "planned",
+                "priority": "medium",
+                "commitment": "considering",
+                "horizon": "multi-year",
+                "domain": "home",
+                "progress_evidence": [nonsoftware["records_view"]],
+            },
+            "why": "capture non-software multi-year outcome",
+        },
+        timeout,
+    )
+    await _call_mutation(
+        client,
+        "plan_memory",
+        {
+            "action": "add",
+            "collection": home_collection,
+            "plan_id": home_initiative_id,
+            "item": {
+                "title": "Improve home exercise space",
+                "kind": "initiative",
+                "status": "planned",
+                "priority": "medium",
+                "commitment": "considering",
+                "horizon": "year",
+                "domain": "home",
+                "parent": f"exomem://plan/1b2d04d7-0748-41da-b4f3-cb5313f38cbe/{home_outcome_id}",
+            },
+            "why": "capture non-software initiative",
+        },
+        timeout,
+    )
+    home = await _call(
+        client,
+        "plan_memory",
+        {"action": "query", "collection": home_collection, "view": "multi-year"},
+        timeout,
+    )
+    if not any(row.get("plan_id") == home_outcome_id for row in home.get("rows", [])):
+        raise RuntimeError("installed Planning multi-year view omitted the home outcome")
+    software["work_item_id"] = work_item_id
+    software["work_item_path"] = (
+        "Knowledge Base/Planning/Software/Items/" + work_item_id + ".md"
+    )
+
+
+async def _planning_restart_session(client, state: dict[str, Any], timeout: float) -> None:
+    software = state["planning"]["software"]
+    query = await _call(
+        client,
+        "plan_memory",
+        {"action": "query", "collection": software["collection"], "limit": 20},
+        timeout,
+    )
+    item = next(
+        (row for row in query.get("rows", []) if row.get("plan_id") == software["work_item_id"]),
+        None,
+    )
+    if (
+        not isinstance(item, dict)
+        or item.get("title") != "Ship Planning query surface (human edit)"
+    ):
+        raise RuntimeError("direct Planning edit was not visible after restart")
+    inspection = await _call(
+        client,
+        "plan_memory",
+        {"action": "inspect", "collection": software["collection"]},
+        timeout,
+    )
+    if inspection.get("audit", {}).get("status") != "gap":
+        raise RuntimeError("direct Planning edit did not retain a positive audit gap")
 
 
 async def _records_first_session(client, state: dict[str, Any], timeout: float) -> None:
@@ -503,6 +806,7 @@ async def _stdio_session(
                 "maintain_memory",
                 "schema_memory",
                 "record_memory",
+                "plan_memory",
             }
             missing = required - tools
             if missing:
@@ -721,6 +1025,7 @@ async def _stdio_session(
                     }
                 )
                 await _records_first_session(client, state, timeout)
+                await _planning_first_session(client, state, timeout)
             else:
                 reconcile = await _call_maintenance(
                     client,
@@ -760,6 +1065,7 @@ async def _stdio_session(
                     timeout=timeout,
                 )
                 await _records_restart_session(client, state, timeout)
+                await _planning_restart_session(client, state, timeout)
                 from exomem import epistemic_graph
 
                 graph_status = reconcile.get("graph_status")
@@ -782,6 +1088,7 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     env = _clean_env(home, vault)
     state: dict[str, Any] = {}
     state["records"] = _write_records_fixture(vault)
+    state["planning"] = _write_planning_fixtures(vault)
     _insert_manual_x3_session(vault, state["records"])
     asyncio.run(
         _stdio_session(
@@ -803,6 +1110,15 @@ def _installed_stdio(args: argparse.Namespace) -> int:
         log.read_text(encoding="utf-8")
         + "\n### 2026-08-06 · Pull (human restart edit)\n"
         + "- Deadlift | grey | 23\n",
+        encoding="utf-8",
+    )
+    planning_item = vault / state["planning"]["software"]["work_item_path"]
+    planning_item.write_text(
+        planning_item.read_text(encoding="utf-8").replace(
+            "title: Ship Planning query surface",
+            "title: Ship Planning query surface (human edit)",
+            1,
+        ),
         encoding="utf-8",
     )
     asyncio.run(
@@ -1078,6 +1394,40 @@ def _assert_unauthenticated_records_refusal(base_url: str, timeout: float) -> No
             raise RuntimeError("unauthenticated HTTP Records refusal disclosed collection content")
 
 
+def _assert_unauthenticated_planning_refusal(base_url: str, timeout: float) -> None:
+    """Prove the installed remote route refuses a real Planning MCP request."""
+    metadata_url = f"{base_url}/.well-known/oauth-protected-resource/mcp"
+    status, headers, response = _http_post_raw(
+        f"{base_url}/mcp",
+        body={
+            "jsonrpc": "2.0",
+            "id": "planning-auth-refusal",
+            "method": "tools/call",
+            "params": {
+                "name": "plan_memory",
+                "arguments": {
+                    "action": "inspect",
+                    "collection": "Knowledge Base/Planning/Software/_collection.md",
+                },
+            },
+        },
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        },
+        timeout=timeout,
+    )
+    expected_challenge = f'Bearer resource_metadata="{metadata_url}"'
+    if status != 401 or headers.get("www-authenticate") != expected_challenge:
+        raise RuntimeError(
+            "unauthenticated installed HTTP Planning request did not receive the expected "
+            f"401 Bearer challenge: {status} {headers.get('www-authenticate')!r}"
+        )
+    for forbidden in (b"Planning/Software", b"Records", b"rows", b"aggregate"):
+        if forbidden in response:
+            raise RuntimeError("unauthenticated HTTP Planning refusal disclosed collection content")
+
+
 def _reserve_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -1152,6 +1502,7 @@ def _installed_auth_required_records_refusal(args: argparse.Namespace) -> None:
                     )
                 try:
                     _assert_unauthenticated_records_refusal(base_url, args.request_timeout)
+                    _assert_unauthenticated_planning_refusal(base_url, args.request_timeout)
                     break
                 except urllib.error.URLError:
                     if time.monotonic() >= deadline:

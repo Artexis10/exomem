@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import sqlite3
+import stat
 import threading
 import time
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -22,12 +25,417 @@ from exomem.lease_coordinator import SQLiteLeaseStore
 from exomem.mutation_lock import VaultMutationCoordinator
 from exomem.vault import PlannedWrite, batch_atomic_write
 from exomem.writer_lease import (
+    IdempotencyStore,
     LeaseConfig,
     LeaseManager,
     LeaseRecord,
     invoke_command,
     reset_managers_for_tests,
 )
+
+
+class _UnknownLengthMapping(Mapping[str, str]):
+    def __init__(self, item_count: int) -> None:
+        self._values = {f"key-{index}": "private result content" for index in range(item_count)}
+        self.items_iterated = 0
+
+    def __getitem__(self, key: str) -> str:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        for key in self._values:
+            self.items_iterated += 1
+            if self.items_iterated > writer_lease_module._RECEIPT_RESULT_SUMMARY_MAX_ITEMS + 1:
+                raise AssertionError("receipt summary consumed too many mapping items")
+            yield key
+
+    def __len__(self) -> int:
+        raise TypeError("mapping length is unavailable")
+
+
+def test_receipt_summary_closes_large_dict_without_visiting_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = writer_lease_module._receipt_result_summary
+    visited = 0
+
+    def counted(value: object, *, depth: int = 0) -> dict[str, object]:
+        nonlocal visited
+        visited += 1
+        return original(value, depth=depth)
+
+    monkeypatch.setattr(writer_lease_module, "_receipt_result_summary", counted)
+    summary = original({f"key-{index}": "private result content" for index in range(200_000)})
+
+    assert summary == {"type": "mapping", "size": 200_000, "truncated": True}
+    assert visited == 0
+    assert "private result content" not in json.dumps(summary)
+
+
+def test_receipt_summary_closes_unknown_length_mapping_after_bounded_probe() -> None:
+    mapping = _UnknownLengthMapping(writer_lease_module._RECEIPT_RESULT_SUMMARY_MAX_ITEMS + 50)
+
+    summary = writer_lease_module._receipt_result_summary(mapping)
+
+    assert summary == {"type": "mapping", "truncated": True}
+    assert mapping.items_iterated == writer_lease_module._RECEIPT_RESULT_SUMMARY_MAX_ITEMS + 1
+    assert "private result content" not in json.dumps(summary)
+
+
+def test_receipt_result_digest_remains_stable_and_sensitive_for_small_mappings() -> None:
+    first = {"z": "private alpha", "a": {"hidden": "one"}}
+    same_values_different_order = {"a": {"hidden": "one"}, "z": "private alpha"}
+    changed = {"a": {"hidden": "two"}, "z": "private alpha"}
+
+    assert writer_lease_module._receipt_result_sha256(first) == writer_lease_module._receipt_result_sha256(
+        same_values_different_order
+    )
+    assert writer_lease_module._receipt_result_sha256(first) != writer_lease_module._receipt_result_sha256(
+        changed
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_idempotency_secret_runtime_artifacts_are_owner_only(tmp_path: Path) -> None:
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+    store.run("secret-modes", "digest", lambda: {"ok": True})
+
+    for path in (
+        store.state_dir,
+        store.state_dir / "idempotency-owners",
+        store.path,
+        store.path.with_name(f"{store.path.name}-wal"),
+        store.path.with_name(f"{store.path.name}-shm"),
+    ):
+        if path.exists():
+            assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_insecure_idempotency_database_is_rejected_before_unpickle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    database = state / "idempotency.sqlite"
+    database.write_bytes(b"not sqlite")
+    database.chmod(0o666)
+    monkeypatch.setattr(
+        writer_lease_module.pickle,
+        "loads",
+        lambda _raw: pytest.fail("unsafe idempotency state reached pickle.loads"),
+    )
+
+    store = IdempotencyStore(database)
+    with pytest.raises(RuntimeError, match="cannot be upgraded safely"):
+        store.run("unsafe", "digest", lambda: pytest.fail("unsafe state ran a leaf"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_legacy_owner_owned_runtime_state_is_hardened_before_sqlite_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "legacy-state"
+    state.mkdir(mode=0o755)
+    database = state / "idempotency.sqlite"
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "CREATE TABLE mutations (key TEXT PRIMARY KEY, digest TEXT NOT NULL, "
+            "state TEXT NOT NULL, result BLOB, updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO mutations VALUES (?, ?, 'completed', ?, 1.0)",
+            ("legacy", "digest", sqlite3.Binary(__import__("pickle").dumps({"kept": True}))),
+        )
+    state.chmod(0o755)
+    database.chmod(0o644)
+    real_connect = writer_lease_module.sqlite3.connect
+
+    def secure_connect(path: object, *args: object, **kwargs: object) -> sqlite3.Connection:
+        if Path(path) == database:
+            assert stat.S_IMODE(database.stat().st_mode) == 0o600
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(writer_lease_module.sqlite3, "connect", secure_connect)
+    store = IdempotencyStore(database)
+
+    assert store.run("legacy", "digest", lambda: pytest.fail("legacy replay lost")) == {
+        "kept": True
+    }
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert stat.S_IMODE(database.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_legacy_owner_lock_is_hardened_with_runtime_state(tmp_path: Path) -> None:
+    state = tmp_path / "legacy-lock-state"
+    owners = state / "idempotency-owners"
+    owners.mkdir(parents=True, mode=0o755)
+    lock = owners / "legacy.lock"
+    lock.write_bytes(b"")
+    state.chmod(0o755)
+    owners.chmod(0o755)
+    lock.chmod(0o644)
+
+    IdempotencyStore(state / "idempotency.sqlite")
+
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+class _EnvelopeProtector:
+    """Portable stand-in for the Windows DPAPI boundary."""
+
+    provider = 1
+
+    def __init__(self) -> None:
+        self.protect_calls: list[tuple[bytes, bytes]] = []
+        self.unprotect_calls: list[tuple[bytes, bytes]] = []
+        self._values: dict[bytes, tuple[bytes, bytes]] = {}
+
+    def protect(self, secret: bytes, entropy: bytes) -> bytes:
+        self.protect_calls.append((secret, entropy))
+        ciphertext = b"protected:" + len(self._values).to_bytes(2, "big") + secret[::-1]
+        self._values[ciphertext] = (secret, entropy)
+        return ciphertext
+
+    def unprotect(self, ciphertext: bytes, entropy: bytes) -> bytes:
+        self.unprotect_calls.append((ciphertext, entropy))
+        return self._values[ciphertext][0] if self._values[ciphertext][1] == entropy else b""
+
+
+class _FixedCiphertextProtector:
+    provider = 1
+
+    def __init__(self, ciphertext: bytes) -> None:
+        self.ciphertext = ciphertext
+
+    def protect(self, _secret: bytes, _entropy: bytes) -> bytes:
+        return self.ciphertext
+
+
+def test_protected_attempt_secret_never_writes_plaintext_to_sqlite(tmp_path: Path) -> None:
+    protector = _EnvelopeProtector()
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=protector)
+    digest = "a" * 64
+
+    assert store._claim_or_inspect("protected", digest, None) == ("owner", None)
+    attempt = store._attempts["protected"]
+    with sqlite3.connect(store.path) as connection:
+        stored = connection.execute(
+            "SELECT commit_secret FROM mutations WHERE key = 'protected'"
+        ).fetchone()[0]
+
+    assert stored != attempt.commit_secret
+    assert stored.startswith(writer_lease_module._WINDOWS_SECRET_ENVELOPE_MAGIC)
+    assert store._read_exact_evidence(
+        lambda _digest, _attempt_id, _token, secret: secret == attempt.commit_secret,
+        digest,
+        writer_lease_module._ExecutionAttempt(
+            attempt.attempt_id, attempt.commit_token, stored, None
+        ),
+    ) is True
+    assert len(protector.protect_calls) == len(protector.unprotect_calls) == 1
+    assert protector.protect_calls[0][1] == (
+        b"exomem-graph-commit-receipt-dpapi:v1\0"
+        + attempt.attempt_id.encode("utf-8")
+        + b"\0"
+        + attempt.commit_token.encode("utf-8")
+    )
+    assert protector.unprotect_calls[0][1] == protector.protect_calls[0][1]
+
+
+def test_protected_attempt_secret_envelope_caps_total_blob_at_4096_bytes(tmp_path: Path) -> None:
+    attempt = writer_lease_module._ExecutionAttempt("a" * 24, "b" * 24, b"s" * 32, None)
+    digest = "d" * 64
+    accepted = IdempotencyStore(
+        tmp_path / "accepted.sqlite", secret_protector=_FixedCiphertextProtector(b"x" * 4086)
+    )
+
+    envelope = accepted._stored_commit_secret(digest, attempt)
+
+    assert len(envelope) == 4096
+    assert envelope[:4] == writer_lease_module._WINDOWS_SECRET_ENVELOPE_MAGIC
+    assert envelope[4:6] == b"\x01\x01"
+    assert int.from_bytes(envelope[6:10], "big") == 4086
+    assert envelope[10:] == b"x" * 4086
+
+    rejected = IdempotencyStore(
+        tmp_path / "rejected.sqlite", secret_protector=_FixedCiphertextProtector(b"x" * 4087)
+    )
+    with pytest.raises(RuntimeError, match="invalid ciphertext"):
+        rejected._stored_commit_secret(digest, attempt)
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        b"EXID\x02\x01" + (1).to_bytes(4, "big") + b"x",
+        b"EXID\x01\x02" + (1).to_bytes(4, "big") + b"x",
+        b"EXID\x01\x01" + (2).to_bytes(4, "big") + b"x",
+        b"EXID\x01\x01" + (1).to_bytes(4, "big") + b"xy",
+        b"EXID\x01\x01" + (4087).to_bytes(4, "big") + b"x" * 4087,
+    ],
+)
+def test_protected_attempt_secret_rejects_non_exact_envelopes(
+    tmp_path: Path, stored: bytes
+) -> None:
+    protector = _EnvelopeProtector()
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=protector)
+    attempt = writer_lease_module._ExecutionAttempt("a" * 24, "b" * 24, stored, None)
+
+    assert store._unprotected_commit_secret("e" * 64, attempt) is None
+    assert protector.unprotect_calls == []
+
+
+@pytest.mark.parametrize("replacement", [b"x" * 32, b"", b"EXID\x01\x01\x00\x00\x00\x20x"])
+def test_malformed_or_legacy_protected_attempt_secret_fails_closed(
+    tmp_path: Path, replacement: bytes
+) -> None:
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=_EnvelopeProtector())
+    digest = "b" * 64
+    assert store._claim_or_inspect("protected", digest, None) == ("owner", None)
+    attempt = store._attempts["protected"]
+
+    assert store._read_exact_evidence(
+        lambda *_args: pytest.fail("invalid secret reached receipt verification"),
+        digest,
+        writer_lease_module._ExecutionAttempt(
+            attempt.attempt_id, attempt.commit_token, replacement, None
+        ),
+    ) is None
+
+
+def test_protected_attempt_secret_binds_the_attempt_identity(tmp_path: Path) -> None:
+    protector = _EnvelopeProtector()
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=protector)
+    digest = "c" * 64
+    assert store._claim_or_inspect("one", digest, None) == ("owner", None)
+    assert store._claim_or_inspect("two", digest, None) == ("owner", None)
+    one = store._attempts["one"]
+    two = store._attempts["two"]
+    with sqlite3.connect(store.path) as connection:
+        stored_one = connection.execute("SELECT commit_secret FROM mutations WHERE key = 'one'").fetchone()[0]
+        stored_two = connection.execute("SELECT commit_secret FROM mutations WHERE key = 'two'").fetchone()[0]
+
+    assert protector.protect_calls[0][1] != protector.protect_calls[1][1]
+    assert store._read_exact_evidence(
+        lambda *_args: pytest.fail("swapped envelope reached receipt verification"),
+        digest,
+        writer_lease_module._ExecutionAttempt(two.attempt_id, two.commit_token, stored_one, None),
+    ) is None
+    assert store._read_exact_evidence(
+        lambda _digest, _attempt_id, _token, secret: secret == one.commit_secret,
+        digest,
+        writer_lease_module._ExecutionAttempt(one.attempt_id, one.commit_token, stored_one, None),
+    ) is True
+    assert stored_one != stored_two
+
+
+def test_protection_failure_refuses_before_creating_an_execution_row(tmp_path: Path) -> None:
+    class BrokenProtector:
+        provider = 1
+
+        def protect(self, _secret: bytes, _entropy: bytes) -> bytes:
+            raise OSError("DPAPI unavailable")
+
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=BrokenProtector())
+
+    with pytest.raises(OpError) as error:
+        store.run("unprotected", "d" * 64, lambda: pytest.fail("leaf ran"))
+    assert error.value.code == "IDEMPOTENCY_SECRET_PROTECTION_UNAVAILABLE"
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM mutations").fetchone() == (0,)
+
+
+def test_legacy_raw_attempt_secret_never_heals_a_dead_execution(tmp_path: Path) -> None:
+    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=_EnvelopeProtector())
+    digest = "e" * 64
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, updated_at, owner, attempt_id, commit_token, commit_secret) "
+            "VALUES (?, ?, 'executing', ?, ?, ?, ?, ?)",
+            (
+                "legacy-raw", digest, 0.0, "dead-owner", "a" * 24, "b" * 24, b"x" * 32,
+            ),
+        )
+
+    with pytest.raises(OpError) as error:
+        store.run(
+            "legacy-raw", digest, lambda: pytest.fail("legacy raw row replayed"),
+            commit_evidence=lambda *_args: pytest.fail("legacy raw row verified"),
+        )
+    assert error.value.code == "MUTATION_OUTCOME_UNKNOWN"
+
+
+def test_windows_runtime_dacl_parser_rejects_a_broadened_or_unprotected_namespace() -> None:
+    from exomem.mutation_lock import _windows_private_dacl_is_valid
+
+    sid = "S-1-5-21-1-2-3-4"
+    protected = f"D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    inherited_file = f"D:(A;ID;FA;;;{sid})(A;ID;FA;;;SY)(A;ID;FA;;;BA)"
+
+    assert _windows_private_dacl_is_valid(protected, sid, directory=True)
+    assert _windows_private_dacl_is_valid(inherited_file, sid, directory=False)
+    assert not _windows_private_dacl_is_valid(
+        protected + "(A;OICI;FA;;;WD)", sid, directory=True
+    )
+    assert not _windows_private_dacl_is_valid(
+        protected.removeprefix("D:P").join(("D:", "")), sid, directory=True
+    )
+
+
+def test_windows_runtime_validation_closes_every_non_reparse_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import mutation_lock
+
+    database = tmp_path / "idempotency.sqlite"
+    database.write_bytes(b"sqlite")
+    closed: list[int] = []
+    sid = "S-1-5-21-1-2-3-4"
+    monkeypatch.setattr(mutation_lock, "_windows_open_path", lambda _path, *, directory: 10)
+    monkeypatch.setattr(mutation_lock, "_windows_close_handle", closed.append)
+    monkeypatch.setattr(
+        mutation_lock,
+        "_windows_dacl_sddl",
+        lambda _path: f"D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+    )
+
+    mutation_lock._validate_windows_runtime_entry(
+        database, directory=False, sid=sid
+    )
+
+    assert closed == [10]
+
+
+def test_windows_runtime_validation_walks_and_closes_every_ancestor_before_sqlite_leaf(
+    tmp_path: Path,
+) -> None:
+    """The Windows path walk is injectable, so this guards it off Windows too."""
+    from exomem import mutation_lock
+
+    opened: list[Path] = []
+    closed: list[int] = []
+    next_handle = iter(range(100, 200))
+
+    def open_path(path: Path, *, directory: bool) -> int:
+        del directory
+        opened.append(path)
+        if path.name == "runtime":
+            raise OSError("reparse points are not allowed")
+        return next(next_handle)
+
+    with pytest.raises(OSError, match="reparse"):
+        mutation_lock._acquire_windows_secure_directory(
+            tmp_path / "runtime" / "state",
+            create=False,
+            mode=0o700,
+            open_path=open_path,
+            close_handle=closed.append,
+        )
+
+    assert any(path.name == "runtime" for path in opened)
+    assert closed == list(reversed(range(100, 100 + len(closed))))
 
 
 def _committed_error(tmp_path: Path, *, targets: tuple[str, ...] = ("note.md",)):
@@ -141,6 +549,33 @@ def test_default_manager_uses_configured_mutation_timeout(
         manager = writer_lease_module.get_manager()
         assert manager.config.mutation_timeout_seconds == 8.0
         assert manager._mutation_timeout_seconds == 8.0
+    finally:
+        reset_managers_for_tests()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_default_manager_hardens_legacy_configured_state_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Released default-manager state upgrades before its idempotency DB is opened."""
+    state = tmp_path / "legacy-default-state"
+    state.mkdir(mode=0o755)
+    safe_name = __import__("hashlib").sha256(b"standalone\0standalone").hexdigest()[:20]
+    database = state / f"idempotency-{safe_name}.sqlite"
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "CREATE TABLE mutations (key TEXT PRIMARY KEY, digest TEXT NOT NULL, "
+            "state TEXT NOT NULL, result BLOB, updated_at REAL NOT NULL)"
+        )
+    state.chmod(0o755)
+    database.chmod(0o644)
+    reset_managers_for_tests()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(state))
+    try:
+        manager = writer_lease_module.get_manager()
+        assert manager.idempotency.path == database
+        assert stat.S_IMODE(state.stat().st_mode) == 0o700
+        assert stat.S_IMODE(database.stat().st_mode) == 0o600
     finally:
         reset_managers_for_tests()
 
@@ -1137,13 +1572,15 @@ def test_identical_inflight_retry_waits_for_original_terminal_result(
     pending_seen = threading.Event()
     calls: list[int] = []
     outcomes: dict[str, object] = {}
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
     manager = LeaseManager(
         LeaseConfig(state_dir=tmp_path),
         mutation_timeout_seconds=0,
         idempotency_wait_seconds=2,
     )
 
-    def leaf(value: int) -> dict[str, object]:
+    def leaf(_vault: Path, value: int) -> dict[str, object]:
         calls.append(value)
         leaf_started.set()
         assert release_leaf.wait(timeout=2)
@@ -1162,7 +1599,7 @@ def test_identical_inflight_retry_waits_for_original_terminal_result(
         try:
             outcomes[name] = manager.invoke(
                 command,
-                (),
+                (vault,),
                 {"value": 1},
                 implicit_idempotency_scope="principal:alice",
             )
@@ -1345,12 +1782,10 @@ def test_pending_row_with_dead_owner_becomes_abandoned(tmp_path: Path) -> None:
     assert outcome_unknown.value.code == "MUTATION_OUTCOME_UNKNOWN"
 
 
-def test_identical_retry_executes_fresh_after_abandonment_grace_period(
+def test_identical_retry_never_replays_an_outcome_unknown_execution(
     tmp_path: Path,
 ) -> None:
-    """After a `pending` row is abandoned, an identical retry made at least
-    `_IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS` later executes fresh rather
-    than replaying `MUTATION_OUTCOME_UNKNOWN` forever."""
+    """An unprovable execution stays fail-closed after its owner dies."""
     clock = Clock()
     manager = LeaseManager(
         LeaseConfig(state_dir=tmp_path),
@@ -1388,15 +1823,16 @@ def test_identical_retry_executes_fresh_after_abandonment_grace_period(
     assert calls == []
 
     clock.value += writer_lease_module._IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS + 1
-    result = manager.invoke(
-        command,
-        (),
-        {},
-        idempotency_key="pending",
-        idempotency_principal_scope="principal:alice",
-    )
-    assert result == "fresh-result"
-    assert calls == ["ran"]
+    with pytest.raises(OpError) as repeated:
+        manager.invoke(
+            command,
+            (),
+            {},
+            idempotency_key="pending",
+            idempotency_principal_scope="principal:alice",
+        )
+    assert repeated.value.code == "MUTATION_OUTCOME_UNKNOWN"
+    assert calls == []
 
 
 def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
@@ -1506,7 +1942,10 @@ def test_postcommit_error_cannot_escape_as_precommit_retryable(tmp_path: Path) -
         raise OpError("MUTATION_BUSY", "misleading post-commit error")
 
     command = _command(writes=True, leaf=commits_then_misreports)
-    for _ in range(2):
+    for expected_code in (
+        "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
+        "MUTATION_OUTCOME_UNKNOWN",
+    ):
         with pytest.raises(OpError) as uncertain:
             manager.invoke(
                 command,
@@ -1515,10 +1954,10 @@ def test_postcommit_error_cannot_escape_as_precommit_retryable(tmp_path: Path) -
                 idempotency_key="postcommit-error",
                 idempotency_principal_scope="principal:alice",
             )
-        assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+        assert uncertain.value.code == expected_code
         payload = error_dict(uncertain.value)
-        assert payload["status"] == "committed"
-        assert payload["committed"] is True
+        assert payload["status"] == ("committed" if expected_code.startswith("MUTATION_COMMITTED") else "uncertain")
+        assert payload["committed"] is (True if expected_code.startswith("MUTATION_COMMITTED") else None)
 
     assert target.read_text(encoding="utf-8") == "committed\n"
     assert calls == 1
@@ -1557,29 +1996,45 @@ def test_completed_result_receipt_failure_is_committed_uncertain(
         batch_atomic_write([PlannedWrite(target, "committed\n")], vault_root=vault)
         return {"committed": True}
 
-    def fail_terminal_receipt(*_args, **_kwargs) -> None:
-        raise sqlite3.OperationalError("deterministic receipt write failure")
+    original_persist = manager.idempotency._persist_completed_from_canonical
+    failed = False
 
-    monkeypatch.setattr(manager.idempotency, "_persist_completed", fail_terminal_receipt)
+    def fail_terminal_receipt(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise sqlite3.OperationalError("deterministic receipt write failure")
+        return original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(
+        manager.idempotency, "_persist_completed_from_canonical", fail_terminal_receipt
+    )
     command = _command(writes=True, leaf=commit)
 
-    for _ in range(2):
-        with pytest.raises(OpError) as uncertain:
-            manager.invoke(
-                command,
-                (tmp_path,),
-                {},
-                idempotency_key="receipt-failure",
-                idempotency_principal_scope="principal:alice",
-            )
-        assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
-        assert error_dict(uncertain.value)["committed"] is True
+    with pytest.raises(OpError) as uncertain:
+        manager.invoke(
+            command,
+            (tmp_path,),
+            {},
+            idempotency_key="receipt-failure",
+            idempotency_principal_scope="principal:alice",
+        )
+    assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+    assert error_dict(uncertain.value)["committed"] is True
+    replay = manager.invoke(
+        command,
+        (tmp_path,),
+        {},
+        idempotency_key="receipt-failure",
+        idempotency_principal_scope="principal:alice",
+    )
+    assert replay["status"] == "committed"
 
     assert target.read_text(encoding="utf-8") == "committed\n"
     assert calls == 1
 
 
-def test_uncommitted_result_receipt_failure_does_not_claim_commit(
+def test_uncommitted_result_is_completed_without_a_graph_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = 0
@@ -1590,22 +2045,14 @@ def test_uncommitted_result_receipt_failure_does_not_claim_commit(
         calls += 1
         return {"validate_only": True, "committed": False}
 
-    def fail_terminal_receipt(*_args, **_kwargs) -> None:
-        raise sqlite3.OperationalError("deterministic receipt write failure")
-
-    monkeypatch.setattr(manager.idempotency, "_persist_completed", fail_terminal_receipt)
     command = _command(writes=True, leaf=validate_only)
 
-    for _ in range(2):
-        with pytest.raises(OpError) as pending:
-            manager.invoke(
-                command,
-                (),
-                {},
-                idempotency_key="validate-receipt-failure",
-            )
-        assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
-        assert error_dict(pending.value)["committed"] is None
+    assert manager.invoke(
+        command, (), {}, idempotency_key="validate-receipt-failure"
+    ) == {"validate_only": True, "committed": False}
+    assert manager.invoke(
+        command, (), {}, idempotency_key="validate-receipt-failure"
+    ) == {"validate_only": True, "committed": False}
 
     assert calls == 1
 
@@ -1899,7 +2346,7 @@ def test_committed_failure_persists_only_sanitized_public_json(tmp_path: Path) -
         manager.invoke(command, (), {}, idempotency_key="sanitized")
 
     _digest, state, stored = _row(manager, "sanitized")
-    assert state == "committed_failure"
+    assert state == "completed"
     assert json.loads(stored.decode("utf-8")) == original.as_public_dict()
     for secret in (
         str(tmp_path).encode(),
@@ -2148,7 +2595,7 @@ def test_corrupt_implicit_committed_failure_timestamp_fails_closed_without_reinv
         manager.invoke(command, (), {}, **marker)
     with sqlite3.connect(manager.idempotency.path) as connection:
         connection.execute(
-            "UPDATE mutations SET updated_at = 'corrupt' WHERE state = 'committed_failure'"
+            "UPDATE mutations SET updated_at = 'corrupt' WHERE state = 'completed'"
         )
 
     with pytest.raises(OpError) as blocked:
@@ -2186,7 +2633,7 @@ def test_expired_corrupt_implicit_committed_failure_payload_fails_closed_without
         manager.invoke(command, (), {}, **marker)
     with sqlite3.connect(manager.idempotency.path) as connection:
         connection.execute(
-            "UPDATE mutations SET result = ? WHERE state = 'committed_failure'",
+            "UPDATE mutations SET result = ? WHERE state = 'completed'",
             (b"not-json",),
         )
 
@@ -2199,7 +2646,7 @@ def test_expired_corrupt_implicit_committed_failure_payload_fails_closed_without
 
 
 @pytest.mark.parametrize("failure_point", ["serialize", "update"])
-def test_committed_marker_storage_failure_keeps_pending_and_blocks_retry(
+def test_committed_marker_storage_failure_keeps_execution_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure_point: str,
@@ -2224,7 +2671,7 @@ def test_committed_marker_storage_failure_keeps_pending_and_blocks_retry(
         with sqlite3.connect(manager.idempotency.path) as connection:
             connection.execute(
                 "CREATE TRIGGER fail_committed_update "
-                "BEFORE UPDATE ON mutations WHEN NEW.state = 'committed_failure' "
+                "BEFORE UPDATE ON mutations WHEN NEW.state = 'completed' "
                 "BEGIN SELECT RAISE(FAIL, 'private sqlite detail'); END"
             )
 
@@ -2234,12 +2681,12 @@ def test_committed_marker_storage_failure_keeps_pending_and_blocks_retry(
     assert first.value.__cause__ is not None
     assert "private" not in str(first.value)
     _digest, state, stored = _row(manager, "storage-failure")
-    assert state == "pending"
+    assert state == "executing"
     assert stored is None
 
     with pytest.raises(OpError) as blocked:
         manager.invoke(command, (), {}, idempotency_key="storage-failure")
-    assert blocked.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+    assert blocked.value.code == "MUTATION_OUTCOME_UNKNOWN"
     assert calls == 1
 
 
@@ -2267,7 +2714,7 @@ def test_explicit_idempotency_blocks_orphaned_pending_after_process_abort(
     )
     with pytest.raises(OpError) as blocked:
         manager.invoke(recovered, (), {}, idempotency_key="request-after-crash")
-    assert blocked.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+    assert blocked.value.code == "MUTATION_OUTCOME_UNKNOWN"
     assert calls == ["aborted"]
 
 

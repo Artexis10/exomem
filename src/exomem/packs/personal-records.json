@@ -5,7 +5,7 @@
   "purpose": "Provide a safe default for everyday records, purchases, travel, home, vehicle, and life-admin knowledge.",
   "audience": "Fresh Exomem users and anyone tracking personal logistics, household records, travel, purchases, or administrative documents.",
   "beginner_description": "Use this as the starter pack for everyday documents, purchases, travel, home, vehicles, and personal admin.",
-  "agent_instructions": "Use this as the default when no stronger domain pack is selected. Route observed purchases, maintenance, mileage, and transactions through record_memory when a Record collection exists; this is guidance only and selecting the pack creates nothing. Save external documents as Sources, preserve proof as Evidence, and compile only durable conclusions, solved problems, and reusable patterns.",
+  "agent_instructions": "Use this as the default when no stronger domain pack is selected. Route observed purchases, maintenance, mileage, and transactions through record_memory when a Record collection exists; use plan_memory only for an explicit household, travel, or life-admin goal, priority, or horizon. This is guidance only and selecting the pack creates nothing. Save external documents as Sources, preserve proof as Evidence, and compile only durable conclusions, solved problems, and reusable patterns.",
   "default_note_types": [
     "research-note",
     "insight",

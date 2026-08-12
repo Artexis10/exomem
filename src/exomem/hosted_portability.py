@@ -27,6 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import __version__
+from .kbdir import kb_dirname
 
 MANIFEST_NAME = "exomem-manifest.json"
 MANIFEST_SCHEMA_VERSION = 1
@@ -74,6 +75,18 @@ class _ClassificationRule:
 
 def _is_review_state(path: str, _parts: tuple[str, ...]) -> bool:
     return path == "Knowledge Base/.review-state.json"
+
+
+def _is_graph_commit_receipt(path: str, _parts: tuple[str, ...]) -> bool:
+    """Only the exact hidden receipt artifact is portable derived state.
+
+    Anchoring avoids allowing a similarly named directory to override the
+    normal secret and unregistered-hidden-state fail-closed rules.
+    """
+    return re.fullmatch(
+        rf"{re.escape(kb_dirname())}/\.graph-commit-receipts/[0-9a-f]{{24}}\.json",
+        path,
+    ) is not None
 
 
 def _is_provider_log(_path: str, parts: tuple[str, ...]) -> bool:
@@ -200,6 +213,12 @@ def _always_canonical(_path: str, _parts: tuple[str, ...]) -> bool:
 
 
 _CLASSIFICATION_RULES = (
+    _ClassificationRule(
+        "portable-graph-commit-receipts",
+        ArtifactClass.PORTABLE_DERIVED,
+        "Content-free graph commit receipts retain exact retry evidence across portable vaults.",
+        _is_graph_commit_receipt,
+    ),
     _ClassificationRule(
         "portable-review-state",
         ArtifactClass.PORTABLE_DERIVED,

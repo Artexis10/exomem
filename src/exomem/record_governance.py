@@ -681,13 +681,24 @@ def _resolve_released_collection(
 def query_collection(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
+    *,
+    semantic_profile: str = "records",
     **kwargs: Any,
 ) -> record_formats.RecordQueryResult:
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
         manifest = _resolve_released_collection(root, collection, receipt=True)
-        require_records_profile(manifest)
+        if manifest.semantic_profile != semantic_profile:
+            error_code = (
+                "RECORDS_PROFILE_REQUIRED"
+                if semantic_profile == "records"
+                else "PLANNING_PROFILE_REQUIRED"
+            )
+            raise collections.CollectionError(
+                error_code,
+                "collection profile is not available",
+            )
         if not _authorize(
             root, manifest.storage.source, receipt=True
         ):

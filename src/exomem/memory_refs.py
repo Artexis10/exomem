@@ -485,21 +485,23 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:
     }
 
 
-def upsert_after_write(vault_root: Path, paths: list[Path]) -> None:
+def upsert_after_write(vault_root: Path, paths: list[Path]) -> bool:
     markdown = [path for path in paths if path.suffix.lower() == ".md"]
     if not markdown:
-        return
+        return True
     try:
         ReferenceIndex(vault_root).refresh_paths(markdown)
     except Exception:  # noqa: BLE001 - derived sidecar failure must not break a write
-        return
+        return False
+    return True
 
 
-def delete_after_remove(vault_root: Path, paths: list[str]) -> None:
+def delete_after_remove(vault_root: Path, paths: list[str]) -> bool:
     try:
         ReferenceIndex(vault_root).delete_paths(paths)
     except Exception:  # noqa: BLE001 - derived sidecar failure must not break a delete
-        return
+        return False
+    return True
 
 
 def scan_issues(vault_root: Path) -> list[dict[str, str]]:

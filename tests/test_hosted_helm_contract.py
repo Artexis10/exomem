@@ -426,6 +426,81 @@ def test_platform_renders_real_provisioner_composition() -> None:
     assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
 
 
+def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+
+    service_account = _find(documents, "ServiceAccount", "exomem-init-retry-recovery")
+    assert service_account["automountServiceAccountToken"] is True
+    role = _find(documents, "ClusterRole", "exomem-init-retry-recovery")
+    for rule in role["rules"]:
+        assert set(rule["verbs"]) <= {"get", "list", "watch"}
+        assert "secrets" not in rule["resources"]
+    expected_resources = {
+        ("", "namespaces"),
+        ("", "persistentvolumeclaims"),
+        ("", "persistentvolumes"),
+        ("", "configmaps"),
+        ("apps", "statefulsets"),
+        ("batch", "jobs"),
+        ("traefik.io", "ingressroutes"),
+    }
+    observed_resources = {
+        (rule["apiGroups"][0], resource) for rule in role["rules"] for resource in rule["resources"]
+    }
+    assert observed_resources == expected_resources
+    _find(documents, "ClusterRoleBinding", "exomem-init-retry-recovery")
+    assert not any(
+        document.get("kind") == "Service"
+        and document.get("metadata", {}).get("name") == "exomem-init-retry-recovery"
+        for document in documents
+    )
+    runbook = (ROOT / "docs/runbooks/hosted/cell.md").read_text(encoding="utf-8")
+    assert "exomem-init-retry-recovery" in runbook
+    assert "spec:\n  enableServiceLinks: false\n  serviceAccountName: exomem-init-retry-recovery" in runbook
+    assert 'exomem-provisioner-recover-init-retry "$mode" --stdin < "$recovery_identity"' in runbook
+    assert 'kubectl -n exomem-platform exec -i "$operator_pod" --' in runbook
+    assert "--identity-file" not in runbook
+    assert "another `reopen`" in runbook
+    assert "set -euo pipefail" in runbook
+    assert 'test "$mode" != reopen || :' not in runbook
+    assert "run_recovery preflight\nrun_recovery reopen\nrun_recovery verify-recovery" in runbook
+    assert ".items[0]" not in runbook
+    assert 'test "${#lock_names[@]}" -eq 1' in runbook
+    assert 'helm -n "$helm_release" get manifest "$helm_release"' in runbook
+    assert "sleep 1200" in runbook
+    assert "verify-recovery" in runbook
+    assert "0006_operation_wire_protocol" in runbook
+    assert ".final_proof == true" in runbook
+    assert 'metadata.annotations."exomem.io/deployment-lock-sha256" == $digest' in runbook
+    lock = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))[
+        "provisioner"
+    ]["deploymentLockSha256"]
+    rendered_lock = _find(
+        documents,
+        "ConfigMap",
+        "exomem-hosted-deployment-lock-v2-" + lock[:16],
+    )
+    assert rendered_lock["metadata"]["annotations"]["exomem.io/deployment-lock-sha256"] == lock
+    rendered = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "contract-test",
+            str(PLATFORM),
+            "--namespace",
+            "exomem-platform",
+            "--values",
+            str(PLATFORM / "values.validation.yaml"),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    assert f'exomem.io/deployment-lock-sha256: "{lock}"' in rendered.stdout
+
+
 def test_platform_mounts_the_selected_lock_for_every_lock_consuming_workload() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
@@ -1666,6 +1741,20 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         not in provisioner_scope_text
     )
     assert "NetworkPolicy deletion is reserved for namespace destruction" in provisioner_scope_text
+    action_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-durability-actions-scope")
+    for scope in (provisioner_scope, action_scope):
+        scope_text = json.dumps(scope)
+        assert "size(variables.target.spec.ingress) == 3" in scope_text
+        for index in range(3):
+            assert f"size(variables.target.spec.ingress[{index}].from) == 1" in scope_text
+        assert (
+            "variables.target.spec.ingress[2].from[0].namespaceSelector.matchLabels" in scope_text
+        )
+        assert "variables.target.spec.ingress[2].from[0].podSelector.matchLabels" in scope_text
+        assert "'app.kubernetes.io/name': 'exomem-provisioner-worker'" in scope_text
+        assert "size(variables.target.spec.ingress[2].ports) == 1" in scope_text
+        assert "variables.target.spec.ingress[2].ports[0].protocol == 'TCP'" in scope_text
+        assert "variables.target.spec.ingress[2].ports[0].port == 8765" in scope_text
 
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
     cronjobs = {
@@ -2048,6 +2137,19 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
                         },
                         "podSelector": {
                             "matchLabels": {"app.kubernetes.io/name": "exomem-durability-actions"}
+                        },
+                    }
+                ],
+                "ports": [{"protocol": "TCP", "port": 8765}],
+            },
+            {
+                "from": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "exomem-provisioner-worker"}
                         },
                     }
                 ],

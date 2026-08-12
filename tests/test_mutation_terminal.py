@@ -22,7 +22,6 @@ def test_compact_projection_leads_with_decisive_commit_fields() -> None:
         "warnings": ["review a link"],
         "semantic": {"transition": "verbose"},
     }
-
     terminal = mutation_terminal.committed_terminal(
         raw,
         request_id="11111111-1111-4111-8111-111111111111",
@@ -43,6 +42,27 @@ def test_compact_projection_leads_with_decisive_commit_fields() -> None:
         "warnings_count": 1,
     }
 
+
+def test_compact_terminal_retains_completed_graph_sync_fields() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "graph_sync": "failed",
+            "graph_sync_code": "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+            "graph_sync_checkpoint": "a" * 64,
+            "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    projected = mutation_terminal.project_terminal(terminal)
+
+    assert projected["graph_sync"] == "failed"
+    assert projected["graph_sync_code"] == "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
+    assert projected["graph_sync_checkpoint"] == "a" * 64
+    assert projected["graph_sync_remediation"] == "Run reconcile to recover the derived graph."
 
 def test_full_projection_adds_the_complete_leaf_result_only_under_diagnostics() -> None:
     mutation_terminal = _terminal_module()
@@ -450,11 +470,13 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
         return raw
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     first_request_id = "11111111-1111-4111-8111-111111111111"
     compact = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {"value": 7, "response_detail": "compact"},
         idempotency_key="same-public-key",
         idempotency_principal_scope="principal:one",
@@ -462,7 +484,7 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
     )
     full = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {"value": 7, "response_detail": "full"},
         idempotency_key="same-public-key",
         idempotency_principal_scope="principal:one",
@@ -470,7 +492,7 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
     )
     legacy = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {"value": 7, "response_detail": "legacy"},
         idempotency_key="same-public-key",
         idempotency_principal_scope="principal:one",
@@ -502,12 +524,14 @@ def test_internal_replay_key_is_separate_from_public_terminal_identity(
         return {"path": "Knowledge Base/hosted.md", "warnings": []}
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     internal_key = "hosted:" + "a" * 64
 
     terminal = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {},
         idempotency_key=internal_key,
         public_idempotency_key=public_key,
@@ -575,6 +599,8 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
             raise asyncio.CancelledError
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
         after_terminal_persisted=after_terminal_persisted,
@@ -583,7 +609,7 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
     with pytest.raises(asyncio.CancelledError):
         manager.invoke(
             command,
-            (tmp_path / "vault",),
+            (vault,),
             {"response_detail": "compact"},
             idempotency_key="ack-lost",
             mutation_request_id=first_request_id,
@@ -591,7 +617,7 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
 
     replay = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {"response_detail": "full"},
         idempotency_key="ack-lost",
         mutation_request_id="22222222-2222-4222-8222-222222222222",

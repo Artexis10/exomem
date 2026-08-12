@@ -413,6 +413,17 @@ def test_non_markdown_is_ignored(vault, monkeypatch: pytest.MonkeyPatch) -> None
     assert ups == [] and dels == []
 
 
+def test_observed_access_policy_edit_marks_external_pending(vault: Path) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    policy = vault / "Knowledge Base" / "_access.yaml"
+    policy.write_text("excluded: []\n", encoding="utf-8")
+
+    watcher._record(policy, deleted=False)
+
+    assert freshness.external_pending(vault) is True
+    assert watcher._pending_upsert == set()
+
+
 # ---- Automatic governed-media dispatch (OpenSpec: automatic-media-processing) ----
 
 
@@ -1432,7 +1443,9 @@ def test_reconcile_drift_evicts_resolver_without_checkpoint_leapfrog(
     # Prime the process-shared resolver at the current freshness triple.
     r1 = find_module._get_query_resolver(vault)
 
-    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    # `index` is duplicated below Knowledge Base/; bare-link normalization
+    # deterministically promotes the KB-root path before stem matching.
+    target = vault / "Knowledge Base" / "index.md"
     future = time.time() + 10_000
     os.utime(target, (future, future))
 
