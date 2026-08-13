@@ -12,6 +12,8 @@ A file-ahead critical suffix left by such a refusal SHALL remain eligible for th
 
 Native Windows lifecycle tombstone writes and unlinks plus deletion/recovery source and destination rename barriers SHALL use the same retained, no-follow, write-capable final-directory durability primitive rather than CRT directory opens. A lifecycle directory open, identity, or flush failure SHALL remain fail-closed at the existing checkpoint and SHALL NOT report the tombstone, unlink, deletion, recovery, or rename durable.
 
+When one or more same-principal receipt or mutation-coordinator processes are the first owners of an absent native Windows writer-state root, Exomem SHALL establish the existing protected principal-private runtime DACL before creating any mutation-lock directory or file. The winning creator alone SHALL apply the DACL to the exact directory it created; concurrent same-principal losers SHALL tolerate atomic-create races and wait only a short bounded interval for the winner's DACL to validate. A pre-existing unsafe or different-principal root SHALL be refused with the exact offending path and remediation command, SHALL NOT be repaired implicitly, and SHALL NOT gain a lock artifact. LocalSystem service and normal-user direct CLI processes SHALL use separate writer-state roots.
+
 #### Scenario: Native Windows appends and verifies ordinary evidence
 
 - **WHEN** a governed disclosure appends a receipt in a valid native Windows vault
@@ -67,3 +69,35 @@ Native Windows lifecycle tombstone writes and unlinks plus deletion/recovery sou
 - **WHEN** a lifecycle directory is a reparse point, changes identity, cannot be opened securely, or cannot be flushed
 - **THEN** the operation fails closed with a content-free lifecycle error
 - **AND** no later durability checkpoint is reported
+
+#### Scenario: Receipt-first startup establishes the private runtime
+
+- **WHEN** native Windows appends its first receipt with an absent configured writer-state root
+- **THEN** the protected principal-private DACL is installed before any mutation-lock artifact
+- **AND** the idempotency runtime can subsequently reuse the same valid root
+
+#### Scenario: Concurrent same-principal first use converges
+
+- **WHEN** multiple native Windows processes under the same principal race receipt append and mutation-coordinator lock access against the same absent writer-state root
+- **THEN** one creator establishes the protected private DACL and every process uses that validated root
+- **AND** no process repairs a directory entry it did not create
+- **AND** every append and coordinator operation succeeds under its existing lock contract
+
+#### Scenario: Coordinator-first startup uses the same private root
+
+- **WHEN** a mutation coordinator is the first owner of an absent native Windows writer-state root
+- **THEN** it establishes and validates the same protected private DACL before opening its lock
+- **AND** later receipt and idempotency owners reuse that root successfully
+
+#### Scenario: Receipt-first startup refuses a legacy unsafe runtime
+
+- **WHEN** the configured writer-state root already exists with a non-conforming Windows DACL
+- **THEN** receipt append fails with the exact root path and exact remediation command
+- **AND** the DACL is unchanged
+- **AND** no mutation-lock child is created
+
+#### Scenario: Different principals do not share a private runtime
+
+- **WHEN** a normal-user process is configured with a writer-state root secured for LocalSystem, or the inverse
+- **THEN** validation refuses the exact trustee mismatch without changing the DACL
+- **AND** the operator is directed to use the principal's separate configured state root or exact remediation

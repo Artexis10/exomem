@@ -34,8 +34,16 @@
 - [x] 5.3 Factor the reviewed Windows final-directory flush primitive into the shared secure filesystem substrate and route receipt and lifecycle wrappers through it.
 - [x] 5.4 Run focused lifecycle and receipt Windows tests, then the full governance receipt suite, and classify any next native blocker before claiming completion.
 
-## 6. Verification And Delivery
+## 6. Receipt-First Runtime Bootstrap
 
-- [ ] 6.1 Run strict OpenSpec validation, focused receipt/mutation-lock/governance-overhead tests, focused Ruff, public-artifact validation, and `git diff --check`.
-- [ ] 6.2 Run the full lean suite and separate any pre-existing native Windows failures from regressions introduced by this change.
-- [ ] 6.3 Record the exact Windows test command that the separate CI repair must add before 0.50 release.
+- [ ] 6.1 Add red native Windows tests proving first receipt use secures an absent writer-state root before any lock artifact and subsequent idempotency initialization succeeds.
+- [ ] 6.2 Add a red native Windows test proving a pre-existing unsafe root is unchanged, gains no lock child, and returns the exact-path remediation through the receipt boundary.
+- [ ] 6.3 Harden the shared first-creation initializer for atomic-create races: only the winning creator applies a DACL, while losers use bounded validation-only stabilization and never repair an observed entry.
+- [ ] 6.4 Route both receipt-first and mutation-coordinator-first Windows lock initialization through that shared initializer while preserving the POSIX lock paths.
+- [ ] 6.5 Run real same-principal multiprocess first-use races from an absent root on Windows: receipt-versus-receipt and receipt-versus-coordinator; require every process to succeed, prove no lock artifact precedes validation, and prove the final root DACL is valid without fixture-created state.
+
+## 7. Verification And Delivery
+
+- [ ] 7.1 Run strict OpenSpec validation, focused receipt/mutation-lock/governance-overhead tests, focused Ruff, public-artifact validation, and `git diff --check`.
+- [ ] 7.2 Run the full lean suite and separate any pre-existing native Windows failures from regressions introduced by this change.
+- [ ] 7.3 Record the exact Windows test command that the separate CI repair must add before 0.50 release.

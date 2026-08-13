@@ -19,7 +19,7 @@ The repository already has two relevant primitives: retained non-reparse Windows
 - Changing receipt JSON, hashing, sequencing, month rotation, or SQLite schema.
 - Moving evidence authority into SQLite.
 - Weakening a durability failure into a warning or best-effort success.
-- Adding dependencies, changing the disclosure ladder, or repairing DACLs.
+- Adding dependencies, changing the disclosure ladder, or repairing pre-existing DACLs.
 
 ## Decisions
 
@@ -44,6 +44,12 @@ Alternative rejected: skip directory fsync on Windows. That would advance the re
 Every open, identity, or flush error remains a content-free `ReceiptError`. A critical JSONL record may be ahead of the durable sidecar after a refusal; an exact-ID retry or verified reconcile must re-establish the file and directory barriers before promotion. Neither path allocates or appends a duplicate event.
 
 Alternative rejected: catch `PermissionError` and commit the sidecar anyway. That converts an unsupported primitive into false durability.
+
+### Bootstrap the writer-state DACL before receipt locking
+
+Receipt append and `VaultMutationCoordinator` lock access can each be the first process to touch the configured writer-state root. On native Windows every creator will invoke one shared private-root bootstrap before constructing or creating a mutation-lock path. If the root is absent, the winning creator establishes the existing protected principal-private DACL before any lock artifact exists. Concurrent same-principal losers tolerate an atomic-create race, reopen the winner's directory, and use a short bounded validation-only stabilization retry while the winner applies that DACL. A process applies permissions only to the exact directory entry it created; it never repairs an entry merely observed after `FileExistsError`. If the root was already present with an unsafe or different-principal DACL, both lock paths preserve the no-implicit-repair policy and return the existing actionable exact-path refusal without creating a lock child. LocalSystem service and normal-user direct CLI processes therefore continue to require separate writer-state roots. POSIX lock creation remains unchanged.
+
+Alternative rejected: make receipt-first bootstrap sequential-only. Native first use fans out across processes, and a loser can otherwise fail on `FileExistsError` or inspect the winner's directory before its DACL is installed.
 
 ### Keep CI workflow ownership separate
 
