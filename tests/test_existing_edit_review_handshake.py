@@ -109,20 +109,29 @@ def test_frontmatterless_body_operations_validate_and_commit_exact_bytes(
 
 
 @pytest.mark.parametrize(
-    "operation",
+    ("operation", "code"),
     [
-        {"kind": "replace_tags", "tags": ["template"]},
-        {"kind": "patch_frontmatter", "field": "status", "value": "active"},
-        {"kind": "fill_row", "row_key": "Template", "take": "Useful."},
-        {
-            "kind": "replace_body",
-            "new_body": "# Template\n\nAfter.\n",
-            "tags": ["template"],
-        },
+        ({"kind": "replace_tags", "tags": ["template"]}, "FRONTMATTER_REQUIRED"),
+        (
+            {"kind": "patch_frontmatter", "field": "status", "value": "active"},
+            "FRONTMATTER_REQUIRED",
+        ),
+        (
+            {"kind": "fill_row", "row_key": "Template", "take": "Useful."},
+            "FRONTMATTER_REQUIRED",
+        ),
+        (
+            {
+                "kind": "replace_body",
+                "new_body": "# Template\n\nAfter.\n",
+                "tags": ["template"],
+            },
+            "FRONTMATTER_REQUIRED",
+        ),
     ],
 )
 def test_frontmatter_operations_refuse_resolved_frontmatterless_paths(
-    tmp_path: Path, operation: dict
+    tmp_path: Path, operation: dict, code: str
 ) -> None:
     relative = "Knowledge Base/Templates/ordinary-template.md"
     source = "# Template\n"
@@ -136,6 +145,7 @@ def test_frontmatter_operations_refuse_resolved_frontmatterless_paths(
             operation=operation,
         )
 
+    assert str(exc.value).startswith(f"{code}:")
     assert "(missing: ['path'])" not in str(exc.value)
     assert page.read_text(encoding="utf-8") == source
 
