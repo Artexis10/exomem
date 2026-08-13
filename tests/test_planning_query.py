@@ -102,6 +102,60 @@ def test_planning_query_returns_bounded_descendant_edges(tmp_path: Path) -> None
     assert result["hierarchy"]["edges"] == [{"parent": outcome_id, "child": initiative_id}]
 
 
+def test_planning_query_returns_only_ancestor_edges_from_a_work_item(tmp_path: Path) -> None:
+    from exomem.planning import add, create_collection, query
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    manifest_path = "Knowledge Base/Planning/Work/_collection.md"
+    create_collection(tmp_path, manifest_path, _manifest(), why="create planning collection")
+    outcome_id = "991acdd4-16b9-4396-8220-2cb37b7e8516"
+    initiative_id = "d9e3e787-3799-4e52-9f66-aef6f6075d28"
+    work_item_id = "ae83f23c-3882-4ed1-80cb-ff9024b39f5e"
+    add(
+        tmp_path,
+        manifest_path,
+        item={"title": "Desired outcome", "kind": "outcome"},
+        plan_id=outcome_id,
+        why="capture outcome",
+    )
+    add(
+        tmp_path,
+        manifest_path,
+        item={
+            "title": "Initiative",
+            "kind": "initiative",
+            "parent": f"exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/{outcome_id}",
+        },
+        plan_id=initiative_id,
+        why="capture initiative",
+    )
+    add(
+        tmp_path,
+        manifest_path,
+        item={
+            "title": "Work item",
+            "parent": f"exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/{initiative_id}",
+        },
+        plan_id=work_item_id,
+        why="capture work item",
+    )
+
+    result = query(
+        tmp_path,
+        manifest_path,
+        filters=[{"column": "plan_id", "op": "eq", "value": work_item_id}],
+        hierarchy_mode="ancestors",
+    )
+
+    assert result["hierarchy"]["roots"] == [work_item_id]
+    assert result["hierarchy"]["edges"] == [
+        {"parent": initiative_id, "child": work_item_id},
+        {"parent": outcome_id, "child": initiative_id},
+    ]
+    assert {"parent": initiative_id, "child": outcome_id} not in result["hierarchy"]["edges"]
+
+
 def test_planning_saved_views_refuse_conflicting_filters_or_lifecycle(tmp_path: Path) -> None:
     from exomem.planning import add, create_collection, query
 
