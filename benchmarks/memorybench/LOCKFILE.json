@@ -47,7 +47,7 @@
     },
     "src/providers/basic-memory/test_sidecar.py": {
       "source": "providers/basic-memory/test_sidecar.py",
-      "sha256": "4d42a9f33686b31ec6e672313c2ae4044de18af361f6729aa03931d300a39476"
+      "sha256": "2144cb0220729936ae882cf2e0876a18dc21362832990f8963b14cb241307310"
     }
   },
   "registration_patch_sha256": "2c080c2872f81e7e5a9fb05513b02db76cfcbc76e57fb255fe0192491f2289bc",
