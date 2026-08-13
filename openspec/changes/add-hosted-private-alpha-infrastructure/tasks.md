@@ -125,6 +125,10 @@
 - [x] 14.3 Add failing tenant-destroy tests covering active/orphan compute, retained volumes, routes, credentials, exports, backups, provider rediscovery, and seven-day pending retention.
 - [x] 14.4 Implement immediate online revocation/destruction, non-attempt-consuming retained waiting, tenant-ledger-driven exact-version and associated-marker removal after the maximum durable/live lock expiry without governance bypass, explicit-page-size exact-key checks with hard page/item/cursor bounds and sibling stop, crash-safe provider-absence/key-erasure proof with a final ledger re-read, durable plaintext-delivery deletion, and a credential-free dispatcher that atomically binds one eligible operation to the exact admission-locked short-lived Job identity before launch and resumes only that claim, plus all four exact final booleans.
 
+## Recovery-fence correction
+
+- [x] Permit final provider-proved equal-fence DISCARD release only for the exact tenant/cell deterministic candidate reserved by the same external provider operation; retain rollback for equal DESTROY, unrelated equal DISCARD, and newer reservations.
+
 ## 15. Add secret handoff, observability, and runbooks
 
 - [x] 15.1 Add a non-printing SOPS/Terraform secret handoff command with an enforced destination/version matrix—Access to Vercel only, Tunnel to K3s only, `EXOMEM_HOSTED_SCHEDULER_SECRET` to the three Exomem hosted Vercel handlers and K3s scheduler only, global `CRON_SECRET` never to K3s, shared application secrets only to named peers—and fixtures that scan output/files/history for plaintext.

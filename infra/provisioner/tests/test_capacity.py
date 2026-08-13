@@ -922,6 +922,232 @@ async def test_malformed_proof_retains_and_equal_fence_release_rolls_back_comple
 
 
 @pytest.mark.asyncio
+async def test_same_logical_candidate_discard_at_equal_fence_releases_atomically(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, authority = capacity_context
+    provision, worker, reservation = await _reserve(
+        repository,
+        authority,
+        operation="op-A",
+        tenant="tenant-equal-discard",
+        cell="cell-equal-discard",
+        fence=7,
+    )
+    await repository.mark_pending(
+        provision.id,
+        worker,
+        claim_token=provision.claim_token or "",
+        claim_generation=provision.claim_generation,
+        checkpoint="namespace-ready",
+        retry_after_seconds=300,
+        now=NOW,
+    )
+    discard = await repository.submit(
+        "discard",
+        "discard-equal-op-a",
+        _request(
+            operation="op-A",
+            tenant="tenant-equal-discard",
+            cell="cell-equal-discard",
+            fence=7,
+        ),
+    )
+    claimed = await repository.claim_next(
+        "discard-equal-op-a-worker",
+        now=NOW,
+        allowed_actions=frozenset({OperationAction.DISCARD}),
+    )
+    assert claimed is not None and claimed.id == discard.id and claimed.claim_token
+    completed = await repository.complete(
+        claimed.id,
+        {"computeDestroyed": True, "storageDestroyed": True, "keysDestroyed": True},
+        worker_id="discard-equal-op-a-worker",
+        claim_token=claimed.claim_token,
+        claim_generation=claimed.claim_generation,
+        now=NOW,
+    )
+    assert completed.state.name == "FINAL"
+
+    async with database.session_factory() as session:
+        released = await session.get(CapacityReservation, reservation.id)
+        fences = list(await session.scalars(select(CapacityDestructiveFence)))
+        ledger = await session.get(CapacityLedger, 1)
+        assert released is not None and released.released_at is not None
+        assert released.releasing_operation_id == discard.id
+        assert released.releasing_provider_operation_id == "op-A"
+        assert released.releasing_fence_generation == 7
+        assert len(fences) == 1
+        fence = fences[0]
+        assert (
+            fence.tenant_id,
+            fence.cell_id,
+            fence.release_reason.value,
+            fence.provider_operation_id,
+            fence.fence_generation,
+        ) == ("tenant-equal-discard", "cell-equal-discard", "DISCARD", "op-A", 7)
+        assert ledger is not None and ledger.revision == 2
+
+    later, later_worker = await _claimed(
+        repository,
+        operation="op-A-later",
+        tenant="tenant-equal-discard",
+        cell="cell-equal-discard",
+        fence=7,
+    )
+    observation = _observation()
+    with pytest.raises(CapacityConflict):
+        await authority.reserve(
+            later,
+            _request(
+                operation="op-A-later",
+                tenant="tenant-equal-discard",
+                cell="cell-equal-discard",
+                fence=7,
+            ),
+            receipt=_receipt(observation),
+            observation=observation,
+            worker_id=later_worker,
+            claim_token=later.claim_token or "",
+            claim_generation=later.claim_generation,
+            now=NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_unrelated_equal_fence_discard_rolls_back_completion(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, authority = capacity_context
+    provision, worker, reservation = await _reserve(
+        repository,
+        authority,
+        operation="op-A",
+        tenant="tenant-unrelated-discard",
+        cell="cell-unrelated-discard",
+        fence=7,
+    )
+    await repository.mark_pending(
+        provision.id,
+        worker,
+        claim_token=provision.claim_token or "",
+        claim_generation=provision.claim_generation,
+        checkpoint="namespace-ready",
+        retry_after_seconds=300,
+        now=NOW,
+    )
+    discard = await repository.submit(
+        "discard",
+        "discard-equal-op-b",
+        _request(
+            operation="op-B",
+            tenant="tenant-unrelated-discard",
+            cell="cell-unrelated-discard",
+            fence=7,
+        ),
+    )
+    claimed = await repository.claim_next(
+        "discard-equal-op-b-worker",
+        now=NOW,
+        allowed_actions=frozenset({OperationAction.DISCARD}),
+    )
+    assert claimed is not None and claimed.id == discard.id and claimed.claim_token
+    with pytest.raises(StaleFence):
+        await repository.complete(
+            claimed.id,
+            {"computeDestroyed": True, "storageDestroyed": True, "keysDestroyed": True},
+            worker_id="discard-equal-op-b-worker",
+            claim_token=claimed.claim_token,
+            claim_generation=claimed.claim_generation,
+            now=NOW,
+        )
+
+    async with database.session_factory() as session:
+        active = await session.get(CapacityReservation, reservation.id)
+        assert active is not None and active.released_at is None
+        assert (
+            await session.scalar(select(func.count()).select_from(CapacityDestructiveFence))
+            == 0
+        )
+    incomplete = await repository.get_by_id(discard.id)
+    assert incomplete is not None
+    assert incomplete.state.name == "CLAIMED"
+    assert incomplete.result_redacted == {}
+
+
+@pytest.mark.asyncio
+async def test_equal_fence_destroy_with_same_logical_candidate_rolls_back_completion(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, authority = capacity_context
+    provision, worker, reservation = await _reserve(
+        repository,
+        authority,
+        operation="op-A",
+        tenant="tenant-equal-destroy",
+        cell="cell-equal-destroy",
+        fence=7,
+    )
+    await repository.mark_pending(
+        provision.id,
+        worker,
+        claim_token=provision.claim_token or "",
+        claim_generation=provision.claim_generation,
+        checkpoint="namespace-ready",
+        retry_after_seconds=300,
+        now=NOW,
+    )
+    destroy = await repository.submit(
+        "destroy",
+        "destroy-equal-op-a",
+        _request(
+            operation="op-A",
+            tenant="tenant-equal-destroy",
+            cell="cell-equal-destroy",
+            fence=7,
+        ),
+    )
+    claimed = await repository.claim_next(
+        "destroy-equal-op-a-worker",
+        now=NOW,
+        allowed_actions=frozenset({OperationAction.DESTROY}),
+    )
+    assert claimed is not None and claimed.id == destroy.id and claimed.claim_token
+    with pytest.raises(StaleFence):
+        await repository.complete(
+            claimed.id,
+            {
+                "computeDestroyed": True,
+                "storageDestroyed": True,
+                "keysDestroyed": True,
+                "tenantResourcesDestroyed": True,
+            },
+            worker_id="destroy-equal-op-a-worker",
+            claim_token=claimed.claim_token,
+            claim_generation=claimed.claim_generation,
+            now=NOW,
+        )
+
+    async with database.session_factory() as session:
+        active = await session.get(CapacityReservation, reservation.id)
+        assert active is not None and active.released_at is None
+        assert (
+            await session.scalar(select(func.count()).select_from(CapacityDestructiveFence))
+            == 0
+        )
+    incomplete = await repository.get_by_id(destroy.id)
+    assert incomplete is not None
+    assert incomplete.state.name == "CLAIMED"
+    assert incomplete.result_redacted == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "proof"),
     [
