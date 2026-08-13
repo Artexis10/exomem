@@ -1,9 +1,9 @@
 ## 1. Red Transaction Tests
 
-- [ ] 1.1 Prove explicit deferred completion stages floor → caller writes, returns the exact checkpoint and predecessor, and never replaces the shared checkpoint.
-- [ ] 1.2 Prove ordinary callers retain floor → caller writes → checkpoint even with `post_commit_fanout=False`, including rollback behavior.
-- [ ] 1.3 Add a native Windows held-checkpoint test for a deferred media sidecar commit.
-- [ ] 1.4 Record the focused red failures against the old implementation.
+- [x] 1.1 Prove explicit deferred completion stages floor → caller writes, returns the exact checkpoint and predecessor, and never replaces the shared checkpoint.
+- [x] 1.2 Prove ordinary callers retain floor → caller writes → checkpoint even with `post_commit_fanout=False`, including rollback behavior.
+- [x] 1.3 Add a native Windows held-checkpoint test for a deferred media sidecar commit.
+- [x] 1.4 Record the focused red failures against the old implementation.
 
 ## 2. Canonical And Derived Boundary
 

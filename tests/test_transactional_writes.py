@@ -5,12 +5,14 @@ import os
 import pickle
 import re
 import stat
+from contextlib import contextmanager
+from dataclasses import FrozenInstanceError
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from exomem import cli_ops, media_jobs
+from exomem import cli_ops, graph_sync, media_jobs
 from exomem import move_file as move_module
 from exomem import vault as vault_module
 
@@ -152,6 +154,163 @@ def _get_descriptor_xattrs(path: Path) -> dict[str, bytes]:
         }
     finally:
         os.close(descriptor)
+
+
+def _graph_write(root: Path, name: str = "sidecar.md") -> vault_module.PlannedWrite:
+    return vault_module.PlannedWrite(
+        root / "Knowledge Base" / "Notes" / name,
+        "---\ntype: evidence\n---\ncanonical media sidecar\n",
+    )
+
+
+def _prime_graph_epoch(root: Path) -> graph_sync.GraphSyncCheckpoint:
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(root / "Knowledge Base" / "Notes" / "prior.md", "# prior\n")],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    checkpoint = graph_sync.read_checkpoint(root)
+    assert checkpoint is not None
+    return checkpoint
+
+
+@contextmanager
+def _hold_windows_checkpoint_without_delete(path: Path):
+    """Hold a real checkpoint handle that permits read but refuses replacement."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(str(path), 0x80000000, 0x1, None, 3, 0, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "could not hold graph checkpoint")
+    try:
+        yield
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def test_deferred_graph_completion_stages_floor_then_caller_and_returns_exact_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Media's explicit boundary leaves the shared checkpoint untouched."""
+    prior = _prime_graph_epoch(tmp_path)
+    checkpoint = graph_sync.checkpoint_path(tmp_path)
+    before = checkpoint.read_bytes()
+    replacements: list[Path] = []
+    real_replace = vault_module.os.replace
+
+    def observe_replace(source, destination, *args, **kwargs):  # noqa: ANN001
+        if _leaf(source).startswith("stage-"):
+            replacements.append(Path(destination))
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "replace", observe_replace)
+    monkeypatch.setattr(graph_sync, "_checkpoint_mutation_id", lambda: "b" * 24)
+    _floor, expected_checkpoint = graph_sync.epoch_writes(
+        tmp_path, [_graph_write(tmp_path)]
+    ) or (None, None)
+    assert expected_checkpoint is not None
+    result = vault_module.batch_atomic_write(
+        [_graph_write(tmp_path)],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+        defer_graph_completion=True,
+    )
+
+    assert isinstance(result, vault_module.DeferredGraphCompletion)
+    assert result.replaced == (_graph_write(tmp_path).path,)
+    assert result.predecessor == prior
+    assert result.checkpoint == graph_sync.GraphSyncCheckpoint.parse(expected_checkpoint.content)
+    assert replacements == [graph_sync.floor_path(tmp_path), _graph_write(tmp_path).path]
+    assert checkpoint.read_bytes() == before
+    for attribute, replacement in (
+        ("checkpoint", prior),
+        ("predecessor", prior),
+        ("replaced", ()),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(result, attribute, replacement)
+
+
+def test_deferred_graph_completion_requires_immediate_fanout_disabled(tmp_path: Path) -> None:
+    """The token has an owner only when the inline fanout is explicitly deferred."""
+    with pytest.raises(ValueError, match="post_commit_fanout"):
+        vault_module.batch_atomic_write(
+            [_graph_write(tmp_path)],
+            vault_root=tmp_path,
+            defer_graph_completion=True,
+        )
+
+
+def test_ordinary_false_fanout_keeps_floor_caller_checkpoint_and_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Graph-internal false-fanout callers must retain their complete epoch."""
+    _prime_graph_epoch(tmp_path)
+    target = _graph_write(tmp_path).path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old sidecar", encoding="utf-8")
+    checkpoint = graph_sync.checkpoint_path(tmp_path)
+    before_checkpoint = checkpoint.read_bytes()
+    floor = graph_sync.floor_path(tmp_path)
+    before_floor = floor.read_bytes()
+    replacements: list[Path] = []
+    real_replace = vault_module.os.replace
+
+    def fail_checkpoint(source, destination, *args, **kwargs):  # noqa: ANN001
+        if _leaf(source).startswith("stage-"):
+            replacements.append(Path(destination))
+            if Path(destination) == checkpoint:
+                raise PermissionError("held graph checkpoint")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "replace", fail_checkpoint)
+    with pytest.raises(Exception, match="held graph checkpoint"):
+        vault_module.batch_atomic_write(
+            [_graph_write(tmp_path)], vault_root=tmp_path, post_commit_fanout=False
+        )
+
+    assert replacements == [graph_sync.floor_path(tmp_path), target, checkpoint]
+    assert target.read_text(encoding="utf-8") == "old sidecar"
+    assert floor.read_bytes() == before_floor
+    assert checkpoint.read_bytes() == before_checkpoint
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows sharing regression")
+def test_windows_held_checkpoint_does_not_block_deferred_media_sidecar_commit(tmp_path: Path) -> None:
+    """A real no-delete reader cannot terminalize a deferred canonical sidecar."""
+    _prime_graph_epoch(tmp_path)
+    checkpoint = graph_sync.checkpoint_path(tmp_path)
+    before = checkpoint.read_bytes()
+    sidecar = _graph_write(tmp_path).path
+
+    with _hold_windows_checkpoint_without_delete(checkpoint):
+        result = vault_module.batch_atomic_write(
+            [_graph_write(tmp_path)],
+            vault_root=tmp_path,
+            post_commit_fanout=False,
+            defer_graph_completion=True,
+        )
+
+    assert isinstance(result, vault_module.DeferredGraphCompletion)
+    assert sidecar.read_text(encoding="utf-8").endswith("canonical media sidecar\n")
+    floor_state, floor = graph_sync.floor_state(tmp_path)
+    assert floor_state == "valid"
+    assert floor is not None and floor.generation == result.checkpoint.generation
+    assert checkpoint.read_bytes() == before
+    assert _workspaces(checkpoint.parent) == []
 
 
 def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
