@@ -5,7 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -61,6 +60,18 @@ from exomem import extract
 assert extract.media_type_for("demo.pdf") == "pdf"
 assert "numpy" not in sys.modules
 assert "exomem.semantic_segments" not in sys.modules
+"""
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_governance_tool_import_does_not_load_membership_only_modules() -> None:
+    result = _run_import_probe(
+        """
+import sys
+from exomem.governance import tool
+assert "exomem.claims" not in sys.modules
+assert "exomem.voice_profiles" not in sys.modules
 """
     )
     assert result.returncode == 0, result.stderr
