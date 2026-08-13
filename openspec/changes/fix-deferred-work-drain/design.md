@@ -1,0 +1,104 @@
+## Context
+
+Two deferred queues live in `deferred_index.py`, backed by
+`Knowledge Base/.deferred-index.sqlite`:
+
+| Queue | Added by | Cleared by | Reachable? |
+| --- | --- | --- | --- |
+| semantic upserts | `index_sync.py:414` (`add`) | `clear_semantic_receipts`, `clear`, `drain_deferred_work` | only via `op_process_media` or a human `exomem index` |
+| full upserts | `index_sync.py:263`, `:516` (`add_full`) | `clear_full`, gated behind `include_full=True` | **no caller passes `include_full=True`** |
+
+`drain_deferred_work` (index_sync.py:594) has one caller in the package:
+`commands.py:4689`, inside `op_process_media._drain_index_refresh`. `_index_main`
+(`__main__.py:640`) calls `clear_deferred_work(vault_root)` with the default
+`include_full=False`, which is why a manual `exomem index` empties the semantic queue and
+leaves the full queue untouched — observed live on 2026-08-13: `semantic 2810 → 0`,
+`full 2866 → 2868` (still climbing) across the same run.
+
+The watcher already has the shape a drain needs. `file_watcher.py:857-880` computes a
+`policy` per pass and distinguishes a reconcile pass (`cap`) from a live burst. It admits
+files up to `max_reconcile_embed_files` / `max_embed_files_per_batch`, and in quiet mode
+takes a third branch that only logs. What it never does is look at what is already queued.
+
+## Goals / Non-Goals
+
+**Goals**
+- A queued entry is retried by the system that queued it, on a bound the mode chooses.
+- Quiet mode converges. Slowly is fine; never is not.
+- Reported backlog reflects real outstanding work.
+- Both queues have a reachable clear path.
+- A failed mode write is loud.
+
+**Non-Goals**
+- No new model, no new index, no change to what gets embedded or how. The drain reuses the
+  existing embedding path under existing policy.
+- No steady-state GPU residency added to `quiet` or `normal`.
+- Not addressing warm-up readiness replay (`readiness.drain_deferred`) — that is a different
+  queue, currently in flight on `fix/watcher-deferred-freshness`.
+
+## Decisions
+
+### Drain belongs on the reconcile pass, not a new scheduler
+
+The reconcile pass already wakes on a mode-chosen interval (900s quiet, 300s performance),
+already holds a policy object, and already bounds its own admission. Adding a separate
+drain thread would duplicate that bounding and introduce a second writer contending for the
+mutation boundary. The drain becomes a step of the pass, sharing its budget: the pass admits
+drift first, then spends any remaining budget on queued entries.
+
+**Alternative rejected** — drain on every write. It puts unbounded latency on the write path,
+which is the symptom this change exists to remove.
+
+### Quiet caps become non-zero
+
+`_QUIET_EXPENSIVE_INDEX_CAP = 0` (mode.py:57) is the halt. A quiet host should still
+converge; the question is only how fast. A cap in the 20–30 range per 900s pass clears a
+2,800-file backlog in roughly a day and a half of idle time at a cost no one notices on CPU.
+
+The exact number is a tuning decision, not a contract. The spec requires non-zero and
+bounded; the implementation picks the value.
+
+**Note**: quiet's third watcher branch (`elif policy.defer_expensive_indexes`) logs the
+deferral but leaves `defer_semantic = False`, so `upsert_after_write` is called with
+`defer_semantic=False` while the log claims deferral. Whether the deferral actually happens
+downstream inside `index_sync` needs confirming during implementation — if the log is lying,
+that is a second defect to fix here, and if it is not, the branch should set the flag it
+implies.
+
+### Reconcile queued entries against index state
+
+The 2026-08-13 evidence is that queue entries outlive the work they describe: 2,810 entries,
+zero files actually needing embedding. Rather than trusting the queue, the drain resolves
+each entry against the same freshness check `exomem index` uses, and retires entries whose
+work is already satisfied. This makes the queue self-healing against any future path that
+satisfies work without clearing its entry — the class of bug that produced this state.
+
+**Alternative rejected** — audit every `add`/`clear` call site for symmetry. Necessary but
+not sufficient; it fixes today's leaks and not tomorrow's, and the queue would still report
+a phantom backlog until someone noticed.
+
+### `include_full` gets a caller or gets deleted
+
+A parameter no caller can reach is not a feature. Either `_index_main` passes
+`include_full=True` (making `exomem index` clear both queues, matching what an operator
+already believes it does), or the full queue gets its own drain. Preference is the former
+plus a drain, so the full queue is both self-draining and manually clearable.
+
+### Mode failure is a first-class error path
+
+`_mode_main` writes `config.json.tmp` then renames. On a service install the user cannot
+replace the SYSTEM-owned target. The fix is not to elevate — it is to fail correctly: catch
+`PermissionError` and `OSError` around the persist, remove the temp on failure, exit
+non-zero, and print one line naming the config path plus the remediation. Reporting the
+persisted mode after a write MUST read the file back rather than echo the requested value.
+
+## Risks
+
+- **Merge collision.** `fix/watcher-deferred-freshness` is unmerged and rewrites
+  `deferred_index.py` (+247) and `index_sync.py` (+52). Sequence the two deliberately;
+  do not let both land blind.
+- **Drain contends for the write boundary.** Bounded admission plus the existing reconcile
+  interval keeps it to the same envelope the pass already occupies, but the bound is the
+  only thing preventing a quiet host from doing performance-mode work.
+- **Retiring entries could retire real work** if the freshness check disagrees with what
+  queued the entry. The check must be the one the indexer trusts, not a cheaper proxy.
