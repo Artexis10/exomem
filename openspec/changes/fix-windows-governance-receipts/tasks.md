@@ -1,10 +1,10 @@
 ## 1. Red Secure-Handle Tests
 
-- [ ] 1.1 Add secure-filesystem unit tests proving retained ancestors use metadata-only access and only the exact flushed directory receives `GENERIC_WRITE` and no-delete sharing.
-- [ ] 1.2 Add unit tests proving Windows `O_CREAT | O_EXCL` maps to exclusive `CREATE_NEW` and existing open/create modes retain their dispositions.
-- [ ] 1.3 Add receipt tests proving the Windows route never asks `os.open` to open a directory and normalizes open, identity, reparse, raw-handle flush, and I/O failures to content-free `ReceiptError` results.
-- [ ] 1.4 Add red tests for junctions at `_Governance`, `events`, and the instance directory plus a swap during first-instance creation, proving no outside path is created or touched.
-- [ ] 1.5 Run the focused new tests and record their expected failure against the old implementation.
+- [x] 1.1 Add secure-filesystem unit tests proving retained ancestors use metadata-only access and only the exact flushed directory receives `GENERIC_WRITE` and no-delete sharing.
+- [x] 1.2 Add unit tests proving Windows `O_CREAT | O_EXCL` maps to exclusive `CREATE_NEW` and existing open/create modes retain their dispositions.
+- [x] 1.3 Add receipt tests proving the Windows route never asks `os.open` to open a directory and normalizes open, identity, reparse, raw-handle flush, and I/O failures to content-free `ReceiptError` results.
+- [x] 1.4 Add red tests for junctions at `_Governance`, `events`, and the instance directory plus a swap during first-instance creation, proving no outside path is created or touched.
+- [x] 1.5 Run the focused new tests and record their expected failure against the old implementation.
 
 ## 2. Secure Receipt Filesystem Wiring
 

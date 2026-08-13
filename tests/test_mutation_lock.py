@@ -5,9 +5,11 @@ import json
 import logging
 import multiprocessing
 import os
+import stat
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,13 +23,93 @@ from exomem.mutation_lock import (
 
 
 def test_windows_path_inspection_access_has_dacl_read_right_without_mutation_rights() -> None:
-    access = inspect.signature(mutation_lock_module._windows_open_path).parameters["access"].default
+    signature = inspect.signature(mutation_lock_module._windows_open_path)
+    access = signature.parameters["access"].default
+    share = signature.parameters["share"].default
 
     assert isinstance(access, int)
     assert access & 0x00000080  # FILE_READ_ATTRIBUTES
     assert access & 0x00020000  # READ_CONTROL, required by GetSecurityInfo(DACL)
     assert not access & 0x40000000  # GENERIC_WRITE
     assert not access & 0x00010000  # DELETE
+    assert isinstance(share, int)
+    assert not share & 0x4  # FILE_SHARE_DELETE
+
+
+def test_windows_retained_directory_ancestors_keep_metadata_only_access() -> None:
+    """Retaining an ancestor must not request write or delete rights."""
+    opened: list[tuple[Path, dict[str, object]]] = []
+
+    def open_path(path: Path, **kwargs: object) -> int:
+        opened.append((path, kwargs))
+        return len(opened)
+
+    directory = mutation_lock_module._acquire_windows_secure_directory(
+        Path(r"C:\\vault\\Knowledge Base\\_Governance\\events"),
+        create=False,
+        mode=0o700,
+        open_path=open_path,
+        close_handle=lambda _handle: None,
+    )
+    try:
+        metadata_access = inspect.signature(mutation_lock_module._windows_open_path).parameters["access"].default
+        assert all(kwargs == {"directory": True} for _path, kwargs in opened)
+        assert metadata_access == 0x00020080  # READ_CONTROL | FILE_READ_ATTRIBUTES
+        assert not metadata_access & 0x40000000  # GENERIC_WRITE
+        assert not metadata_access & 0x00010000  # DELETE
+    finally:
+        directory.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-child branch")
+@pytest.mark.parametrize(
+    ("flags", "expected_creation"),
+    [
+        (os.O_RDONLY, 3),  # OPEN_EXISTING
+        (os.O_WRONLY, 3),  # OPEN_EXISTING
+        (os.O_RDWR, 3),  # OPEN_EXISTING
+        (os.O_WRONLY | os.O_CREAT, 4),  # OPEN_ALWAYS
+        (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 1),  # CREATE_NEW
+    ],
+)
+def test_windows_secure_child_preserves_open_disposition_and_exclusive_create(
+    monkeypatch: pytest.MonkeyPatch, flags: int, expected_creation: int
+) -> None:
+    """The Windows native open must retain POSIX exclusive-create semantics."""
+    calls: list[dict[str, object]] = []
+
+    def open_path(path: Path, **kwargs: object) -> int:
+        calls.append({"path": path, **kwargs})
+        return 73
+
+    directory = mutation_lock_module._SecureDirectory(
+        Path(r"C:\\vault\\state"),
+        windows_handles=[71],
+        close_windows_handle=lambda _handle: None,
+    )
+    monkeypatch.setattr(mutation_lock_module, "_windows_open_path", open_path)
+    monkeypatch.setattr(mutation_lock_module, "_windows_child_is_in_directory", lambda *_args: True)
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: 79),
+    )
+    monkeypatch.setattr(
+        mutation_lock_module.os,
+        "fstat",
+        lambda _fd: SimpleNamespace(st_mode=stat.S_IFREG),
+    )
+    monkeypatch.setattr(mutation_lock_module.os, "close", lambda _fd: None)
+
+    assert mutation_lock_module._open_secure_file_at(directory, "receipt.jsonl", flags) == 79
+    assert calls == [
+        {
+            "path": directory.path / "receipt.jsonl",
+            "directory": False,
+            "access": 0x40000000 if flags & os.O_WRONLY else (0xC0000000 if flags & os.O_RDWR else 0x80000000),
+            "creation": expected_creation,
+        }
+    ]
 
 
 def test_windows_private_dacl_deduplicates_local_system_principal() -> None:
