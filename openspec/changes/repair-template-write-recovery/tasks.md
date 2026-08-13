@@ -6,8 +6,8 @@
 
 ## 2. Tier-two overwrite token symmetry
 
-- [ ] 2.1 Add a red MCP-shaped create-plus-overwrite validate/commit test that copies `draft_token` by name and asserts byte-identical `transition_token` compatibility.
-- [ ] 2.2 Add the overwrite-only response alias, update schema guidance/fixtures, and rerun semantic lifecycle plus command-surface fidelity tests.
+- [x] 2.1 Add a red MCP-shaped create-plus-overwrite validate/commit test that copies `draft_token` by name and asserts byte-identical `transition_token` compatibility.
+- [x] 2.2 Add the overwrite-only response alias, update schema guidance/fixtures, and rerun semantic lifecycle plus command-surface fidelity tests.
 
 ## 3. Graph failure and explicit recovery
 

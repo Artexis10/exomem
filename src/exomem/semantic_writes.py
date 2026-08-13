@@ -924,7 +924,7 @@ class ExistingPreflight:
     census_token: tuple | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "applicability": self.applicability,
             "operation": self.operation,
             "path": self.path,
@@ -937,6 +937,9 @@ class ExistingPreflight:
             "mutated": self.mutated,
             "contract_result": _bounded_semantic_feedback(self.contract_result),
         }
+        if self.operation == "tier2_overwrite":
+            value["draft_token"] = self.transition_token
+        return value
 
 
 @dataclass(frozen=True, slots=True)

@@ -152,7 +152,7 @@ def test_full_mcp_discovery_surface_matches_packaged_contract(
     )
 
 
-def test_manage_memory_file_schema_exposes_append_review_protocol(
+def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,6 +168,7 @@ def test_manage_memory_file_schema_exposes_append_review_protocol(
 
     assert required <= set(properties)
     assert "create or append" in properties["validate_only"]["description"]
+    assert "overwrite preview's `draft_token`" in properties["draft_token"]["description"]
     assert "append transition token" in properties["semantic_transition_token"][
         "description"
     ]

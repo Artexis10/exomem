@@ -5907,7 +5907,9 @@ def op_manage_memory_file(
         validate_only: Validate a Markdown create or append operation without writing.
         draft_id: Draft identity returned by validate_only.
         draft_hash: Exact reviewed draft hash returned by validate_only.
-        draft_token: Opaque destination/date token returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only. For an
+            existing Markdown overwrite, replay the overwrite preview's `draft_token`
+            unchanged on commit.
         semantic_transition_token: Opaque append transition token from validate_only.
         relation_disposition: Reviewed relation outcome for semantic create or append.
         relation_review_hash: Draft or transition hash covered by the relation review.
