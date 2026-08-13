@@ -149,10 +149,78 @@ _RELEASE_DEPENDENCY_FIELDS = frozenset(
     {"ref", "path", "content_hash", "restriction_signature"}
 )
 _RELEASE_OPTIONS_FIELDS = frozenset({"strip_provenance"})
+_RULE_OPTION_STRING_FIELDS = frozenset({"notice", "constraint", "abstract", "bridge"})
+_RULE_OPTION_CONTROL_FIELDS = frozenset({"suspended"})
+_RULE_OPTION_FIELDS = _RULE_OPTION_STRING_FIELDS | _RULE_OPTION_CONTROL_FIELDS
 _PURPOSE_CONDITIONS = frozenset({"matches", "outside"})
 _RULE_KINDS = frozenset({"standing", "org_cap"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONSTRAINT_MAX_CHARS = 500
+
+
+def _mapping_key_sort_key(value: Any) -> tuple[str, str, str]:
+    value_type = type(value)
+    return value_type.__module__, value_type.__qualname__, repr(value)
+
+
+def _check_mapping_keys(
+    mapping: dict[Any, Any],
+    allowed: frozenset[str],
+    location: str,
+    findings: list[dict[str, str]],
+    *,
+    separator: str,
+    noun: str,
+) -> None:
+    """Validate a strict YAML mapping without comparing heterogeneous keys."""
+    non_string = sorted(
+        (key for key in mapping if not isinstance(key, str)),
+        key=_mapping_key_sort_key,
+    )
+    for key in non_string:
+        findings.append(
+            _finding(
+                "invalid_field",
+                location,
+                f"{noun} keys must be strings; got {type(key).__name__}",
+            )
+        )
+    unknown = sorted(
+        key for key in mapping if isinstance(key, str) and key not in allowed
+    )
+    for key in sorted(unknown):
+        findings.append(
+            _finding(
+                "unknown_field",
+                f"{location}{separator}{key}",
+                f"unknown {noun} {key!r}",
+            )
+        )
+
+
+def _check_option_keys(
+    options: dict[Any, Any],
+    allowed: frozenset[str],
+    rel: str,
+    findings: list[dict[str, str]],
+) -> None:
+    """Reject YAML's non-string and unregistered option keys."""
+    _check_mapping_keys(
+        options,
+        allowed,
+        f"{rel}:options",
+        findings,
+        separator=".",
+        noun="option",
+    )
+    if "credential_scrubber" in options:
+        findings.append(
+            _finding(
+                "owner_migration_required",
+                f"{rel}:options.credential_scrubber",
+                "remove credential_scrubber through a reviewed owner migration",
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -705,11 +773,17 @@ def compile_prospective(
 
 
 def _check_common(
-    data: dict[str, Any], rel: str, allowed: frozenset[str]
+    data: dict[Any, Any], rel: str, allowed: frozenset[str]
 ) -> tuple[list[dict[str, str]], str | None]:
     findings: list[dict[str, str]] = []
-    for key in sorted(set(data) - allowed):
-        findings.append(_finding("unknown_field", f"{rel}:{key}", f"unknown field {key!r}"))
+    _check_mapping_keys(
+        data,
+        allowed,
+        rel,
+        findings,
+        separator=":",
+        noun="field",
+    )
     version = data.get("governance_version")
     if version != GOVERNANCE_VERSION:
         findings.append(
@@ -798,10 +872,14 @@ def _parse_scope(data: dict[str, Any], rel: str) -> tuple[Scope | None, list[dic
         findings.append(_finding("invalid_field", f"{rel}:exclude", "exclude must be a mapping"))
         exclude = {}
     else:
-        for key in sorted(set(exclude) - _SCOPE_EXCLUDE_ALLOWED_FIELDS):
-            findings.append(
-                _finding("unknown_field", f"{rel}:exclude.{key}", f"unknown exclude field {key!r}")
-            )
+        _check_mapping_keys(
+            exclude,
+            _SCOPE_EXCLUDE_ALLOWED_FIELDS,
+            f"{rel}:exclude",
+            findings,
+            separator=".",
+            noun="exclude field",
+        )
 
     name = data.get("name")
     if name is not None and not isinstance(name, str):
@@ -922,7 +1000,10 @@ def _parse_rule(data: dict[str, Any], rel: str) -> tuple[Rule | None, list[dict[
         purpose = None
 
     purpose_condition = data.get("purpose_condition", "matches")
-    if purpose_condition not in _PURPOSE_CONDITIONS:
+    if (
+        type(purpose_condition) is not str
+        or purpose_condition not in _PURPOSE_CONDITIONS
+    ):
         findings.append(
             _finding(
                 "invalid_field",
@@ -933,7 +1014,7 @@ def _parse_rule(data: dict[str, Any], rel: str) -> tuple[Rule | None, list[dict[
         purpose_condition = "matches"
 
     kind = data.get("kind", "standing")
-    if kind not in _RULE_KINDS:
+    if type(kind) is not str or kind not in _RULE_KINDS:
         findings.append(_finding("invalid_field", f"{rel}:kind", f"must be one of {sorted(_RULE_KINDS)}"))
         kind = "standing"
 
@@ -941,6 +1022,25 @@ def _parse_rule(data: dict[str, Any], rel: str) -> tuple[Rule | None, list[dict[
     if not isinstance(options, dict):
         findings.append(_finding("invalid_field", f"{rel}:options", "options must be a mapping"))
         options = {}
+    else:
+        _check_option_keys(options, _RULE_OPTION_FIELDS, rel, findings)
+        for key in _RULE_OPTION_STRING_FIELDS:
+            if key in options and not _valid_constraint(options[key]):
+                findings.append(
+                    _finding(
+                        "invalid_field",
+                        f"{rel}:options.{key}",
+                        f"{key} must be a bounded provenance-free string",
+                    )
+                )
+        if "suspended" in options and not isinstance(options["suspended"], bool):
+            findings.append(
+                _finding(
+                    "invalid_field",
+                    f"{rel}:options.suspended",
+                    "suspended must be a boolean",
+                )
+            )
 
     if doc_id is None or not scope_ids or audience is None or ceiling is None:
         return None, findings
@@ -1063,8 +1163,14 @@ def _parse_release_grant(
             if not isinstance(raw, dict):
                 findings.append(_finding("invalid_field", location, "dependency must be a mapping"))
                 continue
-            for key in sorted(set(raw) - _RELEASE_DEPENDENCY_FIELDS):
-                findings.append(_finding("unknown_field", f"{location}.{key}", f"unknown dependency field {key!r}"))
+            _check_mapping_keys(
+                raw,
+                _RELEASE_DEPENDENCY_FIELDS,
+                location,
+                findings,
+                separator=".",
+                noun="dependency field",
+            )
             dep_ref = raw.get("ref")
             dep_path = raw.get("path")
             dep_hash = raw.get("content_hash")
@@ -1101,15 +1207,21 @@ def _parse_release_grant(
     if not isinstance(options, dict):
         findings.append(_finding("missing_field", f"{rel}:options", "options must be a mapping"))
     else:
-        for key in sorted(set(options) - _RELEASE_OPTIONS_FIELDS):
-            findings.append(_finding("unknown_field", f"{rel}:options.{key}", f"unknown option {key!r}"))
+        _check_option_keys(options, _RELEASE_OPTIONS_FIELDS, rel, findings)
         values = options.get("strip_provenance")
         if not isinstance(values, list) or not values or not all(isinstance(item, str) and item.strip() for item in values):
             findings.append(_finding("missing_field", f"{rel}:options.strip_provenance", "strip_provenance must be a non-empty list of refs or paths"))
         else:
             strip = tuple(dict.fromkeys(item.strip() for item in values))
             identities = {item for dep in dependencies for item in (dep.ref, dep.path)}
-            if any(item not in identities for item in strip):
+            if any(
+                item not in identities
+                or (
+                    memory_refs.parse_memory_ref(item) is None
+                    and not _valid_relative_path(item)
+                )
+                for item in strip
+            ):
                 findings.append(_finding("invalid_field", f"{rel}:options.strip_provenance", "strip targets must name approved dependencies"))
             for dep in dependencies:
                 if dep.ref not in strip and dep.path not in strip:

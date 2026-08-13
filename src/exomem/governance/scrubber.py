@@ -3,8 +3,8 @@
 Design decision D7 — and the one intentional behavior change this change ships
 for a vault with **no** `_Governance/` directory (owner-confirmed). Unlike
 every other consumer in this package, the scrubber is *policy-independent*: it
-is content-pattern-based, so it runs on the empty-policy fast path too. Only
-an explicit standing rule (`options: {credential_scrubber: off}`) turns it off.
+is content-pattern-based, so it runs on the empty-policy fast path too. It has
+no policy-controlled disable switch.
 
 Two properties make it safe to run on every result:
 
@@ -24,7 +24,11 @@ Two properties make it safe to run on every result:
 
 from __future__ import annotations
 
+import base64
+import binascii
+import datetime as dt
 import functools
+import hmac
 import math
 import re
 from collections import Counter
@@ -36,6 +40,100 @@ from typing import Any
 #: What replaces a blocked value. Deliberately fixed text: a per-credential
 #: description would itself carry information about what was found.
 NOTICE = "[credential blocked by exomem egress policy]"
+
+# The future authorization-session wire token is parsed here, rather than by
+# each future transport, so the terminal scanner and issuance validation share
+# one canonical spelling. This broad regex remains the fail-closed sweep for
+# malformed candidates in a rejected issuance. Canonical scanning cannot use
+# token boundaries: an adversary may place valid base64url characters directly
+# beside a bearer, so `_scrub_canonical_authorization_bearers` locates every
+# literal start and makes the parser the sole accept/reject authority.
+_AUTHORIZATION_BEARER_CANDIDATE_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])as1\.[A-Za-z0-9_-]{1,256}\.[A-Za-z0-9_-]{1,256}(?![A-Za-z0-9_-])"
+)
+_BASE64URL_ALPHABET = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+_ISSUANCE_ACTIONS = frozenset({"open", "rotate"})
+_ISSUANCE_CONTEXT_SEAL = object()
+_RFC3339_RE = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z",
+    re.ASCII,
+)
+
+
+def _parse_authorization_bearer(value: object) -> str | None:
+    """Return only the exact canonical 70-byte authorization bearer.
+
+    Decode and byte-identical re-encoding are load-bearing: alphabet/length
+    checks alone accept final characters whose unused base64 bits are non-zero.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError:
+        return None
+    if (
+        len(encoded) != 70
+        or encoded[:4] != b"as1."
+        or encoded[26:27] != b"."
+    ):
+        return None
+    locator = encoded[4:26]
+    secret = encoded[27:]
+    if not all(byte in _BASE64URL_ALPHABET for byte in (*locator, *secret)):
+        return None
+    try:
+        locator_bytes = base64.b64decode(
+            locator + b"==", altchars=b"-_", validate=True
+        )
+        secret_bytes = base64.b64decode(
+            secret + b"=", altchars=b"-_", validate=True
+        )
+    except (binascii.Error, ValueError):
+        return None
+    if len(locator_bytes) != 16 or len(secret_bytes) != 32:
+        return None
+    if (
+        base64.urlsafe_b64encode(locator_bytes).rstrip(b"=") != locator
+        or base64.urlsafe_b64encode(secret_bytes).rstrip(b"=") != secret
+    ):
+        return None
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuanceContext:
+    """Private, non-serializable authority for one just-issued bearer."""
+
+    action: str
+    bearer: str
+    _seal: object
+
+    def __reduce__(self) -> object:
+        raise TypeError("issuance context is process-local")
+
+
+def _new_issuance_context(action: object, bearer: object) -> _IssuanceContext:
+    if action not in _ISSUANCE_ACTIONS:
+        raise ValueError("issuance action must be open or rotate")
+    canonical = _parse_authorization_bearer(bearer)
+    if canonical is None:
+        raise ValueError("issued bearer is not canonical")
+    return _IssuanceContext(str(action), canonical, _ISSUANCE_CONTEXT_SEAL)
+
+
+def _valid_rfc3339(value: object) -> bool:
+    if not isinstance(value, str) or not (20 <= len(value) <= 64):
+        return False
+    if _RFC3339_RE.fullmatch(value) is None:
+        return False
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 #: Field names whose value is a structural identifier, not prose. Checked
 #: BEFORE the entropy heuristic; the explicit credential patterns still apply.
@@ -180,6 +278,12 @@ class CredentialPattern:
 #: Trivy failed CI over the GitHub one — and the samples only need to match
 #: their own pattern and anchors, not look plausible. Keep new ones synthesised.
 CREDENTIAL_PATTERNS: tuple[CredentialPattern, ...] = (
+    CredentialPattern(
+        name="authorization_bearer",
+        pattern=_AUTHORIZATION_BEARER_CANDIDATE_RE.pattern,
+        anchors=("as1.",),
+        samples=("as1." + "A" * 22 + "." + "A" * 43,),
+    ),
     CredentialPattern(
         name="pem_private_key",
         pattern=r"-----BEGIN[ A-Z]*PRIVATE KEY-----.*?-----END[ A-Z]*PRIVATE KEY-----",
@@ -408,12 +512,62 @@ def _may_contain_credential(text: str) -> bool:
     return bool(_active_alternatives(text.lower()))
 
 
+def _scrub_canonical_authorization_bearers(text: str) -> tuple[str, int]:
+    """Replace canonical bearers at every literal start, without boundaries.
+
+    Each parser call receives one fixed 70-character window. Advancing past an
+    accepted window makes adjacent occurrences deterministic; rejected starts
+    advance by one character so a later start is never hidden by malformed
+    surrounding text. The fixed window keeps the work linear and bounded.
+    """
+    parts: list[str] = []
+    copied_through = 0
+    search_from = 0
+    replacements = 0
+    while True:
+        start = text.find("as1.", search_from)
+        if start < 0:
+            break
+        end = start + 70
+        candidate = text[start:end]
+        if _parse_authorization_bearer(candidate) is None:
+            search_from = start + 1
+            continue
+        parts.extend((text[copied_through:start], NOTICE))
+        copied_through = end
+        search_from = end
+        replacements += 1
+    if not replacements:
+        return text, 0
+    parts.append(text[copied_through:])
+    return "".join(parts), replacements
+
+
 def _scrub_explicit(text: str) -> tuple[str, int]:
     """Run only the alternatives this text can possibly match."""
     indices = _active_alternatives(text.lower())
     if not indices:
         return text, 0
-    return _union_for(indices).subn(NOTICE, text)
+    replacements = 0
+    authorization_indices = tuple(
+        index
+        for index in indices
+        if CREDENTIAL_PATTERNS[index].name == "authorization_bearer"
+    )
+    if authorization_indices:
+        text, authorization_replacements = _scrub_canonical_authorization_bearers(
+            text
+        )
+        replacements += authorization_replacements
+    ordinary_indices = tuple(
+        index
+        for index in indices
+        if CREDENTIAL_PATTERNS[index].name != "authorization_bearer"
+    )
+    if ordinary_indices:
+        text, ordinary_replacements = _union_for(ordinary_indices).subn(NOTICE, text)
+        replacements += ordinary_replacements
+    return text, replacements
 
 
 def scrub_text(text: str) -> tuple[str, bool]:
@@ -442,6 +596,42 @@ def _scrub_structural(value: str) -> tuple[str, bool]:
     return cleaned, replacements > 0
 
 
+def _stable_mapping_key(value: Any) -> tuple[str, str, str]:
+    """Order JSON-shaped mapping keys without comparing unlike Python types."""
+    value_type = type(value)
+    return value_type.__module__, value_type.__qualname__, repr(value)
+
+
+def _allocate_mapping_keys(
+    entries: list[tuple[Any, Any, bool]],
+) -> list[Any]:
+    """Allocate collision-free transformed keys independent of insertion order.
+
+    Unchanged authored keys reserve their spelling first. Transformed keys are
+    then assigned by their stable original identity, and a suffix counter loops
+    until it finds a genuinely unused key. This preserves every entry even when
+    an adversary pre-populates NOTICE and arbitrary NOTICE#N spellings.
+    """
+    assigned: list[Any] = [None] * len(entries)
+    used: set[Any] = set()
+    for index in sorted(
+        range(len(entries)),
+        key=lambda item: (
+            entries[item][2],
+            _stable_mapping_key(entries[item][0]),
+        ),
+    ):
+        _original, desired, _changed = entries[index]
+        candidate = desired
+        suffix = 1
+        while candidate in used:
+            candidate = f"{desired}#{suffix}"
+            suffix += 1
+        assigned[index] = candidate
+        used.add(candidate)
+    return assigned
+
+
 def scrub_value(value: Any, *, field_name: str | None = None) -> tuple[Any, bool]:
     """Walk any JSON-shaped result, scrubbing every string it contains.
 
@@ -454,11 +644,26 @@ def scrub_value(value: Any, *, field_name: str | None = None) -> tuple[Any, bool
         return scrub_text(value)
     if isinstance(value, Mapping):
         blocked = False
-        out: dict[Any, Any] = {}
+        entries: list[tuple[Any, Any, bool, Any, bool]] = []
         for key, item in value.items():
+            cleaned_key = key
+            key_hit = False
+            if isinstance(key, str):
+                cleaned_key, key_hit = scrub_text(key)
+                blocked = blocked or key_hit
             cleaned, hit = scrub_value(item, field_name=str(key))
-            out[key] = cleaned
+            entries.append((key, cleaned_key, key_hit, cleaned, hit))
             blocked = blocked or hit
+        allocated = _allocate_mapping_keys(
+            [
+                (original_key, cleaned_key, key_hit)
+                for original_key, cleaned_key, key_hit, _, _ in entries
+            ]
+        )
+        out = {
+            allocated[index]: cleaned
+            for index, (_, _, _, cleaned, _) in enumerate(entries)
+        }
         return out, blocked
     if isinstance(value, (list, tuple)):
         blocked = False
@@ -480,26 +685,84 @@ def scrub_value(value: Any, *, field_name: str | None = None) -> tuple[Any, bool
     return value, False
 
 
-def enabled(vault_root: Path) -> bool:
-    """False only when a standing rule explicitly turns the scrubber off.
+def _scrub_issuance_candidates(value: Any) -> tuple[Any, bool]:
+    """Fail closed over malformed `as1` candidates in a rejected issuance."""
+    if isinstance(value, str):
+        cleaned, exact_replacements = _scrub_canonical_authorization_bearers(value)
+        cleaned, broad_replacements = _AUTHORIZATION_BEARER_CANDIDATE_RE.subn(
+            NOTICE, cleaned
+        )
+        return cleaned, exact_replacements + broad_replacements > 0
+    if isinstance(value, Mapping):
+        blocked = False
+        entries: list[tuple[Any, Any, bool, Any, bool]] = []
+        for key, item in value.items():
+            cleaned_key, key_hit = _scrub_issuance_candidates(key)
+            cleaned, hit = _scrub_issuance_candidates(item)
+            entries.append((key, cleaned_key, key_hit, cleaned, hit))
+            blocked = blocked or key_hit or hit
+        allocated = _allocate_mapping_keys(
+            [
+                (original_key, cleaned_key, key_hit)
+                for original_key, cleaned_key, key_hit, _, _ in entries
+            ]
+        )
+        out = {
+            allocated[index]: cleaned
+            for index, (_, _, _, cleaned, _) in enumerate(entries)
+        }
+        return out, blocked
+    if isinstance(value, (list, tuple)):
+        items = []
+        blocked = False
+        for item in value:
+            cleaned, hit = _scrub_issuance_candidates(item)
+            items.append(cleaned)
+            blocked = blocked or hit
+        return (tuple(items) if isinstance(value, tuple) else items), blocked
+    return value, False
 
-    The three-state contract inverts here on purpose: `empty` means no rule
-    can have disabled it (ON — this is the always-on default), and `blocked`
-    means the policy cannot be trusted, so the safe reading is also ON. Only a
-    successfully compiled rule carrying `options: {credential_scrubber: off}`
-    disables it.
+
+def _scrub_issuance_response(
+    command_name: str, response: Any, context: _IssuanceContext | None
+) -> tuple[Any, bool]:
+    """Allow exactly one typed open/rotate bearer; scrub every other shape.
+
+    No public route wires this yet. The terminal postfilter supplies no
+    context, so the production default remains unconditional scrubbing.
     """
-    from . import policy as policy_module
+    context_valid = (
+        type(context) is _IssuanceContext
+        and context._seal is _ISSUANCE_CONTEXT_SEAL
+        and context.action == command_name
+        and context.action in _ISSUANCE_ACTIONS
+    )
+    response_valid = (
+        type(response) is dict
+        and set(response) == {"status", "issued_credential"}
+        and response.get("status") == "ok"
+    )
+    credential = response.get("issued_credential") if response_valid else None
+    credential_valid = (
+        type(credential) is dict
+        and set(credential) == {"kind", "bearer", "expires_at"}
+        and credential.get("kind") == "authorization-session-bearer"
+        and _parse_authorization_bearer(credential.get("bearer")) is not None
+        and _valid_rfc3339(credential.get("expires_at"))
+    )
+    valid = context_valid and credential_valid and hmac.compare_digest(
+        credential["bearer"], context.bearer
+    )
+    if valid:
+        return response, False
+    cleaned, blocked = _scrub_issuance_candidates(response)
+    fallback, fallback_blocked = scrub_value(cleaned)
+    return fallback, blocked or fallback_blocked
 
-    policy = policy_module.load(Path(vault_root))
-    if policy.empty or policy.blocked:
-        return True
-    for rule in policy.rules:
-        setting = rule.options.get("credential_scrubber")
-        if isinstance(setting, str) and setting.strip().lower() in ("off", "false", "no"):
-            return False
-        if setting is False:
-            return False
+
+def enabled(vault_root: Path) -> bool:
+    """The terminal credential scrubber is not a policy-controlled option."""
+    del vault_root
     return True
 
 

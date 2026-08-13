@@ -13,7 +13,11 @@ import itertools
 import random
 from pathlib import Path
 
-from exomem.governance.decisions import decide
+import pytest
+
+from exomem.governance import decisions
+from exomem.governance.bridges import StripIdentity
+from exomem.governance.decisions import Decision, decide
 from exomem.governance.policy import (
     DISCLOSURE_MAX,
     DISCLOSURE_MIN,
@@ -290,26 +294,19 @@ def test_decision_carries_scope_and_rule_ids() -> None:
     assert decision.rule_ids == ("r1",)
 
 
-def test_options_merge_pins_lexical_rule_id_order() -> None:
-    """Pins the exact (documented) merge contract for overlapping option keys
-    across matching rules, so `add-release-gate` inherits a tested behavior
-    rather than an accidental one: rules merge in ascending `id` order, so
-    for a shared key the lexically GREATEST rule id wins."""
-    rule_a = _rule("aaa", 4, options={"notice": "from-aaa", "bridge": "bridge-a", "only_a": 1})
-    rule_b = _rule("bbb", 4, options={"notice": "from-bbb", "only_b": 2})
-    # Insertion order deliberately reversed — the merge must not depend on it.
-    pol = _policy(rules=[rule_b, rule_a])
+def test_options_meet_does_not_select_a_rule_id_winner() -> None:
+    """Equal contributors must agree; authoring order cannot select content."""
+    rule_a = _rule("aaa", 4, options={"notice": "from-aaa"})
+    rule_b = _rule("bbb", 4, options={"notice": "from-bbb"})
 
-    decision = decide([SCOPE], audience="ext", policy=pol)
+    first = decide([SCOPE], audience="ext", policy=_policy(rules=(rule_a, rule_b)))
+    decision = decide([SCOPE], audience="ext", policy=_policy(rules=(rule_b, rule_a)))
 
-    assert decision.options == {
-        "notice": "from-bbb",  # "bbb" > "aaa" lexically -> bbb wins the shared key
-        "bridge": "bridge-a",
-        "only_a": 1,
-        "only_b": 2,
-    }
-    assert decision.notice == "from-bbb"
-    assert decision.bridge == "bridge-a"
+    assert decision == first
+    assert decision.level == 0
+    assert decision.options == {}
+    assert decision.notice is None
+    assert decision.bridge is None
 
 
 # ---------------------------------------------------------------------------
@@ -555,20 +552,8 @@ def test_no_declaring_scope_is_recorded_for_the_owner() -> None:
     assert decide([SCOPE], audience=OWNER_AUDIENCE, policy=pol).default_deny_scope_ids == ()
 
 
-def test_a_grant_on_a_sibling_scope_still_raises_a_declared_scope_as_it_does_a_ceiling_0_rule() -> None:
-    """The declaration does NOT close the grant lane, and must not pretend to.
-
-    `grant_max = max(grant_ceilings + [standing_min])` and `_grant_matches` tests
-    scope INTERSECTION, so a grant naming an audience for S2 raises an item that
-    is also in a closed S1 — the compartment crossover, via grants rather than
-    rules. Measured L0 -> L6.
-
-    This is pinned as an EQUIVALENCE, not as an approval. The authored
-    `ceiling: 0` spelling behaves identically, so the behaviour is a pre-existing
-    property of the lattice and not something the declaration introduced. The
-    test exists so the two spellings cannot silently diverge while the real fix
-    (scoping a grant's raise to the scopes it names) is out of scope here.
-    """
+def test_a_grant_on_a_sibling_scope_cannot_raise_a_declared_scope() -> None:
+    """A scope grant raises only the explicitly named compartment."""
     s1 = "01ARZ3NDEKTSV4RRFFQ69G5FA1"
     s2 = "01ARZ3NDEKTSV4RRFFQ69G5FA2"
     both = [s1, s2]
@@ -587,31 +572,270 @@ def test_a_grant_on_a_sibling_scope_still_raises_a_declared_scope_as_it_does_a_c
             s2: Scope(id=s2, source="scopes/s2.yaml"),
         },
     )
-    authored = Policy(
+    assert decide(both, audience="partner-x", policy=declared).level == DISCLOSURE_MIN
+    declared_granted = dataclasses.replace(declared, grants=(grant,))
+    assert decide(both, audience="partner-x", policy=declared_granted).level == DISCLOSURE_MIN
+    assert decide(list(reversed(both)), audience="partner-x", policy=declared_granted).level == DISCLOSURE_MIN
+
+
+def test_a_grant_covering_each_scope_raises_each_scope_independently() -> None:
+    s1, s2 = "scope-a", "scope-b"
+    grant = StandingGrant(
+        id="g", source="grants/g.yaml", scope_ids=(s1, s2), audience="ext", ceiling=5
+    )
+    policy = Policy(
         fingerprint="p",
         scopes={
-            s1: Scope(id=s1, source="scopes/s1.yaml"),
-            s2: Scope(id=s2, source="scopes/s2.yaml"),
+            s1: Scope(id=s1, source="scopes/a.yaml", default_deny=True),
+            s2: Scope(id=s2, source="scopes/b.yaml", default_deny=True),
+        },
+        grants=(grant,),
+    )
+
+    assert decide((s1, s2), audience="ext", policy=policy).level == 5
+    assert decide((s2, s1), audience="ext", policy=policy).level == 5
+
+
+def test_item_minimum_keeps_a_sibling_organisation_cap_and_owner_rule() -> None:
+    s1, s2 = "scope-a", "scope-b"
+    policy = Policy(
+        fingerprint="p",
+        scopes={
+            s1: Scope(id=s1, source="scopes/a.yaml", default_deny=True),
+            s2: Scope(id=s2, source="scopes/b.yaml", default_deny=True),
         },
         rules=(
-            Rule(
-                id="01ARZ3NDEKTSV4RRFFQ69G5FB0",
-                source="rules/r.yaml",
-                scope_ids=(s1,),
-                audience="partner-x",
-                ceiling=0,
-            ),
+            Rule("owner", "rules/owner.yaml", (s1,), OWNER_AUDIENCE, 5),
+            Rule("cap", "rules/cap.yaml", (s2,), OWNER_AUDIENCE, 2, kind="org_cap"),
         ),
     )
 
-    # Closed identically without a grant.
-    assert decide(both, audience="partner-x", policy=declared).level == DISCLOSURE_MIN
-    assert decide(both, audience="partner-x", policy=authored).level == DISCLOSURE_MIN
+    assert decide((s1, s2), audience=OWNER_AUDIENCE, policy=policy).level == 2
 
-    # And raised identically by a grant that names only the sibling scope.
-    declared_granted = dataclasses.replace(declared, grants=(grant,))
-    authored_granted = dataclasses.replace(authored, grants=(grant,))
-    assert (
-        decide(both, audience="partner-x", policy=declared_granted).level
-        == decide(both, audience="partner-x", policy=authored_granted).level
-    ), "the declaration must not be weaker OR stronger than an authored ceiling-0 here"
+
+def test_equal_purpose_levels_meet_options_without_adding_declared_content() -> None:
+    policy = _policy(
+        rules=(
+            _rule("plain", 3, options={"abstract": "undeclared abstraction"}),
+            _rule(
+                "declared", 3, purpose="audit", options={"notice": "declared notice"}
+            ),
+        )
+    )
+
+    decision = decide((SCOPE,), audience="ext", purpose="audit", policy=policy)
+
+    assert decision.level == 0
+    assert decision.options == {}
+    assert decision.notice is None
+
+
+def test_decision_meet_is_associative_commutative_and_idempotent() -> None:
+    contributors = (
+        Decision(level=2, options={"constraint": "one"}),
+        Decision(level=2, options={"constraint": "two"}),
+        Decision(level=2, options={"constraint": "two"}),
+    )
+    expected = decisions._meet_decisions(contributors)
+
+    for permutation in itertools.permutations(contributors):
+        folded = decisions._meet_decisions(permutation)
+        left = decisions._meet_decisions(
+            (decisions._meet_decisions(permutation[:2]), permutation[2])
+        )
+        right = decisions._meet_decisions(
+            (permutation[0], decisions._meet_decisions(permutation[1:]))
+        )
+        assert folded == expected
+        assert left == expected
+        assert right == expected
+    assert decisions._meet_decisions((expected, expected)) == expected
+
+
+@pytest.mark.parametrize(
+    ("level", "key", "left", "right", "expected_level"),
+    [
+        (1, "notice", "one", "two", 0),
+        (2, "constraint", "one", "two", 1),
+        (3, "abstract", "one", "two", 2),
+        (4, "bridge", "one", "two", 3),
+    ],
+)
+def test_same_scope_option_conflicts_lower_before_cross_scope_meet(
+    level: int, key: str, left: str, right: str, expected_level: int
+) -> None:
+    rules = (
+        _rule("a", level, options={key: left}),
+        _rule("b", level, options={key: right}),
+    )
+
+    decision = decide((SCOPE,), audience="ext", policy=_policy(rules=rules))
+
+    assert decision.level == expected_level
+    assert key not in decision.options
+
+
+def test_decision_meet_is_aci_with_absence_and_mixed_levels() -> None:
+    contributors = (
+        Decision(level=2, options={"constraint": "one"}),
+        Decision(level=2, options={}),
+        Decision(level=3, options={"abstract": "abstract"}),
+    )
+    expected = decisions._meet_decisions(contributors)
+
+    assert expected.level == 1
+    assert expected.options["constraint_ambiguous"] is True
+    for permutation in itertools.permutations(contributors):
+        assert decisions._meet_decisions(permutation) == expected
+        assert decisions._meet_decisions(
+            (decisions._meet_decisions(permutation[:2]), permutation[2])
+        ) == expected
+        assert decisions._meet_decisions(
+            (permutation[0], decisions._meet_decisions(permutation[1:]))
+        ) == expected
+
+
+def test_decision_meet_preserves_equal_release_fields_and_unions_strip() -> None:
+    first = Decision(
+        level=4,
+        release_reason="approved",
+        release_grant_id="grant",
+        release_dependency_digest="digest",
+        release_strip=("a",),
+    )
+    second = dataclasses.replace(first, release_strip=("b", "a"))
+
+    decision = decisions._meet_decisions((first, second))
+
+    assert decision.release_reason == "approved"
+    assert decision.release_grant_id == "grant"
+    assert decision.release_dependency_digest == "digest"
+    assert decision.release_strip == ("a", "b")
+
+
+def test_decision_meet_drops_disagreed_or_absent_release_singletons() -> None:
+    first = Decision(level=4, release_reason="approved", release_grant_id="grant")
+    disagreed = Decision(level=4, release_reason="other", release_grant_id="other")
+    absent = Decision(level=4)
+
+    assert decisions._meet_decisions((first, disagreed)).release_reason is None
+    assert decisions._meet_decisions((first, disagreed)).release_grant_id is None
+    assert decisions._meet_decisions((first, absent)).release_reason is None
+    assert decisions._meet_decisions((first, absent)).release_grant_id is None
+
+
+def test_release_strip_unions_real_identities_across_orders_and_groupings() -> None:
+    identities = (
+        StripIdentity(path="Knowledge Base/Sources/a.md", ref="ref-a", title="A"),
+        StripIdentity(path="Knowledge Base/Sources/b.md", ref="ref-b", title="B"),
+        StripIdentity(path="Knowledge Base/Sources/c.md", ref="ref-c", title="C"),
+    )
+    contributors = (
+        Decision(level=4, release_strip=(identities[1], identities[0])),
+        Decision(level=4, release_strip=(identities[2], identities[0])),
+        Decision(level=4, release_strip=(identities[1],)),
+    )
+    expected = tuple(sorted(identities, key=lambda item: (item.path, item.ref, item.title)))
+
+    for permutation in itertools.permutations(contributors):
+        assert decisions._meet_decisions(permutation).release_strip == expected
+        assert decisions._meet_decisions(
+            (decisions._meet_decisions(permutation[:2]), permutation[2])
+        ).release_strip == expected
+        assert decisions._meet_decisions(
+            (permutation[0], decisions._meet_decisions(permutation[1:]))
+        ).release_strip == expected
+
+
+def test_decision_retains_deterministic_per_scope_contributions() -> None:
+    s1, s2 = "scope-a", "scope-b"
+    constraint = {"constraint": "reviewed constraint"}
+    standing = Rule(
+        "standing", "rules/standing.yaml", (s1,), "ext", 5, options=constraint
+    )
+    cap = Rule(
+        "cap", "rules/cap.yaml", (s1,), "ext", 4, kind="org_cap", options=constraint
+    )
+    grant = StandingGrant("grant", "grants/grant.yaml", (s2,), "ext", 3)
+    policy = Policy(
+        fingerprint="p",
+        scopes={
+            s1: Scope(id=s1, source="scopes/a.yaml", default_deny=True),
+            s2: Scope(id=s2, source="scopes/b.yaml", default_deny=True),
+        },
+        rules=(cap, standing),
+        grants=(grant,),
+    )
+
+    decision = decide((s2, s1), audience="ext", policy=policy)
+
+    # The scope-local constraint is absent from the sibling, so the complete
+    # item meet lowers below L2 even though the numeric scope ceilings are 4/3.
+    assert decision.level == 1
+    assert [item.scope_id for item in decision.scope_contributions] == [s1, s2]
+    first, second = decision.scope_contributions
+    assert first.purpose_branch == "neutral"
+    assert first.standing_floor == 5
+    assert first.default_deny_supplied_floor is False
+    assert first.standing_rule_ids == ("standing",)
+    assert first.grant_ids == ()
+    assert first.grant_ceiling is None
+    assert first.grant_contribution == 5
+    assert first.organization_cap_ids == ("cap",)
+    assert first.organization_cap == 4
+    assert first.option_values == (("constraint", "reviewed constraint"),)
+    assert first.option_ambiguities == ()
+    assert first.final_ceiling == 4
+    assert second.standing_floor == 0
+    assert second.default_deny_supplied_floor is True
+    assert second.standing_rule_ids == ()
+    assert second.grant_ids == ("grant",)
+    assert second.grant_ceiling == 3
+    assert second.grant_contribution == 3
+    assert second.organization_cap_ids == ()
+    assert second.organization_cap == DISCLOSURE_MAX
+    assert second.option_values == ()
+    assert second.option_ambiguities == ()
+    assert second.final_ceiling == 3
+
+
+def test_purpose_meet_labels_duplicate_scope_contributions_by_branch() -> None:
+    declared = _rule(
+        "declared",
+        3,
+        purpose="audit",
+        purpose_condition="matches",
+        options={"abstract": "declared abstract"},
+    )
+    undeclared = _rule(
+        "undeclared",
+        3,
+        purpose="audit",
+        purpose_condition="outside",
+    )
+
+    forward = decide(
+        (SCOPE,),
+        audience="ext",
+        purpose="audit",
+        policy=_policy(rules=(declared, undeclared)),
+    )
+    reverse = decide(
+        (SCOPE,),
+        audience="ext",
+        purpose="audit",
+        policy=_policy(rules=(undeclared, declared)),
+    )
+
+    assert forward == reverse
+    assert forward.level == 2
+    assert [item.scope_id for item in forward.scope_contributions] == [SCOPE, SCOPE]
+    assert [item.purpose_branch for item in forward.scope_contributions] == [
+        "declared",
+        "undeclared",
+    ]
+    assert [item.final_ceiling for item in forward.scope_contributions] == [3, 3]
+    assert forward.scope_contributions[0].option_values == (
+        ("abstract", "declared abstract"),
+    )
+    assert forward.scope_contributions[1].option_values == ()

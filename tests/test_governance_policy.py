@@ -40,6 +40,72 @@ _RULE_A = (
 )
 
 
+class _UnhashablePolicyValue:
+    __hash__ = None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("purpose_condition", ["matches"]),
+        ("purpose_condition", {"value": "matches"}),
+        ("purpose_condition", _UnhashablePolicyValue()),
+        ("kind", ["standing"]),
+        ("kind", {"value": "standing"}),
+        ("kind", _UnhashablePolicyValue()),
+    ],
+)
+def test_rule_enum_fields_reject_unhashable_containers_without_crashing(
+    field: str, value: object
+) -> None:
+    data = {
+        "governance_version": 1,
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "scope_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+        "audience": "external",
+        "ceiling": 2,
+        field: value,
+    }
+
+    _rule, findings = policy._parse_rule(data, "rules/invalid.yaml")
+
+    assert any(
+        finding["code"] == "invalid_field"
+        and finding["path"] == f"rules/invalid.yaml:{field}"
+        for finding in findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "yaml_value"),
+    [
+        ("purpose_condition", "[matches]"),
+        ("purpose_condition", "{value: matches}"),
+        ("kind", "[standing]"),
+        ("kind", "{value: standing}"),
+    ],
+)
+def test_rule_enum_container_values_block_a_cold_policy_compile(
+    vault: Path, field: str, yaml_value: str
+) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(
+        vault,
+        "rules",
+        "invalid",
+        _RULE_A + f"{field}: {yaml_value}\n",
+    )
+
+    compiled = policy.load(vault)
+
+    assert compiled.blocked
+    assert any(
+        finding["code"] == "invalid_field"
+        and finding["path"].endswith(f":{field}")
+        for finding in compiled.findings
+    )
+
+
 def test_empty_dir_yields_empty_singleton(vault: Path) -> None:
     (vault / "Knowledge Base" / "_Governance").mkdir(parents=True, exist_ok=True)
     pol = policy.load(vault)
@@ -884,6 +950,144 @@ def test_a_yaml_boolean_spelling_is_accepted(vault: Path) -> None:
     pol = policy.load(vault)
     assert pol.blocked is False
     assert pol.scopes[_SCOPE_A_ID].default_deny is True
+
+
+@pytest.mark.parametrize(
+    "option_yaml",
+    [
+        "credential_scrubber: off\n",
+        "credential_scrubber: true\n",
+        "unknown: value\n",
+        "notice: [not, a, string]\n",
+        'suspended: "no"\n',
+        "constraint_source: scope\n",
+    ],
+)
+def test_rule_options_are_a_closed_typed_registry(vault: Path, option_yaml: str) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "external", _RULE_A + "options:\n  " + option_yaml.replace("\n", "\n  "))
+
+    compiled = policy.load(vault)
+
+    assert compiled.blocked is True
+    assert any(finding["path"].startswith("rules/external.yaml:options") for finding in compiled.findings)
+
+
+@pytest.mark.parametrize(
+    "option_yaml",
+    [
+        "1: value\n",
+        "1: value\nunknown: value\n",
+        "[list]: value\n",
+        "notice: !!set {value: null}\n",
+        "notice: !!python/name:os.system ''\n",
+        "notice: .nan\n",
+        "notice: " + "x" * 501 + "\n",
+        "bridge: [wrong]\n",
+        "credential_scrubber: on\n",
+        "credential_scrubber: false\n",
+        "credential_scrubber: no\n",
+        'credential_scrubber: "disabled"\n',
+        "credential_scrubber: [off]\n",
+    ],
+)
+def test_rule_option_malformed_values_always_block_without_parser_crash(
+    vault: Path, option_yaml: str
+) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "external", _RULE_A + "options:\n  " + option_yaml.replace("\n", "\n  "))
+
+    compiled = policy.load(vault)
+
+    assert compiled.blocked is True
+    assert compiled.findings
+
+
+def _release_document(*, top_extra: str = "", dependency_extra: str = "", options_extra: str = "") -> str:
+    return (
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+        "kind: release\n"
+        "path: Knowledge Base/Notes/Patterns/released.md\n"
+        "ref: exomem://memory/00000000-0000-0000-0000-000000000001\n"
+        f"content_hash: {'a' * 64}\n"
+        "to_audience: external\n"
+        "released_at: '2026-08-13T12:00:00Z'\n"
+        "why: Owner reviewed the exact release\n"
+        "bridge_scope: review\n"
+        "bridge_of:\n"
+        "  - ref: exomem://memory/00000000-0000-0000-0000-000000000002\n"
+        "    path: Knowledge Base/Sources/Other/source.md\n"
+        f"    content_hash: {'b' * 64}\n"
+        f"    restriction_signature: {'c' * 64}\n"
+        f"{dependency_extra}"
+        "options:\n"
+        "  strip_provenance:\n"
+        "    - exomem://memory/00000000-0000-0000-0000-000000000002\n"
+        f"{options_extra}"
+        f"{top_extra}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "document"),
+    [
+        ("scopes", _SCOPE_A + "unknown: mixed\n1: mixed\n"),
+        (
+            "scopes",
+            _SCOPE_A + "exclude:\n  paths: []\n  unknown: mixed\n  1: mixed\n",
+        ),
+        ("rules", _RULE_A + "unknown: mixed\n1: mixed\n"),
+        ("grants", _GRANT_A + "unknown: mixed\n1: mixed\n"),
+        ("grants", _release_document(top_extra="unknown: mixed\n1: mixed\n")),
+        (
+            "grants",
+            _release_document(
+                dependency_extra="    unknown: mixed\n    1: mixed\n"
+            ),
+        ),
+        (
+            "grants",
+            _release_document(options_extra="  unknown: mixed\n  1: mixed\n"),
+        ),
+    ],
+)
+def test_every_strict_policy_map_blocks_mixed_keys_without_type_error(
+    vault: Path, kind: str, document: str
+) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, kind, "mixed-keys", document)
+
+    compiled = policy.load(vault)
+
+    assert compiled.blocked is True
+    assert any(
+        finding["code"] == "invalid_field"
+        and "keys must be strings" in finding["detail"]
+        for finding in compiled.findings
+    )
+
+
+def test_credential_scrubber_occurrence_emits_owner_migration_finding(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(
+        vault,
+        "rules",
+        "legacy-scrubber",
+        _RULE_A + "options:\n  credential_scrubber: off\n",
+    )
+
+    compiled = policy.load(vault)
+
+    assert compiled.blocked is True
+    migration = [
+        finding
+        for finding in compiled.findings
+        if finding["code"] == "owner_migration_required"
+    ]
+    assert len(migration) == 1
+    assert migration[0]["path"].endswith(":options.credential_scrubber")
+    assert "remove" in migration[0]["detail"].lower()
 
 
 @pytest.mark.parametrize(
