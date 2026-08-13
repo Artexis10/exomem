@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.49.0](https://github.com/Artexis10/exomem/compare/v0.48.0...v0.49.0) (2026-08-13)
+
+
+### Features
+
+* **records:** add readable child presentations ([#457](https://github.com/Artexis10/exomem/issues/457)) ([4b405f5](https://github.com/Artexis10/exomem/commit/4b405f5c6832b4452adca419a13e238aad284385))
+
+
+### Bug Fixes
+
+* drain deferred work and surface runtime failures ([47f56c8](https://github.com/Artexis10/exomem/commit/47f56c8bc34ce0ee17cef5d6fcec42d793324823))
+* **hosted:** release same-candidate discard capacity ([#458](https://github.com/Artexis10/exomem/issues/458)) ([02a1212](https://github.com/Artexis10/exomem/commit/02a121271f96644df0f60d770d97812058214e17))
+* **hosted:** report published runtime schema digest ([#459](https://github.com/Artexis10/exomem/issues/459)) ([6d972fb](https://github.com/Artexis10/exomem/commit/6d972fb0a955464e5c85669443284210ab55870f))
+* **planning:** stop ancestor traversal at roots ([#453](https://github.com/Artexis10/exomem/issues/453)) ([5c56ffd](https://github.com/Artexis10/exomem/commit/5c56ffd5412b228bb6c97055298e52f58aa62eab))
+
+## [Unreleased]
+
+### Bug Fixes
+
+* drain semantic and full deferred-index work from bounded reconcile passes, including
+  a non-zero quiet-mode throttle, and make deferred-work status and doctor reporting
+  actionable
+* make `exomem mode` clean up failed temporary writes and report machine-config
+  permission failures without a traceback
+* report pre-existing unsafe Windows idempotency DACLs with the exact path and explicit
+  `icacls.exe` remediation, while retaining fail-closed principal-private state
+
 ## [0.48.0](https://github.com/Artexis10/exomem/compare/v0.47.0...v0.48.0) (2026-08-12)
 
 

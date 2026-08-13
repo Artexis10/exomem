@@ -451,16 +451,25 @@ async def _release_completed_capacity(
     reservations = list(
         await session.scalars(statement.order_by(CapacityReservation.id).with_for_update())
     )
-    if any(
-        reservation.reserving_fence_generation >= operation.fence_generation
-        for reservation in reservations
-    ):
-        raise StaleFence("destructive operation cannot release an equal-or-newer reservation")
     if operation.action is OperationAction.DISCARD and any(
-        reservation.resource_name != cell_resource_name(reservation.cell_id)
+        reservation.resource_name != cell_resource_name(operation.cell_id)
         for reservation in reservations
     ):
         raise ImmutableMetadataConflict("discard reservation resource identity differs")
+    if any(
+        reservation.reserving_fence_generation > operation.fence_generation
+        or (
+            reservation.reserving_fence_generation == operation.fence_generation
+            and not (
+                operation.action is OperationAction.DISCARD
+                and reservation.resource_name == cell_resource_name(operation.cell_id)
+                and reservation.reserving_provider_operation_id
+                == operation.external_operation_id
+            )
+        )
+        for reservation in reservations
+    ):
+        raise StaleFence("destructive operation cannot release an equal-or-newer reservation")
     for reservation in reservations:
         reservation.released_at = completed_at
         reservation.releasing_operation_id = operation.id

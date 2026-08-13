@@ -80,7 +80,8 @@ def _connect(
         CREATE TABLE IF NOT EXISTS full_upserts (
             rel_path TEXT PRIMARY KEY,
             created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
+            updated_at REAL NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1
         )
         """
     )
@@ -91,6 +92,11 @@ def _connect(
         conn.execute(
             "ALTER TABLE semantic_upserts "
             "ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
+        )
+    full_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(full_upserts)")}
+    if "revision" not in full_columns:
+        conn.execute(
+            "ALTER TABLE full_upserts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
         )
     return conn
 
@@ -329,9 +335,11 @@ def _add(vault_root: Path, rel_paths: list[str], *, table: str) -> int:
         with conn:
             conn.executemany(
                 f"""
-                INSERT INTO {table}(rel_path, created_at, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(rel_path) DO UPDATE SET updated_at = excluded.updated_at
+                INSERT INTO {table}(rel_path, created_at, updated_at, revision)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(rel_path) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    revision = {table}.revision + 1
                 """,
                 [(rel, now, now) for rel in rels],
             )
@@ -345,12 +353,7 @@ def list_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
 
 
 def list_full_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
-    paths = _list_paths(vault_root, table="full_upserts", limit=limit)
-    valid = [rel for rel in paths if _safe_markdown_rel_path(rel) is not None]
-    corrupt = [rel for rel in paths if _safe_markdown_rel_path(rel) is None]
-    if corrupt:
-        _purge_corrupt_paths(vault_root, "full_upserts", corrupt)
-    return valid
+    return [receipt.rel_path for receipt in snapshot_full(vault_root, limit=limit)]
 
 
 def snapshot(
@@ -366,7 +369,10 @@ def snapshot(
             for row in conn.execute("PRAGMA table_info(semantic_upserts)")
         }
         revision = "revision" if "revision" in columns else "1 AS revision"
-        sql = f"SELECT rel_path, {revision} FROM semantic_upserts ORDER BY rel_path"
+        sql = (
+            f"SELECT rel_path, {revision} FROM semantic_upserts "
+            "ORDER BY updated_at, rel_path"
+        )
         params: tuple[Any, ...] = ()
         if limit is not None:
             sql += " LIMIT ?"
@@ -394,6 +400,45 @@ def snapshot(
     return valid
 
 
+def snapshot_full(
+    vault_root: Path, *, limit: int | None = None
+) -> list[DeferredReceipt]:
+    path = store_path(vault_root)
+    if not path.exists():
+        return []
+    conn = _connect(vault_root, create=False)
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(full_upserts)")}
+        revision = "revision" if "revision" in columns else "1 AS revision"
+        sql = (
+            f"SELECT rel_path, {revision} FROM full_upserts "
+            "ORDER BY updated_at, rel_path"
+        )
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (max(0, limit),)
+        receipts = [
+            DeferredReceipt(str(row[0]), int(row[1]))
+            for row in conn.execute(sql, params).fetchall()
+        ]
+    finally:
+        conn.close()
+    valid = [
+        DeferredReceipt(rel, receipt.revision)
+        for receipt in receipts
+        if (rel := _safe_markdown_rel_path(receipt.rel_path)) is not None
+    ]
+    corrupt = [
+        receipt.rel_path
+        for receipt in receipts
+        if _safe_markdown_rel_path(receipt.rel_path) is None
+    ]
+    if corrupt:
+        _purge_corrupt_paths(vault_root, "full_upserts", corrupt)
+    return valid
+
+
 def clear_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
     if not receipts or not store_path(vault_root).exists():
         return 0
@@ -404,6 +449,51 @@ def clear_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
                 conn.execute(
                     "DELETE FROM semantic_upserts WHERE rel_path = ? AND revision = ?",
                     (receipt.rel_path, receipt.revision),
+                ).rowcount
+                for receipt in receipts
+            )
+        return int(changed)
+    finally:
+        conn.close()
+
+
+def clear_full_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
+    if not receipts or not store_path(vault_root).exists():
+        return 0
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            changed = sum(
+                conn.execute(
+                    "DELETE FROM full_upserts WHERE rel_path = ? AND revision = ?",
+                    (receipt.rel_path, receipt.revision),
+                ).rowcount
+                for receipt in receipts
+            )
+        return int(changed)
+    finally:
+        conn.close()
+
+
+def rotate_receipts(
+    vault_root: Path,
+    receipts: list[DeferredReceipt],
+    *,
+    full: bool = False,
+) -> int:
+    """Move failed receipt revisions behind untouched work without changing CAS identity."""
+    if not receipts or not store_path(vault_root).exists():
+        return 0
+    table = "full_upserts" if full else "semantic_upserts"
+    now = time.time()
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            changed = sum(
+                conn.execute(
+                    f"UPDATE {table} SET updated_at = ? "
+                    "WHERE rel_path = ? AND revision = ?",
+                    (now, receipt.rel_path, receipt.revision),
                 ).rowcount
                 for receipt in receipts
             )
@@ -530,10 +620,15 @@ def status(vault_root: Path | None) -> dict[str, Any]:
 
 def full_status(vault_root: Path | None) -> dict[str, Any]:
     result = _status(vault_root, table="full_upserts")
+    command = (
+        f'exomem index --vault "{vault_root}" --scope vault'
+        if vault_root is not None
+        else "exomem index --scope vault"
+    )
     return {
         **result,
         "retryable": result["count"] > 0,
-        "next_action": "retry deferred index refresh" if result["count"] else None,
+        "next_action": command if result["count"] else None,
     }
 
 
@@ -589,9 +684,17 @@ def _sidecar_state(sidecar: Path) -> tuple[tuple[bool, tuple[int, int, int, int]
 
 
 def inspect_embedding_freshness(
-    vault_root: Path, rel_paths: list[str]
+    vault_root: Path,
+    rel_paths: list[str],
+    *,
+    mtime_slack_seconds: float = 0.0,
 ) -> dict[str, EmbeddingFreshness]:
-    """Classify paths without importing or initializing the embedding stack."""
+    """Classify paths without initializing an embedding model.
+
+    Exact mtime comparison remains the default for existing admission callers.
+    The deferred drain opts into the incremental indexer's one-second
+    filesystem-jitter allowance.
+    """
     rels = sorted({rel.replace("\\", "/") for rel in rel_paths})
     result = {rel: EmbeddingFreshness.UNVERIFIABLE for rel in rels}
     if not rels:
@@ -600,6 +703,8 @@ def inspect_embedding_freshness(
     if not sidecar.is_file():
         return result
     try:
+        from . import access, embeddings, find, semantic_index
+
         before_sidecar = _sidecar_state(sidecar)
         wal_exists = before_sidecar[1][0]
         shm_exists = before_sidecar[2][0]
@@ -608,11 +713,23 @@ def inspect_embedding_freshness(
             return result
         disk_mtimes: dict[str, float] = {}
         disk_identities: dict[str, tuple[int, int, int, int]] = {}
+        chunked: dict[str, bool] = {}
+        parent_states: dict[str, Any] = {}
         for rel in rels:
             path = vault_root / rel
             try:
                 disk_identities[rel] = _file_identity(path)
                 disk_mtimes[rel] = path.stat().st_mtime
+                page = find._CACHE.get(path, vault_root)
+                if page is None or not access.is_indexable(vault_root, rel):
+                    continue
+                chunked[rel] = bool(embeddings._chunks_for_page(vault_root, page))
+                try:
+                    parent_states[rel] = semantic_index.build_parent_index_state(
+                        vault_root, path
+                    )
+                except (OSError, UnicodeError, ValueError):
+                    pass
             except OSError:
                 continue
         query_sidecar = sidecar
@@ -644,6 +761,7 @@ def inspect_embedding_freshness(
             conn.execute("PRAGMA query_only = ON")
             conn.execute("PRAGMA busy_timeout=0")
             stored: dict[str, float] = {}
+            stored_units: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
             for offset in range(0, len(rels), 400):
                 batch = rels[offset : offset + 400]
                 rows = conn.execute(
@@ -653,6 +771,27 @@ def inspect_embedding_freshness(
                     batch,
                 ).fetchall()
                 stored.update({str(row[0]): float(row[1]) for row in rows})
+            has_unit_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'semantic_unit_vectors'"
+            ).fetchone()
+            if has_unit_table:
+                for offset in range(0, len(rels), 400):
+                    batch = rels[offset : offset + 400]
+                    rows = conn.execute(
+                        "SELECT parent_path, parent_generation, unit_ref "
+                        "FROM semantic_unit_vectors WHERE parent_path IN "
+                        f"({','.join('?' for _ in batch)})",
+                        batch,
+                    ).fetchall()
+                    for parent_path, generation, unit_ref in rows:
+                        generations, unit_refs = stored_units.setdefault(
+                            str(parent_path), (frozenset(), frozenset())
+                        )
+                        stored_units[str(parent_path)] = (
+                            generations | {str(generation)},
+                            unit_refs | {str(unit_ref)},
+                        )
         finally:
             conn.close()
             if snapshot_dir is not None:
@@ -667,9 +806,33 @@ def inspect_embedding_freshness(
             except OSError:
                 continue
             row_mtime = stored.get(rel)
+            if mtime_slack_seconds > 0:
+                mtime_current = (
+                    row_mtime is not None
+                    and disk_mtime <= row_mtime + mtime_slack_seconds
+                )
+            else:
+                mtime_current = row_mtime is not None and disk_mtime == row_mtime
+            file_current = (
+                mtime_current
+                if chunked.get(rel, False)
+                else row_mtime is None
+            )
+            parent_state = parent_states.get(rel)
+            if parent_state is None:
+                unit_current = rel not in stored_units
+            else:
+                expected_refs = frozenset(
+                    unit.unit_ref
+                    for unit in parent_state.document.units
+                    if unit.unit_ref is not None
+                )
+                expected = (frozenset({parent_state.parent_generation}), expected_refs)
+                actual = stored_units.get(rel)
+                unit_current = actual == expected or (actual is None and not expected_refs)
             result[rel] = (
                 EmbeddingFreshness.CURRENT
-                if row_mtime is not None and row_mtime == disk_mtime
+                if file_current and unit_current
                 else EmbeddingFreshness.STALE
             )
         return result

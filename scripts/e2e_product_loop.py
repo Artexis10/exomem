@@ -74,6 +74,24 @@ item_schema:
     title: {type: string, required: true}
     status: {type: enum, enum: [completed, partial, aborted]}
     movements: {type: array, items: {type: object}}
+    note: {type: string}
+    provenance: {type: string}
+record_presentation:
+  version: 1
+  summary:
+    - {field: title, label: Session}
+    - {field: status, label: Status}
+  tables:
+    - field: movements
+      label: Movements
+      columns:
+        - {field: movement, label: Movement, type: string}
+        - {field: band, label: Band, type: string}
+        - {field: repetitions, label: Repetitions, type: string}
+  notes:
+    - {field: note, label: Note}
+  details:
+    - {field: provenance, label: Provenance}
 views:
   completed-sessions:
     query:
@@ -453,6 +471,42 @@ def _assert_records_rebaseline(inspection: dict[str, Any], history: dict[str, An
         raise RuntimeError("installed Records rebaseline did not retain reader marker 2")
 
 
+def _assert_records_presentation_rows(
+    unexpanded: dict[str, Any], expanded_pages: list[dict[str, Any]]
+) -> None:
+    """Assert the installed Records safe projection in both query modes."""
+    rows = unexpanded.get("rows")
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise RuntimeError("installed Records unexpanded query lost its parent row")
+    movements = rows[0].get("movements") if isinstance(rows[0], dict) else None
+    if not isinstance(movements, list) or len(movements) != 3:
+        raise RuntimeError("installed Records unexpanded query lost safe nested rows")
+    serialized_parent = json.dumps(rows, sort_keys=True)
+    if "e2e undeclared child sentinel" in serialized_parent:
+        raise RuntimeError("installed Records unexpanded query exposed an undeclared child field")
+    expanded = [row for page in expanded_pages for row in page.get("rows", [])]
+    if [row.get("child_index") for row in expanded if isinstance(row, dict)] != [0, 1, 2]:
+        raise RuntimeError(
+            "installed Records child pagination duplicated or skipped a child row: "
+            f"{expanded_pages!r}"
+        )
+    if any(
+        not isinstance(row, dict)
+        or row.get("child_field") != "movements"
+        or "movements" in row
+        or "private" in row
+        for row in expanded
+    ):
+        raise RuntimeError("installed Records expanded query escaped its safe child projection")
+    if (
+        expanded_pages[0].get("continuation") is None
+        or expanded_pages[-1].get("continuation") is not None
+    ):
+        raise RuntimeError(
+            "installed Records child pagination did not expose a bounded terminal page"
+        )
+
+
 async def _planning_first_session(client, state: dict[str, Any], timeout: float) -> None:
     fixtures = state["planning"]
     software = fixtures["software"]
@@ -743,7 +797,18 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
                 "occurred_on": "2026-08-04",
                 "title": "Pull",
                 "status": "completed",
-                "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}],
+                "movements": [
+                    {
+                        "movement": "Deadlift",
+                        "band": "grey",
+                        "repetitions": "22",
+                        "private": "e2e undeclared child sentinel",
+                    },
+                    {"movement": "Row", "band": "blue", "repetitions": "12"},
+                    {"movement": "Curl", "band": "white", "repetitions": "8"},
+                ],
+                "note": "Stopped exactly at the recorded count.",
+                "provenance": "Captured by the installed-wheel Records journey.",
             },
             "item_key": item_key,
             "expected_container_hash": _record_snapshot(before),
@@ -775,6 +840,42 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
     )
     if not isinstance(item, dict) or not isinstance(item.get("item_version"), str):
         raise RuntimeError("installed Records query did not return the appended item version")
+    first_children = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": collection,
+            "expand_child": "movements",
+            "limit": 2,
+        },
+        timeout,
+    )
+    second_children = await _call(
+        client,
+        "record_memory",
+        {
+            "action": "query",
+            "collection": collection,
+            "expand_child": "movements",
+            "limit": 2,
+            "continuation": first_children.get("continuation"),
+        },
+        timeout,
+    )
+    _assert_records_presentation_rows(
+        after_append,
+        [first_children, second_children],
+    )
+    item_text = (Path(state["vault"]) / fixture["item_path"]).read_text(encoding="utf-8")
+    if (
+        "<!-- exomem-record-presentation:v1" not in item_text
+        or "### Movements" not in item_text
+        or "e2e record row-only sentinel" not in item_text
+    ):
+        raise RuntimeError(
+            "installed Records append did not preserve authored prose and managed view"
+        )
     updated = await _call_mutation(
         client,
         "record_memory",
@@ -791,6 +892,9 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
     )
     if updated.get("operation") != "update":
         raise RuntimeError(f"installed Records update returned unexpected data: {updated!r}")
+    updated_item_text = (Path(state["vault"]) / fixture["item_path"]).read_text(encoding="utf-8")
+    if "**Session:** Push corrected" not in updated_item_text:
+        raise RuntimeError("installed Records value update did not refresh managed presentation")
     derived = await _call(
         client,
         "record_memory",
@@ -958,6 +1062,13 @@ async def _records_rebaseline_session(client, state: dict[str, Any], timeout: fl
         or not isinstance(guards, dict)
     ):
         raise RuntimeError("direct Records edit did not produce an inspectable guarded audit gap")
+    presentation = inspection.get("presentation")
+    if (
+        not isinstance(presentation, dict)
+        or presentation.get("counts", {}).get("stale") != 1
+        or presentation.get("items", [{}])[0].get("remedy") != "rebaseline_then_refresh"
+    ):
+        raise RuntimeError("direct Records edit did not produce one actionable stale presentation")
     rebaselined = await _call_mutation(
         client,
         "record_memory",
@@ -972,6 +1083,46 @@ async def _records_rebaseline_session(client, state: dict[str, Any], timeout: fl
     )
     if rebaselined.get("operation") != "rebaseline":
         raise RuntimeError("installed Records rebaseline did not commit")
+    repair_inspection = await _call(
+        client,
+        "record_memory",
+        {"action": "inspect", "collection": fixture["collection"]},
+        timeout,
+    )
+    repair_read = await _call(
+        client,
+        "record_memory",
+        {"action": "query", "collection": fixture["collection"], "limit": 20},
+        timeout,
+    )
+    repair_item = next(
+        (
+            row
+            for row in repair_read.get("rows", [])
+            if isinstance(row, dict) and row.get("record_id") == fixture["item_key"]
+        ),
+        None,
+    )
+    repair_guards = repair_inspection.get("lifecycle_guards")
+    if not isinstance(repair_item, dict) or not isinstance(repair_guards, dict):
+        raise RuntimeError("installed Records repair did not reacquire exact guards")
+    refreshed = await _call_mutation(
+        client,
+        "record_memory",
+        {
+            "action": "update",
+            "collection": fixture["collection"],
+            "item_key": fixture["item_key"],
+            "changes": {},
+            "expected_container_hash": repair_guards["expected_container_hash"],
+            "expected_item_version": repair_item["item_version"],
+            "refresh_presentation": True,
+            "why": "refresh installed managed presentation after rebaseline",
+        },
+        timeout,
+    )
+    if refreshed.get("operation") != "update":
+        raise RuntimeError("installed Records presentation refresh did not commit")
     readback = await _call(
         client,
         "record_memory",
@@ -997,6 +1148,8 @@ async def _records_rebaseline_session(client, state: dict[str, Any], timeout: fl
         timeout,
     )
     _assert_records_rebaseline(rebaselined_inspection, readback.get("agent_history", {}))
+    if rebaselined_inspection.get("presentation", {}).get("items") != []:
+        raise RuntimeError("installed Records presentation remained stale after guarded refresh")
 
 
 async def _stdio_session(
@@ -1324,6 +1477,7 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     home = Path(args.home)
     env = _clean_env(home, vault)
     state: dict[str, Any] = {}
+    state["vault"] = str(vault)
     state["records"] = _write_records_fixture(vault)
     state["manual_records"] = _write_manual_records_fixture(vault)
     state["planning"] = _write_planning_fixtures(vault)
