@@ -69,7 +69,7 @@ class ExomemDirectProvider:
         finally:
             try:
                 if self._context is not None:
-                    for component in ("vault", "logs"):
+                    for component in ("vault", "logs", "leases"):
                         retire_child_directory(
                             self._context.work_root,
                             component,
