@@ -254,6 +254,55 @@ def test_deferred_graph_completion_requires_immediate_fanout_disabled(tmp_path: 
         )
 
 
+def test_deferred_graph_completion_requires_a_vault_root(tmp_path: Path) -> None:
+    """The deferred token has no valid graph epoch without its vault root."""
+    with pytest.raises(ValueError, match="vault_root"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(tmp_path / "sidecar.md", "canonical")],
+            post_commit_fanout=False,
+            defer_graph_completion=True,
+        )
+
+
+def test_deferred_graph_completion_keeps_the_admitted_predecessor_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkpoint advance after admission cannot replace the token's predecessor."""
+    prior = _prime_graph_epoch(tmp_path)
+    original_admit = graph_sync._admit_epoch_inputs
+    advanced = graph_sync.GraphSyncCheckpoint.create(
+        generation=prior.generation + 9,
+        mutation_id="c" * 24,
+        paths=(),
+        created_paths=(),
+        scope="full",
+    )
+
+    def admit_then_advance(root: Path):
+        original_admit(root)
+        graph_sync.floor_path(root).write_text(
+            graph_sync.GraphSyncGenerationFloor.create(advanced.generation).render(),
+            encoding="utf-8",
+        )
+        graph_sync.checkpoint_path(root).write_text(advanced.render(), encoding="utf-8")
+        return original_admit(root)
+
+    monkeypatch.setattr(graph_sync, "_admit_epoch_inputs", admit_then_advance)
+    result = vault_module.batch_atomic_write(
+        [_graph_write(tmp_path)],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+        defer_graph_completion=True,
+    )
+
+    assert isinstance(result, vault_module.DeferredGraphCompletion)
+    assert result.predecessor == advanced
+    assert result.checkpoint.generation == advanced.generation + 1
+    assert result.predecessor != result.checkpoint
+    assert graph_sync.read_checkpoint(tmp_path) == advanced
+    assert result.predecessor == graph_sync.read_checkpoint(tmp_path)
+
+
 def test_ordinary_false_fanout_keeps_floor_caller_checkpoint_and_rolls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

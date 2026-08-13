@@ -24,13 +24,16 @@ from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO, Literal
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
 from slugify import slugify as _slugify
 
 from . import freshness, privacy_log
 from .kbdir import kb_dirname, kb_prefix
+
+if TYPE_CHECKING:
+    from .graph_sync import GraphSyncCheckpoint
 
 if os.name == "nt":  # pragma: no cover - imported only on Windows
     import msvcrt
@@ -2436,6 +2439,15 @@ class PlannedWrite:
     ensure_directories: tuple[Path, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class DeferredGraphCompletion:
+    """Exact graph handoff retained after a canonical deferred-completion batch."""
+
+    replaced: tuple[Path, ...]
+    checkpoint: GraphSyncCheckpoint
+    predecessor: GraphSyncCheckpoint | None
+
+
 def _summarize_batch_targets(
     writes: Iterable[PlannedWrite], vault_root: Path | None
 ) -> BatchTargetSummary:
@@ -2909,7 +2921,8 @@ def batch_atomic_write(
     semantic_states: Mapping[str, Any] | None = None,
     post_commit_fanout: bool = True,
     commit_point: bool = True,
-) -> list[Path]:
+    defer_graph_completion: bool = False,
+) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
     A process-shared lock closes the gap between validating any ``expected_hash``
@@ -2918,6 +2931,10 @@ def batch_atomic_write(
     index fan-out.
     """
     with _BATCH_COMMIT_LOCK:
+        if defer_graph_completion and (post_commit_fanout or vault_root is None):
+            raise ValueError(
+                "defer_graph_completion requires vault_root and post_commit_fanout=False"
+            )
         return _batch_atomic_write_locked(
             writes,
             vault_root=vault_root,
@@ -2926,6 +2943,7 @@ def batch_atomic_write(
             semantic_states=semantic_states,
             post_commit_fanout=post_commit_fanout,
             commit_point=commit_point,
+            defer_graph_completion=defer_graph_completion,
         )
 
 
@@ -2938,7 +2956,8 @@ def _batch_atomic_write_locked(
     semantic_states: Mapping[str, Any] | None = None,
     post_commit_fanout: bool = True,
     commit_point: bool = True,
-) -> list[Path]:
+    defer_graph_completion: bool = False,
+) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
     Existing destinations are snapshotted into memory before the first flip. A
@@ -2961,15 +2980,34 @@ def _batch_atomic_write_locked(
     writes = list(caller_writes)
     graph_checkpoint_path: Path | None = None
     graph_floor_path: Path | None = None
+    deferred_checkpoint: GraphSyncCheckpoint | None = None
+    deferred_predecessor: GraphSyncCheckpoint | None = None
     if vault_root is not None:
         from . import graph_sync
 
-        epoch_writes = graph_sync.epoch_writes(Path(vault_root), writes)
+        if defer_graph_completion:
+            deferred_epoch_writes = graph_sync.deferred_epoch_writes(Path(vault_root), writes)
+            if deferred_epoch_writes is None:
+                epoch_writes = None
+            else:
+                floor_write, checkpoint_write, deferred_predecessor = deferred_epoch_writes
+                epoch_writes = (floor_write, checkpoint_write)
+        else:
+            epoch_writes = graph_sync.epoch_writes(Path(vault_root), writes)
         if epoch_writes is not None:
             floor_write, checkpoint_write = epoch_writes
-            writes = [floor_write, *writes, checkpoint_write]
+            if defer_graph_completion:
+                deferred_checkpoint = graph_sync.GraphSyncCheckpoint.parse(checkpoint_write.content)
+                if deferred_checkpoint is None:  # pragma: no cover - graph_sync renders its own token
+                    raise ValueError("deferred graph completion checkpoint is invalid")
+                writes = [floor_write, *writes]
+            else:
+                writes = [floor_write, *writes, checkpoint_write]
             graph_floor_path = floor_write.path
-            graph_checkpoint_path = checkpoint_write.path
+            if not defer_graph_completion:
+                graph_checkpoint_path = checkpoint_write.path
+        elif defer_graph_completion:
+            raise ValueError("defer_graph_completion requires graph-relevant writes")
     destinations: set[str] = set()
     for write in writes:
         destination = os.path.abspath(write.path)
@@ -3296,6 +3334,12 @@ def _batch_atomic_write_locked(
             "BATCH_CLEANUP_INCOMPLETE",
             target_summary,
             True,
+        )
+    if deferred_checkpoint is not None:
+        return DeferredGraphCompletion(
+            tuple(path for path in replaced if path != graph_floor_path),
+            deferred_checkpoint,
+            deferred_predecessor,
         )
     return [write.path for write in caller_writes]
 

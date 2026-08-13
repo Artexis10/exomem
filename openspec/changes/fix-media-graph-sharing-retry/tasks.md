@@ -7,7 +7,7 @@
 
 ## 2. Canonical And Derived Boundary
 
-- [ ] 2.1 Add the narrow deferred-completion option with exact checkpoint output, floor retention, checkpoint omission, and unchanged defaults.
+- [x] 2.1 Add the narrow deferred-completion option with exact checkpoint output, floor retention, checkpoint omission, and unchanged defaults.
 - [ ] 2.2 Wire only explicit media call sites; re-enter the canonical coordinator and CAS-publish the exact checkpoint only when floor/predecessor still match before fanout.
 - [ ] 2.3 Add a deterministic two-writer test proving a newer epoch supersedes a stale media token without regression, false fanout success, or receipt clearing.
 - [ ] 2.4 Prove all graph-internal and ordinary false-fanout callers retain their epoch behavior.

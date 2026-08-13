@@ -1180,9 +1180,9 @@ def _admit_epoch_inputs(
     raise GraphEpochIncoherent("graph floor/checkpoint epoch is malformed or ambiguous")
 
 
-def epoch_writes(
+def _epoch_writes_with_predecessor(
     vault_root: Path, writes: Iterable[PlannedWrite]
-) -> tuple[PlannedWrite, PlannedWrite] | None:
+) -> tuple[PlannedWrite, PlannedWrite, GraphSyncCheckpoint | None] | None:
     """Build ordered internal epoch replacements for canonical Markdown writes.
 
     The import stays here to keep the vault writer free of a module cycle.
@@ -1233,7 +1233,23 @@ def epoch_writes(
     return (
         PlannedWrite(floor_path(root), GraphSyncGenerationFloor.create(checkpoint.generation).render()),
         PlannedWrite(checkpoint_path(root), checkpoint.render()),
+        epoch.checkpoint,
     )
+
+
+def epoch_writes(
+    vault_root: Path, writes: Iterable[PlannedWrite]
+) -> tuple[PlannedWrite, PlannedWrite] | None:
+    """Build ordered internal epoch replacements for canonical Markdown writes."""
+    result = _epoch_writes_with_predecessor(vault_root, writes)
+    return None if result is None else result[:2]
+
+
+def deferred_epoch_writes(
+    vault_root: Path, writes: Iterable[PlannedWrite]
+) -> tuple[PlannedWrite, PlannedWrite, GraphSyncCheckpoint | None] | None:
+    """Build one deferred graph token from its admitted predecessor snapshot."""
+    return _epoch_writes_with_predecessor(vault_root, writes)
 
 
 def checkpoint_write(
