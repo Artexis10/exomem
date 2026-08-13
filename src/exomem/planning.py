@@ -688,11 +688,10 @@ def _hierarchy(
     while frontier and current_depth < depth:
         next_frontier: list[str] = []
         for node in frontier:
-            related = (
-                [parent_of[node]]
-                if mode == "ancestors" and node in parent_of
-                else children.get(node, [])
-            )
+            if mode == "ancestors":
+                related = [parent_of[node]] if node in parent_of else []
+            else:
+                related = children.get(node, [])
             for other in related:
                 if other not in rows:
                     continue
