@@ -21,7 +21,7 @@ from exomem import commands
 from exomem import find as find_module
 from exomem.find_types import GraphProvenance, Hit
 from exomem.governance import egress, receipts
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 # --------------------------------------------------------------------------
 # Governed-vault helpers
@@ -3834,3 +3834,136 @@ def test_a_broad_undeclared_scope_cannot_reopen_a_declared_one(vault: Path) -> N
     with request_scope(_external()):
         with pytest.raises(ValueError, match="NOT_FOUND"):
             commands.op_get(vault, path=RESTRICTED_PATH)
+
+
+def test_owner_explain_exposes_per_scope_contributions_only_to_owner(vault: Path) -> None:
+    from exomem.governance.inspection import inspect_operation
+
+    write_scope(vault, default_deny=True)
+    second_scope = "01ARZ3NDEKTSV4RRFFQ69G5FC2"
+    (_gov_dir(vault) / "scopes" / "second.yaml").write_text(
+        f"governance_version: 1\nid: {second_scope}\nname: Second\n"
+        f'paths: ["{PATTERNS_GLOB}"]\ndefault_deny: true\n',
+        encoding="utf-8",
+    )
+    write_rule(
+        vault,
+        ceiling=5,
+        extra="options:\n  constraint: reviewed constraint\n",
+    )
+    (_gov_dir(vault) / "rules" / "cap.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC3\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: {EXTERNAL}\nkind: org_cap\n'
+        "ceiling: 4\noptions:\n  constraint: reviewed constraint\n",
+        encoding="utf-8",
+    )
+    grants = _gov_dir(vault) / "grants"
+    grants.mkdir(parents=True, exist_ok=True)
+    (grants / "second.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC4\nkind: standing\n"
+        f'scope_ids: ["{second_scope}"]\naudience: {EXTERNAL}\nceiling: 3\n',
+        encoding="utf-8",
+    )
+    _reset_caches()
+
+    owner_result = inspect_operation(
+        vault,
+        "explain",
+        principal=owner_principal(),
+        audience=EXTERNAL,
+        path=RESTRICTED_PATH,
+    )
+    non_owner_result = inspect_operation(
+        vault,
+        "explain",
+        principal=_external(),
+        audience=EXTERNAL,
+        path=RESTRICTED_PATH,
+    )
+
+    assert owner_result["effective_ceiling"] == 1
+    assert owner_result["scope_contributions"] == [
+        {
+            "scope_id": SCOPE_ID,
+            "purpose_branch": "neutral",
+            "standing_floor": 5,
+            "default_deny_supplied_floor": False,
+            "standing_rule_ids": [RULE_ID],
+            "grant_ids": [],
+            "grant_ceiling": None,
+            "grant_contribution": 5,
+            "organization_cap_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FC3"],
+            "organization_cap": 4,
+            "option_values": {"constraint": "reviewed constraint"},
+            "option_ambiguities": [],
+            "final_ceiling": 4,
+        },
+        {
+            "scope_id": second_scope,
+            "purpose_branch": "neutral",
+            "standing_floor": 0,
+            "default_deny_supplied_floor": True,
+            "standing_rule_ids": [],
+            "grant_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FC4"],
+            "grant_ceiling": 3,
+            "grant_contribution": 3,
+            "organization_cap_ids": [],
+            "organization_cap": 6,
+            "option_values": {},
+            "option_ambiguities": [],
+            "final_ceiling": 3,
+        },
+    ]
+    assert set(non_owner_result) == {
+        "enabled",
+        "effective_ceiling",
+        "rule_ids",
+        "participating_chain",
+    }
+
+
+def test_owner_explain_labels_purpose_branches_before_conservative_meet(
+    vault: Path,
+) -> None:
+    from exomem.governance.inspection import inspect_operation
+
+    write_scope(vault)
+    rules = _gov_dir(vault) / "rules"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "declared.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC5\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: {EXTERNAL}\nceiling: 3\n'
+        "purpose: audit\npurpose_condition: matches\n"
+        "options:\n  abstract: declared abstract\n",
+        encoding="utf-8",
+    )
+    (rules / "undeclared.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC6\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: {EXTERNAL}\nceiling: 3\n'
+        "purpose: audit\npurpose_condition: outside\n",
+        encoding="utf-8",
+    )
+    _reset_caches()
+
+    result = inspect_operation(
+        vault,
+        "explain",
+        principal=owner_principal(),
+        audience=EXTERNAL,
+        purpose="audit",
+        path=RESTRICTED_PATH,
+    )
+
+    assert result["effective_ceiling"] == 2
+    assert [row["purpose_branch"] for row in result["scope_contributions"]] == [
+        "declared",
+        "undeclared",
+    ]
+    assert [row["final_ceiling"] for row in result["scope_contributions"]] == [
+        3,
+        3,
+    ]
+    assert result["scope_contributions"][0]["option_values"] == {
+        "abstract": "declared abstract"
+    }
+    assert result["scope_contributions"][1]["option_values"] == {}
