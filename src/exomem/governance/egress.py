@@ -1100,8 +1100,14 @@ def _decide_path(
         # enumerated in the walk; permitted media stopped downloading for
         # everyone, owner included) and logged a `utf-8 codec` warning per
         # decision on the way. Path/ref selectors decide a binary with no
-        # parse at all; a sidecar page supplies frontmatter when one exists.
-        scope_ids = membership_module.evaluate_path_only(vault_root, rel_path, policy)
+        # parse at all; semantic selectors remain explicitly unresolved until
+        # companion descriptors are implemented.
+        try:
+            scope_ids = membership_module.evaluate_path_only(
+                vault_root, rel_path, policy
+            ).require_classified()
+        except membership_module.MembershipUnresolved:
+            return None
     else:
         page = find_corpus.parse_page(full_path, mtime, vault_root, content=raw)
         if page is None:
@@ -2826,12 +2832,12 @@ def release_level_for_path_only(
     who = principal if principal is not None else effective_principal()
     if policy.blocked or not who.resolved:
         return DISCLOSURE_MIN
-    if any(
-        scope.projects or scope.tags or scope.types or scope.classes
-        for scope in policy.scopes.values()
-    ):
+    try:
+        scope_ids = membership_module.evaluate_path_only(
+            vault_root, rel_path, policy
+        ).require_classified()
+    except membership_module.MembershipUnresolved:
         return DISCLOSURE_MIN
-    scope_ids = membership_module.evaluate_path_only(vault_root, rel_path, policy)
     decision = decide(
         scope_ids,
         audience=who.audience_id,
