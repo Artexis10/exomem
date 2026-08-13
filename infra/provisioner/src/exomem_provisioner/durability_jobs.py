@@ -122,6 +122,7 @@ class KubernetesDeletionJobLauncher:
             self._batch.list_namespaced_job,  # type: ignore[attr-defined]
             self._namespace,
             label_selector="exomem.io/deletion-job=true",
+            _request_timeout=(2, 5),
         )
         for item in getattr(result, "items", ()) or ():
             status = getattr(item, "status", None)
@@ -155,6 +156,7 @@ class KubernetesDeletionJobLauncher:
             self._batch.create_namespaced_job,  # type: ignore[attr-defined]
             self._namespace,
             body,
+            _request_timeout=(2, 5),
         )
 
     @staticmethod
@@ -650,10 +652,13 @@ async def _run_deletion_dispatcher(settings: DeletionDispatcherSettings) -> None
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         kubernetes_config.load_incluster_config()
+        kubernetes_configuration = kubernetes_client.Configuration.get_default_copy()
+        kubernetes_configuration.retries = 0
+        api_client = kubernetes_client.ApiClient(configuration=kubernetes_configuration)
         await dispatch_one_deletion_job(
             RepositoryDeletionDispatchSource(sessions),
             KubernetesDeletionJobLauncher(
-                batch_v1=kubernetes_client.BatchV1Api(),
+                batch_v1=kubernetes_client.BatchV1Api(api_client=api_client),
                 namespace=settings.namespace,
                 job_template=template,
             ),
