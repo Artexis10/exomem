@@ -23,6 +23,7 @@ _INTERNAL_LINK_INDEX_AUTHORIZED_CANDIDATES = 2_048
 _PUBLIC_LINK_INDEX_AUTHORIZED_BYTES = 4 * 1024 * 1024
 _INTERNAL_LINK_INDEX_AUTHORIZED_BYTES = 32 * 1024 * 1024
 _MAX_LINK_INDEX_ENTRY_BYTES = 256 * 1024
+_PRESENTATION_FINDING_LIMIT = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,7 @@ _INSPECTION_KEYS = frozenset(
         "audit",
         "saved_views",
         "lifecycle_guards",
+        "presentation",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -58,6 +60,7 @@ _INSPECTION_VIEW_QUERY_KEYS = frozenset(
         "date_to",
         "date_column",
         "expand_children",
+        "expand_child",
         "limit",
     }
 )
@@ -208,6 +211,11 @@ def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
             if type(value_) is not bool:
                 return None
             normalized_query[key] = value_
+        elif key == "expand_child":
+            column = _inspection_field_name(value_)
+            if column is None:
+                return None
+            normalized_query[key] = column
         elif key == "limit":
             if type(value_) is not int or not 1 <= value_ <= query_data.HARD_ROW_CAP:
                 return None
@@ -302,6 +310,63 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     normalized_views = [_inspection_saved_view(view) for view in views]
     if any(view is None for view in normalized_views):
         return None
+    presentation = payload.get("presentation")
+    if presentation is not None and (not isinstance(presentation, Mapping) or set(presentation) != {"items", "counts", "truncated"}):
+        return None
+    items, counts = (presentation.get("items"), presentation.get("counts")) if isinstance(presentation, Mapping) else ([], {})
+    states = {"missing", "stale", "malformed", "unrenderable"}
+    if not isinstance(items, list) or len(items) > 128 or not isinstance(counts, Mapping) or (presentation is not None and type(presentation.get("truncated")) is not bool):
+        return None
+    normalized_presentation: list[dict[str, Any]] = []
+    for item in items:
+        if (
+            not isinstance(item, Mapping)
+            or set(item)
+            - {"item_key", "path", "version", "state", "remedy", "location"}
+            or not {"item_key", "path", "version", "state", "remedy"} <= set(item)
+        ):
+            return None
+        key, path, version, state = (
+            _inspection_string(item.get("item_key"), maximum=512),
+            _inspection_path(item.get("path")),
+            _inspection_hash(item.get("version")),
+            item.get("state"),
+        )
+        if key is None or path is None or version is None or state not in states:
+            return None
+        remedies = {
+            "guarded_refresh",
+            "rebaseline_then_refresh",
+            "repair_markers_then_refresh",
+            "guarded_value_update",
+        }
+        remedy = item.get("remedy")
+        if remedy not in remedies:
+            return None
+        normalized_item: dict[str, Any] = {
+            "item_key": key,
+            "path": path,
+            "version": version,
+            "state": state,
+            "remedy": remedy,
+        }
+        location = item.get("location")
+        if location is not None:
+            if (
+                state != "unrenderable"
+                or not isinstance(location, Mapping)
+                or set(location) != {"table", "column", "child_index"}
+                or _inspection_string(location.get("table"), maximum=128) is None
+                or _inspection_string(location.get("column"), maximum=128) is None
+                or type(location.get("child_index")) is not int
+                or location["child_index"] < 0
+            ):
+                return None
+            normalized_item["location"] = dict(location)
+        normalized_presentation.append(normalized_item)
+    normalized_counts = {state: counts.get(state, 0) for state in states}
+    if any(type(value) is not int or value < 0 for value in normalized_counts.values()):
+        return None
     snapshot = payload.get("snapshot")
     if snapshot is not None and _inspection_hash(snapshot) is None:
         return None
@@ -392,6 +457,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         "diagnostics": normalized_diagnostics,
         "audit": normalized_audit,
         "saved_views": [view for view in normalized_views if view is not None],
+        **({"presentation": {"items": normalized_presentation, "counts": normalized_counts, "truncated": presentation["truncated"]}} if presentation is not None else {}),
         **({"lifecycle_guards": dict(guards)} if guards is not None else {}),
     }
     return result
@@ -429,6 +495,7 @@ egress.register_projector(
         "audit",
         "saved_views",
         "lifecycle_guards",
+        "presentation",
     ),
     validator=_validate_record_inspection,
 )
@@ -579,6 +646,14 @@ class _LinkProjector:
             else:
                 projected[name] = value
         return projected
+
+    def project_presentation_value(
+        self, value: Any, column: collections.RecordPresentationColumn
+    ) -> Any:
+        """Project only declared nested links at the audience egress boundary."""
+        if column.type != "link":
+            return value
+        return self._project_value(value, collections.FieldSpec("link", link_kind=column.link_kind))
 
     def _project_value(self, value: Any, spec: collections.FieldSpec) -> Any:
         if spec.type == "array" and spec.items is not None and isinstance(value, list | tuple):
@@ -757,6 +832,7 @@ def query_collection(
             manifest,
             authorize_path=lambda path: _authorize(root, path, receipt=True),
             project_values=links,
+            project_child_value=links.project_presentation_value,
             **kwargs,
         )
         egress.emit_boundary_receipt(collector)
@@ -776,6 +852,28 @@ def _authorize_saved_view(
     query = view.definition.get("query")
     if not isinstance(query, Mapping):
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
+    child_requested = query.get("expand_children") is True or query.get("expand_child") is not None
+    selected_child = _saved_view_child_selector(manifest, query)
+    if child_requested and selected_child is None:
+        raise collections.CollectionError(
+            "SAVED_VIEW_NOT_AVAILABLE", "saved view is not available"
+        )
+    allowed_fields = collections._saved_view_selected_fields(
+        collections._saved_view_fields(
+            manifest.schema,
+            manifest.storage,
+            manifest.semantic_profile,
+            manifest.record_presentation,
+        ),
+        collections._saved_view_child_shapes(
+            manifest.storage, manifest.record_presentation
+        ),
+        selected_child,
+    )
+    if any(field not in allowed_fields for field in _saved_view_query_fields(query)):
+        raise collections.CollectionError(
+            "SAVED_VIEW_NOT_AVAILABLE", "saved view is not available"
+        )
     filters = query.get("filters", ())
     if not isinstance(filters, list):
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view filters are invalid")
@@ -783,7 +881,11 @@ def _authorize_saved_view(
         if not isinstance(raw, Mapping) or "value" not in raw:
             continue
         column = raw.get("column")
-        spec = manifest.schema.fields.get(column) if type(column) is str else None
+        spec = (
+            _saved_view_field_spec(manifest, query, column)
+            if type(column) is str
+            else None
+        )
         if spec is None:
             continue
         if not _saved_view_filter_links_are_authorized(raw["value"], spec, links):
@@ -791,6 +893,72 @@ def _authorize_saved_view(
                 "SAVED_VIEW_NOT_AVAILABLE", "saved view is not available"
             )
     return view
+
+
+def _saved_view_field_spec(
+    manifest: collections.CollectionManifest,
+    query: Mapping[str, Any],
+    column: str,
+) -> collections.FieldSpec | None:
+    """Resolve a saved-view field in the row shape the view actually selects."""
+    selected = _saved_view_child_selector(manifest, query)
+    child_requested = query.get("expand_children") is True or query.get("expand_child") is not None
+    if child_requested and selected is None:
+        return None
+    recipe = manifest.record_presentation
+    if type(selected) is str and recipe is not None:
+        table = next((item for item in recipe.tables if item.field == selected), None)
+        if table is not None:
+            child = next((item for item in table.columns if item.field == column), None)
+            if child is not None:
+                return collections.FieldSpec(child.type, link_kind=child.link_kind)
+            if column in {
+                candidate.field
+                for candidate_table in recipe.tables
+                for candidate in candidate_table.columns
+            }:
+                return None
+            if column == selected:
+                return None
+    return manifest.schema.fields.get(column)
+
+
+def _saved_view_child_selector(
+    manifest: collections.CollectionManifest, query: Mapping[str, Any]
+) -> str | None:
+    explicit = query.get("expand_child")
+    if type(explicit) is str:
+        candidates = collections._saved_view_child_fields(
+            manifest.storage, manifest.record_presentation
+        )
+        return explicit if explicit in candidates else None
+    if query.get("expand_children") is not True:
+        return None
+    candidates = collections._saved_view_child_fields(
+        manifest.storage, manifest.record_presentation
+    )
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _saved_view_query_fields(query: Mapping[str, Any]) -> set[str]:
+    fields: set[str] = set()
+    filters = query.get("filters", ())
+    if isinstance(filters, list):
+        fields.update(
+            raw["column"]
+            for raw in filters
+            if isinstance(raw, Mapping) and type(raw.get("column")) is str
+        )
+    columns = query.get("columns", ())
+    if isinstance(columns, list):
+        fields.update(column for column in columns if type(column) is str)
+    for key in ("sort_by", "date_column"):
+        if type(query.get(key)) is str:
+            fields.add(query[key])
+    aggregate = query.get("aggregate")
+    if type(aggregate) is str and ":" in aggregate:
+        fields.add(aggregate.split(":", 1)[1])
+    return fields
 
 
 def _saved_view_filter_links_are_authorized(
@@ -829,7 +997,6 @@ def inspect_collection(
                 root,
                 manifest,
                 authorize_path=lambda path: _authorize(root, path, receipt=True),
-                project_values=links,
             )
         except collections.CollectionError as error:
             inspection = record_formats.CollectionInspection(
@@ -887,11 +1054,22 @@ def inspect_collection(
                 "audit": _inspection_audit(audit),
                 "saved_views": saved_views,
                 "lifecycle_guards": guards,
+                **({"presentation": _presentation_inspection(inspection.presentation)} if manifest.record_presentation is not None else {}),
             }
         )
         projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
         egress.emit_boundary_receipt(collector)
         return projected
+
+
+def _presentation_inspection(findings: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    states = ("missing", "stale", "malformed", "unrenderable")
+    counts = {state: sum(item.get("state") == state for item in findings) for state in states}
+    return {
+        "items": list(findings[:_PRESENTATION_FINDING_LIMIT]),
+        "counts": counts,
+        "truncated": len(findings) > _PRESENTATION_FINDING_LIMIT,
+    }
 
 
 def inventory_collections(vault_root: Path) -> dict[str, Any]:
@@ -1068,10 +1246,11 @@ _QUERY_KEYS = frozenset(
         "date_to",
         "date_column",
         "expand_children",
+        "expand_child",
     }
 )
 _SYSTEM_FIELDS = frozenset(
-    {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
+    {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id", "child_field", "child_index"}
 )
 _QUERY_OPS = frozenset(
     {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains", "startswith", "in", "nin", "exists", "missing"}
@@ -1111,6 +1290,9 @@ def _json_value(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -
 def _query_value_fields(manifest: collections.CollectionManifest) -> set[str]:
     """Return schema fields plus the manifest-declared markdown-log projections."""
     fields = set(manifest.schema.fields)
+    if manifest.record_presentation is not None:
+        for table in manifest.record_presentation.tables:
+            fields.update(column.field for column in table.columns)
     if manifest.storage.strategy != "markdown-log":
         return fields
     descriptor = manifest.storage.descriptor
@@ -1126,7 +1308,7 @@ def _query_value_fields(manifest: collections.CollectionManifest) -> set[str]:
 
 
 def _valid_query_descriptor(query: Mapping[str, Any], manifest: collections.CollectionManifest) -> bool:
-    if set(query) != _QUERY_KEYS:
+    if set(query) not in {_QUERY_KEYS, _QUERY_KEYS - {"expand_child"}}:
         return False
     columns = _query_value_fields(manifest) | _SYSTEM_FIELDS
     filters = query["filters"]
@@ -1152,6 +1334,8 @@ def _valid_query_descriptor(query: Mapping[str, Any], manifest: collections.Coll
         if query[key] is not None and (type(query[key]) is not str or query[key] not in columns):
             return False
     if type(query["descending"]) is not bool or type(query["expand_children"]) is not bool:
+        return False
+    if query.get("expand_child") is not None and (type(query.get("expand_child")) is not str or query["expand_children"]):
         return False
     if any(query[key] is not None and type(query[key]) is not str for key in ("date_from", "date_to")):
         return False
@@ -1201,10 +1385,12 @@ def _valid_row(
     ):
         return None
     if "parent_record_id" in row and (
-        query["expand_children"] is not True
+        query["expand_children"] is not True and query.get("expand_child") is None
         or type(row["parent_record_id"]) is not str
         or row["parent_record_id"] != row["record_id"]
     ):
+        return None
+    if "child_field" in row and (type(row["child_field"]) is not str or type(row.get("child_index")) is not int or row["child_index"] < 0):
         return None
     values = {name: value for name, value in row.items() if name in manifest.schema.fields}
     try:

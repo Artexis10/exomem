@@ -334,6 +334,7 @@ def update_record(
     operation: str = "update",
     delete_fields: tuple[str, ...] = (),
     body: str | None = None,
+    refresh_presentation: bool = False,
     validate_snapshot: Callable[[collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Apply a guarded, exact-key update to one existing Markdown record."""
@@ -342,12 +343,16 @@ def update_record(
     if body is not None:
         _validate_body(body)
     item_key = _validate_item_key(item_key)
-    if not isinstance(changes, Mapping) or (not changes and not delete_fields and body is None):
+    if type(refresh_presentation) is not bool:
+        raise collections.CollectionError("INVALID_RECORD_PRESENTATION", "refresh_presentation must be boolean")
+    if not isinstance(changes, Mapping) or (not changes and not delete_fields and body is None and not refresh_presentation):
         raise collections.CollectionError(
             "INVALID_RECORD_CHANGES", "changes must be a non-empty object"
         )
     with writer_lease.active_manager().mutation_guard(root, operation="record_update"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
+        if refresh_presentation and manifest.record_presentation is None:
+            raise collections.CollectionError("INVALID_RECORD_PRESENTATION", "collection has no record_presentation")
         record_governance.require_mutation_visibility(root, manifest)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
@@ -403,6 +408,11 @@ def update_record(
             merged.pop(name, None)
         merged.update(changes)
         values = _validate_values(manifest, merged)
+        if refresh_presentation and not changes and not delete_fields and body is None:
+            if record_formats.splice_record_presentation(source_text, manifest, values) == source_text:
+                raise collections.CollectionError(
+                    "NOOP_RECORD_PRESENTATION", "managed presentation is already current"
+                )
         audit_correlation = _transition_id()
         after_manifest_text = record_formats.render_manifest_audit_head(
             manifest_text, audit_correlation, semantic_profile=manifest.semantic_profile
@@ -432,6 +442,7 @@ def update_record(
                 delete_fields=delete_fields,
                 body=body,
             )
+            replacement = record_formats.splice_record_presentation(replacement, manifest, values)
             after_text = replacement
             canonical_path = source_path
             before_container_hash = snapshot.snapshot
@@ -934,6 +945,8 @@ def _validate_revision_manifest(
     record_governance.require_proposed_manifest_visibility(root, proposed)
     for record in snapshot.records:
         _validate_values(proposed, record.values)
+        if proposed.record_presentation is not None:
+            record_formats._presentation_payload(proposed, record.values)
     return proposed
 
 
@@ -2255,12 +2268,51 @@ def _payload_hash(
     manifest: collections.CollectionManifest, key: str, values: Mapping[str, Any], body: str
 ) -> str:
     ordered = [[name, _normalize_json(values[name])] for name in sorted(values)]
-    payload = [manifest.schema.version, key, ordered, _normalize_json(body)]
+    payload = [
+        manifest.schema.version,
+        key,
+        ordered,
+        _normalize_json(_semantic_body(body, manifest, values)),
+    ]
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(
             "utf-8"
         )
     ).hexdigest()
+
+
+def _semantic_body(
+    body: str,
+    manifest: collections.CollectionManifest | None = None,
+    values: Mapping[str, Any] | None = None,
+) -> str:
+    """Ignore one valid renderer span when comparing append retries."""
+    try:
+        span = record_formats._presentation_span(body)
+    except collections.CollectionError:
+        return body
+    if span is None:
+        return body
+    if manifest is not None and values is not None:
+        payload = record_formats._presentation_payload(manifest, values)
+        canonical = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        expected_digest = hashlib.sha256(canonical).hexdigest()
+        marker = record_formats._PRESENTATION_OPEN.search(body, span[0], span[1])
+        if marker is None or marker.group(1) != expected_digest:
+            return body
+    rendered = body[: span[0]] + body[span[1] :]
+    # Remove only the renderer's structural separator.  Author-authored leading
+    # blank lines remain part of semantic append identity.
+    if span[0] == 0:
+        if rendered in {"\n", "\r\n"}:
+            return ""
+        if rendered.startswith("\r\n\r\n"):
+            return rendered[4:]
+        if rendered.startswith("\n\n"):
+            return rendered[2:]
+    return rendered
 
 
 def _normalize_json(value: Any) -> Any:

@@ -217,7 +217,10 @@ def test_continuation_binds_manifest_bytes_and_refuses_tampering(tmp_path: Path)
     assert first.continuation
     assert "source_hashes" in first.rendered
     _version, token_payload, checksum = first.continuation.split(".")
-    forged = json.loads(base64.urlsafe_b64decode(token_payload + "=" * (-len(token_payload) % 4)))
+    compact_payload = token_payload.replace("~", "")
+    forged = json.loads(
+        base64.urlsafe_b64decode(compact_payload + "=" * (-len(compact_payload) % 4))
+    )
     forged["offset"] = 999
     altered = (
         "v1."

@@ -298,6 +298,16 @@ when collections compete or identity, date, provenance, or ownership is unclear.
 When no collection fits, use `record_memory(action="describe")` and propose a
 concise collection; the agent must not silently create a long-lived schema.
 
+For a Records collection stored as Markdown items, YAML frontmatter is the sole
+canonical value source. A manifest may opt into `record_presentation` to add a
+generated, readable body block for selected nested child values. Treat that
+block as derived: never edit it as data or read values back from it. If a person
+directly edits selected frontmatter, inspect and rebaseline the audit gap, then
+use guarded `record_memory(action="update", refresh_presentation=true, ...)`
+to refresh the block. Query a declared child table with `expand_child`; use the
+older `expand_children=true` only when the collection has one unambiguous child
+container.
+
 Examples:
 
 - "Remember this decision" -> write a concise compiled note and report
