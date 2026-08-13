@@ -3655,7 +3655,7 @@ _RANK_DERIVED_SIGNALS = ("bm25_rank", "keyword_rank", "vector_rank", "graph_in_d
 def test_spec_names_the_known_preexisting_relevance_ranking_channel() -> None:
     spec = (
         Path(__file__).resolve().parents[1]
-        / "openspec/changes/add-default-deny-scope-cap/specs/governance-kernel/spec.md"
+        / "openspec/changes/archive/2026-08-13-add-default-deny-scope-cap/specs/governance-kernel/spec.md"
     ).read_text(encoding="utf-8")
     scenario = spec.split(
         "#### Scenario: an audience no rule names receives nothing", 1
