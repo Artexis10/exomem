@@ -196,7 +196,7 @@ def test_windows_raw_directory_flush_failure_is_content_free(
         handles.append(handle)
         raise OSError(detail)
 
-    monkeypatch.setattr(receipts, "_flush_windows_directory_handle", fail_flush, raising=False)
+    monkeypatch.setattr(mutation_lock, "_windows_flush_directory_handle", fail_flush)
     with pytest.raises(receipts.ReceiptError, match="durable directory") as exc_info:
         receipts._fsync_directory(directory)
 
@@ -264,12 +264,12 @@ def test_windows_directory_flush_uses_only_a_write_capable_exact_leaf(
         opened.append((path, kwargs))
         return 409
 
-    monkeypatch.setattr(receipts, "_open_secure_directory", lambda path, **_kwargs: Retained(path), raising=False)
-    monkeypatch.setattr(receipts, "_windows_open_path", open_path, raising=False)
-    monkeypatch.setattr(receipts, "_windows_child_is_in_directory", lambda *_args: True, raising=False)
-    monkeypatch.setattr(receipts, "_windows_handle_identity", lambda handle: (1, 2, handle), raising=False)
-    monkeypatch.setattr(receipts, "_windows_close_handle", lambda _handle: None, raising=False)
-    monkeypatch.setattr(receipts, "_flush_windows_directory_handle", flushed.append, raising=False)
+    monkeypatch.setattr(mutation_lock, "_open_secure_directory", lambda path, **_kwargs: Retained(path))
+    monkeypatch.setattr(mutation_lock, "_windows_open_path", open_path)
+    monkeypatch.setattr(mutation_lock, "_windows_child_is_in_directory", lambda *_args: True)
+    monkeypatch.setattr(mutation_lock, "_windows_handle_identity", lambda handle: (1, 2, handle))
+    monkeypatch.setattr(mutation_lock, "_windows_close_handle", lambda _handle: None)
+    monkeypatch.setattr(mutation_lock, "_windows_flush_directory_handle", flushed.append)
 
     receipts._fsync_directory(directory)
 

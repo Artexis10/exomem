@@ -617,6 +617,53 @@ def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
     return info.volume_serial, info.file_index_high, info.file_index_low
 
 
+@contextlib.contextmanager
+def _open_windows_directory_for_flush(path: Path) -> Iterator[int]:
+    """Retain one native directory leaf suitable for a durability flush."""
+    expected = os.lstat(path)
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(expected.st_mode)
+        or not stat.S_ISDIR(expected.st_mode)
+        or getattr(expected, "st_file_attributes", 0) & reparse_point
+    ):
+        raise OSError("Windows durability directory is not a real directory")
+    with contextlib.ExitStack() as stack:
+        parent = stack.enter_context(_open_secure_directory(path.parent, create=False))
+        handle = _windows_open_path(
+            path,
+            directory=True,
+            access=0x40000000,  # GENERIC_WRITE only on the exact final directory
+            share=0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; never FILE_SHARE_DELETE
+        )
+        stack.callback(_windows_close_handle, handle)
+        if not _windows_child_is_in_directory(parent, handle):
+            raise OSError("Windows durability directory escaped its retained parent")
+        _windows_handle_identity(handle)
+        if not os.path.samestat(expected, os.lstat(path)):
+            raise OSError("Windows durability directory changed during open")
+        yield handle
+
+
+def _windows_flush_directory(path: Path) -> None:
+    """Flush one no-follow Windows directory entry with exact handle ownership."""
+    with _open_windows_directory_for_flush(path) as handle:
+        _windows_flush_directory_handle(handle)
+
+
+def _windows_flush_directory_handle(handle: int) -> None:
+    """Flush one raw native directory handle without taking ownership of it."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _windows_library(ctypes, "kernel32")
+    flush = kernel32.FlushFileBuffers
+    flush.argtypes = [wintypes.HANDLE]
+    flush.restype = wintypes.BOOL
+    if not flush(handle):
+        raise OSError(_windows_last_error(ctypes), "cannot flush Windows directory")
+
+
 def _open_posix_directory(path: Path, *, create: bool, mode: int) -> int:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     current_fd = os.open(path.anchor or "/", flags)

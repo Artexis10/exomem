@@ -29,10 +29,10 @@
 
 ## 5. Shared Lifecycle Durability
 
-- [ ] 5.1 Add red native Windows tests for governed delete/recovery tombstone durability and ungoverned atomic rename without CRT directory opens.
-- [ ] 5.2 Add red lifecycle tests for raw-handle flush failure, exact close ownership, reparse/direct-child identity refusal, and content-free error output.
-- [ ] 5.3 Factor the reviewed Windows final-directory flush primitive into the shared secure filesystem substrate and route receipt and lifecycle wrappers through it.
-- [ ] 5.4 Run focused lifecycle and receipt Windows tests, then the full governance receipt suite, and classify any next native blocker before claiming completion.
+- [x] 5.1 Add red native Windows tests for governed delete/recovery tombstone durability and ungoverned atomic rename without CRT directory opens.
+- [x] 5.2 Add red lifecycle tests for raw-handle flush failure, exact close ownership, reparse/direct-child identity refusal, and content-free error output.
+- [x] 5.3 Factor the reviewed Windows final-directory flush primitive into the shared secure filesystem substrate and route receipt and lifecycle wrappers through it.
+- [x] 5.4 Run focused lifecycle and receipt Windows tests, then the full governance receipt suite, and classify any next native blocker before claiming completion.
 
 ## 6. Verification And Delivery
 

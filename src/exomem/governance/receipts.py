@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .. import memory_refs
+from .. import memory_refs, mutation_lock
 from ..mutation_lock import (
     VaultMutationCoordinator,
     _SecureDirectory,
@@ -1148,25 +1148,11 @@ def _fsync_durable_prefix(instance_dir: Path, target: Path) -> None:
             _fsync_path(instance_dir / name)
 
 
-def _flush_windows_directory_handle(handle: int) -> None:
-    """Flush one native directory handle without taking ownership of it."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
-    flush = kernel32.FlushFileBuffers
-    flush.argtypes = [wintypes.HANDLE]
-    flush.restype = wintypes.BOOL
-    if not flush(handle):
-        raise OSError(ctypes.get_last_error(), "cannot flush receipt directory")
-
-
 def _fsync_directory(path: Path) -> None:
     """Fsync a real directory entry; unsupported directory fsync fails closed."""
     if _is_windows():
         try:
-            with _open_windows_receipt_directory(path, write=True) as handle:
-                _flush_windows_directory_handle(handle)
+            mutation_lock._windows_flush_directory(path)
         except ReceiptError:
             raise
         except OSError as exc:
