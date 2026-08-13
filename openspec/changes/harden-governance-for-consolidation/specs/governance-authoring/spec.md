@@ -50,16 +50,17 @@ or select a different target. A crash before SQLite commit exposes the predecess
 may release the nonce after exact abort; a crash after commit exposes the complete
 target and reconciliation completes only its terminal evidence.
 
-The reviewed target documents SHALL be mirrored into `_Governance` separately through
-handle-relative no-follow compare-and-swap against the proposal's captured workspace
-bytes and stable identities. Mirror SHALL never overwrite an external edit. An edit
-racing or following snapshot acquisition remains pending next-generation input with
-owner-only source/generation conflict diagnostics. It cannot alter the immutable target
-or become active, and mirror failure alone need not abort an otherwise exact tuple
-transaction. The receipt SHALL record active generation, prior/target source identities,
-and mirror outcome. Source/generation parity and recovery SHALL recompile only the exact
-source bytes stored in the immutable generation; no recovery path may infer active
-authority from a fresh workspace walk.
+The reviewed target documents SHALL be mirrored into `_Governance` separately under a
+cooperative writer fence, through held-parent no-follow traversal and descriptor-identity
+checks against the proposal's captured workspace bytes. An observed byte or identity
+drift SHALL refuse the mirror and remains pending next-generation input with owner-only
+source/generation conflict diagnostics. Direct OS-owner mutation is outside the
+cooperative writer fence. A workspace edit cannot alter the immutable target or become
+active, and mirror failure alone need not abort an otherwise exact tuple transaction. The
+receipt SHALL record active generation, prior/target source identities, and mirror
+outcome. Source/generation parity and recovery SHALL recompile only the exact source
+bytes stored in the immutable generation; no recovery path may infer active authority
+from a fresh workspace walk.
 
 On successful tuple activation, commit SHALL archive the predecessor generation,
 publish the new policy fingerprint on the next request, and preserve any independently
@@ -99,13 +100,14 @@ source snapshot; mutable `_Governance` alone is insufficient.
 - **THEN** the event remains blocked and unspent until exact restoration or explicit
   transaction reconciliation, and it never recompiles/reinterprets a different target
 
-#### Scenario: External workspace write is preserved as pending
+#### Scenario: Observed workspace drift remains pending
 
-- **WHEN** an uncoordinated filesystem writer changes a reviewed policy file after
+- **WHEN** held-parent/descriptor checks observe a reviewed policy file changed after
   snapshot acquisition before or after active-tuple publication
-- **THEN** the mirror does not overwrite it; the exact reviewed generation may activate
-  if active-base/membership checks pass, and the edited bytes remain pending input with
-  owner-only divergence diagnostics
+- **THEN** the mirror refuses; the exact reviewed generation may activate if active-base/
+  membership checks pass, and the observed edited bytes remain pending input with
+  owner-only divergence diagnostics. Direct OS-owner mutation is outside cooperative
+  fencing
 
 #### Scenario: Atomic active tuple transaction is the concurrency cut
 
@@ -176,11 +178,12 @@ and external-registry acknowledgement, never re-resolve current YAML or a new ca
 
 For undo, the archived predecessor's exact stored source bytes are immutable generation
 input, not live authority. Restoring them into `_Governance` SHALL be a separate held-
-handle compare-and-swap mirror after/beside publication. Mirror failure or a later valid
-external edit SHALL leave those bytes pending and MUST NOT roll back, replace, or modify
-the published generation. A partial, missing, conflicted, or otherwise invalid enrolled
-workspace SHALL still make content serving BLOCKED until repair, without changing the
-active tuple.
+parent mirror under the cooperative writer fence after/beside publication. An observed
+byte or descriptor-identity drift refuses that mirror and leaves the bytes pending; mirror
+failure SHALL NOT roll back, replace, or modify the published generation. Direct OS-owner
+mutation is outside the cooperative writer fence. A partial, missing, conflicted, or
+otherwise invalid enrolled workspace SHALL still make content serving BLOCKED until
+repair, without changing the active tuple.
 
 #### Scenario: Widening suspend waits for atomic publication
 
@@ -214,11 +217,11 @@ active tuple.
 
 #### Scenario: YAML mirror failure is non-authoritative
 
-- **WHEN** the exact target tuple commits but `_Governance` mirror CAS finds changed
-  identities or fails
-- **THEN** the committed immutable policy/dependent grants remain selected, no external
-  bytes are overwritten, valid divergent bytes remain pending, and invalid workspace
-  state blocks serving until repaired
+- **WHEN** the exact target tuple commits but the cooperatively fenced `_Governance`
+  mirror observes changed identities or fails
+- **THEN** the committed immutable policy/dependent grants remain selected, observed
+  divergent bytes remain pending, and invalid workspace state blocks serving until
+  repaired; direct OS-owner mutation is outside the fence
 
 #### Scenario: Crash before publication retains predecessor
 
@@ -253,8 +256,8 @@ when one SQLite transaction verifies journal/receipt evidence and compare-and-sw
 complete `active_governance_tuple`. The marker and journal SHALL remain control metadata
 outside logical policy composites and bind protocol, phase, event, prior/prepared/final
 digests, affected ids/paths, complete expected tuple, and target tuple. Removing a marker
-cannot bypass a pending journal. A workspace mirror is a separate held-handle CAS and
-MUST NOT define activation or overwrite external edits.
+cannot bypass a pending journal. A workspace mirror is a separate cooperatively fenced,
+held-parent operation; observed drift refuses it, and it MUST NOT define activation.
 
 #### Scenario: Crash during multi-file mirror does not activate a hybrid
 
@@ -289,10 +292,11 @@ An allocating event with no durable intent may close exact-prior. A pending even
 exact prepared immutable bytes and intact receipt chain may complete only its recorded
 active-tuple CAS and authenticated external expected-id/epoch/digest acknowledgement.
 A committed tuple may have its terminal evidence/mirror completed idempotently, but the
-mirror runs only when captured workspace identities still match. Any mixed/third state,
-missing required terminal, registry/store mismatch, invalid workspace, or target tuple
-that no longer matches the expected predecessor SHALL remain BLOCKED. Reconciliation
-SHALL never overwrite later external workspace edits.
+mirror runs only when the cooperative writer fence and captured workspace identities
+still match; observed drift refuses the mirror. Any mixed/third state, missing required
+terminal, registry/store mismatch, invalid workspace, or target tuple that no longer
+matches the expected predecessor SHALL remain BLOCKED. Reconciliation makes no
+filesystem guarantee against direct OS-owner workspace mutation.
 
 #### Scenario: Exact prepared state completes only recorded tuple
 
@@ -308,13 +312,13 @@ SHALL never overwrite later external workspace edits.
 - **THEN** reads are BLOCKED until reconciliation proves the exact committed row/digest
   and completes that same authenticated acknowledgement once
 
-#### Scenario: Committed tuple survives mirror drift without overwrite
+#### Scenario: Committed tuple survives observed mirror drift
 
 - **WHEN** the target tuple committed and current workspace bytes differ from the mirror
   expectation
-- **THEN** reconciliation keeps the immutable tuple, does not overwrite the external
-  edit, and treats valid bytes as pending; invalid/missing workspace keeps content reads
-  fail-closed until repair
+- **THEN** reconciliation keeps the immutable tuple and, when it observes the drift,
+  refuses the mirror and treats valid bytes as pending; invalid/missing workspace keeps
+  content reads fail-closed until repair. Direct OS-owner mutation is outside the fence
 
 #### Scenario: Third-state recovery blocks
 
@@ -429,10 +433,11 @@ proposal, receipt, crash-recovery, principal, and projection contracts.
 
 The dispatcher classifier is preflight only. Every generic leaf SHALL traverse and
 mutate relative to held no-follow vault/parent handles through the leaf operation and
-revalidate stable filesystem identity atomically with read/mutation. Parent swaps,
-rename/link races, hard links, reparse/junction points, and bind aliases MUST NOT turn a
-previously ordinary path into reserved-tree access. A platform without equivalent
-handle-relative/CAS primitives SHALL fail closed. The private owning-command authority
+revalidate stable filesystem identity at the read/mutation operation against retained
+anchors. Stable pre-existing and anchor-observable parent swaps, rename/link changes,
+hard links, reparse/junction points, and bind aliases SHALL refuse reserved-tree access.
+A platform without equivalent handle-relative primitives SHALL disable the affected
+route. The private owning-command authority
 MAY enter its tree only through the same safe traversal plus its receipt-first lifecycle.
 
 #### Scenario: Generic write cannot author governance policy
@@ -446,7 +451,9 @@ MAY enter its tree only through the same safe traversal plus its receipt-first l
 
 - **WHEN** a trash sidecar, explicit restore target, alias, or recursive child would
   restore into `_Governance` or `_Consolidation`
-- **THEN** recovery refuses atomically and no contained entry is restored
+- **THEN** ordered preflight refuses before that entry is restored; prior durable saga
+  entries reconcile from recorded receipt/journal state; recovery remains per-entry
+  rather than transactional across its full set
 
 #### Scenario: Dataset and media leaves cannot reach administration state
 
@@ -481,10 +488,11 @@ state during recovery.
 Commit SHALL revalidate the complete active tuple and membership through the one SQLite
 transaction that inserts the immutable compiled generation and compare-and-swaps the
 active tuple. That transaction, not a filesystem check or mirror, SHALL be the
-concurrency cut. Workspace mirroring SHALL compare-and-swap separately through held
-no-follow handles and MUST NOT overwrite changed bytes. An external edit overlapping or
-following snapshot acquisition SHALL remain pending future input and cannot alter or
-become part of the reviewed generation.
+concurrency cut. Workspace mirroring SHALL instead use the cooperative writer fence,
+held-parent no-follow traversal, and descriptor-identity checks; observed drift refuses
+the mirror. Direct OS-owner mutation is outside the cooperative writer fence.
+An observed external edit overlapping or following snapshot acquisition SHALL remain
+pending future input and cannot alter or become part of the reviewed generation.
 
 #### Scenario: Proposal refuses conflict instead of previewing it away
 
@@ -511,8 +519,9 @@ become part of the reviewed generation.
 
 - **WHEN** an external writer changes workspace bytes after prospective acquisition but
   the reviewed active tuple and affected membership still match
-- **THEN** the tuple transaction may activate only the stored immutable target, the
-  mirror preserves/refuses the external edit, and diagnostics mark it pending next input
+- **THEN** the tuple transaction may activate only the stored immutable target; when the
+  cooperative fence observes the drift, the mirror refuses and diagnostics mark it
+  pending next input. Direct OS-owner mutation is outside the cooperative writer fence
 
 #### Scenario: Source parity uses immutable generation bytes
 
