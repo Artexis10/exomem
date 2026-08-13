@@ -35,6 +35,12 @@ therefore cannot replace it. The run died with a bare `PermissionError` tracebac
 `quiet`. A documented user-facing command became a silent no-op whose only evidence was a
 stack trace and an orphaned temp file.
 
+A third upgrade defect shipped in v0.47.0: Windows idempotency runtime hardening protects
+new directories but deliberately refuses to repair existing ones. An install upgraded from
+v0.46.0 can therefore pass `doctor`, then stop the media worker on its first idempotency
+store access with a pathless `unsafe Windows DACL` error. The failure neither identifies the
+offending runtime path nor gives the operator a command that can make it safe.
+
 Worst of the three: `full_upserts` cannot be cleared by anything. It is only released by
 `clear_deferred_work(include_full=True)`, and `include_full` appears in exactly three places
 in the package — its own parameter declaration and the two `if include_full:` branches it
@@ -58,6 +64,9 @@ guards. **No caller passes it.** That queue grows monotonically for the life of 
 - Make `exomem mode` non-silent: on a permission failure it MUST exit non-zero with one clear
   line naming the config path and the remediation, MUST NOT leave an orphaned `.tmp`, and
   MUST NOT report or imply success while the persisted mode is unchanged.
+- Keep Windows idempotency state fail-closed while making legacy-DACL upgrade failures
+  actionable: name the exact offending path and an exact `icacls` remediation command, make
+  `doctor` surface the same fault, and document the principal-private runtime boundary.
 
 ## Capabilities
 
@@ -69,6 +78,11 @@ guards. **No caller passes it.** That queue grows monotonically for the life of 
 - `command-surface`: mode persistence failures become loud and actionable rather than a
   silent no-op with a traceback.
 
+### Added Capabilities
+
+- `windows-runtime-security`: pre-existing idempotency runtime state remains fail-closed, but
+  an invalid DACL now produces a path-specific remediation and is visible in preflight.
+
 ## Impact
 
 - `src/exomem/index_sync.py` — drain/clear paths for both queues; `include_full` reachable.
@@ -78,6 +92,10 @@ guards. **No caller passes it.** That queue grows monotonically for the life of 
 - `src/exomem/__main__.py` — `_mode_main` failure path; `_index_main` clears both queues.
 - `src/exomem/doctor.py` — backlog warning.
 - `src/exomem/commands.py` — `status` next_action honesty.
+- `src/exomem/mutation_lock.py` / `src/exomem/writer_lease.py` — actionable Windows runtime
+  DACL failure without weakening the private-state validator.
+- `CHANGELOG.md` / `docs/deployment.md` — Windows upgrade remediation and service/user state
+  ownership boundary.
 
 No behavior here runs a model that was not already running; the drain reuses the existing
 embedding path under existing mode policy, so the pure-substrate constraint is unaffected.

@@ -1935,6 +1935,12 @@ class IdempotencyStore:
         with self._condition:
             self._condition.notify_all()
 
+    def validate_runtime_state(self) -> None:
+        """Fail closed before diagnostics summarize private receipt state."""
+        if self._runtime_state_error is not None:
+            raise self._runtime_state_error
+        self._ensure_private_runtime_state()
+
     def _after_terminal_persisted(self) -> None:
         if self.after_terminal_persisted is not None:
             self.after_terminal_persisted()
@@ -1942,7 +1948,8 @@ class IdempotencyStore:
     def status_summary(self) -> dict[str, Any]:
         """Content-free counts for `coordination_status`/`doctor`: never a
         key, digest, or result — just how many rows are pending/abandoned
-        and how stale the oldest pending row is."""
+        and how stale the oldest pending row is. Call `validate_runtime_state`
+        first when an unsafe store must be surfaced rather than softened."""
         try:
             now = self.clock()
             with self._connect() as conn:

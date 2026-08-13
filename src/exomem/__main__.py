@@ -637,7 +637,8 @@ def _index_main(argv: list[str]) -> int:
     if not args.dry_run:
         from . import index_sync
 
-        index_sync.clear_deferred_work(vault_root)
+        index_sync.drain_deferred_work(vault_root)
+        index_sync.clear_deferred_work(vault_root, paths=[], include_full=True)
     print(json.dumps(stats))
     return 0
 
@@ -777,7 +778,23 @@ def _mode_main(argv: list[str]) -> int:
     except ValueError as e:
         print(f"mode: {e}", file=sys.stderr)
         return 2
-    print(f"Compute mode set to '{mode_mod.normalize(args.mode)}'  ({path})")
+    except OSError:
+        print(
+            f"mode: could not persist {mode_mod.config_path()}; grant Modify permission "
+            "to the invoking account or change EXOMEM_CONFIG_PATH",
+            file=sys.stderr,
+        )
+        return 1
+    requested = mode_mod.normalize(args.mode)
+    persisted = mode_mod.normalize(mode_mod.read_config().get("mode"))
+    if persisted != requested:
+        print(
+            f"mode: {path} read back {persisted!r} instead of {requested!r}; "
+            "stop concurrent config writers, verify the path permissions, and retry",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"Compute mode set to '{persisted}'  ({path})")
     print("A running exomem server applies it live within ~10s (or restart to apply now).")
     print("CLI ops (exomem index / warm) use it on their next run.")
     return 0

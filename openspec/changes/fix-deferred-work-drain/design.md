@@ -92,6 +92,32 @@ replace the SYSTEM-owned target. The fix is not to elevate — it is to fail cor
 non-zero, and print one line naming the config path plus the remediation. Reporting the
 persisted mode after a write MUST read the file back rather than echo the requested value.
 
+### Invalid Windows runtime DACLs fail with an exact repair command
+
+The Windows private-runtime validator remains fail-closed. It MUST NOT silently rewrite a
+pre-existing directory, because the process doing the repair may be a user CLI while the
+runtime belongs to a LocalSystem service (or the reverse). Replacing the DACL under the
+wrong principal would convert an upgrade failure into a lockout of the intended owner.
+
+Instead, validation errors name the exact path and render an `icacls` command for the
+current runtime principal plus the existing SYSTEM and Administrators recovery principals.
+The command is documentation, not an invoked subprocess: Exomem does not elevate and does
+not mutate an existing DACL implicitly. `doctor` preserves the structured failure rather
+than converting an unreadable idempotency store into a healthy result.
+
+The trustee contract is intentionally principal-private. LocalSystem resolves to `{SY, BA}`;
+a normal user resolves to `{user SID, SY, BA}`. Because the validator requires an exact
+trustee set, one runtime directory cannot satisfy both identities. Deployment documentation
+therefore requires separate `EXOMEM_WRITER_LEASE_STATE_DIR` values for service-owned and
+direct user-owned processes. Weakening the DACL to make a shared directory pass would also
+conflict with the user-bound DPAPI receipt envelope and is outside this change.
+
+That separation is not permission for concurrent mutation. The state directory also anchors
+the host-local mutation coordinator, so two identity-specific roots would create two locks for
+one vault. A direct user process MUST NOT mutate a service-owned vault while the LocalSystem
+service is running; ordinary mutations route through the service, and direct maintenance runs
+only while the service is stopped.
+
 ## Risks
 
 - **Merge collision.** `fix/watcher-deferred-freshness` is unmerged and rewrites
@@ -102,3 +128,9 @@ persisted mode after a write MUST read the file back rather than echo the reques
   only thing preventing a quiet host from doing performance-mode work.
 - **Retiring entries could retire real work** if the freshness check disagrees with what
   queued the entry. The check must be the one the indexer trusts, not a cheaper proxy.
+- **A direct CLI and a service cannot share one private runtime directory.** This change
+  documents the boundary and fails actionably; it does not redesign cross-principal local
+  mutation coordination or weaken the idempotency secret boundary.
+- **Separate private roots also separate host-local mutation locks.** Operators must quiesce
+  the service before direct CLI maintenance; supporting concurrent cross-principal local
+  mutation would require a separate lock-root design outside this change.
