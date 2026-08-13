@@ -873,7 +873,8 @@ def test_lease_manager_preserves_real_wait_path_graph_failure_code(
     note = vault / "Knowledge Base/Notes/wait-failure.md"
     calls = 0
     failure_type = RuntimeError if failure_kind == "RuntimeError" else getattr(graph_sync, failure_kind)
-    failure = failure_type("injected wait-path failure")
+    sentinel = "private builder path C:\\vault\\Knowledge Base\\secret.md"
+    failure = failure_type(sentinel)
 
     def fail_builder(_self: EpistemicGraphIndex) -> dict[str, int]:
         raise failure
@@ -895,6 +896,7 @@ def test_lease_manager_preserves_real_wait_path_graph_failure_code(
     assert result["graph_sync"] == "failed"
     assert result["graph_sync_code"] == expected_code
     assert result["graph_sync_remediation"] == expected_remediation
+    assert sentinel not in str(result)
     assert replay == result
     assert calls == 1
 

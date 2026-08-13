@@ -6,6 +6,7 @@ import atexit
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -90,6 +91,7 @@ _PENDING_WAITERS: ContextVar[
 ] = (
     ContextVar("exomem_pending_graph_rebuild_waiters", default=None)
 )
+logger = logging.getLogger(__name__)
 
 
 def _canonical_json(value: object) -> bytes:
@@ -1577,10 +1579,13 @@ class GraphWaiterCapacityError(GraphRebuildRegistrationError):
 class GraphRebuildStopped(GraphRebuildRegistrationError):
     """A registered builder exited before producing coverage."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        remediation: str = "Retry the same mutation identity or run reconcile to recover the derived graph.",
+    ) -> None:
         super().__init__(
             "GRAPH_SYNC_REBUILD_STOPPED",
-            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+            remediation,
         )
 
 
@@ -1777,12 +1782,29 @@ class GraphRebuildCoordinator:
             try:
                 outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
-                with self._condition:
-                    self._error = (
-                        error
-                        if isinstance(error, GraphRebuildRegistrationError)
-                        else GraphRebuildStopped()
+                if isinstance(error, GraphRebuildRegistrationError):
+                    projection = error
+                else:
+                    try:
+                        state = status(self.vault_root)["state"]
+                    except Exception:  # noqa: BLE001 - status is fail-closed
+                        remediation = "Run reconcile to recover the derived graph."
+                    else:
+                        remediation = (
+                            "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
+                            "to recover the derived graph."
+                            if state == "unavailable"
+                            else "Retry the same mutation identity or run reconcile to recover the derived graph."
+                        )
+                    logger.exception(
+                        "graph rebuild stopped checkpoint_sha256=%s generation=%s",
+                        required.checkpoint_sha256,
+                        required.generation,
                     )
+                    projection = GraphRebuildStopped(remediation)
+                    projection.__cause__ = error
+                with self._condition:
+                    self._error = projection
                     self._running = False
                     self._condition.notify_all()
                 return

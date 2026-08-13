@@ -938,6 +938,59 @@ def test_single_flight_retries_for_new_checkpoint_and_never_releases_stale_waite
     assert observed == [1, 2]
 
 
+@pytest.mark.parametrize(
+    ("state", "expected_remediation"),
+    [
+        (
+            "current",
+            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+        ),
+        (
+            "recovery_required",
+            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+        ),
+        (
+            "unavailable",
+            "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
+            "to recover the derived graph.",
+        ),
+    ],
+)
+def test_registered_builder_failure_logs_and_chains_a_content_free_state_aware_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    state: str,
+    expected_remediation: str,
+) -> None:
+    """Arbitrary builder failures retain diagnostics without leaking into terminals."""
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    checkpoint = _checkpoint(1)
+    sentinel = "private builder path C:\\vault\\Knowledge Base\\secret.md"
+    failure = RuntimeError(sentinel)
+
+    monkeypatch.setattr(
+        graph_sync,
+        "status",
+        lambda _root: {"state": state, "generation": checkpoint.generation},
+    )
+
+    def fail(_checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        raise failure
+
+    caplog.set_level("ERROR")
+    waiter = coordinator.start_or_join(checkpoint, fail)
+    with pytest.raises(graph_sync.GraphRebuildStopped) as stopped:
+        waiter.wait(1)
+
+    assert stopped.value.__cause__ is failure
+    assert stopped.value.code == "GRAPH_SYNC_REBUILD_STOPPED"
+    assert stopped.value.remediation == expected_remediation
+    assert sentinel not in str(stopped.value)
+    assert sentinel in caplog.text
+    assert checkpoint.checkpoint_sha256 in caplog.text
+
+
 def test_same_generation_with_a_different_digest_does_not_cover_a_waiter() -> None:
     first = _checkpoint(1)
     replacement = graph_sync.GraphSyncCheckpoint.create(

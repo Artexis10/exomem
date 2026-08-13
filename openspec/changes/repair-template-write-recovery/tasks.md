@@ -11,8 +11,8 @@
 
 ## 3. Graph failure and explicit recovery
 
-- [ ] 3.1 Add red coordinator tests proving the original builder exception is logged/chained and terminal remediation differs for recoverable versus unavailable epoch state.
-- [ ] 3.2 Implement diagnostic preservation and state-aware content-free remediation without changing the canonical committed terminal.
+- [x] 3.1 Add red coordinator tests proving the original builder exception is logged/chained and terminal remediation differs for recoverable versus unavailable epoch state.
+- [x] 3.2 Implement diagnostic preservation and state-aware content-free remediation without changing the canonical committed terminal.
 - [ ] 3.3 Add red dry-run, successful reset, partial-rollback, open-reader, reparse, canonical-hash preservation, and rebuild-failure quarantine tests for `rebuild_graph=true`.
 - [ ] 3.4 Implement bounded derived graph quarantine/reset under the existing mutation boundary and wire the default-false parameter through reconcile, maintain-memory, CLI, REST, MCP, and generated schema fixtures.
 - [ ] 3.5 Rerun graph availability, idempotency handoff, writer lease, reconcile, watcher, mutation-terminal, and command-surface tests.
