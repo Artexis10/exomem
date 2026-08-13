@@ -1,0 +1,441 @@
+{
+  "$defs": {
+    "AmendmentIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "affected_sections": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Affected Sections",
+          "type": "array"
+        },
+        "contract": {
+          "$ref": "#/$defs/ContractArtifactIdentity"
+        },
+        "effective_policy": {
+          "title": "Effective Policy",
+          "type": "string"
+        },
+        "parent_contract_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Contract Sha256",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        },
+        "receipt": {
+          "$ref": "#/$defs/ReceiptIdentity"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "receipt",
+        "parent_contract_sha256",
+        "contract",
+        "affected_sections",
+        "rationale",
+        "effective_policy"
+      ],
+      "title": "AmendmentIdentity",
+      "type": "object"
+    },
+    "BudgetSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "cap_usd": {
+          "minimum": 0,
+          "title": "Cap Usd",
+          "type": "number"
+        },
+        "committed_usd": {
+          "minimum": 0,
+          "title": "Committed Usd",
+          "type": "number"
+        },
+        "refusals": {
+          "minimum": 0,
+          "title": "Refusals",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cap_usd",
+        "committed_usd",
+        "refusals"
+      ],
+      "title": "BudgetSummary",
+      "type": "object"
+    },
+    "ContractArtifactIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "repository_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Repository Revision",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "repository_revision"
+      ],
+      "title": "ContractArtifactIdentity",
+      "type": "object"
+    },
+    "DatasetIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "case_count": {
+          "minimum": 0,
+          "title": "Case Count",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "variant": {
+          "title": "Variant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "variant",
+        "source",
+        "revision",
+        "sha256",
+        "case_count"
+      ],
+      "title": "DatasetIdentity",
+      "type": "object"
+    },
+    "LaneReadiness": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "title": "Evidence",
+          "type": "string"
+        },
+        "fallback_detected": {
+          "default": false,
+          "title": "Fallback Detected",
+          "type": "boolean"
+        },
+        "lane": {
+          "title": "Lane",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "index-count",
+            "config-state",
+            "semantic-probe",
+            "memories-canary",
+            "doctor-check",
+            "readiness-unverifiable"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "requested": {
+          "title": "Requested",
+          "type": "boolean"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lane",
+        "requested",
+        "verified",
+        "method",
+        "evidence"
+      ],
+      "title": "LaneReadiness",
+      "type": "object"
+    },
+    "LeakageSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "detectors_fired": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Detectors Fired",
+          "type": "object"
+        },
+        "invalidated_cases": {
+          "minimum": 0,
+          "title": "Invalidated Cases",
+          "type": "integer"
+        },
+        "scanned_cases": {
+          "minimum": 0,
+          "title": "Scanned Cases",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scanned_cases",
+        "invalidated_cases"
+      ],
+      "title": "LeakageSummary",
+      "type": "object"
+    },
+    "PreregistrationIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "amendments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AmendmentIdentity"
+          },
+          "title": "Amendments",
+          "type": "array"
+        },
+        "contract_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Contract Revision",
+          "type": "string"
+        },
+        "effective": {
+          "$ref": "#/$defs/ContractArtifactIdentity"
+        },
+        "original": {
+          "$ref": "#/$defs/ContractArtifactIdentity"
+        },
+        "ratification": {
+          "$ref": "#/$defs/ReceiptIdentity"
+        }
+      },
+      "required": [
+        "contract_revision",
+        "original",
+        "ratification",
+        "effective"
+      ],
+      "title": "PreregistrationIdentity",
+      "type": "object"
+    },
+    "ReceiptIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "introduction_revision": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{40}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Introduction Revision"
+        },
+        "receipt_path": {
+          "minLength": 1,
+          "title": "Receipt Path",
+          "type": "string"
+        },
+        "receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Receipt Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "receipt_path",
+        "receipt_sha256",
+        "introduction_revision"
+      ],
+      "title": "ReceiptIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "budget": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BudgetSummary"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "contamination": {
+      "anyOf": [
+        {
+          "enum": [
+            "isolated",
+            "contaminated",
+            "unverifiable"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Contamination"
+    },
+    "control_config_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Control Config Sha256"
+    },
+    "dataset": {
+      "$ref": "#/$defs/DatasetIdentity"
+    },
+    "finalized_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finalized At"
+    },
+    "invalid_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Invalid Reason"
+    },
+    "leakage": {
+      "$ref": "#/$defs/LeakageSummary"
+    },
+    "namespaces": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Namespaces",
+      "type": "object"
+    },
+    "pins": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Pins",
+      "type": "object"
+    },
+    "preregistration_identity": {
+      "$ref": "#/$defs/PreregistrationIdentity"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "provider_variant": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Variant"
+    },
+    "readiness": {
+      "items": {
+        "$ref": "#/$defs/LaneReadiness"
+      },
+      "title": "Readiness",
+      "type": "array"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "started_at": {
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "started",
+        "VALID",
+        "INVALID",
+        "READINESS_UNVERIFIABLE",
+        "ABORTED_BUDGET",
+        "BLOCKED"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "dataset",
+    "status",
+    "started_at",
+    "preregistration_identity"
+  ],
+  "title": "RunManifest",
+  "type": "object"
+}

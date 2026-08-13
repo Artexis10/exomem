@@ -1,0 +1,32 @@
+# RED fixture: names an assertion that is not in the frozen registry.
+# Loading this file MUST fail before any provider runs.
+scenario_id: red-unknown-assertion
+family_id: f01
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1
+    ops:
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: memory_feels_coherent
+        subject: claim-1
+fairness:
+  why_neutral: red fixture; never scored
+  public_coverage_subtraction: none
+  mechanisms:
+    - provider_role: subject
+      mechanism: none
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:39
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+  acceptance_predicate: none

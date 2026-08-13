@@ -1,0 +1,201 @@
+{
+  "$defs": {
+    "ProviderCleanupNamespaceMembership": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_namespace": {
+          "title": "Expected Namespace",
+          "type": "string"
+        },
+        "kind": {
+          "const": "namespace-membership",
+          "default": "namespace-membership",
+          "title": "Kind",
+          "type": "string"
+        },
+        "live_namespaces": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Live Namespaces",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "expected_namespace",
+        "live_namespaces"
+      ],
+      "title": "ProviderCleanupNamespaceMembership",
+      "type": "object"
+    },
+    "ProviderCleanupPathLstat": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Entries",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "kind": {
+          "const": "path-lstat",
+          "default": "path-lstat",
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "pattern": "^(?!/)(?!.*[\\\\\\\\])(?!.*//)(?!.*\\/$)(?!\\\\.?\\.?$)(?!.*(?:^|/)\\.{1,2}(?:/|$)).+$",
+          "title": "Path",
+          "type": "string"
+        },
+        "raw_kind": {
+          "enum": [
+            "missing",
+            "directory",
+            "regular",
+            "symlink",
+            "other"
+          ],
+          "title": "Raw Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "raw_kind",
+        "entries"
+      ],
+      "title": "ProviderCleanupPathLstat",
+      "type": "object"
+    },
+    "ProviderCleanupProviderState": {
+      "additionalProperties": false,
+      "properties": {
+        "backend_active": {
+          "title": "Backend Active",
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "provider-state",
+          "default": "provider-state",
+          "title": "Kind",
+          "type": "string"
+        },
+        "remaining_record_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Remaining Record Ids",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "remaining_record_ids",
+        "backend_active"
+      ],
+      "title": "ProviderCleanupProviderState",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifact_type": {
+      "const": "provider-cleanup-observation.v1",
+      "default": "provider-cleanup-observation.v1",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "cleanup_called": {
+      "title": "Cleanup Called",
+      "type": "boolean"
+    },
+    "namespace": {
+      "title": "Namespace",
+      "type": "string"
+    },
+    "observations": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "namespace-membership": "#/$defs/ProviderCleanupNamespaceMembership",
+            "path-lstat": "#/$defs/ProviderCleanupPathLstat",
+            "provider-state": "#/$defs/ProviderCleanupProviderState"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/ProviderCleanupNamespaceMembership"
+          },
+          {
+            "$ref": "#/$defs/ProviderCleanupProviderState"
+          },
+          {
+            "$ref": "#/$defs/ProviderCleanupPathLstat"
+          }
+        ]
+      },
+      "title": "Observations",
+      "type": "array"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "provider_variant": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Provider Variant"
+    },
+    "requested_provider": {
+      "title": "Requested Provider",
+      "type": "string"
+    },
+    "required_surface_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Surface Ids",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "session_id",
+    "requested_provider",
+    "provider_variant",
+    "namespace",
+    "cleanup_called",
+    "required_surface_ids",
+    "observations"
+  ],
+  "title": "ProviderCleanupObservation",
+  "type": "object"
+}

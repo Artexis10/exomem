@@ -1,0 +1,68 @@
+{
+  "artifact_type": "lme-selection.v1",
+  "protocol_version": "1.0.0",
+  "question_type_order": [
+    "single-session-user",
+    "single-session-assistant",
+    "single-session-preference",
+    "multi-session",
+    "temporal-reasoning",
+    "knowledge-update"
+  ],
+  "quotas": {
+    "abstention": 7,
+    "knowledge-update": 3,
+    "multi-session": 3,
+    "single-session-assistant": 3,
+    "single-session-preference": 3,
+    "single-session-user": 3,
+    "temporal-reasoning": 3
+  },
+  "schema_version": 1,
+  "selection_algorithm": "sha256(utf8(question_id + dataset_sha256)); sort (digest_hex, question_id)",
+  "selection_algorithm_version": "lme-s-25.sha256-v1",
+  "source_identity": {
+    "abstention_count": 30,
+    "byte_count": 277383467,
+    "filename": "longmemeval_s_cleaned.json",
+    "repository": "xiaowu0162/longmemeval-cleaned",
+    "revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+    "row_count": 500,
+    "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "type_census": {
+      "knowledge-update": 78,
+      "multi-session": 133,
+      "single-session-assistant": 56,
+      "single-session-preference": 30,
+      "single-session-user": 70,
+      "temporal-reasoning": 133
+    }
+  },
+  "target_question_ids": [
+    "3f1e9474",
+    "bc8a6e93",
+    "3d86fd0a",
+    "1903aded",
+    "c8f1aeed",
+    "c4f10528",
+    "1c0ddc50",
+    "195a1a1b",
+    "0a34ad58",
+    "91b15a6e",
+    "d905b33f",
+    "80ec1f4f",
+    "gpt4_0b2f1d21",
+    "b29f3365",
+    "gpt4_1e4a8aeb",
+    "07741c45",
+    "830ce83f",
+    "5c40ec5b",
+    "19b5f2b3_abs",
+    "edced276_abs",
+    "ba358f49_abs",
+    "6aeb4375_abs",
+    "2133c1b5_abs",
+    "031748ae_abs",
+    "0862e8bf_abs"
+  ]
+}

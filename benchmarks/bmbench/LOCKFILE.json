@@ -1,0 +1,13 @@
+{
+  "harness": "bm-bench (basic_memory_benchmarks)",
+  "owner": "basicmachines",
+  "upstream_repo_url": "https://github.com/basicmachines-co/basic-memory",
+  "upstream_base_sha": "816accaa9befe8281668ba8819eaf74d11ce2385",
+  "upstream_base_tree_sha": "4f0255a31c609cad90dbf3b50e3d14a517e4566e",
+  "fork_branch": "exomem-provider-v2",
+  "checkout_env_var": "BMBENCH_FORK_HOME",
+  "legacy_reference": "sibling checkout on branch exomem-provider (HEAD 463191d0; 6 ahead / 156 behind upstream) — historical reference and defect trail only; never executed by this programme",
+  "dataset_variant_required": "longmemeval-cleaned (upstream pins the original variant; the cleaned repoint is proposed upstream as PR-2 and applied in the fork until it lands)",
+  "verified_at_utc": "2026-08-09",
+  "notes": "Guest-lane pin. Exomem enters as a guest provider on the fork branch; Basic Memory's own providers and harness defaults are never modified here. Runs record the fork HEAD sha in their manifests; near-zero retrieval by ANY provider is a harness fault per the fairness contract."
+}

@@ -1,0 +1,305 @@
+{
+  "$defs": {
+    "DatasetIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "case_count": {
+          "minimum": 0,
+          "title": "Case Count",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source": {
+          "pattern": "^(?:https://[^\\\\\\s]+|[A-Za-z0-9][A-Za-z0-9._+-]*(?::[A-Za-z0-9][A-Za-z0-9._/@+-]*)?)$",
+          "title": "Source",
+          "type": "string"
+        },
+        "variant": {
+          "title": "Variant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "variant",
+        "source",
+        "revision",
+        "sha256",
+        "case_count"
+      ],
+      "title": "DatasetIdentity",
+      "type": "object"
+    },
+    "MemoryBenchHarnessIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "bun_lock_sha256": {
+          "const": "561d761fd16f895a6597227c6fc1e46064779284317fd479e079e3c86b9857da",
+          "title": "Bun Lock Sha256",
+          "type": "string"
+        },
+        "commit": {
+          "const": "118209a746d97d0d85e5a7234267f0b6962857e9",
+          "title": "Commit",
+          "type": "string"
+        },
+        "repository": {
+          "const": "https://github.com/supermemoryai/memorybench",
+          "title": "Repository",
+          "type": "string"
+        },
+        "tree": {
+          "const": "2ee25bdbcb6bfaaecb32f917920c53775a299b37",
+          "title": "Tree",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "commit",
+        "tree",
+        "bun_lock_sha256"
+      ],
+      "title": "MemoryBenchHarnessIdentity",
+      "type": "object"
+    },
+    "MemoryBenchSelection": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "target_question_ids": {
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "full"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "target_question_ids": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "full",
+            "explicit"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "target_question_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Question Ids"
+        }
+      },
+      "required": [
+        "mode",
+        "target_question_ids"
+      ],
+      "title": "MemoryBenchSelection",
+      "type": "object"
+    },
+    "ProviderCheckoutIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Commit",
+          "type": "string"
+        },
+        "lock_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lock Sha256",
+          "type": "string"
+        },
+        "repository": {
+          "pattern": "^(?:https://[^\\\\\\s]+|[A-Za-z0-9][A-Za-z0-9._+-]*(?::[A-Za-z0-9][A-Za-z0-9._/@+-]*)?)$",
+          "title": "Repository",
+          "type": "string"
+        },
+        "root": {
+          "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+          "title": "Root",
+          "type": "string"
+        },
+        "tree": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Tree",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "repository",
+        "commit",
+        "tree",
+        "lock_sha256"
+      ],
+      "title": "ProviderCheckoutIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifact_type": {
+      "const": "memorybench-run-plan.v1",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "benchmark": {
+      "const": "longmemeval",
+      "title": "Benchmark",
+      "type": "string"
+    },
+    "contract_revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Contract Revision",
+      "type": "string"
+    },
+    "dataset": {
+      "$ref": "#/$defs/DatasetIdentity"
+    },
+    "dataset_path": {
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+      "title": "Dataset Path",
+      "type": "string"
+    },
+    "guest_evidence_root": {
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+      "title": "Guest Evidence Root",
+      "type": "string"
+    },
+    "guest_work_root": {
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+      "title": "Guest Work Root",
+      "type": "string"
+    },
+    "harness": {
+      "$ref": "#/$defs/MemoryBenchHarnessIdentity"
+    },
+    "memorybench_home": {
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+      "title": "Memorybench Home",
+      "type": "string"
+    },
+    "output_root": {
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+      "title": "Output Root",
+      "type": "string"
+    },
+    "preregistration_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Preregistration Sha256",
+      "type": "string"
+    },
+    "privacy_hmac_key_hex": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Privacy Hmac Key Hex",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "provider": {
+      "enum": [
+        "basic-memory",
+        "exomem"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "provider_checkout": {
+      "$ref": "#/$defs/ProviderCheckoutIdentity"
+    },
+    "provider_variant": {
+      "minLength": 1,
+      "title": "Provider Variant",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "selection": {
+      "$ref": "#/$defs/MemoryBenchSelection"
+    },
+    "upstream_run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "title": "Upstream Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "schema_version",
+    "artifact_type",
+    "run_id",
+    "upstream_run_id",
+    "provider",
+    "provider_variant",
+    "benchmark",
+    "selection",
+    "harness",
+    "dataset",
+    "dataset_path",
+    "provider_checkout",
+    "memorybench_home",
+    "output_root",
+    "guest_work_root",
+    "guest_evidence_root",
+    "contract_revision",
+    "preregistration_sha256",
+    "privacy_hmac_key_hex"
+  ],
+  "title": "MemoryBenchRunPlan",
+  "type": "object"
+}

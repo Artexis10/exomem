@@ -1,0 +1,18 @@
+{
+  "amendment_contract": {
+    "applicability": "repository_ancestry_through_contract_revision",
+    "artifact_type": "preregistration-amendment-receipt.v1",
+    "ordering": "strict_contiguous_sequence",
+    "parent_binding": "previous_whole_document_sha256",
+    "schema_version": 1
+  },
+  "artifact_type": "preregistration-ratification-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "21aa5a8815038b82358336798b10afd8d3ffbd9739c8da597955bd14d8d962e3",
+  "decision": "ratified",
+  "ratified_on": "2026-08-11",
+  "ratifier": "Hugo Ander Kivi",
+  "repository_revision": "7cd15e6d6c67eb914e4f57bd943f98f7d1894b7f",
+  "schema_version": 1,
+  "sequence": 0
+}

@@ -246,8 +246,10 @@ class _RunView:
 
 
 def _load_run(run_dir: Path) -> _RunView:
+    from membench.runner import load_membench_result_manifest
+
     run_dir = Path(run_dir)
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest = load_membench_result_manifest(run_dir).model_dump(mode="json")
     dimensions: dict = {}
     per_query: list[dict] = []
     scores_path = run_dir / "deterministic-scores.json"

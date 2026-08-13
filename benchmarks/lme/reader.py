@@ -38,6 +38,12 @@ def _require_approval(token: str | None) -> str:
     return token.strip()
 
 
+#: How retrieved rows are packed into one reader context.  The equivalence
+#: lane records the packed context, so the separator lives here rather than
+#: being spelled twice.
+CONTEXT_SEPARATOR = "\n\n--- retrieved session ---\n\n"
+
+
 @runtime_checkable
 class Reader(Protocol):
     name: str
@@ -94,7 +100,7 @@ class ApiReader:
 
     @staticmethod
     def _prompt(question: LmeQuestion, retrieved_text: list[str]) -> str:
-        context = "\n\n--- retrieved session ---\n\n".join(retrieved_text)
+        context = CONTEXT_SEPARATOR.join(retrieved_text)
         if not context.strip():
             context = "[no retrieved context]"
         return (
