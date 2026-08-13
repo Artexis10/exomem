@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 
 VALID = "VALID"
 READINESS_UNVERIFIABLE = "READINESS_UNVERIFIABLE"

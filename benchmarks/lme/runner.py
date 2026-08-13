@@ -42,14 +42,13 @@ from .providers.lifecycle import (
 
 from .adapter import LmeExomemAdapter, lme_profile
 from .bounds import BoundRun, Hypothesis, run_bounds
-from .dataset import LmeDataset, QUESTION_TYPES, dump_dataset, load_dataset, load_dataset_bytes, stable_dataset_bytes
+from .dataset import LmeDataset, QUESTION_TYPES, dump_dataset, load_dataset_bytes, stable_dataset_bytes
 from .fetch import file_sha256, verify_sha256
 from .judge_io import _bound_ids, official_judge_commands
 from .reader import ABSTENTION, ApiReader, Reader, StubReader, _require_approval
 from .report import manifest_banner, render_report
 from .normalize import ingest_field_groups, neutralize, render_neutral_session
 from equivalence.selection import CANONICAL_LME_S_SOURCE, load_frozen_lme_selection, select_lme_s_25
-from protocol.models import LmeSelection
 
 
 class LmeRunInvalid(RuntimeError):
@@ -270,7 +269,6 @@ def _canonical_selection(dataset: LmeDataset, dataset_path: Path, config: RunCon
         raise ValueError("canonical selection requires the frozen source SHA-256")
     if config.dataset_revision != CANONICAL_LME_S_SOURCE["revision"]:
         raise ValueError("canonical selection requires the frozen source revision")
-    artifact_path = Path(__file__).resolve().parents[1] / "equivalence/subsets/lme-s-25.json"
     try:
         artifact, raw = load_frozen_lme_selection()
     except Exception as exc:

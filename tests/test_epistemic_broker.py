@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import signal
 import socket
 import subprocess
@@ -140,7 +141,6 @@ def test_receipt_is_reread_and_tamper_unsealed_or_undeclared_calls_refuse(tmp_pa
     driver_result = broker.run_driver(
         "def run(broker): return broker.invoke('state.read')", timeout_s=2.0
     )
-    ref = driver_result.receipt_ref
     audit = audit_invocation_receipts(
         broker=broker, run_root=tmp_path, driver_result=driver_result,
         matrix=(_matrix_entry(),), provider="fixture", variant="native",
@@ -798,10 +798,16 @@ def test_recheck3_parent_reply_write_is_nonblocking_deadline_bound_and_reaped(
         """
     )
     try:
+        repo_root = Path(__file__).resolve().parents[1]
+        child_env = os.environ.copy()
+        child_env["PYTHONPATH"] = os.pathsep.join(
+            (str(repo_root / "src"), str(repo_root / "benchmarks"))
+        )
         completed = subprocess.run(
             [sys.executable, "-c", script, str(tmp_path)],
             check=False,
             capture_output=True,
+            env=child_env,
             text=True,
             timeout=4.0,
         )

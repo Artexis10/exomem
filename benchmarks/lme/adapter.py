@@ -70,11 +70,9 @@ class LmeExomemAdapter(ExomemLocalAdapter):
                 "run `uv sync --extra embeddings` and warm the Hugging Face embedding "
                 "model cache before an offline LME run"
             )
-        capability = "text embedding model"
         try:
             super().setup(workdir, profile)
             if not profile.settings.get("EXOMEM_DISABLE_CLIP"):
-                capability = "CLIP semantic model"
                 from exomem import embeddings
 
                 embeddings.get_clip_model()

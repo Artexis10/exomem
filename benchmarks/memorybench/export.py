@@ -28,8 +28,6 @@ from protocol.models import (
     RunManifest,
 )
 from equivalence.selection import CANONICAL_LME_S_SOURCE, load_frozen_lme_selection, select_lme_s_25
-from lme.fetch import file_sha256
-from protocol.models import LmeSelection
 
 try:
     from .setup import verify_checkout
@@ -300,7 +298,6 @@ def _canonical_selection_pins(plan: MemoryBenchRunPlan, rows: list[dict[str, Any
         or plan.selection.mode != "explicit"
     ):
         raise ValueError("25-case comparative tier requires canonical LongMemEval-S identity")
-    artifact_path = _ROOT / "benchmarks/equivalence/subsets/lme-s-25.json"
     try:
         artifact, raw = load_frozen_lme_selection()
     except Exception as exc:
@@ -911,7 +908,6 @@ def _build_export(
     )
     dataset_raw = [by_dataset_id[question_id] for question_id in selected_ids]
     run_root = Path(plan.memorybench_home) / "data" / "runs" / plan.upstream_run_id
-    checkpoint_path = run_root / "checkpoint.json"
     failures = set(extra_failures or ())
     checkpoint: dict[str, Any] | None = None
     checkpoint_sha: str | None = None
@@ -1379,7 +1375,6 @@ def _privacy_forbidden_values(plan: MemoryBenchRunPlan) -> set[str]:
                     forbidden.add(value)
     except Exception:
         pass
-    run_root = Path(plan.memorybench_home) / "data/runs" / plan.upstream_run_id
     try:
         checkpoint = _load_json_bytes(_secure_run_read(plan, "checkpoint.json"), "checkpoint")
         if isinstance(checkpoint, dict) and isinstance(checkpoint.get("questions"), list):

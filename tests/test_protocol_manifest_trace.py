@@ -511,7 +511,6 @@ def test_feedback10_cleanup_observation_leaf_replacement_after_verification_inva
 def test_feedback11_evidence_inventory_binds_the_descriptor_identity_it_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import lme.providers.lifecycle as lifecycle
     from protocol.custody import HeldDirectory
     from protocol.manifest import ManifestError, load_manifest
 

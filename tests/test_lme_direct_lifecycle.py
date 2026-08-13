@@ -140,7 +140,7 @@ def test_lifecycle_cleans_once_and_reraises_the_original_base_exception(tmp_path
 def test_constructor_failure_has_no_provider_state_claim_and_terminalizes(tmp_path: Path) -> None:
     from lme.providers import registry
     from lme.reader import StubReader
-    from lme.runner import LmeRunInvalid, RunConfig, execute_run
+    from lme.runner import LmeRunInvalid, execute_run
 
     def constructor():
         raise RuntimeError("constructor")
@@ -426,7 +426,7 @@ def test_terminal_manifest_and_report_revalidate_valid_lifecycle_artifacts(
 ) -> None:
     """Start valid, then prove both terminal consumers reject lifecycle artifact drift."""
     from lme.reader import StubReader
-    from lme.runner import RunConfig, execute_run
+    from lme.runner import execute_run
     from lme.report import render_run_report
     from protocol.manifest import ManifestError, load_manifest
     from protocol.trace import CaseTraceReader
@@ -920,7 +920,7 @@ def _runner_spec(factory):
 def test_one_case_isolation_records_typed_na_without_a_foreign_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from lme.providers import registry
     from lme.reader import StubReader
-    from lme.runner import LmeRunInvalid, RunConfig, execute_run
+    from lme.runner import LmeRunInvalid, execute_run
 
     queries: list[tuple[str, str]] = []
 
@@ -954,7 +954,7 @@ def test_one_case_isolation_records_typed_na_without_a_foreign_query(tmp_path: P
 def test_two_cases_probe_the_actual_prior_token_and_shared_state_invalidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from lme.providers import registry
     from lme.reader import StubReader
-    from lme.runner import LmeRunInvalid, RunConfig, execute_run
+    from lme.runner import LmeRunInvalid, execute_run
 
     ingested: list[str] = []
     absence_queries: list[str] = []
@@ -1005,7 +1005,7 @@ def test_runner_delegates_representative_failures_to_one_lifecycle_owner(
     """This covers runner wiring; the parameterized unit test covers every inner stage."""
     import lme.runner as runner
     from lme.providers import registry
-    from lme.runner import LmeRunInvalid, RunConfig, execute_run
+    from lme.runner import LmeRunInvalid, execute_run
 
     instances: list[object] = []
 
@@ -1263,7 +1263,6 @@ def test_feedback2_exomem_observer_uses_real_vault_bytes_not_allocated_wrapper(
     """A removed real vault is absent even while the adapter still holds its Path."""
     from lme.dataset import load_dataset
     from lme.normalize import neutralize
-    from lme.providers.base import RetrievalPurpose
     from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
     from lme.providers.registry import provider_spec
     from protocol.models import CaseHandle, DatasetIdentity

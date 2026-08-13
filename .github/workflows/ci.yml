@@ -27,6 +27,17 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Benchmark contract receipts are verified against their complete
+          # introduction/amendment ancestry. A shallow PR merge checkout
+          # cannot prove that history and must not silently weaken the gate.
+          fetch-depth: 0
+      - name: Install pinned Bun runtime
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install process-isolation runtime
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:

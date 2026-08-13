@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -113,7 +112,7 @@ def test_budget_refusal_does_not_consume_budget_and_stale_lock_recovers(tmp_path
     (tmp_path / "STOP").unlink()
     ledger.release(ts="2026-01-01T00:00:02Z", seq=3, actor="t", op="i", units=4)
     assert ledger.reserve(ts="2026-01-01T00:00:03Z", seq=4, actor="t", op="i", units=5).decision == "approved"
-    (tmp_path / ".budget.lock").write_text(f"999999 0\n", encoding="utf-8")
+    (tmp_path / ".budget.lock").write_text("999999 0\n", encoding="utf-8")
     ledger.approve(ts="2026-01-01T00:00:04Z", seq=5, actor="t", op="i")
 
 

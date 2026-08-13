@@ -8,7 +8,6 @@ import os
 import stat
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping
-from typing import Any
 from pathlib import Path
 
 from protocol.models import LmeSelection

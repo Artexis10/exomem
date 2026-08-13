@@ -729,7 +729,6 @@ def test_feedback6_preflight_and_execution_model_refuse_before_factory(
 def test_feedback6_constructor_and_setup_attempts_are_non_authorizing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lme.providers import registry
     from lme.reader import StubReader
     from lme.runner import LmeRunInvalid, execute_run
 
@@ -807,7 +806,6 @@ def test_feedback6_constructor_and_setup_attempts_are_non_authorizing(
 def test_feedback6_direct_run_id_refuses_unsafe_components_before_factory_or_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lme.providers import registry
     from lme.reader import StubReader
     from lme.runner import execute_run
 
@@ -914,7 +912,6 @@ def test_feedback6_raw_question_ids_are_logical_only_and_internal_ids_injective(
 def test_feedback6_session_work_and_evidence_fds_exist_before_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lme.providers import registry
     from lme.reader import StubReader
     from lme.runner import LmeRunInvalid, execute_run
 
@@ -965,7 +962,6 @@ def test_feedback6_hostile_runner_ledger_and_terminalization_never_mask_primary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import lme.runner as runner
-    from lme.providers import registry
     from lme.reader import StubReader
 
     hooks: list[str] = []

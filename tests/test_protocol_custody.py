@@ -228,7 +228,7 @@ def test_feedback7_failed_child_construction_closes_all_attempt_descriptors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
 ) -> None:
     import protocol.custody as custody_module
-    from protocol.custody import CustodyError, hold_directory
+    from protocol.custody import hold_directory
 
     root = hold_directory(tmp_path / "root", create=True, logical_ref=Path("root"))
     if operation == "open_dir":
@@ -276,12 +276,11 @@ def test_feedback7_retirement_leaves_replacement_inserted_before_rmdir_untouched
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import protocol.custody as custody_module
-    from protocol.custody import CustodyBindingLost, hold_directory
+    from protocol.custody import hold_directory
 
     parent = hold_directory(tmp_path / "parent", create=True, logical_ref=Path("parent"))
     held = parent.mkdir("child", logical_ref=Path("parent/child"))
     replacement = tmp_path / "parent" / "child"
-    displaced = tmp_path / "displaced-child"
     real_rename = custody_module.os.rename
     swapped = False
 
@@ -360,7 +359,6 @@ def test_feedback9_recursive_retirement_quarantines_the_inspected_entry_before_f
 
     root = hold_directory(tmp_path / "root", create=True, logical_ref=Path("root"))
     target = root.capability_path / "target"
-    displaced = root.capability_path / "displaced"
     if kind == "file":
         target.write_bytes(b"held")
     else:

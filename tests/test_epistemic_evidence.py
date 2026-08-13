@@ -198,7 +198,7 @@ def test_replay_refuses_schema_invalid_payload_even_with_matching_digest(tmp_pat
 
 
 def test_replay_refuses_snapshot_digest_or_schema_mismatch(tmp_path: Path) -> None:
-    from epistemic.evidence import AssertionEvidencePayload, EvidenceReplayError, replay_assertion_evidence
+    from epistemic.evidence import EvidenceReplayError, replay_assertion_evidence
 
     ref = _persist(tmp_path)
     payload_path = tmp_path / ref.path

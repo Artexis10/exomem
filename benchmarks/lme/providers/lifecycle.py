@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import json
 import os
 import stat
 from collections.abc import Callable, Iterable, Mapping
@@ -12,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from protocol.custody import (
-    CustodyBindingLost,
     CustodyError,
     CustodyLimitExceeded,
     HeldDirectory,
@@ -511,7 +509,7 @@ def run_provider_lifecycle(
                 _assert_published_observation_identity(
                     active_custody.evidence, observation_path.relative_to(context.evidence_root), observation_identity,
                 )
-        except BaseException as failure:
+        except BaseException:
             bindings_valid = False
             capture(
                 CleanupUnproved("custody binding was lost", fact="custody_binding_lost"),
