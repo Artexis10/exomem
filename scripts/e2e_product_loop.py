@@ -498,8 +498,13 @@ def _assert_records_presentation_rows(
         for row in expanded
     ):
         raise RuntimeError("installed Records expanded query escaped its safe child projection")
-    if expanded_pages[0].get("continuation") is None or expanded_pages[-1].get("continuation") is not None:
-        raise RuntimeError("installed Records child pagination did not expose a bounded terminal page")
+    if (
+        expanded_pages[0].get("continuation") is None
+        or expanded_pages[-1].get("continuation") is not None
+    ):
+        raise RuntimeError(
+            "installed Records child pagination did not expose a bounded terminal page"
+        )
 
 
 async def _planning_first_session(client, state: dict[str, Any], timeout: float) -> None:
@@ -858,14 +863,19 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
         },
         timeout,
     )
-    _assert_records_presentation_rows(after_append, [first_children, second_children])
+    _assert_records_presentation_rows(
+        after_append,
+        [first_children, second_children],
+    )
     item_text = (Path(state["vault"]) / fixture["item_path"]).read_text(encoding="utf-8")
     if (
         "<!-- exomem-record-presentation:v1" not in item_text
         or "### Movements" not in item_text
         or "e2e record row-only sentinel" not in item_text
     ):
-        raise RuntimeError("installed Records append did not preserve authored prose and managed view")
+        raise RuntimeError(
+            "installed Records append did not preserve authored prose and managed view"
+        )
     updated = await _call_mutation(
         client,
         "record_memory",
