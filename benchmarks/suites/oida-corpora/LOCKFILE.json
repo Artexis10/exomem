@@ -1,0 +1,13 @@
+{
+  "suite": "oida-corpora",
+  "paper": "arXiv:2604.11759",
+  "repo_url": "https://github.com/kakashi-ventures/oida-evaluation-corpora",
+  "commit_sha": "2fd2eb9e31f1f2cd72a54dcf6e05d7401e225a22",
+  "upstream_last_commit": "2026-06-15",
+  "license_spdx": "CC-BY-4.0",
+  "shape": "6 corpora (3 organizational, 2 investigative, 1 communication); 259 documents, 89 queries; BEIR layout (corpus.jsonl, queries.jsonl, qrels/test.tsv)",
+  "checkout_env_var": "SUITE_OIDA_HOME",
+  "runability": "runnable",
+  "verified_at_utc": "2026-08-09",
+  "notes": "Corpora only — the OIDA system itself is unreleased. Nine epistemic classes incl. DECISION/HYPOTHESIS/QUESTION; the most directly reusable public artifact for the epistemic-wedge thesis. Synthetic and small; the authors' own paper documents metric circularity — use the corpora, not their EQS metric. Attribution required (CC-BY-4.0)."
+}

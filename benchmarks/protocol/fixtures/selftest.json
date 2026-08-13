@@ -1,0 +1,14 @@
+{
+  "gold": {
+    "case_id": "fixture",
+    "answer": "violet cedar lantern",
+    "answer_session_ids": ["answer_fixture"],
+    "question_type": "knowledge-update",
+    "question": "Which lantern?"
+  },
+  "content_fields": ["plain source"],
+  "authored_literals": {"title": "case {case}"},
+  "harness_fields": {"title": "case 1", "tags": ["longmemeval"]},
+  "canary_hits": {"presence": true, "cross_case": false, "never_ingested": false},
+  "update_hits": ["current"]
+}

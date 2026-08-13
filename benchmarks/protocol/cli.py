@@ -1,0 +1,106 @@
+"""Offline command line entry points for protocol maintenance and validation."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import tempfile
+from pathlib import Path
+
+from .canary import evaluate_probes
+from .leakage import scan_ingest
+from .manifest import load_manifest
+from .models import CaseGold, export_json_schemas
+from .readiness import validate as validate_readiness
+from .probes import classify_update_outcome
+from .trace import CaseTraceReader
+
+_ROOT = Path(__file__).resolve().parent
+_FIXTURE_PATH = _ROOT / "fixtures" / "selftest.json"
+
+
+def _export_schemas(check: bool) -> int:
+    target = _ROOT / "schema"
+    if check:
+        with tempfile.TemporaryDirectory() as temp:
+            fresh = {path.name: path.read_bytes() for path in export_json_schemas(Path(temp))}
+        committed = {path.name: path.read_bytes() for path in target.glob("*.schema.json")}
+        if fresh != committed:
+            print("protocol schema drift detected")
+            return 1
+        return 0
+    for path in export_json_schemas(target):
+        print(path)
+    return 0
+
+
+def _selftest_fixture() -> int:
+    fixture = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
+    gold = CaseGold.model_validate(fixture["gold"])
+    if scan_ingest(
+        fixture["content_fields"], fixture["authored_literals"], fixture["harness_fields"], gold
+    ):
+        raise RuntimeError("clean fixture unexpectedly triggered leakage scan")
+    if evaluate_probes(fixture["canary_hits"]) != "isolated":
+        raise RuntimeError("canary fixture failed")
+    if classify_update_outcome(fixture["update_hits"]) != "superseded":
+        raise RuntimeError("probe fixture failed")
+    return 0
+
+
+def _selftest(*, fixtures: bool) -> int:
+    if fixtures:
+        _selftest_fixture()
+        print("protocol fixture selftest: ok")
+        return 0
+    gold = CaseGold(case_id="fixture", answer="violet cedar lantern", answer_session_ids=["answer_fixture"], question_type="knowledge-update", question="Which lantern?")
+    if scan_ingest(["plain source"], {"title": "case {case}"}, {"title": "case 1", "tags": ["longmemeval"]}, gold):
+        raise RuntimeError("clean fixture unexpectedly triggered leakage scan")
+    if evaluate_probes({"presence": True, "cross_case": False, "never_ingested": False}) != "isolated":
+        raise RuntimeError("canary selftest failed")
+    if classify_update_outcome(["current"]) != "superseded":
+        raise RuntimeError("probe selftest failed")
+    print("protocol selftest: ok")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="benchmark-protocol")
+    sub = parser.add_subparsers(dest="command", required=True)
+    export = sub.add_parser("export-schemas")
+    export.add_argument("--check", action="store_true")
+    validate = sub.add_parser("validate")
+    validate.add_argument("--run-dir", required=True)
+    validate.add_argument("--strict", action="store_true")
+    selftest = sub.add_parser("selftest")
+    selftest.add_argument("--fixtures", action="store_true")
+    args = parser.parse_args(argv)
+    if args.command == "export-schemas":
+        return _export_schemas(args.check)
+    if args.command == "validate":
+        try:
+            manifest = load_manifest(args.run_dir)
+            readiness = validate_readiness(manifest.readiness, strict=args.strict)
+            if args.strict and manifest.status == "VALID":
+                if manifest.contamination in {"contaminated", "unverifiable"}:
+                    raise RuntimeError("VALID manifest cannot claim contaminated or unverifiable canary state")
+                if readiness.status != "VALID":
+                    raise RuntimeError("VALID manifest has invalid or unverifiable requested readiness")
+                if manifest.budget is None:
+                    raise RuntimeError("VALID manifest has no measured budget summary")
+                ledger = Path(args.run_dir) / "ledger.jsonl"
+                if not ledger.is_file() or not ledger.read_text(encoding="utf-8").strip():
+                    raise RuntimeError("VALID manifest has no measured budget ledger")
+            print(manifest.status)
+            trace_dir = Path(args.run_dir) / "traces"
+            for trace in sorted(trace_dir.glob("*.jsonl")) if trace_dir.exists() else ():
+                list(CaseTraceReader(args.run_dir, trace.stem))
+        except Exception as exc:
+            print(f"invalid manifest: {exc}")
+            return 2 if args.strict else 1
+        return 0
+    return _selftest(fixtures=args.fixtures)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

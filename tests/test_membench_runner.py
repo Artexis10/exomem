@@ -155,11 +155,76 @@ def test_happy_run_writes_complete_artifacts(corpus: Path, tmp_path: Path) -> No
     ):
         assert (result.run_dir / name).exists(), name
     assert adapter.cleaned_up
+    manifest = json.loads((result.run_dir / "manifest.json").read_text())
+    assert manifest["protocol_version"] == "1.0.0"
+    assert manifest["schema_version"] == 2
+    assert manifest["artifact_type"].endswith(".v2")
+    assert manifest["preregistration_identity"]["original"]["sha256"] == (
+        "21aa5a8815038b82358336798b10afd8d3ffbd9739c8da597955bd14d8d962e3"
+    )
     scores = json.loads((result.run_dir / "deterministic-scores.json").read_text())
     assert scores["dimensions"]["_run"]["failures"] == 0
     assert result.dimensions["factual_qa"]["pass"] >= 1
     retrieval_rows = (result.run_dir / "retrieval.jsonl").read_text().splitlines()
     assert retrieval_rows and '"text"' not in retrieval_rows[0]
+
+
+def test_started_versioned_manifest_is_durable_before_adapter_work(
+    corpus: Path, tmp_path: Path
+) -> None:
+    class ManifestObservingAdapter(FakeAdapter):
+        def setup(self, workdir: Path, profile: Profile) -> None:
+            manifest_path = Path(workdir).parent / "manifest.json"
+            assert manifest_path.is_file()
+            started = json.loads(manifest_path.read_text(encoding="utf-8"))
+            assert started["protocol_version"] == "1.0.0"
+            assert started["schema_version"] == 2
+            assert started["artifact_type"].endswith(".v2")
+            assert started["status"] == "started"
+            assert started["preregistration_identity"]["contract_revision"]
+            super().setup(workdir, profile)
+
+    result = execute_run(_spec(corpus, tmp_path, ManifestObservingAdapter()))
+    assert not result.invalid
+
+
+def test_comparison_refuses_unversioned_historical_membench_result(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "legacy",
+                "provider": "fixture",
+                "profile": {"name": "legacy"},
+                "invalid": False,
+                "run_failures": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="historical-untrusted|schema_version|manifest"):
+        build_comparison_report([legacy], tmp_path / "comparison.md")
+
+
+@pytest.mark.parametrize("alteration", ["identity", "unknown-field"])
+def test_comparison_reconstructs_and_strictly_validates_membench_result_identity(
+    corpus: Path, tmp_path: Path, alteration: str
+) -> None:
+    result = execute_run(_spec(corpus, tmp_path, FakeAdapter()))
+    manifest_path = result.run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if alteration == "identity":
+        manifest["preregistration_identity"]["original"]["sha256"] = "f" * 64
+    else:
+        manifest["unexpected"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="pre.?registration|identity|schema|manifest"):
+        build_comparison_report([result.run_dir], tmp_path / "comparison.md")
 
 
 def test_run_dir_is_never_overwritten(corpus: Path, tmp_path: Path) -> None:

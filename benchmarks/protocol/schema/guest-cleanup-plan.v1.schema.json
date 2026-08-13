@@ -1,0 +1,124 @@
+{
+  "$defs": {
+    "GuestCleanupTargetPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "container_tag": {
+          "minLength": 1,
+          "title": "Container Tag",
+          "type": "string"
+        },
+        "container_tag_hmac_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Container Tag Hmac Sha256",
+          "type": "string"
+        },
+        "discovery_sources": {
+          "items": {
+            "enum": [
+              "checkpoint",
+              "guest_evidence",
+              "secure_descriptor"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Discovery Sources",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "namespace_expected": {
+          "title": "Namespace Expected",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "container_tag",
+        "container_tag_hmac_sha256",
+        "discovery_sources",
+        "namespace_expected"
+      ],
+      "title": "GuestCleanupTargetPlan",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifact_type": {
+      "const": "guest-cleanup-plan.v1",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "guest_evidence_root": {
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+      "title": "Guest Evidence Root",
+      "type": "string"
+    },
+    "guest_work_root": {
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+      "title": "Guest Work Root",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "provider": {
+      "enum": [
+        "basic-memory",
+        "exomem"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "provider_variant": {
+      "minLength": 1,
+      "title": "Provider Variant",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "run_plan_path": {
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2}).+$",
+      "title": "Run Plan Path",
+      "type": "string"
+    },
+    "run_plan_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Run Plan Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/$defs/GuestCleanupTargetPlan"
+      },
+      "title": "Targets",
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "protocol_version",
+    "schema_version",
+    "artifact_type",
+    "run_id",
+    "provider",
+    "provider_variant",
+    "guest_work_root",
+    "guest_evidence_root",
+    "run_plan_path",
+    "run_plan_sha256",
+    "targets"
+  ],
+  "title": "GuestCleanupPlan",
+  "type": "object"
+}

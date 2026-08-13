@@ -1,0 +1,19 @@
+{
+  "suite": "stale",
+  "paper": "arXiv:2605.06527",
+  "repo_url": "https://github.com/icedreamc/STALE",
+  "commit_sha": "ea7d391103a151927cd29d2f01d87597a782bdcb",
+  "upstream_last_commit": "2026-05-19",
+  "license_spdx": "MIT",
+  "license_sha256": "0adcc27078a1b9a5f9905b7bba7b9b1a280d56828c2c00b6db17c872ee549bb6",
+  "dataset": {
+    "hf_id": "STALEproj/STALE",
+    "hf_revision": "617c51dc200b5ab09970834144c7e51c77959af0",
+    "license_spdx": "CC-BY-4.0",
+    "shape": "400 instances x 3 probe dimensions (state validation / stale-premise robustness / implicit downstream adaptation); haystacks to 150K tokens; LongMemEval MIT distractors"
+  },
+  "checkout_env_var": "SUITE_STALE_HOME",
+  "runability": "runnable-with-cost",
+  "verified_at_utc": "2026-08-09",
+  "notes": "Release found in paper Appendix G (p.37), not linked from the abstract. Includes the runnable CUP-Mem prototype. Repo static since 2026-05-19; release is 'anonymized form' — verify no functional redaction before building on cup_mem/. Generation and LLM-judge evaluation require provider keys under the budget ledger."
+}
