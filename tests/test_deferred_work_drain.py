@@ -645,7 +645,7 @@ def test_preexisting_unsafe_runtime_fails_before_idempotency_sqlite_open(
             state, directory=True, sid=sid
         ),
     )
-    monkeypatch.setattr(writer_lease.os, "name", "nt")
+    monkeypatch.setattr(writer_lease, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(
         writer_lease.sqlite3,
         "connect",
@@ -653,7 +653,9 @@ def test_preexisting_unsafe_runtime_fails_before_idempotency_sqlite_open(
     )
 
     with pytest.raises(mutation_lock.WindowsRuntimeDaclError) as raised:
-        writer_lease.IdempotencyStore(state_dir / "idempotency.sqlite")
+        writer_lease.IdempotencyStore(
+            state_dir / "idempotency.sqlite", secret_protector=object()
+        )
 
     assert str(state_dir) in str(raised.value)
     assert "icacls.exe" in str(raised.value)
