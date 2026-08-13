@@ -661,7 +661,13 @@ def _acquire_windows_secure_directory(
                 if not create:
                     raise
                 current.mkdir(mode=mode)
+                created = os.lstat(current)
+                _after_windows_secure_directory_create(current)
+                if not os.path.samestat(created, os.lstat(current)):
+                    raise OSError("Windows directory changed during creation")
                 handles.append(open_path(current, directory=True))
+                if not os.path.samestat(created, os.lstat(current)):
+                    raise OSError("Windows directory changed during creation")
         return _SecureDirectory(
             absolute, windows_handles=handles, close_windows_handle=close_handle
         )
@@ -669,6 +675,10 @@ def _acquire_windows_secure_directory(
         while handles:
             close_handle(handles.pop())
         raise
+
+
+def _after_windows_secure_directory_create(_path: Path) -> None:
+    """Test seam between native directory creation and retained-handle open."""
 
 
 def _acquire_secure_directory(
@@ -785,7 +795,10 @@ def _open_secure_file_at(
             access = 0xC0000000  # GENERIC_READ | GENERIC_WRITE
         elif flags & os.O_WRONLY:
             access = 0x40000000  # GENERIC_WRITE
-        creation = 4 if flags & os.O_CREAT else 3  # OPEN_ALWAYS / OPEN_EXISTING
+        if flags & os.O_CREAT and flags & os.O_EXCL:
+            creation = 1  # CREATE_NEW
+        else:
+            creation = 4 if flags & os.O_CREAT else 3  # OPEN_ALWAYS / OPEN_EXISTING
         handle = _windows_open_path(
             directory.path / name,
             directory=False,
@@ -799,10 +812,13 @@ def _open_secure_file_at(
         except BaseException:
             _windows_close_handle(handle)
             raise
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode):
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("lock path is not a regular file")
+    except BaseException:
         os.close(fd)
-        raise OSError("lock path is not a regular file")
+        raise
     return fd
 
 

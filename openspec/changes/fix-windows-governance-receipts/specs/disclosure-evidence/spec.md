@@ -1,6 +1,6 @@
 ## ADDED Requirements
 
-### Requirement: Receipt Filesystem Safety And Critical Durability Are Cross-Platform
+### Requirement: Governance Evidence Filesystem Safety And Critical Durability Are Cross-Platform
 
 Receipt evidence opening and creation SHALL use platform-safe, no-follow filesystem operations on every supported operating system. POSIX SHALL retain the receipt instance directory and use descriptor-relative child access. Windows SHALL retain the instance directory and its existing ancestors while a monthly JSONL child is opened or exclusively created. A monthly evidence handle SHALL resolve to a regular, non-reparse direct child of that retained instance directory.
 
@@ -9,6 +9,8 @@ Native Windows receipt operations SHALL NOT depend on the CRT opening a director
 Before advancing the durable sidecar head for a critical receipt, Exomem SHALL flush the complete JSONL durable prefix and every receipt-directory entry through the existing Knowledge Base root. Native Windows SHALL perform this operation through a write-capable no-follow directory handle. Unsupported, denied, unsafe, or failed directory durability SHALL fail closed and SHALL NOT advance the durable or observed sidecar head.
 
 A file-ahead critical suffix left by such a refusal SHALL remain eligible for the existing exact-ID retry and verified reconcile paths. Neither path SHALL duplicate the critical event or promote it before file and directory durability succeeds.
+
+Native Windows lifecycle tombstone writes and unlinks plus deletion/recovery source and destination rename barriers SHALL use the same retained, no-follow, write-capable final-directory durability primitive rather than CRT directory opens. A lifecycle directory open, identity, or flush failure SHALL remain fail-closed at the existing checkpoint and SHALL NOT report the tombstone, unlink, deletion, recovery, or rename durable.
 
 #### Scenario: Native Windows appends and verifies ordinary evidence
 
@@ -48,3 +50,20 @@ A file-ahead critical suffix left by such a refusal SHALL remain eligible for th
 - **WHEN** another actor attempts to rename or replace the retained instance path between validation and monthly-file open
 - **THEN** retained handles either block the swap or Exomem detects the changed identity
 - **AND** no bytes cross into the replacement tree
+
+#### Scenario: Governed deletion and recovery persist lifecycle barriers
+
+- **WHEN** native Windows performs governed deletion or recovery
+- **THEN** its tombstone write or unlink and every source/destination rename directory are flushed at the existing lifecycle checkpoints
+- **AND** critical receipt order and lifecycle lineage remain valid
+
+#### Scenario: Ungoverned atomic rename persists its directories
+
+- **WHEN** native Windows performs an allowed ungoverned lifecycle atomic rename
+- **THEN** the source and distinct destination parent directories are flushed without a CRT directory open
+
+#### Scenario: Lifecycle directory durability refuses unsafe state
+
+- **WHEN** a lifecycle directory is a reparse point, changes identity, cannot be opened securely, or cannot be flushed
+- **THEN** the operation fails closed with a content-free lifecycle error
+- **AND** no later durability checkpoint is reported

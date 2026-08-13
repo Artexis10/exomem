@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from exomem import mutation_lock
 from exomem.governance import receipts
 
 
@@ -54,30 +53,6 @@ def _outside_target(tmp_path: Path, component: str) -> Path:
     return outside
 
 
-def _stub_directory_open(
-    monkeypatch: pytest.MonkeyPatch, instance_dir: Path, *, child_open
-) -> None:
-    """Reach the native fallback child seam without asking the CRT for a directory."""
-    original_fstat = receipts.os.fstat
-    original_open = receipts.os.open
-    original_close = receipts.os.close
-    instance_stat = os.lstat(instance_dir)
-    directory_fd = 90_001
-
-    def open_path(path, *args, **kwargs):  # noqa: ANN001
-        if Path(path) == instance_dir:
-            return directory_fd
-        return child_open(path, *args, **kwargs)
-
-    def fstat_path(fd: int):
-        return instance_stat if fd == directory_fd else original_fstat(fd)
-
-    monkeypatch.setattr(receipts.os, "open", open_path)
-    monkeypatch.setattr(receipts.os, "fstat", fstat_path)
-    monkeypatch.setattr(receipts.os, "close", lambda fd: None if fd == directory_fd else original_close(fd))
-    assert original_open is not None
-
-
 def test_windows_month_open_never_uses_crt_to_open_retained_directory(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -87,14 +62,43 @@ def test_windows_month_open_never_uses_crt_to_open_retained_directory(
     month = _month(instance_dir)
     original_open = receipts.os.open
 
-    def reject_crt_directory(path, *args, **kwargs):  # noqa: ANN001
-        if Path(path) == instance_dir:
-            pytest.fail("Windows receipt open attempted CRT directory access")
+    def reject_crt_path(path, *args, **kwargs):  # noqa: ANN001
+        if Path(path) in {instance_dir, month}:
+            pytest.fail("Windows receipt open attempted CRT access")
         return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(receipts.os, "open", reject_crt_directory)
+    monkeypatch.setattr(receipts.os, "open", reject_crt_path)
     with receipts._open_month_fd(instance_dir, month.name) as fd:
         assert os.read(fd, 1) == b"{"
+
+
+def test_windows_month_open_refuses_ordinary_instance_replacement_after_enumeration(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enumerated instance identity must remain bound to the retained handle."""
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / ("f" * 32)
+    instance_dir.mkdir(parents=True)
+    month = _month(instance_dir)
+    replacement = instance_dir.with_name(instance_dir.name + "-replacement")
+    replacement.mkdir()
+    (replacement / month.name).write_bytes(b'{"schema":"receipt/v1"}\n')
+    swapped = False
+
+    def replace_after_enumeration(path: Path, name: str) -> None:
+        nonlocal swapped
+        assert path == instance_dir
+        assert name == month.name
+        instance_dir.rename(instance_dir.with_name(instance_dir.name + "-original"))
+        replacement.rename(instance_dir)
+        swapped = True
+
+    monkeypatch.setattr(receipts, "_after_month_enumeration", replace_after_enumeration)
+
+    with pytest.raises(receipts.ReceiptError, match="instance path"):
+        with receipts._open_month_fd(instance_dir, month.name):
+            pass
+
+    assert swapped is True
 
 
 def test_windows_month_open_normalizes_a_direct_child_open_refusal(
@@ -105,14 +109,14 @@ def test_windows_month_open_normalizes_a_direct_child_open_refusal(
     instance_dir.mkdir(parents=True)
     month = _month(instance_dir)
     detail = r"native child denial C:\\private\\receipt.jsonl"
-    original_open = receipts.os.open
+    original_open = receipts._open_secure_file_at
 
-    def deny_child(path, *args, **kwargs):  # noqa: ANN001
-        if Path(path) == month:
+    def deny_child(directory, name, flags, mode=0o600):  # noqa: ANN001
+        if name == month.name:
             raise PermissionError(detail)
-        return original_open(path, *args, **kwargs)
+        return original_open(directory, name, flags, mode)
 
-    _stub_directory_open(monkeypatch, instance_dir, child_open=deny_child)
+    monkeypatch.setattr(receipts, "_open_secure_file_at", deny_child)
     with pytest.raises(receipts.ReceiptError, match="evidence path") as exc_info:
         with receipts._open_month_fd(instance_dir, month.name):
             pass
@@ -126,41 +130,25 @@ def test_windows_month_open_normalizes_child_identity_and_reparse_refusals(
     instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / ("d" * 32)
     instance_dir.mkdir(parents=True)
     month = _month(instance_dir)
-    original_lstat = receipts.os.lstat
-    original_fstat = receipts.os.fstat
-    original_open = receipts.os.open
     detail = r"reparse target C:\\private\\outside"
 
-    _stub_directory_open(monkeypatch, instance_dir, child_open=original_open)
-    child_fd = original_open(month, os.O_RDONLY)
-    try:
-        child_stat = original_fstat(child_fd)
-    finally:
-        os.close(child_fd)
-
-    def changed_fstat(fd: int):
-        if fd == 90_001:
-            return os.lstat(instance_dir)
-        value = original_fstat(fd)
-        if fd != 90_001 and stat.S_ISREG(value.st_mode):
-            return SimpleNamespace(st_mode=value.st_mode, st_dev=value.st_dev, st_ino=value.st_ino + 1)
-        return value
-
-    monkeypatch.setattr(receipts.os, "fstat", changed_fstat)
+    monkeypatch.setattr(mutation_lock, "_windows_child_is_in_directory", lambda *_args: False)
     with pytest.raises(receipts.ReceiptError, match="evidence path") as identity_error:
         with receipts._open_month_fd(instance_dir, month.name):
             pass
-    assert str(child_stat.st_ino) not in str(identity_error.value)
 
-    def reparse_lstat(path):  # noqa: ANN001
-        if Path(path) == month:
-            return SimpleNamespace(st_mode=stat.S_IFLNK)
-        return original_lstat(path)
+    original_open = mutation_lock._windows_open_path
 
-    monkeypatch.setattr(receipts.os, "lstat", reparse_lstat)
+    def refuse_reparse(path: Path, **kwargs: object) -> int:
+        if not kwargs["directory"]:
+            raise OSError(detail)
+        return original_open(path, **kwargs)
+
+    monkeypatch.setattr(mutation_lock, "_windows_open_path", refuse_reparse)
     with pytest.raises(receipts.ReceiptError, match="evidence path") as reparse_error:
         with receipts._open_month_fd(instance_dir, month.name):
             pass
+    assert detail not in str(identity_error.value)
     assert detail not in str(reparse_error.value)
 
 
@@ -172,8 +160,6 @@ def test_windows_month_open_normalizes_yielded_io_failure_without_path_detail(
     instance_dir.mkdir(parents=True)
     month = _month(instance_dir)
     detail = r"I/O error C:\\private\\receipt.jsonl"
-    _stub_directory_open(monkeypatch, instance_dir, child_open=receipts.os.open)
-
     with pytest.raises(receipts.ReceiptError, match="evidence path") as exc_info:
         with receipts._open_month_fd(instance_dir, month.name):
             raise OSError(detail)
@@ -216,6 +202,40 @@ def test_windows_raw_directory_flush_failure_is_content_free(
 
     assert handles
     assert detail not in str(exc_info.value)
+
+
+def test_windows_raw_directory_handle_closes_once_after_success_and_failure(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt layer owns each native leaf handle exactly once."""
+    directory = vault / "Knowledge Base" / "_Governance" / "events"
+    directory.mkdir(parents=True)
+    closed: list[int] = []
+
+    class Retained:
+        windows_handle = 401
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    monkeypatch.setattr(receipts, "_open_secure_directory", lambda *_args, **_kwargs: Retained())
+    monkeypatch.setattr(receipts, "_windows_open_path", lambda *_args, **_kwargs: 409)
+    monkeypatch.setattr(receipts, "_windows_child_is_in_directory", lambda *_args: True)
+    monkeypatch.setattr(receipts, "_windows_handle_identity", lambda _handle: (1, 2, 3))
+    monkeypatch.setattr(receipts, "_windows_close_handle", closed.append)
+
+    with receipts._open_windows_receipt_directory(directory) as handle:
+        assert handle == 409
+    assert closed == [409]
+
+    closed.clear()
+    with pytest.raises(OSError, match="caller failure"):
+        with receipts._open_windows_receipt_directory(directory):
+            raise OSError("caller failure")
+    assert closed == [409]
 
 
 def test_windows_directory_flush_uses_only_a_write_capable_exact_leaf(

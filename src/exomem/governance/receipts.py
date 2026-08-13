@@ -21,7 +21,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,8 +30,15 @@ from typing import Any
 from .. import memory_refs
 from ..mutation_lock import (
     VaultMutationCoordinator,
+    _SecureDirectory,
+    _open_secure_directory,
+    _open_secure_file_at,
     _release_os_lock,
     _try_os_lock,
+    _windows_child_is_in_directory,
+    _windows_close_handle,
+    _windows_handle_identity,
+    _windows_open_path,
 )
 from ..writer_lease import LeaseConfig
 from . import store
@@ -85,6 +92,11 @@ _RECEIPT_CONNECTIONS_CONDITION = threading.Condition()
 _RECEIPT_ACTIVE_CONNECTIONS = 0
 _RECEIPT_CONNECTIONS_FORKING = False
 _RECEIPT_CONNECTIONS_MAX = 32
+
+
+def _is_windows() -> bool:
+    """Keep platform selection local so tests never alter process-global state."""
+    return os.name == "nt"
 
 
 @dataclass
@@ -242,8 +254,11 @@ def _events_root(vault_root: Path) -> Path:
 
 
 def _validated_events_root(vault_root: Path) -> Path:
-    vault = Path(vault_root).resolve()
-    events_root = _events_root(vault).resolve()
+    vault = Path(vault_root).expanduser().absolute()
+    events_root = _events_root(vault)
+    if not _is_windows():
+        vault = vault.resolve()
+        events_root = events_root.resolve()
     try:
         events_root.relative_to(vault)
     except ValueError as exc:
@@ -427,6 +442,79 @@ def _after_month_enumeration(_instance_dir: Path, _name: str) -> None:
     """Test seam: runs after a month name is enumerated and before opening it."""
 
 
+@contextmanager
+def _open_windows_receipt_directory(
+    path: Path, *, write: bool = False, expected_entry: os.stat_result | None = None
+):
+    """Retain a receipt directory without following any ancestor or leaf reparse point."""
+    with ExitStack() as stack:
+        try:
+            expected = expected_entry or os.lstat(path)
+            parent = stack.enter_context(_open_secure_directory(path.parent, create=False))
+            handle = _windows_open_path(
+                path,
+                directory=True,
+                access=0x40000000 if write else 0x00020080,  # GENERIC_WRITE / metadata only
+                share=0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; never FILE_SHARE_DELETE
+            )
+            stack.callback(_windows_close_handle, handle)
+            if not _windows_child_is_in_directory(parent, handle):
+                raise OSError("receipt directory escaped its retained parent")
+            _windows_handle_identity(handle)
+            if not os.path.samestat(expected, os.lstat(path)):
+                raise ReceiptError("receipt instance path changed during open")
+        except ReceiptError:
+            raise
+        except OSError as exc:
+            raise ReceiptError("receipt durable directory could not be opened") from exc
+        yield handle
+
+
+@contextmanager
+def _open_windows_month_fd(
+    instance_dir: Path,
+    name: str,
+    *,
+    write: bool,
+    create: bool,
+    expected_entry: os.stat_result,
+):
+    """Open one receipt child while retaining its native Windows parent handle."""
+    flags = (os.O_WRONLY | os.O_APPEND) if write else os.O_RDONLY
+    fd = -1
+    try:
+        with _open_windows_receipt_directory(instance_dir, expected_entry=expected_entry) as handle:
+            directory = _SecureDirectory(
+                instance_dir,
+                windows_handles=[handle],
+                close_windows_handle=lambda _handle: None,
+            )
+            while True:
+                try:
+                    fd = _open_secure_file_at(directory, name, flags)
+                    break
+                except FileNotFoundError:
+                    if not create:
+                        raise ReceiptError("receipt evidence path is missing") from None
+                    try:
+                        fd = _open_secure_file_at(
+                            directory, name, flags | os.O_CREAT | os.O_EXCL, 0o600
+                        )
+                        break
+                    except FileExistsError:
+                        continue
+                except OSError as exc:
+                    raise ReceiptError("receipt evidence path could not be opened") from exc
+            yield fd
+    except ReceiptError:
+        raise
+    except OSError as exc:
+        raise ReceiptError("receipt evidence path could not be opened") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _monthly_evidence_names(instance_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
     names: list[str] = []
     issues: list[dict[str, str]] = []
@@ -447,13 +535,28 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
     entry-swap attacks, but cannot provide POSIX openat equivalence on Windows.
     """
     _validated_month_path(instance_dir, instance_dir / name)
-    _after_month_enumeration(instance_dir, name)
     try:
         instance_stat = os.lstat(instance_dir)
     except FileNotFoundError as exc:
         raise ReceiptError("receipt instance path disappeared during open") from exc
     if stat.S_ISLNK(instance_stat.st_mode) or not stat.S_ISDIR(instance_stat.st_mode):
         raise ReceiptError("receipt instance path is not a real directory")
+    _after_month_enumeration(instance_dir, name)
+    if _is_windows():
+        try:
+            with _open_windows_month_fd(
+                instance_dir,
+                name,
+                write=write,
+                create=create,
+                expected_entry=instance_stat,
+            ) as fd:
+                yield fd
+        except ReceiptError:
+            raise
+        except OSError as exc:
+            raise ReceiptError("receipt evidence path I/O failed") from exc
+        return
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     supports_dir_fd = nofollow and os.open in os.supports_dir_fd
@@ -1031,7 +1134,7 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
 
 
 def _fsync_path(path: Path) -> None:
-    with _open_month_fd(path.parent, path.name) as fd:
+    with _open_month_fd(path.parent, path.name, write=_is_windows()) as fd:
         os.fsync(fd)
 
 
@@ -1045,8 +1148,30 @@ def _fsync_durable_prefix(instance_dir: Path, target: Path) -> None:
             _fsync_path(instance_dir / name)
 
 
+def _flush_windows_directory_handle(handle: int) -> None:
+    """Flush one native directory handle without taking ownership of it."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    flush = kernel32.FlushFileBuffers
+    flush.argtypes = [wintypes.HANDLE]
+    flush.restype = wintypes.BOOL
+    if not flush(handle):
+        raise OSError(ctypes.get_last_error(), "cannot flush receipt directory")
+
+
 def _fsync_directory(path: Path) -> None:
     """Fsync a real directory entry; unsupported directory fsync fails closed."""
+    if _is_windows():
+        try:
+            with _open_windows_receipt_directory(path, write=True) as handle:
+                _flush_windows_directory_handle(handle)
+        except ReceiptError:
+            raise
+        except OSError as exc:
+            raise ReceiptError("receipt durable directory fsync failed") from exc
+        return
     try:
         entry = os.lstat(path)
         if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
@@ -1075,10 +1200,24 @@ def _fsync_durable_directories(vault_root: Path, instance_dir: Path) -> None:
     directory durability operation, so an unsupported directory fsync refuses
     the critical append rather than claiming a durable name.
     """
-    governance = governance_root(Path(vault_root)).resolve()
+    governance = governance_root(Path(vault_root))
+    if not _is_windows():
+        governance = governance.resolve()
     directories = (instance_dir, instance_dir.parent, governance, governance.parent)
     for directory in dict.fromkeys(directories):
         _fsync_directory(directory)
+
+
+def _ensure_receipt_instance_directory(instance_dir: Path) -> None:
+    """Create the lexical receipt hierarchy only through retained secure handles."""
+    try:
+        if _is_windows():
+            with _open_secure_directory(instance_dir, create=True):
+                pass
+        else:
+            instance_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ReceiptError("receipt instance path is not a real directory") from exc
 
 
 def _matching_existing_event(
@@ -1125,10 +1264,7 @@ def append_event(
         with _receipt_connection(vault_root, durable=critical) as conn:
             instance_id = _instance_id(conn)
             instance_dir = _instance_dir(vault_root, instance_id)
-            try:
-                instance_dir.mkdir(parents=True, exist_ok=True)
-            except FileExistsError as exc:
-                raise ReceiptError("receipt instance path is not a real directory") from exc
+            _ensure_receipt_instance_directory(instance_dir)
             instance_dir = _instance_dir(vault_root, instance_id)
             if _conflicted_evidence(instance_dir):
                 raise ReceiptError("conflicted receipt evidence must be resolved")
@@ -1209,7 +1345,6 @@ def append_event(
             encoded = _canonical_json(record)
             if len(encoded) + 1 > MAX_RECORD_BYTES:
                 raise ReceiptError("receipt record exceeds the bounded tail window")
-            path.parent.mkdir(parents=True, exist_ok=True)
             with _open_month_fd(instance_dir, path.name, write=True, create=True) as fd:
                 output = os.fdopen(fd, "ab", closefd=False)
                 try:

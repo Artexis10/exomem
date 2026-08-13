@@ -1,13 +1,14 @@
 ## Why
 
-Governance receipt append is unusable on native Windows because the receipt layer asks the CRT to open a directory. The same unsupported primitive sits on the critical durability path, so governed operations fail even when the vault and DACLs are valid. This is a release blocker for Windows services and clients: weakening or skipping the durability barrier would make a critical receipt claim persistence that was never established.
+Governance receipt append and deletion/recovery lifecycle durability are unusable on native Windows because both layers ask the CRT to open directories. Governed operations and even ungoverned atomic lifecycle moves fail when flushing tombstone or rename barriers despite valid vault paths and DACLs. This is a release blocker: weakening or skipping those barriers would claim critical receipt or lifecycle persistence that was never established.
 
 ## What Changes
 
 - Route receipt directory and monthly-file access through retained, no-follow filesystem handles that work on both POSIX and native Windows.
-- Flush critical receipt directories on Windows through write-capable native directory handles before advancing the SQLite durable head.
+- Share one secure native Windows directory-flush primitive between receipts and lifecycle, while preserving each domain's content-free errors.
+- Flush critical receipt directories before advancing the SQLite durable head and flush lifecycle tombstone/unlink/rename directories at their existing checkpoints.
 - Preserve fail-closed retry and reconciliation semantics when any file or directory durability operation fails.
-- Add native Windows regression coverage for ordinary receipts, critical receipts, reparse refusal, namespace races, and durability failures.
+- Add native Windows regression coverage for receipts, governed delete/recovery, ungoverned atomic rename, reparse refusal, namespace races, and durability failures.
 
 This does not change the receipt schema, JSONL authority, SQLite sidecar format, public API, disclosure ladder, or dependencies.
 
@@ -23,7 +24,7 @@ None.
 
 ## Impact
 
-- Affected code: `src/exomem/governance/receipts.py` and the existing secure filesystem helpers it reuses.
-- Affected tests: governance receipt safety/durability tests plus a focused native Windows regression suite.
+- Affected code: `src/exomem/governance/receipts.py`, `src/exomem/governance/lifecycle.py`, and shared secure filesystem helpers.
+- Affected tests: governance receipt and lifecycle safety/durability tests plus focused native Windows regression suites.
 - Operations: valid Windows NSSM and user-owned runtimes regain governed receipt append without an ACL migration or data migration.
 - CI: the native Windows receipt contract needs a focused Windows gate; coordinate that workflow edit with the in-flight CI repair before this change merges.

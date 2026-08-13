@@ -1,6 +1,6 @@
 ## Context
 
-Receipt evidence is authoritative JSONL with a SQLite durable-head sidecar. Critical events advance that head only after the JSONL prefix and the directory chain through `Knowledge Base` are durable. POSIX implements the namespace operations with `dir_fd` and `O_NOFOLLOW`; native Windows currently falls through to `os.open(directory)`, which the CRT rejects with `PermissionError`.
+Receipt evidence is authoritative JSONL with a SQLite durable-head sidecar. Critical events advance that head only after the JSONL prefix and directory chain are durable. Lifecycle deletion/recovery separately requires tombstone durability before moves and directory durability after marker unlink or atomic rename. POSIX uses directory descriptors; both native Windows paths currently fall through to `os.open(directory)`, which the CRT rejects.
 
 The repository already has two relevant primitives: retained non-reparse Windows directory/file handles in `mutation_lock.py`, and a native directory handle substrate in `vault.py`. Native verification on the development host established the access contract: `FlushFileBuffers` succeeds on a raw Windows directory handle opened with `GENERIC_WRITE`; metadata-only or read-only access receives access denied, and passing the raw handle to `os.fsync` is invalid. Microsoft documents that directory handles require `FILE_FLAG_BACKUP_SEMANTICS`, and that `FlushFileBuffers` requires `GENERIC_WRITE`.
 
@@ -8,7 +8,7 @@ The repository already has two relevant primitives: retained non-reparse Windows
 
 **Goals:**
 
-- Restore ordinary and critical receipt append/verify on native Windows.
+- Restore ordinary and critical receipt append/verify plus lifecycle delete/recovery/rename durability on native Windows.
 - Retain direct-child, no-follow, anti-reparse, identity, and namespace-race guarantees.
 - Keep the critical ordering JSONL flush → directory-chain flush → durable-head commit.
 - Leave a file-ahead critical suffix recoverable without duplication after any refused durability step.
@@ -31,13 +31,13 @@ Exclusive create will map `O_CREAT | O_EXCL` to `CREATE_NEW`; the current `OPEN_
 
 Alternative rejected: keep pathname opens with pre/post `lstat`. It can detect many swaps but cannot retain every Windows ancestor or guarantee exclusive creation.
 
-### Flush directories with write-capable native handles
+### Share directory flush through write-capable native handles
 
-On Windows `_fsync_directory` will retain the target's ancestors with metadata-only access, open only the final exact non-reparse directory through `CreateFileW` using `GENERIC_WRITE`, `FILE_FLAG_BACKUP_SEMANTICS`, and no delete sharing, verify it is the direct child of the retained parent, then call `FlushFileBuffers` on the raw handle and close it exactly once. POSIX remains unchanged.
+One helper in the secure mutation-lock substrate will retain target ancestors with metadata-only access, open only the final exact non-reparse directory through `CreateFileW` using `GENERIC_WRITE`, `FILE_FLAG_BACKUP_SEMANTICS`, and no delete sharing, verify direct-child identity, call `FlushFileBuffers`, and close exactly once. Receipt and lifecycle wrappers translate failure into their own content-free errors. POSIX remains unchanged.
 
 Write access must not propagate to the drive root or ordinary ancestors: valid user vaults cannot open `C:\` or `C:\Users` with `GENERIC_WRITE`, and those ancestors do not need it for flushing the leaf.
 
-Alternative rejected: skip directory fsync on Windows. That would advance the durable head without satisfying the contract it represents.
+Alternative rejected: skip directory fsync on Windows. That would advance the receipt head or lifecycle checkpoint without satisfying the contract represented.
 
 ### Preserve failure and recovery ordering
 

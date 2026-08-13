@@ -61,6 +61,29 @@ def test_windows_retained_directory_ancestors_keep_metadata_only_access() -> Non
         directory.close()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-directory branch")
+def test_windows_secure_directory_refuses_ordinary_replacement_after_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A created component must not be replaceable before its retained handle opens."""
+    target = tmp_path / "created"
+    replaced = False
+
+    def replace_created(path: Path) -> None:
+        nonlocal replaced
+        if path == target:
+            path.rmdir()
+            path.mkdir()
+            replaced = True
+
+    monkeypatch.setattr(mutation_lock_module, "_after_windows_secure_directory_create", replace_created)
+
+    with pytest.raises(OSError, match="changed during creation"):
+        mutation_lock_module._acquire_windows_secure_directory(target, create=True, mode=0o700)
+
+    assert replaced is True
+
+
 @pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-child branch")
 @pytest.mark.parametrize(
     ("flags", "expected_creation"),
@@ -110,6 +133,37 @@ def test_windows_secure_child_preserves_open_disposition_and_exclusive_create(
             "creation": expected_creation,
         }
     ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-child branch")
+def test_windows_secure_child_closes_descriptor_when_post_open_fstat_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CRT descriptor owns the raw handle after conversion, even on inspection failure."""
+    closed: list[int] = []
+    directory = mutation_lock_module._SecureDirectory(
+        Path(r"C:\\vault\\state"),
+        windows_handles=[71],
+        close_windows_handle=lambda _handle: None,
+    )
+    monkeypatch.setattr(mutation_lock_module, "_windows_open_path", lambda *_args, **_kwargs: 73)
+    monkeypatch.setattr(mutation_lock_module, "_windows_child_is_in_directory", lambda *_args: True)
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: 79),
+    )
+    monkeypatch.setattr(
+        mutation_lock_module.os,
+        "fstat",
+        lambda _fd: (_ for _ in ()).throw(OSError("injected fstat failure")),
+    )
+    monkeypatch.setattr(mutation_lock_module.os, "close", closed.append)
+
+    with pytest.raises(OSError, match="injected fstat failure"):
+        mutation_lock_module._open_secure_file_at(directory, "receipt.jsonl", os.O_RDONLY)
+
+    assert closed == [79]
 
 
 def test_windows_private_dacl_deduplicates_local_system_principal() -> None:
