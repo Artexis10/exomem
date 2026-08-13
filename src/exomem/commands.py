@@ -2349,13 +2349,14 @@ def op_edit(
       `allow_curated=true` for curated trees (was `set_frontmatter_field`).
     Otherwise the default (composable) body/tags/surgical modes:
     - `new_body` — replace the WHOLE body. Heavyweight; you re-send
-      everything after the frontmatter.
-    - `tags` — replace the `tags:` frontmatter field.
+      everything after frontmatter, or the complete ordinary Markdown page
+      when it has no frontmatter.
+    - `tags` — replace the `tags:` frontmatter field (requires frontmatter).
     - `old_string`/`new_string` — **surgical** string-replace inside the
       body. Token-cheap: send only the changed snippet, not the whole
       page. Ideal for filling a `[take: ]` row or appending one opinion
       (replace a section heading with itself + the new line). `updated:`
-      is always bumped to today.
+      is bumped to today on frontmatter-backed pages.
 
     Surgical-mode rules (mirrors a precise find-and-replace):
     - `old_string` must match the file EXACTLY, including whitespace.
@@ -2371,26 +2372,31 @@ def op_edit(
     - All other frontmatter fields (type, project, status, sources,
       superseded_by, etc.). If you need to change those, use `replace`.
 
-    No type allowlist: any frontmatter-bearing page outside Sources/
-    Evidence is editable, regardless of `type:`. Works on novel page
-    types (`identity`, future types) without code changes.
+    Whole-body, surgical string, batch-string, and section edits preserve
+    ordinary Markdown without synthesizing YAML. There is no type allowlist:
+    any page outside Sources/Evidence is eligible for those body operations,
+    including frontmatter-less templates and novel page types (`identity`,
+    future types). Tags, frontmatter patch, and take-row operations still
+    require frontmatter.
 
     Refuses:
     - Sources/ and Evidence/ paths (rule 2: append-only). Add a
       corrective source or compile a downstream note instead.
-    - Pages without a frontmatter block (won't synthesize one).
+    - Frontmatter-less pages for tags, frontmatter patch, or take-row
+      operations (won't synthesize a frontmatter block).
     - Pages already marked `status: superseded` (don't edit history;
       supersede the active page instead).
 
     Args:
-        path: Vault-relative path to the compiled page (same shape as
+        path: Vault-relative path to the existing page (same shape as
             `get` accepts).
         why: One-line rationale for the edit. Required — lands in the
             log entry so the change is auditable.
-        new_body: New markdown body (everything after frontmatter).
-            Omit to keep the existing body.
+        new_body: New Markdown body. On an ordinary frontmatter-less page,
+            this is the complete page content. Omit to keep the existing body.
         tags: New tags list (replaces existing). Lowercase dash-
-            separated; the server normalizes. Omit to keep existing tags.
+            separated; the server normalizes. Requires frontmatter. Omit to
+            keep existing tags.
         old_string: Exact snippet to find in the body (surgical mode).
         new_string: Replacement snippet (required with old_string; must
             differ from it).
@@ -2406,11 +2412,11 @@ def op_edit(
         edits: Batch-surgical mode — list of {old_string, new_string,
             replace_all?} applied sequentially in one atomic commit.
         row_key: Take-row mode — natural leading text of the row to fill
-            (e.g. "Whiplash (2014)"). Requires `take`.
+            (e.g. "Whiplash (2014)"). Requires `take` and frontmatter.
         take: Text to write between `[take:` and `]` (take-row mode).
         overwrite: In take-row mode, also replace an already-filled take.
-        field: Frontmatter-patch mode — the single frontmatter key to set
-            (cannot be `updated`, which is auto-bumped).
+        field: Frontmatter-patch mode — the single frontmatter key to set.
+            Requires frontmatter and cannot be `updated`, which is auto-bumped.
         value: New value for `field` (scalar/list/dict).
         allow_curated: Allow a frontmatter patch under a curated tree.
         expected_hash: Optional drift guard. Pass the `content_hash` you
@@ -2439,6 +2445,7 @@ def op_edit(
         STRING_NOT_FOUND (surgical snippet absent); AMBIGUOUS_MATCH
         (snippet not unique and replace_all=False); ALREADY_SUPERSEDED;
         STALE_EDIT (expected_hash mismatch — file changed since read);
+        FRONTMATTER_REQUIRED (a metadata operation targeted ordinary Markdown);
         UNREADABLE.
     """
     active = [n for n, on in (
@@ -4239,6 +4246,10 @@ def op_edit_memory(
     Use for small corrections, section edits, batch string edits, opinion-row
     fills, or one frontmatter field. Substantial rewrites should use
     `replace_memory` so history stays explicit.
+
+    Whole-body, surgical string, batch-string, and section edits preserve
+    ordinary Markdown without synthesizing YAML. Tags, frontmatter patch, and
+    take-row operations still require frontmatter.
 
     When `RELATION_DISPOSITION_STALE` or `RELATION_DISPOSITION_MISSING` blocks
     an edit, first call the identical operation with `validate_only=true`.

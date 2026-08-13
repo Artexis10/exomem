@@ -112,13 +112,21 @@ def test_frontmatterless_body_operations_validate_and_commit_exact_bytes(
     "operation",
     [
         {"kind": "replace_tags", "tags": ["template"]},
+        {"kind": "patch_frontmatter", "field": "status", "value": "active"},
+        {"kind": "fill_row", "row_key": "Template", "take": "Useful."},
+        {
+            "kind": "replace_body",
+            "new_body": "# Template\n\nAfter.\n",
+            "tags": ["template"],
+        },
     ],
 )
 def test_frontmatter_operations_refuse_resolved_frontmatterless_paths(
     tmp_path: Path, operation: dict
 ) -> None:
     relative = "Knowledge Base/Templates/ordinary-template.md"
-    _write(tmp_path, relative, "# Template\n")
+    source = "# Template\n"
+    page = _write(tmp_path, relative, source)
 
     with pytest.raises(ValueError) as exc:
         commands.op_edit_memory(
@@ -128,8 +136,16 @@ def test_frontmatter_operations_refuse_resolved_frontmatterless_paths(
             operation=operation,
         )
 
-    assert "FRONTMATTER_REQUIRED" in str(exc.value)
     assert "(missing: ['path'])" not in str(exc.value)
+    assert page.read_text(encoding="utf-8") == source
+
+
+def test_public_edit_guidance_explains_frontmatterless_policy() -> None:
+    guidance = commands.op_edit_memory.__doc__ or ""
+
+    assert "ordinary Markdown" in guidance
+    assert "without synthesizing YAML" in guidance
+    assert "take-row operations still require frontmatter" in guidance
 
 
 def _save_current_review(root: Path, source: str) -> None:
