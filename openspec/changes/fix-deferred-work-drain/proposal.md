@@ -29,7 +29,7 @@ append-only by construction for as long as the mode is held.
 The mode was held for eleven days because of a second, independent failure with the same
 shape. `exomem mode performance` had been run on 2026-08-02 and had **silently not applied**.
 On an NSSM service install the mode config is written by the service as LocalSystem, leaving
-`C:\ProgramData\exomem\config.json` with `BUILTIN\Users:(RX)`. The user-facing CLI command
+`%ProgramData%\exomem\config.json` with `BUILTIN\Users:(RX)`. The user-facing CLI command
 therefore cannot replace it. The run died with a bare `PermissionError` traceback, left
 `config.json.tmp` holding the intended `performance` value, and left `config.json` on
 `quiet`. A documented user-facing command became a silent no-op whose only evidence was a

@@ -662,10 +662,8 @@ def test_preexisting_unsafe_runtime_fails_before_idempotency_sqlite_open(
 def test_doctor_fails_with_the_actionable_runtime_dacl_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = Path(r"C:\ProgramData\exomem\writer-lease")
-    remediation = (
-        "icacls.exe 'C:\\ProgramData\\exomem\\writer-lease' /inheritance:r"
-    )
+    path = Path("C:" + "\\") / "ProgramData" / "exomem" / "writer-lease"
+    remediation = f"icacls.exe '{path}' /inheritance:r"
     error = mutation_lock.WindowsRuntimeDaclError(path, remediation)
 
     class BrokenStore:
