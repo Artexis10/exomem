@@ -15,6 +15,7 @@ other consumer: empty -> open, blocked -> fail closed, else decide.
 from __future__ import annotations
 
 import json
+import pickle
 import re
 from pathlib import Path
 
@@ -49,6 +50,14 @@ JWT = (
 )
 BEARER = "Authorization: Bearer sk-proj-9dQm2XvKpLzR4wTnBcYeF8aHgJ1sVuNiO0rEyMdA"
 HIGH_ENTROPY = "s3cr3tK3yZ9qWmPvXtLnBdRfGhJkYuIoAeCxSvTgNbMh"
+AS1_BEARER = "as1." + "A" * 22 + "." + "A" * 43
+AS1_VECTOR_BEARER = (
+    "as1."
+    + "AAECAwQFBgcICQoLDA0ODw"
+    + "."
+    + "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+)
+ISSUANCE_EXPIRY = "2026-08-13T12:34:56Z"
 
 # Structural identifiers that MUST survive untouched.
 CONTENT_HASH = "9f2c4e1a7b8d3f0e6c5a9b2d4e7f1a3c8b6d0e2f4a7c9b1d3e5f7a9c0b2d4e6f"
@@ -355,7 +364,222 @@ def test_nested_structures_are_walked() -> None:
     assert cleaned["hits"][1]["excerpt"] == "fine"
 
 
-def test_scrubber_is_disabled_by_a_standing_rule(vault: Path) -> None:
+def test_canonical_as1_bearers_and_mapping_keys_are_scrubbed() -> None:
+    payload = {
+        AS1_BEARER: "value",
+        "nested": {AWS_KEY: AS1_BEARER},
+    }
+
+    cleaned, blocked = scrubber.scrub_value(payload)
+
+    encoded = json.dumps(cleaned)
+    assert blocked
+    assert AS1_BEARER not in encoded
+    assert AWS_KEY not in encoded
+    assert scrubber.NOTICE in encoded
+
+
+def test_as1_parser_accepts_fixed_canonical_vectors_and_rejects_unused_bits() -> None:
+    assert scrubber._parse_authorization_bearer(AS1_BEARER) == AS1_BEARER
+    assert scrubber._parse_authorization_bearer(AS1_VECTOR_BEARER) == AS1_VECTOR_BEARER
+
+    locator, secret = AS1_BEARER.removeprefix("as1.").split(".")
+    for malformed in (
+        AS1_BEARER[:-1],
+        AS1_BEARER + "x",
+        AS1_BEARER.replace("as1.", "AS1."),
+        AS1_BEARER.replace(".", "_", 1),
+        f"as1.{locator[:-1]}B.{secret}",
+        f"as1.{locator}.{secret[:-1]}B",
+    ):
+        assert scrubber._parse_authorization_bearer(malformed) is None
+
+
+def test_arbitrary_content_scanning_calls_the_canonical_as1_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    real = scrubber._parse_authorization_bearer
+
+    def recording_parser(value: object) -> str | None:
+        calls.append(value)
+        return real(value)
+
+    monkeypatch.setattr(scrubber, "_parse_authorization_bearer", recording_parser)
+
+    cleaned, blocked = scrubber.scrub_text(f"prefix {AS1_VECTOR_BEARER} suffix")
+
+    assert blocked
+    assert AS1_VECTOR_BEARER not in cleaned
+    assert AS1_VECTOR_BEARER in calls
+
+
+def test_canonical_as1_scanning_ignores_adjacent_base64url_characters() -> None:
+    # The first `as1.` is a malformed start whose fixed 70-character window
+    # overlaps the canonical bearer that follows it. The scanner must advance
+    # to the later start, then continue through an adjacent second bearer.
+    payload = f"as1.x{AS1_VECTOR_BEARER}{AS1_BEARER}y"
+
+    cleaned, blocked = scrubber.scrub_text(payload)
+
+    assert blocked
+    assert AS1_VECTOR_BEARER not in cleaned
+    assert AS1_BEARER not in cleaned
+    assert cleaned == f"as1.x{scrubber.NOTICE}{scrubber.NOTICE}y"
+
+
+def test_canonical_as1_in_mapping_key_is_scrubbed_without_token_boundaries() -> None:
+    payload = {f"x{AS1_VECTOR_BEARER}y": "safe"}
+
+    cleaned, blocked = scrubber.scrub_value(payload)
+
+    assert blocked
+    assert cleaned == {f"x{scrubber.NOTICE}y": "safe"}
+
+
+def _issuance_response(bearer: str = AS1_BEARER) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "issued_credential": {
+            "kind": "authorization-session-bearer",
+            "bearer": bearer,
+            "expires_at": ISSUANCE_EXPIRY,
+        },
+    }
+
+
+def test_exact_issuance_context_allows_only_one_matching_typed_response() -> None:
+    context = scrubber._new_issuance_context("open", AS1_BEARER)
+    response = _issuance_response()
+
+    cleaned, blocked = scrubber._scrub_issuance_response("open", response, context)
+
+    assert not blocked
+    assert cleaned == response
+
+
+def test_issuance_context_cannot_be_serialized() -> None:
+    with pytest.raises(TypeError, match="process-local"):
+        pickle.dumps(scrubber._new_issuance_context("rotate", AS1_BEARER))
+
+
+def test_issuance_context_validates_action_and_private_seal() -> None:
+    with pytest.raises(ValueError, match="action"):
+        scrubber._new_issuance_context("get", AS1_BEARER)
+
+    forged = scrubber._IssuanceContext(
+        action="open", bearer=AS1_BEARER, _seal=object()
+    )
+    cleaned, blocked = scrubber._scrub_issuance_response(
+        "open", _issuance_response(), forged
+    )
+
+    assert blocked
+    assert AS1_BEARER not in json.dumps(cleaned)
+
+
+@pytest.mark.parametrize(
+    ("command", "response"),
+    [
+        ("get", _issuance_response()),
+        ("rotate", _issuance_response()),
+        ("open", {**_issuance_response(), "copy": AS1_BEARER}),
+        ("open", {"status": "error", "issued_credential": _issuance_response()["issued_credential"]}),
+        ("open", {"issued_credential": _issuance_response()["issued_credential"]}),
+        ("open", {"status": "ok", "issued_credential": {**_issuance_response()["issued_credential"], "extra": 1}}),
+        ("open", {"status": "ok", "issued_credential": {**_issuance_response()["issued_credential"], "kind": "other"}}),
+        ("open", {"status": "ok", "issued_credential": {**_issuance_response()["issued_credential"], "expires_at": "tomorrow"}}),
+        ("open", _issuance_response(AS1_BEARER + "x")),
+    ],
+)
+def test_issuance_context_scrubs_wrong_or_duplicate_bearers(
+    command: str, response: dict[str, object]
+) -> None:
+    context = scrubber._new_issuance_context("open", AS1_BEARER)
+
+    cleaned, blocked = scrubber._scrub_issuance_response(command, response, context)
+
+    assert blocked
+    assert AS1_BEARER not in json.dumps(cleaned)
+
+
+def test_rejected_issuance_scrubs_embedded_duplicate_canonical_bearers() -> None:
+    context = scrubber._new_issuance_context("open", AS1_BEARER)
+    response = {
+        **_issuance_response(),
+        f"x{AS1_VECTOR_BEARER}y": f"x{AS1_BEARER}{AS1_VECTOR_BEARER}y",
+    }
+
+    cleaned, blocked = scrubber._scrub_issuance_response("open", response, context)
+
+    encoded = json.dumps(cleaned)
+    assert blocked
+    assert AS1_BEARER not in encoded
+    assert AS1_VECTOR_BEARER not in encoded
+    assert encoded.count(scrubber.NOTICE) == 4
+
+
+def test_issuance_without_process_local_context_is_refused() -> None:
+    cleaned, blocked = scrubber._scrub_issuance_response(
+        "open", _issuance_response(), None
+    )
+
+    assert blocked
+    assert AS1_BEARER not in json.dumps(cleaned)
+
+
+def test_live_success_and_control_envelopes_never_receive_issuance_exception(
+    vault: Path,
+) -> None:
+    response = _issuance_response()
+
+    cleaned = egress.postfilter("open", response, vault)
+
+    assert AS1_BEARER not in json.dumps(cleaned)
+    assert scrubber.NOTICE in json.dumps(cleaned)
+
+
+@pytest.mark.parametrize("rejected_issuance", [False, True])
+def test_mapping_key_scrubbing_is_collision_safe_and_order_independent(
+    rejected_issuance: bool,
+) -> None:
+    entries = [
+        (scrubber.NOTICE, "literal notice"),
+        (f"{scrubber.NOTICE}#1", "literal suffix one"),
+        (f"{scrubber.NOTICE}#3", "literal suffix three"),
+        (AS1_BEARER, "authorization bearer key"),
+        (AWS_KEY, "aws key"),
+    ]
+
+    outputs = []
+    for ordered in (entries, list(reversed(entries))):
+        payload = dict(ordered)
+        if rejected_issuance:
+            cleaned, blocked = scrubber._scrub_issuance_response("get", payload, None)
+        else:
+            cleaned, blocked = scrubber.scrub_value(payload)
+        assert blocked
+        assert len(cleaned) == len(payload)
+        assert sorted(cleaned.values()) == sorted(value for _, value in entries)
+        assert AS1_BEARER not in cleaned
+        assert AWS_KEY not in cleaned
+        outputs.append(cleaned)
+
+    assert outputs[0] == outputs[1]
+
+
+def test_error_details_scrub_bearers_and_credential_mapping_keys(vault: Path) -> None:
+    error = ValueError("upstream bearer " + AS1_BEARER)
+    error.details = {AWS_KEY: {AS1_BEARER: "value"}}
+
+    egress.postfilter_error("get", error, vault)
+
+    encoded = json.dumps({"args": error.args, "details": error.details})
+    assert AS1_BEARER not in encoded
+    assert AWS_KEY not in encoded
+
+
+def test_scrubber_cannot_be_disabled_by_a_standing_rule(vault: Path) -> None:
     assert scrubber.enabled(vault) is True
     disable = vault / "Knowledge Base" / "_Governance" / "rules" / "no-scrubber.yaml"
     disable.parent.mkdir(parents=True, exist_ok=True)
@@ -372,7 +596,7 @@ def test_scrubber_is_disabled_by_a_standing_rule(vault: Path) -> None:
         "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: [\"**\"]\n",
         encoding="utf-8",
     )
-    assert scrubber.enabled(vault) is False
+    assert scrubber.enabled(vault) is True
 
 
 def test_scrubber_stays_on_for_a_blocked_policy(vault: Path) -> None:

@@ -623,9 +623,12 @@ bounded `govern_memory` lifecycle. `_Consolidation` SHALL remain reachable only 
 its owning consolidation command; until that command exists it SHALL have no public
 reader. The closed internal-state registry—including governance/session DB and journal
 family, raw lexical/vector/CLIP/reference/graph indexes, projected namespaces, catalog
-descriptors, locks, temps, WAL/SHM, and physical aliases—SHALL likewise be structurally
-absent from every ordinary operation. Owner or L6 status SHALL NOT turn a reserved tree
-or internal-state file into ordinary knowledge or non-Markdown membership.
+descriptors, locks, temps, WAL/SHM, and retained/published physical identities—SHALL be
+structurally absent from every ordinary Exomem operation. This is not a claim that direct
+filesystem or block access as the OS vault owner cannot disclose, corrupt, move, or delete
+state; that access is owner-equivalent and outside the command boundary. Owner or L6
+status SHALL NOT turn a reserved tree or internal-state file into ordinary knowledge or
+non-Markdown membership.
 
 Text released from any surface MUST NOT embed a machine-readable enumeration of item
 paths, targets, content hashes, policy documents, session capabilities, or per-item run
@@ -642,11 +645,11 @@ governed owning command.
 
 #### Scenario: Reserved trees have no ordinary projection
 
-- **WHEN** any ordinary content, dataset, media, graph, export, transfer, list, or direct-
-  read command targets `_Governance`, `_Consolidation`, a registered internal-state
-  family, or any logical/physical alias resolving into them
+- **WHEN** any ordinary Exomem content, dataset, media, graph, export, transfer, list,
+  or direct-read command targets `_Governance`, `_Consolidation`, a registered
+  internal-state family, or a retained/published physical alias resolving into one
 - **THEN** the tree is absent from the public corpus and no path, bytes, metadata, count,
-  or existence signal is returned
+  or existence signal is returned through that command boundary
 
 #### Scenario: A released run summary carries no per-item detail
 

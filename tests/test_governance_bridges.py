@@ -1166,7 +1166,7 @@ def test_restriction_signature_preserves_container_types() -> None:
     assert signature({"value": b"binary"}) != signature({"value": "b'binary'"})
 
 
-def test_safe_loaded_rule_options_stale_without_get_find_or_attention_crash(
+def test_unsafe_loaded_rule_options_block_all_content_paths_without_leaking(
     vault: Path,
 ) -> None:
     _write_bridge_fixture(vault, approval=True)
@@ -1192,32 +1192,58 @@ def test_safe_loaded_rule_options_stale_without_get_find_or_attention_crash(
     policy._LAST_GOOD.clear()
 
     compiled = policy.load(vault)
-    values = compiled.rules[0].options
-    assert values["binary"] == b"\x01\x02"
-    assert isinstance(values["day"], dt.date)
-    assert isinstance(values["instant"], dt.datetime)
-    assert values["members"] == {"a", "b"}
+    assert compiled.blocked
+    assert compiled.rules == ()
+    assert compiled.release_grants == ()
+    assert {
+        "rules/private.yaml:options.binary",
+        "rules/private.yaml:options.day",
+        "rules/private.yaml:options.instant",
+        "rules/private.yaml:options.members",
+        "rules/private.yaml:options.not_a_number",
+        "rules/private.yaml:options.infinity",
+    } <= {
+        finding["path"]
+        for finding in compiled.findings
+        if finding["severity"] == "error"
+    }
 
     with request_scope(_external()):
-        with pytest.raises(ValueError, match="^NOT_FOUND"):
+        with pytest.raises(ValueError, match="^NOT_FOUND") as get_error:
             commands.op_get(vault, path=BRIDGE_PATH)
-        assert all(
-            hit.get("path") != BRIDGE_PATH
-            for hit in commands.op_find(
-                vault,
-                query="unlimited evening capacity",
-                mode="keyword",
-                graph=False,
-                limit=10,
-            )
+        found = commands.op_find(
+            vault,
+            query="unlimited evening capacity",
+            mode="keyword",
+            graph=False,
+            limit=10,
         )
-    item = next(
-        item
-        for item in attention.attention(vault, today=dt.date(2026, 7, 28), limit=0).items
-        if "bridge_review" in item.categories
+        attention_result = egress.postfilter(
+            "attention",
+            attention.attention(
+                vault, today=dt.date(2026, 7, 28), limit=0
+            ).as_dict(),
+            vault,
+        )
+
+    assert found == []
+    assert attention_result["items"] == []
+    assert str(get_error.value) == f"NOT_FOUND: file does not exist: {BRIDGE_PATH}"
+    assert BRIDGE_PATH not in repr({"find": found, "attention": attention_result})
+    projected = repr(
+        {
+            "get_error": str(get_error.value),
+            "find": found,
+            "attention": attention_result,
+        }
     )
-    reason = next(reason for reason in item.reasons if reason["category"] == "bridge_review")
-    assert reason["meta"]["cause"] == "SOURCE_CHANGED_OR_RESTRICTION_CHANGED"
+    for private_value in (
+        SOURCE_PATH,
+        "RESTRICTED-SENTINEL",
+        "Private source title",
+        "unlimited evening capacity",
+    ):
+        assert private_value not in projected
 
 
 def test_unsupported_rule_option_fails_closed_without_crashing_admission(

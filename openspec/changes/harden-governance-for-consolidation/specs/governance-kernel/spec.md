@@ -117,15 +117,17 @@ never an active policy/catalog pairing lacking its exact namespace. A held artif
 companion identity/hash that differs from its active catalog row before publication SHALL
 fail content-free as stale/warming and MUST NOT be served through the prior projection.
 
-Writing the reviewed documents back to `_Governance` SHALL be a separate handle-
-relative compare-and-swap mirror against the exact captured workspace identities. It
-MUST NOT overwrite an external edit. Bytes that race or follow snapshot acquisition
-SHALL remain pending next-generation input with owner-only conflict/parity diagnostics;
-they SHALL NOT alter the immutable reviewed generation or become active. Mirror failure
-alone need not abort an otherwise exact tuple transaction. Recovery SHALL derive
-source/generation parity from the immutable source byte map, never from a fresh
-workspace walk, and SHALL fail closed rather than select mutable or historical bytes
-when the active tuple or external expected activation digest cannot be verified.
+Writing the reviewed documents back to `_Governance` SHALL be a separate mirror under a
+cooperative writer fence, with held-parent no-follow traversal and descriptor-identity
+checks against the exact captured workspace identities. An observed byte or identity
+drift SHALL refuse the mirror and leave those bytes pending next-generation input with
+owner-only conflict/parity diagnostics; they SHALL NOT alter the immutable reviewed
+generation or become active. Direct OS-owner mutation is outside the cooperative writer
+fence. Mirror failure
+alone need not abort an otherwise exact tuple transaction. Recovery SHALL derive source/
+generation parity from the immutable source byte map, never from a fresh workspace walk,
+and SHALL fail closed rather than select mutable or historical bytes when the active tuple
+or external expected activation digest cannot be verified.
 
 #### Scenario: Empty policy short-circuits
 
@@ -172,13 +174,14 @@ when the active tuple or external expected activation digest cannot be verified.
 - **THEN** compare-and-swap refuses as stale, selects no target, and requires a fresh
   proposal unless receipt recovery already proves that exact transaction committed
 
-#### Scenario: External workspace write remains pending
+#### Scenario: Observed workspace drift remains pending
 
-- **WHEN** an external writer changes a reviewed policy target after the last preflight
-  probe but before or after the active-tuple transaction
-- **THEN** the mirror does not overwrite that edit, the exact reviewed generation may
-  activate if its active-base and membership checks still pass, and the external bytes
-  remain pending with a source/generation divergence diagnostic
+- **WHEN** held-parent/descriptor checks observe a reviewed policy target changed after
+  the last preflight probe but before or after the active-tuple transaction
+- **THEN** the mirror refuses, the exact reviewed generation may activate if its active-
+  base and membership checks still pass, and the observed bytes remain pending with a
+  source/generation divergence diagnostic. Direct OS-owner mutation outside cooperative
+  fencing is outside the cooperative writer fence
 
 #### Scenario: Competing policy publication has one winner
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -20,7 +21,18 @@ from typing import Any
 
 import yaml
 
-from .. import find_corpus, memory_refs
+from .. import (
+    deferred_index,
+    epistemic_graph,
+    find_corpus,
+    graph_sync,
+    index_paths,
+    lexstore,
+    media_jobs,
+    memory_refs,
+    review_state,
+)
+from ..kbdir import kb_dirname
 from . import decisions, membership, receipts, store
 from . import policy as policy_module
 from . import tokens as tokens_module
@@ -43,6 +55,14 @@ from .transaction import GovernanceCrash, GovernanceError, authorization_row, po
 
 PENDING_MARKER = ".policy-mutation.pending.json"
 DEFAULT_PROPOSAL_TTL_SECONDS = 900
+_GRAPH_REBUILD_SIDECAR_RE = re.compile(
+    rf"^{re.escape(graph_sync._TEMP_PREFIX)}[0-9a-f]{{64}}-[0-9a-f]{{24}}\.sqlite"
+    r"(?:-(?:wal|shm|journal))?$"
+)
+_REVIEW_STATE_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$")
+_LEXICAL_REBUILD_TEMP_RE = re.compile(
+    r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$"
+)
 
 __all__ = [
     "GovernanceCrash",
@@ -160,7 +180,14 @@ def _memberships_for_path(
 ) -> frozenset[str]:
     rel = path.relative_to(vault_root).as_posix()
     if path.suffix.casefold() != ".md":
-        return membership.evaluate_path_only(vault_root, rel, candidate)
+        try:
+            return membership.evaluate_path_only(
+                vault_root, rel, candidate
+            ).require_classified()
+        except membership.MembershipUnresolved as exc:
+            raise GovernanceError(
+                "MEMBERSHIP_UNRESOLVED", "cannot resolve exact non-Markdown membership"
+            ) from exc
     try:
         page = find_corpus.parse_page(path, path.stat().st_mtime, vault_root)
         return membership.evaluate(page, candidate)
@@ -168,6 +195,58 @@ def _memberships_for_path(
         raise GovernanceError(
             "MEMBERSHIP_UNRESOLVED", f"cannot resolve exact membership for {rel!r}"
         ) from exc
+
+
+def _is_operational_membership_path(vault_root: Path, candidate: Path) -> bool:
+    """Whether a current internal-state owner, rather than content, owns a path."""
+    from .. import claims, voice_profiles
+
+    sidecars = (
+        index_paths.sidecar_path(vault_root),
+        index_paths.clip_sidecar_path(vault_root),
+        index_paths.governance_sidecar_path(vault_root),
+        claims.sidecar_path(vault_root),
+        memory_refs.sidecar_path(vault_root),
+        lexstore.lexical_path(vault_root),
+        epistemic_graph.sidecar_path(vault_root),
+        deferred_index.store_path(vault_root),
+        media_jobs.job_store_path(vault_root),
+    )
+    for sidecar in sidecars:
+        if candidate in (
+            sidecar,
+            sidecar.with_name(f"{sidecar.name}-wal"),
+            sidecar.with_name(f"{sidecar.name}-shm"),
+            sidecar.with_name(f"{sidecar.name}-journal"),
+        ):
+            return True
+
+    if candidate in (
+        media_jobs.worker_lock_path(vault_root),
+        voice_profiles.voice_profiles_path(vault_root),
+        review_state.state_path(vault_root),
+        graph_sync.checkpoint_path(vault_root),
+        graph_sync.floor_path(vault_root),
+    ):
+        return True
+    review_state_path = review_state.state_path(vault_root)
+    if (
+        candidate.parent == review_state_path.parent
+        and _REVIEW_STATE_TEMP_RE.fullmatch(candidate.name) is not None
+    ):
+        return True
+    lexical_path = lexstore.lexical_path(vault_root)
+    if (
+        candidate.parent == lexical_path.parent
+        and _LEXICAL_REBUILD_TEMP_RE.fullmatch(candidate.name) is not None
+    ):
+        return True
+    receipt_root = graph_sync.graph_commit_receipt_path(vault_root, "0" * 24).parent
+    graph_sidecar_parent = epistemic_graph.sidecar_path(vault_root).parent
+    return candidate.is_relative_to(receipt_root) or (
+        candidate.parent == graph_sidecar_parent
+        and _GRAPH_REBUILD_SIDECAR_RE.fullmatch(candidate.name) is not None
+    )
 
 
 def _membership_manifest(
@@ -179,11 +258,13 @@ def _membership_manifest(
     affected = _affected_scope_ids(current, prospective, document_paths)
     rows: dict[str, str] = {}
     if affected:
-        for candidate in sorted(vault_root.rglob("*")):
+        for candidate in sorted((vault_root / kb_dirname()).rglob("*")):
             if not candidate.is_file():
                 continue
             rel = candidate.relative_to(vault_root).as_posix()
             if policy_module.is_governance_path(rel):
+                continue
+            if _is_operational_membership_path(vault_root, candidate):
                 continue
             union = _memberships_for_path(
                 vault_root, candidate, current
@@ -371,11 +452,13 @@ def _purpose_direction(
     before: dict[str, int] = {}
     after: dict[str, int] = {}
     try:
-        for candidate in sorted(vault_root.rglob("*")):
+        for candidate in sorted((vault_root / kb_dirname()).rglob("*")):
             if not candidate.is_file():
                 continue
             rel = candidate.relative_to(vault_root).as_posix()
             if policy_module.is_governance_path(rel):
+                continue
+            if _is_operational_membership_path(vault_root, candidate):
                 continue
             scopes = _memberships_for_path(vault_root, candidate, policy)
             before[rel] = decisions.decide(

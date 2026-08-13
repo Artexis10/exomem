@@ -1,13 +1,11 @@
 """Pure, order-free disclosure-ceiling evaluator.
 
-`decide()` computes `min(org_cap, max(grants, min(standing_rules)))` — the
-kernel's only decision surface, and the only place a later enforcement change
-will call into. It is a pure function over already-compiled tables: no file
-IO, no clock, no randomness, and no rule-priority ordering — every matching
-rule participates, and min/max are commutative so the result never depends on
-authoring order (design decision D5). Purpose-absence is deterministic: a
-purpose-conditioned allowance does not fire when purpose is undeclared, while
-an "outside purpose" restriction does.
+`decide()` resolves standing rules, exact-scope grants, and organisation caps
+for every member scope independently before taking the conservative item meet.
+It is a pure function over already-compiled tables: no file IO, no clock, no
+randomness, and no rule-priority ordering. Purpose-absence is deterministic:
+a purpose-conditioned allowance does not fire when purpose is undeclared,
+while an "outside purpose" restriction does.
 
 The standing default is OPEN — an audience no rule names receives full
 disclosure — unless a scope the item belongs to sets `default_deny`, which
@@ -20,11 +18,32 @@ a rule authored on one declared scope never suppresses another's declaration.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy, Rule, StandingGrant
 from .principal import OWNER_AUDIENCE
+
+_PurposeBranch = Literal["neutral", "declared", "undeclared"]
+
+
+@dataclass(frozen=True)
+class _ScopeContribution:
+    """Immutable owner-inspection evidence for one scope-local evaluation."""
+
+    scope_id: str
+    purpose_branch: _PurposeBranch
+    standing_floor: int
+    default_deny_supplied_floor: bool
+    standing_rule_ids: tuple[str, ...]
+    grant_ids: tuple[str, ...]
+    grant_ceiling: int | None
+    grant_contribution: int
+    organization_cap_ids: tuple[str, ...]
+    organization_cap: int
+    option_values: tuple[tuple[str, Any], ...]
+    option_ambiguities: tuple[str, ...]
+    final_ceiling: int
 
 
 @dataclass(frozen=True)
@@ -44,6 +63,11 @@ class Decision:
     release_grant_id: str | None = None
     release_strip: tuple[Any, ...] = ()
     release_dependency_digest: str | None = None
+    option_values: dict[str, Any] = field(default_factory=dict, repr=False)
+    option_ambiguities: frozenset[str] = field(default_factory=frozenset, repr=False)
+    scope_contributions: tuple[_ScopeContribution, ...] = field(
+        default_factory=tuple, repr=False
+    )
 
 
 def _rule_matches(
@@ -66,8 +90,202 @@ def _rule_matches(
     return True
 
 
-def _grant_matches(grant: StandingGrant, scope_ids: frozenset[str], audience: str) -> bool:
-    return grant.audience == audience and bool(set(grant.scope_ids) & scope_ids)
+def _grant_matches(grant: StandingGrant, scope_id: str, audience: str) -> bool:
+    return grant.audience == audience and scope_id in grant.scope_ids
+
+
+_OPTION_KEYS = frozenset({"notice", "constraint", "abstract", "bridge"})
+_OPTION_LEVELS = {"notice": 1, "constraint": 2, "abstract": 3, "bridge": 4}
+_MISSING = object()
+
+
+def _release_strip_key(value: Any) -> tuple[str, ...]:
+    value_type = type(value)
+    type_key = (value_type.__module__, value_type.__qualname__)
+    path = getattr(value, "path", None)
+    ref = getattr(value, "ref", None)
+    title = getattr(value, "title", None)
+    if all(isinstance(item, str) for item in (path, ref, title)):
+        return (*type_key, "identity", path, ref, title)
+    if isinstance(value, str):
+        return (*type_key, "string", value)
+    return (*type_key, "repr", repr(value))
+
+
+def _normalize_release_strip(values: Iterable[Any]) -> tuple[Any, ...]:
+    by_key: dict[tuple[str, ...], Any] = {}
+    for value in values:
+        by_key.setdefault(_release_strip_key(value), value)
+    return tuple(by_key[key] for key in sorted(by_key))
+
+
+def _scope_contribution_key(contribution: _ScopeContribution) -> tuple[Any, ...]:
+    return (
+        contribution.scope_id,
+        contribution.purpose_branch,
+        contribution.standing_floor,
+        contribution.default_deny_supplied_floor,
+        contribution.standing_rule_ids,
+        contribution.grant_ids,
+        -1 if contribution.grant_ceiling is None else contribution.grant_ceiling,
+        contribution.grant_contribution,
+        contribution.organization_cap_ids,
+        contribution.organization_cap,
+        tuple((key, repr(value)) for key, value in contribution.option_values),
+        contribution.option_ambiguities,
+        contribution.final_ceiling,
+    )
+
+
+def _normalize_scope_contributions(
+    contributions: Iterable[_ScopeContribution],
+) -> tuple[_ScopeContribution, ...]:
+    by_key: dict[tuple[Any, ...], _ScopeContribution] = {}
+    for contribution in contributions:
+        by_key.setdefault(_scope_contribution_key(contribution), contribution)
+    return tuple(by_key[key] for key in sorted(by_key))
+
+
+def _meet_options(option_sets: Iterable[dict[str, Any]]) -> tuple[dict[str, Any], set[str]]:
+    """Meet closed policy options without allowing a sibling to fill absence."""
+    contributors = tuple(option_sets)
+    if not contributors:
+        return {}, set()
+    result: dict[str, Any] = {}
+    ambiguous: set[str] = set()
+    for key in _OPTION_KEYS:
+        values = tuple(options.get(key, _MISSING) for options in contributors)
+        if all(value is _MISSING for value in values):
+            continue
+        if any(value is _MISSING or value != values[0] for value in values[1:]):
+            ambiguous.add(key)
+            continue
+        result[key] = values[0]
+    return result, ambiguous
+
+
+def _decision(
+    level: int,
+    *,
+    scope_ids: Iterable[str],
+    rule_ids: Iterable[str],
+    default_deny_scope_ids: Iterable[str],
+    options: dict[str, Any],
+    option_ambiguities: Iterable[str] = (),
+    option_values: dict[str, Any] | None = None,
+    release_reason: str | None = None,
+    release_grant_id: str | None = None,
+    release_strip: Iterable[Any] = (),
+    release_dependency_digest: str | None = None,
+    scope_contributions: Iterable[_ScopeContribution] = (),
+) -> Decision:
+    values = {
+        key: value
+        for key, value in (option_values if option_values is not None else options).items()
+        if key in _OPTION_KEYS
+    }
+    ambiguities = frozenset(option_ambiguities)
+    projected_level = level
+    for key in ("bridge", "abstract", "constraint", "notice"):
+        if key in ambiguities and projected_level >= _OPTION_LEVELS[key]:
+            projected_level = _OPTION_LEVELS[key] - 1
+    projected_options = {
+        key: value
+        for key, value in values.items()
+        if _OPTION_LEVELS[key] <= projected_level and key not in ambiguities
+    }
+    if (
+        "constraint" in projected_options
+        and options.get("constraint_source") == "scope"
+    ):
+        projected_options["constraint_source"] = "scope"
+    if "constraint" in ambiguities and projected_level == 1:
+        projected_options["constraint_ambiguous"] = True
+    return Decision(
+        level=projected_level,
+        scope_ids=tuple(sorted(set(scope_ids))),
+        rule_ids=tuple(sorted(set(rule_ids))),
+        default_deny_scope_ids=tuple(sorted(set(default_deny_scope_ids))),
+        options=projected_options,
+        notice=projected_options.get("notice"),
+        bridge=projected_options.get("bridge"),
+        release_reason=release_reason,
+        release_grant_id=release_grant_id,
+        release_strip=_normalize_release_strip(release_strip),
+        release_dependency_digest=release_dependency_digest,
+        option_values=values,
+        option_ambiguities=ambiguities,
+        scope_contributions=_normalize_scope_contributions(scope_contributions),
+    )
+
+
+def _meet_decisions(decisions: Iterable[Decision]) -> Decision:
+    """Conservatively fold complete decisions at a shared disclosure level."""
+    contributors = tuple(decisions)
+    if not contributors:
+        return _decision(
+            DISCLOSURE_MAX,
+            scope_ids=(),
+            rule_ids=(),
+            default_deny_scope_ids=(),
+            options={},
+        )
+    level = min(decision.level for decision in contributors)
+    values: dict[str, Any] = {}
+    ambiguous: set[str] = set()
+    for key in _OPTION_KEYS:
+        states = []
+        for decision in contributors:
+            if key in decision.option_ambiguities:
+                states.append(_MISSING)
+                ambiguous.add(key)
+            else:
+                source = decision.option_values or decision.options
+                states.append(source.get(key, _MISSING))
+        if all(state is _MISSING for state in states):
+            if key not in ambiguous:
+                continue
+        elif any(state is _MISSING or state != states[0] for state in states[1:]):
+            ambiguous.add(key)
+        else:
+            values[key] = states[0]
+    options = dict(values)
+    if values.get("constraint") and all(
+        decision.options.get("constraint_source") == "scope"
+        for decision in contributors
+    ):
+        options["constraint_source"] = "scope"
+
+    def singleton(name: str) -> Any:
+        candidates = [getattr(decision, name) for decision in contributors]
+        return candidates[0] if candidates[0] is not None and all(
+            candidate == candidates[0] for candidate in candidates
+        ) else None
+
+    return _decision(
+        level,
+        scope_ids=(scope_id for decision in contributors for scope_id in decision.scope_ids),
+        rule_ids=(rule_id for decision in contributors for rule_id in decision.rule_ids),
+        default_deny_scope_ids=(
+            scope_id
+            for decision in contributors
+            for scope_id in decision.default_deny_scope_ids
+        ),
+        options=options,
+        option_ambiguities=ambiguous,
+        option_values=values,
+        release_reason=singleton("release_reason"),
+        release_grant_id=singleton("release_grant_id"),
+        release_strip=(
+            strip for decision in contributors for strip in decision.release_strip
+        ),
+        release_dependency_digest=singleton("release_dependency_digest"),
+        scope_contributions=(
+            contribution
+            for decision in contributors
+            for contribution in decision.scope_contributions
+        ),
+    )
 
 
 def decide(
@@ -107,19 +325,20 @@ def decide(
     if purpose is None:
         return _decide_at(
             scope_ids, audience=audience, purpose=None, policy=policy,
+            purpose_branch="neutral",
             active_grants=active_grants,
         )
     declared = _decide_at(
         scope_ids, audience=audience, purpose=purpose, policy=policy,
+        purpose_branch="declared",
         active_grants=active_grants,
     )
     undeclared = _decide_at(
         scope_ids, audience=audience, purpose=None, policy=policy,
+        purpose_branch="undeclared",
         active_grants=active_grants,
     )
-    # Ties go to the declared branch so its rule_ids/scope_ids explain the
-    # outcome when both branches agree on the level.
-    return declared if declared.level <= undeclared.level else undeclared
+    return _meet_decisions((declared, undeclared))
 
 
 def _decide_at(
@@ -127,88 +346,75 @@ def _decide_at(
     *,
     audience: str,
     purpose: str | None,
+    purpose_branch: _PurposeBranch,
     policy: Policy,
     active_grants: Iterable[StandingGrant] | None = None,
 ) -> Decision:
     """One evaluation of the lattice at a single purpose value."""
     scope_id_set = frozenset(scope_ids)
     grants = policy.grants if active_grants is None else tuple(active_grants)
-
-    matched_rules = [r for r in policy.rules if _rule_matches(r, scope_id_set, audience, purpose)]
-    matched_grants = [g for g in grants if _grant_matches(g, scope_id_set, audience)]
-
-    standing = [r for r in matched_rules if r.kind != "org_cap"]
-    org_caps = [r for r in matched_rules if r.kind == "org_cap"]
-
-    # The one default this change inverts, resolved PER DECLARING SCOPE. A
-    # declared scope keeps its default until a standing rule names this
-    # audience *for that scope* — resolving it against the item's global
-    # matched-rule set instead would let a rule authored on one compartment
-    # suppress a different compartment's declaration, so authorising a partner
-    # on S1 would hand them an item that is also in an untouched S2.
-    #
-    # It stays a default and not a synthetic ceiling-0 rule: the floor is
-    # folded into `standing_min` only for scopes NO rule named, so an authored
-    # `ceiling: 3` on a declared scope still reads 3 rather than
-    # `min(3, 0) = 0`.
-    default_deny_scope_ids: tuple[str, ...] = ()
-    if audience != OWNER_AUDIENCE:
-        # The owner is exempt where the default is CHOSEN, not by a post-hoc
-        # override, so a rule that deliberately restricts the owner still
-        # takes effect through the ceilings below.
-        named_scope_ids = {
-            scope_id for rule in standing for scope_id in rule.scope_ids
-        } & scope_id_set
-        # ANY declared member that named nobody closes the item: membership is
-        # a set, and a declaration that could be defeated by authoring a broad
-        # undeclared scope alongside it would be no control at all.
-        default_deny_scope_ids = tuple(
-            sorted(
-                scope_id
-                for scope_id in scope_id_set
-                if scope_id not in named_scope_ids
-                and (scope := policy.scopes.get(scope_id)) is not None
-                and scope.default_deny
-            )
+    scope_decisions: list[Decision] = []
+    for scope_id in sorted(scope_id_set):
+        matched_rules = [
+            rule
+            for rule in policy.rules
+            if _rule_matches(rule, frozenset((scope_id,)), audience, purpose)
+        ]
+        standing = [rule for rule in matched_rules if rule.kind != "org_cap"]
+        org_caps = [rule for rule in matched_rules if rule.kind == "org_cap"]
+        scope = policy.scopes.get(scope_id)
+        default_denied = (
+            audience != OWNER_AUDIENCE
+            and not standing
+            and scope is not None
+            and scope.default_deny
         )
-    ceilings = [rule.ceiling for rule in standing]
-    if default_deny_scope_ids:
-        ceilings.append(DISCLOSURE_MIN)
-    standing_min = min(ceilings, default=DISCLOSURE_MAX)
-    # Unchanged: a grant still raises off the floor, so "unless a grant names
-    # them" needs no special case.
-    grant_max = max([g.ceiling for g in matched_grants] + [standing_min])
-    org_cap_min = min((r.ceiling for r in org_caps), default=DISCLOSURE_MAX)
-    level = min(org_cap_min, grant_max)
-
-    options: dict[str, Any] = {}
-    for rule in sorted(matched_rules, key=lambda r: r.id):
-        options.update(rule.options)
-
-    # Scope-registered L2 constraints are governed micro-bridges.  Resolve
-    # them as a set, not by document/rule order: one distinct approved string
-    # is deterministic; two different strings are ambiguous and therefore
-    # cannot cross the boundary.  Legacy rule-option constraints remain the
-    # fallback when no scope record applies.
-    scope_constraints = {
-        scope.constraint
-        for scope_id in scope_id_set
-        if (scope := policy.scopes.get(scope_id)) is not None and scope.constraint
-    }
-    if level >= 2 and len(scope_constraints) == 1:
-        options["constraint"] = next(iter(scope_constraints))
-        options["constraint_source"] = "scope"
-    elif level >= 2 and len(scope_constraints) > 1:
-        level = min(level, 1)
-        options.pop("constraint", None)
-        options["constraint_ambiguous"] = True
-
-    return Decision(
-        level=level,
-        scope_ids=tuple(sorted(scope_id_set)),
-        rule_ids=tuple(sorted(r.id for r in matched_rules)),
-        default_deny_scope_ids=default_deny_scope_ids,
-        options=options,
-        notice=options.get("notice"),
-        bridge=options.get("bridge"),
-    )
+        standing_level = min(
+            (rule.ceiling for rule in standing),
+            default=DISCLOSURE_MIN if default_denied else DISCLOSURE_MAX,
+        )
+        matched_grants = [
+            grant for grant in grants if _grant_matches(grant, scope_id, audience)
+        ]
+        grant_ceiling = max(
+            (grant.ceiling for grant in matched_grants), default=None
+        )
+        grant_level = max(
+            standing_level,
+            grant_ceiling if grant_ceiling is not None else standing_level,
+        )
+        organization_cap = min(
+            (rule.ceiling for rule in org_caps), default=DISCLOSURE_MAX
+        )
+        level = min(grant_level, organization_cap)
+        options, ambiguous = _meet_options(rule.options for rule in matched_rules)
+        if level >= 2 and scope is not None and scope.constraint:
+            options["constraint"] = scope.constraint
+            options["constraint_source"] = "scope"
+        scope_decision = _decision(
+            level,
+            scope_ids=(scope_id,),
+            rule_ids=(rule.id for rule in matched_rules),
+            default_deny_scope_ids=(scope_id,) if default_denied else (),
+            options=options,
+            option_ambiguities=ambiguous,
+        )
+        contribution = _ScopeContribution(
+            scope_id=scope_id,
+            purpose_branch=purpose_branch,
+            standing_floor=standing_level,
+            default_deny_supplied_floor=default_denied,
+            standing_rule_ids=tuple(sorted(rule.id for rule in standing)),
+            grant_ids=tuple(sorted(grant.id for grant in matched_grants)),
+            grant_ceiling=grant_ceiling,
+            grant_contribution=grant_level,
+            organization_cap_ids=tuple(sorted(rule.id for rule in org_caps)),
+            organization_cap=organization_cap,
+            option_values=tuple(sorted(scope_decision.option_values.items())),
+            option_ambiguities=tuple(sorted(scope_decision.option_ambiguities)),
+            final_ceiling=scope_decision.level,
+        )
+        scope_decisions.append(
+            replace(scope_decision, scope_contributions=(contribution,))
+        )
+    return _meet_decisions(scope_decisions)

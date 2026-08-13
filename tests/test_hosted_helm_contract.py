@@ -1293,6 +1293,11 @@ def test_platform_deletion_dispatcher_is_credential_free_and_worker_is_job_only(
 
     assert dispatcher_pod["serviceAccountName"] == "exomem-deletion-dispatcher"
     assert dispatcher_container["command"] == ["exomem-deletion-dispatcher"]
+    assert dispatcher["spec"]["jobTemplate"]["spec"]["activeDeadlineSeconds"] == 30
+    assert dispatcher_container["resources"] == {
+        "requests": {"cpu": "10m", "memory": "128Mi"},
+        "limits": {"cpu": "250m", "memory": "256Mi"},
+    }
     assert dispatcher_secret_refs == {"exomem-provisioner-database/url"}
     assert not any(
         fragment in item["name"]
