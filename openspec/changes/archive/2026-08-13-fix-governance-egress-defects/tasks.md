@@ -57,4 +57,4 @@
 - [x] 6.3 Run `ruff check`, `git diff --check`, and the scaffold leak gate.
 - [x] 6.4 Run `openspec validate fix-governance-egress-defects --strict`.
 - [x] 6.5 Run the lean suite, then the full suite.
-- [ ] 6.6 Independent review of the exact diff against the threat model, with the reviewer rechecking their own findings after fixes.
+- [x] 6.6 Independent review of the exact diff against the threat model, with the reviewer rechecking their own findings after fixes. Evidence: the durable Wave 0 closeout records the independent review, the three findings it surfaced, the same-reviewer recheck, the 11/11 green CI result, and merge as PR #367 (`14ba1cc`).
