@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib
+import json
 from pathlib import Path
 
 import pytest
@@ -182,6 +185,56 @@ def test_continuation_payload_and_envelope_caps_round_trip_at_the_boundary() -> 
 
     assert len(token.encode("utf-8")) <= record_formats._MAX_TOKEN_ENVELOPE_BYTES
     assert record_formats._decode_continuation(token) == payload
+
+
+def test_pre_chunking_v1_continuation_remains_valid_and_tamper_evident() -> None:
+    payload = {
+        "collection_id": COLLECTION_ID,
+        "offset": 7,
+        "query": {"filters": [], "sort_by": "occurred_on", "descending": False},
+        "snapshot": "a" * 64,
+    }
+    raw = json.dumps(
+        payload, separators=(",", ":"), ensure_ascii=False, sort_keys=True
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    checksum = hashlib.sha256(record_formats._CURSOR_DOMAIN + raw).hexdigest()
+    legacy = f"v1.{encoded}.{checksum}"
+
+    assert "~" not in legacy and len(encoded) > record_formats._CURSOR_CHUNK_CHARS
+    assert record_formats._decode_continuation(legacy) == payload
+    with pytest.raises(collections.CollectionError, match="INVALID_RECORD_CONTINUATION"):
+        record_formats._decode_continuation(legacy[:-1] + ("0" if legacy[-1] != "0" else "1"))
+
+
+def test_pre_expand_child_v1_continuation_reaches_page_two_without_weakening_identity(
+    tmp_path: Path,
+) -> None:
+    manifest = _collection(
+        tmp_path,
+        "## Sessions\n\n### 2026-08-02 · Alpha\n\n### 2026-08-01 · Beta\n",
+    )
+    current = record_formats.query_collection(tmp_path, manifest, limit=1)
+    assert current.continuation is not None
+    payload = record_formats._decode_continuation(current.continuation)
+    legacy_query = dict(payload["query"])
+    assert legacy_query.pop("expand_child") is None
+    payload["query"] = legacy_query
+    raw = json.dumps(
+        payload, separators=(",", ":"), ensure_ascii=False, sort_keys=True
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    checksum = hashlib.sha256(record_formats._CURSOR_DOMAIN + raw).hexdigest()
+    legacy = f"v1.{encoded}.{checksum}"
+
+    second = record_formats.query_collection(tmp_path, manifest, limit=1, continuation=legacy)
+
+    assert second.returned == 1
+    assert second.rows[0]["title"] != current.rows[0]["title"]
+    with pytest.raises(collections.CollectionError, match="INVALID_RECORD_CONTINUATION"):
+        record_formats.query_collection(
+            tmp_path, manifest, limit=1, descending=True, continuation=legacy
+        )
 
 
 def test_truncated_aggregate_is_returned_even_without_row_progress(

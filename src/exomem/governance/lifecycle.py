@@ -903,6 +903,63 @@ def _record_lifecycle(operation: LifecycleOperation, event_type: str, exact_stat
     )
 
 
+_CLOSED_ACCEPTED_INDEX_CODES = frozenset(
+    {
+        "no_eligible_paths",
+        "embeddings_disabled",
+        "clip_disabled",
+    }
+)
+
+
+def _index_report_is_exact(index_report: Mapping[str, Any] | None) -> bool:
+    """Whether post-transition derived state is proved before terminalizing it."""
+    if index_report is None:
+        return False
+    if index_report.get("paths_truncated") is True or index_report.get("reconcile_required") is True:
+        return False
+    if index_report.get("derived_work") == "unverified":
+        return False
+    components = index_report.get("components")
+    if not isinstance(components, (list, tuple)):
+        return False
+    for item in components:
+        if not isinstance(item, Mapping):
+            return False
+        outcome = item.get("outcome")
+        if outcome == "accepted":
+            if item.get("code") not in _CLOSED_ACCEPTED_INDEX_CODES:
+                return False
+        elif outcome not in {"completed", "registered", "not_required"}:
+            return False
+    return True
+
+
+def exact_no_derived_index_report(
+    operation: LifecycleOperation,
+) -> dict[str, object] | None:
+    """Return explicit proof only where this lifecycle transition has no index work."""
+    has_markdown = any(item.source_path.lower().endswith(".md") for item in operation.manifest)
+    has_visual_media = any(
+        media_types.media_type_for(item.source_path) in {"image", "video"}
+        for item in operation.manifest
+    )
+    clip_enabled = os.environ.get("EXOMEM_DISABLE_CLIP", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if has_markdown or (has_visual_media and clip_enabled):
+        return None
+    return {
+        "components": [],
+        "derived_work": "not_required",
+        "paths_truncated": False,
+        "reconcile_required": False,
+    }
+
+
 def finish_deletion(
     operation: LifecycleOperation,
     *,
@@ -910,15 +967,8 @@ def finish_deletion(
 ) -> bool:
     if not operation.governed:
         return True
-    if index_report is not None:
-        if index_report.get("paths_truncated") is True:
-            return False
-        components = index_report.get("components", [])
-        if any(
-            isinstance(item, Mapping) and item.get("outcome") == "degraded"
-            for item in components
-        ):
-            return False
+    if not _index_report_is_exact(index_report):
+        return False
     if classify_deletion(operation) != operation.target_digest:
         return False
     _record_lifecycle(operation, "deletion", operation.target_digest)
@@ -1286,14 +1336,8 @@ def _scene_derivatives_exact(vault_root: Path, videos: tuple[str, ...]) -> bool:
 def finish_recovery(operation: LifecycleOperation, *, index_report: Mapping[str, Any] | None = None) -> bool:
     if not operation.governed:
         return True
-    if index_report is not None:
-        components = index_report.get("components", [])
-        if any(
-            isinstance(item, Mapping)
-            and item.get("outcome") in {"degraded", "deferred", "unverified"}
-            for item in components
-        ):
-            return False
+    if not _index_report_is_exact(index_report):
+        return False
     if classify_recovery(operation) != operation.target_digest:
         return False
     _record_lifecycle(operation, "recovery", operation.target_digest)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import yaml
 
@@ -222,3 +223,36 @@ def test_core_skill_tool_loading_mentions_current_product_surface() -> None:
         'connect_memory,adopt_vault,maintain_memory,schema_memory,govern_memory,'
         'process_media,query_dataset,read_media")'
     ) in loading_section
+
+
+def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() -> None:
+    """Both generic skill copies teach the same safe Records routing contract."""
+    repo_root = Path(__file__).resolve().parents[1]
+    skill_copies = (
+        workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md",
+        repo_root / "plugins" / "claude-code" / "skills" / "exomem" / "SKILL.md",
+    )
+    operation_copies = (
+        workflow_skills.WORKFLOW_SKILLS_DIR.parent / "references" / "operations.md",
+        repo_root
+        / "plugins"
+        / "claude-code"
+        / "skills"
+        / "exomem"
+        / "references"
+        / "operations.md",
+    )
+
+    for path in skill_copies + operation_copies:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert "without waiting for a magic verb" in text
+        assert "exactly one compatible existing collection" in text
+        assert "propose a concise collection" in text
+        assert "must not silently create" in text
+
+    for path in operation_copies:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert (
+            "`describe`, `validate`, `inspect`, and `query`; `create`, `append`, "
+            "`update`, `revise`, and `rebaseline`"
+        ) in text

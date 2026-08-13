@@ -558,6 +558,58 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
+    """Warn when durable index work is a material share of indexed pages."""
+    details: dict[str, object] = {
+        "indexed_pages": 0,
+        "warn_fraction": 0.10,
+        "semantic_upserts": 0,
+        "full_upserts": 0,
+    }
+    if vault_root is None:
+        return _check(
+            "deferred_index_backlog",
+            "pass",
+            "No vault configured; deferred index backlog was not inspected.",
+            details=details,
+        )
+    from . import index_sync, lexstore
+
+    sidecar = lexstore.lexical_path(vault_root)
+    if sidecar.exists():
+        try:
+            details["indexed_pages"] = _lexical_page_count(sidecar)
+        except (OSError, sqlite3.Error):
+            # The lexical health check owns the unreadable-sidecar diagnostic.
+            pass
+    status = index_sync.deferred_work_status(vault_root)
+    for queue in ("semantic_upserts", "full_upserts"):
+        details[queue] = int(status.get(queue, {}).get("count", 0))
+    indexed_pages = int(details["indexed_pages"])
+    warn_above = indexed_pages * float(details["warn_fraction"])
+    offenders = [
+        f"{queue}={details[queue]}"
+        for queue in ("semantic_upserts", "full_upserts")
+        if int(details[queue]) > warn_above
+    ]
+    if offenders:
+        command = f'exomem index --vault "{vault_root}" --scope vault'
+        return _check(
+            "deferred_index_backlog",
+            "warn",
+            f"Deferred index backlog exceeds 10% of {indexed_pages} indexed page(s): "
+            + ", ".join(offenders),
+            f"Reconciliation drains it automatically; run `{command}` to drain now.",
+            details=details,
+        )
+    return _check(
+        "deferred_index_backlog",
+        "pass",
+        f"Deferred index backlog is below 10% of {indexed_pages} indexed page(s).",
+        details=details,
+    )
+
+
 def _check_sqlite_vec() -> DoctorCheck:
     """vec0 backend availability: package import + a live loadability probe.
 
@@ -1823,9 +1875,20 @@ def _check_idempotency_store() -> DoctorCheck:
     try:
         from .writer_lease import get_manager
 
-        summary = get_manager().idempotency.status_summary()
-    except Exception:  # noqa: BLE001 - doctor must stay structured
-        summary = {"pending": None, "abandoned": None, "oldest_pending_age_seconds": None}
+        store = get_manager().idempotency
+        validate_runtime_state = getattr(store, "validate_runtime_state", None)
+        if validate_runtime_state is not None:
+            validate_runtime_state()
+        summary = store.status_summary()
+    except Exception as error:  # noqa: BLE001 - doctor must stay structured
+        remediation = getattr(error, "remediation", None)
+        return _check(
+            "idempotency_store",
+            "fail",
+            f"Idempotency runtime is unavailable: {error}",
+            remediation,
+            details={"error": type(error).__name__},
+        )
 
     abandoned = summary.get("abandoned")
     oldest_pending_age_seconds = summary.get("oldest_pending_age_seconds")
@@ -1921,6 +1984,7 @@ def doctor(
         _check_registry(),
         _check_resource_posture(profile),
         _check_lexical(vault_root),
+        _check_deferred_index_backlog(vault_root),
     ]
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:

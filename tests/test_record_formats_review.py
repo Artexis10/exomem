@@ -217,7 +217,10 @@ def test_continuation_binds_manifest_bytes_and_refuses_tampering(tmp_path: Path)
     assert first.continuation
     assert "source_hashes" in first.rendered
     _version, token_payload, checksum = first.continuation.split(".")
-    forged = json.loads(base64.urlsafe_b64decode(token_payload + "=" * (-len(token_payload) % 4)))
+    compact_payload = token_payload.replace("~", "")
+    forged = json.loads(
+        base64.urlsafe_b64decode(compact_payload + "=" * (-len(compact_payload) % 4))
+    )
     forged["offset"] = 999
     altered = (
         "v1."
@@ -323,6 +326,27 @@ def test_inspection_keeps_adapter_evidence_when_one_saved_view_is_malformed(tmp_
     assert inspected.snapshot is not None
     assert inspected.source_versions
     assert "INVALID_SAVED_VIEW" in {diagnostic.code for diagnostic in inspected.diagnostics}
+
+
+def test_inspection_reports_one_located_diagnostic_per_invalid_saved_view(tmp_path: Path) -> None:
+    manifest = _log_collection(tmp_path)
+    path = tmp_path / manifest.path
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "item_schema:",
+            "views:\n  broken:\n    query:\n      columns: [[title]]\nitem_schema:",
+        ),
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, path)
+
+    diagnostics = record_formats.inspect_collection(tmp_path, manifest).diagnostics
+
+    assert diagnostics == (
+        collections.CollectionDiagnostic(
+            "INVALID_SAVED_VIEW", "saved view columns are invalid", "views.broken"
+        ),
+    )
 
 
 def test_report_only_inspection_returns_typed_diagnostics_without_repair(tmp_path: Path) -> None:

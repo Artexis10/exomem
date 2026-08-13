@@ -54,7 +54,7 @@ _DEFAULT_RECONCILE_INTERVAL_SECONDS = 300.0
 _QUIET_RECONCILE_INTERVAL_SECONDS = 900.0
 _DEFAULT_LIVE_MAX_EMBED_FILES = 32
 _DEFAULT_RECONCILE_MAX_EMBED_FILES = 500
-_QUIET_EXPENSIVE_INDEX_CAP = 0
+_QUIET_EXPENSIVE_INDEX_CAP = 25
 
 _MODE_ENV = "EXOMEM_MODE"
 _QUIET_ALIAS_ENV = "EXOMEM_QUIET_MODE"
@@ -242,8 +242,15 @@ def write_mode(value: str) -> Path:
     data = read_config()
     data.update(schema=1, mode=canonical)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), "utf-8")
-    os.replace(tmp, path)  # atomic swap
+    try:
+        tmp.write_text(json.dumps(data, indent=2), "utf-8")
+        os.replace(tmp, path)  # atomic swap
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return path
 
 

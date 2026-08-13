@@ -127,6 +127,8 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     ):
         assert required in combined
     assert "secret" in combined.lower()
+    assert 'HELM_REPOSITORY_CONFIG="${helm_repository_config}"' in validator
+    assert 'HELM_REPOSITORY_CACHE="${helm_repository_cache}"' in validator
     assert "openspec validate add-hosted-private-alpha-infrastructure --strict" in workflow
     assert 'UV_VERSION: "0.11.28"' in workflow
     assert 'PYTHON_VERSION: "3.13.5"' in workflow
@@ -245,16 +247,32 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "verify_provisioner_image.py",
     ):
         assert f"uv run --frozen python infra/scripts/{script}" in release_proof_step["run"]
+    workflow_inputs = triggers["workflow_dispatch"]["inputs"]
+    assert workflow_inputs["deployment_lock_pair"]["default"] == (
+        "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
+    )
+    assert workflow_inputs["deployment_lock_evidence"]["default"] == (
+        "infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
+    )
+    assert workflow_inputs["runtime_selection"] == {
+        "description": "Runtime unit selected from the reviewed deployment lock",
+        "required": True,
+        "default": "active",
+        "type": "choice",
+        "options": ["active", "rollback"],
+    }
+    assert "DEPLOYMENT_LOCK_PAIR: ${{ inputs.deployment_lock_pair }}" in workflow
+    assert "DEPLOYMENT_LOCK_EVIDENCE: ${{ inputs.deployment_lock_evidence }}" in workflow
+    assert "RUNTIME_SELECTION: ${{ inputs.runtime_selection }}" in workflow
+    assert '--runtime-selection "$RUNTIME_SELECTION"' in release_proof_step["run"]
+    assert '--lock-pair "$DEPLOYMENT_LOCK_PAIR"' in release_proof_step["run"]
+    assert '--lock-evidence "$DEPLOYMENT_LOCK_EVIDENCE"' in release_proof_step["run"]
     blackbox_job = parsed["jobs"]["external-blackbox"]
     assert blackbox_job["if"] == (
         "github.event_name == 'schedule' || "
         "(github.event_name == 'workflow_dispatch' && inputs.external_blackbox)"
     )
     assert "--require-published" in workflow
-    assert (
-        "DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
-        in workflow
-    )
     assert "verify_hosted_release.py" in workflow
     assert '--phase "$DEPLOYMENT_PHASE"' in workflow
     assert "--deployment-lock-pair" not in workflow

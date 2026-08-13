@@ -1,5 +1,7 @@
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 {{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
+{{- $lockFile := include "exomem.hostedDeploymentLockFileName" . -}}
+{{- $runtimeSelection := include "exomem.hostedRuntimeSelection" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -116,6 +118,7 @@ spec:
           'EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID',
           'EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY',
           'EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH',
+          'EXOMEM_PROVISIONER_RUNTIME_SELECTION',
           'EXOMEM_DELETION_BATCH_SIZE',
           'EXOMEM_PROVISIONER_WORKER_ID',
           'HOME'
@@ -152,10 +155,11 @@ spec:
         object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.key == 'application-key'
       message: The deletion worker provider inputs must match the reviewed exact references.
     - expression: >-
-        object.spec.template.spec.containers[0].env[14].value == '/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json' &&
-        object.spec.template.spec.containers[0].env[15].value == '1' &&
-        object.spec.template.spec.containers[0].env[16].valueFrom.fieldRef.fieldPath == "metadata.labels['batch.kubernetes.io/job-name']" &&
-        object.spec.template.spec.containers[0].env[17].value == '/tmp'
+        object.spec.template.spec.containers[0].env[14].value == {{ printf "/etc/exomem/deployment-lock/%s" $lockFile | quote }} &&
+        object.spec.template.spec.containers[0].env[15].value == {{ $runtimeSelection | quote }} &&
+        object.spec.template.spec.containers[0].env[16].value == '1' &&
+        object.spec.template.spec.containers[0].env[17].valueFrom.fieldRef.fieldPath == "metadata.labels['batch.kubernetes.io/job-name']" &&
+        object.spec.template.spec.containers[0].env[18].value == '/tmp'
       message: The deletion worker batch and runtime identity must match the reviewed template.
     - expression: >-
         !has(object.spec.template.spec.containers[0].env[0].value) &&
@@ -186,9 +190,10 @@ spec:
         !has(object.spec.template.spec.containers[0].env[13].valueFrom.secretKeyRef.optional) &&
         !has(object.spec.template.spec.containers[0].env[14].valueFrom) &&
         !has(object.spec.template.spec.containers[0].env[15].valueFrom) &&
-        !has(object.spec.template.spec.containers[0].env[16].value) &&
-        object.spec.template.spec.containers[0].env[16].valueFrom.fieldRef.apiVersion == 'v1' &&
-        !has(object.spec.template.spec.containers[0].env[17].valueFrom)
+        !has(object.spec.template.spec.containers[0].env[16].valueFrom) &&
+        !has(object.spec.template.spec.containers[0].env[17].value) &&
+        object.spec.template.spec.containers[0].env[17].valueFrom.fieldRef.apiVersion == 'v1' &&
+        !has(object.spec.template.spec.containers[0].env[18].valueFrom)
       message: The deletion worker environment sources may not add alternate or optional inputs.
     - expression: >-
         size(object.spec.template.spec.volumes) == 2 &&
@@ -199,8 +204,8 @@ spec:
         object.spec.template.spec.volumes[1].name == 'deployment-lock' &&
         object.spec.template.spec.volumes[1].configMap.name == {{ $lockName | quote }} &&
         size(object.spec.template.spec.volumes[1].configMap.items) == 1 &&
-        object.spec.template.spec.volumes[1].configMap.items[0].key == 'exomem-hosted-deployment-lock-v2.json' &&
-        object.spec.template.spec.volumes[1].configMap.items[0].path == 'exomem-hosted-deployment-lock-v2.json' &&
+        object.spec.template.spec.volumes[1].configMap.items[0].key == {{ $lockFile | quote }} &&
+        object.spec.template.spec.volumes[1].configMap.items[0].path == {{ $lockFile | quote }} &&
         !has(dyn(object.spec.template.spec.volumes[1].configMap.items[0]).mode) &&
         object.spec.template.spec.volumes[1].configMap.defaultMode == 292 &&
         !has(object.spec.template.spec.volumes[1].configMap.optional) &&

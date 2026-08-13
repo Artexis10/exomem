@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem.governance.principal import RequestPrincipal, request_scope
 from exomem.structured_collections import CollectionError
 
 
@@ -66,6 +67,76 @@ def test_planning_create_uses_the_shared_guarded_writer_and_planning_receipt(
     assert receipt["_plan_receipt"] == "exomem.planning-mutation"
     assert receipt["operation"] == "create"
     assert (tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items").is_dir()
+
+
+def test_planning_create_gates_candidate_path_before_parsing_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import planning
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    parsed = False
+
+    def refuse_candidate(*_args: object) -> None:
+        raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+
+    def fail_if_parsed(*_args: object, **_kwargs: object) -> object:
+        nonlocal parsed
+        parsed = True
+        raise AssertionError("Planning parsed caller bytes before candidate admission")
+
+    monkeypatch.setattr(planning.record_governance, "require_candidate_manifest_visibility", refuse_candidate)
+    monkeypatch.setattr(planning.collections, "parse_manifest_bytes", fail_if_parsed)
+
+    with pytest.raises(CollectionError, match="^COLLECTION_NOT_FOUND:"):
+        planning.create_collection(
+            tmp_path,
+            "Knowledge Base/Planning/Hidden/_collection.md",
+            "---\nnot: [valid\n---\n",
+            why="hidden candidate",
+        )
+
+    assert not parsed
+
+
+def test_planning_create_hides_malformed_candidate_bytes_like_a_missing_collection(
+    tmp_path: Path,
+) -> None:
+    from exomem import planning
+
+    root = tmp_path / "Knowledge Base" / "_Governance"
+    (root / "scopes").mkdir(parents=True)
+    (root / "rules").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    (root / "scopes" / "planning.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        "name: Hidden planning\n"
+        'paths: ["Planning/**"]\n',
+        encoding="utf-8",
+    )
+    (root / "rules" / "external.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        "audience: external\n"
+        "ceiling: 0\n",
+        encoding="utf-8",
+    )
+    malformed = "---\nnot: [valid\n---\n"
+    outcomes: list[tuple[str, str]] = []
+
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        for path in (
+            "Knowledge Base/Planning/Hidden/_collection.md",
+            "Knowledge Base/Planning/Missing/_collection.md",
+        ):
+            with pytest.raises(CollectionError) as raised:
+                planning.create_collection(tmp_path, path, malformed, why="hidden candidate")
+            outcomes.append((raised.value.code, raised.value.reason))
+
+    assert outcomes == [("COLLECTION_NOT_FOUND", "collection was not found")] * 2
 
 
 def test_planning_add_applies_capture_defaults_and_writes_a_plan_item(tmp_path: Path) -> None:

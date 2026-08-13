@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.49.0](https://github.com/Artexis10/exomem/compare/v0.48.0...v0.49.0) (2026-08-13)
+
+
+### Features
+
+* **records:** add readable child presentations ([#457](https://github.com/Artexis10/exomem/issues/457)) ([4b405f5](https://github.com/Artexis10/exomem/commit/4b405f5c6832b4452adca419a13e238aad284385))
+
+
+### Bug Fixes
+
+* drain deferred work and surface runtime failures ([47f56c8](https://github.com/Artexis10/exomem/commit/47f56c8bc34ce0ee17cef5d6fcec42d793324823))
+* **hosted:** release same-candidate discard capacity ([#458](https://github.com/Artexis10/exomem/issues/458)) ([02a1212](https://github.com/Artexis10/exomem/commit/02a121271f96644df0f60d770d97812058214e17))
+* **hosted:** report published runtime schema digest ([#459](https://github.com/Artexis10/exomem/issues/459)) ([6d972fb](https://github.com/Artexis10/exomem/commit/6d972fb0a955464e5c85669443284210ab55870f))
+* **planning:** stop ancestor traversal at roots ([#453](https://github.com/Artexis10/exomem/issues/453)) ([5c56ffd](https://github.com/Artexis10/exomem/commit/5c56ffd5412b228bb6c97055298e52f58aa62eab))
+
+## [Unreleased]
+
+### Bug Fixes
+
+* drain semantic and full deferred-index work from bounded reconcile passes, including
+  a non-zero quiet-mode throttle, and make deferred-work status and doctor reporting
+  actionable
+* make `exomem mode` clean up failed temporary writes and report machine-config
+  permission failures without a traceback
+* report pre-existing unsafe Windows idempotency DACLs with the exact path and explicit
+  `icacls.exe` remediation, while retaining fail-closed principal-private state
+
+## [0.48.0](https://github.com/Artexis10/exomem/compare/v0.47.0...v0.48.0) (2026-08-12)
+
+
+### Features
+
+* **hosted:** compose ready recovery deployment lock ([3dc2c54](https://github.com/Artexis10/exomem/commit/3dc2c549c410f4a798c48e2a58c6cedc47a42506))
+* **records:** add first-class lifecycle and hosted release ([#452](https://github.com/Artexis10/exomem/issues/452)) ([b49ad33](https://github.com/Artexis10/exomem/commit/b49ad338dc3bbff213af5c3f81fd1ba8e3a0fd6a))
+
+
+### Bug Fixes
+
+* **hosted:** disable recovery pod service links ([#451](https://github.com/Artexis10/exomem/issues/451)) ([d5c128a](https://github.com/Artexis10/exomem/commit/d5c128a3000ff3071596784ffb23869e221538e5))
+
+## [0.47.0](https://github.com/Artexis10/exomem/compare/v0.46.0...v0.47.0) (2026-08-12)
+
+
+### Features
+
+* **graph:** rebuild outside the mutation boundary ([2e6cfbc](https://github.com/Artexis10/exomem/commit/2e6cfbceed5adf804bc1f658760fa374a0e30092))
+
+
+### Bug Fixes
+
+* **hosted:** recover successful init retry at revision 0006 ([#448](https://github.com/Artexis10/exomem/issues/448)) ([17ba4d3](https://github.com/Artexis10/exomem/commit/17ba4d39f5d56177c4242ef4ece03b53c60b5649))
+
+## [0.46.0](https://github.com/Artexis10/exomem/compare/v0.45.0...v0.46.0) (2026-08-11)
+
+
+### Features
+
+* **hosted:** compose v0.45 deployment lock ([#439](https://github.com/Artexis10/exomem/issues/439)) ([7fd0e88](https://github.com/Artexis10/exomem/commit/7fd0e885c0baf26151557724af31574d942c7cfd))
+* **hosted:** select provisioner cell ingress fix ([#441](https://github.com/Artexis10/exomem/issues/441)) ([e0b4525](https://github.com/Artexis10/exomem/commit/e0b45253f6bad329de6bb3cfd317ec21df195e00))
+* **planning:** add multi-horizon planning ([8f2b21b](https://github.com/Artexis10/exomem/commit/8f2b21bff112383d50f16d311d57151a4ac5309b))
+
+
+### Bug Fixes
+
+* **hosted:** accept successful init job retries ([#443](https://github.com/Artexis10/exomem/issues/443)) ([568c82c](https://github.com/Artexis10/exomem/commit/568c82c9912ade1584afac447b188ad72c1f7747))
+* **hosted:** allow provisioner cell health ingress ([#440](https://github.com/Artexis10/exomem/issues/440)) ([e347779](https://github.com/Artexis10/exomem/commit/e347779959cb8a8b49e7d62851aa11bb3cd769a6))
+* **hosted:** correct retained private contract evidence ([#442](https://github.com/Artexis10/exomem/issues/442)) ([d2471d1](https://github.com/Artexis10/exomem/commit/d2471d100f8e035bac7a4ba51b40e4a7317e0450))
+* **hosted:** recover deleted init jobs ([979ad25](https://github.com/Artexis10/exomem/commit/979ad2586382e2129361ec1533e602a5f1eb62ed))
+* **hosted:** recover init retry operation ([#445](https://github.com/Artexis10/exomem/issues/445)) ([ec817c5](https://github.com/Artexis10/exomem/commit/ec817c598b22c03b2fdd0c0568aceaabed1c99d9))
+
 ## [0.45.0](https://github.com/Artexis10/exomem/compare/v0.44.0...v0.45.0) (2026-08-11)
 
 

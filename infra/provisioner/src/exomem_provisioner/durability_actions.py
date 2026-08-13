@@ -10,7 +10,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -107,6 +107,9 @@ class DurabilityActionSettings(BaseSettings):
         validation_alias="EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
     )
     deployment_lock_path: Path = Field(validation_alias="EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH")
+    runtime_selection: Literal["active", "rollback"] | None = Field(
+        default=None, validation_alias="EXOMEM_DURABILITY_RUNTIME_SELECTION"
+    )
     cell_chart_path: str = Field(
         min_length=1,
         max_length=4096,
@@ -177,7 +180,9 @@ class DurabilityActionSettings(BaseSettings):
 
     @property
     def deployment_lock(self) -> DeploymentLock:
-        return load_deployment_lock(self.deployment_lock_path)
+        lock = load_deployment_lock(self.deployment_lock_path)
+        lock.selected_runtime(self.runtime_selection)
+        return lock
 
     @field_validator("control_hostname", "transfer_hostname")
     @classmethod
@@ -911,7 +916,8 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
     from kubernetes import client, config
 
     lock = settings.deployment_lock
-    target = lock.runtime_target
+    selected = lock.selected_runtime(settings.runtime_selection)
+    target = selected.runtimeTarget
     signer = ProviderRecoveryIdentityCodec.from_encoded_seed(
         settings.provider_recovery_signing_key.get_secret_value()
     )
@@ -937,7 +943,7 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
         coordination = client.CoordinationV1Api(api_client)
         custom = client.CustomObjectsApi(api_client)
         lifecycle_config = LifecycleConfig(
-            image=lock.components.runtime.image,
+            image=selected.image,
             chart_path=settings.cell_chart_path,
             chart_version=settings.cell_chart_version,
             helm_version=settings.helm_version,
@@ -953,6 +959,8 @@ async def _run_durability_actions(settings: DurabilityActionSettings) -> None:
             (unit.releaseVersion, unit.protocolVersion): unit.contract.model_dump(mode="json")
             for unit in lock.composition.legacyCatalog
         },
+            records_reader_version=selected.recordsReaderVersion,
+            lifecycle_actions_enabled=selected.lifecycleActionsEnabled,
         )
         helm = HelmCliAdapter(
             binary=settings.helm_binary,

@@ -8,6 +8,7 @@ releases the latter when a process exits, so a leftover file is harmless.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import json
@@ -15,15 +16,16 @@ import logging
 import math
 import os
 import re
+import stat
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, TypedDict, cast
 
 from .cli_ops import OpError
 
@@ -48,18 +50,35 @@ _HOLDER_SCHEMA = 1
 # `writer_lease.invoke()` at the mutation-journal seam (O5) and by the R1
 # telemetry events, both of which run in the same execution context shortly
 # after the `with ...hold():` block exits.
-_LAST_MUTATION_TIMING: ContextVar[dict[str, float] | None] = ContextVar(
+class MutationTiming(TypedDict):
+    """Completed outer mutation-boundary timing and identifying metadata."""
+
+    wait_ms: float
+    hold_ms: float
+    operation: str
+    holder_kind: str
+
+
+_LAST_MUTATION_TIMING: ContextVar[MutationTiming | None] = ContextVar(
     "exomem_last_mutation_timing", default=None
 )
 
 
-def last_mutation_timing() -> dict[str, float] | None:
-    """Return `{"wait_ms", "hold_ms"}` for the most recent boundary hold in
-    this context, or `None` if none has been recorded yet."""
+def last_mutation_timing() -> MutationTiming | None:
+    """Return the most recent completed boundary hold in this context, or `None`."""
     return _LAST_MUTATION_TIMING.get()
 
 
 logger = logging.getLogger(__name__)
+
+
+def _windows_library(ctypes_module: Any, name: str) -> Any:
+    """Keep Windows-only ctypes attributes out of non-Windows type stubs."""
+    return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)
+
+
+def _windows_last_error(ctypes_module: Any) -> int:
+    return int(getattr(ctypes_module, "get_last_error")())
 
 
 def _log_mutation_lock_event(event: str, **fields: Any) -> None:
@@ -98,6 +117,719 @@ def canonical_mutation_identity(vault_or_cell: os.PathLike[str] | str) -> str:
     if not value:
         raise ValueError("mutation identity must not be empty")
     return f"cell:{value}"
+
+
+def nofollow_regular_file_identity(path: Path) -> tuple[int, int, int, int, int]:
+    """Return one regular entry identity, rejecting links and Windows reparse points."""
+    info = os.lstat(path)
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & reparse_point:
+        raise OSError("path is not a regular no-follow file")
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+    )
+
+
+class _SecureDirectory:
+    """A retained non-reparse directory handle used for runtime lock files."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        fd: int | None = None,
+        windows_handles: list[int] | None = None,
+        close_fd: Callable[[int], None] | None = None,
+        close_windows_handle: Callable[[int], None] | None = None,
+    ) -> None:
+        self.path = path
+        self.fd = fd
+        self.windows_handles = windows_handles or []
+        # Retain the primitive rather than looking it up during a late atexit
+        # cleanup. A daemon that owns a graph rebuild may outlive normal module
+        # teardown ordering.
+        self._close_fd = close_fd or os.close
+        self._close_windows_handle = close_windows_handle or _windows_close_handle
+
+    @property
+    def windows_handle(self) -> int:
+        if not self.windows_handles:
+            raise OSError("secure Windows directory handle is unavailable")
+        return self.windows_handles[-1]
+
+    def close(self) -> None:
+        if self.fd is not None:
+            self._close_fd(self.fd)
+            self.fd = None
+        while self.windows_handles:
+            self._close_windows_handle(self.windows_handles.pop())
+
+
+def _windows_open_path(
+    path: Path,
+    *,
+    directory: bool,
+    access: int = 0x00020080,  # READ_CONTROL | FILE_READ_ATTRIBUTES
+    share: int = 0x3,
+    creation: int = 3,
+) -> int:
+    """Open one exact Windows path entry without following reparse points."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _windows_library(ctypes, "kernel32")
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    flags = 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+    if directory:
+        flags |= 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
+    handle = create_file(str(path), access, share, None, creation, flags, None)
+    invalid = wintypes.HANDLE(-1).value
+    if handle == invalid:
+        error = _windows_last_error(ctypes)
+        if error in {2, 3}:
+            raise FileNotFoundError(error, f"cannot safely open {path.name}")
+        if error in {80, 183}:
+            raise FileExistsError(error, f"path already exists: {path.name}")
+        raise OSError(error, f"cannot safely open {path.name}")
+
+    class _AttributeTagInfo(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
+
+    info = _AttributeTagInfo()
+    try:
+        get_info = kernel32.GetFileInformationByHandleEx
+        get_info.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        get_info.restype = wintypes.BOOL
+        if not get_info(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            raise OSError(_windows_last_error(ctypes), f"cannot inspect {path.name}")
+        if info.attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+            raise OSError("reparse points are not allowed")
+        if bool(info.attributes & 0x10) != directory:
+            raise OSError("unexpected path type")
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+    return int(handle)
+
+
+def _windows_close_handle(handle: int) -> None:
+    import ctypes
+
+    _windows_library(ctypes, "kernel32").CloseHandle(handle)
+
+
+def _windows_final_path(handle: int) -> str:
+    """Return the resolved path of one retained Windows handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _windows_library(ctypes, "kernel32")
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get_final_path.restype = wintypes.DWORD
+    needed = get_final_path(handle, None, 0, 0)
+    if not needed:
+        raise OSError(_windows_last_error(ctypes), "cannot resolve retained Windows path")
+    buffer = ctypes.create_unicode_buffer(needed + 1)
+    written = get_final_path(handle, buffer, len(buffer), 0)
+    if not written or written >= len(buffer):
+        raise OSError(_windows_last_error(ctypes), "cannot resolve retained Windows path")
+    return str(buffer.value)
+
+
+def _normalized_windows_path(value: str) -> str:
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return value.rstrip("\\/").replace("/", "\\").casefold()
+
+
+def _windows_child_is_in_directory(directory: _SecureDirectory, handle: int) -> bool:
+    parent = _normalized_windows_path(_windows_final_path(directory.windows_handle))
+    child = _normalized_windows_path(_windows_final_path(handle))
+    return child.rsplit("\\", 1)[0] == parent
+
+
+def _windows_current_user_sid() -> str:
+    """Return the current process token SID without shelling out to icacls."""
+    import ctypes
+    from ctypes import wintypes
+
+    token_query = 0x0008
+    token_user = 1
+    token = wintypes.HANDLE()
+    kernel32 = _windows_library(ctypes, "kernel32")
+    advapi32 = _windows_library(ctypes, "advapi32")
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = wintypes.HANDLE
+    open_process_token = advapi32.OpenProcessToken
+    open_process_token.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+    ]
+    open_process_token.restype = wintypes.BOOL
+    if not open_process_token(get_current_process(), token_query, ctypes.byref(token)):
+        raise OSError(_windows_last_error(ctypes), "cannot open current Windows token")
+    try:
+        needed = wintypes.DWORD()
+        get_token_information = advapi32.GetTokenInformation
+        get_token_information.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        get_token_information.restype = wintypes.BOOL
+        get_token_information(token, token_user, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            raise OSError(_windows_last_error(ctypes), "cannot measure current Windows token SID")
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not get_token_information(
+            token, token_user, buffer, needed, ctypes.byref(needed)
+        ):
+            raise OSError(_windows_last_error(ctypes), "cannot read current Windows token SID")
+        sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        text = wintypes.LPWSTR()
+        convert = advapi32.ConvertSidToStringSidW
+        convert.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+        convert.restype = wintypes.BOOL
+        if not convert(sid, ctypes.byref(text)):
+            raise OSError(_windows_last_error(ctypes), "cannot render current Windows token SID")
+        try:
+            return str(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _windows_private_dacl_trustees(sid: str) -> tuple[str, ...]:
+    """Return the distinct SDDL trustees permitted for private runtime state."""
+    if not re.fullmatch(r"S-1-[0-9-]+", sid):
+        raise ValueError("invalid current Windows SID")
+    aliases = {"S-1-5-18": "SY", "S-1-5-32-544": "BA"}
+    principals = (aliases.get(sid, sid), "SY", "BA")
+    unique: dict[str, str] = {}
+    for principal in principals:
+        unique.setdefault(principal.casefold(), principal)
+    return tuple(unique.values())
+
+
+class WindowsRuntimeDaclError(RuntimeError):
+    """Actionable fail-closed result for one unsafe idempotency runtime entry."""
+
+    def __init__(self, path: Path, remediation: str):
+        self.path = path
+        self.remediation = remediation
+        super().__init__(
+            f"unsafe Windows DACL at {path}; run in elevated PowerShell: {remediation}"
+        )
+
+
+def _windows_private_dacl_repair_command(
+    path: Path, sid: str, *, directory: bool
+) -> str:
+    """Render an explicit, non-recursive repair for exactly one runtime entry."""
+    trustees = {
+        "SY": "S-1-5-18",
+        "BA": "S-1-5-32-544",
+    }
+    trustee_sids = tuple(
+        trustees.get(trustee, trustee)
+        for trustee in _windows_private_dacl_trustees(sid)
+    )
+    quoted_path = "'" + str(path).replace("'", "''") + "'"
+    flags = "(OI)(CI)" if directory else ""
+    grants = " ".join(
+        f"'*{trustee}:{flags}F'" for trustee in trustee_sids
+    )
+    return (
+        f"icacls.exe {quoted_path} /reset; if ($LASTEXITCODE -eq 0) {{ "
+        f"icacls.exe {quoted_path} /inheritance:r /grant:r {grants} }}"
+    )
+
+
+def _windows_private_dacl_sddl(sid: str) -> str:
+    """Protected, inheritable DACL: current user plus only OS recovery principals."""
+    return "D:P" + "".join(
+        f"(A;OICI;FA;;;{trustee})" for trustee in _windows_private_dacl_trustees(sid)
+    )
+
+
+def _windows_apply_dacl_sddl(path: Path, sddl: str) -> None:
+    """Apply one native SDDL DACL without shelling out through a localized tool."""
+    import ctypes
+    from ctypes import wintypes
+
+    descriptor = wintypes.LPVOID()
+    advapi32 = _windows_library(ctypes, "advapi32")
+    kernel32 = _windows_library(ctypes, "kernel32")
+    convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.LPVOID), wintypes.LPVOID]
+    convert.restype = wintypes.BOOL
+    if not convert(sddl, 1, ctypes.byref(descriptor), None):
+        raise OSError(_windows_last_error(ctypes), "cannot build Windows runtime DACL")
+    try:
+        set_security = advapi32.SetFileSecurityW
+        set_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
+        set_security.restype = wintypes.BOOL
+        dacl_information = 0x00000004 | 0x80000000
+        if not set_security(str(path), dacl_information, descriptor):
+            raise OSError(_windows_last_error(ctypes), "cannot protect Windows runtime DACL")
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def _windows_apply_private_dacl(path: Path, sid: str) -> None:
+    """Set a protected inheritable DACL on a newly-created runtime directory."""
+    _windows_apply_dacl_sddl(path, _windows_private_dacl_sddl(sid))
+
+
+def _windows_dacl_sddl(path: Path) -> str:
+    """Read only the DACL text through native security APIs."""
+    import ctypes
+    from ctypes import wintypes
+
+    security_descriptor = wintypes.LPVOID()
+    text = wintypes.LPWSTR()
+    advapi32 = _windows_library(ctypes, "advapi32")
+    kernel32 = _windows_library(ctypes, "kernel32")
+    get_security = advapi32.GetNamedSecurityInfoW
+    get_security.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID,
+        wintypes.LPVOID, wintypes.LPVOID, ctypes.POINTER(wintypes.LPVOID),
+    ]
+    get_security.restype = wintypes.DWORD
+    dacl_information = 0x00000004
+    result = get_security(
+        str(path), 1, dacl_information, None, None, None, None, ctypes.byref(security_descriptor)
+    )
+    if result:
+        raise OSError(result, "cannot inspect Windows runtime DACL")
+    try:
+        convert = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+        convert.argtypes = [
+            wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.LPWSTR),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        convert.restype = wintypes.BOOL
+        size = wintypes.DWORD()
+        if not convert(security_descriptor, 1, dacl_information, ctypes.byref(text), ctypes.byref(size)):
+            raise OSError(_windows_last_error(ctypes), "cannot render Windows runtime DACL")
+        try:
+            return str(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(security_descriptor)
+
+
+def _windows_dacl_sddl_for_handle(handle: int) -> str:
+    """Read the DACL bound to a retained Windows handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    security_descriptor = wintypes.LPVOID()
+    text = wintypes.LPWSTR()
+    advapi32 = _windows_library(ctypes, "advapi32")
+    kernel32 = _windows_library(ctypes, "kernel32")
+    get_security = advapi32.GetSecurityInfo
+    get_security.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID,
+        wintypes.LPVOID, wintypes.LPVOID, ctypes.POINTER(wintypes.LPVOID),
+    ]
+    get_security.restype = wintypes.DWORD
+    dacl_information = 0x00000004
+    result = get_security(handle, 1, dacl_information, None, None, None, None, ctypes.byref(security_descriptor))
+    if result:
+        raise OSError(result, "cannot inspect Windows runtime DACL")
+    try:
+        convert = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+        convert.argtypes = [
+            wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.LPWSTR),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        convert.restype = wintypes.BOOL
+        size = wintypes.DWORD()
+        if not convert(security_descriptor, 1, dacl_information, ctypes.byref(text), ctypes.byref(size)):
+            raise OSError(_windows_last_error(ctypes), "cannot render Windows runtime DACL")
+        try:
+            return str(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(security_descriptor)
+
+
+def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> bool:
+    """Reject broad or altered ACEs; inherited file ACEs are accepted precisely."""
+    if not isinstance(sddl, str) or "D:" not in sddl:
+        return False
+    dacl = sddl.split("D:", 1)[1]
+    if directory and not dacl.startswith("P"):
+        return False
+    aces = re.findall(r"\(([^()]*)\)", dacl)
+    expected = {trustee.casefold() for trustee in _windows_private_dacl_trustees(sid)}
+    observed: set[str] = set()
+    for ace in aces:
+        fields = ace.split(";")
+        if len(fields) != 6:
+            return False
+        kind, flags, rights, _object_guid, _inherit_object_guid, trustee = fields
+        if kind != "A" or rights.casefold() not in {"fa", "0x1f01ff"}:
+            return False
+        if trustee.casefold() not in expected or trustee.casefold() in observed:
+            return False
+        normalized_flags = flags.casefold()
+        allowed = {"", "oici", "idoici", "id"} if not directory else {"oici"}
+        if normalized_flags not in allowed:
+            return False
+        observed.add(trustee.casefold())
+    return observed == expected
+
+
+def _validate_windows_runtime_entry(
+    path: Path, *, directory: bool, sid: str, handle: int | None = None
+) -> None:
+    """Validate one path through a scoped non-reparse handle."""
+    opened_here = handle is None
+    if handle is None:
+        handle = _windows_open_path(path, directory=directory)
+    try:
+        sddl = _windows_dacl_sddl_for_handle(handle) if not opened_here else _windows_dacl_sddl(path)
+        if not _windows_private_dacl_is_valid(sddl, sid, directory=directory):
+            raise WindowsRuntimeDaclError(
+                path,
+                _windows_private_dacl_repair_command(path, sid, directory=directory),
+            )
+    finally:
+        if opened_here:
+            _windows_close_handle(handle)
+
+
+def prepare_windows_idempotency_runtime_paths(state_dir: Path, owners_dir: Path) -> None:
+    """Create the two runtime directories with protected DACLs, never repair old ones."""
+    if os.name != "nt":
+        return
+    sid = _windows_current_user_sid()
+
+    def acquire(path: Path) -> tuple[_SecureDirectory, bool]:
+        try:
+            return _acquire_secure_directory(path, create=False), False
+        except FileNotFoundError:
+            return _acquire_secure_directory(path, create=True), True
+
+    state, state_created = acquire(state_dir)
+    try:
+        if state_created:
+            _windows_apply_private_dacl(state_dir, sid)
+        _validate_windows_runtime_entry(
+            state_dir, directory=True, sid=sid, handle=state.windows_handle
+        )
+        owners, owners_created = acquire(owners_dir)
+        try:
+            if not _windows_child_is_in_directory(state, owners.windows_handle):
+                raise OSError("Windows owner directory escaped its retained state directory")
+            if owners_created:
+                _windows_apply_private_dacl(owners_dir, sid)
+            _validate_windows_runtime_entry(
+                owners_dir, directory=True, sid=sid, handle=owners.windows_handle
+            )
+        finally:
+            owners.close()
+    finally:
+        state.close()
+
+
+def validate_windows_idempotency_runtime_paths(
+    state_dir: Path, owners_dir: Path, private_paths: tuple[Path, ...]
+) -> None:
+    """Reject reparse points or broadened runtime state before SQLite/pickle reads."""
+    if os.name != "nt":
+        return
+    sid = _windows_current_user_sid()
+    with _open_secure_directory(state_dir, create=False) as state:
+        _validate_windows_runtime_entry(
+            state_dir, directory=True, sid=sid, handle=state.windows_handle
+        )
+        with _open_secure_directory(owners_dir, create=False) as owners:
+            if not _windows_child_is_in_directory(state, owners.windows_handle):
+                raise OSError("Windows owner directory escaped its retained state directory")
+            _validate_windows_runtime_entry(
+                owners_dir, directory=True, sid=sid, handle=owners.windows_handle
+            )
+        for path in private_paths:
+            if path.parent != state_dir:
+                raise RuntimeError("idempotency runtime database escaped its trusted state directory")
+            try:
+                fd = _open_secure_file_at(state, path.name, os.O_RDONLY)
+            except FileNotFoundError:
+                continue
+            try:
+                _validate_windows_runtime_entry(
+                    path,
+                    directory=False,
+                    sid=sid,
+                    handle=getattr(msvcrt, "get_osfhandle")(fd),  # noqa: B009 - Windows-only stub
+                )
+            finally:
+                os.close(fd)
+
+
+def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileInfo(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("access_time", wintypes.FILETIME),
+            ("write_time", wintypes.FILETIME),
+            ("volume_serial", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    info = _FileInfo()
+    kernel32 = _windows_library(ctypes, "kernel32")
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(_FileInfo)]
+    get_info.restype = wintypes.BOOL
+    if not get_info(handle, ctypes.byref(info)):
+        raise OSError(_windows_last_error(ctypes), "cannot identify retained Windows handle")
+    return info.volume_serial, info.file_index_high, info.file_index_low
+
+
+def _open_posix_directory(path: Path, *, create: bool, mode: int) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current_fd = os.open(path.anchor or "/", flags)
+    try:
+        for part in path.parts[1:]:
+            try:
+                child_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, mode=mode, dir_fd=current_fd)
+                child_fd = os.open(part, flags, dir_fd=current_fd)
+            if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                os.close(child_fd)
+                raise OSError("non-directory path component")
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _acquire_windows_secure_directory(
+    absolute: Path,
+    *,
+    create: bool,
+    mode: int,
+    open_path: Callable[..., int] = _windows_open_path,
+    close_handle: Callable[[int], None] = _windows_close_handle,
+) -> _SecureDirectory:
+    """Open every directory component without following a Windows reparse point."""
+    handles: list[int] = []
+    current = Path(absolute.anchor)
+    try:
+        handles.append(open_path(current, directory=True))
+        for part in absolute.parts[1:]:
+            current /= part
+            try:
+                handles.append(open_path(current, directory=True))
+            except FileNotFoundError:
+                if not create:
+                    raise
+                current.mkdir(mode=mode)
+                handles.append(open_path(current, directory=True))
+        return _SecureDirectory(
+            absolute, windows_handles=handles, close_windows_handle=close_handle
+        )
+    except BaseException:
+        while handles:
+            close_handle(handles.pop())
+        raise
+
+
+def _acquire_secure_directory(
+    path: Path, *, create: bool, mode: int = 0o700
+) -> _SecureDirectory:
+    """Return a retained secure directory handle for explicit owners."""
+    absolute = path.expanduser().absolute()
+    if os.name != "nt":
+        directory = _SecureDirectory(
+            absolute,
+            fd=_open_posix_directory(absolute, create=create, mode=mode),
+        )
+    else:
+        directory = _acquire_windows_secure_directory(absolute, create=create, mode=mode)
+    return directory
+
+
+def _acquire_trusted_runtime_root(path: Path) -> _SecureDirectory:
+    """Pin the configured runtime root after validating its local authority."""
+    absolute = path.expanduser().absolute()
+    created = False
+    try:
+        os.lstat(absolute)
+    except FileNotFoundError:
+        created = True
+    directory = _acquire_secure_directory(absolute, create=True, mode=0o700)
+    try:
+        if os.name != "nt":
+            assert directory.fd is not None
+            if created:
+                os.fchmod(directory.fd, 0o700)
+            info = os.fstat(directory.fd)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise OSError("runtime state root is not owner-controlled")
+        return directory
+    except BaseException:
+        directory.close()
+        raise
+
+
+@contextlib.contextmanager
+def _open_secure_directory(
+    path: Path, *, create: bool, mode: int = 0o700
+) -> Iterator[_SecureDirectory]:
+    """Pin the lock directory and, on Windows, every non-reparse ancestor."""
+    directory = _acquire_secure_directory(path, create=create, mode=mode)
+    try:
+        yield directory
+    finally:
+        directory.close()
+
+
+def _same_directory_path(directory: _SecureDirectory) -> bool:
+    try:
+        if os.name != "nt":
+            current = os.lstat(directory.path)
+            assert directory.fd is not None
+            retained = os.fstat(directory.fd)
+            return (
+                stat.S_ISDIR(current.st_mode)
+                and current.st_dev == retained.st_dev
+                and current.st_ino == retained.st_ino
+            )
+        current_handle = _windows_open_path(directory.path, directory=True)
+        try:
+            return _windows_handle_identity(current_handle) == _windows_handle_identity(
+                directory.windows_handle
+            )
+        finally:
+            _windows_close_handle(current_handle)
+    except OSError:
+        return False
+
+
+def _same_file_entry(directory: _SecureDirectory, name: str, fd: int) -> bool:
+    try:
+        if os.name != "nt":
+            current = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+            retained = os.fstat(fd)
+            return (
+                stat.S_ISREG(current.st_mode)
+                and current.st_dev == retained.st_dev
+                and current.st_ino == retained.st_ino
+            )
+        current_handle = _windows_open_path(directory.path / name, directory=False)
+        try:
+            return _windows_handle_identity(current_handle) == _windows_handle_identity(
+                getattr(msvcrt, "get_osfhandle")(fd)
+            )
+        finally:
+            _windows_close_handle(current_handle)
+    except OSError:
+        return False
+
+
+def _open_secure_file_at(
+    directory: _SecureDirectory,
+    name: str,
+    flags: int,
+    mode: int = 0o600,
+) -> int:
+    if not name or Path(name).name != name or "/" in name or "\\" in name:
+        raise OSError("lock operations require one child basename")
+    if os.name != "nt":
+        actual_flags = flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(name, actual_flags, mode, dir_fd=directory.fd)
+    else:
+        access = 0x80000000  # GENERIC_READ
+        if flags & os.O_RDWR:
+            access = 0xC0000000  # GENERIC_READ | GENERIC_WRITE
+        elif flags & os.O_WRONLY:
+            access = 0x40000000  # GENERIC_WRITE
+        creation = 4 if flags & os.O_CREAT else 3  # OPEN_ALWAYS / OPEN_EXISTING
+        handle = _windows_open_path(
+            directory.path / name,
+            directory=False,
+            access=access,
+            creation=creation,
+        )
+        try:
+            if not _windows_child_is_in_directory(directory, handle):
+                raise OSError("Windows runtime file escaped its retained directory")
+            fd = getattr(msvcrt, "open_osfhandle")(handle, flags | getattr(os, "O_BINARY", 0))
+        except BaseException:
+            _windows_close_handle(handle)
+            raise
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
+        raise OSError("lock path is not a regular file")
+    return fd
+
+
+def _open_owned_runtime_lock_file(directory: _SecureDirectory, name: str) -> int:
+    """Open one persistent owner-only runtime lock without replacing it."""
+    created = False
+    if os.name != "nt":
+        try:
+            fd = _open_secure_file_at(directory, name, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            fd = _open_secure_file_at(directory, name, os.O_RDWR, 0o600)
+        try:
+            if created:
+                os.fchmod(fd, 0o600)
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise OSError("runtime lock file is not owner-only")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+    return _open_secure_file_at(directory, name, os.O_RDWR | os.O_CREAT, 0o600)
 
 
 @dataclass
@@ -247,7 +979,14 @@ class VaultMutationCoordinator:
                 yield
             finally:
                 hold_ms = round((time.monotonic() - acquired_at) * 1000, 2)
-                _LAST_MUTATION_TIMING.set({"wait_ms": wait_ms, "hold_ms": hold_ms})
+                _LAST_MUTATION_TIMING.set(
+                    {
+                        "wait_ms": wait_ms,
+                        "hold_ms": hold_ms,
+                        "operation": _safe_label(operation, fallback="unknown"),
+                        "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+                    }
+                )
                 with state.metadata_guard:
                     already_warned = state.long_warning_emitted
                     state.request_id = None
@@ -494,17 +1233,36 @@ class VaultMutationCoordinator:
         )
 
 
-def _try_os_lock(handle: BinaryIO) -> bool:
+def _try_os_lock(
+    handle: BinaryIO,
+    *,
+    _windows: bool = os.name == "nt",
+    _locking: Callable[[int, int, int], Any] | None = (
+        getattr(msvcrt, "locking", None) if os.name == "nt" else None
+    ),
+    _flock: Callable[[int, int], Any] | None = (
+        None if os.name == "nt" else fcntl.flock
+    ),
+    _busy_errnos: frozenset[int] = _BUSY_ERRNOS,
+    _lock_nonblocking: int | None = (
+        getattr(msvcrt, "LK_NBLCK", None) if os.name == "nt" else None
+    ),
+    _lock_exclusive_nonblocking: int | None = (
+        None if os.name == "nt" else fcntl.LOCK_EX | fcntl.LOCK_NB
+    ),
+) -> bool:
     try:
-        if os.name == "nt":
+        if _windows:
+            assert _locking is not None and _lock_nonblocking is not None
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            _locking(handle.fileno(), _lock_nonblocking, 1)
         else:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert _flock is not None and _lock_exclusive_nonblocking is not None
+            _flock(handle.fileno(), _lock_exclusive_nonblocking)
     except BlockingIOError:
         return False
     except OSError as exc:
-        if exc.errno in _BUSY_ERRNOS:
+        if exc.errno in _busy_errnos:
             return False
         raise
     return True
@@ -523,12 +1281,28 @@ def _acquire_os_lock_until(
         time.sleep(min(poll_interval_seconds, remaining))
 
 
-def _release_os_lock(handle: BinaryIO) -> None:
-    if os.name == "nt":
+def _release_os_lock(
+    handle: BinaryIO,
+    *,
+    _windows: bool = os.name == "nt",
+    _locking: Callable[[int, int, int], Any] | None = (
+        getattr(msvcrt, "locking", None) if os.name == "nt" else None
+    ),
+    _flock: Callable[[int, int], Any] | None = (
+        None if os.name == "nt" else fcntl.flock
+    ),
+    _lock_unlock: int | None = (
+        getattr(msvcrt, "LK_UNLCK", None) if os.name == "nt" else None
+    ),
+    _lock_unlock_posix: int | None = (None if os.name == "nt" else fcntl.LOCK_UN),
+) -> None:
+    if _windows:
+        assert _locking is not None and _lock_unlock is not None
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        _locking(handle.fileno(), _lock_unlock, 1)
     else:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        assert _flock is not None and _lock_unlock_posix is not None
+        _flock(handle.fileno(), _lock_unlock_posix)
 
 
 def _safe_label(value: object, *, fallback: str) -> str:
@@ -598,8 +1372,8 @@ def _read_holder_metadata(path: Path) -> dict[str, object] | None:
 def _holder_snapshot(
     holder: dict[str, object], *, verified: bool
 ) -> dict[str, object]:
-    acquired_at = float(holder["acquired_at"])
-    long_holder_seconds = float(holder["long_holder_seconds"])
+    acquired_at = float(cast(int | float, holder["acquired_at"]))
+    long_holder_seconds = float(cast(int | float, holder["long_holder_seconds"]))
     age = max(0.0, time.time() - acquired_at)
     return {
         "state": "held",
@@ -665,7 +1439,10 @@ def active_mutation_snapshot() -> dict[str, object]:
     ]
     if not held:
         return {"state": "free"}
-    return max(held, key=lambda item: float(item["age_seconds"]))
+    return max(
+        held,
+        key=lambda item: float(cast(int | float, item["age_seconds"])),
+    )
 
 
 def dynamic_retry_after_ms(snapshot: dict[str, object] | None) -> int:
@@ -676,7 +1453,7 @@ def dynamic_retry_after_ms(snapshot: dict[str, object] | None) -> int:
     """
     if not snapshot or snapshot.get("state") != "held":
         return 750
-    age_seconds = float(snapshot.get("age_seconds") or 0.0)
+    age_seconds = float(cast(int | float, snapshot.get("age_seconds") or 0.0))
     retry_after_ms = min(15000, max(750, int(age_seconds * 500)))
     if snapshot.get("overdue"):
         retry_after_ms = max(retry_after_ms, 5000)

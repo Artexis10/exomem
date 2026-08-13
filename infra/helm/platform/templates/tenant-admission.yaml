@@ -59,6 +59,8 @@ spec:
         'exomem.io/pvc-name' in namespaceObject.metadata.annotations &&
         'exomem.io/credentials-secret-name' in namespaceObject.metadata.annotations &&
         'exomem.io/init-request-configmap-name' in namespaceObject.metadata.annotations &&
+        'exomem.io/records-reader-version' in namespaceObject.metadata.annotations &&
+        'exomem.io/lifecycle-actions-enabled' in namespaceObject.metadata.annotations &&
         has(object.metadata.labels) &&
         'exomem.io/cell' in object.metadata.labels &&
         object.metadata.labels['exomem.io/cell'] == namespaceObject.metadata.annotations['exomem.io/resource-name'] &&
@@ -205,7 +207,7 @@ spec:
         (
         !has(object.spec.containers[0].command) &&
         object.spec.containers[0].args == ['--transport', 'http', '--port', '8765'] &&
-        size(object.spec.containers[0].env) == 22 &&
+        size(object.spec.containers[0].env) == 24 &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_CELL' && has(env.value) && env.value == '1' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
@@ -236,6 +238,12 @@ spec:
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_WORKER_POLICY_DIGEST' && has(env.value) &&
           env.value == namespaceObject.metadata.annotations['exomem.io/worker-policy-digest'] && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_RECORDS_READER_VERSION' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/records-reader-version'] && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/lifecycle-actions-enabled'] && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_STORAGE_LIMIT_BYTES' && has(env.value) && env.value == '5368709120' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,

@@ -52,7 +52,7 @@ The cell SHALL use invariant absolute vault/state/log paths, no symlink componen
 
 Provision SHALL NOT create a route or return final success until the bound PV `volumeHandle` and location are durably recorded and the HCloud tenant/cell/operation/fence labels are independently verified. Replay after a crash in that interval SHALL adopt the original volume.
 
-Before either the routine lifecycle driver or the dedicated volume-registration driver performs a PROVISION effect, the worker SHALL revalidate the signed live receipt and fresh local observation and SHALL create or find the exact active reservation for the claimed internal operation, immutable tenant/cell/resource/class/provider-operation/fence identity, and current claim. Every observed active reservation SHALL appear in exactly its reserved USER or RECOVERY class before idempotent return or limit evaluation. Namespace creation and initial Helm installation SHALL independently require that exact active reservation. Reservation release SHALL occur only in the same fenced transaction as final provider-proved DISCARD or DESTROY completion; pending, failure, retry exhaustion, claim expiry, and provision completion SHALL retain it. Every proof-valid destructive completion SHALL also write immutable history under the capacity-ledger lock even when no active reservation exists: DISCARD fences its authenticated tenant/cell and DESTROY fences its authenticated tenant. An equal-or-newer destructive fence SHALL block admission, while a genuinely later PROVISION fence remains eligible.
+Before either the routine lifecycle driver or the dedicated volume-registration driver performs a PROVISION effect, the worker SHALL revalidate the signed live receipt and fresh local observation and SHALL create or find the exact active reservation for the claimed internal operation, immutable tenant/cell/resource/class/provider-operation/fence identity, and current claim. Every observed active reservation SHALL appear in exactly its reserved USER or RECOVERY class before idempotent return or limit evaluation. Namespace creation and initial Helm installation SHALL independently require that exact active reservation. Reservation release SHALL occur only in the same fenced transaction as final provider-proved DISCARD or DESTROY completion; pending, failure, retry exhaustion, claim expiry, and provision completion SHALL retain it. Older reservations SHALL release normally. An equal-fence release SHALL be allowed only for DISCARD after the final three-true provider proof selects the exact authenticated tenant/cell active reservation, validates its deterministic `cell_resource_name(cell)`, and proves `reserving_provider_operation_id` equals the DISCARD operation's external operation ID; this proves cleanup of the same logical candidate. Equal-fence DESTROY, equal-fence DISCARD for another provider operation, and any newer reservation SHALL roll back completion without release or destructive history. Every proof-valid destructive completion SHALL also write immutable history under the capacity-ledger lock even when no active reservation exists: DISCARD fences its authenticated tenant/cell and DESTROY fences its authenticated tenant. An equal-or-newer destructive fence SHALL block admission, while a genuinely later PROVISION fence remains eligible.
 
 #### Scenario: Fresh cell initializes once
 - **WHEN** a new provision action binds an empty PVC
@@ -71,7 +71,7 @@ Before either the routine lifecycle driver or the dedicated volume-registration 
 - **THEN** the volume worker revalidates live evidence, finds the same exact active reservation idempotently, and only then resumes its driver effect
 
 #### Scenario: Final destruction releases reserved capacity
-- **WHEN** DISCARD proves exactly compute/storage/key destruction or DESTROY additionally proves all tenant resources destroyed at a strictly newer fence
+- **WHEN** DISCARD proves exactly compute/storage/key destruction at a newer fence or the equal-fence reservation of the same provider operation and deterministic candidate, or DESTROY additionally proves all tenant resources destroyed at a strictly newer fence
 - **THEN** operation completion, the targeted reservation release, and immutable destructive history commit atomically while the historical reservation row remains
 
 #### Scenario: Destruction completes before admission
@@ -79,7 +79,7 @@ Before either the routine lifecycle driver or the dedicated volume-registration 
 - **THEN** immutable destructive history blocks that admission, while pending, failed, malformed-proof, or rolled-back destruction leaves no such fence
 
 #### Scenario: Reservation wins the equal-fence race
-- **WHEN** an equal-fence PROVISION reservation commits before DISCARD or DESTROY completes
+- **WHEN** an equal-fence PROVISION reservation commits before DESTROY, or before DISCARD for a different provider operation, completes
 - **THEN** destructive completion rolls back rather than releasing or fencing the equal-or-newer reservation
 
 ### Requirement: Provisioner health proves the exact runtime admission contract

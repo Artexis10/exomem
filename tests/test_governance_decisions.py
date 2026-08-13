@@ -71,7 +71,7 @@ def _policy(rules=(), grants=(), scopes=()):
 def _change_contract(name: str) -> str:
     return (
         Path(__file__).resolve().parents[1]
-        / "openspec/changes/add-default-deny-scope-cap"
+        / "openspec/changes/archive/2026-08-13-add-default-deny-scope-cap"
         / name
     ).read_text(encoding="utf-8")
 

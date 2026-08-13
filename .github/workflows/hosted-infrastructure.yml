@@ -32,6 +32,22 @@ on:
         default: expand
         type: choice
         options: [expand, contract]
+      deployment_lock_pair:
+        description: Repository path to the reviewed immutable deployment lock pair
+        required: true
+        default: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json
+        type: string
+      deployment_lock_evidence:
+        description: Repository path to the reviewed immutable lock evidence directory
+        required: true
+        default: infra/contracts/exomem-hosted-deployment-lock-evidence-v2
+        type: string
+      runtime_selection:
+        description: Runtime unit selected from the reviewed deployment lock
+        required: true
+        default: active
+        type: choice
+        options: [active, rollback]
       external_blackbox:
         description: Run the deployed availability, backup-freshness, and scheduler probes
         required: false
@@ -229,19 +245,25 @@ jobs:
       - name: Derive and prove both published images from the reviewed phase lock
         env:
           GH_TOKEN: ${{ github.token }}
-          DEPLOYMENT_LOCK_PAIR: infra/contracts/exomem-hosted-deployment-lock-pair-v2.json
+          DEPLOYMENT_LOCK_PAIR: ${{ inputs.deployment_lock_pair }}
+          DEPLOYMENT_LOCK_EVIDENCE: ${{ inputs.deployment_lock_evidence }}
           DEPLOYMENT_PHASE: ${{ inputs.deployment_phase }}
+          RUNTIME_SELECTION: ${{ inputs.runtime_selection }}
         run: |
           test -f "$DEPLOYMENT_LOCK_PAIR" || { echo "canonical deployment lock pair is not committed" >&2; exit 2; }
+          test -d "$DEPLOYMENT_LOCK_EVIDENCE" || { echo "canonical deployment lock evidence is not committed" >&2; exit 2; }
           uv run --frozen python infra/scripts/prepare_hosted_release.py \
             --lock-pair "$DEPLOYMENT_LOCK_PAIR" \
             --phase "$DEPLOYMENT_PHASE" \
+            --runtime-selection "$RUNTIME_SELECTION" \
             --control-hostname control.example.invalid \
             --transfer-hostname transfer.example.invalid \
             --values-output /tmp/exomem-hosted-release-values.json
           PROVISIONER_IMAGE="$(python3 -c 'import json; print(json.load(open("/tmp/exomem-hosted-release-values.json"))["provisioner"]["deploymentLockJson"] )' | python3 -c 'import json, sys; print(json.load(sys.stdin)["components"]["provisioner"]["image"])')"
           uv run --frozen python infra/scripts/verify_hosted_release.py \
             --phase "$DEPLOYMENT_PHASE" \
+            --lock-pair "$DEPLOYMENT_LOCK_PAIR" \
+            --lock-evidence "$DEPLOYMENT_LOCK_EVIDENCE" \
             --repository .
           uv run --frozen python infra/scripts/verify_provisioner_image.py \
             --image "$PROVISIONER_IMAGE" \

@@ -385,8 +385,12 @@ def test_openai_packet_rejects_missing_boolean_annotation(
     root = copy_hosted_tree(tmp_path / "repo")
     original_manifest = hosted_plugins.compatibility_manifest
 
-    def incomplete_annotations(repo_root: Path | None = None) -> dict[str, object]:
-        manifest = json.loads(json.dumps(original_manifest(repo_root)))
+    def incomplete_annotations(
+        repo_root: Path | None = None,
+        *,
+        candidate: str = hosted_plugins.DEFAULT_CANDIDATE,
+    ) -> dict[str, object]:
+        manifest = json.loads(json.dumps(original_manifest(repo_root, candidate=candidate)))
         del manifest["agent_contract"]["commands"][0]["mcp_tool"]["annotations"]["idempotentHint"]
         return manifest
 
@@ -1800,8 +1804,12 @@ def test_openai_packet_rejects_sale_language_in_tool_contract(
     root = copy_hosted_tree(tmp_path / "repo")
     original_manifest = hosted_plugins.compatibility_manifest
 
-    def sale_manifest(repo_root: Path | None = None) -> dict[str, object]:
-        manifest = json.loads(json.dumps(original_manifest(repo_root)))
+    def sale_manifest(
+        repo_root: Path | None = None,
+        *,
+        candidate: str = hosted_plugins.DEFAULT_CANDIDATE,
+    ) -> dict[str, object]:
+        manifest = json.loads(json.dumps(original_manifest(repo_root, candidate=candidate)))
         manifest["agent_contract"]["commands"][0]["mcp_tool"]["description"] = "Buy Pro access now."
         return manifest
 
@@ -1819,8 +1827,12 @@ def test_directory_packet_rejects_live_credential_schema_literals(
     root = copy_hosted_tree(tmp_path / "repo")
     original_manifest = hosted_plugins.compatibility_manifest
 
-    def credential_manifest(repo_root: Path | None = None) -> dict[str, object]:
-        manifest = json.loads(json.dumps(original_manifest(repo_root)))
+    def credential_manifest(
+        repo_root: Path | None = None,
+        *,
+        candidate: str = hosted_plugins.DEFAULT_CANDIDATE,
+    ) -> dict[str, object]:
+        manifest = json.loads(json.dumps(original_manifest(repo_root, candidate=candidate)))
         schema = manifest["agent_contract"]["commands"][0]["mcp_tool"]["inputSchema"]
         schema["properties"]["api_token"] = {
             "type": "string",

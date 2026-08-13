@@ -8,6 +8,7 @@ without it the invocation path is the legacy standalone path.
 from __future__ import annotations
 
 import atexit
+import ctypes
 import hashlib
 import json
 import logging
@@ -15,7 +16,9 @@ import math
 import os
 import pickle
 import re
+import secrets
 import sqlite3
+import stat
 import threading
 import time
 import urllib.error
@@ -39,6 +42,7 @@ from .mutation_lock import (
 from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
+    ResponseDetail,
     committed_terminal,
     needs_review_terminal,
     project_terminal,
@@ -101,18 +105,27 @@ _COMMITTED_FAILURE_OUTCOME_KEYS = frozenset(
         "omitted_target_count",
     }
 )
+_RECEIPT_RESULT_SUMMARY_MAX_DEPTH = 8
+_RECEIPT_RESULT_SUMMARY_MAX_ITEMS = 128
 _RETRY_IDEMPOTENCY_CLAIM = object()
-# A `pending` row whose owning process is dead becomes `abandoned` rather
-# than blocking every future retry forever; this is the pause before an
-# identical retry is allowed to execute fresh (not the same as the general
-# `expires_after` a caller passes, which governs `completed`/
-# `committed_failure` rows and may be None).
+# Retained for compatibility with callers that advance their injected clocks
+# before asserting a dead attempt remains fail-closed.
 _IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS = 60.0
 # A `pending` row written before this feature shipped has no `owner` to
 # probe; it is honored under the pre-existing any-pending-blocks-forever
-# rule for this long before it, too, ages into `abandoned`.
+# rule for this long before it is classified as an unknown outcome.
 _IDEMPOTENCY_LEGACY_OWNER_GRACE_SECONDS = 600.0
+_OUTCOME_UNKNOWN_TERMINAL = ("exomem.outcome-unknown", 1)
+_OUTCOME_UNKNOWN_PAYLOAD = pickle.dumps(_OUTCOME_UNKNOWN_TERMINAL)
 _WINDOWS_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+_WINDOWS_SECRET_ENVELOPE_MAGIC = b"EXID"
+_WINDOWS_SECRET_ENVELOPE_VERSION = 1
+_WINDOWS_SECRET_ENVELOPE_MAX_BYTES = 4096
+_WINDOWS_SECRET_ENVELOPE_HEADER_BYTES = 10
+_WINDOWS_SECRET_ENVELOPE_MAX_CIPHERTEXT = (
+    _WINDOWS_SECRET_ENVELOPE_MAX_BYTES - _WINDOWS_SECRET_ENVELOPE_HEADER_BYTES
+)
+_WINDOWS_SECRET_ENTROPY_DOMAIN = b"exomem-graph-commit-receipt-dpapi:v1\0"
 logger = logging.getLogger(__name__)
 _mutation_logger = logging.getLogger("exomem.calls")
 _ACTIVE_WRITE_FENCE: ContextVar[tuple[Any, int] | None] = ContextVar(
@@ -124,9 +137,33 @@ _ACTIVE_MUTATION_TRACE: ContextVar[tuple[str, str, str] | None] = ContextVar(
 _ACTIVE_MUTATION_COMMITTED: ContextVar[bool] = ContextVar(
     "exomem_active_mutation_committed", default=False
 )
+_ACTIVE_MUTATION_PROTOCOL: ContextVar[tuple[str | None, str | None] | None] = ContextVar(
+    "exomem_active_mutation_protocol", default=None
+)
 _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
     "exomem_active_lease_manager", default=None
 )
+_ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = ContextVar(
+    "exomem_active_direct_mutation_guards", default=()
+)
+
+
+def _direct_mutation_boundary(
+    vault_root: os.PathLike[str] | str, state_root: Path
+) -> tuple[str, Path]:
+    root = Path(vault_root) if isinstance(vault_root, str) and Path(vault_root).is_absolute() else vault_root
+    return (
+        canonical_mutation_identity(root),
+        state_root.expanduser().resolve(strict=False),
+    )
+
+
+def _windows_library(ctypes_module: Any, name: str) -> Any:
+    return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)
+
+
+def _windows_last_error(ctypes_module: Any) -> int:
+    return int(getattr(ctypes_module, "get_last_error")())
 
 
 def _log_mutation_event(phase: str, *, level: int = logging.INFO, **fields: Any) -> None:
@@ -158,6 +195,39 @@ def mark_active_mutation_committed() -> None:
         _ACTIVE_MUTATION_COMMITTED.set(True)
 
 
+@contextmanager
+def active_mutation_claim_context(
+    *, claim_token: str | None, command_digest: str | None
+) -> Iterator[None]:
+    """Bind opaque per-claim protocol identity for canonical helper calls.
+
+    The idempotency state-machine lane supplies the durable claim token.  The
+    existing invocation path sets only its already-computed command digest, so
+    existing callers retain their standalone random checkpoint identity.
+    """
+    if claim_token is not None and re.fullmatch(r"[0-9a-f]{24}", claim_token) is None:
+        raise ValueError("claim token must be lowercase 24-hex")
+    if command_digest is not None and re.fullmatch(r"[0-9a-f]{64}", command_digest) is None:
+        raise ValueError("command digest must be lowercase SHA-256")
+    token = _ACTIVE_MUTATION_PROTOCOL.set((claim_token, command_digest))
+    try:
+        yield
+    finally:
+        _ACTIVE_MUTATION_PROTOCOL.reset(token)
+
+
+def active_mutation_claim_token() -> str | None:
+    """Return the current opaque attempt claim token, if the caller has one."""
+    active = _ACTIVE_MUTATION_PROTOCOL.get()
+    return active[0] if active is not None else None
+
+
+def active_mutation_command_digest() -> str | None:
+    """Return the current normalized command digest without exposing arguments."""
+    active = _ACTIVE_MUTATION_PROTOCOL.get()
+    return active[1] if active is not None else None
+
+
 class _PostCommitOutcomeUncertain(OpError):
     """Sanitized terminal state for an unexpected exception after canonical commit."""
 
@@ -170,6 +240,129 @@ class _PostCommitOutcomeUncertain(OpError):
             "Do not rerun with a new identity; reconcile and retry only with the same identity.",
             details={"status": "committed", "committed": True},
         )
+
+
+@dataclass
+class _ExecutionAttempt:
+    """One bounded owner claim for a single canonical leaf execution."""
+
+    attempt_id: str
+    commit_token: str
+    commit_secret: bytes
+    handle: Any | None
+
+
+class _WindowsDPAPISecretProtector:
+    """Current-user DPAPI envelope for one local receipt-authentication key."""
+
+    provider = 1
+
+    def _crypt(self, secret: bytes, entropy: bytes, *, protect: bool) -> bytes:
+        if protect and len(secret) != 32:
+            raise ValueError("idempotency commit secret must be 32 bytes")
+        from ctypes import wintypes
+
+        class _DataBlob(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+        def blob(value: bytes) -> tuple[_DataBlob, Any]:
+            buffer = ctypes.create_string_buffer(value)
+            return _DataBlob(len(value), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte))), buffer
+
+        source, _source_buffer = blob(secret)
+        entropy_blob, _entropy_buffer = blob(entropy)
+        output = _DataBlob()
+        crypt32 = _windows_library(ctypes, "crypt32")
+        if protect:
+            routine = crypt32.CryptProtectData
+            routine.argtypes = [
+                ctypes.POINTER(_DataBlob), wintypes.LPCWSTR, ctypes.POINTER(_DataBlob),
+                wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(_DataBlob),
+            ]
+            ok = routine(
+                ctypes.byref(source), None, ctypes.byref(entropy_blob), None, None, 0x1,
+                ctypes.byref(output),
+            )
+        else:
+            routine = crypt32.CryptUnprotectData
+            description = wintypes.LPWSTR()
+            routine.argtypes = [
+                ctypes.POINTER(_DataBlob), ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(_DataBlob),
+                wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(_DataBlob),
+            ]
+            ok = routine(
+                ctypes.byref(source), ctypes.byref(description), ctypes.byref(entropy_blob), None,
+                None, 0x1, ctypes.byref(output),
+            )
+            if description:
+                _windows_library(ctypes, "kernel32").LocalFree(description)
+        if not ok:
+            raise OSError(_windows_last_error(ctypes), "Windows DPAPI operation failed")
+        try:
+            if output.cbData > _WINDOWS_SECRET_ENVELOPE_MAX_CIPHERTEXT:
+                raise ValueError("Windows DPAPI output exceeds the idempotency envelope limit")
+            return ctypes.string_at(output.pbData, output.cbData)
+        finally:
+            if not protect and output.pbData and output.cbData:
+                try:
+                    ctypes.memset(output.pbData, 0, output.cbData)
+                except Exception:  # noqa: BLE001 - native cleanup must not mask DPAPI failure
+                    pass
+            if output.pbData:
+                _windows_library(ctypes, "kernel32").LocalFree(output.pbData)
+
+    def protect(self, secret: bytes, entropy: bytes) -> bytes:
+        return self._crypt(secret, entropy, protect=True)
+
+    def unprotect(self, ciphertext: bytes, entropy: bytes) -> bytes:
+        result = self._crypt(ciphertext, entropy, protect=False)
+        if len(result) != 32:
+            raise ValueError("Windows DPAPI idempotency secret has invalid length")
+        return result
+
+
+@dataclass(frozen=True)
+class _CanonicalResume:
+    """A missing SQLite terminal backed by exact external commit evidence."""
+
+    result: Any
+    evidence: Any
+
+
+@dataclass(frozen=True)
+class _CanonicalCommittedFailure:
+    """Canonical graph handoff retained before its stable public failure."""
+
+    result: Any
+    payload: dict[str, Any]
+
+
+def _new_attempt() -> _ExecutionAttempt:
+    # UUID hex is portable lowercase hexadecimal; trimming preserves the
+    # protocol's opaque 96-bit identifier shape.
+    attempt_id = uuid.uuid4().hex[:24]
+    return _ExecutionAttempt(
+        attempt_id=attempt_id,
+        commit_token=uuid.uuid4().hex[:24],
+        commit_secret=secrets.token_bytes(32),
+        handle=None,
+    )
+
+
+def _call_after_canonical(
+    callback: Any, result: Any, attempt: _ExecutionAttempt, canonical_disposition: str
+) -> Any:
+    """Support the pre-redesign one-argument hook during rolling upgrades."""
+    try:
+        return callback(result, attempt, canonical_disposition)
+    except TypeError as error:
+        try:
+            return callback(result, attempt)
+        except TypeError:
+            try:
+                return callback(result)
+            except TypeError:
+                raise error from None
 
 
 def _invalid_committed_failure_payload() -> ValueError:
@@ -248,6 +441,97 @@ def _serialize_committed_failure_payload(payload: Any) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _receipt_result_summary(value: Any, *, depth: int = 0) -> dict[str, Any]:
+    """Build a bounded, content-free canonical summary of an ordinary result."""
+    if value is None:
+        return {"type": "none"}
+    if type(value) is bool:
+        return {"type": "bool", "value": value}
+    if type(value) is int:
+        magnitude = abs(value)
+        width = max(1, (magnitude.bit_length() + 7) // 8)
+        return {
+            "type": "int",
+            "negative": value < 0,
+            "bits": magnitude.bit_length(),
+            "sha256": hashlib.sha256(magnitude.to_bytes(width, "big")).hexdigest(),
+        }
+    if type(value) is float:
+        if math.isnan(value):
+            encoded = b"nan"
+        elif math.isinf(value):
+            encoded = b"-inf" if value < 0 else b"inf"
+        else:
+            encoded = value.hex().encode("ascii")
+        return {"type": "float", "sha256": hashlib.sha256(encoded).hexdigest()}
+    if type(value) is str:
+        encoded = value.encode("utf-8")
+        return {
+            "type": "str",
+            "bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        }
+    if type(value) is bytes:
+        return {
+            "type": "bytes",
+            "bytes": len(value),
+            "sha256": hashlib.sha256(value).hexdigest(),
+        }
+    if depth >= _RECEIPT_RESULT_SUMMARY_MAX_DEPTH:
+        return {"type": "truncated"}
+    if isinstance(value, Mapping):
+        try:
+            size = len(value)
+        except Exception:  # noqa: BLE001 - an arbitrary mapping may not report a length
+            size = None
+        if size is not None and size > _RECEIPT_RESULT_SUMMARY_MAX_ITEMS:
+            return {"type": "mapping", "size": size, "truncated": True}
+        try:
+            items = []
+            for index, (key, item) in enumerate(value.items()):
+                if index >= _RECEIPT_RESULT_SUMMARY_MAX_ITEMS:
+                    return {"type": "mapping", "truncated": True}
+                items.append(
+                    [
+                        _receipt_result_summary(key, depth=depth + 1),
+                        _receipt_result_summary(item, depth=depth + 1),
+                    ]
+                )
+            items.sort(
+                key=lambda item: json.dumps(
+                    item[0], allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+            )
+        except Exception:  # noqa: BLE001 - an arbitrary mapping is summarized closed
+            return {"type": "opaque"}
+        return {
+            "type": "mapping",
+            "items": items,
+            "truncated": False,
+        }
+    if type(value) in {list, tuple}:
+        sequence_items = [
+            _receipt_result_summary(item, depth=depth + 1)
+            for item in value[:_RECEIPT_RESULT_SUMMARY_MAX_ITEMS]
+        ]
+        return {
+            "type": "sequence",
+            "items": sequence_items,
+            "truncated": len(value) > len(sequence_items),
+        }
+    return {"type": "opaque"}
+
+
+def _receipt_result_sha256(result: Any) -> str:
+    """Hash a deterministic bounded summary without retaining leaf content."""
+    summary = _receipt_result_summary(result)
+    return hashlib.sha256(
+        json.dumps(
+            summary, allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -462,7 +746,9 @@ class LeaseCoordinatorClient:
         )
 
     def release(self, fencing_token: int) -> LeaseRecord:
-        return self.release_holder(self.config.replica_id, fencing_token)
+        replica_id = self.config.replica_id
+        assert replica_id is not None
+        return self.release_holder(replica_id, fencing_token)
 
     def release_holder(self, holder_replica_id: str, fencing_token: int) -> LeaseRecord:
         """Release on behalf of ANY holder, not just this client's own
@@ -518,8 +804,8 @@ def _mutation_outcome_unknown_error() -> OpError:
     return OpError(
         "MUTATION_OUTCOME_UNKNOWN",
         "the executing process terminated before recording this mutation's outcome",
-        "Verify whether the mutation landed before retrying; an identical retry executes "
-        "fresh once the abandonment grace period has passed.",
+        "Verify whether the mutation landed and reconcile before submitting any new mutation; "
+        "retries with this identity will remain fail-closed.",
         details={"status": "uncertain", "committed": None, "abandoned": True},
     )
 
@@ -542,8 +828,11 @@ def _acquire_own_owner_lock(state_dir: Path, owner: str) -> Any | None:
     cleans it up itself."""
     path = _owner_lock_path(state_dir, owner)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        existed = path.exists()
         handle = path.open("a+b")
+        if not existed and os.name != "nt":
+            os.chmod(path, 0o600)
     except OSError:
         return None
     try:
@@ -602,6 +891,7 @@ class IdempotencyStore:
         wait_seconds: float = _IDEMPOTENCY_WAIT_SECONDS,
         poll_interval_seconds: float = _IDEMPOTENCY_POLL_INTERVAL_SECONDS,
         after_terminal_persisted=None,  # noqa: ANN001
+        secret_protector=None,  # noqa: ANN001
     ):
         if wait_seconds < 0:
             raise ValueError("idempotency wait must be non-negative")
@@ -614,13 +904,51 @@ class IdempotencyStore:
         self.wait_seconds = wait_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.after_terminal_persisted = after_terminal_persisted
+        self._runtime_state_error: RuntimeError | None = None
+        self._secret_protector = (
+            secret_protector
+            if secret_protector is not None
+            else _WindowsDPAPISecretProtector() if os.name == "nt" else None
+        )
         self._condition = threading.Condition()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.owner_id = _generate_owner_id()
+        self._attempts: dict[str, _ExecutionAttempt] = {}
+        self.owner_id: str | None = None
+        state_dir_existed = path.parent.exists()
+        owners_dir = _owner_lock_path(path.parent, "bootstrap").parent
+        owners_dir_existed = owners_dir.exists()
+        private_paths = (path, path.with_name(f"{path.name}-wal"), path.with_name(f"{path.name}-shm"))
+        preexisting_private_paths = {item for item in private_paths if item.exists()}
+        if os.name != "nt":
+            path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            owners_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+            if not state_dir_existed:
+                os.chmod(path.parent, 0o700)
+            if not owners_dir_existed:
+                os.chmod(owners_dir, 0o700)
+        else:
+            from .mutation_lock import prepare_windows_idempotency_runtime_paths
+
+            prepare_windows_idempotency_runtime_paths(path.parent, owners_dir)
+        try:
+            self._harden_legacy_runtime_paths()
+            self._validate_existing_runtime_paths()
+        except RuntimeError as error:
+            # Construction is also used by read/graph readiness paths. Keep
+            # the unsafe runtime root inert there; every SQLite/claim use
+            # below still fails closed before untrusted state is opened.
+            self._runtime_state_error = error
+            self.owner_id = None
+            self._owner_lock_handle = None
+            return
+        # Kept only to recognize rows written by the preceding store-lifetime
+        # owner protocol. New executions use an attempt lock below and release
+        # it on every exit.
+        owner_id = _generate_owner_id()
+        self.owner_id = owner_id
         # Held for this store's lifetime (process lifetime, in practice —
         # stores are cached singletons keyed by vault+replica); never
         # explicitly released. See `_probe_owner_liveness`.
-        self._owner_lock_handle = _acquire_own_owner_lock(self.state_dir, self.owner_id)
+        self._owner_lock_handle = _acquire_own_owner_lock(self.state_dir, owner_id)
         if self._owner_lock_handle is None:
             # Fail closed on the REGISTRATION side too: advertising an owner id
             # whose lock file could not be created/held would let any peer
@@ -642,11 +970,193 @@ class IdempotencyStore:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(mutations)").fetchall()}
             if "owner" not in columns:
                 conn.execute("ALTER TABLE mutations ADD COLUMN owner TEXT")
+            if "attempt_id" not in columns:
+                conn.execute("ALTER TABLE mutations ADD COLUMN attempt_id TEXT")
+            if "commit_token" not in columns:
+                conn.execute("ALTER TABLE mutations ADD COLUMN commit_token TEXT")
+            if "commit_secret" not in columns:
+                conn.execute("ALTER TABLE mutations ADD COLUMN commit_secret BLOB")
+        if not path.exists():  # pragma: no cover - sqlite always creates the database
+            raise RuntimeError("idempotency runtime database was not created")
+        if os.name != "nt":
+            for item in private_paths:
+                if item.exists() and item not in preexisting_private_paths:
+                    os.chmod(item, 0o600)
+        self._ensure_private_runtime_state()
+
+    def _ensure_private_runtime_state(self) -> None:
+        """Secrets require a local owner-only state directory; never repair one."""
+        if os.name == "nt":
+            from .mutation_lock import validate_windows_idempotency_runtime_paths
+
+            validate_windows_idempotency_runtime_paths(
+                self.state_dir,
+                _owner_lock_path(self.state_dir, "bootstrap").parent,
+                (
+                    self.path,
+                    self.path.with_name(f"{self.path.name}-wal"),
+                    self.path.with_name(f"{self.path.name}-shm"),
+                ),
+            )
+            return
+        mode = stat.S_IMODE(self.state_dir.stat().st_mode)
+        if mode & 0o077:
+            raise RuntimeError("idempotency runtime state directory is not owner-only")
+        owners_dir = _owner_lock_path(self.state_dir, "bootstrap").parent
+        if stat.S_IMODE(owners_dir.stat().st_mode) & 0o077:
+            raise RuntimeError("idempotency owner directory is not owner-only")
+        for owner_lock in owners_dir.glob("*.lock"):
+            if stat.S_IMODE(owner_lock.stat().st_mode) & 0o077:
+                raise RuntimeError("idempotency owner lock is not owner-only")
+        for item in (
+            self.path,
+            self.path.with_name(f"{self.path.name}-wal"),
+            self.path.with_name(f"{self.path.name}-shm"),
+        ):
+            if item.exists() and stat.S_IMODE(item.stat().st_mode) & 0o077:
+                raise RuntimeError("idempotency runtime database is not owner-only")
+
+    def _validate_existing_runtime_paths(self) -> None:
+        """Reject attacker-controlled SQLite/pickle paths before opening them."""
+        if os.name == "nt":
+            self._ensure_private_runtime_state()
+            return
+        owners_dir = _owner_lock_path(self.state_dir, "bootstrap").parent
+        paths = (
+            (self.state_dir, True),
+            (owners_dir, True),
+            (self.path, False),
+            (self.path.with_name(f"{self.path.name}-wal"), False),
+            (self.path.with_name(f"{self.path.name}-shm"), False),
+        )
+        for path, directory in paths:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode) or (
+                not stat.S_ISDIR(info.st_mode) if directory else not stat.S_ISREG(info.st_mode)
+            ):
+                raise RuntimeError("idempotency runtime state path is not a trusted regular path")
+            if stat.S_IMODE(info.st_mode) & 0o077:
+                raise RuntimeError("idempotency runtime state path is not owner-only")
+
+    def _harden_legacy_runtime_paths(self) -> None:
+        """Upgrade prior owner-owned 0755/0644 runtime artifacts before open."""
+        if os.name == "nt":
+            return
+        owners_dir = _owner_lock_path(self.state_dir, "bootstrap").parent
+        paths = (
+            (self.state_dir, True),
+            (owners_dir, True),
+            (self.path, False),
+            (self.path.with_name(f"{self.path.name}-wal"), False),
+            (self.path.with_name(f"{self.path.name}-shm"), False),
+        )
+        owner_uid = os.geteuid()
+        for path, directory in paths:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or (not stat.S_ISDIR(info.st_mode) if directory else not stat.S_ISREG(info.st_mode))
+                or info.st_uid != owner_uid
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise RuntimeError("idempotency runtime state path cannot be upgraded safely")
+            desired_mode = 0o700 if directory else 0o600
+            if stat.S_IMODE(info.st_mode) != desired_mode:
+                os.chmod(path, desired_mode)
+        for owner_lock in owners_dir.glob("*.lock"):
+            info = owner_lock.lstat()
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != owner_uid
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise RuntimeError("idempotency owner lock cannot be upgraded safely")
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                os.chmod(owner_lock, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
+        if self._runtime_state_error is not None:
+            raise self._runtime_state_error
+        if os.name == "nt":
+            self._ensure_private_runtime_state()
+        private_paths = (
+            self.path,
+            self.path.with_name(f"{self.path.name}-wal"),
+            self.path.with_name(f"{self.path.name}-shm"),
+        )
+        existed = {item for item in private_paths if item.exists()}
         conn = sqlite3.connect(self.path, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            if os.name == "nt":
+                self._ensure_private_runtime_state()
+        except BaseException:
+            conn.close()
+            raise
+        if os.name != "nt":
+            for item in private_paths:
+                if item.exists() and item not in existed:
+                    os.chmod(item, 0o600)
         return conn
+
+    def _commit_secret_entropy(self, digest: str, attempt: _ExecutionAttempt) -> bytes:
+        del digest
+        return (
+            _WINDOWS_SECRET_ENTROPY_DOMAIN
+            + attempt.attempt_id.encode("utf-8")
+            + b"\0"
+            + attempt.commit_token.encode("utf-8")
+        )
+
+    def _stored_commit_secret(self, digest: str, attempt: _ExecutionAttempt) -> bytes:
+        protector = self._secret_protector
+        if protector is None:
+            return attempt.commit_secret
+        ciphertext = protector.protect(attempt.commit_secret, self._commit_secret_entropy(digest, attempt))
+        if not isinstance(ciphertext, bytes) or not 1 <= len(ciphertext) <= _WINDOWS_SECRET_ENVELOPE_MAX_CIPHERTEXT:
+            raise RuntimeError("idempotency secret protector returned an invalid ciphertext")
+        provider = getattr(protector, "provider", None)
+        if type(provider) is not int or not 1 <= provider <= 255:
+            raise RuntimeError("idempotency secret protector has no valid provider")
+        return (
+            _WINDOWS_SECRET_ENVELOPE_MAGIC
+            + bytes((_WINDOWS_SECRET_ENVELOPE_VERSION, provider))
+            + len(ciphertext).to_bytes(4, "big")
+            + ciphertext
+        )
+
+    def _unprotected_commit_secret(self, digest: str, attempt: _ExecutionAttempt) -> bytes | None:
+        stored = attempt.commit_secret
+        protector = self._secret_protector
+        if protector is None:
+            return stored if len(stored) == 32 else None
+        if any(active is attempt for active in self._attempts.values()):
+            return stored if len(stored) == 32 else None
+        header = _WINDOWS_SECRET_ENVELOPE_HEADER_BYTES
+        if (
+            len(stored) < header
+            or len(stored) > _WINDOWS_SECRET_ENVELOPE_MAX_BYTES
+            or not stored.startswith(_WINDOWS_SECRET_ENVELOPE_MAGIC)
+            or stored[4] != _WINDOWS_SECRET_ENVELOPE_VERSION
+            or stored[5] != getattr(protector, "provider", None)
+        ):
+            return None
+        length = int.from_bytes(stored[6:10], "big")
+        ciphertext = stored[10:]
+        if length != len(ciphertext) or not 1 <= length <= _WINDOWS_SECRET_ENVELOPE_MAX_CIPHERTEXT:
+            return None
+        try:
+            secret = protector.unprotect(ciphertext, self._commit_secret_entropy(digest, attempt))
+        except Exception:  # noqa: BLE001 - unreadable local authority fails closed
+            return None
+        return secret if isinstance(secret, bytes) and len(secret) == 32 else None
 
     def run(
         self,
@@ -658,142 +1168,422 @@ class IdempotencyStore:
         on_replay=None,  # noqa: ANN001
         operation_guard=None,  # noqa: ANN001
         commit_observed=None,  # noqa: ANN001
+        after_canonical_persisted=None,  # noqa: ANN001
+        after_operation_guard=None,  # noqa: ANN001
+        resume_canonically_committed=None,  # noqa: ANN001
+        commit_evidence=None,  # noqa: ANN001
+        legacy_graph_pending_proof=None,  # noqa: ANN001
     ) -> Any:
         if not key:
             with operation_guard() if operation_guard is not None else nullcontext():
-                return operation()
+                result = operation()
+            return after_operation_guard(result) if after_operation_guard is not None else result
 
         while True:
-            disposition, stored = self._claim_or_inspect(key, digest, expires_after)
+            disposition, stored = self._claim_or_inspect(
+                key,
+                digest,
+                expires_after,
+                commit_evidence=commit_evidence,
+                legacy_graph_pending_proof=legacy_graph_pending_proof,
+            )
             if disposition == "owner":
                 break
             if disposition == "pending":
-                waited = self._wait_for_terminal(key, digest, on_replay=on_replay)
+                waited = self._wait_for_terminal(
+                    key,
+                    digest,
+                    on_replay=on_replay,
+                    commit_evidence=commit_evidence,
+                    legacy_graph_pending_proof=legacy_graph_pending_proof,
+                )
                 if waited is _RETRY_IDEMPOTENCY_CLAIM:
                     continue
-                return waited
-            if disposition == "abandoned":
+                disposition, stored = waited
+            if disposition == "canonical_resume":
+                if resume_canonically_committed is None:
+                    raise _mutation_outcome_unknown_error()
+                terminal_result = resume_canonically_committed(stored)
+                if terminal_result == _OUTCOME_UNKNOWN_TERMINAL:
+                    # A v2 receipt can prove the canonical write happened,
+                    # yet deliberately retains no cleanup target paths.  Do
+                    # not turn that signed committed-failure cut into a
+                    # fabricated success: retain the stable fail-closed
+                    # terminal for every exact replay.
+                    try:
+                        self._persist_completed_from_canonical(
+                            key, digest, terminal_result
+                        )
+                    except Exception as storage_error:
+                        raise _PostCommitOutcomeUncertain() from storage_error
+                    self._notify_waiters()
+                    self._after_terminal_persisted()
+                    raise _mutation_outcome_unknown_error()
+                if isinstance(terminal_result, _CanonicalCommittedFailure):
+                    try:
+                        self._persist_committed_failure(
+                            key, digest, terminal_result.payload
+                        )
+                    except Exception as storage_error:
+                        raise _PostCommitOutcomeUncertain() from storage_error
+                    self._notify_waiters()
+                    self._after_terminal_persisted()
+                    raise _CachedCommittedFailure(terminal_result.payload)
+                try:
+                    terminal_result = self._persist_completed_from_canonical(
+                        key, digest, terminal_result
+                    )
+                except Exception as storage_error:
+                    # The canonical row remains the exact retry anchor. Never
+                    # let a SQLite hiccup send an already committed leaf back
+                    # through the execution path.
+                    raise _PostCommitOutcomeUncertain() from storage_error
+                self._notify_waiters()
+                self._after_terminal_persisted()
+                return terminal_result
+            if disposition == "outcome_unknown":
                 raise _mutation_outcome_unknown_error()
             return self._replay(disposition, stored, on_replay)
 
+        attempt = self._attempts.get(key)
+        if attempt is None:  # pragma: no cover - defensive against an in-process map loss
+            raise self._reconciliation_error("executing mutation attempt")
         guard = operation_guard() if operation_guard is not None else nullcontext()
+        leaf_started = False
         leaf_returned = False
-        terminal_persisted = False
+        canonical_persisted = False
+        committed_failure: dict[str, Any] | None = None
+        committed_error: Exception | None = None
+        committed_handoff = False
         try:
             with guard:
-                try:
-                    result = operation()
-                except Exception as operation_error:
-                    if isinstance(operation_error, _PostCommitOutcomeUncertain):
-                        leaf_returned = True
-                        try:
-                            self._persist_committed_uncertain(key, digest)
-                        except Exception as storage_error:
-                            raise operation_error from storage_error
-                        terminal_persisted = True
-                        self._notify_waiters()
-                        self._after_terminal_persisted()
-                        raise
-                    committed_failure = _committed_failure_payload(operation_error)
-                    if committed_failure is None:
-                        raise
-                    leaf_returned = True
+                with active_mutation_claim_context(
+                    claim_token=attempt.commit_token,
+                    command_digest=digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None,
+                ):
                     try:
-                        self._persist_committed_failure(key, digest, committed_failure)
-                    except Exception as storage_error:
-                        raise operation_error from storage_error
-                    terminal_persisted = True
-                    self._notify_waiters()
-                    self._after_terminal_persisted()
-                    raise
-                leaf_returned = True
-                try:
-                    self._persist_completed(key, digest, result)
-                except Exception as storage_error:
-                    if commit_observed is not None and commit_observed():
-                        uncertain = _PostCommitOutcomeUncertain()
-                        try:
-                            self._persist_committed_uncertain(key, digest)
-                        except Exception:  # noqa: BLE001 - leave pending fail-closed
-                            pass
-                        else:
-                            terminal_persisted = True
-                    else:
-                        uncertain = OpError(
-                            "MUTATION_ACKNOWLEDGEMENT_PENDING",
-                            "the mutation result could not be persisted; its commit outcome "
-                            "is not known",
-                            "Retry with the same mutation identity; do not submit a revised "
-                            "payload.",
+                        leaf_started = True
+                        result = operation()
+                    except Exception as operation_error:
+                        if isinstance(operation_error, _PostCommitOutcomeUncertain):
+                            leaf_returned = True
+                            raise
+                        committed_failure = _committed_failure_payload(operation_error)
+                        if committed_failure is None:
+                            raise
+                        leaf_returned = True
+                        if commit_observed is None or not commit_observed():
+                            try:
+                                self._persist_committed_failure(key, digest, committed_failure)
+                            except Exception as storage_error:
+                                raise operation_error from storage_error
+                            self._notify_waiters()
+                            self._after_terminal_persisted()
+                            raise
+                        committed_error = operation_error
+                        committed_handoff = True
+                        # The outer signed receipt disposition, rather than
+                        # any portable terminal field, records this cut.
+                        result = {"status": "committed", "mutated": True}
+                    leaf_returned = True
+                    if after_canonical_persisted is not None:
+                        prepared = _call_after_canonical(
+                            after_canonical_persisted,
+                            result,
+                            attempt,
+                            "committed_failure" if committed_handoff else "success",
                         )
+                        result = prepared
+                    canonical_result = result
+                    if committed_handoff:
+                        assert committed_failure is not None
+                        canonical_result = _CanonicalCommittedFailure(
+                            result, committed_failure
+                        )
+                    try:
+                        self._persist_canonically_committed(
+                            key,
+                            digest,
+                            canonical_result,
+                            attempt,
+                        )
+                    except Exception as storage_error:
+                        if self._exact_evidence(commit_evidence, digest, attempt):
+                            raise _PostCommitOutcomeUncertain() from storage_error
+                        raise _PostCommitOutcomeUncertain() from storage_error
+                    canonical_persisted = True
                     self._notify_waiters()
-                    raise uncertain from storage_error
-                terminal_persisted = True
+            # The attempt lock is released only after the canonical handoff;
+            # derived graph work is deliberately not owned by it.
+            self._release_attempt(key, attempt)
+            if after_operation_guard is None:
+                terminal_result = result
+            else:
+                terminal_result = after_operation_guard(result)
+            if committed_handoff:
+                assert committed_failure is not None
+                try:
+                    self._persist_committed_failure(key, digest, committed_failure)
+                except Exception as storage_error:
+                    assert committed_error is not None
+                    raise committed_error from storage_error
                 self._notify_waiters()
                 self._after_terminal_persisted()
-                return result
-        except Exception:
-            # Guard acquisition is pre-leaf and safe to retry. Once a leaf has
-            # returned (or reported a recognized committed outcome), storage or
-            # acknowledgement failures must leave the pending/terminal receipt
-            # fail-closed rather than allow a duplicate execution.
-            if not leaf_returned and not terminal_persisted:
-                self._delete_pending(key, digest)
+                assert committed_error is not None
+                raise committed_error
+            try:
+                terminal_result = self._persist_completed_from_canonical(
+                    key, digest, terminal_result
+                )
+            except Exception as storage_error:
+                raise _PostCommitOutcomeUncertain() from storage_error
+            self._notify_waiters()
+            self._after_terminal_persisted()
+            return terminal_result
+        except BaseException as error:
+            # Ordinary, explicitly uncommitted leaf failures are safe to retry.
+            # Abrupt exits and anything after the canonical commit point are
+            # intentionally retained for exact evidence/outcome-unknown
+            # classification instead.
+            if (
+                not leaf_returned
+                and isinstance(error, Exception)
+                and (commit_observed is None or not commit_observed())
+            ):
+                self._delete_executing(key, digest, attempt)
+            elif not leaf_started:
+                self._delete_executing(key, digest, attempt)
+            elif not canonical_persisted:
+                # A returned leaf without a durable exact receipt is the
+                # unavoidable multi-store cut. Its released attempt makes the
+                # next exact retry classify outcome_unknown, never replay it.
+                self._notify_waiters()
             raise
+        finally:
+            self._release_attempt(key, attempt)
 
     def _claim_or_inspect(
-        self, key: str, digest: str, expires_after: float | None
+        self,
+        key: str,
+        digest: str,
+        expires_after: float | None,
+        *,
+        commit_evidence=None,
+        legacy_graph_pending_proof=None,
     ) -> tuple[str, Any]:
         now = self.clock()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._prune_expired(conn, now, expires_after, key)
             row = conn.execute(
-                "SELECT digest, state, result, updated_at, owner FROM mutations WHERE key = ?",
+                "SELECT digest, state, result, updated_at, owner, attempt_id, commit_token, commit_secret "
+                "FROM mutations WHERE key = ?",
                 (key,),
             ).fetchone()
             if row and self._expired_row(row, now, expires_after):
                 conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
                 row = None
             if row is not None:
-                row = self._abandon_if_dead(conn, key, row, now)
-                return self._decode_disposition(row, digest)
-            conn.execute(
-                "INSERT INTO mutations(key, digest, state, updated_at, owner) "
-                "VALUES (?, ?, 'pending', ?, ?)",
-                (key, digest, now, self.owner_id),
-            )
-        _log_mutation_event("reserved", receipt=_receipt_tag(key))
+                row = self._abandon_if_dead(
+                    conn,
+                    key,
+                    row,
+                    now,
+                    commit_evidence=commit_evidence,
+                    legacy_graph_pending_proof=legacy_graph_pending_proof,
+                )
+                if row is not None:
+                    return self._decode_disposition(row, digest, commit_evidence=commit_evidence)
+            self._ensure_private_runtime_state()
+            attempt = _new_attempt()
+            try:
+                stored_commit_secret = self._stored_commit_secret(digest, attempt)
+            except Exception as error:
+                raise OpError(
+                    "IDEMPOTENCY_SECRET_PROTECTION_UNAVAILABLE",
+                    "could not protect the local idempotency receipt secret",
+                    "Resolve local Windows credential protection before retrying this mutation.",
+                ) from error
+            attempt.handle = _acquire_own_owner_lock(self.state_dir, attempt.attempt_id)
+            if attempt.handle is None:
+                raise OpError(
+                    "IDEMPOTENCY_OWNER_UNAVAILABLE",
+                    "could not establish a bounded idempotency execution claim",
+                    "Retry the same mutation identity after local coordination recovers.",
+                )
+            try:
+                self._ensure_private_runtime_state()
+                conn.execute(
+                    "INSERT INTO mutations(key, digest, state, updated_at, owner, attempt_id, commit_token, commit_secret) "
+                    "VALUES (?, ?, 'reserved', ?, ?, ?, ?, ?)",
+                    (
+                        key,
+                        digest,
+                        now,
+                        attempt.attempt_id,
+                        attempt.attempt_id,
+                        attempt.commit_token,
+                        stored_commit_secret,
+                    ),
+                )
+                cursor = conn.execute(
+                    "UPDATE mutations SET state = 'executing' WHERE key = ? AND state = 'reserved' "
+                    "AND attempt_id = ? AND commit_token = ?",
+                    (key, attempt.attempt_id, attempt.commit_token),
+                )
+                if cursor.rowcount != 1:
+                    raise self._reconciliation_error("reserved mutation claim")
+            except BaseException:
+                _release_owner_lock(attempt.handle)
+                attempt.handle.close()
+                raise
+            self._attempts[key] = attempt
+        _log_mutation_event("executing", receipt=_receipt_tag(key))
         return "owner", None
 
     def _abandon_if_dead(
-        self, conn: sqlite3.Connection, key: str, row: tuple[Any, ...], now: float
-    ) -> tuple[Any, ...]:
-        """If `row` is `pending` and its owner is provably dead, transition it
-        to `abandoned` in the same transaction and return the updated row.
+        self,
+        conn: sqlite3.Connection,
+        key: str,
+        row: tuple[Any, ...],
+        now: float,
+        *,
+        commit_evidence=None,  # noqa: ANN001
+        legacy_graph_pending_proof=None,  # noqa: ANN001
+    ) -> tuple[Any, ...] | None:
+        """Resolve proven-dead idempotency ownership without replaying a leaf.
         Fail-closed: an inconclusive liveness probe leaves the row `pending`.
         """
-        if row[1] != "pending":
+        if row[1] == "graph_pending":
+            # Retired graph-pending rows predate the authenticated commit
+            # receipt. Migrate only an exact checkpoint binding that still
+            # names the current coherent durable epoch; every other legacy cut
+            # remains outcome-unknown and can never replay its leaf.
+            try:
+                legacy_result = pickle.loads(row[2])  # noqa: S301 - local runtime state
+                checkpoint_payload = (
+                    legacy_result.get("_graph_sync_checkpoint")
+                    if type(legacy_result) is dict
+                    else None
+                )
+                if type(checkpoint_payload) is not dict:
+                    raise ValueError("legacy graph checkpoint binding is absent")
+                from . import graph_sync
+
+                checkpoint = graph_sync.GraphSyncCheckpoint.parse(
+                    json.dumps(checkpoint_payload, sort_keys=True, separators=(",", ":")).encode(
+                        "utf-8"
+                    )
+                )
+                if checkpoint is None or legacy_graph_pending_proof is None:
+                    raise ValueError("legacy graph checkpoint binding is invalid")
+                if legacy_graph_pending_proof(checkpoint) is not True:
+                    raise ValueError("legacy graph checkpoint is not durable")
+            except Exception:  # noqa: BLE001 - legacy state is fail-closed
+                try:
+                    cursor = conn.execute(
+                        "UPDATE mutations SET state = 'completed', result = ?, owner = NULL, updated_at = ? "
+                        "WHERE key = ? AND state = 'graph_pending'",
+                        (_OUTCOME_UNKNOWN_PAYLOAD, now, key),
+                    )
+                except sqlite3.Error:
+                    return (
+                        row[0],
+                        "completed",
+                        _OUTCOME_UNKNOWN_PAYLOAD,
+                        now,
+                        None,
+                        row[5],
+                        row[6],
+                        row[7],
+                    )
+                if cursor.rowcount == 1:
+                    self._notify_waiters()
+                    return (
+                        row[0],
+                        "completed",
+                        _OUTCOME_UNKNOWN_PAYLOAD,
+                        now,
+                        None,
+                        row[5],
+                        row[6],
+                        row[7],
+                    )
+                refreshed = conn.execute(
+                    "SELECT digest, state, result, updated_at, owner, attempt_id, commit_token, commit_secret "
+                    "FROM mutations WHERE key = ?",
+                    (key,),
+                ).fetchone()
+                return refreshed if refreshed is not None else row
+            cursor = conn.execute(
+                "UPDATE mutations SET state = 'canonically_committed', owner = NULL, "
+                "updated_at = ? WHERE key = ? AND state = 'graph_pending'",
+                (now, key),
+            )
+            if cursor.rowcount == 1:
+                return (row[0], "canonically_committed", row[2], now, None, row[5], row[6], row[7])
+            return row
+        if row[1] not in {"pending", "reserved", "executing"}:
             return row
         owner = row[4]
         if owner is None:
             dead = (now - row[3]) >= _IDEMPOTENCY_LEGACY_OWNER_GRACE_SECONDS
-        elif owner == self.owner_id:
+        elif any(
+            active.attempt_id == owner and active.handle is not None
+            for active in self._attempts.values()
+        ):
             dead = False
+        elif owner == self.owner_id and row[5] is None:
+            # A row from the retired store-lifetime owner scheme cannot name
+            # an active execution in this process. Treat it as an unprovable
+            # legacy cut instead of letting this idle store object hold it
+            # forever merely because its compatibility lock remains open.
+            dead = True
         else:
             dead = not _probe_owner_liveness(self.state_dir, owner)
         if not dead:
             return row
-        cursor = conn.execute(
-            "UPDATE mutations SET state = 'abandoned', updated_at = ? "
-            "WHERE key = ? AND state = 'pending'",
-            (now, key),
+        if row[1] == "reserved":
+            # No leaf can have started before the executing transition. A
+            # proven-dead reservation is therefore safe to reclaim with a
+            # fresh attempt secret and must not consult vault evidence.
+            cursor = conn.execute(
+                "DELETE FROM mutations WHERE key = ? AND state = 'reserved'",
+                (key,),
+            )
+            return None if cursor.rowcount == 1 else row
+        attempt = _ExecutionAttempt(
+            attempt_id=row[5] if isinstance(row[5], str) else owner or "",
+            commit_token=row[6] if isinstance(row[6], str) else "",
+            commit_secret=row[7] if isinstance(row[7], bytes) else b"",
+            handle=None,
         )
+        if row[1] == "executing" and self._exact_evidence(commit_evidence, row[0], attempt):
+            cursor = conn.execute(
+                "UPDATE mutations SET state = 'canonically_committed', owner = NULL, updated_at = ? "
+                "WHERE key = ? AND state IN ('pending', 'reserved', 'executing')",
+                (now, key),
+            )
+            if cursor.rowcount == 1:
+                self._notify_waiters()
+                return (row[0], "canonically_committed", row[2], now, None, row[5], row[6], row[7])
+        else:
+            try:
+                cursor = conn.execute(
+                    "UPDATE mutations SET state = 'completed', result = ?, owner = NULL, updated_at = ? "
+                    "WHERE key = ? AND state IN ('pending', 'reserved', 'executing')",
+                    (_OUTCOME_UNKNOWN_PAYLOAD, now, key),
+                )
+            except sqlite3.Error:
+                # A broken retry store cannot authorize a replay. Classify this
+                # observation fail-closed even when its durable marker cannot advance.
+                return (row[0], "completed", _OUTCOME_UNKNOWN_PAYLOAD, now, None, row[5], row[6], row[7])
         if cursor.rowcount != 1:
             # Raced with another abandon/terminal transition; re-read rather
             # than assume which one won.
             refreshed = conn.execute(
-                "SELECT digest, state, result, updated_at, owner FROM mutations WHERE key = ?",
+                "SELECT digest, state, result, updated_at, owner, attempt_id, commit_token, commit_secret "
+                "FROM mutations WHERE key = ?",
                 (key,),
             ).fetchone()
             return refreshed if refreshed is not None else row
@@ -801,7 +1591,7 @@ class IdempotencyStore:
             "abandoned", level=logging.WARNING, receipt=_receipt_tag(key)
         )
         self._notify_waiters()
-        return (row[0], "abandoned", None, now, owner)
+        return (row[0], "completed", _OUTCOME_UNKNOWN_PAYLOAD, now, None, row[5], row[6], row[7])
 
     def _prune_expired(
         self,
@@ -813,13 +1603,27 @@ class IdempotencyStore:
         key_pattern = f"{key.partition(':')[0]}:%"
         if expires_after is not None:
             cutoff = now - expires_after
-            conn.execute(
-                "DELETE FROM mutations WHERE key LIKE ? "
+            expired_completed = conn.execute(
+                "SELECT key, result FROM mutations WHERE key LIKE ? "
                 "AND state = 'completed' "
                 "AND typeof(updated_at) IN ('integer', 'real') "
                 "AND updated_at >= 0 AND updated_at <= ?",
                 (key_pattern, cutoff),
-            )
+            ).fetchall()
+            for expired_key, expired_payload in expired_completed:
+                try:
+                    completed = pickle.loads(expired_payload)  # noqa: S301 - trusted runtime state
+                except Exception:
+                    try:
+                        _deserialize_committed_failure_payload(expired_payload)
+                    except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
+                        continue
+                else:
+                    if completed == _OUTCOME_UNKNOWN_TERMINAL:
+                        continue
+                conn.execute(
+                    "DELETE FROM mutations WHERE key = ? AND state = 'completed'", (expired_key,)
+                )
             expired_failures = conn.execute(
                 "SELECT key, result FROM mutations WHERE key LIKE ? "
                 "AND state = 'committed_failure' "
@@ -836,22 +1640,25 @@ class IdempotencyStore:
                     "DELETE FROM mutations WHERE key = ? AND state = 'committed_failure'",
                     (expired_key,),
                 )
-        # Abandoned rows always expire after their own fixed grace period,
-        # regardless of the caller's `expires_after` (which may be None).
-        abandoned_cutoff = now - _IDEMPOTENCY_ABANDONED_RETRY_AFTER_SECONDS
-        conn.execute(
-            "DELETE FROM mutations WHERE key LIKE ? "
-            "AND state = 'abandoned' "
-            "AND typeof(updated_at) IN ('integer', 'real') "
-            "AND updated_at >= 0 AND updated_at <= ?",
-            (key_pattern, abandoned_cutoff),
-        )
+        # `outcome_unknown` deliberately remains retained: expiry would turn
+        # an unprovable canonical cut into permission to replay the leaf.
 
     def _expired_row(self, row: tuple[Any, ...], now: float, expires_after: float | None) -> bool:
         if expires_after is None or row[1] not in {"completed", "committed_failure"}:
             return False
         updated_at = row[3]
-        if row[1] == "committed_failure":
+        if row[1] == "completed":
+            try:
+                completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
+            except Exception:
+                try:
+                    _deserialize_committed_failure_payload(row[2])
+                except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
+                    raise self._reconciliation_error("cached completed mutation state") from None
+            else:
+                if completed == _OUTCOME_UNKNOWN_TERMINAL:
+                    return False
+        elif row[1] == "committed_failure":
             try:
                 _deserialize_committed_failure_payload(row[2])
             except Exception:  # noqa: BLE001 - corrupt state blocks mutation
@@ -860,7 +1667,9 @@ class IdempotencyStore:
             raise self._reconciliation_error("cached mutation state")
         return updated_at <= now - expires_after
 
-    def _decode_disposition(self, row: tuple[Any, ...], digest: str) -> tuple[str, Any]:
+    def _decode_disposition(
+        self, row: tuple[Any, ...], digest: str, *, commit_evidence=None  # noqa: ANN001
+    ) -> tuple[str, Any]:
         if row[0] != digest:
             raise OpError(
                 "IDEMPOTENCY_KEY_REUSED",
@@ -868,7 +1677,17 @@ class IdempotencyStore:
             )
         state = row[1]
         if state == "completed":
-            return "completed", pickle.loads(row[2])  # noqa: S301 - trusted runtime state
+            try:
+                completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
+            except Exception:
+                try:
+                    failure = _CachedCommittedFailure(_deserialize_committed_failure_payload(row[2]))
+                except Exception:  # noqa: BLE001 - corrupt state blocks mutation
+                    raise self._reconciliation_error("cached completed mutation state") from None
+                return "committed_failure", failure
+            if completed == _OUTCOME_UNKNOWN_TERMINAL:
+                return "outcome_unknown", None
+            return "completed", completed
         if state == "committed_failure":
             try:
                 failure = _CachedCommittedFailure(_deserialize_committed_failure_payload(row[2]))
@@ -879,10 +1698,29 @@ class IdempotencyStore:
             if row[2] is not None:
                 raise self._reconciliation_error("cached committed mutation state")
             return "committed_uncertain", _PostCommitOutcomeUncertain()
-        if state == "pending":
+        if state == "graph_pending":
+            # A migration race must never turn an unvalidated legacy row into
+            # permission to deserialize and resume derived work.
+            return "outcome_unknown", None
+        if state == "canonically_committed":
+            if row[2] is not None:
+                try:
+                    return "canonical_resume", pickle.loads(row[2])  # noqa: S301
+                except Exception:  # noqa: BLE001 - corrupt runtime state is not a terminal
+                    raise self._reconciliation_error("cached canonical mutation state") from None
+            attempt = _ExecutionAttempt(
+                attempt_id=row[5] if isinstance(row[5], str) else "",
+                commit_token=row[6] if isinstance(row[6], str) else "",
+                commit_secret=row[7] if isinstance(row[7], bytes) else b"",
+                handle=None,
+            )
+            return "canonical_resume", _CanonicalResume(
+                None, self._read_exact_evidence(commit_evidence, row[0], attempt)
+            )
+        if state in {"pending", "reserved", "executing"}:
             return "pending", None
-        if state == "abandoned":
-            return "abandoned", None
+        if state in {"abandoned", "outcome_unknown"}:
+            return "outcome_unknown", None
         raise self._reconciliation_error("cached mutation state")
 
     def _wait_for_terminal(
@@ -891,26 +1729,27 @@ class IdempotencyStore:
         digest: str,
         *,
         on_replay=None,  # noqa: ANN001
+        commit_evidence=None,  # noqa: ANN001
+        legacy_graph_pending_proof=None,  # noqa: ANN001
     ) -> Any:
         _log_mutation_event("pending", receipt=_receipt_tag(key))
         deadline = self.monotonic() + self.wait_seconds
         while True:
             now = self.clock()
-            with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT digest, state, result, updated_at, owner FROM mutations WHERE key = ?",
-                    (key,),
-                ).fetchone()
-                if row is not None:
-                    row = self._abandon_if_dead(conn, key, row, now)
-            if row is None:
+            del now
+            disposition, stored = self._claim_or_inspect(
+                key,
+                digest,
+                None,
+                commit_evidence=commit_evidence,
+                legacy_graph_pending_proof=legacy_graph_pending_proof,
+            )
+            if disposition == "owner":
                 return _RETRY_IDEMPOTENCY_CLAIM
-            disposition, stored = self._decode_disposition(row, digest)
-            if disposition == "abandoned":
-                raise _mutation_outcome_unknown_error()
+            if disposition == "outcome_unknown":
+                return disposition, stored
             if disposition != "pending":
-                return self._replay(disposition, stored, on_replay)
+                return disposition, stored
             remaining = deadline - self.monotonic()
             if remaining <= 0:
                 raise OpError(
@@ -925,6 +1764,21 @@ class IdempotencyStore:
         if on_replay is not None:
             on_replay()
         if disposition == "completed":
+            if isinstance(stored, Mapping):
+                leaf = stored.get("leaf_result")
+                if (
+                    isinstance(leaf, Mapping)
+                    and leaf.get("receipt_version") == 2
+                    and valid_collection_receipt(leaf)
+                    and leaf.get("outcome") == "committed"
+                ):
+                    stored_request_id = stored.get("request_id")
+                    return replayed_terminal(
+                        leaf,
+                        request_id=(stored_request_id if isinstance(stored_request_id, str) else str(uuid.uuid4())),
+                        receipt_id=stored.get("receipt_id") if isinstance(stored.get("receipt_id"), str) else None,
+                        idempotency_key=stored.get("idempotency_key") if isinstance(stored.get("idempotency_key"), str) else None,
+                    )
             return stored
         if disposition == "committed_failure":
             raise stored
@@ -937,7 +1791,60 @@ class IdempotencyStore:
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE mutations SET state = 'completed', result = ?, updated_at = ? "
-                "WHERE key = ? AND digest = ? AND state = 'pending'",
+                "WHERE key = ? AND digest = ? AND state IN ('pending', 'executing', 'canonically_committed')",
+                (payload, self.clock(), key, digest),
+            )
+            if cursor.rowcount != 1:
+                raise self._reconciliation_error("completed mutation state")
+        _log_mutation_event("terminal", receipt=_receipt_tag(key))
+
+    def _persist_canonically_committed(
+        self, key: str, digest: str, result: Any, attempt: _ExecutionAttempt
+    ) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE mutations SET state = 'canonically_committed', result = ?, owner = NULL, "
+                "updated_at = ? WHERE key = ? AND digest = ? AND state = 'executing' "
+                "AND attempt_id = ? AND commit_token = ?",
+                (
+                    pickle.dumps(result),
+                    self.clock(),
+                    key,
+                    digest,
+                    attempt.attempt_id,
+                    attempt.commit_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise self._reconciliation_error("canonical mutation state")
+        _log_mutation_event("canonically_committed", receipt=_receipt_tag(key))
+
+    def _persist_completed_from_canonical(self, key: str, digest: str, result: Any) -> Any:
+        payload = pickle.dumps(result)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE mutations SET state = 'completed', result = ?, updated_at = ? "
+                "WHERE key = ? AND digest = ? AND state = 'canonically_committed'",
+                (payload, self.clock(), key, digest),
+            )
+            if cursor.rowcount != 1:
+                row = conn.execute(
+                    "SELECT result FROM mutations WHERE key = ? AND digest = ? AND state = 'completed'",
+                    (key, digest),
+                ).fetchone()
+                if row is None:
+                    raise self._reconciliation_error("canonical mutation completion")
+                return pickle.loads(row[0])  # noqa: S301 - trusted runtime state
+        _log_mutation_event("terminal", receipt=_receipt_tag(key))
+        return result
+
+    def _replace_completed(self, key: str, digest: str, result: Any) -> None:
+        """Advance a durably committed canonical terminal with derived progress."""
+        payload = pickle.dumps(result)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE mutations SET result = ?, updated_at = ? "
+                "WHERE key = ? AND digest = ? AND state = 'completed'",
                 (payload, self.clock(), key, digest),
             )
             if cursor.rowcount != 1:
@@ -950,8 +1857,9 @@ class IdempotencyStore:
         payload = _serialize_committed_failure_payload(committed_failure)
         with self._connect() as conn:
             cursor = conn.execute(
-                "UPDATE mutations SET state = 'committed_failure', result = ?, "
-                "updated_at = ? WHERE key = ? AND digest = ? AND state = 'pending'",
+                "UPDATE mutations SET state = 'completed', result = ?, "
+                "updated_at = ? WHERE key = ? AND digest = ? "
+                "AND state IN ('executing', 'canonically_committed')",
                 (payload, self.clock(), key, digest),
             )
             if cursor.rowcount != 1:
@@ -960,28 +1868,78 @@ class IdempotencyStore:
                 )
         _log_mutation_event("terminal", receipt=_receipt_tag(key))
 
-    def _persist_committed_uncertain(self, key: str, digest: str) -> None:
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "UPDATE mutations SET state = 'committed_uncertain', result = NULL, "
-                "updated_at = ? WHERE key = ? AND digest = ? AND state = 'pending'",
-                (self.clock(), key, digest),
-            )
-            if cursor.rowcount != 1:
-                raise self._reconciliation_error("committed mutation state")
-        _log_mutation_event("terminal_uncertain", receipt=_receipt_tag(key))
-
     def _delete_pending(self, key: str, digest: str) -> None:
         with self._connect() as conn:
             conn.execute(
-                "DELETE FROM mutations WHERE key = ? AND digest = ? AND state = 'pending'",
+                "DELETE FROM mutations WHERE key = ? AND digest = ? "
+                "AND state IN ('pending', 'reserved', 'executing')",
                 (key, digest),
             )
         self._notify_waiters()
 
+    def _delete_executing(self, key: str, digest: str, attempt: _ExecutionAttempt) -> None:
+        del attempt
+        self._delete_pending(key, digest)
+
+    def _release_attempt(self, key: str, attempt: _ExecutionAttempt) -> None:
+        current = self._attempts.get(key)
+        if current is attempt:
+            self._attempts.pop(key, None)
+        handle = attempt.handle
+        attempt.handle = None
+        if handle is None:
+            return
+        try:
+            _release_owner_lock(handle)
+        except OSError:
+            pass
+        try:
+            handle.close()
+        except OSError:
+            pass
+        try:
+            _owner_lock_path(self.state_dir, attempt.attempt_id).unlink()
+        except OSError:
+            pass
+
+    def _read_exact_evidence(
+        self, commit_evidence: Any, digest: str, attempt: _ExecutionAttempt
+    ) -> Any:
+        if (
+            commit_evidence is None
+            or not attempt.attempt_id
+            or not attempt.commit_token
+        ):
+            return None
+        self._ensure_private_runtime_state()
+        secret = self._unprotected_commit_secret(digest, attempt)
+        if secret is None:
+            return None
+        try:
+            return commit_evidence(
+                digest, attempt.attempt_id, attempt.commit_token, secret
+            )
+        except TypeError:
+            try:
+                # Generic IdempotencyStore users may still provide their own
+                # local evidence hook while they migrate. LeaseManager never
+                # uses this compatibility route for portable receipts.
+                return commit_evidence(digest, attempt.attempt_id, attempt.commit_token)
+            except TypeError:
+                return commit_evidence()
+
+    def _exact_evidence(self, commit_evidence: Any, digest: str, attempt: _ExecutionAttempt) -> bool:
+        return bool(self._read_exact_evidence(commit_evidence, digest, attempt))
+
     def _notify_waiters(self) -> None:
         with self._condition:
             self._condition.notify_all()
+
+    def validate_runtime_state(self) -> None:
+        """Fail closed before diagnostics summarize private receipt state."""
+        if self._runtime_state_error is not None:
+            raise self._runtime_state_error
+        self._ensure_private_runtime_state()
 
     def _after_terminal_persisted(self) -> None:
         if self.after_terminal_persisted is not None:
@@ -990,18 +1948,23 @@ class IdempotencyStore:
     def status_summary(self) -> dict[str, Any]:
         """Content-free counts for `coordination_status`/`doctor`: never a
         key, digest, or result — just how many rows are pending/abandoned
-        and how stale the oldest pending row is."""
+        and how stale the oldest pending row is. Call `validate_runtime_state`
+        first when an unsafe store must be surfaced rather than softened."""
         try:
             now = self.clock()
             with self._connect() as conn:
                 pending_updated_at = [
                     row[0]
                     for row in conn.execute(
-                        "SELECT updated_at FROM mutations WHERE state = 'pending'"
+                        "SELECT updated_at FROM mutations "
+                        "WHERE state IN ('pending', 'reserved', 'executing')"
                     ).fetchall()
                 ]
                 abandoned = conn.execute(
-                    "SELECT COUNT(*) FROM mutations WHERE state = 'abandoned'"
+                    "SELECT COUNT(*) FROM mutations "
+                    "WHERE state IN ('abandoned', 'outcome_unknown') "
+                    "OR (state = 'completed' AND result = ?)",
+                    (_OUTCOME_UNKNOWN_PAYLOAD,),
                 ).fetchone()[0]
             oldest_pending_age_seconds = (
                 round(max(0.0, now - min(pending_updated_at)), 3)
@@ -1100,6 +2063,13 @@ def _effective_idempotency_key(
     return None, None, None
 
 
+def _is_receipt_vault_root(root: Path) -> bool:
+    """Receipt storage is allowed only inside an existing vault scaffold."""
+    from .kbdir import kb_dirname
+
+    return (root / kb_dirname()).is_dir()
+
+
 class LeaseManager:
     def __init__(
         self,
@@ -1168,6 +2138,17 @@ class LeaseManager:
         except Exception:  # noqa: BLE001 - observability must never break the caller
             pass
 
+    def _mutation_coordinator_for(
+        self, vault_root: os.PathLike[str] | str
+    ) -> VaultMutationCoordinator:
+        """Construct this manager's canonical boundary for one vault."""
+        return VaultMutationCoordinator(
+            self.config.state_dir,
+            vault_root,
+            timeout_seconds=self._mutation_timeout_seconds,
+            poll_interval_seconds=self._mutation_poll_interval_seconds,
+        )
+
     def _log_lease_event(self, event: str, **fields: Any) -> None:
         try:
             from .log_events import log_event
@@ -1218,12 +2199,7 @@ class LeaseManager:
         holder_kind: str = "unknown",
     ) -> Iterator[VaultMutationCoordinator]:
         """Serialize hosted reads with mutations without requiring writer authority."""
-        mutation = VaultMutationCoordinator(
-            self.config.state_dir,
-            vault_root,
-            timeout_seconds=self._mutation_timeout_seconds,
-            poll_interval_seconds=self._mutation_poll_interval_seconds,
-        )
+        mutation = self._mutation_coordinator_for(vault_root)
         with mutation.hold(
             request_id=request_id,
             operation=operation,
@@ -1241,22 +2217,62 @@ class LeaseManager:
         holder_kind: str = "command",
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the shared vault mutation boundary and revalidate writer authority."""
-        with self.consistency_guard(
-            vault_root,
-            request_id=request_id,
-            operation=operation,
-            holder_kind=holder_kind,
-        ) as mutation:
+        direct_boundary: tuple[str, Path] | None = None
+        direct_token: Token[tuple[tuple[str, Path], ...]] | None = None
+        outer_direct_boundary = False
+        inherited_manager = _ACTIVE_LEASE_MANAGER.get()
+        if (
+            inherited_manager is None
+            and request_id is None
+            and active_mutation_request_id() is None
+        ):
+            direct_boundary = _direct_mutation_boundary(vault_root, self.config.state_dir)
+            active_direct = _ACTIVE_DIRECT_MUTATION_GUARDS.get()
+            outer_direct_boundary = direct_boundary not in active_direct
+            direct_token = _ACTIVE_DIRECT_MUTATION_GUARDS.set(
+                (*active_direct, direct_boundary)
+            )
+        manager_token = _ACTIVE_LEASE_MANAGER.set(self)
+        try:
+            with self.consistency_guard(
+                vault_root,
+                request_id=request_id,
+                operation=operation,
+                holder_kind=holder_kind,
+            ) as mutation:
+                try:
+                    with self.writer_authority_guard():
+                        yield mutation
+                finally:
+                    # Bump while the boundary is still held, so the counter is
+                    # serialized with the mutations it fingerprints. Every
+                    # governed writer exits through here (wide or narrow), which
+                    # is what lets the validity-stamp comparison skip the
+                    # in-boundary corpus stat-walk.
+                    _bump_commit_generation(self.config.state_dir, vault_root)
+        finally:
+            _ACTIVE_LEASE_MANAGER.reset(manager_token)
+            if direct_token is not None:
+                _ACTIVE_DIRECT_MUTATION_GUARDS.reset(direct_token)
+        if outer_direct_boundary and (
+            isinstance(vault_root, os.PathLike)
+            or (isinstance(vault_root, str) and Path(vault_root).is_absolute())
+        ):
+            from . import graph_sync
+
+            root = Path(vault_root)
             try:
-                with self.writer_authority_guard():
-                    yield mutation
-            finally:
-                # Bump while the boundary is still held, so the counter is
-                # serialized with the mutations it fingerprints. Every
-                # governed writer exits through here (wide or narrow), which
-                # is what lets the validity-stamp comparison skip the
-                # in-boundary corpus stat-walk.
-                _bump_commit_generation(self.config.state_dir, vault_root)
+                graph_sync.start_registered(root, state_root=self.config.state_dir)
+                graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
+            except graph_sync.GraphRebuildRegistrationError:
+                # Direct leaf APIs have no terminal-envelope seam for a graph
+                # failure. Canonical bytes and the exact durable failure handle
+                # remain authoritative; their bounded index/readiness paths
+                # expose the recovery requirement.
+                logger.warning(
+                    "direct mutation graph join failed after canonical release",
+                    exc_info=True,
+                )
 
     @contextmanager
     def writer_authority_guard(self) -> Iterator[None]:
@@ -1301,7 +2317,12 @@ class LeaseManager:
     ) -> Any:
         t_start = time.perf_counter()
         kwargs = _canonicalize_command_kwargs(kwargs)
-        response_detail_default = getattr(command, "response_detail", None) or "compact"
+        configured_response_detail = getattr(command, "response_detail", None)
+        response_detail_default: ResponseDetail = (
+            configured_response_detail
+            if configured_response_detail in {"compact", "full", "legacy"}
+            else "compact"
+        )
         kwargs, response_detail = split_response_detail(
             kwargs, default=response_detail_default
         )
@@ -1319,8 +2340,13 @@ class LeaseManager:
             # decision that reserved the bypass to `mode="audit"`/
             # `validate_only` reads while other hosted reads held the guard
             # (openspec/changes/archive/2026-07-20-make-mcp-acknowledgement-replay-safe/design.md:64).
-            return command.leaf(*injected, **kwargs)
+            manager_token = _ACTIVE_LEASE_MANAGER.set(self)
+            try:
+                return command.leaf(*injected, **kwargs)
+            finally:
+                _ACTIVE_LEASE_MANAGER.reset(manager_token)
         mutation_subject = self._mutation_subject(injected)
+        receipt_vault_root = self._receipt_vault_root(injected)
         digest = _command_digest(command, kwargs)
         key, expires_after, on_replay = _effective_idempotency_key(
             self,
@@ -1331,6 +2357,13 @@ class LeaseManager:
             principal_scope=idempotency_principal_scope,
             implicit_idempotency_scope=implicit_idempotency_scope,
         )
+        # The receipt hooks below are reached only through the idempotent
+        # state-machine path; unkeyed writes bypass `IdempotencyStore.run`'s
+        # durable receipt protocol.
+        if key is not None:
+            receipt_key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        else:
+            receipt_key_digest = None
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
         commit_state = {"observed": False}
@@ -1409,6 +2442,362 @@ class LeaseManager:
                 _ACTIVE_MUTATION_COMMITTED.reset(commit_token)
                 _ACTIVE_MUTATION_TRACE.reset(trace_token)
 
+        def with_graph_outcome(result: Any, outcome: Mapping[str, Any]) -> Any:
+            """Keep derived graph health in the durable terminal payload."""
+            if not isinstance(result, Mapping):
+                return result
+            terminal = {**result, **outcome}
+            leaf = result.get("leaf_result")
+            if isinstance(leaf, Mapping) and not valid_collection_receipt(leaf):
+                terminal["leaf_result"] = {**leaf, **outcome}
+            return terminal
+
+        def graph_failure(checkpoint: Any, error: BaseException | None = None) -> dict[str, str]:
+            from . import graph_sync
+
+            if isinstance(error, graph_sync.GraphRebuildRegistrationError):
+                return graph_sync.committed_graph_failure(
+                    checkpoint, code=error.code, remediation=error.remediation
+                )
+            return graph_sync.committed_graph_failure(checkpoint)
+
+        def wait_for_graph_sync(result: Any) -> Any:
+            """Join derived graph work only after the canonical guard released."""
+            terminal_result = (
+                {key: value for key, value in result.items() if key != "_graph_sync_checkpoint"}
+                if isinstance(result, Mapping)
+                else result
+            )
+
+            def finish_reconcile_graph_status(value: Any, *, current: bool) -> Any:
+                if not isinstance(value, Mapping):
+                    return value
+                final = dict(value)
+                refreshed = final.pop("_graph_reconcile_registered", None)
+                leaf = final.get("leaf_result")
+                if refreshed is None and isinstance(leaf, Mapping):
+                    refreshed = leaf.get("_graph_reconcile_registered")
+                if refreshed is None:
+                    return final
+                if isinstance(leaf, Mapping):
+                    reported_leaf = dict(leaf)
+                    reported_leaf.pop("_graph_reconcile_registered", None)
+                    final["leaf_result"] = {
+                        **reported_leaf,
+                        "graph_status": "refreshed" if current else "unavailable",
+                        "graph_refreshed": refreshed if current else 0,
+                    }
+                else:
+                    final["graph_status"] = "refreshed" if current else "unavailable"
+                    final["graph_refreshed"] = refreshed if current else 0
+                return final
+
+            required = None
+            try:
+                from . import graph_sync
+
+                root = receipt_vault_root
+                if root is None:
+                    return terminal_result
+                required = graph_sync.registered_checkpoint(
+                    root, state_root=self.config.state_dir
+                )
+                if required is None:
+                    return terminal_result
+                graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
+            except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
+                terminal_result = finish_reconcile_graph_status(
+                    terminal_result, current=False
+                )
+                if isinstance(result, Mapping) and required is not None:
+                    return with_graph_outcome(
+                        terminal_result, graph_failure(required, error)
+                    )
+                return terminal_result
+            if command.name == "reconcile" or (
+                command.name == "maintain_memory" and kwargs.get("mode") == "reconcile"
+            ):
+                try:
+                    from . import audit as audit_module
+                    from .epistemic_graph import EpistemicGraphIndex
+
+                    graph_current = (
+                        graph_sync.status(root)["state"] == "current"
+                        and EpistemicGraphIndex(
+                            root, mutation_coordinator=self._mutation_coordinator_for(root)
+                        ).available()
+                        and not audit_module._check_graph_drift(root)
+                    )
+                except Exception:  # noqa: BLE001 - preserve a failed graph terminal
+                    graph_current = False
+                terminal_result = finish_reconcile_graph_status(
+                    terminal_result, current=graph_current
+                )
+            if isinstance(terminal_result, Mapping):
+                return with_graph_outcome(terminal_result, {"graph_sync": "completed"})
+            return terminal_result
+
+        def persist_graph_sync_progress(
+            result: Any, attempt: _ExecutionAttempt, canonical_disposition: str = "success"
+        ) -> Any:
+            """Persist exact canonical evidence while canonical authority is held."""
+            if not commit_state["observed"]:
+                return result
+            try:
+                from . import graph_sync
+
+                root = receipt_vault_root
+                if root is None or not _is_receipt_vault_root(root):
+                    raise _PostCommitOutcomeUncertain()
+                required = graph_sync.registered_checkpoint(
+                    root, state_root=self.config.state_dir
+                )
+                current = graph_sync.read_checkpoint(root)
+                if (
+                    current is not None
+                    and current.mutation_id == attempt.commit_token
+                ):
+                    required = current
+                projection = {
+                    name: result.get(name)
+                    for name in (
+                        "_terminal",
+                        "version",
+                        "ok",
+                        "state",
+                        "status",
+                        "committed",
+                        "mutated",
+                        "terminal",
+                        "request_id",
+                        "receipt_id",
+                        "operation_id",
+                        "warnings_count",
+                    )
+                    if isinstance(result, Mapping) and name in result
+                }
+                projection["result_sha256"] = _receipt_result_sha256(result)
+                if not projection:
+                    projection = {"status": "committed", "mutated": True}
+                evidence = graph_sync.GraphCommitReceipt.create(
+                    idempotency_key_digest=receipt_key_digest or "0" * 64,
+                    command_digest=digest,
+                    attempt_id=attempt.attempt_id,
+                    commit_token=attempt.commit_token,
+                    canonical_disposition=canonical_disposition,
+                    terminal_projection=projection,
+                    checkpoint_generation=(required.generation if required is not None else None),
+                    checkpoint_sha256=(required.checkpoint_sha256 if required is not None else None),
+                    commit_secret=attempt.commit_secret,
+                )
+                graph_sync.write_graph_commit_receipt(root, evidence)
+                if isinstance(result, Mapping) and required is not None:
+                    return {
+                        **result,
+                        "_graph_sync_checkpoint": required.as_dict(),
+                    }
+                return result
+            except Exception as error:
+                raise _PostCommitOutcomeUncertain() from error
+
+        def exact_commit_evidence(
+            expected_digest: str, attempt_id: str, claim_token: str, commit_secret: bytes
+        ) -> Any:
+            try:
+                from . import graph_sync
+
+                root = receipt_vault_root
+                if root is None or not _is_receipt_vault_root(root):
+                    return False
+                evidence = graph_sync.read_graph_commit_receipt(root, claim_token)
+                if not (
+                    evidence is not None
+                    and evidence.verify(
+                        commit_secret,
+                        idempotency_key_digest=receipt_key_digest or "0" * 64,
+                        command_digest=expected_digest,
+                        attempt_id=attempt_id,
+                        commit_token=claim_token,
+                    )
+                ):
+                    return None
+                return evidence
+            except Exception:  # noqa: BLE001 - absence is fail-closed
+                return None
+
+        def legacy_graph_pending_proof(candidate: Any) -> bool:
+            """Authorize only the retired row's exact coherent graph epoch."""
+            try:
+                from . import graph_sync
+
+                root = receipt_vault_root
+                if root is None or not _is_receipt_vault_root(root):
+                    return False
+                epoch = graph_sync.classify_epoch(root)
+                return (
+                    epoch.kind == "coherent"
+                    and epoch.checkpoint is not None
+                    and epoch.checkpoint == candidate
+                    and graph_sync.read_checkpoint(root) == candidate
+                )
+            except Exception:  # noqa: BLE001 - legacy migration is fail-closed
+                return False
+
+        def resume_graph_sync(result: Any) -> Any:
+            """Resume only a durable derived checkpoint after owner death."""
+            required = None
+            evidence: Any = None
+            terminal: dict[str, Any] | None = None
+            committed_failure: dict[str, Any] | None = None
+
+            def retain_failure(value: Any) -> Any:
+                return (
+                    _CanonicalCommittedFailure(value, committed_failure)
+                    if committed_failure is not None
+                    else value
+                )
+
+            try:
+                from . import graph_sync
+                from .epistemic_graph import EpistemicGraphIndex
+
+                root = receipt_vault_root
+                if isinstance(result, _CanonicalResume):
+                    evidence = result.evidence
+                    result = result.result
+                    # A canonical row without its retained terminal needs
+                    # the exact receipt *and* its matching local secret to
+                    # establish what crossed the multi-store cut.  A cleanup
+                    # crash may leave the row but lose that trusted material;
+                    # derived recovery cannot fabricate a success from it.
+                    if result is None and not isinstance(
+                        evidence, graph_sync.GraphCommitReceipt
+                    ):
+                        return _OUTCOME_UNKNOWN_TERMINAL
+                if isinstance(result, _CanonicalCommittedFailure):
+                    committed_failure = result.payload
+                    result = result.result
+                if result is None:
+                    if not isinstance(evidence, graph_sync.GraphCommitReceipt):
+                        raise ValueError("canonical receipt terminal projection is unavailable")
+                    terminal = dict(evidence.terminal_projection)
+                    # The portable receipt deliberately cannot retain leaf
+                    # paths/content. Keep the public terminal envelope valid
+                    # with an empty local diagnostics projection.
+                    terminal["leaf_result"] = {}
+                    receipt_only_failure = (
+                        evidence.canonical_disposition == "committed_failure"
+                    )
+                    if terminal.get("_terminal") == "exomem.mutation-terminal":
+                        if effective_public_idempotency_key is not None:
+                            terminal["idempotency_key"] = effective_public_idempotency_key
+                    if root is None or not _is_receipt_vault_root(root):
+                        if receipt_only_failure:
+                            return _OUTCOME_UNKNOWN_TERMINAL
+                        return retain_failure(with_graph_outcome(terminal, {
+                            "graph_sync": "failed",
+                            "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
+                            "graph_sync_remediation": (
+                                "Configure the vault mount and run reconcile to recover the derived graph."
+                            ),
+                        }))
+                    required = graph_sync.read_checkpoint(root)
+                    if (evidence.checkpoint_generation, evidence.checkpoint_sha256) != (
+                        required.generation if required is not None else None,
+                        required.checkpoint_sha256 if required is not None else None,
+                    ):
+                        if receipt_only_failure:
+                            return _OUTCOME_UNKNOWN_TERMINAL
+                        if required is not None:
+                            return retain_failure(with_graph_outcome(terminal, graph_failure(required)))
+                        return retain_failure(with_graph_outcome(terminal, {
+                            "graph_sync": "failed",
+                            "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
+                            "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+                        }))
+                    if required is None:
+                        if receipt_only_failure:
+                            return _OUTCOME_UNKNOWN_TERMINAL
+                        return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
+                    EpistemicGraphIndex(
+                        root, mutation_coordinator=self._mutation_coordinator_for(root)
+                    ).rebuild_all()
+                    if graph_sync.status(root)["state"] == "current":
+                        if receipt_only_failure:
+                            return _OUTCOME_UNKNOWN_TERMINAL
+                        return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
+                    if receipt_only_failure:
+                        return _OUTCOME_UNKNOWN_TERMINAL
+                    return retain_failure(with_graph_outcome(terminal, graph_failure(required)))
+                if not isinstance(result, Mapping):
+                    return retain_failure(result)
+                if root is None or not _is_receipt_vault_root(root):
+                    terminal = {
+                        key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
+                    }
+                    return retain_failure(with_graph_outcome(terminal, {
+                        "graph_sync": "failed",
+                        "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
+                        "graph_sync_remediation": (
+                            "Configure the vault mount and run reconcile to recover the derived graph."
+                        ),
+                    }))
+                payload = result.get("_graph_sync_checkpoint")
+                if payload is None:
+                    return retain_failure(result)
+                if not isinstance(payload, dict):
+                    raise ValueError("canonical checkpoint payload is invalid")
+                stored = graph_sync.GraphSyncCheckpoint.parse(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                )
+                if stored is None:
+                    raise ValueError("graph-pending checkpoint payload is invalid")
+                required = graph_sync.read_checkpoint(root)
+                if (
+                    required is None
+                    or stored != required
+                ):
+                    terminal = {
+                        key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
+                    }
+                    if required is not None:
+                        return retain_failure(with_graph_outcome(
+                            terminal, graph_sync.committed_graph_failure(required)
+                        ))
+                    return retain_failure(with_graph_outcome(terminal, {
+                        "graph_sync": "failed",
+                        "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
+                        "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+                    }))
+                EpistemicGraphIndex(
+                    root, mutation_coordinator=self._mutation_coordinator_for(root)
+                ).rebuild_all()
+                terminal = {
+                    key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
+                }
+                if graph_sync.status(root)["state"] == "current":
+                    return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
+                return retain_failure(with_graph_outcome(terminal, graph_sync.committed_graph_failure(required)))
+            except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
+                if terminal is None:
+                    if isinstance(result, Mapping):
+                        terminal = {
+                            key: value
+                            for key, value in result.items()
+                            if key != "_graph_sync_checkpoint"
+                        }
+                    elif isinstance(getattr(evidence, "terminal_projection", None), Mapping):
+                        terminal = dict(evidence.terminal_projection)
+                    else:
+                        terminal = {}
+                if required is not None:
+                    return retain_failure(with_graph_outcome(terminal, graph_failure(required, error)))
+                return retain_failure(with_graph_outcome(terminal, {
+                    "graph_sync": "failed",
+                    "graph_sync_code": "GRAPH_SYNC_RESUME_FAILED",
+                    "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+                }))
+
         narrow_media_commit = command.name == "process_media" and kwargs.get(
             "operation", "process"
         ) in {"process", "retry"}
@@ -1454,6 +2843,11 @@ class LeaseManager:
                     )
                 ),
                 commit_observed=lambda: commit_state["observed"],
+                after_canonical_persisted=persist_graph_sync_progress,
+                after_operation_guard=wait_for_graph_sync,
+                resume_canonically_committed=resume_graph_sync,
+                commit_evidence=exact_commit_evidence,
+                legacy_graph_pending_proof=legacy_graph_pending_proof,
             )
         except BaseException as error:
             if isinstance(error, OpError):
@@ -1561,6 +2955,20 @@ class LeaseManager:
             return self.config.vault_id
         return "standalone"
 
+    def _receipt_vault_root(self, injected: tuple[Any, ...]) -> Path | None:
+        """Resolve receipt storage only from an explicit vault authority."""
+        candidate = injected[0] if injected else None
+        if isinstance(candidate, (str, os.PathLike)):
+            root = Path(candidate)
+            if root.is_absolute():
+                return root.resolve(strict=False)
+        configured = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
+        if configured:
+            root = Path(configured)
+            if root.is_absolute():
+                return root.resolve(strict=False)
+        return None
+
     def validate_fencing_token(self, fencing_token: int) -> None:
         """Fail closed unless the command's token is still locally and remotely current."""
         with self._lock:
@@ -1620,6 +3028,23 @@ class LeaseManager:
             "last_coordinator_error": None,
             "idempotency": self.idempotency.status_summary(),
         }
+        if vault_or_cell is not None:
+            try:
+                from . import epistemic_graph, graph_sync
+
+                vault_root = Path(vault_or_cell)
+                graph_status = graph_sync.status(vault_root)
+                if graph_status["state"] == "current" and not epistemic_graph.EpistemicGraphIndex(
+                    vault_root,
+                    mutation_coordinator=self._mutation_coordinator_for(vault_root),
+                ).available():
+                    graph_status = {
+                        "state": "unavailable",
+                        "generation": graph_status["generation"],
+                    }
+                base["graph_sync"] = graph_status
+            except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
+                base["graph_sync"] = {"state": "unavailable", "generation": 0}
         if not self.config.enabled:
             return base
         assert self.client is not None
@@ -1629,7 +3054,9 @@ class LeaseManager:
             # Record the fault instead of only ever reporting
             # `coordinator_healthy: False` with no further detail.
             self._record_coordinator_error(error.code)
-            code, at = self._last_coordinator_error
+            current_error = self._last_coordinator_error
+            assert current_error is not None
+            code, at = current_error
             base["last_coordinator_error"] = {
                 "code": code,
                 "age_seconds": round(time.monotonic() - at, 3),
@@ -1854,6 +3281,14 @@ def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
     return trace[0] if trace is not None else None
+
+
+def active_direct_mutation_guard(
+    vault_root: os.PathLike[str] | str, *, state_root: Path
+) -> bool:
+    """Return whether this thread owns this manager-root boundary directly."""
+    boundary = _direct_mutation_boundary(vault_root, state_root)
+    return boundary in _ACTIVE_DIRECT_MUTATION_GUARDS.get()
 
 
 def invoke_command(

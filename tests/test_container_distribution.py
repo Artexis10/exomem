@@ -121,6 +121,33 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
         assert "substrate-gateway-contract-selection" not in job
 
 
+def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
+
+    assert "records_rollback_runtime_target_json" not in automatic
+    assert "records_rollback_runtime_target_json:" in text
+    assert "required: false" in text.split(
+        "records_rollback_runtime_target_json:", 1
+    )[1].split("publish_pypi:", 1)[0]
+    assert (
+        "RECORDS_RUNTIME_TARGET_JSON: "
+        "${{ inputs.records_rollback_runtime_target_json }}"
+    ) in manual
+    for flag in (
+        "--records-profile hosted-alpha-agent-v1",
+        "--records-reader-version 2",
+        "--lifecycle-actions-enabled false",
+        "--records-issued-at",
+        "--records-expires-at",
+        "--records-runtime-target-json",
+    ):
+        assert flag in manual
+    assert 'if [[ -n "$RECORDS_RUNTIME_TARGET_JSON" ]]' in manual
+    assert '"${records_compatibility_args[@]}"' in manual
+
+
 def test_release_workflow_binds_automatic_and_manual_builds_to_the_tag_commit() -> None:
     text = _read(".github/workflows/release-please.yml")
     automatic = _workflow_job(text, "publish-image", "publish-existing-image")
@@ -150,6 +177,37 @@ def test_release_publication_jobs_checkout_the_created_tag() -> None:
     for job in jobs:
         assert "ref: ${{ needs.release-please.outputs.tag_name }}" in job
         assert "ref: main" not in job
+
+
+V2_OPENAI_APP = "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json"
+
+
+def _assert_v2_openai_app_id_derivation(flow: str, command: str) -> None:
+    assert "openai_app_id=\"$(python - <<'PY'" in flow
+    assert f'Path("{V2_OPENAI_APP}")' in flow
+    assert 'print(app["apps"]["exomem"]["id"])' in flow
+    assert 'PY\n          )"' in flow
+    assert (
+        f"{command} --candidate hosted-alpha-agent-v2 --platform all "
+        '--openai-app-id "$openai_app_id"'
+    ) in flow
+    assert f"cat {V2_OPENAI_APP}" not in flow
+    assert 'echo "$openai_app_id"' not in flow
+    assert "plugin_asdk_app_" not in flow
+
+
+def test_release_workflow_refreshes_and_checks_the_v2_hosted_candidate() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    sync = _workflow_job(text, "sync-hosted-artifacts", "build-artifacts")
+    render = sync.split("\n      - name: Regenerate hosted plugin artifacts\n", 1)[1].split(
+        "\n      - name: Verify the regenerated artifacts are current\n", 1
+    )[0]
+    check = sync.split("\n      - name: Verify the regenerated artifacts are current\n", 1)[
+        1
+    ].split("\n      - name: Commit the resync onto the release PR\n", 1)[0]
+
+    _assert_v2_openai_app_id_derivation(render, "render")
+    _assert_v2_openai_app_id_derivation(check, "check")
 
 
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:

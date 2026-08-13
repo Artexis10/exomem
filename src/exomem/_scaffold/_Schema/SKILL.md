@@ -282,13 +282,31 @@ experiments, proof-bearing records, review, and supersession.
 | `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
 | `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `plan_memory` for intended future state in a configured Planning collection |
-| `record` | "log this session," "record this measurement," "add this transaction," "update the mileage" | `record_memory` for observed state in a configured Record collection |
+| `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `record_memory` for observed state in a configured Record collection |
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
 | `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `schema_memory`; infer before saving, and keep governance optional |
+
+Records routing is semantic: use it for durable observed events or current state
+without waiting for a magic verb. When exactly one compatible existing collection
+accepts a sufficiently identified observation, the active engagement policy may
+append or update it and the agent reports the mutation. Ask one focused question
+when collections compete or identity, date, provenance, or ownership is unclear.
+When no collection fits, use `record_memory(action="describe")` and propose a
+concise collection; the agent must not silently create a long-lived schema.
+
+For a Records collection stored as Markdown items, YAML frontmatter is the sole
+canonical value source. A manifest may opt into `record_presentation` to add a
+generated, readable body block for selected nested child values. Treat that
+block as derived: never edit it as data or read values back from it. If a person
+directly edits selected frontmatter, inspect and rebaseline the audit gap, then
+use guarded `record_memory(action="update", refresh_presentation=true, ...)`
+to refresh the block. Query a declared child table with `expand_child`; use the
+older `expand_children=true` only when the collection has one unambiguous child
+container.
 
 Examples:
 
@@ -300,7 +318,10 @@ Examples:
   only if a conclusion is present.
 - "Keep this receipt for the warranty case" -> `preserve_evidence`, `preserve_artifacts`, or `transfer_artifact`, not as a
   general note.
-- "Log this training session" -> `record_memory(action="append")` after resolving the collection; keep the session as an observed Record, not a compiled conclusion.
+- "I completed a dated training session" -> resolve exactly one compatible
+  collection before `record_memory(action="append")`; keep the session as an
+  observed Record, not a compiled conclusion. If none fits, propose a collection
+  rather than creating one silently.
 - "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
 - "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from prose or elapsed time.
 - "Compile these three sources" -> draft a sourced note with `remember` link suggestions,

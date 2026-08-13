@@ -166,6 +166,43 @@ def _pair() -> dict[str, object]:
     return {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 2, "locks": [expand, contract]}
 
 
+def _v3_member() -> dict[str, object]:
+    member = _member("expand")
+    member["schemaVersion"] = 3
+    member["runtimeTarget"]["agentProfile"] = "hosted-alpha-agent-v2"  # type: ignore[index]
+    member["recordsCompatibility"] = {
+        "minimum_records_reader_version": 2,
+        "activeProfile": "hosted-alpha-agent-v2",
+        "activeLifecycleActionsEnabled": True,
+        "rollbackProfile": "hosted-alpha-agent-v1",
+        "rollbackLifecycleActionsEnabled": False,
+        "rollbackRuntime": {
+            "image": "ghcr.io/artexis10/exomem@sha256:" + "f" * 64,
+            "sourceCommit": "d" * 40,
+            "candidateSha256": "e" * 64,
+            "recordsReaderVersion": 2,
+            "readerStatusProof": {
+                "profile": "hosted-alpha-agent-v1",
+                "recordsReaderVersion": 2,
+                "lifecycleActionsEnabled": False,
+                "issuedAt": "2026-08-12T10:00:00Z",
+                "expiresAt": "2026-08-12T11:00:00Z",
+                "signerWorkflow": "Artexis10/exomem/.github/workflows/release-please.yml",
+                "signerWorkflowDigest": "d" * 40,
+            },
+            "runtimeTarget": {
+                "releaseVersion": "0.35.0",
+                "protocolVersion": "1",
+                "agentProfile": "hosted-alpha-agent-v1",
+                "gatewayContractDigest": "6" * 64,
+                "commandFingerprint": "7" * 64,
+                "schemaDigest": "8" * 64,
+            },
+        },
+    }
+    return member
+
+
 def _write_pair(path: Path) -> tuple[dict[str, object], str]:
     pair = _pair()
     path.write_bytes(_canonical(pair))
@@ -473,6 +510,209 @@ def test_rollback_substrate_consumer_requires_the_exact_pinned_commit(
         verifier._verify_substrate_v1_consumer("d" * 40, "gh")
 
 
+def test_selected_v3_lock_requires_and_reverifies_the_rollback_runtime_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _module(VERIFIER)
+    selected = _v3_member()
+    candidate = tmp_path / "rollback.candidate-v1.json"
+    image_bundle = tmp_path / "rollback.sigstore.json"
+    candidate_bundle = tmp_path / "rollback.candidate.sigstore.json"
+    for path in (candidate, image_bundle, candidate_bundle):
+        path.write_bytes(b"bundle")
+    calls: dict[str, object] = {}
+
+    prepare = SimpleNamespace(
+        _load_pair=lambda _path: {},
+        _select_member=lambda _pair, **_kwargs: (selected, "a" * 64),
+    )
+    composer = SimpleNamespace(verify_source_closure=lambda *_args: None)
+    candidate_tool = SimpleNamespace(
+        load_candidate=lambda _path: {"kind": "runtime", "image": {"reference": selected["components"]["runtime"]["image"]}, "source": {"commit": selected["components"]["runtime"]["sourceCommit"]}, "release": {"tag": "v0.35.1"}},
+        verify_candidate=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        verifier,
+        "_load_script",
+        lambda name: {"prepare_hosted_release.py": prepare, "hosted_composition_lock.py": composer, "hosted_image_candidate.py": candidate_tool}[name],
+    )
+    monkeypatch.setattr(verifier, "_verify_lock_evidence", lambda *_args: None)
+    monkeypatch.setattr(
+        verifier,
+        "_download_release_runtime_candidate",
+        lambda **_kwargs: (candidate, image_bundle, candidate_bundle),
+    )
+    monkeypatch.setattr(verifier, "_verified_provisioner_candidate", lambda **_kwargs: None)
+    monkeypatch.setattr(verifier, "_verify_substrate_v1_consumer", lambda *_args: None)
+    monkeypatch.setattr(verifier, "_run", lambda *_args, **_kwargs: SimpleNamespace(stdout=""))
+
+    def verify_rollback(lock: dict[str, object], **kwargs: object) -> None:
+        calls["lock"] = lock
+        calls.update(kwargs)
+
+    monkeypatch.setattr(verifier, "verify_v3_rollback_runtime_candidate", verify_rollback)
+    verifier.verify_selected_deployment_lock(
+        phase="expand",
+        repository=tmp_path,
+        rollback_runtime_candidate=candidate,
+        rollback_runtime_image_bundle=image_bundle,
+        rollback_runtime_candidate_bundle=candidate_bundle,
+    )
+
+    assert calls == {
+        "lock": selected,
+        "candidate": candidate,
+        "candidate_sha256": "e" * 64,
+        "image_bundle": image_bundle,
+        "candidate_bundle": candidate_bundle,
+    }
+
+
+def test_selected_lock_cli_passes_v3_rollback_artifacts_without_changing_v2_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _module(VERIFIER)
+    paths = [tmp_path / name for name in ("candidate", "image-bundle", "candidate-bundle")]
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(verifier, "verify_selected_deployment_lock", lambda **kwargs: calls.append(kwargs) or {})
+
+    assert verifier.main(["--phase", "expand", "--repository", str(tmp_path)]) == 0
+    assert verifier.main([
+        "--phase", "expand", "--repository", str(tmp_path),
+        "--rollback-runtime-candidate", str(paths[0]),
+        "--rollback-runtime-image-bundle", str(paths[1]),
+        "--rollback-runtime-candidate-bundle", str(paths[2]),
+    ]) == 0
+    assert calls[0] == {"phase": "expand", "repository": tmp_path, "oras_binary": "oras"}
+    assert calls[1] == {
+        **calls[0],
+        "rollback_runtime_candidate": paths[0],
+        "rollback_runtime_image_bundle": paths[1],
+        "rollback_runtime_candidate_bundle": paths[2],
+    }
+
+    pair = tmp_path / "pair.json"
+    evidence = tmp_path / "evidence"
+    assert verifier.main([
+        "--phase", "contract", "--repository", str(tmp_path),
+        "--lock-pair", str(pair), "--lock-evidence", str(evidence),
+    ]) == 0
+    assert calls[2] == {
+        "phase": "contract",
+        "repository": tmp_path,
+        "oras_binary": "oras",
+        "lock_pair_path": pair,
+        "lock_evidence_directory": evidence,
+    }
+
+
+def test_selected_v3_lock_discovers_the_signed_rollback_candidate_from_its_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _module(VERIFIER)
+    selected = _v3_member()
+    rollback = selected["recordsCompatibility"]["rollbackRuntime"]  # type: ignore[index]
+    candidate = tmp_path / "rollback.candidate-v1.json"
+    image_bundle = tmp_path / "rollback.sigstore.json"
+    candidate_bundle = tmp_path / "rollback.candidate.sigstore.json"
+    for path in (candidate, image_bundle, candidate_bundle):
+        path.write_bytes(b"bundle")
+    discovered: list[tuple[str, str]] = []
+    verified: list[tuple[Path, Path, Path]] = []
+
+    prepare = SimpleNamespace(
+        _load_pair=lambda _path: {},
+        _select_member=lambda _pair, **_kwargs: (selected, "a" * 64),
+    )
+    composer = SimpleNamespace(verify_source_closure=lambda *_args: None)
+    candidate_tool = SimpleNamespace(
+        load_candidate=lambda _path: {
+            "kind": "runtime",
+            "image": {"reference": selected["components"]["runtime"]["image"]},
+            "source": {"commit": selected["components"]["runtime"]["sourceCommit"]},
+            "release": {"tag": "v0.35.1"},
+        },
+        verify_candidate=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        verifier,
+        "_load_script",
+        lambda name: {
+            "prepare_hosted_release.py": prepare,
+            "hosted_composition_lock.py": composer,
+            "hosted_image_candidate.py": candidate_tool,
+        }[name],
+    )
+    monkeypatch.setattr(verifier, "_verify_lock_evidence", lambda *_args: None)
+    monkeypatch.setattr(
+        verifier,
+        "_download_release_runtime_candidate",
+        lambda **kwargs: discovered.append(
+            (kwargs["release"], kwargs["expected_sha256"])
+        ) or (candidate, image_bundle, candidate_bundle),
+    )
+    monkeypatch.setattr(verifier, "_verified_provisioner_candidate", lambda **_kwargs: None)
+    monkeypatch.setattr(verifier, "_verify_substrate_v1_consumer", lambda *_args: None)
+    monkeypatch.setattr(verifier, "_run", lambda *_args, **_kwargs: SimpleNamespace(stdout=""))
+    monkeypatch.setattr(
+        verifier,
+        "verify_v3_rollback_runtime_candidate",
+        lambda _lock, **kwargs: verified.append(
+            (kwargs["candidate"], kwargs["image_bundle"], kwargs["candidate_bundle"])
+        ),
+    )
+
+    verifier.verify_selected_deployment_lock(phase="expand", repository=tmp_path)
+
+    assert discovered == [
+        (
+            selected["runtimeTarget"]["releaseVersion"],  # type: ignore[index]
+            selected["components"]["runtime"]["candidateSha256"],  # type: ignore[index]
+        ),
+        (rollback["runtimeTarget"]["releaseVersion"], rollback["candidateSha256"]),
+    ]
+    assert verified == [(candidate, image_bundle, candidate_bundle)]
+
+
+def test_v3_rollback_runtime_verification_accepts_an_exact_claim_after_composition_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _module(VERIFIER)
+    lock = _v3_member()
+    rollback = lock["recordsCompatibility"]["rollbackRuntime"]  # type: ignore[index]
+    candidate = tmp_path / "rollback.candidate-v1.json"
+    image_bundle = tmp_path / "rollback.sigstore.json"
+    candidate_bundle = tmp_path / "rollback.candidate.sigstore.json"
+    for path in (candidate, image_bundle, candidate_bundle):
+        path.write_bytes(b"bundle")
+    freshness: list[bool] = []
+    verified = {
+        "image": {"reference": rollback["image"]},
+        "source": {"commit": rollback["sourceCommit"]},
+    }
+    expected_claim = {**rollback["readerStatusProof"], "runtimeTarget": rollback["runtimeTarget"]}
+    candidate_module = SimpleNamespace(
+        validate_records_compatibility_claim=lambda _candidate, **kwargs: freshness.append(
+            kwargs["require_fresh"]
+        ) or expected_claim
+    )
+    composer = SimpleNamespace(
+        CandidateInput=lambda *_args: object(),
+        _candidate=lambda *_args, **_kwargs: (verified, rollback["candidateSha256"]),
+        hosted_image_candidate=candidate_module,
+    )
+    monkeypatch.setattr(verifier, "_load_script", lambda _name: composer)
+
+    verifier.verify_v3_rollback_runtime_candidate(
+        lock,
+        candidate=candidate,
+        candidate_sha256=rollback["candidateSha256"],
+        image_bundle=image_bundle,
+        candidate_bundle=candidate_bundle,
+    )
+    assert freshness == [False]
+
+
 def test_deploy_runbook_mandates_the_selected_lock_verifier() -> None:
     runbook = (ROOT / "docs/runbooks/hosted/deploy.md").read_text(encoding="utf-8")
 
@@ -504,6 +744,44 @@ def test_prepare_v2_derives_all_deploy_inputs_from_one_exact_pair_member(tmp_pat
         "controlHostname": "control.example.test",
         "transferHostname": "transfer.example.test",
     }
+
+
+def test_prepare_v3_requires_runtime_selection_and_emits_only_the_operator_value(tmp_path: Path) -> None:
+    prepare = _module()
+    pair_path = tmp_path / "pair.json"
+    member = _v3_member()
+    contract = deepcopy(member)
+    contract["admissionMode"] = "contract"
+    pair = {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 3, "locks": [member, contract]}
+    pair_path.write_bytes(_canonical(pair))
+    member_sha256 = hashlib.sha256(_canonical(member)).hexdigest()
+
+    with pytest.raises(prepare.ReleaseManifestError, match="requires runtime selection"):
+        prepare.prepare_v2(
+            lock_pair_path=pair_path, values_path=tmp_path / "values.json", phase="expand",
+            member_sha256=member_sha256, control_hostname="control.example.test",
+            transfer_hostname="transfer.example.test",
+        )
+
+    prepare.prepare_v2(
+        lock_pair_path=pair_path, values_path=tmp_path / "values.json", phase="expand",
+        member_sha256=member_sha256, runtime_selection="rollback",
+        control_hostname="control.example.test", transfer_hostname="transfer.example.test",
+    )
+    assert json.loads((tmp_path / "values.json").read_text())["provisioner"]["runtimeSelection"] == "rollback"
+
+
+def test_prepare_v2_refuses_rollback_selection(tmp_path: Path) -> None:
+    prepare = _module()
+    pair_path = tmp_path / "pair.json"
+    _pair, member_sha256 = _write_pair(pair_path)
+
+    with pytest.raises(prepare.ReleaseManifestError, match="v2"):
+        prepare.prepare_v2(
+            lock_pair_path=pair_path, values_path=tmp_path / "values.json", phase="expand",
+            member_sha256=member_sha256, runtime_selection="rollback",
+            control_hostname="control.example.test", transfer_hostname="transfer.example.test",
+        )
 
 
 @pytest.mark.parametrize(

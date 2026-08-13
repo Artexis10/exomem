@@ -61,6 +61,7 @@ RUN case "$(pg_dump --version)" in "pg_dump (PostgreSQL) 17."*) ;; *) exit 1;; e
     && exomem-provisioner-worker --help >/dev/null \
     && exomem-volume-worker --help >/dev/null \
     && exomem-provisioner-volume-rebind --help >/dev/null \
+    && exomem-provisioner-recover-init-retry --help >/dev/null \
     && exomem-durability-actions --help >/dev/null \
     && exomem-restore-fetch --help >/dev/null \
     && for command in exomem-provisioner-database-bootstrap \

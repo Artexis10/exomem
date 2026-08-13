@@ -1,0 +1,11 @@
+{
+  "plugins/hosted/definition.json": "96f92d72b47b2578d28e8cc60fe65a3d1dbb0f0ea11d3ee8ecc44d895e443196",
+  "plugins/hosted/generated/claude.lock.json": "671dc3bf25797f2be259b68afe17eb338a6397a252992bbcef9fd2b96753e4d6",
+  "plugins/hosted/generated/claude.zip": "0da1055f4bb34d383101011f568b171f73ad4e033c3f3dd575136e1da54a1442",
+  "plugins/hosted/generated/compatibility.json": "9aed518b54b77652885f25dd3d90996c3f3e93de541affe696c7884fb5b89a50",
+  "plugins/hosted/generated/openai.lock.json": "42a41c9b28e6b5349ded0b3957d4f50f764cb331504c230bbaa6c3ab08b6e778",
+  "plugins/hosted/generated/openai.zip": "d8e42e7b886ddd87ba0b84f58cc03d40296d64c7c38b419f0ee8579b9af8028f",
+  "plugins/hosted/promotion/claude.json": "a489c80456db9b2f8929284b53b1dc6892f08eecfda9213bb57457480ed250a9",
+  "plugins/hosted/promotion/openai.json": "ddf7ce10b19d700dad60c06805eed6cb028acad91cab5c37fc89fc811ed5130b",
+  "plugins/hosted/skills/exomem/SKILL.md": "830dd0876c93169e5c659fde6d31088de845a3da6846732289614f599cb6eca3"
+}

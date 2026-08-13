@@ -7,10 +7,11 @@
     "provisioner": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["deploymentLockJson", "deploymentLockSha256", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "location", "internalOrigin", "pollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret", "capacityReceiptPublicKeySecret"],
+      "required": ["deploymentLockJson", "deploymentLockSha256", "runtimeSelection", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "location", "internalOrigin", "pollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret", "capacityReceiptPublicKeySecret"],
       "properties": {
         "deploymentLockJson": {"type": "string", "minLength": 1, "maxLength": 1048576, "contentMediaType": "application/json"},
         "deploymentLockSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "runtimeSelection": {"enum": ["", "active", "rollback"]},
         "replicas": {"type": "integer", "minimum": 1, "maximum": 2},
         "databaseSchema": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,62}$"},
         "databaseRole": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,62}$"},

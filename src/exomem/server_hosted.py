@@ -321,7 +321,8 @@ def _hosted_mutation_error_details(
     *,
     context: gateway.TrustedGatewayContext,
 ) -> dict[str, Any]:
-    expected_shape = _HOSTED_MUTATION_ERROR_SHAPES.get(error.get("code"))
+    code = error.get("code")
+    expected_shape = _HOSTED_MUTATION_ERROR_SHAPES.get(code) if isinstance(code, str) else None
     if expected_shape is None:
         return {}
     expected_status, expected_committed = expected_shape
@@ -765,14 +766,24 @@ def register_hosted_routes(
         protocol_version=config.protocol_version,
         expose_tier2=expose_tier2,
     )
-    agent_profile = commands_module.HOSTED_ALPHA_AGENT_PROFILE
-    agent_commands = commands_module.product_commands_for_profile(agent_profile, "rest")
-    agent_commands_by_name = {command.name: command for command in agent_commands}
-    agent_surface_descriptor = gateway.hosted_agent_surface_descriptor(agent_profile)
-    agent_contract = gateway.build_agent_gateway_contract(
-        profile=agent_profile,
-        protocol_version=config.protocol_version,
-    )
+    agent_profiles = (config.active_agent_profile,)
+    agent_commands_by_profile = {
+        profile: {
+            command.name: command
+            for command in commands_module.product_commands_for_profile(profile, "rest")
+        }
+        for profile in agent_profiles
+    }
+    agent_surface_descriptors = {
+        profile: gateway.hosted_agent_surface_descriptor(profile) for profile in agent_profiles
+    }
+    agent_contracts = {
+        profile: gateway.build_agent_gateway_contract(
+            profile=profile,
+            protocol_version=config.protocol_version,
+        )
+        for profile in agent_profiles
+    }
     invoke = invoke_command_func
     if invoke is None:
         from .writer_lease import invoke_command
@@ -839,7 +850,8 @@ def register_hosted_routes(
         try:
             context = _trusted_context(request, config, private_authenticator)
             surface_profile = str(request.path_params.get("surface_profile", ""))
-            if surface_profile != agent_profile:
+            agent_contract = agent_contracts.get(surface_profile)
+            if agent_contract is None:
                 raise gateway.HostedGatewayError(
                     "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
                     "hosted agent surface profile is not supported",
@@ -865,6 +877,41 @@ def register_hosted_routes(
         return Response(
             gateway.canonical_contract_json(agent_contract),
             media_type="application/json",
+        )
+
+    @mcp_app.custom_route(
+        "/private/exomem/v1/agent/{surface_profile}/reader-status",
+        methods=["GET"],
+    )
+    async def _reader_status(request: Request) -> HostedJSONResponse:
+        started = time.perf_counter()
+        context: gateway.TrustedGatewayContext | None = None
+        try:
+            context = _trusted_context(request, config, private_authenticator)
+            surface_profile = str(request.path_params.get("surface_profile", ""))
+            if surface_profile not in agent_surface_descriptors:
+                raise gateway.HostedGatewayError(
+                    "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+                    "hosted agent surface profile is not supported",
+                )
+        except gateway.HostedGatewayError as exc:
+            return _error_response(
+                exc.code,
+                config=config,
+                operation="reader-status",
+                request_id=context.request_id if context else None,
+                started=started,
+            )
+        assert context is not None
+        return _success_response(
+            {
+                "records_reader_version": config.records_reader_version,
+                "lifecycle_actions_enabled": config.lifecycle_actions_enabled,
+            },
+            config=config,
+            operation="reader-status",
+            request_id=context.request_id,
+            started=started,
         )
 
     @mcp_app.custom_route("/private/exomem/v1/live", methods=["GET"])
@@ -954,6 +1001,15 @@ def register_hosted_routes(
                 guarded_fields=command.guarded_fields,
                 tool=command.name,
             )
+            if (
+                command.name == "record_memory"
+                and kwargs.get("action") in {"revise", "rebaseline"}
+                and not config.lifecycle_actions_enabled
+            ):
+                raise gateway.HostedGatewayError(
+                    "HOSTED_RECORDS_LIFECYCLE_DISABLED",
+                    "Records lifecycle mutations are disabled for this runtime",
+                )
             injected = (
                 (config.vault_root, source_schema) if command.needs_schema else (config.vault_root,)
             )
@@ -1061,7 +1117,9 @@ def register_hosted_routes(
     )
     async def _agent_command(request: Request) -> HostedJSONResponse:
         surface_profile = str(request.path_params.get("surface_profile", ""))
-        if surface_profile != agent_profile:
+        command_map = agent_commands_by_profile.get(surface_profile)
+        descriptor = agent_surface_descriptors.get(surface_profile)
+        if command_map is None or descriptor is None:
             started = time.perf_counter()
             context: gateway.TrustedGatewayContext | None = None
             try:
@@ -1082,8 +1140,8 @@ def register_hosted_routes(
             )
         return await _execute_command(
             request,
-            command_map=agent_commands_by_name,
-            descriptor=agent_surface_descriptor,
+            command_map=command_map,
+            descriptor=descriptor,
         )
 
     async def lifecycle_context(

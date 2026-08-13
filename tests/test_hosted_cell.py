@@ -176,6 +176,33 @@ def test_hosted_config_rejects_missing_relative_and_overlapping_roots(
     assert SECRET not in str(error.value)
 
 
+def test_hosted_records_surface_configuration_is_explicit_and_coherent(tmp_path: Path) -> None:
+    rollback = _env(tmp_path)
+    rollback.update(
+        {
+            "EXOMEM_HOSTED_RECORDS_READER_VERSION": "2",
+            "EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED": "false",
+        }
+    )
+    config = HostedCellConfig.from_env(rollback, require_provisioned=False)
+
+    assert config.records_reader_version == 2
+    assert config.lifecycle_actions_enabled is False
+
+    contradictory = dict(rollback)
+    contradictory["EXOMEM_HOSTED_RECORDS_READER_VERSION"] = "1"
+    contradictory["EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED"] = "true"
+    with pytest.raises(HostedConfigError) as conflict:
+        HostedCellConfig.from_env(contradictory, require_provisioned=False)
+    assert conflict.value.code == "HOSTED_RECORDS_READER_UNSUPPORTED"
+
+    unknown = dict(rollback)
+    unknown["EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED"] = "unknown"
+    with pytest.raises(HostedConfigError) as invalid:
+        HostedCellConfig.from_env(unknown, require_provisioned=False)
+    assert invalid.value.code == "HOSTED_LIFECYCLE_ACTIONS_INVALID"
+
+
 def test_hosted_config_rejects_symlinked_roots(tmp_path: Path) -> None:
     real = tmp_path / "real-vault"
     real.mkdir()

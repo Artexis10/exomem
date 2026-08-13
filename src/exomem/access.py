@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -50,6 +51,14 @@ _APPEND_ONLY = ("Sources", "Evidence")
 # access checks then reuse this parsed snapshot without rereading the policy.
 _PolicySignature = tuple[int, int, int, int, int]
 _CACHE: dict[str, tuple[_PolicySignature, str, dict[str, list[str]]]] = {}
+PUBLICATION_POLICY_MAX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationPolicySnapshot:
+    """One bounded exact access-policy identity for derived publication."""
+
+    fingerprint: str
 
 
 def access_config_path(vault_root: Path) -> Path:
@@ -89,6 +98,33 @@ def policy_fingerprint(vault_root: Path) -> str:
         _CACHE.pop(str(path), None)
         return "missing"
     return _refresh_config(path, signature)[0]
+
+
+def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot | None:
+    """Safely snapshot exact policy bytes for a derived publication.
+
+    Unreadable, replaced, or over-limit bytes fail closed; an absent policy has
+    the stable explicit ``missing`` identity.
+    """
+    root = Path(vault_root)
+    path = access_config_path(root)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return PublicationPolicySnapshot("missing")
+    except OSError:
+        return None
+    try:
+        from . import vault
+
+        raw, _guard = vault.read_bounded_guarded_bytes(
+            root,
+            path.relative_to(root).as_posix(),
+            limit=PUBLICATION_POLICY_MAX_BYTES,
+        )
+    except (OSError, ValueError):
+        return None
+    return PublicationPolicySnapshot(hashlib.sha256(raw).hexdigest())
 
 
 def _policy_signature(path: Path) -> _PolicySignature:

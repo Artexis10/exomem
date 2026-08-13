@@ -145,8 +145,8 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
                 "watcher_policy": {
                     "debounce_seconds": 2.0,
                     "reconcile_interval_seconds": 900.0,
-                    "max_embed_files_per_batch": 0,
-                    "max_reconcile_embed_files": 0,
+                    "max_embed_files_per_batch": 25,
+                    "max_reconcile_embed_files": 25,
                     "defer_expensive_indexes": True,
                 },
                 "release_when_idle": True,
@@ -274,8 +274,8 @@ def test_resolved_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
         "watcher_policy": {
             "debounce_seconds": 2.0,
             "reconcile_interval_seconds": 900.0,
-            "max_embed_files_per_batch": 0,
-            "max_reconcile_embed_files": 0,
+            "max_embed_files_per_batch": 25,
+            "max_reconcile_embed_files": 25,
             "defer_expensive_indexes": True,
         },
         "release_when_idle": True,

@@ -2,6 +2,12 @@
 {{- $lock := $lockJson | mustFromJson -}}
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 {{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
+{{- $lockFile := include "exomem.hostedDeploymentLockFileName" . -}}
+{{- $runtimeSelection := include "exomem.hostedRuntimeSelection" . -}}
+{{- $runtimeTarget := $lock.runtimeTarget -}}
+{{- if eq $runtimeSelection "rollback" -}}
+{{- $runtimeTarget = $lock.recordsCompatibility.rollbackRuntime.runtimeTarget -}}
+{{- end -}}
 {{- $capacityContractRaw := .Files.Get "files/private-alpha-capacity-v1.json" -}}
 {{- if ne .Values.capacityCollector.contractSha256 ($capacityContractRaw | sha256sum) -}}
 {{- fail "provisioner capacity contract SHA-256 mismatch" -}}
@@ -63,6 +69,8 @@ spec:
       labels:
         app.kubernetes.io/name: exomem-provisioner-api
         app.kubernetes.io/part-of: exomem-hosted
+      annotations:
+        exomem.io/runtime-selection: {{ $runtimeSelection | quote }}
     spec:
       serviceAccountName: exomem-provisioner-api
       automountServiceAccountToken: false
@@ -111,7 +119,9 @@ spec:
               extra="forbid", so an unmodelled prefixed variable fails validation.
             */}}
             - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
-              value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
+              value: {{ printf "/etc/exomem/deployment-lock/%s" $lockFile | quote }}
+            - name: EXOMEM_PROVISIONER_RUNTIME_SELECTION
+              value: {{ $runtimeSelection | quote }}
           ports:
             - name: http
               containerPort: 8080
@@ -155,8 +165,8 @@ spec:
           configMap:
             name: {{ $lockName }}
             items:
-              - key: exomem-hosted-deployment-lock-v2.json
-                path: exomem-hosted-deployment-lock-v2.json
+              - key: {{ $lockFile }}
+                path: {{ $lockFile }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -180,6 +190,7 @@ spec:
         app.kubernetes.io/part-of: exomem-hosted
       annotations:
         exomem.io/deployment-lock-sha256: {{ $lockJson | sha256sum | quote }}
+        exomem.io/runtime-selection: {{ $runtimeSelection | quote }}
     spec:
       serviceAccountName: exomem-cell-provisioner
       automountServiceAccountToken: true
@@ -224,13 +235,15 @@ spec:
             - name: EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS
               value: {{ .Values.provisioner.trustedProxyIps | quote }}
             - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH
-              value: /etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v2.json
+              value: {{ printf "/etc/exomem/deployment-lock/%s" $lockFile | quote }}
             - name: EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_SHA256
               value: {{ $lockJson | sha256sum | quote }}
             - name: EXOMEM_PROVISIONER_ADMISSION_MODE
               value: {{ $lock.admissionMode | quote }}
+            - name: EXOMEM_PROVISIONER_RUNTIME_SELECTION
+              value: {{ $runtimeSelection | quote }}
             - name: EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON
-              value: {{ $lock.runtimeTarget | toJson | quote }}
+              value: {{ $runtimeTarget | toJson | quote }}
             - name: EXOMEM_PROVISIONER_CELL_CHART_PATH
               value: {{ .Values.provisioner.cellChartPath | quote }}
             - name: EXOMEM_PROVISIONER_CELL_CHART_VERSION
@@ -313,8 +326,8 @@ spec:
           configMap:
             name: {{ $lockName }}
             items:
-              - key: exomem-hosted-deployment-lock-v2.json
-                path: exomem-hosted-deployment-lock-v2.json
+              - key: {{ $lockFile }}
+                path: {{ $lockFile }}
         - name: capacity-contract
           configMap:
             name: exomem-capacity-contract

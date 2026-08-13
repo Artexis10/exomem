@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import relation_review, semantic_index, semantic_writes
+from . import graph_sync, relation_review, semantic_index, semantic_writes
 from .governance import lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -25,6 +25,7 @@ from .vault import (
     PathGuard,
     PathGuardError,
     VaultPathError,
+    content_hash,
     in_append_only_tree,
     in_curated_tree,
     read_guarded_text,
@@ -190,6 +191,7 @@ def recover_from_trash(
 
     semantic: dict | None = None
     lifecycle_operation: lifecycle.LifecycleOperation | None = None
+    graph_transition: graph_sync.GraphLifecycleTransition | None = None
     semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
     recovery_entries: list[semantic_writes.RecoveryEntry] = []
     destination_root_guard: PathGuard | None = None
@@ -295,39 +297,83 @@ def recover_from_trash(
                 )
 
             try:
-                lifecycle_operation = lifecycle.begin_recovery(
-                    vault_root, trash_rel=trash_rel, source_rel=restore_rel
+                graph_transition = graph_sync.begin_recovery_transition(
+                    vault_root,
+                    trash_rel=trash_rel,
+                    source_rel=restore_rel,
+                    restored_paths=[
+                        (entry.restore_path, content_hash(entry.source))
+                        for entry in recovery_entries
+                    ],
                 )
             except lifecycle.LifecycleError as error:
                 raise RecoverError(code=error.code, reason=error.reason) from error
+            except graph_sync.GraphLifecycleEpochSetupError as error:
+                raise RecoverError(
+                    code="GRAPH_SYNC_EPOCH_FAILED",
+                    reason="could not establish the graph recovery epoch",
+                ) from error
+            except graph_sync.GraphLifecycleRollbackError as error:
+                raise RecoverError(
+                    code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                    reason="the staged recovery transition could not be restored",
+                ) from error
+            lifecycle_operation = graph_transition.operation
 
             def restore() -> None:
                 try:
-                    assert lifecycle_operation is not None
-                    lifecycle.atomic_rename(
-                        lifecycle_operation,
-                        source=trash_abs,
-                        destination=restore_abs,
-                        recovery=True,
-                    )
+                    assert graph_transition is not None
+                    graph_transition.rename()
                 except lifecycle.LifecycleError as error:
                     raise RecoverError(
                         code=error.code,
                         reason=error.reason,
                     ) from error
+                try:
+                    graph_transition.publish_checkpoint()
+                except Exception as error:  # noqa: BLE001 - outer abort reverses the move
+                    raise RecoverError(
+                        code="GRAPH_SYNC_RECOVERY_CHECKPOINT_FAILED",
+                        reason="graph checkpoint failed; recovery will be reversed",
+                    ) from error
+                from .writer_lease import mark_active_mutation_committed
+
+                mark_active_mutation_committed()
 
             committed = semantic_writes.commit_recovery(
                 vault_root, preflight=preflight, mutate=restore
             )
             semantic = committed.as_dict()
         except semantic_writes.SemanticWriteError as error:
-            if lifecycle_operation is not None:
-                lifecycle.abort_recovery(lifecycle_operation)
+            if graph_transition is not None:
+                try:
+                    graph_transition.abort()
+                except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                    raise RecoverError(
+                        code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                        reason="recovery could not be reversed; reconcile is required",
+                    ) from rollback_error
             raise RecoverError(code=error.code, reason=error.reason) from error
         except PathGuardError as error:
-            if lifecycle_operation is not None:
-                lifecycle.abort_recovery(lifecycle_operation)
+            if graph_transition is not None:
+                try:
+                    graph_transition.abort()
+                except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                    raise RecoverError(
+                        code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                        reason="recovery could not be reversed; reconcile is required",
+                    ) from rollback_error
             raise RecoverError(code=error.code, reason=error.reason) from error
+        except RecoverError:
+            if graph_transition is not None:
+                try:
+                    graph_transition.abort()
+                except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                    raise RecoverError(
+                        code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                        reason="recovery could not be reversed; reconcile is required",
+                    ) from rollback_error
+            raise
     else:
         if relation_reviews:
             raise RecoverError(
@@ -342,25 +388,55 @@ def recover_from_trash(
                 warnings=[],
             )
         try:
-            lifecycle_operation = lifecycle.begin_recovery(
-                vault_root, trash_rel=trash_rel, source_rel=restore_rel
+            graph_transition = graph_sync.begin_recovery_transition(
+                vault_root,
+                trash_rel=trash_rel,
+                source_rel=restore_rel,
+                restored_paths=[],
             )
         except lifecycle.LifecycleError as error:
             raise RecoverError(code=error.code, reason=error.reason) from error
-        restore_abs.parent.mkdir(parents=True, exist_ok=True)
+        except graph_sync.GraphLifecycleEpochSetupError as error:
+            raise RecoverError(
+                code="GRAPH_SYNC_EPOCH_FAILED",
+                reason="could not establish the graph recovery epoch",
+            ) from error
+        except graph_sync.GraphLifecycleRollbackError as error:
+            raise RecoverError(
+                code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                reason="the staged recovery transition could not be restored",
+            ) from error
+        lifecycle_operation = graph_transition.operation
         try:
-            lifecycle.atomic_rename(
-                lifecycle_operation,
-                source=trash_abs,
-                destination=restore_abs,
-                recovery=True,
-            )
+            graph_transition.rename()
+            graph_transition.publish_checkpoint()
         except lifecycle.LifecycleError as e:
-            lifecycle.abort_recovery(lifecycle_operation)
+            try:
+                graph_transition.abort()
+            except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                raise RecoverError(
+                    code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                    reason="recovery could not be reversed; reconcile is required",
+                ) from rollback_error
             raise RecoverError(
                 code=e.code,
                 reason=e.reason,
             ) from e
+        except Exception as error:  # noqa: BLE001 - reverse a caught epoch failure
+            try:
+                graph_transition.abort()
+            except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                raise RecoverError(
+                    code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                    reason="recovery could not be reversed; reconcile is required",
+                ) from rollback_error
+            raise RecoverError(
+                code="GRAPH_SYNC_RECOVERY_CHECKPOINT_FAILED",
+                reason="graph checkpoint failed; recovery was reversed",
+            ) from error
+        from .writer_lease import mark_active_mutation_committed
+
+        mark_active_mutation_committed()
 
     warnings: list[str] = []
     if sidecar_guard.leaf_policy == "content":
@@ -390,6 +466,7 @@ def recover_from_trash(
     if restored_markdown:
         from . import file_watcher, index_sync
 
+        fanout_unverified = False
         try:
             file_watcher.register_self_write(vault_root, restored_markdown)
         except Exception:  # noqa: BLE001 - suppression is independently observed
@@ -422,6 +499,10 @@ def recover_from_trash(
                 report = index_sync.upsert_after_write(vault_root, restored_markdown)
         except Exception:  # noqa: BLE001 - restore remains authoritative
             log.exception("restored index refresh failed for %s", restore_rel)
+            try:
+                graph_sync.register_outer_fanout_failure(vault_root)
+            except Exception:  # noqa: BLE001 - retain the canonical recovery and report reconcile
+                log.exception("graph fanout failure handoff could not be registered")
             warnings.append(
                 "recovery succeeded but derived-index refresh failed; run reconcile"
             )
@@ -431,6 +512,7 @@ def recover_from_trash(
                 watcher=watcher_outcome,
             )
         else:
+            fanout_unverified = not isinstance(report, index_sync.IndexSyncReport)
             report = index_sync.with_component(
                 report
                 if isinstance(report, index_sync.IndexSyncReport)
@@ -440,6 +522,20 @@ def recover_from_trash(
                 watcher_outcome,
             )
         index_feedback = report.as_dict()
+        if fanout_unverified:
+            index_feedback["derived_work"] = "unverified"
+
+        from .writer_lease import active_mutation_request_id
+
+        if active_mutation_request_id() is None:
+            required = graph_sync.registered_checkpoint(vault_root)
+            if required is not None:
+                try:
+                    graph_sync.wait_for_registered(vault_root)
+                except Exception:  # noqa: BLE001 - leave recovery evidence staged
+                    warnings.append("recovery succeeded but graph publication failed; run reconcile")
+    elif lifecycle_operation is not None:
+        index_feedback = lifecycle.exact_no_derived_index_report(lifecycle_operation)
 
     if lifecycle_operation is not None and not lifecycle.finish_recovery(
         lifecycle_operation, index_report=index_feedback
@@ -470,6 +566,16 @@ def recover_from_trash(
     )
     if log_warning:
         warnings.append(log_warning)
+
+    from .writer_lease import active_mutation_request_id
+
+    if active_mutation_request_id() is None:
+        required = graph_sync.registered_checkpoint(vault_root)
+        if required is not None:
+            try:
+                graph_sync.wait_for_registered(vault_root)
+            except Exception:  # noqa: BLE001 - log publication remains recoverable
+                warnings.append("recovery log graph publication failed; run reconcile")
 
     return RecoverResult(
         trash_path=trash_rel,

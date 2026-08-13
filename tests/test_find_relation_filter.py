@@ -10,7 +10,9 @@ unavailable).
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -145,6 +147,38 @@ def test_missing_sidecar_raises_warming(tmp_path: Path) -> None:
     with pytest.raises(RetrievalIndexWarming) as excinfo:
         find_module.find(vault, query="", relations=["supports"], limit=15)
     assert excinfo.value.status == "warming"
+
+
+def test_custom_manager_read_binds_relation_warming_to_its_runtime_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    ambient_state = tmp_path / "ambient-state"
+    custom_state = tmp_path / "custom-state"
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(ambient_state))
+    vault = _vault(tmp_path, build=False)
+    manager = LeaseManager(LeaseConfig(state_dir=custom_state))
+    observed: list[Path] = []
+    rebuilt = threading.Event()
+
+    def rebuild(self):  # noqa: ANN001
+        observed.append(self._canonical_mutation_coordinator().state_root)
+        rebuilt.set()
+        return {}
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "rebuild_all", rebuild)
+    command = SimpleNamespace(
+        name="relation-read",
+        read_only=True,
+        leaf=lambda root: find_module.find(root, query="", relations=["supports"], limit=15),
+    )
+
+    with pytest.raises(RetrievalIndexWarming):
+        manager.invoke(command, (vault,), {})
+
+    assert rebuilt.wait(1)
+    assert observed == [custom_state]
 
 
 def test_stale_sidecar_raises_warming(tmp_path: Path) -> None:

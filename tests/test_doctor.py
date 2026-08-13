@@ -12,6 +12,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -126,17 +127,54 @@ def test_idempotency_store_check_warns_on_abandoned_receipts(_isolated_lease_man
     assert check.details["abandoned"] == 1
 
 
-def test_idempotency_store_check_warns_on_stale_pending(_isolated_lease_manager) -> None:
+def test_idempotency_store_check_warns_on_stale_live_receipt(_isolated_lease_manager) -> None:
     store = _isolated_lease_manager.idempotency
     with sqlite3.connect(store.path) as connection:
-        connection.execute(
+        connection.executemany(
             "INSERT INTO mutations(key, digest, state, updated_at, owner) "
-            "VALUES ('k1', 'd1', 'pending', ?, NULL)",
-            (0.0,),
+            "VALUES (?, ?, ?, ?, NULL)",
+            [
+                ("live-key-secret", "live-digest-secret", "executing", 0.0),
+                ("reserved-key-secret", "reserved-digest-secret", "reserved", time.time()),
+                ("pending-key-secret", "pending-digest-secret", "pending", time.time()),
+            ],
         )
     check = doctor_module._check_idempotency_store()
     assert check.status == "warn"
     assert "oldest pending" in check.message
+    assert check.details == {
+        "pending": 3,
+        "abandoned": 0,
+        "oldest_pending_age_seconds": pytest.approx(time.time(), abs=1.0),
+    }
+    assert "live-key-secret" not in json.dumps(check.details)
+    assert "live-digest-secret" not in json.dumps(check.details)
+    assert "reserved-key-secret" not in json.dumps(check.details)
+    assert "pending-key-secret" not in json.dumps(check.details)
+
+
+def test_idempotency_store_check_warns_on_completed_outcome_unknown(
+    _isolated_lease_manager,
+) -> None:
+    from exomem import writer_lease as writer_lease_module
+
+    store = _isolated_lease_manager.idempotency
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(key, digest, state, result, updated_at, owner) "
+            "VALUES ('unknown-key-secret', 'unknown-digest-secret', 'completed', ?, ?, NULL)",
+            (writer_lease_module._OUTCOME_UNKNOWN_PAYLOAD, 0.0),
+        )
+    check = doctor_module._check_idempotency_store()
+    assert check.status == "warn"
+    assert "1 abandoned idempotency receipt" in check.message
+    assert check.details == {
+        "pending": 0,
+        "abandoned": 1,
+        "oldest_pending_age_seconds": None,
+    }
+    assert "unknown-key-secret" not in json.dumps(check.details)
+    assert "unknown-digest-secret" not in json.dumps(check.details)
 
 
 def test_lexical_check_uses_escaped_immutable_query_only_snapshot(

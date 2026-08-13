@@ -267,13 +267,11 @@ def test_database_commands_accept_explicit_session_stable_pooler(
     module = _bootstrap_module()
     monkeypatch.setenv(
         "EXOMEM_PROVISIONER_DATABASE_ADMIN_URL",
-        "postgresql+asyncpg://operator:admin@session-pooler.internal/control"
-        "?pool_mode=session",
+        "postgresql+asyncpg://operator:admin@session-pooler.internal/control?pool_mode=session",
     )
     monkeypatch.setenv(
         "EXOMEM_PROVISIONER_DATABASE_URL",
-        "postgresql+asyncpg://runtime:runtime@session-pooler.internal/control"
-        "?pool_mode=session",
+        "postgresql+asyncpg://runtime:runtime@session-pooler.internal/control?pool_mode=session",
     )
     monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_SCHEMA", "provisioner_data")
     monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_ROLE", "runtime")

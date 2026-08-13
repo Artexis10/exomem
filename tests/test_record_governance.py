@@ -12,8 +12,9 @@ from record_fixtures import (
     copy_vehicle_maintenance_fixture,
     copy_x3_fixture,
 )
+from record_presentation_fixtures import manifest_text
 
-from exomem import memory_refs, record_formats, record_governance, records
+from exomem import memory_refs, record_formats, record_governance, records, vault
 from exomem import structured_collections as collections
 from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, request_scope
@@ -639,6 +640,203 @@ One ordinary""",
     assert raised.value.code == "SAVED_VIEW_NOT_AVAILABLE"
 
 
+def _nested_link_saved_view(tmp_path: Path) -> collections.CollectionManifest:
+    (tmp_path / "Knowledge Base/log.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Knowledge Base/log.md").write_text("# Activity\n", encoding="utf-8")
+    path = tmp_path / "Knowledge Base/Records/Observed/_collection.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        manifest_text().replace(
+            "record_presentation:\n",
+            "views:\n"
+            "  hidden-child-link:\n"
+            "    query:\n"
+            "      filters:\n"
+            "        - column: source\n"
+            "          op: eq\n"
+            '          value: "[[Private/Target]]"\n'
+            "      columns: [source]\n"
+            "      sort_by: source\n"
+            "      aggregate: distinct:source\n"
+            "      expand_child: measurements\n"
+            "record_presentation:\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    (path.parent / "Items").mkdir()
+    target = tmp_path / "Knowledge Base/Private/Target.md"
+    target.parent.mkdir()
+    target.write_text("# Withheld target\n", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="private", paths="Private/**")
+    return collections.load_manifest(tmp_path, path)
+
+
+def test_nested_saved_view_link_filter_is_authorized_before_query_source_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _nested_link_saved_view(tmp_path)
+    reads: list[str] = []
+
+    def forbidden_read(self: record_formats.MarkdownItemsAdapter):  # noqa: ANN202
+        reads.append(self.manifest.storage.source)
+        raise AssertionError("saved-view authorization must precede canonical source read")
+
+    monkeypatch.setattr(record_formats.MarkdownItemsAdapter, "read", forbidden_read)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            record_governance.query_collection(tmp_path, manifest, view="hidden-child-link")
+
+    assert raised.value.code == "SAVED_VIEW_NOT_AVAILABLE"
+    assert reads == []
+
+
+def test_inspection_withholds_nested_saved_view_link_literal_without_target_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _nested_link_saved_view(tmp_path)
+    opened: list[str] = []
+    real_read = vault.read_bounded_guarded_bytes
+
+    def observed_read(root: Path, relative: str, **kwargs: object):  # noqa: ANN202
+        opened.append(relative)
+        return real_read(root, relative, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", observed_read)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        inspected = record_governance.inspect_collection(tmp_path, manifest)
+
+    serialized = json.dumps(inspected, sort_keys=True)
+    assert inspected["saved_views"] == []
+    assert "SAVED_VIEW_NOT_AVAILABLE" in serialized
+    assert "Private/Target" not in serialized and "[[Private/Target]]" not in serialized
+    assert "Knowledge Base/Private/Target.md" not in opened
+
+
+def test_ambiguous_boolean_saved_view_never_releases_nested_link_literal_or_target_path(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Knowledge Base/log.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Knowledge Base/log.md").write_text("# Activity\n", encoding="utf-8")
+    path = tmp_path / "Knowledge Base/Records/Observed/_collection.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        manifest_text(two_tables=True).replace(
+            "record_presentation:\n",
+            "views:\n"
+            "  ambiguous-child:\n"
+            "    query:\n"
+            "      expand_children: true\n"
+            "      filters:\n"
+            "        - column: source\n"
+            "          op: eq\n"
+            '          value: "[[Private/Target]]"\n'
+            "record_presentation:\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    (path.parent / "Items").mkdir()
+    target = tmp_path / "Knowledge Base/Private/Target.md"
+    target.parent.mkdir()
+    target.write_text("# Withheld target\n", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="private", paths="Private/**")
+    manifest = collections.load_manifest(tmp_path, path)
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        inspected = record_governance.inspect_collection(tmp_path, manifest)
+
+    serialized = json.dumps(inspected, sort_keys=True)
+    assert inspected["saved_views"] == []
+    assert "INVALID_SAVED_VIEW" in serialized
+    assert "Private/Target" not in serialized
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            record_governance.query_collection(tmp_path, manifest, view="ambiguous-child")
+    assert raised.value.code == "INVALID_SAVED_VIEW"
+
+
+def test_saved_view_child_authorization_fails_closed_when_row_shape_is_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "Knowledge Base/log.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Knowledge Base/log.md").write_text("# Activity\n", encoding="utf-8")
+    path = tmp_path / "Knowledge Base/Records/Observed/_collection.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(manifest_text(two_tables=True), encoding="utf-8")
+    (path.parent / "Items").mkdir()
+    manifest = collections.load_manifest(tmp_path, path)
+    links = record_governance._LinkProjector.create(tmp_path, manifest)
+    query = {
+        "expand_children": True,
+        "filters": [{"column": "source", "op": "eq", "value": "[[Private/Target]]"}],
+    }
+
+    assert record_governance._saved_view_field_spec(manifest, query, "source") is None
+    monkeypatch.setattr(
+        collections,
+        "resolve_saved_view",
+        lambda _manifest, _name: collections.SavedView(
+            "ambiguous", {"query": query}, "0" * 64
+        ),
+    )
+    with pytest.raises(collections.CollectionError, match="SAVED_VIEW_NOT_AVAILABLE"):
+        record_governance._authorize_saved_view(tmp_path, manifest, "ambiguous", links)
+
+
+@pytest.mark.parametrize("parent_source", (False, True))
+def test_cross_table_saved_view_never_releases_sibling_link_literal(
+    tmp_path: Path, parent_source: bool
+) -> None:
+    (tmp_path / "Knowledge Base/log.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Knowledge Base/log.md").write_text("# Activity\n", encoding="utf-8")
+    path = tmp_path / "Knowledge Base/Records/Observed/_collection.md"
+    path.parent.mkdir(parents=True)
+    source = manifest_text(two_tables=True)
+    if parent_source:
+        source = source.replace(
+            "    note:\n", "    source:\n      type: string\n    note:\n", 1
+        )
+    path.write_text(
+        source.replace(
+            "record_presentation:\n",
+            "views:\n"
+            "  cross-table:\n"
+            "    query:\n"
+            "      expand_child: qualifiers\n"
+            "      filters:\n"
+            "        - column: source\n"
+            "          op: eq\n"
+            '          value: "[[Private/Target]]"\n'
+            "record_presentation:\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    (path.parent / "Items").mkdir()
+    target = tmp_path / "Knowledge Base/Private/Target.md"
+    target.parent.mkdir()
+    target.write_text("# Withheld target\n", encoding="utf-8")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="private", paths="Private/**")
+    manifest = collections.load_manifest(tmp_path, path)
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        inspected = record_governance.inspect_collection(tmp_path, manifest)
+
+    serialized = json.dumps(inspected, sort_keys=True)
+    assert inspected["saved_views"] == []
+    assert "INVALID_SAVED_VIEW" in serialized
+    assert "Private/Target" not in serialized
+    assert record_governance._saved_view_field_spec(
+        manifest,
+        {"expand_child": "qualifiers"},
+        "source",
+    ) is None
+
+
 def test_governed_inspection_is_typed_report_only_and_requires_l6_before_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -694,7 +892,9 @@ One ordinary""",
     inspection = record_governance.inspect_collection(tmp_path, manifest)
 
     assert inspection["report_only"] is True
-    assert {item["code"] for item in inspection["diagnostics"]} >= {"INVALID_SAVED_VIEW"}
+    assert inspection["diagnostics"] == [
+        {"code": "INVALID_SAVED_VIEW", "reason": "saved view filters are invalid"}
+    ]
     assert inspection["saved_views"] == []
 
 
@@ -725,6 +925,58 @@ def test_governed_inspection_reports_hidden_and_missing_templates_the_same(tmp_p
         "code": "TEMPLATE_UNAVAILABLE",
         "reason": "declared template is unavailable",
     }
+
+
+def test_inspection_guard_reload_does_not_read_withheld_item_or_expose_its_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    hidden = fixture / "Events" / "withheld" / "2026-06-01-inspection.md"
+    hidden_rel = hidden.relative_to(tmp_path).as_posix()
+    read = record_formats.vault.read_bounded_guarded_bytes
+
+    def deny_hidden_read(root: Path, relative: str, **kwargs: object):
+        assert relative != hidden_rel
+        return read(root, relative, **kwargs)
+
+    monkeypatch.setattr(record_formats.vault, "read_bounded_guarded_bytes", deny_hidden_read)
+    authorize = record_governance._authorize
+    monkeypatch.setattr(
+        record_governance,
+        "_authorize",
+        lambda root, path, *, receipt: path != hidden_rel and authorize(root, path, receipt=receipt),
+    )
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert hidden_rel not in json.dumps(inspection)
+
+
+def test_withheld_template_omits_inspection_lifecycle_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "---\n\nOne ordinary", "templates: [{path: Templates/session.md}]\n---\n\nOne ordinary"
+        ), encoding="utf-8"
+    )
+    template = fixture / "Templates" / "session.md"
+    template.parent.mkdir()
+    template.write_text("private", encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    template_rel = template.relative_to(tmp_path).as_posix()
+    authorize = record_governance._authorize
+    monkeypatch.setattr(
+        record_governance,
+        "_authorize",
+        lambda root, path, *, receipt: path != template_rel and authorize(root, path, receipt=receipt),
+    )
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert inspection["diagnostics"][-1]["code"] == "TEMPLATE_UNAVAILABLE"
+    assert "lifecycle_guards" not in inspection
 
 
 def test_manifest_projector_round_trips_opaque_plan_descriptor_without_resolution(

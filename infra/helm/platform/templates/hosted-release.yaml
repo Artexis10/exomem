@@ -1,5 +1,6 @@
 {{- $lockJson := include "exomem.hostedDeploymentLockJson" . -}}
 {{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
+{{- $lockFile := include "exomem.hostedDeploymentLockFileName" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,5 +13,5 @@ metadata:
     exomem.io/deployment-lock-sha256: {{ $lockJson | sha256sum | quote }}
 immutable: true
 data:
-  exomem-hosted-deployment-lock-v2.json: |
+  {{ $lockFile }}: |
     {{- $lockJson | nindent 4 }}

@@ -58,12 +58,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import ntpath
 import os
 import threading
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, overload
 
 from .kbdir import kb_dirname
 
@@ -114,6 +116,26 @@ class RecallFreshnessCheckpoint(NamedTuple):
     triple: tuple[int, int, str]
     policy_version: str
     access_policy_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecallPublicationState:
+    """Immutable prepared recall identity for bounded sidecar publication."""
+
+    checkpoint: RecallFreshnessCheckpoint
+    registry_key: tuple[str, str]
+
+    @property
+    def triple(self) -> tuple[int, int, str]:
+        return self.checkpoint.triple
+
+    @property
+    def policy_version(self) -> str:
+        return self.checkpoint.policy_version
+
+    @property
+    def access_policy_fingerprint(self) -> str:
+        return self.checkpoint.access_policy_fingerprint
 
 
 class RecallDelta(NamedTuple):
@@ -183,6 +205,8 @@ _recall_generations: dict[tuple[str, str], int] = {}
 _recall_identities: dict[tuple[str, str], tuple[str, str]] = {}
 _recall_live: set[tuple[str, str]] = set()
 _recall_history: dict[tuple[str, str], list[tuple[int, int, frozenset[str]]]] = {}
+_recall_publications: dict[tuple[str, str], RecallPublicationState] = {}
+RECALL_PUBLICATION_PREPARE_ATTEMPTS = 4
 # Watchdog records an external event here before its debounce window. Graph
 # readers can then fail closed in O(1) until that exact queued generation has
 # been published through the event-maintained corpus fan-out.
@@ -231,7 +255,7 @@ def event_indexes_enabled() -> bool:
 
 
 def _truthy(value: str | None) -> bool:
-    return bool(value) and value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def stat_signature(path: Path) -> FileSignature:
@@ -254,6 +278,16 @@ def _normalize_signature(value: SignatureLike) -> FileSignature:
     return (int(value[0]), int(value[1]), int(value[2]))
 
 
+def _digest_path(path: str) -> str:
+    """Canonicalize Windows aliases without changing non-Windows digest inputs."""
+    if os.name != "nt":
+        return path
+    try:
+        return ntpath.normcase(str(Path(path).resolve()))
+    except OSError:
+        return ntpath.normcase(path)
+
+
 def triple_from_entries(
     entries: Iterable[tuple[str, SignatureLike]],
 ) -> tuple[int, int, str]:
@@ -265,7 +299,7 @@ def triple_from_entries(
     delete-paired-with-create, renames, and content replacements that preserve
     mtimes and would otherwise leave warmed recall stale.
     """
-    items = sorted((sp, _normalize_signature(signature)) for sp, signature in entries)
+    items = sorted((_digest_path(sp), _normalize_signature(signature)) for sp, signature in entries)
     latest = 0
     h = hashlib.blake2b(digest_size=16)
     for sp, signature in items:
@@ -313,13 +347,36 @@ def recall_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
     return triple_from_entries(entries)
 
 
-def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint:
-    """Return one coherent recall-projection and policy identity checkpoint."""
+@overload
+def recall_checkpoint(
+    vault_root: Path, scope: str, *, max_attempts: None = None
+) -> RecallFreshnessCheckpoint: ...
+
+
+@overload
+def recall_checkpoint(
+    vault_root: Path, scope: str, *, max_attempts: int
+) -> RecallFreshnessCheckpoint | None: ...
+
+
+def recall_checkpoint(
+    vault_root: Path, scope: str, *, max_attempts: int | None = None
+) -> RecallFreshnessCheckpoint | None:
+    """Return one coherent recall-projection and policy identity checkpoint.
+
+    Ordinary callers retain the established unbounded convergence behavior.
+    Bounded publishers can opt into a finite retry budget so policy churn cannot
+    keep a publication authority wait forever.
+    """
     from . import recall_policy
 
+    if max_attempts is not None and max_attempts < 1:
+        return None
     root = Path(vault_root)
     key = _key(root, scope)
-    while True:
+    attempts = 0
+    while max_attempts is None or attempts < max_attempts:
+        attempts += 1
         policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
         identity = (policy_version, access_fingerprint)
         with _lock:
@@ -383,11 +440,13 @@ def recall_checkpoint(vault_root: Path, scope: str) -> RecallFreshnessCheckpoint
             _recall_maps[key] = projected
             _recall_triples[key] = None
             _recall_identities[key] = identity
+            _recall_publications.pop(key, None)
             # An access-policy transition is a real projected event even when
             # no Markdown changed.  Retain its exact row delta so a live catalog
             # can remove/re-add eligible pages without a request-path walk.
             _record_recall_event(key, touched)
             continue
+    return None
 
 
 def recall_projection_snapshot(
@@ -447,10 +506,10 @@ def recall_projection_snapshot(
 
             kb = root / kb_dirname()
             walk = find_module._walk_md(kb) if kb.is_dir() else ()
-        entries: dict[str, FileSignature] = {}
+        walk_entries: dict[str, FileSignature] = {}
         for path in recall_policy.iter_recall_markdown(root, walk):
             try:
-                entries[str(path)] = stat_signature(path)
+                walk_entries[str(path)] = stat_signature(path)
             except OSError:
                 continue
         if recall_policy.recall_policy_identity(root) != identity:
@@ -465,11 +524,11 @@ def recall_projection_snapshot(
             RecallFreshnessCheckpoint(
                 instance_id,
                 generation,
-                triple_from_entries(entries.items()),
+                triple_from_entries(walk_entries.items()),
                 identity[0],
                 identity[1],
             ),
-            entries,
+            walk_entries,
         )
 
 
@@ -492,13 +551,110 @@ def recall_is_live(vault_root: Path, scope: str) -> bool:
         return _key(vault_root, scope) in _recall_live
 
 
+def prepare_recall_publication(
+    vault_root: Path,
+    scope: str,
+    *,
+    expected_policy_identity: tuple[str, str] | None = None,
+) -> RecallPublicationState | None:
+    """Materialize one publishable event-maintained recall checkpoint.
+
+    Cold callers deliberately receive no state.  Policy reprojection runs here,
+    outside the eventual publication authority; the hot publication path uses
+    :func:`peek_recall_publication` only.
+    """
+    from . import recall_policy
+
+    root = Path(vault_root)
+    key = _key(root, scope)
+    for _attempt in range(RECALL_PUBLICATION_PREPARE_ATTEMPTS):
+        identity = recall_policy.recall_publication_policy_identity(root)
+        if identity is None or (
+            expected_policy_identity is not None and identity != expected_policy_identity
+        ):
+            return None
+        with _lock:
+            if (
+                not event_indexes_enabled()
+                or key not in _recall_live
+                or _canon(root) in _external_pending
+            ):
+                return None
+        checkpoint = recall_checkpoint(root, scope, max_attempts=1)
+        if checkpoint is None:
+            continue
+        if (checkpoint.policy_version, checkpoint.access_policy_fingerprint) != identity:
+            if expected_policy_identity is not None:
+                return None
+            continue
+        if recall_policy.recall_publication_policy_identity(root) != identity:
+            if expected_policy_identity is not None:
+                return None
+            continue
+        with _lock:
+            if (
+                not event_indexes_enabled()
+                or key not in _recall_live
+                or _canon(root) in _external_pending
+                or _recall_generations.get(key, 0) != checkpoint.generation
+                or _recall_identities.get(key) != identity
+            ):
+                continue
+            state = RecallPublicationState(checkpoint, key)
+            _recall_publications[key] = state
+            return state
+    return None
+
+
+def peek_recall_publication(
+    vault_root: Path,
+    scope: str,
+    *,
+    expected_policy_identity: tuple[str, str] | None = None,
+    ticket: RecallPublicationState | None = None,
+) -> RecallPublicationState | None:
+    """Return prepared publication state without filesystem or policy work."""
+    # Do not canonicalize here: resolve() would violate the strict hot-path
+    # contract. A differently spelled root is conservatively cold.
+    key = ticket.registry_key if ticket is not None else (str(Path(vault_root)), scope)
+    with _lock:
+        if (
+            (ticket is not None and key[1] != scope)
+            or not event_indexes_enabled()
+            or key[0] in _external_pending
+        ):
+            return None
+        state = _recall_publications.get(key)
+        if ticket is not None and state != ticket:
+            return None
+        if state is None or key not in _recall_live:
+            return None
+        checkpoint = state.checkpoint
+        if (
+            _recall_generations.get(key, 0) != checkpoint.generation
+            or _recall_identities.get(key)
+            != (checkpoint.policy_version, checkpoint.access_policy_fingerprint)
+            or _recall_triples.get(key) != checkpoint.triple
+            or (
+                expected_policy_identity is not None
+                and expected_policy_identity
+                != (checkpoint.policy_version, checkpoint.access_policy_fingerprint)
+            )
+        ):
+            return None
+        return state
+
+
 def mark_external_pending(vault_root: Path) -> int:
     """Mark an observed out-of-band event pending before watcher debounce."""
     global _external_pending_clock
     with _lock:
         _external_pending_clock += 1
         epoch = _external_pending_clock
-        _external_pending[_canon(vault_root)] = epoch
+        root = _canon(vault_root)
+        _external_pending[root] = epoch
+        for scope in SCOPES:
+            _recall_publications.pop((root, scope), None)
         return epoch
 
 
@@ -647,6 +803,7 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLik
         _recall_triples[key] = None
         _recall_generations[key] = _next_gen()
         _recall_identities[key] = recall_identity
+        _recall_publications.pop(key, None)
         _recall_live.add(key)
         _recall_history[key] = []
 
@@ -682,6 +839,7 @@ def reconcile(
         _recall_maps[key] = recall_fresh
         _recall_triples[key] = None
         _recall_identities[key] = recall_identity
+        _recall_publications.pop(key, None)
         if old_recall != recall_fresh or old_identity != recall_identity:
             _recall_generations[key] = _next_gen()
             _recall_history[key] = []
@@ -982,6 +1140,7 @@ def on_files_changed(
         for self_key, paths in touched.items():
             _record_event(self_key, paths)
         for self_key, paths in recall_touched.items():
+            _recall_publications.pop(self_key, None)
             _record_recall_event(self_key, paths)
 
 
@@ -1004,6 +1163,7 @@ def invalidate(vault_root: Path | None = None) -> None:
             _recall_identities.clear()
             _recall_live.clear()
             _recall_history.clear()
+            _recall_publications.clear()
             _external_pending.clear()
             return
         root = _canon(vault_root)
@@ -1020,6 +1180,7 @@ def invalidate(vault_root: Path | None = None) -> None:
             _recall_identities.pop(key, None)
             _recall_live.discard(key)
             _recall_history.pop(key, None)
+            _recall_publications.pop(key, None)
 
 
 def rebaseline(vault_root: Path) -> dict[str, bool]:

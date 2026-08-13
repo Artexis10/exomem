@@ -1,0 +1,86 @@
+## ADDED Requirements
+
+### Requirement: Deferred Index Work Is Retried By The Server
+
+Every deferred-index queue SHALL be drained by the running server without operator
+intervention. A queue entry SHALL NOT depend on a human invoking a CLI command, nor on an
+unrelated operation running as a side effect, in order to be retried.
+
+The drain SHALL be bounded by the active compute mode's policy, and SHALL share the
+reconciliation pass budget rather than opening an independent write path.
+
+#### Scenario: Queued semantic work drains without operator action
+
+- **WHEN** semantic upserts are queued and the server runs with no operator commands issued
+- **THEN** subsequent reconciliation passes drain queued entries
+- **AND** the queue count strictly decreases across passes while entries remain
+- **AND** the drain admits no more entries per pass than the active mode's cap allows
+
+#### Scenario: Full-upsert work is reachable
+
+- **WHEN** full upserts are queued
+- **THEN** a code path exists that clears them
+- **AND** that path is reached by server-side drain and by `exomem index`
+- **AND** the queue does not grow monotonically across the life of a vault
+
+#### Scenario: Drain does not extend write latency
+
+- **WHEN** a mutation is committed while entries are queued
+- **THEN** the mutation does not block on draining those entries
+
+### Requirement: Deferral Throttles Rather Than Halts
+
+Deferral SHALL trade indexing throughput for latency, never for convergence. In every
+compute mode including `quiet`, the per-pass admission for deferred work SHALL be non-zero,
+so that a host left running with no operator action converges to an empty queue.
+
+#### Scenario: Quiet mode still converges
+
+- **WHEN** the compute mode is `quiet` and a backlog the size of the corpus exists
+- **THEN** each reconciliation pass admits a non-zero, bounded number of entries
+- **AND** the backlog reaches zero after a bounded number of passes
+- **AND** the work runs within the quiet mode's resource posture
+
+#### Scenario: Quiet deferral reporting matches quiet behaviour
+
+- **WHEN** the watcher reports that it is deferring semantic indexing for a set of files
+- **THEN** those files are in fact deferred by the downstream index path
+- **AND** the reported deferral and the actual behaviour do not disagree
+
+### Requirement: Queued Entries Are Reconciled Against Index State
+
+A drain SHALL resolve each queued entry against the freshness check the indexer itself
+trusts, and SHALL retire entries whose work is already satisfied. A queue SHALL NOT report
+outstanding work for files that require no indexing.
+
+#### Scenario: Already-satisfied entries are retired, not re-reported
+
+- **WHEN** entries are queued for files already embedded and current
+- **THEN** the drain retires those entries without re-embedding them
+- **AND** the reported backlog count drops to reflect only real outstanding work
+
+#### Scenario: Real work is never retired unperformed
+
+- **WHEN** a queued entry names a file that genuinely requires embedding
+- **THEN** the drain performs the work before retiring the entry
+
+### Requirement: Backlog Is Reported Honestly
+
+Status output SHALL NOT advertise a `next_action` that no code path performs. When a queue
+reports a remediation, that remediation SHALL be either performed automatically or named as
+an operator-runnable command.
+
+Health diagnostics SHALL warn when a deferred queue exceeds a meaningful fraction of the
+indexed corpus, at a severity an operator reading a summary will notice.
+
+#### Scenario: Status names only real actions
+
+- **WHEN** `status` reports a deferred queue with a `next_action`
+- **THEN** that action is either performed by the server automatically
+- **OR** it names a command the operator can run verbatim
+
+#### Scenario: Doctor surfaces a corpus-scale backlog
+
+- **WHEN** a deferred queue holds entries exceeding a meaningful fraction of indexed pages
+- **THEN** `doctor` reports a warning identifying the queue and its size
+- **AND** the vault is not reported as unqualifiedly healthy

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib.util
 import io
 import json
 import os
@@ -11,17 +12,19 @@ import re
 import shutil
 import stat
 import zipfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from . import commands, hosted_gateway
 
 PLUGIN_ROOT = Path("plugins/hosted")
+DEFAULT_CANDIDATE = "hosted-alpha-agent-v1"
+LIFECYCLE_CANDIDATE = "hosted-alpha-agent-v2"
 PLATFORMS = ("claude", "openai")
 DIRECTORY_CHANNELS = ("claude-connector", "claude-plugin", "openai-plugin")
 REGISTERED_OPENAI_APP_ID = "plugin_asdk_app_6a5e3d26f2b08191a04424d1c1b33fc0"
@@ -182,7 +185,27 @@ def _repo_root(repo_root: Path | None = None) -> Path:
     return (repo_root or Path(__file__).resolve().parents[2]).resolve()
 
 
-def _validate_definition(raw: dict[str, Any]) -> HostedDefinition:
+def _records_live_acceptance_module() -> Any:
+    path = Path(__file__).resolve().parents[2] / "scripts" / "records_live_acceptance.py"
+    spec = importlib.util.spec_from_file_location("_exomem_records_live_acceptance", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Records live acceptance verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _candidate_root(root: Path, candidate: str) -> Path:
+    if candidate == DEFAULT_CANDIDATE:
+        return root / PLUGIN_ROOT
+    if candidate == LIFECYCLE_CANDIDATE:
+        return root / PLUGIN_ROOT / "candidates" / candidate
+    raise ValueError("unsupported Hosted candidate")
+
+
+def _validate_definition(
+    raw: dict[str, Any], *, expected_profile: str = commands.HOSTED_ALPHA_AGENT_PROFILE
+) -> HostedDefinition:
     allowed = {
         "plugin_id",
         "version",
@@ -216,7 +239,7 @@ def _validate_definition(raw: dict[str, Any]) -> HostedDefinition:
         raise ValueError("only the production channel is distributable")
     if endpoint != "https://substratesystems.io/api/exomem/mcp/v1":
         raise ValueError("production endpoint must be the canonical Hosted resource")
-    if raw["profile"] != commands.HOSTED_ALPHA_AGENT_PROFILE:
+    if raw["profile"] != expected_profile:
         raise ValueError("Hosted definition must use the exact alpha profile")
     if raw["distribution_scope"] != "pending":
         raise ValueError("Hosted distribution scope remains pending real-client acceptance")
@@ -226,23 +249,40 @@ def _validate_definition(raw: dict[str, Any]) -> HostedDefinition:
     return HostedDefinition(**{key: str(value) for key, value in raw.items()})
 
 
-def load_definition_file(path: Path) -> HostedDefinition:
+def load_definition_file(
+    path: Path, *, expected_profile: str = commands.HOSTED_ALPHA_AGENT_PROFILE
+) -> HostedDefinition:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("Hosted definition must be valid JSON") from exc
     if not isinstance(raw, dict):
         raise ValueError("Hosted definition must be an object")
-    return _validate_definition(raw)
+    return _validate_definition(raw, expected_profile=expected_profile)
 
 
-def load_definition(repo_root: Path | None = None) -> HostedDefinition:
+def load_definition(
+    repo_root: Path | None = None, *, candidate: str = DEFAULT_CANDIDATE
+) -> HostedDefinition:
     root = _repo_root(repo_root)
-    return load_definition_file(root / PLUGIN_ROOT / "definition.json")
+    profile = (
+        commands.HOSTED_ALPHA_AGENT_PROFILE
+        if candidate == DEFAULT_CANDIDATE
+        else commands.HOSTED_ALPHA_AGENT_V2_PROFILE
+    )
+    return load_definition_file(
+        _candidate_root(root, candidate) / "definition.json", expected_profile=profile
+    )
 
 
-def _skill_paths(root: Path) -> tuple[Path, ...]:
-    return tuple(root / PLUGIN_ROOT / "skills" / name / "SKILL.md" for name in SKILL_NAMES)
+def _skill_paths(root: Path, candidate: str = DEFAULT_CANDIDATE) -> tuple[Path, ...]:
+    base = root / PLUGIN_ROOT / "skills"
+    paths = tuple(base / name / "SKILL.md" for name in SKILL_NAMES)
+    if candidate == LIFECYCLE_CANDIDATE:
+        return paths + (_candidate_root(root, candidate) / "skills/exomem-records/SKILL.md",)
+    if candidate == DEFAULT_CANDIDATE:
+        return paths
+    raise ValueError("unsupported Hosted candidate")
 
 
 def _frontmatter(text: str, skill: Path) -> dict[str, Any]:
@@ -266,37 +306,41 @@ def _frontmatter(text: str, skill: Path) -> dict[str, Any]:
     return fields
 
 
-def validate_skill_text(text: str, skill: Path) -> tuple[str, ...]:
+def validate_skill_text(
+    text: str, skill: Path, *, profile: str = commands.HOSTED_ALPHA_AGENT_PROFILE
+) -> tuple[str, ...]:
     allowed = set(
-        commands.product_commands_for_profile(commands.HOSTED_ALPHA_AGENT_PROFILE, "rest")
+        commands.product_commands_for_profile(profile, "rest")
     )
     allowed_names = {command.name for command in allowed}
     declared = _frontmatter(text, skill)["required_tools"]
-    observed = set(TOOL_REFERENCE.findall(text))
-    observed.update(
+    observed_names = set(TOOL_REFERENCE.findall(text))
+    observed_names.update(
         name for name in PROSE_CALL_REFERENCE.findall(text) if name in _CANONICAL_CALLABLES
     )
-    observed = tuple(sorted(observed))
-    unavailable = (set(declared) | set(observed)) - allowed_names
+    unavailable = (set(declared) | set(observed_names)) - allowed_names
     if unavailable:
         raise ValueError(f"{skill}: unavailable Hosted tools: {', '.join(sorted(unavailable))}")
-    missing_declaration = set(observed) - set(declared)
+    missing_declaration = observed_names - set(declared)
     if missing_declaration:
         raise ValueError(
             f"{skill}: callable tools must be declared: {', '.join(sorted(missing_declaration))}"
         )
-    unused = set(declared) - set(observed)
+    unused = set(declared) - observed_names
     if unused:
         raise ValueError(f"{skill}: declared tools are not used: {', '.join(sorted(unused))}")
     return tuple(declared)
 
 
-def skill_dependencies(repo_root: Path | None = None) -> dict[str, tuple[str, ...]]:
+def skill_dependencies(
+    repo_root: Path | None = None, *, candidate: str = DEFAULT_CANDIDATE
+) -> dict[str, tuple[str, ...]]:
     root = _repo_root(repo_root)
+    definition = load_definition(root, candidate=candidate)
     result: dict[str, tuple[str, ...]] = {}
-    for skill in _skill_paths(root):
+    for skill in _skill_paths(root, candidate):
         text = skill.read_text(encoding="utf-8")
-        result[skill.parent.name] = validate_skill_text(text, skill)
+        result[skill.parent.name] = validate_skill_text(text, skill, profile=definition.profile)
     return result
 
 
@@ -415,6 +459,13 @@ def validate_hosted_public_inputs(
     ]
     paths = [path for path in paths if path.exists()]
     paths.extend(_skill_paths(root))
+    lifecycle_root = _candidate_root(root, LIFECYCLE_CANDIDATE)
+    if lifecycle_root.exists():
+        paths.extend(
+            path
+            for path in lifecycle_root.rglob("*")
+            if path.is_file() or path.is_symlink()
+        )
     directories = ["assets", "acceptance", "promotion", "directory"]
     if include_generated:
         directories.append("generated")
@@ -479,6 +530,11 @@ def validate_hosted_public_inputs(
                     "promotion" in path.parts
                     or "acceptance" in path.parts
                     or "directory" in path.parts
+                    or (
+                        "candidates" in path.parts
+                        and LIFECYCLE_CANDIDATE in path.parts
+                        and "generated" not in path.parts
+                    )
                     or path.name.startswith("acceptance-")
                     or path.name.startswith("marketplace-")
                 ),
@@ -1324,10 +1380,10 @@ def directory_check(
     return checked
 
 
-def _skills_digest(root: Path) -> str:
+def _skills_digest(root: Path, candidate: str = DEFAULT_CANDIDATE) -> str:
     payload = {
         path.relative_to(root).as_posix(): path.read_text(encoding="utf-8").replace("\r\n", "\n")
-        for path in _skill_paths(root)
+        for path in _skill_paths(root, candidate)
     }
     return _sha256(_canonical_json(payload))
 
@@ -1375,10 +1431,12 @@ def oauth_discovery_overlay(contract: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def compatibility_manifest(repo_root: Path | None = None) -> dict[str, Any]:
+def compatibility_manifest(
+    repo_root: Path | None = None, *, candidate: str = DEFAULT_CANDIDATE
+) -> dict[str, Any]:
     root = _repo_root(repo_root)
-    definition = load_definition(root)
-    dependencies = skill_dependencies(root)
+    definition = load_definition(root, candidate=candidate)
+    dependencies = skill_dependencies(root, candidate=candidate)
     contract = hosted_gateway.build_agent_gateway_contract(profile=definition.profile)
     oauth_overlay = oauth_discovery_overlay(contract)
     # The descriptor identifies the contract surface, not the build that emitted
@@ -1404,9 +1462,7 @@ def compatibility_manifest(repo_root: Path | None = None) -> dict[str, Any]:
         **published_base,
         "digest": {"algorithm": "sha256", "value": _sha256(_canonical_json(published_base))},
     }
-    raw_definition = json.loads(
-        (root / PLUGIN_ROOT / "definition.json").read_text(encoding="utf-8")
-    )
+    raw_definition = json.loads((_candidate_root(root, candidate) / "definition.json").read_text(encoding="utf-8"))
     commands_in_order = tuple(item["name"] for item in contract["commands"])
     base = {
         "schema_version": 1,
@@ -1418,12 +1474,14 @@ def compatibility_manifest(repo_root: Path | None = None) -> dict[str, Any]:
         "command_surface_sha256": contract["agent_profile"]["active_capability_sha256"],
         "schema_contract_sha256": published_contract["digest"]["value"],
         "definition_sha256": _sha256(_canonical_json(raw_definition)),
-        "skills_sha256": _skills_digest(root),
+        "skills_sha256": _skills_digest(root, candidate),
         "skills": {name: list(required_tools) for name, required_tools in dependencies.items()},
         "agent_contract": published_contract,
         "oauth_discovery": oauth_overlay,
         "oauth_discovery_sha256": _sha256(_canonical_json(oauth_overlay)),
     }
+    if candidate == LIFECYCLE_CANDIDATE:
+        base["minimum_records_reader_version"] = 2
     return {**base, "compatibility_sha256": _sha256(_canonical_json(base))}
 
 
@@ -1532,9 +1590,10 @@ def _package_lock(
     artifact_root: Path,
     *,
     registered_app_id: str | None = None,
+    candidate: str = DEFAULT_CANDIDATE,
 ) -> dict[str, Any]:
-    definition = load_definition(root)
-    compatibility = compatibility_manifest(root)
+    definition = load_definition(root, candidate=candidate)
+    compatibility = compatibility_manifest(root, candidate=candidate)
     lock = {
         "schema_version": 1,
         "platform": platform,
@@ -1555,6 +1614,12 @@ def _package_lock(
         if registered_app_id is None:
             raise ValueError("OpenAI package lock requires a registered app identity")
         lock["registered_app_id_sha256"] = _registered_app_id_sha256(registered_app_id)
+    if candidate == LIFECYCLE_CANDIDATE:
+        lock["minimum_records_reader_version"] = 2
+        selection_path = _candidate_root(root, candidate) / "selection-cases.json"
+        lock["selection_cases_sha256"] = _sha256(
+            _canonical_json(json.loads(selection_path.read_text(encoding="utf-8")))
+        )
     return lock
 
 
@@ -1702,7 +1767,11 @@ def _validate_directory_receipt(
         != promotion_record_sha256(root, "openai" if channel == "openai-plugin" else "claude")
     ):
         return f"{label} does not bind the current publication state"
-    if require_current_listing and receipt["listing_sha256"] != packet["listing_sha256"]:
+    if (
+        require_current_listing
+        and packet is not None
+        and receipt["listing_sha256"] != packet["listing_sha256"]
+    ):
         return f"{label} does not bind the current listing"
     if channel == "openai-plugin":
         if receipt["registered_app_id_sha256"] != bindings["registered_app_id_sha256"]:
@@ -1812,13 +1881,17 @@ def _interface_metadata(definition: HostedDefinition) -> dict[str, Any]:
 
 
 def candidate_files(
-    repo_root: Path | None = None, *, platform: str = "claude", openai_app_id: str | None = None
+    repo_root: Path | None = None,
+    *,
+    platform: str = "claude",
+    openai_app_id: str | None = None,
+    candidate: str = DEFAULT_CANDIDATE,
 ) -> dict[str, bytes]:
     """Return deterministic candidate bytes without creating a staging directory."""
 
     root = _repo_root(repo_root)
-    definition = load_definition(root)
-    skill_dependencies(root)
+    definition = load_definition(root, candidate=candidate)
+    skill_dependencies(root, candidate=candidate)
     validate_hosted_public_inputs(root, include_generated=False)
     if platform not in (*PLATFORMS, "all"):
         raise ValueError("unsupported platform")
@@ -1826,11 +1899,13 @@ def candidate_files(
     app_id = _validate_openai_app_id(openai_app_id) if "openai" in selected else None
     files: dict[str, bytes] = {}
     for item in selected:
+        if item == "openai":
+            assert app_id is not None
         prefix = f"{item}/"
-        for source in _skill_paths(root):
-            files[
-                prefix + "skills/" + source.relative_to(root / PLUGIN_ROOT / "skills").as_posix()
-            ] = source.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+        for source in _skill_paths(root, candidate):
+            files[prefix + f"skills/{source.parent.name}/SKILL.md"] = (
+                source.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+            )
         for source in (root / PLUGIN_ROOT / "assets").rglob("*"):
             if source.is_file():
                 files[
@@ -1911,6 +1986,7 @@ def candidate_files(
             item,
             root / PLUGIN_ROOT / "generated" / item,
             registered_app_id=app_id,
+            candidate=candidate,
         )
         lock["artifact_sha256"] = _map_digest(files, prefix)
         files[f"{item}.lock.json"] = _canonical_json(lock) + b"\n"
@@ -1922,7 +1998,7 @@ def candidate_files(
                     "platform": item,
                     "archive_sha256": _sha256(archive_bytes),
                     **(
-                        {"registered_app_id_sha256": _registered_app_id_sha256(app_id)}
+                        {"registered_app_id_sha256": _registered_app_id_sha256(cast(str, app_id))}
                         if item == "openai"
                         else {}
                     ),
@@ -1930,7 +2006,9 @@ def candidate_files(
             )
             + b"\n"
         )
-    files["compatibility.json"] = _canonical_json(compatibility_manifest(root)) + b"\n"
+    files["compatibility.json"] = (
+        _canonical_json(compatibility_manifest(root, candidate=candidate)) + b"\n"
+    )
     return files
 
 
@@ -1941,17 +2019,26 @@ def render(
     openai_app_id: str | None = None,
     platform: str = "claude",
     staging_root: Path | None = None,
+    candidate: str = DEFAULT_CANDIDATE,
 ) -> Path:
     root = _repo_root(repo_root)
     if platform not in (*PLATFORMS, "all"):
         raise ValueError("unsupported platform")
-    destination = (output or root / PLUGIN_ROOT / "generated").resolve()
+    generated_root = root / PLUGIN_ROOT / "generated"
+    destination = (
+        output
+        or (generated_root if candidate == DEFAULT_CANDIDATE else generated_root / "candidates" / candidate)
+    ).resolve()
     allowed_root = (staging_root or (root / PLUGIN_ROOT)).resolve()
     if allowed_root not in destination.parents or destination == allowed_root:
         raise ValueError("render output must be below the explicit staging root")
     if destination == root or destination in root.parents:
         raise ValueError("render output must not be at or above the repository")
-    managed_destination = (root / PLUGIN_ROOT / "generated").resolve()
+    managed_destination = (
+        generated_root
+        if candidate == DEFAULT_CANDIDATE
+        else generated_root / "candidates" / candidate
+    ).resolve()
     if destination.exists() and destination != managed_destination:
         raise ValueError("render output already exists; refuse to replace an unchecked directory")
     selected = PLATFORMS if platform == "all" else (platform,)
@@ -1961,8 +2048,11 @@ def render(
         if destination == managed_destination:
             for selected_platform in sorted(PLATFORMS):
                 release_locks.enter_context(_promotion_mutex(root, selected_platform))
-        candidate = candidate_files(root, platform=platform, openai_app_id=openai_app_id)
+        rendered_files = candidate_files(
+            root, platform=platform, openai_app_id=openai_app_id, candidate=candidate
+        )
         nonce = uuid4().hex
+        destination.parent.mkdir(parents=True, exist_ok=True)
         temporary_root = allowed_root / f".exomem-hosted-render-{nonce}"
         temporary = temporary_root / "generated"
         backup: Path | None = None
@@ -1978,7 +2068,7 @@ def render(
                     shutil.rmtree(package)
                 for suffix in (".lock.json", ".zip", ".zip.lock.json"):
                     (temporary / f"{selected_platform}{suffix}").unlink(missing_ok=True)
-            for relative, contents in candidate.items():
+            for relative, contents in rendered_files.items():
                 target = temporary / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(contents)
@@ -2007,14 +2097,21 @@ def check(
     *,
     openai_app_id: str | None = None,
     platform: str = "claude",
+    candidate: str = DEFAULT_CANDIDATE,
 ) -> None:
     root = _repo_root(repo_root)
     validate_hosted_public_inputs(root)
-    check_compatibility_descriptor(root)
+    if candidate == DEFAULT_CANDIDATE:
+        check_compatibility_descriptor(root)
     if platform not in (*PLATFORMS, "all"):
         raise ValueError("unsupported platform")
     selected = PLATFORMS if platform == "all" else (platform,)
-    expected = root / PLUGIN_ROOT / "generated"
+    generated_root = root / PLUGIN_ROOT / "generated"
+    expected = (
+        generated_root
+        if candidate == DEFAULT_CANDIDATE
+        else generated_root / "candidates" / candidate
+    )
     if "openai" in selected:
         generated_app_id = _generated_openai_app_id(expected)
         _validate_repository_openai_app_id(root, generated_app_id)
@@ -2028,17 +2125,19 @@ def check(
         for path in expected.rglob("*")
         if path.is_file()
         and (
-            path.parts[len(expected.parts)] in selected
-            or path.name
-            in {
-                "compatibility.json",
+                path.parts[len(expected.parts)] in selected
+                or (path.parent == expected and path.name
+                in {
+                    "compatibility.json",
                 *(f"{item}.lock.json" for item in selected),
                 *(f"{item}.zip" for item in selected),
-                *(f"{item}.zip.lock.json" for item in selected),
-            }
+                    *(f"{item}.zip.lock.json" for item in selected),
+                })
         )
     }
-    actual_files = candidate_files(root, platform=platform, openai_app_id=openai_app_id)
+    actual_files = candidate_files(
+        root, platform=platform, openai_app_id=openai_app_id, candidate=candidate
+    )
     if expected_files != actual_files:
         raise ValueError("Hosted generated artifacts are stale; run hosted-plugin.py render")
 
@@ -2064,6 +2163,7 @@ def archive(
     *,
     openai_app_id: str | None = None,
     platform: str = "claude",
+    candidate: str = DEFAULT_CANDIDATE,
 ) -> Path:
     root = _repo_root(repo_root)
     if platform not in (*PLATFORMS, "all"):
@@ -2073,11 +2173,14 @@ def archive(
         for selected_platform in sorted(selected):
             release_locks.enter_context(_promotion_mutex(root, selected_platform))
         validate_hosted_public_inputs(root)
-        check(root, openai_app_id=openai_app_id, platform=platform)
+        check(root, openai_app_id=openai_app_id, platform=platform, candidate=candidate)
         output_root = output or root / "dist" / "hosted"
         output_root.mkdir(parents=True, exist_ok=True)
         for selected_platform in selected:
-            package = root / PLUGIN_ROOT / "generated" / selected_platform
+            generated = root / PLUGIN_ROOT / "generated"
+            if candidate != DEFAULT_CANDIDATE:
+                generated = generated / "candidates" / candidate
+            package = generated / selected_platform
             archive_path = output_root / f"{selected_platform}.zip"
             archive_bytes = _archive_bytes(package)
             _write_bytes_atomic(archive_path, archive_bytes)
@@ -2087,7 +2190,7 @@ def archive(
             }
             if selected_platform == "openai":
                 lock["registered_app_id_sha256"] = _registered_app_id_sha256(
-                    _generated_openai_app_id(root / PLUGIN_ROOT / "generated")
+                    _generated_openai_app_id(generated)
                 )
             _write_json_atomic(
                 output_root / f"{selected_platform}.zip.lock.json",
@@ -2096,14 +2199,19 @@ def archive(
     return output_root
 
 
-def promotion_record(repo_root: Path | None, platform: str) -> Path:
+def promotion_record(
+    repo_root: Path | None, platform: str, *, candidate: str = DEFAULT_CANDIDATE
+) -> Path:
     if platform not in PLATFORMS:
         raise ValueError("unsupported platform")
-    return _repo_root(repo_root) / PLUGIN_ROOT / "promotion" / f"{platform}.json"
+    root = _repo_root(repo_root) / PLUGIN_ROOT / "promotion"
+    return root / f"{platform}.json" if candidate == DEFAULT_CANDIDATE else root / "candidates" / candidate / f"{platform}.json"
 
 
-def promotion_record_sha256(repo_root: Path | None, platform: str) -> str:
-    path = promotion_record(repo_root, platform)
+def promotion_record_sha256(
+    repo_root: Path | None, platform: str, *, candidate: str = DEFAULT_CANDIDATE
+) -> str:
+    path = promotion_record(repo_root, platform, candidate=candidate)
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -2140,14 +2248,83 @@ def _load_acceptance_fixture(root: Path) -> dict[str, Any]:
     return fixture
 
 
-def _current_release_binding(root: Path, platform: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _selection_cases(
+    root: Path, lock: Mapping[str, Any]
+) -> tuple[dict[str, str], dict[str, tuple[str, str, str, bool]], dict[str, tuple[str, str, str, str]]]:
+    path = _candidate_root(root, LIFECYCLE_CANDIDATE) / "selection-cases.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("Records selection cases must be valid JSON") from exc
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"schema_version", "client_contracts", "cases"}
+        or raw["schema_version"] != 1
+    ):
+        raise ValueError("Records selection cases have an invalid schema")
+    cases = raw["cases"]
+    raw_contracts = raw["client_contracts"]
+    if not isinstance(cases, list) or not isinstance(raw_contracts, dict):
+        raise ValueError("Records selection cases must be a list")
+    contracts: dict[str, tuple[str, str, str, str]] = {}
+    for client in ("codex", "claude-code"):
+        contract = raw_contracts.get(client)
+        if not isinstance(contract, dict) or set(contract) != {
+            "client", "client_version", "model_version", "system_contract_version"
+        }:
+            raise ValueError("Records selection cases have invalid client contracts")
+        values = tuple(contract[key] for key in ("client", "client_version", "model_version", "system_contract_version"))
+        if not all(isinstance(value, str) and value for value in values) or values[0] != client:
+            raise ValueError("Records selection cases have invalid client contracts")
+        contracts[client] = values
+    if set(raw_contracts) != set(contracts):
+        raise ValueError("Records selection cases have invalid client contracts")
+    expected_pairs = {
+        ("codex-existing-collection", "codex", "append"),
+        ("claude-code-existing-collection", "claude-code", "append"),
+        ("codex-no-collection", "codex", "proposal"),
+        ("claude-code-no-collection", "claude-code", "proposal"),
+    }
+    actual_pairs: set[tuple[str, str, str]] = set()
+    prompts: dict[str, str] = {}
+    results: dict[str, tuple[str, str, str, bool]] = {}
+    for case in cases:
+        if not isinstance(case, dict) or set(case) != {"id", "client", "expected", "prompt_sha256"}:
+            raise ValueError("Records selection cases have invalid fields")
+        identifier, client, expected, digest = (
+            case["id"], case["client"], case["expected"], case["prompt_sha256"]
+        )
+        if not all(isinstance(value, str) for value in (identifier, client, expected, digest)) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("Records selection cases have invalid values")
+        actual_pairs.add((identifier, client, expected))
+        prompts[identifier] = digest
+        results[identifier] = (
+            client,
+            "append" if expected == "append" else "proposal",
+            "committed" if expected == "append" else "completed",
+            expected == "append",
+        )
+    if actual_pairs != expected_pairs or len(prompts) != len(cases):
+        raise ValueError("Records selection cases do not cover the required client matrix")
+    digest = _sha256(_canonical_json(raw))
+    if lock.get("selection_cases_sha256") != digest:
+        raise ValueError("Records candidate lock does not bind the selection cases")
+    return prompts, results, contracts
+
+
+def _current_release_binding(
+    root: Path, platform: str, *, candidate: str = DEFAULT_CANDIDATE
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    generated = root / PLUGIN_ROOT / "generated"
+    if candidate != DEFAULT_CANDIDATE:
+        generated = generated / "candidates" / candidate
     try:
         lock = json.loads(
-            (root / PLUGIN_ROOT / "generated" / f"{platform}.lock.json").read_text(encoding="utf-8")
+            (generated / f"{platform}.lock.json").read_text(encoding="utf-8")
         )
-        archive_path = root / PLUGIN_ROOT / "generated" / f"{platform}.zip"
+        archive_path = generated / f"{platform}.zip"
         archive_lock = json.loads(
-            (root / PLUGIN_ROOT / "generated" / f"{platform}.zip.lock.json").read_text(
+            (generated / f"{platform}.zip.lock.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -2155,8 +2332,8 @@ def _current_release_binding(root: Path, platform: str) -> tuple[dict[str, Any],
         raise ValueError(
             "promotion requires a committed generated package and archive lock"
         ) from exc
-    check(root, platform=platform)
-    package = root / PLUGIN_ROOT / "generated" / platform
+    check(root, platform=platform, candidate=candidate)
+    package = generated / platform
     archive_bytes = archive_path.read_bytes()
     if (
         _files_digest(package) != lock.get("artifact_sha256")
@@ -2167,6 +2344,55 @@ def _current_release_binding(root: Path, platform: str) -> tuple[dict[str, Any],
     return lock, archive_lock
 
 
+def _validate_records_acceptance(
+    root: Path, evidence: dict[str, Any], *, compatibility: dict[str, Any], lock: dict[str, Any], expectation: Any,
+    require_fresh: bool = True,
+) -> None:
+    if not isinstance(expectation, dict) or set(expectation) != {
+        "deployment_sha256", "vault_purpose", "reset_epoch", "principal_hmac_sha256",
+        "audience_hmac_sha256", "client_contracts", "graph_proof_digest", "prompt_cases", "selection_cases_sha256",
+    }:
+        raise ValueError("Records promotion requires exact operator expectations")
+    facts = evidence.get("records_acceptance")
+    if not isinstance(facts, dict):
+        raise ValueError("Records promotion requires closed lifecycle evidence")
+    if lock.get("minimum_records_reader_version") != 2:
+        raise ValueError("Records lifecycle candidate does not bind reader floor 2")
+    prompt_cases, prompt_results, contracts = _selection_cases(root, lock)
+    if (
+        expectation["selection_cases_sha256"] != lock["selection_cases_sha256"]
+        or expectation["prompt_cases"] != prompt_cases
+        or expectation["client_contracts"] != {
+            client: list(contract) for client, contract in contracts.items()
+        }
+    ):
+        raise ValueError("Records operator expectations do not match the committed selection cases")
+    live = _records_live_acceptance_module()
+    expected = live.RecordsEvidenceExpectation(
+        deployment_sha256=expectation["deployment_sha256"],
+        package="exomem",
+        release_version=lock["plugin_version"],
+        profile=LIFECYCLE_CANDIDATE,
+        minimum_records_reader_version=2,
+        surface_digest=compatibility["schema_contract_sha256"],
+        vault_purpose=expectation["vault_purpose"],
+        reset_epoch=expectation["reset_epoch"],
+        principal_hmac_sha256=expectation["principal_hmac_sha256"],
+        audience_hmac_sha256=expectation["audience_hmac_sha256"],
+        client_contracts=contracts,
+        required_actions=frozenset({"describe", "validate", "create", "inspect", "query", "append", "update", "revise", "rebaseline"}),
+        required_prompt_cases=prompt_cases,
+        required_prompt_case_results=prompt_results,
+        graph_proof_digest=expectation["graph_proof_digest"],
+    )
+    try:
+        live.validate_records_live_evidence(
+            facts, expected=expected, now=datetime.now(UTC), require_fresh=require_fresh
+        )
+    except ValueError as exc:
+        raise ValueError(f"Records lifecycle evidence is invalid: {exc}") from exc
+
+
 def _validate_promotion_evidence(
     root: Path,
     platform: str,
@@ -2175,6 +2401,8 @@ def _validate_promotion_evidence(
     trusted_key_id: str | None,
     trusted_secret: str | None,
     require_fresh: bool = True,
+    candidate: str = DEFAULT_CANDIDATE,
+    records_expectation: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     required_strings = {
         "client_version",
@@ -2226,6 +2454,8 @@ def _validate_promotion_evidence(
         *required_counts,
         *required_operations,
     }
+    if candidate == LIFECYCLE_CANDIDATE:
+        required.add("records_acceptance")
     if evidence.get("mocked") or set(evidence) != required:
         raise ValueError("live promotion requires exact real content-bearing client evidence")
     if evidence["schema_version"] != 1 or evidence["platform"] != platform:
@@ -2262,9 +2492,9 @@ def _validate_promotion_evidence(
     if timestamp > now or (require_fresh and (now - timestamp).total_seconds() > 24 * 60 * 60):
         raise ValueError("promotion evidence timestamp is stale")
 
-    compatibility = compatibility_manifest(root)
-    definition = load_definition(root)
-    lock, archive_lock = _current_release_binding(root, platform)
+    compatibility = compatibility_manifest(root, candidate=candidate)
+    definition = load_definition(root, candidate=candidate)
+    lock, archive_lock = _current_release_binding(root, platform, candidate=candidate)
     expected_identity = {
         "endpoint": compatibility["endpoint"],
         "compatibility_sha256": compatibility["compatibility_sha256"],
@@ -2287,7 +2517,7 @@ def _validate_promotion_evidence(
             raise ValueError("promotion evidence has a different registered app identity")
     if any(evidence[key] != value for key, value in expected_identity.items()):
         raise ValueError("promotion evidence has a different compatibility or package identity")
-    digest_keys = (
+    digest_keys: tuple[str, ...] = (
         "result_sha256",
         "package_artifact_sha256",
         "archive_sha256",
@@ -2315,6 +2545,15 @@ def _validate_promotion_evidence(
     ).hexdigest()
     if not hmac.compare_digest(evidence["operator_signature"], expected_signature):
         raise ValueError("promotion operator signature is invalid")
+    if candidate == LIFECYCLE_CANDIDATE:
+        _validate_records_acceptance(
+            root,
+            evidence,
+            compatibility=compatibility,
+            lock=lock,
+            expectation=records_expectation,
+            require_fresh=require_fresh,
+        )
     return compatibility, lock, archive_lock
 
 
@@ -2327,6 +2566,8 @@ def promote(
     trusted_secret: str | None = None,
     expected_state: str | None = None,
     expected_record_sha256: str | None = None,
+    candidate: str = DEFAULT_CANDIDATE,
+    records_expectation: dict[str, Any] | None = None,
 ) -> None:
     """Promote only evidence from a real, content-bearing clean-client journey."""
     if platform not in PLATFORMS:
@@ -2336,11 +2577,14 @@ def promote(
     ):
         raise ValueError("promotion requires an operator-trusted signing key")
     root = _repo_root(repo_root)
-    if expected_state not in {"pending", "failed"} or not re.fullmatch(
+    expected_states = {"pending", "failed"}
+    if candidate == LIFECYCLE_CANDIDATE:
+        expected_states.add("live")
+    if expected_state not in expected_states or not re.fullmatch(
         r"[0-9a-f]{64}", str(expected_record_sha256 or "")
     ):
         raise ValueError("promotion requires expected state and record digest")
-    record_path = promotion_record(root, platform)
+    record_path = promotion_record(root, platform, candidate=candidate)
     with _promotion_mutex(root, platform):
         try:
             prior = json.loads(record_path.read_text(encoding="utf-8"))
@@ -2352,24 +2596,50 @@ def promote(
         ):
             raise ValueError("promotion record changed; refresh before retrying")
         validate_hosted_public_inputs(root)
+        if expected_state == "live" and prior.get("evidence") == evidence:
+            compatibility, lock, _archive_lock = _validate_promotion_evidence(
+                root,
+                platform,
+                evidence,
+                trusted_key_id=trusted_key_id,
+                trusted_secret=trusted_secret,
+                require_fresh=False,
+                candidate=candidate,
+                records_expectation=records_expectation,
+            )
+            if (
+                prior.get("package_lock") != lock
+                or prior.get("compatibility_sha256") != compatibility["compatibility_sha256"]
+            ):
+                raise ValueError("promotion record changed; refresh before retrying")
+            return
         compatibility, lock, _archive_lock = _validate_promotion_evidence(
             root,
             platform,
             evidence,
             trusted_key_id=trusted_key_id,
             trusted_secret=trusted_secret,
+            candidate=candidate,
+            records_expectation=records_expectation,
         )
-        _write_json_atomic(
-            record_path,
-            {
-                "schema_version": 1,
-                "platform": platform,
-                "state": "live",
-                "package_lock": lock,
-                "compatibility_sha256": compatibility["compatibility_sha256"],
-                "evidence": evidence,
-            },
-        )
+        promoted = {
+            "schema_version": 1,
+            "platform": platform,
+            **(
+                {"candidate": candidate, "minimum_records_reader_version": 2}
+                if candidate == LIFECYCLE_CANDIDATE
+                else {}
+            ),
+            "state": "live",
+            "package_lock": lock,
+            "compatibility_sha256": compatibility["compatibility_sha256"],
+            "evidence": evidence,
+        }
+        if expected_state == "live":
+            if prior != promoted:
+                raise ValueError("promotion record changed; refresh before retrying")
+            return
+        _write_json_atomic(record_path, promoted)
 
 
 def demote(
@@ -2379,6 +2649,7 @@ def demote(
     *,
     expected_state: str | None = None,
     expected_record_sha256: str | None = None,
+    candidate: str = DEFAULT_CANDIDATE,
 ) -> None:
     root = _repo_root(repo_root)
     if reason not in DEMOTION_REASONS:
@@ -2387,7 +2658,7 @@ def demote(
         r"[0-9a-f]{64}", str(expected_record_sha256 or "")
     ):
         raise ValueError("demotion requires expected live state and record digest")
-    record_path = promotion_record(root, platform)
+    record_path = promotion_record(root, platform, candidate=candidate)
     with _promotion_mutex(root, platform):
         try:
             prior = json.loads(record_path.read_text(encoding="utf-8"))
@@ -2403,6 +2674,7 @@ def demote(
             {
                 "schema_version": 1,
                 "platform": platform,
+                **({"candidate": candidate, "minimum_records_reader_version": 2} if candidate == LIFECYCLE_CANDIDATE else {}),
                 "state": "failed",
                 "reason": reason,
             },
@@ -2414,10 +2686,12 @@ def distribution_manifest(
     *,
     trusted_key_id: str | None = None,
     trusted_secret: str | None = None,
+    candidate: str = DEFAULT_CANDIDATE,
+    records_expectation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = _repo_root(repo_root)
     records = {
-        platform: json.loads(promotion_record(root, platform).read_text(encoding="utf-8"))
+        platform: json.loads(promotion_record(root, platform, candidate=candidate).read_text(encoding="utf-8"))
         for platform in PLATFORMS
     }
     live: list[str] = []
@@ -2434,6 +2708,8 @@ def distribution_manifest(
             trusted_key_id=trusted_key_id,
             trusted_secret=trusted_secret,
             require_fresh=False,
+            candidate=candidate,
+            records_expectation=records_expectation,
         )
         if (
             record.get("package_lock") != lock
@@ -2813,6 +3089,7 @@ def _post_install_blockers(
     )
     if receipt_error is not None:
         return [receipt_error]
+    receipt_mapping = cast(dict[str, Any], receipt)
     required_checks = {
         "fresh_non_reviewer_oauth",
         "tool_and_skill_discovery",
@@ -2825,9 +3102,9 @@ def _post_install_blockers(
     if (
         evidence.get("channel") != channel
         or evidence.get("submission_sha256") != active_submission_sha256
-        or evidence.get("listing_sha256") != receipt.get("listing_sha256")
-        or evidence.get("package_lock_sha256") != receipt.get("package_lock_sha256")
-        or evidence.get("public_url") != receipt.get("public_url")
+        or evidence.get("listing_sha256") != receipt_mapping.get("listing_sha256")
+        or evidence.get("package_lock_sha256") != receipt_mapping.get("package_lock_sha256")
+        or evidence.get("public_url") != receipt_mapping.get("public_url")
         or evidence.get("sampled_output_sale_free") is not True
         or evidence.get("checks") != {check: True for check in required_checks}
     ):

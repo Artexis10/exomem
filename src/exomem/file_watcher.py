@@ -267,6 +267,7 @@ class FileWatcher:
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
         self._pending_external_epoch = 0
+        self._pending_access_policy = False
         self._last_change = 0.0
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -306,6 +307,19 @@ class FileWatcher:
         from .vault import in_excluded_scan_dir
 
         rel = self._rel(path)
+        if rel == f"{kb_prefix()}_access.yaml":
+            # Access policy changes are a publication boundary despite not
+            # being Markdown.  Do this before the generic non-Markdown return
+            # so graph reads fail closed until policy projection is reconciled.
+            with self._lock:
+                self._pending_access_policy = True
+                self._pending_external_epoch = max(
+                    self._pending_external_epoch,
+                    freshness.mark_external_pending(self._vault_root),
+                )
+                self._last_change = time.monotonic()
+            self._wake.set()
+            return
         if rel is not None and in_excluded_scan_dir(rel):
             # _trash/_archive/_Schema/…: every full walk skips these, so the
             # event path must too — else a delete's move-to-trash re-embeds
@@ -347,23 +361,27 @@ class FileWatcher:
             except ValueError:
                 return None
 
-    def _drain(self) -> tuple[list[Path], list[Path], list[str], int]:
+    def _drain(self) -> tuple[list[Path], list[Path], list[str], int, bool]:
         with self._lock:
             media = sorted(self._pending_media)
             ups = sorted(self._pending_upsert)
             dels = sorted(self._pending_delete)
             pending_epoch = self._pending_external_epoch
+            access_policy = self._pending_access_policy
             self._pending_media.clear()
             self._pending_upsert.clear()
             self._pending_delete.clear()
             self._pending_external_epoch = 0
+            self._pending_access_policy = False
         del_rels = [r for r in (self._rel(p) for p in dels) if r]
-        return media, ups, del_rels, pending_epoch
+        return media, ups, del_rels, pending_epoch, access_policy
 
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
-        media, ups, del_rels, pending_epoch = self._drain()
+        media, ups, del_rels, pending_epoch, access_policy = self._drain()
+        if access_policy:
+            self._reconcile_access_policy(pending_epoch)
         if not (media or ups or del_rels):
             return
 
@@ -390,6 +408,16 @@ class FileWatcher:
             cap=False,
             pending_epoch=pending_epoch,
         )
+
+    def _reconcile_access_policy(self, pending_epoch: int) -> None:
+        """Reproject one observed `_access.yaml` edit before clearing its barrier."""
+        try:
+            for scope in freshness.SCOPES:
+                if freshness.recall_is_live(self._vault_root, scope):
+                    freshness.recall_checkpoint(self._vault_root, scope)
+            self._recover_external_pending(pending_epoch)
+        except Exception:  # noqa: BLE001 - keep the observation pending for retry
+            log.exception("file watcher: access-policy reconciliation failed")
 
     # ---- debounce loop ----
 
@@ -480,21 +508,34 @@ class FileWatcher:
             if baselines_current:
                 self._validate_existing_graph_on_seed()
             return
+        policy = self._watcher_policy()
+        drift_admission = 0
         if drifted:
             # Maps are healed; fan the drift delta out. Each step is
             # belt-and-suspenders exception-safe — a bad batch must never kill
             # the reconcile loop.
             try:
-                self._dispatch_reconcile_delta(list(changed_union), list(deleted_union))
+                drift_admission = self._dispatch_reconcile_delta(
+                    list(changed_union), list(deleted_union), policy
+                )
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: reconcile drift dispatch failed")
         if pending_epoch is not None and baselines_current:
             self._recover_external_pending(pending_epoch)
         if baselines_current and not freshness.external_pending(self._vault_root):
             self._recover_suspended_graph()
+        remaining = (
+            None
+            if policy.max_reconcile_embed_files is None
+            else max(0, policy.max_reconcile_embed_files - drift_admission)
+        )
+        try:
+            index_sync.drain_deferred_work(self._vault_root, limit=remaining)
+        except Exception:  # noqa: BLE001 - queued work remains retryable
+            log.exception("file watcher: deferred index drain failed")
         if not drifted:
             return
-        if self._watcher_policy().defer_expensive_indexes:
+        if policy.defer_expensive_indexes:
             log.info("file watcher: quiet reconcile deferred expensive warm-up")
             return
         from . import bm25
@@ -553,12 +594,12 @@ class FileWatcher:
         from . import find as find_module
         from . import vault as vault_module
 
+        if not epistemic_graph.graph_enabled() or not epistemic_graph.sidecar_path(
+            self._vault_root
+        ).exists():
+            return
         graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
-        if (
-            not epistemic_graph.graph_enabled()
-            or not graph.path.exists()
-            or not graph.reads_suspended()
-        ):
+        if not graph.reads_suspended():
             return
         try:
             find_module.evict_resolver_caches(self._vault_root)
@@ -589,9 +630,9 @@ class FileWatcher:
         from . import find as find_module
         from . import vault as vault_module
 
-        graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
-        if not graph.path.exists():
+        if not epistemic_graph.sidecar_path(self._vault_root).exists():
             return
+        graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
         try:
             graph.suspend_reads()
             if not epistemic_graph.graph_enabled():
@@ -608,7 +649,12 @@ class FileWatcher:
                 pass
             log.exception("file watcher: startup graph validation failed")
 
-    def _dispatch_reconcile_delta(self, changed: list[str], deleted: list[str]) -> None:
+    def _dispatch_reconcile_delta(
+        self,
+        changed: list[str],
+        deleted: list[str],
+        policy: mode.WatcherPolicy | None = None,
+    ) -> int:
         """Fan a reconcile drift delta out through the per-batch event path.
 
         Mirrors `_flush` MINUS the freshness publish — `reconcile` already
@@ -673,13 +719,14 @@ class FileWatcher:
                 changed_rel_pairs = [(p, r) for p, r in changed_rel_pairs if r not in gone_now]
                 changed_paths = [p for p, _ in changed_rel_pairs]
 
-        self._dispatch_batch(
+        return self._dispatch_batch(
             changed_paths,
             up_rels,
             del_rels,
             cap=True,
             publish_corpus_change=False,
             pending_epoch=None,
+            policy=policy,
         )
 
     def _dispatch_batch(
@@ -691,7 +738,8 @@ class FileWatcher:
         cap: bool,
         publish_corpus_change: bool = True,
         pending_epoch: int | None = None,
-    ) -> None:
+        policy: mode.WatcherPolicy | None = None,
+    ) -> int:
         """Shared fan-out tail for `_flush` and `_dispatch_reconcile_delta`:
         inbound publish -> resolver publish -> KB-filtered index_sync
         upsert/delete. Each step keeps its own exception guard — a bad batch
@@ -705,7 +753,7 @@ class FileWatcher:
         always fully healed independent of this cap.
         """
         if not (up_rels or del_rels):
-            return
+            return 0
 
         # Publish the complete vault-wide batch before any path-local consumer
         # sees it. A transient failure retries this same batch; a persistent
@@ -825,8 +873,9 @@ class FileWatcher:
                 )
             except Exception:  # noqa: BLE001 - graph remains fail-closed by checkpoint
                 log.exception("file watcher: vault-wide graph repair failed")
-        policy = self._watcher_policy()
+        policy = policy or self._watcher_policy()
         defer_semantic = False
+        admitted_semantic = len(semantic_kb_ups)
         if cap and not policy.defer_expensive_indexes:
             max_files = policy.max_reconcile_embed_files
             if max_files is not None and len(semantic_kb_ups) > max_files:
@@ -838,6 +887,7 @@ class FileWatcher:
                     max_files,
                 )
                 defer_semantic = True
+                admitted_semantic = 0
         elif not cap and not policy.defer_expensive_indexes:
             max_files = policy.max_embed_files_per_batch
             if max_files is not None and len(semantic_kb_ups) > max_files:
@@ -850,11 +900,14 @@ class FileWatcher:
                     max_files,
                 )
                 defer_semantic = True
+                admitted_semantic = 0
         elif policy.defer_expensive_indexes and semantic_kb_ups:
             log.info(
                 "file watcher: quiet mode deferring semantic indexing for %d admitted semantic file(s)",
                 len(semantic_kb_ups),
             )
+            defer_semantic = True
+            admitted_semantic = 0
         if kb_ups:
             try:
                 index_sync.upsert_after_write(
@@ -891,6 +944,7 @@ class FileWatcher:
                 log.warning(
                     "file watcher: graph fan-out incomplete; periodic recovery re-armed"
                 )
+        return admitted_semantic
 
     def _run_reconcile(self) -> None:
         # Seed immediately (off the boot path — this is the watcher's own

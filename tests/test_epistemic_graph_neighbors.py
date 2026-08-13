@@ -151,46 +151,54 @@ def test_cache_token_none_when_unavailable(tmp_path: Path, monkeypatch) -> None:
     assert epistemic_graph.cache_token(vault) is None
 
 
-def test_generation_bumps_on_write(tmp_path: Path) -> None:
+def test_in_place_write_bumps_generation_without_changing_instance(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _seed(vault)
     idx = epistemic_graph.EpistemicGraphIndex(vault)
     idx.rebuild_all()
     before = epistemic_graph.cache_token(vault)
+    assert before is not None
 
     target = vault / TARGET
     target.write_text(target.read_text(encoding="utf-8") + "\nMore.\n", encoding="utf-8")
-    epistemic_graph.upsert_after_write(vault, [target])
+    index_sync.upsert_after_write(vault, [target])
 
     after = epistemic_graph.cache_token(vault)
+    assert after is not None
     assert after != before
     assert int(after[2]) > int(before[2])
+    assert after[3] == before[3]
 
 
-def test_generation_bumps_on_delete(tmp_path: Path) -> None:
+def test_cache_token_moves_on_delete(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _seed(vault)
     idx = epistemic_graph.EpistemicGraphIndex(vault)
     idx.rebuild_all()
     before = epistemic_graph.cache_token(vault)
+    assert before is not None
 
     (vault / LINKED).unlink()
     index_sync.delete_after_remove(vault, [LINKED])
 
     after = epistemic_graph.cache_token(vault)
-    assert int(after[2]) > int(before[2])
+    assert after is not None
+    assert after != before
 
 
-def test_generation_bumps_on_rebuild(tmp_path: Path) -> None:
+def test_cache_token_moves_on_rebuild(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _seed(vault)
     idx = epistemic_graph.EpistemicGraphIndex(vault)
     idx.rebuild_all()
     before = epistemic_graph.cache_token(vault)
+    assert before is not None
 
     idx.rebuild_all()
     after = epistemic_graph.cache_token(vault)
+    assert after is not None
     assert after != before
+    assert after[3] != before[3]
 
 
 def test_neighbors_for_resolves_semantic_block_relations(tmp_path: Path) -> None:
@@ -309,6 +317,7 @@ def test_content_edit_moves_token_like_a_rebuild(tmp_path: Path) -> None:
     idx = epistemic_graph.EpistemicGraphIndex(vault)
     idx.rebuild_all()
     before = epistemic_graph.cache_token(vault)
+    assert before is not None
 
     seed = vault / SEED
     seed.write_text(
@@ -318,13 +327,16 @@ def test_content_edit_moves_token_like_a_rebuild(tmp_path: Path) -> None:
     )
     epistemic_graph.upsert_after_write(vault, [seed])
     incremental = epistemic_graph.cache_token(vault)
+    assert incremental is not None
     assert incremental != before
 
     epistemic_graph.sidecar_path(vault).unlink()
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     rebuilt = epistemic_graph.cache_token(vault)
-    # Both operations produce a live token (schema + registry identity match);
-    # the generation counter differs by history, which is expected.
+    # Both operations produce a live token with the same schema and registry.
+    # Recreating the sidecar gives the rebuild a fresh instance identity even
+    # when its local generation happens to equal an earlier sidecar's value.
     assert rebuilt is not None
     assert rebuilt[0] == incremental[0]
     assert rebuilt[1] == incremental[1]
+    assert rebuilt[3] != incremental[3]

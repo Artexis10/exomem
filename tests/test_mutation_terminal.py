@@ -22,7 +22,6 @@ def test_compact_projection_leads_with_decisive_commit_fields() -> None:
         "warnings": ["review a link"],
         "semantic": {"transition": "verbose"},
     }
-
     terminal = mutation_terminal.committed_terminal(
         raw,
         request_id="11111111-1111-4111-8111-111111111111",
@@ -43,6 +42,27 @@ def test_compact_projection_leads_with_decisive_commit_fields() -> None:
         "warnings_count": 1,
     }
 
+
+def test_compact_terminal_retains_completed_graph_sync_fields() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "graph_sync": "failed",
+            "graph_sync_code": "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+            "graph_sync_checkpoint": "a" * 64,
+            "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    projected = mutation_terminal.project_terminal(terminal)
+
+    assert projected["graph_sync"] == "failed"
+    assert projected["graph_sync_code"] == "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
+    assert projected["graph_sync_checkpoint"] == "a" * 64
+    assert projected["graph_sync_remediation"] == "Run reconcile to recover the derived graph."
 
 def test_full_projection_adds_the_complete_leaf_result_only_under_diagnostics() -> None:
     mutation_terminal = _terminal_module()
@@ -152,6 +172,74 @@ def test_record_replay_terminal_is_not_presented_as_a_new_commit() -> None:
         "payload_hash": "c" * 64,
         "outcome": "replayed",
         "audit_correlation": "d" * 24,
+        "warnings_count": 0,
+    }
+
+
+def test_compact_lifecycle_record_receipt_retains_its_closed_receipt_fields() -> None:
+    mutation_terminal = _terminal_module()
+    receipt = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 2,
+        "operation": "revise",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": None,
+        "before_item_hash": None,
+        "after_item_hash": None,
+        "before_manifest_hash": "a" * 64,
+        "after_manifest_hash": "b" * 64,
+        "before_container_hash": "c" * 64,
+        "after_container_hash": "d" * 64,
+        "affected_paths": ["Knowledge Base/Records/log/_collection.md"],
+        "payload_hash": "e" * 64,
+        "outcome": "committed",
+        "audit_correlation": "f" * 24,
+        "continuity": True,
+        "acknowledged_gap_codes": [],
+        "gap_fingerprint": None,
+        "checkpoint_snapshot_hash": None,
+        "minimum_reader_version": 2,
+    }
+
+    projected = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(
+            receipt,
+            request_id="11111111-1111-4111-8111-111111111111",
+            receipt_id="receipt-1",
+            idempotency_key="same-call",
+        )
+    )
+
+    assert projected == {
+        "ok": True,
+        "state": "committed",
+        "terminal": True,
+        "status": "committed",
+        "mutated": True,
+        "paths": ["Knowledge Base/Records/log/_collection.md"],
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "receipt_id": "receipt-1",
+        "idempotency_key": "same-call",
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 2,
+        "operation": "revise",
+        "collection_id": "11111111-1111-4111-8111-111111111111",
+        "item_key": None,
+        "before_item_hash": None,
+        "after_item_hash": None,
+        "before_manifest_hash": "a" * 64,
+        "after_manifest_hash": "b" * 64,
+        "before_container_hash": "c" * 64,
+        "after_container_hash": "d" * 64,
+        "affected_paths": ["Knowledge Base/Records/log/_collection.md"],
+        "payload_hash": "e" * 64,
+        "outcome": "committed",
+        "audit_correlation": "f" * 24,
+        "continuity": True,
+        "acknowledged_gap_codes": [],
+        "gap_fingerprint": None,
+        "checkpoint_snapshot_hash": None,
+        "minimum_reader_version": 2,
         "warnings_count": 0,
     }
 
@@ -450,11 +538,13 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
         return raw
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     first_request_id = "11111111-1111-4111-8111-111111111111"
     compact = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {"value": 7, "response_detail": "compact"},
         idempotency_key="same-public-key",
         idempotency_principal_scope="principal:one",
@@ -462,7 +552,7 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
     )
     full = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {"value": 7, "response_detail": "full"},
         idempotency_key="same-public-key",
         idempotency_principal_scope="principal:one",
@@ -470,7 +560,7 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
     )
     legacy = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {"value": 7, "response_detail": "legacy"},
         idempotency_key="same-public-key",
         idempotency_principal_scope="principal:one",
@@ -502,12 +592,14 @@ def test_internal_replay_key_is_separate_from_public_terminal_identity(
         return {"path": "Knowledge Base/hosted.md", "warnings": []}
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     internal_key = "hosted:" + "a" * 64
 
     terminal = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {},
         idempotency_key=internal_key,
         public_idempotency_key=public_key,
@@ -575,6 +667,8 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
             raise asyncio.CancelledError
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
         after_terminal_persisted=after_terminal_persisted,
@@ -583,7 +677,7 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
     with pytest.raises(asyncio.CancelledError):
         manager.invoke(
             command,
-            (tmp_path / "vault",),
+            (vault,),
             {"response_detail": "compact"},
             idempotency_key="ack-lost",
             mutation_request_id=first_request_id,
@@ -591,7 +685,7 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
 
     replay = manager.invoke(
         command,
-        (tmp_path / "vault",),
+        (vault,),
         {"response_detail": "full"},
         idempotency_key="ack-lost",
         mutation_request_id="22222222-2222-4222-8222-222222222222",
