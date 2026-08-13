@@ -328,6 +328,40 @@ def _windows_private_dacl_trustees(sid: str) -> tuple[str, ...]:
     return tuple(unique.values())
 
 
+class WindowsRuntimeDaclError(RuntimeError):
+    """Actionable fail-closed result for one unsafe idempotency runtime entry."""
+
+    def __init__(self, path: Path, remediation: str):
+        self.path = path
+        self.remediation = remediation
+        super().__init__(
+            f"unsafe Windows DACL at {path}; run in elevated PowerShell: {remediation}"
+        )
+
+
+def _windows_private_dacl_repair_command(
+    path: Path, sid: str, *, directory: bool
+) -> str:
+    """Render an explicit, non-recursive repair for exactly one runtime entry."""
+    trustees = {
+        "SY": "S-1-5-18",
+        "BA": "S-1-5-32-544",
+    }
+    trustee_sids = tuple(
+        trustees.get(trustee, trustee)
+        for trustee in _windows_private_dacl_trustees(sid)
+    )
+    quoted_path = "'" + str(path).replace("'", "''") + "'"
+    flags = "(OI)(CI)" if directory else ""
+    grants = " ".join(
+        f"'*{trustee}:{flags}F'" for trustee in trustee_sids
+    )
+    return (
+        f"icacls.exe {quoted_path} /reset; if ($LASTEXITCODE -eq 0) {{ "
+        f"icacls.exe {quoted_path} /inheritance:r /grant:r {grants} }}"
+    )
+
+
 def _windows_private_dacl_sddl(sid: str) -> str:
     """Protected, inheritable DACL: current user plus only OS recovery principals."""
     return "D:P" + "".join(
@@ -460,7 +494,7 @@ def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> b
         if trustee.casefold() not in expected or trustee.casefold() in observed:
             return False
         normalized_flags = flags.casefold()
-        allowed = {"oici", "idoici", "id"} if not directory else {"oici"}
+        allowed = {"", "oici", "idoici", "id"} if not directory else {"oici"}
         if normalized_flags not in allowed:
             return False
         observed.add(trustee.casefold())
@@ -477,8 +511,10 @@ def _validate_windows_runtime_entry(
     try:
         sddl = _windows_dacl_sddl_for_handle(handle) if not opened_here else _windows_dacl_sddl(path)
         if not _windows_private_dacl_is_valid(sddl, sid, directory=directory):
-            kind = "directory" if directory else "file"
-            raise RuntimeError(f"idempotency runtime {kind} has an unsafe Windows DACL")
+            raise WindowsRuntimeDaclError(
+                path,
+                _windows_private_dacl_repair_command(path, sid, directory=directory),
+            )
     finally:
         if opened_here:
             _windows_close_handle(handle)
