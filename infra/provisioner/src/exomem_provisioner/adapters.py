@@ -868,15 +868,49 @@ class PrivateCellApiAdapter:
             if (
                 not isinstance(agent_metadata, dict)
                 or not isinstance(agent_digest, dict)
+                or set(agent_digest) != {"algorithm", "value"}
                 or agent_digest.get("algorithm") != "sha256"
                 or not isinstance(agent_metadata.get("profile"), str)
                 or not isinstance(agent_metadata.get("active_capability_sha256"), str)
                 or not isinstance(agent_digest.get("value"), str)
+                or not isinstance(agent_contract.get("exomem_release"), str)
             ):
                 raise MetadataConflict("private cell agent contract is incomplete")
+            runtime_contract = {
+                key: value for key, value in agent_contract.items() if key != "digest"
+            }
+            try:
+                observed_runtime_digest = hashlib.sha256(
+                    json.dumps(
+                        runtime_contract,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+                published_contract = {
+                    key: value
+                    for key, value in agent_contract.items()
+                    if key not in {"exomem_release", "digest"}
+                }
+                schema_digest = hashlib.sha256(
+                    json.dumps(
+                        published_contract,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+            except (TypeError, ValueError) as error:
+                raise MetadataConflict("private cell agent contract is invalid") from error
+            if not hmac.compare_digest(agent_digest["value"], observed_runtime_digest):
+                raise MetadataConflict("private cell agent contract digest differs")
+            if agent_contract["exomem_release"] != expected_release:
+                raise MetadataConflict("private cell agent contract release differs")
+            if agent_contract.get("protocol_version") != protocol_version:
+                raise MetadataConflict("private cell agent contract protocol differs")
             agent_profile = agent_metadata["profile"]
             command_fingerprint = agent_metadata["active_capability_sha256"]
-            schema_digest = agent_digest["value"]
             if config.records_reader_version is not None:
                 reader_response = await self._request(
                     "GET",

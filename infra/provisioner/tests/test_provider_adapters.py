@@ -851,8 +851,33 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
 
 
 @pytest.mark.asyncio
-async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
+async def test_private_cell_api_derives_release_independent_schema_digest_from_agent_contract() -> None:
     calls: list[str] = []
+    agent_contract_base = {
+        "schema_version": 1,
+        "protocol_version": "1",
+        "exomem_release": "0.22.0",
+        "agent_profile": {
+            "profile": "hosted-alpha-agent-v1",
+            "active_capability_sha256": "c" * 64,
+        },
+        "commands": [],
+    }
+    runtime_digest = hashlib.sha256(
+        json.dumps(agent_contract_base, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    published_schema_digest = hashlib.sha256(
+        json.dumps(
+            {
+                key: value
+                for key, value in agent_contract_base.items()
+                if key != "exomem_release"
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert runtime_digest != published_schema_digest
 
     async def request(
         method: str,
@@ -867,11 +892,8 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
             return _Response(
                 200,
                 {
-                    "agent_profile": {
-                        "profile": "hosted-alpha-agent-v1",
-                        "active_capability_sha256": "c" * 64,
-                    },
-                    "digest": {"algorithm": "sha256", "value": "d" * 64},
+                    **agent_contract_base,
+                    "digest": {"algorithm": "sha256", "value": runtime_digest},
                 },
                 raw=True,
             )
@@ -925,7 +947,7 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
             "agentProfile": "hosted-alpha-agent-v1",
             "gatewayContractDigest": "b" * 64,
             "commandFingerprint": "c" * 64,
-            "schemaDigest": "d" * 64,
+            "schemaDigest": published_schema_digest,
         },
         records_reader_version=2,
         lifecycle_actions_enabled=True,
@@ -944,7 +966,7 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
 
     assert health.agent_profile == "hosted-alpha-agent-v1"
     assert health.command_fingerprint == "c" * 64
-    assert health.schema_digest == "d" * 64
+    assert health.schema_digest == published_schema_digest
     assert health.records_reader_version == 2
     assert health.lifecycle_actions_enabled is False
     assert calls == [
@@ -954,3 +976,198 @@ async def test_private_cell_api_observes_the_selected_agent_contract() -> None:
         "http://cells.invalid/private/exomem/v1/agent/hosted-alpha-agent-v1/contract",
         "http://cells.invalid/private/exomem/v1/agent/hosted-alpha-agent-v1/reader-status",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["digest", "body"])
+async def test_private_cell_api_rejects_agent_contract_with_unverified_content(tamper: str) -> None:
+    agent_contract_base = {
+        "schema_version": 1,
+        "protocol_version": "1",
+        "exomem_release": "0.22.0",
+        "agent_profile": {
+            "profile": "hosted-alpha-agent-v1",
+            "active_capability_sha256": "c" * 64,
+        },
+        "commands": [],
+    }
+    runtime_digest = hashlib.sha256(
+        json.dumps(agent_contract_base, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    agent_contract: dict[str, object] = {
+        **agent_contract_base,
+        "digest": {"algorithm": "sha256", "value": runtime_digest},
+    }
+    if tamper == "digest":
+        agent_contract["digest"] = {"algorithm": "sha256", "value": "d" * 64}
+    else:
+        agent_contract["unexpected"] = True
+
+    async def request(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: object = None,
+    ) -> _Response:
+        del method, headers, json
+        if url.endswith("/agent/hosted-alpha-agent-v1/contract"):
+            return _Response(200, agent_contract, raw=True)
+        if url.endswith("/contract"):
+            return _Response(200, {"digest": {"algorithm": "sha256", "value": "b" * 64}}, raw=True)
+        if url.endswith("/ready"):
+            return _Response(
+                200,
+                {
+                    "cell_id": "cell-alpha",
+                    "vault_id": "tenant-alpha",
+                    "exomem_release": "0.22.0",
+                    "hosted_protocol": "1",
+                    "authenticated_credential_version": "1",
+                    "security_revision": 1,
+                    "service_authenticated": True,
+                    "mutation_authority": True,
+                    "admission_phase": "active",
+                    "read_admission": True,
+                    "write_admission": True,
+                    "worker_policy_digest": hashlib.sha256(
+                        b'{"media":false,"semantic":true,"workerCount":2}'
+                    ).hexdigest(),
+                },
+            )
+        return _Response(200, {"live": True, "cell_id": "cell-alpha", "protocol_version": "1"})
+
+    adapter = PrivateCellApiAdapter(request=request, internal_origin="http://cells.invalid")
+    config = LifecycleConfig(
+        image="repo@sha256:" + "a" * 64,
+        chart_path="chart",
+        chart_version="0.1.0",
+        helm_version="3.19.4",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        browser_origin="https://substratesystems.io",
+        release_version="0.22.0",
+        protocol_version="1",
+        contract_digest="b" * 64,
+        location="fsn1",
+        runtime_target={
+            "releaseVersion": "0.22.0",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "b" * 64,
+            "commandFingerprint": "c" * 64,
+            "schemaDigest": "d" * 64,
+        },
+    )
+
+    with pytest.raises(MetadataConflict, match="agent contract digest differs"):
+        await adapter.health(
+            _metadata(),
+            credential=_credential(),
+            protocol_version="1",
+            config=config,
+            expected_release="0.22.0",
+            expected_worker_policy={"workerCount": 2, "semantic": True, "media": False},
+            require_runtime_identity=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    (
+        ("exomem_release", "0.22.1", "release differs"),
+        ("protocol_version", "2", "protocol differs"),
+    ),
+)
+async def test_private_cell_api_rejects_validly_redigested_wrong_agent_contract_identity(
+    field: str,
+    replacement: str,
+    message: str,
+) -> None:
+    agent_contract_base: dict[str, object] = {
+        "schema_version": 1,
+        "protocol_version": "1",
+        "exomem_release": "0.22.0",
+        "agent_profile": {
+            "profile": "hosted-alpha-agent-v1",
+            "active_capability_sha256": "c" * 64,
+        },
+        "commands": [],
+    }
+    agent_contract_base[field] = replacement
+    runtime_digest = hashlib.sha256(
+        json.dumps(agent_contract_base, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    agent_contract = {
+        **agent_contract_base,
+        "digest": {"algorithm": "sha256", "value": runtime_digest},
+    }
+
+    async def request(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: object = None,
+    ) -> _Response:
+        del method, headers, json
+        if url.endswith("/agent/hosted-alpha-agent-v1/contract"):
+            return _Response(200, agent_contract, raw=True)
+        if url.endswith("/contract"):
+            return _Response(200, {"digest": {"algorithm": "sha256", "value": "b" * 64}}, raw=True)
+        if url.endswith("/ready"):
+            return _Response(
+                200,
+                {
+                    "cell_id": "cell-alpha",
+                    "vault_id": "tenant-alpha",
+                    "exomem_release": "0.22.0",
+                    "hosted_protocol": "1",
+                    "authenticated_credential_version": "1",
+                    "security_revision": 1,
+                    "service_authenticated": True,
+                    "mutation_authority": True,
+                    "admission_phase": "active",
+                    "read_admission": True,
+                    "write_admission": True,
+                    "worker_policy_digest": hashlib.sha256(
+                        b'{"media":false,"semantic":true,"workerCount":2}'
+                    ).hexdigest(),
+                },
+            )
+        return _Response(200, {"live": True, "cell_id": "cell-alpha", "protocol_version": "1"})
+
+    adapter = PrivateCellApiAdapter(request=request, internal_origin="http://cells.invalid")
+    config = LifecycleConfig(
+        image="repo@sha256:" + "a" * 64,
+        chart_path="chart",
+        chart_version="0.1.0",
+        helm_version="3.19.4",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        browser_origin="https://substratesystems.io",
+        release_version="0.22.0",
+        protocol_version="1",
+        contract_digest="b" * 64,
+        location="fsn1",
+        runtime_target={
+            "releaseVersion": "0.22.0",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "b" * 64,
+            "commandFingerprint": "c" * 64,
+            "schemaDigest": "d" * 64,
+        },
+    )
+
+    with pytest.raises(MetadataConflict, match=message):
+        await adapter.health(
+            _metadata(),
+            credential=_credential(),
+            protocol_version="1",
+            config=config,
+            expected_release="0.22.0",
+            expected_worker_policy={"workerCount": 2, "semantic": True, "media": False},
+            require_runtime_identity=True,
+        )
