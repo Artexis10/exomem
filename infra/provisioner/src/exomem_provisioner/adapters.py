@@ -905,6 +905,10 @@ class PrivateCellApiAdapter:
                 raise MetadataConflict("private cell agent contract is invalid") from error
             if not hmac.compare_digest(agent_digest["value"], observed_runtime_digest):
                 raise MetadataConflict("private cell agent contract digest differs")
+            if agent_contract["exomem_release"] != expected_release:
+                raise MetadataConflict("private cell agent contract release differs")
+            if agent_contract.get("protocol_version") != protocol_version:
+                raise MetadataConflict("private cell agent contract protocol differs")
             agent_profile = agent_metadata["profile"]
             command_fingerprint = agent_metadata["active_capability_sha256"]
             if config.records_reader_version is not None:
