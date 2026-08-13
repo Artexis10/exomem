@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import fnmatch
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .. import find_corpus
 from ..find_types import ParsedPage
@@ -35,6 +37,20 @@ class MembershipUnresolved(Exception):
     which is the opposite of what an IO failure should cost. Callers must
     translate this into their own fail-closed signal.
     """
+
+
+@dataclass(frozen=True)
+class MembershipOutcome:
+    """Non-Markdown membership that is either proven or safely unresolved."""
+
+    state: Literal["classified", "unresolved"]
+    scope_ids: frozenset[str]
+    reason: Literal["companion_required"] | None = None
+
+    def require_classified(self) -> frozenset[str]:
+        if self.state == "classified":
+            return self.scope_ids
+        raise MembershipUnresolved("non-Markdown membership requires a companion")
 
 
 def clear_memo() -> None:
@@ -112,23 +128,16 @@ def _scope_matches(scope: Scope, page: ParsedPage) -> bool:
     return not excluded
 
 
-def _scope_matches_path_only(scope: Scope, rel_path: str) -> bool:
-    """The half of `_scope_matches` that needs no parsed page.
-
-    Only `paths` and `refs` select on the path itself; every other selector
-    reads frontmatter. An exclude that cannot be evaluated is treated as NOT
-    excluding — the fail-closed direction, since excluding would widen
-    disclosure.
-    """
-    positive = (bool(scope.paths) and _matches_paths(scope.paths, rel_path)) or (
-        bool(scope.refs) and _matches_refs(scope.refs, rel_path)
-    )
-    if not positive:
-        return False
-    excluded = (
+def _path_ref_excludes(scope: Scope, rel_path: str) -> bool:
+    return (
         bool(scope.exclude_paths) and _matches_paths(scope.exclude_paths, rel_path)
     ) or (bool(scope.exclude_refs) and _matches_refs(scope.exclude_refs, rel_path))
-    return not excluded
+
+
+def _path_ref_matches(scope: Scope, rel_path: str) -> bool:
+    return (bool(scope.paths) and _matches_paths(scope.paths, rel_path)) or (
+        bool(scope.refs) and _matches_refs(scope.refs, rel_path)
+    )
 
 
 def _needs_frontmatter(scope: Scope) -> bool:
@@ -137,8 +146,8 @@ def _needs_frontmatter(scope: Scope) -> bool:
 
 def evaluate_path_only(
     vault_root: Path, rel_path: str, policy: Policy
-) -> frozenset[str]:
-    """Scope membership for a NON-MARKDOWN item, decided without parsing it.
+) -> MembershipOutcome:
+    """Classify a non-Markdown item's path/ref membership without reading it.
 
     `find_corpus.parse_page` cannot decode a binary, and the caller used to
     read that failure as `None` — a value overloaded to mean both "unreadable"
@@ -149,45 +158,27 @@ def evaluate_path_only(
     value as deny (so creating `_Governance/` broke media for everyone,
     including the owner).
 
-    A binary has no frontmatter of its own, so `paths` and `refs` are the only
-    selectors that can name it directly — no parse is needed for those. When a
-    scope selects on tags/types/classes/projects, the item's SIDECAR page
-    (`<name>.md`, the media metadata convention) is the thing carrying that
-    frontmatter, so it is consulted when present.
-
-    Never returns `None`: an unmatched binary is genuinely a member of no
-    scope. `None` is reserved for a real IO failure, which the caller raises.
+    A path/ref exclusion proves exclusion and a path/ref positive proves
+    membership.  A selector requiring artifact semantics cannot be decided in
+    this compatibility slice: descriptor-like legacy companions deliberately
+    stay unresolved until the closed companion registry lands.
     """
     if policy.empty or not policy.scopes:
-        return frozenset()
-
-    sidecar_page: ParsedPage | None = None
-    sidecar_loaded = False
-
-    def _sidecar() -> ParsedPage | None:
-        nonlocal sidecar_page, sidecar_loaded
-        if not sidecar_loaded:
-            sidecar_loaded = True
-            candidate = Path(vault_root) / f"{rel_path}.md"
-            try:
-                if candidate.is_file():
-                    sidecar_page = find_corpus.parse_page(
-                        candidate, candidate.stat().st_mtime, Path(vault_root)
-                    )
-            except OSError:
-                sidecar_page = None
-        return sidecar_page
+        return MembershipOutcome("classified", frozenset())
 
     matched: set[str] = set()
+    unresolved = False
     for scope_id, scope in policy.scopes.items():
-        if _scope_matches_path_only(scope, rel_path):
+        if _path_ref_excludes(scope, rel_path):
+            continue
+        if _path_ref_matches(scope, rel_path):
             matched.add(scope_id)
             continue
         if _needs_frontmatter(scope):
-            page = _sidecar()
-            if page is not None and _scope_matches(scope, page):
-                matched.add(scope_id)
-    return frozenset(matched)
+            unresolved = True
+    if unresolved:
+        return MembershipOutcome("unresolved", frozenset(matched), "companion_required")
+    return MembershipOutcome("classified", frozenset(matched))
 
 
 def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:

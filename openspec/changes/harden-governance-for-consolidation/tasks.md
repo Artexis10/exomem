@@ -59,7 +59,7 @@
 
 ## 2. Fail-Closed Non-Markdown Membership
 
-- [ ] 2.1 Add red tests in `tests/test_governance_membership.py` for a missing companion
+- [x] 2.1 Add red tests in `tests/test_governance_membership.py` for a missing companion
   under semantic-only project/tag/type/class scopes, proving the outcome is unresolved
   rather than the classified empty set.
 - [ ] 2.2 Add red tests for malformed, unreadable, stale, symlink-escaping, and
