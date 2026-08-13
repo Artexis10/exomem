@@ -57,6 +57,7 @@ jobs:
           # conftest autouse defaults so a forgotten extra can't change behaviour.
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           --splits=4

@@ -72,9 +72,9 @@ class _Chunk:
     vector: tuple[float, ...] = field(default=())
 
 
-def _fixture_vector(text: str, dimensions: int) -> tuple[float, ...]:
+def _fixture_vector(tokens: Sequence[str], dimensions: int) -> tuple[float, ...]:
     values = [0.0] * dimensions
-    for token in tokenize(text):
+    for token in tokens:
         digest = hashlib.sha256(token.encode()).digest()
         index = int.from_bytes(digest[:2], "big") % dimensions
         values[index] += -1.0 if digest[2] & 1 else 1.0
@@ -149,8 +149,15 @@ class HybridRagDirectProvider:
             )
             for offset, text in enumerate(packed):
                 digest = hashlib.sha256(f"{handle.case_id}:{ordinal}:{offset}:{text}".encode()).hexdigest()
+                tokens = tuple(tokenize(text))
                 self._chunks.append(
-                    _Chunk(digest, text, tuple(tokenize(text)), ordinal, _fixture_vector(text, self.config.fixture_dimensions))
+                    _Chunk(
+                        digest,
+                        text,
+                        tokens,
+                        ordinal,
+                        _fixture_vector(tokens, self.config.fixture_dimensions),
+                    )
                 )
                 inserted.append(digest)
         # One pass at ingest builds the document-frequency table every later
@@ -174,7 +181,7 @@ class HybridRagDirectProvider:
         ]
 
     def semantic_ranking(self, query: str) -> list[str]:
-        vector = _fixture_vector(query, self.config.fixture_dimensions)
+        vector = _fixture_vector(tokenize(query), self.config.fixture_dimensions)
         return [
             chunk_id
             for _score, chunk_id in sorted(

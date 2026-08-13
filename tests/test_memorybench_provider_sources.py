@@ -233,7 +233,7 @@ def test_provider_sources_carry_fail_closed_contract_markers(
 def test_sources_contain_no_operator_paths_or_founder_gate_bypass() -> None:
     windows_user_root = "C:" + "\\Users\\"
     for path in ROOT.rglob("*"):
-        if path.is_file():
+        if path.is_file() and "__pycache__" not in path.parts:
             text = path.read_text(encoding="utf-8", errors="ignore")
             assert "/home/" not in text
             assert windows_user_root not in text
@@ -241,7 +241,8 @@ def test_sources_contain_no_operator_paths_or_founder_gate_bypass() -> None:
     ledger = Path("openspec/changes/add-competitive-benchmark-programme/tasks.md").read_text(
         encoding="utf-8"
     )
-    assert "- [ ] 0.7 ⛳ Founder ratifies" in ledger
+    assert "- [x] 0.7 ⛳ Founder ratified" in ledger
+    assert "benchmarks/epistemic/contracts/ratification.v1.json" in ledger
     assert "- [x] 4.4 TS providers" in ledger
 
 
