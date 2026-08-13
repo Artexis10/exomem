@@ -179,6 +179,37 @@ def test_release_publication_jobs_checkout_the_created_tag() -> None:
         assert "ref: main" not in job
 
 
+V2_OPENAI_APP = "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json"
+
+
+def _assert_v2_openai_app_id_derivation(flow: str, command: str) -> None:
+    assert "openai_app_id=\"$(python - <<'PY'" in flow
+    assert f'Path("{V2_OPENAI_APP}")' in flow
+    assert 'print(app["apps"]["exomem"]["id"])' in flow
+    assert 'PY\n          )"' in flow
+    assert (
+        f"{command} --candidate hosted-alpha-agent-v2 --platform all "
+        '--openai-app-id "$openai_app_id"'
+    ) in flow
+    assert f"cat {V2_OPENAI_APP}" not in flow
+    assert 'echo "$openai_app_id"' not in flow
+    assert "plugin_asdk_app_" not in flow
+
+
+def test_release_workflow_refreshes_and_checks_the_v2_hosted_candidate() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    sync = _workflow_job(text, "sync-hosted-artifacts", "build-artifacts")
+    render = sync.split("\n      - name: Regenerate hosted plugin artifacts\n", 1)[1].split(
+        "\n      - name: Verify the regenerated artifacts are current\n", 1
+    )[0]
+    check = sync.split("\n      - name: Verify the regenerated artifacts are current\n", 1)[
+        1
+    ].split("\n      - name: Commit the resync onto the release PR\n", 1)[0]
+
+    _assert_v2_openai_app_id_derivation(render, "render")
+    _assert_v2_openai_app_id_derivation(check, "check")
+
+
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:
     ml = _read("compose.ml.yaml")
     cuda = _read("compose.cuda.yaml")
