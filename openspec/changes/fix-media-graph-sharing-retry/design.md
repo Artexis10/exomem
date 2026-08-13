@@ -25,7 +25,9 @@ Many graph protocol and recovery callers deliberately use `post_commit_fanout=Fa
 
 ### Add explicit deferred graph completion
 
-`batch_atomic_write` gains a narrow internal option valid only with immediate fanout disabled. It computes one exact checkpoint, stages its generation floor before caller writes, omits the shared checkpoint, and returns the exact deferred checkpoint to the media boundary. The floor keeps graph status recovery-required or unavailable across a crash gap. After the mutation guard, media publishes that exact checkpoint before ordinary graph/index fanout; the success path must not substitute an old checkpoint or manufacture a full-scope replacement.
+`batch_atomic_write` gains a narrow internal option valid only with immediate fanout disabled. It computes one exact checkpoint, stages its generation floor before caller writes, omits the shared checkpoint, and returns the exact deferred checkpoint plus its admitted predecessor to the media boundary. The floor keeps graph status recovery-required or unavailable across a crash gap.
+
+After the mutation guard, media re-enters the canonical coordinator before checkpoint publication. It verifies the floor still equals the deferred generation and the checkpoint still equals the admitted predecessor, then publishes the exact token. If another writer advanced the epoch, the stale media token is not published and fanout is not claimed complete; its write-ahead receipt remains for recovery. The success path must never regress a newer epoch, substitute an old checkpoint, or manufacture a full-scope replacement.
 
 All callers that do not opt in retain the existing floor → caller writes → checkpoint behavior, including graph-internal callers with `post_commit_fanout=False`.
 
@@ -33,7 +35,7 @@ Alternatives rejected: retry the checkpoint replacement after earlier writes may
 
 ### Write recovery work ahead of canonical change
 
-Before the floor/sidecar batch, media admits a revisioned full-refresh receipt. After commit it publishes the exact checkpoint, runs graph/index fanout, and CAS-clears only the admitted revision after genuine success. Crash, checkpoint publication failure, fanout failure, or a concurrent receipt revision leaves durable work queued.
+Before the floor/sidecar batch, media admits a revisioned full-refresh receipt. Admission failure aborts before floor or canonical mutation. After commit it publishes the exact checkpoint, runs graph/index fanout, and CAS-clears only the admitted revision after every required component either completes or installs its existing verified durable exact downstream handoff. Any failed, degraded, missing, or unverifiable handoff retains the receipt. This definition permits quiet-mode graph/semantic handoff without falsely clearing lost work or pinning receipts forever. Crash, checkpoint publication failure, fanout failure, or a concurrent receipt revision leaves durable work queued.
 
 Full-receipt drain and watcher startup validation recognize floor-ahead recoverable state, publish/recover a checkpoint before graph work, then clear receipts only after success. A committed transcript is never re-extracted.
 
@@ -41,7 +43,7 @@ Alternative rejected: rely on the current exception handler to add the receipt. 
 
 ### Treat every trusted batch-error ambiguity as governed reconciliation
 
-The strict bounded classifier accepts a valid stored `BatchWriteError` envelope. `BATCH_ROLLBACK_INCOMPLETE` becomes reconciliation-required and non-retryable. A trusted `BatchWriteError:` prefix with malformed, truncated, or invalid payload receives the same classification without target authority; unrelated errors retain generic behavior.
+The strict bounded classifier accepts a valid stored `BatchWriteError` envelope. `BATCH_ROLLBACK_INCOMPLETE` becomes reconciliation-required and non-retryable. A trusted `BatchWriteError:` prefix with malformed, truncated, invalid, oversized, or malicious payload receives the same classification without target authority; unrelated errors retain generic behavior. Both `jobs[].error` and top-level `errors[]` replace the raw stored text with one bounded stable diagnostic for ambiguous malformed input.
 
 The ledger stores no separate expected binary identity, so canonical sidecar provenance is the authority. Targeted retry reconciles before requeue: a complete transcript resolves only when its provenance matches the current binary; a fresh guarded attempt is permitted only for a matching pending sidecar; missing/conflicting provenance or changed input remains blocked/stale. Retained batch workspaces remain inspect-only.
 
