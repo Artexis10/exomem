@@ -1661,7 +1661,7 @@ def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
     assert "transcript survives index failure" in sidecar.read_text(encoding="utf-8")
     status = deferred_index.full_status(vault)
     assert status["count"] == 1
-    assert status["next_action"] == "retry deferred index refresh"
+    assert status["next_action"] == f'exomem index --vault "{vault}" --scope vault'
 
     monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_a, **_kw: True)
     assert index_sync.drain_deferred_work(vault) == 1

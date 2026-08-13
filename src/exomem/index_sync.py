@@ -603,51 +603,125 @@ def drain_deferred_work(
     the normal writer path. Crash/restart recovery still comes from drift audit
     and explicit reconcile/index.
     """
-    processed = 0
-    full_pending = deferred_index.list_full_paths(
-        vault_root, limit=limit if paths is None else None
-    )
+    requested: set[str] | None = None
     if paths is not None:
-        requested: set[str] = set()
+        requested = set()
         for item in paths:
             if isinstance(item, Path):
                 requested.update(_rel_md_paths(vault_root, [item]))
             else:
                 requested.add(str(item).replace("\\", "/"))
-        full_pending = [rel for rel in full_pending if rel in requested]
-        if limit is not None:
-            full_pending = full_pending[: max(0, limit)]
-    if full_pending:
-        full_paths = [vault_root / rel for rel in full_pending]
+    full_receipts = deferred_index.snapshot_full(vault_root)
+    semantic_receipts = deferred_index.snapshot(vault_root)
+    if requested is not None:
+        full_receipts = [receipt for receipt in full_receipts if receipt.rel_path in requested]
+        # `paths=` is the media worker's targeted full-refresh seam. Semantic
+        # replay is owned by the periodic unscoped drain and must not add
+        # unrelated work to a media completion callback.
+        semantic_receipts = []
+    if limit is not None:
+        budget = max(0, limit)
+        if full_receipts and semantic_receipts and budget > 1:
+            full_budget = budget // 2
+            semantic_budget = budget - full_budget
+        elif full_receipts:
+            full_budget, semantic_budget = budget, 0
+        else:
+            full_budget, semantic_budget = 0, budget
+        full_receipts = full_receipts[:full_budget]
+        semantic_receipts = semantic_receipts[:semantic_budget]
+
+    processed = 0
+    if full_receipts:
+        full_paths = [vault_root / receipt.rel_path for receipt in full_receipts]
+        full_batch_completed = False
         try:
             dispatched = upsert_after_write(vault_root, full_paths)
-        except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
-            log.warning("deferred full-index dispatch failed; work remains queued", exc_info=True)
+        except Exception:  # noqa: BLE001 - isolate failures below
+            log.warning("deferred full-index batch failed; isolating receipts", exc_info=True)
         else:
+            full_batch_completed = dispatched is not False and not (
+                isinstance(dispatched, IndexSyncReport) and dispatched.reconcile_required
+            )
+        if full_batch_completed:
+            processed += deferred_index.clear_full_receipts(vault_root, full_receipts)
+        else:
+            log.warning("deferred full-index batch incomplete; isolating receipts")
+        for receipt in () if full_batch_completed else full_receipts:
+            try:
+                dispatched = upsert_after_write(
+                    vault_root, [vault_root / receipt.rel_path]
+                )
+            except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
+                log.warning(
+                    "deferred full-index dispatch failed; work remains queued",
+                    exc_info=True,
+                )
+                deferred_index.rotate_receipts(vault_root, [receipt], full=True)
+                continue
             if dispatched is False or (
                 isinstance(dispatched, IndexSyncReport) and dispatched.reconcile_required
             ):
                 log.warning("deferred full-index dispatch incomplete; work remains queued")
-                return processed
-            processed += deferred_index.clear_full(vault_root, full_pending)
+                deferred_index.rotate_receipts(vault_root, [receipt], full=True)
+                continue
+            processed += deferred_index.clear_full_receipts(vault_root, [receipt])
 
-    if paths is not None:
+    if limit is None and requested is None and full_receipts:
+        # A full refresh performed under a deferring mode can create or revise
+        # semantic receipts. The unbounded operator drain must reconcile that
+        # post-full snapshot too; bounded reconcile passes leave it for the
+        # next pass so one file cannot consume the shared cap twice.
+        semantic_receipts = deferred_index.snapshot(vault_root)
+    if not semantic_receipts:
         return processed
-
-    remaining_limit = None if limit is None else max(0, limit - processed)
-    receipts = deferred_index.snapshot(vault_root, limit=remaining_limit)
-    if not receipts:
+    freshness = deferred_index.inspect_embedding_freshness(
+        vault_root,
+        [receipt.rel_path for receipt in semantic_receipts],
+        mtime_slack_seconds=1.0,
+    )
+    current = [
+        receipt
+        for receipt in semantic_receipts
+        if freshness.get(receipt.rel_path) is deferred_index.EmbeddingFreshness.CURRENT
+    ]
+    processed += deferred_index.clear_receipts(vault_root, current)
+    semantic_receipts = [
+        receipt for receipt in semantic_receipts if receipt not in current
+    ]
+    if not semantic_receipts:
         return processed
-    semantic_paths = [vault_root / receipt.rel_path for receipt in receipts]
+    semantic_paths = [vault_root / receipt.rel_path for receipt in semantic_receipts]
     try:
-        status = replay_deferred_embedding(vault_root, semantic_paths, receipts)
+        status = replay_deferred_embedding(vault_root, semantic_paths, semantic_receipts)
     except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
         log.warning("deferred semantic dispatch failed; work remains queued", exc_info=True)
-        return processed
-    if status.status != "completed":
+    else:
+        if status.status == "completed":
+            return processed + len(semantic_receipts)
         log.warning("deferred semantic dispatch incomplete; work remains queued")
-        return processed
-    return processed + len(receipts)
+
+    # A single malformed source must not pin every later receipt in the sorted
+    # batch. The optimistic batch above is the fast path; only a failed batch
+    # falls back to per-receipt replay so successful work can retire by CAS.
+    for receipt in semantic_receipts:
+        try:
+            status = replay_deferred_embedding(
+                vault_root, [vault_root / receipt.rel_path], [receipt]
+            )
+        except Exception:  # noqa: BLE001 - isolate poison receipts
+            log.warning(
+                "deferred semantic receipt dispatch failed; work remains queued",
+                exc_info=True,
+            )
+            deferred_index.rotate_receipts(vault_root, [receipt])
+            continue
+        if status.status == "completed":
+            processed += 1
+        else:
+            log.warning("deferred semantic receipt incomplete; work remains queued")
+            deferred_index.rotate_receipts(vault_root, [receipt])
+    return processed
 
 
 def _dispatch_upsert_components(

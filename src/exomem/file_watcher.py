@@ -508,21 +508,34 @@ class FileWatcher:
             if baselines_current:
                 self._validate_existing_graph_on_seed()
             return
+        policy = self._watcher_policy()
+        drift_admission = 0
         if drifted:
             # Maps are healed; fan the drift delta out. Each step is
             # belt-and-suspenders exception-safe — a bad batch must never kill
             # the reconcile loop.
             try:
-                self._dispatch_reconcile_delta(list(changed_union), list(deleted_union))
+                drift_admission = self._dispatch_reconcile_delta(
+                    list(changed_union), list(deleted_union), policy
+                )
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: reconcile drift dispatch failed")
         if pending_epoch is not None and baselines_current:
             self._recover_external_pending(pending_epoch)
         if baselines_current and not freshness.external_pending(self._vault_root):
             self._recover_suspended_graph()
+        remaining = (
+            None
+            if policy.max_reconcile_embed_files is None
+            else max(0, policy.max_reconcile_embed_files - drift_admission)
+        )
+        try:
+            index_sync.drain_deferred_work(self._vault_root, limit=remaining)
+        except Exception:  # noqa: BLE001 - queued work remains retryable
+            log.exception("file watcher: deferred index drain failed")
         if not drifted:
             return
-        if self._watcher_policy().defer_expensive_indexes:
+        if policy.defer_expensive_indexes:
             log.info("file watcher: quiet reconcile deferred expensive warm-up")
             return
         from . import bm25
@@ -636,7 +649,12 @@ class FileWatcher:
                 pass
             log.exception("file watcher: startup graph validation failed")
 
-    def _dispatch_reconcile_delta(self, changed: list[str], deleted: list[str]) -> None:
+    def _dispatch_reconcile_delta(
+        self,
+        changed: list[str],
+        deleted: list[str],
+        policy: mode.WatcherPolicy | None = None,
+    ) -> int:
         """Fan a reconcile drift delta out through the per-batch event path.
 
         Mirrors `_flush` MINUS the freshness publish — `reconcile` already
@@ -701,13 +719,14 @@ class FileWatcher:
                 changed_rel_pairs = [(p, r) for p, r in changed_rel_pairs if r not in gone_now]
                 changed_paths = [p for p, _ in changed_rel_pairs]
 
-        self._dispatch_batch(
+        return self._dispatch_batch(
             changed_paths,
             up_rels,
             del_rels,
             cap=True,
             publish_corpus_change=False,
             pending_epoch=None,
+            policy=policy,
         )
 
     def _dispatch_batch(
@@ -719,7 +738,8 @@ class FileWatcher:
         cap: bool,
         publish_corpus_change: bool = True,
         pending_epoch: int | None = None,
-    ) -> None:
+        policy: mode.WatcherPolicy | None = None,
+    ) -> int:
         """Shared fan-out tail for `_flush` and `_dispatch_reconcile_delta`:
         inbound publish -> resolver publish -> KB-filtered index_sync
         upsert/delete. Each step keeps its own exception guard — a bad batch
@@ -733,7 +753,7 @@ class FileWatcher:
         always fully healed independent of this cap.
         """
         if not (up_rels or del_rels):
-            return
+            return 0
 
         # Publish the complete vault-wide batch before any path-local consumer
         # sees it. A transient failure retries this same batch; a persistent
@@ -853,8 +873,9 @@ class FileWatcher:
                 )
             except Exception:  # noqa: BLE001 - graph remains fail-closed by checkpoint
                 log.exception("file watcher: vault-wide graph repair failed")
-        policy = self._watcher_policy()
+        policy = policy or self._watcher_policy()
         defer_semantic = False
+        admitted_semantic = len(semantic_kb_ups)
         if cap and not policy.defer_expensive_indexes:
             max_files = policy.max_reconcile_embed_files
             if max_files is not None and len(semantic_kb_ups) > max_files:
@@ -866,6 +887,7 @@ class FileWatcher:
                     max_files,
                 )
                 defer_semantic = True
+                admitted_semantic = 0
         elif not cap and not policy.defer_expensive_indexes:
             max_files = policy.max_embed_files_per_batch
             if max_files is not None and len(semantic_kb_ups) > max_files:
@@ -878,11 +900,14 @@ class FileWatcher:
                     max_files,
                 )
                 defer_semantic = True
+                admitted_semantic = 0
         elif policy.defer_expensive_indexes and semantic_kb_ups:
             log.info(
                 "file watcher: quiet mode deferring semantic indexing for %d admitted semantic file(s)",
                 len(semantic_kb_ups),
             )
+            defer_semantic = True
+            admitted_semantic = 0
         if kb_ups:
             try:
                 index_sync.upsert_after_write(
@@ -919,6 +944,7 @@ class FileWatcher:
                 log.warning(
                     "file watcher: graph fan-out incomplete; periodic recovery re-armed"
                 )
+        return admitted_semantic
 
     def _run_reconcile(self) -> None:
         # Seed immediately (off the boot path — this is the watcher's own

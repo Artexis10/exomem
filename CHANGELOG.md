@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+* drain semantic and full deferred-index work from bounded reconcile passes, including
+  a non-zero quiet-mode throttle, and make deferred-work status and doctor reporting
+  actionable
+* make `exomem mode` clean up failed temporary writes and report machine-config
+  permission failures without a traceback
+* report pre-existing unsafe Windows idempotency DACLs with the exact path and explicit
+  `icacls.exe` remediation, while retaining fail-closed principal-private state
+
 ## [0.48.0](https://github.com/Artexis10/exomem/compare/v0.47.0...v0.48.0) (2026-08-12)
 
 
