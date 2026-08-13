@@ -1,8 +1,8 @@
 ## 1. Frontmatter-less editor
 
-- [ ] 1.1 Add red leaf and public-command tests for validate/commit of `replace_string`, `replace_body`, `batch_replace`, and `edit_section` on frontmatter-less Markdown, including exact hashes and no synthesized YAML.
-- [ ] 1.2 Add red tests proving tag/frontmatter-dependent operations refuse without a bogus `missing: ['path']` suffix.
-- [ ] 1.3 Implement operation-owned frontmatter eligibility and one shared exact renderer for `edit` and `multi_edit`; rerun focused editor and semantic-handshake tests.
+- [x] 1.1 Add red leaf and public-command tests for validate/commit of `replace_string`, `replace_body`, `batch_replace`, and `edit_section` on frontmatter-less Markdown, including exact hashes and no synthesized YAML.
+- [x] 1.2 Add red tests proving tag/frontmatter-dependent operations refuse without a bogus `missing: ['path']` suffix.
+- [x] 1.3 Implement operation-owned frontmatter eligibility and one shared exact renderer for `edit` and `multi_edit`; rerun focused editor and semantic-handshake tests.
 
 ## 2. Tier-two overwrite token symmetry
 

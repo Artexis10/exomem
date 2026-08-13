@@ -31,6 +31,7 @@ from .edit import (
     apply_surgical_replace,
     commit_edit,
     load_editable,
+    render_editable,
 )
 from .vault import content_hash
 
@@ -159,7 +160,9 @@ def multi_edit(
         or temporal.stamp(now)
     )
 
-    editable = load_editable(vault_root, path, expected_hash=expected_hash)
+    editable = load_editable(
+        vault_root, path, expected_hash=expected_hash, allow_frontmatterless=True
+    )
 
     # ---- validate-only: per-pair counts against the evolving body, no write ----
     if validate_only:
@@ -199,9 +202,10 @@ def multi_edit(
             except EditError:
                 semantic = None
             else:
-                fm_text = _set_or_append(editable.fm_text, "updated", date_iso)
-                rendered = rendered.rstrip() + "\n"
-                proposed = f"---\n{fm_text}\n---\n{rendered}"
+                fm_text = editable.fm_text
+                if editable.has_frontmatter:
+                    fm_text = _set_or_append(fm_text, "updated", date_iso)
+                proposed = render_editable(editable, rendered, fm_text)
                 semantic = semantic_writes.preflight_existing(
                     vault_root,
                     path=editable.rel_path,
@@ -241,9 +245,10 @@ def multi_edit(
         warnings.extend(w)
 
     # ---- ONE commit: updated: bump + body + index refresh + one log entry ----
-    fm_text = _set_or_append(editable.fm_text, "updated", date_iso)
-    new_body_final = body.rstrip() + "\n"
-    new_text = f"---\n{fm_text}\n---\n{new_body_final}"
+    fm_text = editable.fm_text
+    if editable.has_frontmatter:
+        fm_text = _set_or_append(fm_text, "updated", date_iso)
+    new_text = render_editable(editable, body, fm_text)
     committed = commit_edit(
         vault_root,
         abs_path=editable.abs_path,

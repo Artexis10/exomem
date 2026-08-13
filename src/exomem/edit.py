@@ -16,7 +16,8 @@ What it leaves alone:
 
 Refuses:
 - Sources/ and Evidence/ paths (rule 2: append-only).
-- Pages without frontmatter (won't synthesize a frontmatter block).
+- Metadata edits on pages without frontmatter (won't synthesize a frontmatter
+  block); body-only edits preserve ordinary Markdown as-is.
 - Pages already marked `status: superseded` (don't edit history; supersede
   the new page instead).
 
@@ -126,7 +127,7 @@ def edit(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
 ) -> EditResult | EditValidation:
-    """Edit a compiled page in place. Bumps `updated:` to the write instant.
+    """Edit an existing page in place. Frontmatter pages bump `updated:`.
 
     Four (composable) modes:
     - `new_body` — replace the whole body. The heavyweight mode.
@@ -209,14 +210,20 @@ def edit(
         or temporal.stamp(now)
     )
 
-    editable = load_editable(vault_root, path, expected_hash=expected_hash)
+    editable = load_editable(
+        vault_root,
+        path,
+        expected_hash=expected_hash,
+        allow_frontmatterless=tags is None,
+    )
     abs_path = editable.abs_path
     rel_path = editable.rel_path
     fm_text = editable.fm_text
     body = editable.body
 
-    # Patch updated: (always).
-    fm_text = _set_or_append(fm_text, "updated", date_iso)
+    # Frontmatter-backed pages keep the server-owned timestamp contract.
+    if editable.has_frontmatter:
+        fm_text = _set_or_append(fm_text, "updated", date_iso)
 
     # Patch tags: if provided.
     if tags is not None:
@@ -296,7 +303,7 @@ def edit(
     # Normalize trailing newline so we don't accumulate blanks across edits.
     new_body_final = new_body_final.rstrip() + "\n"
 
-    new_text = f"---\n{fm_text}\n---\n{new_body_final}"
+    new_text = render_editable(editable, new_body_final, fm_text)
 
     if validate_only:
         try:
@@ -418,16 +425,23 @@ class _Editable:
     semantic_before_hash: str
     fm_text: str
     body: str
+    has_frontmatter: bool
 
 
 def load_editable(
-    vault_root: Path, path: str, *, expected_hash: str | None = None
+    vault_root: Path,
+    path: str,
+    *,
+    expected_hash: str | None = None,
+    allow_frontmatterless: bool = False,
 ) -> _Editable:
     """Resolve + guard a page for in-place editing, returning its split parts.
 
     Runs every safety gate, in the exact order `edit` used inline: append-only
     refusal (Sources/Evidence), NOT_FOUND, superseded refusal, the optimistic-
     concurrency `expected_hash` guard, and the frontmatter-required check.
+    `allow_frontmatterless` is owned by the requested operation: ordinary body
+    edits may opt in, while metadata operations retain the strict requirement.
     Shared by `edit` and `multi_edit`.
     """
     abs_path, rel_path = _resolve(vault_root, path)
@@ -492,12 +506,22 @@ def load_editable(
 
     fm_match = _FM_PATTERN.match(original_text)
     if not fm_match:
+        if allow_frontmatterless:
+            return _Editable(
+                abs_path=abs_path,
+                rel_path=rel_path,
+                original_text=original_text,
+                semantic_before_hash=content_hash(original_text),
+                fm_text="",
+                body=original_text,
+                has_frontmatter=False,
+            )
         raise EditError(
-            code="UNREADABLE",
-            missing=["path"],
+            code="FRONTMATTER_REQUIRED",
+            missing=[],
             reason=(
-                f"{rel_path} has no frontmatter delimiters; edit refuses to "
-                "synthesize them."
+                f"{rel_path} has no frontmatter delimiters; this operation "
+                "requires frontmatter and refuses to synthesize it."
             ),
         )
     return _Editable(
@@ -507,7 +531,16 @@ def load_editable(
         semantic_before_hash=content_hash(original_text),
         fm_text=fm_match.group(1),
         body=fm_match.group(2),
+        has_frontmatter=True,
     )
+
+
+def render_editable(editable: _Editable, body: str, fm_text: str) -> str:
+    """Render a candidate with the page's existing frontmatter policy."""
+    body = body.rstrip() + "\n"
+    if not editable.has_frontmatter:
+        return body
+    return f"---\n{fm_text}\n---\n{body}"
 
 
 def apply_surgical_replace(

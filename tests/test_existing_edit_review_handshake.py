@@ -46,6 +46,92 @@ def _write(root: Path, relative: str, source: str) -> Path:
     return path
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        {"kind": "replace_body", "new_body": "# Template\n\nAfter body.\n"},
+        {
+            "kind": "replace_string",
+            "old_string": "Before marker",
+            "new_string": "After marker",
+        },
+        {
+            "kind": "batch_replace",
+            "edits": [
+                {"old_string": "Before marker", "new_string": "After marker"},
+                {"old_string": "Before section", "new_string": "After section"},
+            ],
+        },
+        {
+            "kind": "edit_section",
+            "heading": "Notes",
+            "new_string": "After section.",
+            "section_position": "replace",
+        },
+    ],
+)
+def test_frontmatterless_body_operations_validate_and_commit_exact_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: dict
+) -> None:
+    relative = "Knowledge Base/Templates/ordinary-template.md"
+    source = "# Template\n\nBefore marker\n\n## Notes\n\nBefore section\n"
+    page = _write(tmp_path, relative, source)
+    ticks = iter(
+        [
+            dt.datetime(2026, 8, 10, 12, 0, 0, tzinfo=dt.UTC),
+            dt.datetime(2026, 8, 10, 12, 0, 1, tzinfo=dt.UTC),
+        ]
+    )
+    monkeypatch.setattr(temporal, "now", lambda: next(ticks))
+
+    preview = commands.op_edit_memory(
+        tmp_path,
+        path=relative,
+        why="validate template edit",
+        operation={**operation, "validate_only": True},
+    )
+    semantic = preview["semantic"]
+    committed = commands.op_edit_memory(
+        tmp_path,
+        path=relative,
+        why="commit template edit",
+        operation={
+            **operation,
+            "transition_token": semantic["transition_token"],
+        },
+    )
+
+    committed_source = page.read_text(encoding="utf-8")
+    assert committed["semantic"]["mutated"] is True
+    assert semantic["after_hash"] == vault.content_hash(committed_source)
+    assert not committed_source.startswith("---\n")
+    assert "updated:" not in committed_source
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        {"kind": "replace_tags", "tags": ["template"]},
+    ],
+)
+def test_frontmatter_operations_refuse_resolved_frontmatterless_paths(
+    tmp_path: Path, operation: dict
+) -> None:
+    relative = "Knowledge Base/Templates/ordinary-template.md"
+    _write(tmp_path, relative, "# Template\n")
+
+    with pytest.raises(ValueError) as exc:
+        commands.op_edit_memory(
+            tmp_path,
+            path=relative,
+            why="metadata requires frontmatter",
+            operation=operation,
+        )
+
+    assert "FRONTMATTER_REQUIRED" in str(exc.value)
+    assert "(missing: ['path'])" not in str(exc.value)
+
+
 def _save_current_review(root: Path, source: str) -> None:
     decision = relation_review.build_lifecycle_decision(
         page_identity=PAGE_ID,
