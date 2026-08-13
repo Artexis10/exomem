@@ -93,9 +93,9 @@
   distinct from companion-page metadata. Make all reads immutable, canonical, regular,
   no-follow snapshots.
 - [ ] 2.8 Implement `backfill_companion` preview/commit through trusted local-owner
-  context and receipt-first no-follow CAS. Validate the exact version-1 input, preserve
-  all non-descriptor bytes, persist prior/target identities and owner/event evidence, and
-  prohibit every metadata-inference path.
+  context and receipt-first no-follow held-parent/descriptor-bound transaction. Validate
+  the exact version-1 input, preserve all non-descriptor bytes, persist prior/target
+  identities and owner/event evidence, and prohibit every metadata-inference path.
 - [ ] 2.9 Introduce the typed classified/unresolved membership result and update memo keys
   so companion and artifact immutable identities participate without adding index-time
   materialization.
@@ -121,12 +121,14 @@
 - [ ] 3.4 Add red tests proving direct workspace create/edit/delete/conflict never changes
   active authority. Prove valid edits/deletions remain pending and deletion does not
   revoke, while missing/corrupt/conflicted workspace blocks warm/restart content. Barrier
-  every edit before/after snapshot and tuple commit; assert mirror CAS never overwrites
-  it and only the expected immutable target may activate.
+  every edit before/after snapshot and tuple commit; assert the cooperatively fenced
+  held-parent/descriptor-identity mirror refuses observed drift, while only the expected
+  immutable target may activate. Direct OS-owner mutation is outside that guarantee.
 - [ ] 3.5 Add deterministic SQLite barrier/crash tests for two commits sharing one
   predecessor and policy commit versus content create/edit/delete/companion publication:
   stage-before-tuple, tuple/receipt/namespace transaction, reader snapshot, response, and
-  workspace mirror. Assert one full-tuple CAS winner, predecessor-or-target visibility,
+  workspace mirror.
+  Assert one full-tuple CAS winner, predecessor-or-target visibility,
   exact nonce recovery, append-only generations, and no stale policy/catalog projection.
 - [ ] 3.6 Add red startup/migration/backup tests for current direct-source v3 to v4:
   ordinary v3 opener leaves exact v3 with no v4 DDL/DML; quiesced explicit migration;
@@ -137,8 +139,8 @@
 - [ ] 3.7 Add red `govern_memory` suspend/resume/undo matrices: semantic widening and
   narrowing; changed dependent scope/member identity/hash/set with deterministic expire/
   review state; exact policy generation + grant manifest + ready namespace identity;
-  races against content create/edit/delete and companion publication; YAML mirror CAS
-  failure/valid divergence/invalid partial state; and crash barriers before/after target
+  races against content create/edit/delete and companion publication; cooperatively fenced
+  mirror observed-drift refusal/valid divergence/invalid partial state; and crash barriers before/after target
   preparation, receipt intent, narrowing overlay, tuple publication, external digest
   acknowledgement, response, and mirror. Assert predecessor-or-complete-target only,
   one tuple winner, no stale grant/catalog hybrid, and no semantic replay.
@@ -155,9 +157,10 @@
   activation epoch/digest, and ready namespace. Make policy commits CAS expected catalog,
   content/companion writers CAS expected policy, and readers pin one tuple; remove direct
   workspace loading and independent policy/catalog pointer linearization.
-- [ ] 3.11 Implement the separate handle-relative no-follow workspace mirror CAS. Never
-  overwrite changed identities; record exact mirror result and pending divergence while
-  allowing an already-exact tuple transaction to stand.
+- [ ] 3.11 Implement the separate cooperatively fenced, handle-relative no-follow
+  workspace mirror with held-parent/descriptor-identity checks. Refuse observable drift,
+  record exact mirror result and pending divergence, and allow an already-exact tuple
+  transaction to stand; direct OS-owner mutation is outside the filesystem guarantee.
 - [ ] 3.12 Restrict recovery/doctor/backup/rebuild/downmigration compiles to immutable
   generation/journal/receipt bytes. Implement irreversible registry enrollment, initial
   direct-source/catalog migration, exact active-source mirroring for v4→v3 under the
@@ -170,23 +173,22 @@
 
 ## 4. Reserved Administration Path Monopoly
 
-- [ ] 4.1 Add a red pure matrix in `tests/test_reserved_admin_paths.py` covering
-  the closed internal-state registry: `_Governance`, `_Consolidation`, governance/
-  embeddings/CLIP/lexical/graph/claims/refs/deferred/media/idempotency SQLite names and
-  every WAL/SHM/journal, JSON/lock/legacy spelling, graph rebuild temp, and
-  `.authorization-projections/**`; explicitly include `.graph-sync.json`,
-  `.graph-sync-floor.json`, `.graph-commit-receipts/**`, `.review-state.json`, exact
-  `..review-state.json.[a-z0-9_]{8}.tmp`, exact lexical rebuild temp family, and grouped
-  main/WAL/SHM lexical quarantine forms. Derive an independent expected inventory from
-  every current private-state owner/path factory—not hosted portability—and require one
-  descriptor each. Cover case/NFKC/separators/prefix/dot/drive/UNC/ADS,
-  short names, refs, aliases, symlinks, hard links, bind aliases, and multiply linked files.
+Execution order is binding despite the retained task numbers. **PR A** has no closed
+registry dependency: 4.4a writes the red native primitive/API fixtures, then 4.7 provides
+and verifies that primitive, its runtime capability probes, and internal identity
+publication. **PR B** starts only after PR A verification: 4.6 begins with its focused
+red registry-construction/classifier cases and establishes the closed registry, 4.1
+completes its inventory/invariant suite after 4.6, 4.4b adds the registry/leaf/lifecycle
+race matrix, and 4.8-4.10 plus 4.2, 4.3, and 4.5 wire dispatcher, leaves,
+and surface parity. 4.11 runs required combined verification. No public security claim is
+made before both PRs and their combined verification are complete.
 - [ ] 4.2 Add red source/destination tests for create/file+directory, edit/observe/replace,
   append, move/copy, delete, recursive delete, trash, explicit recovery target,
   metadata-derived original recovery target, recursive recovery children, upload,
   download, export, and transfer for every registered internal family. For each newly
   named graph/review/lexical form, exercise its exact pre-create spelling, live name,
-  transactional sibling, and physical alias as both source and destination.
+  transactional sibling, and stable pre-existing physical alias as both source and
+  destination.
 - [ ] 4.3 Add red read/structured tests for get/fetch/list/browse/search, dataset,
   walk, `record_memory`, media/process/read/frame, audit/repair, export, and every
   `manage_memory_file` alias variant; assert reads hide and generic writes refuse before
@@ -194,31 +196,63 @@
   Pair absent/present fixtures for every graph-sync/floor/receipt descendant,
   review-state/temp, and lexical rebuild/quarantine member and require stable list/walk/
   search/get/download/dataset/export/transfer envelopes.
-- [ ] 4.4 Add barrier-controlled adversarial TOCTOU tests for every generic read/mutation
-  primitive: swap a checked parent to symlink/junction/reparse/bind alias; rename/exchange
-  source or destination; add a hard link; change recovery metadata/recursive child; race
-  cross-device copy publication; and race DB/WAL/SHM/journal/index staging, checkpoint,
-  rename, deletion, and graph rebuild. Add barriers at graph checkpoint/floor/receipt
-  pre-create, review-state temp create/replace, lexical rebuild-temp publish, and grouped
-  main/WAL/SHM quarantine/restore while list/download/recovery/delete/link runs. Assert
-  internal bytes/effects never cross and the entire multi-entry operation stays atomic.
+- [ ] 4.4a **PR A:** Add red native primitive/API fixture tests, independent of the
+  closed registry and public leaves: held no-follow parent acquisition, relative
+  read/write/rename/link/unlink API behaviour, same-device versus cross-device result,
+  destination-only copy publication, ordered per-entry saga records, stable identity
+  publication under coordination, and runtime capability-probe/fallback-disable results.
+  Cover POSIX dirfd/openat2 and Windows `NtCreateFile` RootDirectory-relative plus
+  `NtSetInformationFile` fixture contracts.
+- [ ] 4.4b **PR B, after 4.6:** Add barrier-controlled, anchor-observable end-to-end
+  registry/leaf/lifecycle TOCTOU tests: swap a checked parent to symlink/junction/reparse/
+  bind alias; rename/exchange source or destination; add a hard link; change recovery
+  metadata/recursive child; race cross-device copy publication; and race DB/WAL/SHM/
+  journal/index staging, checkpoint, rename, deletion, and graph rebuild. Add barriers at
+  graph checkpoint/floor/receipt pre-create, review-state temp create/replace, lexical
+  rebuild-temp publish, and grouped main/WAL/SHM quarantine/restore while
+  list/download/recovery/delete/link runs. Assert retained-anchor discrepancies fail
+  closed within the cooperating boundary; test same-device leaf operations under
+  coordination, cross-device move/trash/recovery refusal, destination-atomic copy only,
+  and saga/recovery for recursive or multi-entry power loss rather than external same-UID
+  zero-effect or all-or-none claims.
 - [ ] 4.5 Add red parity tests in `tests/test_command_surface_retry.py`,
   `tests/test_rest_registry.py`, `tests/test_hosted_private_routes.py`, and CLI coverage
   proving reads are missing and mutations return the same content-free reserved-path
   code across MCP, REST, Hosted, and CLI.
-- [ ] 4.6 Implement one closed versioned internal-state descriptor registry plus pure
-  logical classifier with separator, NFKC, casefold, prefix,
+- [ ] 4.6 Add focused red registry-construction/classifier tests, then implement one
+  closed versioned internal-state descriptor registry plus pure logical classifier with
+  separator, NFKC, casefold, prefix,
   ref, alias, and platform-name normalization plus one secure physical-target check that
-  rejects symlink escape, compares stable filesystem identity for hard-link/bind aliases,
-  and refuses ambiguous/non-canonical or multiply linked reserved targets.
-- [ ] 4.7 Implement a shared handle-relative reserved-path transaction used by every leaf
-  and internal-store lifecycle: publish primary/WAL/SHM/journal/temp/index stable identities
-  before reachability;
-  no-follow vault/parent traversal held through read/mutation, stable identity checks,
-  relative create/read/write/rename/link/unlink, dual-parent moves, verified held-handle
-  cross-device copies, and handle-enumerated recursive operations. Use POSIX
-  `openat2`/equivalent and Windows reparse-aware handle primitives; refuse without a path
-  fallback where equivalence is unavailable.
+  rejects symlink escape, compares retained stable filesystem identity for pre-existing
+  hard-link/bind/physical aliases at protected acquisition, and refuses
+  ambiguous/non-canonical or multiply linked reserved targets; fail closed only for drift
+  observable against logical/catalogue/registry/identity anchors.
+- [ ] 4.1 **PR B, after 4.6:** Complete the red closed-registry inventory/invariant suite
+  in `tests/test_reserved_admin_paths.py` covering `_Governance`, `_Consolidation`,
+  governance/embeddings/CLIP/lexical/graph/claims/refs/deferred/media/idempotency SQLite
+  names and every WAL/SHM/journal, JSON/lock/legacy spelling, graph rebuild temp, and
+  `.authorization-projections/**`; explicitly include `.graph-sync.json`,
+  `.graph-sync-floor.json`, `.graph-commit-receipts/**`, `.review-state.json`, exact
+  `..review-state.json.[a-z0-9_]{8}.tmp`, exact lexical rebuild temp family, and grouped
+  main/WAL/SHM lexical quarantine forms. Derive an independent expected inventory from
+  every current private-state owner/path factory—not hosted portability—and require one
+  descriptor each. Keep the matrix at the Exomem/cooperating-subsystem boundary: static
+  logical reservation before existence, plus protected acquisition of stable pre-existing
+  symlink/reparse/hardlink/physical aliases. Also cover case/NFKC/separators/prefix/dot/
+  drive/UNC/ADS, short names, refs, and managed aliases; do not claim universal detection
+  or zero effect for direct OS-vault-owner filesystem/block access.
+- [ ] 4.7 **PR A:** Provide and verify the shared native held-handle primitive used later
+  by every leaf and internal-store lifecycle: publish SQLite primary/WAL/SHM stable
+  identities before releasing cooperative coordination, not before filesystem
+  reachability; hold no-follow vault/parent traversal through primitive operations,
+  relative create/read/write/rename/link/unlink, same-device dual-parent rename/trash/
+  recovery, held-source/destination-atomic copy only, and handle-enumerated saga records
+  for recursive operations. Use POSIX
+  `openat2`/equivalent dirfd primitives and Windows `NtCreateFile` RootDirectory-relative
+  plus `NtSetInformationFile` semantics. Add a runtime actual-filesystem capability probe
+  proving relative handles, no-follow/reparse behaviour, and final identity checks;
+  disable/refuse an unsupported route rather than using a path fallback. PR B wires this
+  primitive into descriptor-bound reads/writes for every leaf and lifecycle.
 - [ ] 4.8 Extend registry metadata with owning subsystem and source/destination/recursive/recovery/dataset/media
   path roles, and add startup tests that enumerate every command and finite selector and
   fail on an unclassified path/ref parameter.
@@ -230,9 +264,14 @@
   fallback owner until it exists; give each registered database/index only its named
   subsystem token; owning commands still use safe handle traversal and no generic bypass.
 - [ ] 4.11 Run the reserved-path and active race matrices on Linux and the Windows-specific
-  alias/junction/reparse job; prove enumeration/download/export/dataset/transfer never
-  disclose internal state, moves/copies/recoveries are atomic, and no refused case creates
-  a file, directory, receipt, marker, sidecar, or index row.
+  windows-latest NTFS junction/reparse/hard-link/8.3/rename-disposition/fallback-disable
+  CI job; wire it into the required combined release gate. Prove enumeration/download/
+  export/dataset/transfer never disclose internal state through Exomem, same-device
+  coordinated rename/trash/recovery and destination-atomic copy meet their contracts,
+  cross-device move/trash/recovery refuse, and no refused Exomem case creates a file,
+  directory, receipt, marker, sidecar, or index row. Complete this only after PR A
+  (primitives, capability probes, internal identity publication) and PR B (registry,
+  dispatcher, all leaves, surface parity) have landed.
 
 ## 5. Durable Authorization-Session Capability Core
 
