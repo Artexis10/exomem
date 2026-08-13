@@ -87,10 +87,38 @@ jobs:
           enable-cache: true
 
       - name: Regenerate hosted plugin artifacts
-        run: uv run --frozen python scripts/hosted-plugin.py regenerate --platform claude
+        run: |
+          uv run --frozen python scripts/hosted-plugin.py regenerate --platform claude
+          openai_app_id="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          app = json.loads(
+              Path("plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          print(app["apps"]["exomem"]["id"])
+          PY
+          )"
+          uv run --frozen python scripts/hosted-plugin.py render --candidate hosted-alpha-agent-v2 --platform all --openai-app-id "$openai_app_id"
 
       - name: Verify the regenerated artifacts are current
-        run: uv run --frozen python scripts/hosted-plugin.py check --platform claude
+        run: |
+          uv run --frozen python scripts/hosted-plugin.py check --platform claude
+          openai_app_id="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          app = json.loads(
+              Path("plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          print(app["apps"]["exomem"]["id"])
+          PY
+          )"
+          uv run --frozen python scripts/hosted-plugin.py check --candidate hosted-alpha-agent-v2 --platform all --openai-app-id "$openai_app_id"
 
       - name: Commit the resync onto the release PR
         run: |
