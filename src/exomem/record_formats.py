@@ -6,6 +6,7 @@ import base64
 import csv
 import datetime as dt
 import hashlib
+import html
 import json
 import math
 import re
@@ -31,6 +32,7 @@ _MAX_TOKEN_PAYLOAD_BYTES = 4 * 1024
 _MAX_TOKEN_ENVELOPE_BYTES = 6 * 1024
 _CURSOR_VERSION = "v1"
 _CURSOR_DOMAIN = b"exomem.record-continuation.v1\0"
+_CURSOR_CHUNK_CHARS = 24
 _MAX_HEADING_FIELDS = 8
 _MAX_GRAMMAR_LITERAL_BYTES = 128
 _MAX_NOTE_RULES = 32
@@ -38,6 +40,12 @@ _MAX_MARKDOWN_HEADINGS = 10_000
 _MAX_RECORDS = 10_000
 _MAX_CHILD_ROWS = 10_000
 _MAX_CHILD_FIELDS = 16
+_MAX_PRESENTATION_BLOCK_BYTES = 256 * 1024
+_EXPANDED_METADATA_FIELDS = frozenset({"parent_record_id", "child_field", "child_index"})
+_PRESENTATION_OPEN = re.compile(
+    r"(?m)^<!-- exomem-record-presentation:v1 digest=sha256:([0-9a-f]{64}) -->\r?$"
+)
+_PRESENTATION_CLOSE = re.compile(r"(?m)^<!-- /exomem-record-presentation -->\r?$")
 _SYSTEM_FIELDS = frozenset(
     {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
@@ -794,7 +802,188 @@ def render_markdown_item(
     frontmatter.update(values)
     audit_line = f"# {profile.item_audit_marker}: {audit_correlation}\n" if audit_correlation else ""
     text = "---\n" + vault.serialize_frontmatter(frontmatter) + "\n" + audit_line + "---\n"
-    return text + ("\n" + body if body else "")
+    source = text + ("\n" + body if body else "")
+    return splice_record_presentation(source, manifest, values)
+
+
+def _presentation_payload(manifest: collections.CollectionManifest, values: Mapping[str, Any]) -> dict[str, Any]:
+    recipe = manifest.record_presentation
+    assert recipe is not None
+    selected: dict[str, Any] = {}
+    for field_name, _label in (*recipe.summary, *recipe.notes, *recipe.details):
+        value = values.get(field_name)
+        try:
+            collections._validate_field_value(field_name, value, manifest.schema.fields[field_name])
+        except collections.CollectionError as error:
+            raise collections.CollectionError(
+                "UNRENDERABLE_RECORD_PRESENTATION",
+                f"presentation parent field is invalid: {field_name}",
+                {"field": field_name},
+            ) from error
+        selected[field_name] = value
+    for table in recipe.tables:
+        rows = values.get(table.field)
+        if not isinstance(rows, list):
+            raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "presentation table is not an array")
+        projected: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            projected.append(_presentation_child(row, table, index))
+        selected[table.field] = projected
+    return {"version": recipe.version, "recipe": _presentation_recipe_identity(recipe), "values": selected}
+
+
+def _presentation_recipe_identity(recipe: collections.RecordPresentation) -> dict[str, Any]:
+    return {
+        "version": recipe.version,
+        "summary": list(recipe.summary),
+        "tables": [
+            {
+                "field": table.field,
+                "label": table.label,
+                "columns": [
+                    {"field": column.field, "type": column.type, "label": column.label, "link_kind": column.link_kind}
+                    for column in table.columns
+                ],
+            }
+            for table in recipe.tables
+        ],
+        "notes": list(recipe.notes),
+        "details": list(recipe.details),
+    }
+
+
+def _presentation_child(
+    row: Any, table: collections.RecordPresentationTable, index: int
+) -> dict[str, Any]:
+    if not isinstance(row, Mapping):
+        raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "presentation child is not an object")
+    result: dict[str, Any] = {}
+    for column in table.columns:
+        value = row.get(column.field)
+        try:
+            collections._validate_field_value(column.field, value, collections.FieldSpec(column.type, link_kind=column.link_kind))
+        except collections.CollectionError as error:
+            raise collections.CollectionError(
+                "UNRENDERABLE_RECORD_PRESENTATION",
+                f"presentation child column is invalid at {table.field}[{index}].{column.field}",
+                {
+                    "table": table.field,
+                    "column": column.field,
+                    "child_index": index,
+                },
+            ) from error
+        result[column.field] = value
+    return result
+
+
+def _presentation_block(manifest: collections.CollectionManifest, values: Mapping[str, Any], newline: str) -> str:
+    payload = _presentation_payload(manifest, values)
+    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    digest = hashlib.sha256(canonical).hexdigest()
+    recipe = manifest.record_presentation
+    assert recipe is not None
+    lines = [f"<!-- exomem-record-presentation:v1 digest=sha256:{digest} -->", "<!-- generated: canonical frontmatter remains authoritative -->"]
+    for field_name, label in recipe.summary:
+        lines.append(f"- **{html.escape(label or field_name)}:** {_presentation_scalar(values.get(field_name))}")
+    for table in recipe.tables:
+        lines.extend(["", f"### {html.escape(table.label or table.field)}"])
+        labels = [html.escape(column.label or column.field) for column in table.columns]
+        lines.extend(["| " + " | ".join(labels) + " |", "| " + " | ".join("---" for _ in labels) + " |"])
+        for row in _presentation_payload(manifest, values)["values"][table.field]:
+            lines.append("| " + " | ".join(_presentation_cell(row[column.field]) for column in table.columns) + " |")
+    if recipe.notes:
+        lines.extend(["", "### Notes"])
+        lines.extend(f"- **{html.escape(label or field)}:** {_presentation_scalar(values.get(field))}" for field, label in recipe.notes)
+    if recipe.details:
+        lines.extend(["", "<details>", "<summary>Details</summary>", ""])
+        lines.extend(f"- **{html.escape(label or field)}:** {_presentation_scalar(values.get(field))}" for field, label in recipe.details)
+        lines.extend(["", "</details>"])
+    lines.append("<!-- /exomem-record-presentation -->")
+    block = newline.join(lines)
+    if len(block.encode("utf-8")) > _MAX_PRESENTATION_BLOCK_BYTES:
+        raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "managed presentation block is too large")
+    return block
+
+
+def _presentation_scalar(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, (dict, list)):
+        raise collections.CollectionError(
+            "UNRENDERABLE_RECORD_PRESENTATION",
+            "presentation scalar contains a nested value",
+        )
+    return _inert_markdown_text(str(value))
+
+
+def _inert_markdown_text(value: str) -> str:
+    """Preserve displayed text without emitting active Markdown or raw HTML."""
+    escaped = html.escape(value, quote=False)
+    translation: dict[str, str | int | None] = {
+        "\\": "&#92;",
+        "`": "&#96;",
+        "*": "&#42;",
+        "_": "&#95;",
+        "[": "&#91;",
+        "]": "&#93;",
+        "(": "&#40;",
+        ")": "&#41;",
+        "#": "&#35;",
+        "!": "&#33;",
+        "~": "&#126;",
+        "^": "&#94;",
+        "$": "&#36;",
+    }
+    inert = escaped.translate(
+        str.maketrans(translation)
+    )
+    return (
+        inert
+        .replace("\r\n", "<br>")
+        .replace("\n", "<br>")
+        .replace("\r", "<br>")
+    )
+
+
+def _presentation_cell(value: Any) -> str:
+    """Render a Markdown table cell without letting values alter the table grammar."""
+    return _presentation_scalar(value).replace("|", "\\|")
+
+
+def _presentation_span(source: str) -> tuple[int, int] | None:
+    opens = list(_PRESENTATION_OPEN.finditer(source))
+    closes = list(_PRESENTATION_CLOSE.finditer(source))
+    if not opens and not closes:
+        return None
+    if len(opens) != 1 or len(closes) != 1 or opens[0].start() >= closes[0].start():
+        raise collections.CollectionError("MALFORMED_RECORD_PRESENTATION", "managed presentation markers are ambiguous")
+    start, end = opens[0].start(), closes[0].end()
+    if end - start > _MAX_PRESENTATION_BLOCK_BYTES:
+        raise collections.CollectionError("MALFORMED_RECORD_PRESENTATION", "managed presentation block is too large")
+    return start, end
+
+
+def splice_record_presentation(
+    source: str, manifest: collections.CollectionManifest, values: Mapping[str, Any]
+) -> str:
+    """Replace only an exact managed span, preserving every other source character."""
+    if manifest.record_presentation is None:
+        return source
+    newline = "\r\n" if "\r\n" in source else "\n"
+    block = _presentation_block(manifest, values, newline)
+    span = _presentation_span(source)
+    if span is not None:
+        return source[: span[0]] + block + source[span[1] :]
+    # New items gain the derived block before authored prose; the prose suffix is
+    # spliced verbatim rather than normalized or parsed.
+    bom = "\ufeff" if source.startswith("\ufeff") else ""
+    text = source[len(bom) :]
+    opening = re.match(r"\A---\r?\n", text)
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :] if opening else "")
+    if opening is None or closing is None:
+        raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
+    close_end = opening.end() + closing.end()
+    return bom + text[:close_end] + newline + block + text[close_end:]
 
 
 def render_markdown_item_update(
@@ -965,6 +1154,7 @@ class CollectionInspection:
     source_hashes: Mapping[str, str]
     diagnostics: tuple[collections.CollectionDiagnostic, ...]
     record_count: int = 0
+    presentation: tuple[dict[str, Any], ...] = ()
 
 
 def inspect_collection(
@@ -994,6 +1184,7 @@ def inspect_collection(
             diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
         )
     diagnostics = list((*manifest.view_diagnostics, *parsed.diagnostics)[:64])
+    presentation = _inspect_presentation(manifest, parsed)
     for name in manifest.views:
         if len(diagnostics) >= 64:
             break
@@ -1018,7 +1209,57 @@ def inspect_collection(
         source_hashes={version.path: version.hash for version in parsed.source_versions},
         diagnostics=tuple(diagnostics),
         record_count=len(parsed.records),
+        presentation=presentation,
     )
+
+
+def _inspect_presentation(
+    manifest: collections.CollectionManifest, parsed: AdapterSnapshot
+) -> tuple[dict[str, Any], ...]:
+    """Compare derived bytes without parsing them back or mutating the item."""
+    if manifest.record_presentation is None:
+        return ()
+    source_bytes = dict(parsed.source_bytes)
+    findings: list[dict[str, Any]] = []
+    for record in parsed.records:
+        source = source_bytes.get(record.source.path)
+        if source is None:
+            continue
+        error_details: Mapping[str, Any] | None = None
+        try:
+            text = _decode_item_bytes(source)
+            span = _presentation_span(text)
+            if span is None:
+                state = "missing"
+            else:
+                expected = splice_record_presentation(text, manifest, record.values)
+                state = "current" if expected == text else "stale"
+        except collections.CollectionError as error:
+            state = "unrenderable" if error.code == "UNRENDERABLE_RECORD_PRESENTATION" else "malformed"
+            error_details = error.details if isinstance(error.details, Mapping) else None
+        if state != "current":
+            finding: dict[str, Any] = {
+                "item_key": record.identity.key,
+                "path": record.source.path,
+                "version": record.source.hash,
+                "state": state,
+                "remedy": {
+                    "missing": "guarded_refresh",
+                    "stale": "rebaseline_then_refresh",
+                    "malformed": "repair_markers_then_refresh",
+                    "unrenderable": "guarded_value_update",
+                }[state],
+            }
+            if state == "unrenderable" and error_details is not None:
+                location = {
+                    name: error_details[name]
+                    for name in ("table", "column", "child_index")
+                    if name in error_details
+                }
+                if location:
+                    finding["location"] = location
+            findings.append(finding)
+    return tuple(sorted(findings, key=lambda finding: str(finding["item_key"])))
 
 
 def _source_versions_for_returned_rows(
@@ -1053,11 +1294,13 @@ def query_collection(
     date_to: str | None = None,
     date_column: str | None = None,
     expand_children: bool = False,
+    expand_child: str | None = None,
     continuation: str | None = None,
     output_format: str = "json",
     view: str | None = None,
     authorize_path: Callable[[str], bool] | None = None,
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    project_child_value: Callable[[Any, collections.RecordPresentationColumn], Any] | None = None,
     source_versions_limit: int | None = None,
     source_versions_for_rows: bool = False,
 ) -> RecordQueryResult:
@@ -1074,6 +1317,7 @@ def query_collection(
             or date_to is not None
             or date_column is not None
             or expand_children
+            or expand_child is not None
         ):
             raise collections.CollectionError(
                 "INVALID_RECORD_QUERY", "saved views cannot be mixed with inline shaping"
@@ -1090,17 +1334,36 @@ def query_collection(
         date_to = saved_query.get("date_to")
         date_column = saved_query.get("date_column")
         expand_children = saved_query.get("expand_children", False)
+        expand_child = saved_query.get("expand_child")
         limit = saved_query.get("limit", limit)
         view_provenance = {
             "name": saved_view.name,
             "definition": saved_view.definition,
             "identity": saved_view.identity,
         }
+    selected_child = _resolve_child_selector(manifest, expand_children, expand_child)
+    _validate_query_projection_fields(
+        manifest,
+        selected_child=selected_child,
+        filters=filters,
+        columns=columns,
+        sort_by=sort_by,
+        aggregate=aggregate,
+        date_column=date_column,
+    )
     adapter = load_adapter(
         vault_root, manifest, authorize_path=authorize_path, project_values=project_values
     )
     parsed = adapter.read()
-    query = {
+    _enforce_selected_child_cap(parsed.records, selected_child)
+    parsed = replace(
+        parsed,
+        records=tuple(
+            replace(record, values=_safe_presentation_values(record.values, manifest, project_child_value))
+            for record in parsed.records
+        ),
+    )
+    query: dict[str, Any] = {
         "filters": filters or [],
         "columns": columns,
         "sort_by": sort_by,
@@ -1111,6 +1374,8 @@ def query_collection(
         "date_column": date_column,
         "expand_children": expand_children,
     }
+    if manifest.semantic_profile == "records":
+        query["expand_child"] = expand_child
     cursor_query = query if view_provenance is None else {**query, "limit": limit, "view": view_provenance}
     offset = 0
     if continuation:
@@ -1121,14 +1386,18 @@ def query_collection(
             )
         if token.get("snapshot") != parsed.snapshot:
             raise collections.CollectionError("STALE_RECORD_SNAPSHOT", "canonical source changed")
-        if token.get("query") != cursor_query:
+        if not _continuation_query_matches(token.get("query"), cursor_query):
             raise collections.CollectionError(
                 "INVALID_RECORD_CONTINUATION", "continuation does not match query"
             )
         offset = token["offset"]
     profile = profile_for(manifest.semantic_profile)
     rows = _query_rows(
-        parsed.records, expand_children, include_item_version=adapter.mutable, item_id_property=profile.item_id_property
+        parsed.records,
+        expand_children,
+        selected_child=selected_child,
+        include_item_version=adapter.mutable,
+        item_id_property=profile.item_id_property,
     )
     effective_columns = columns
     if columns:
@@ -1683,8 +1952,145 @@ def _schema_values(
     return values
 
 
+def _safe_presentation_values(
+    values: Mapping[str, Any],
+    manifest: collections.CollectionManifest,
+    project_child_value: Callable[[Any, collections.RecordPresentationColumn], Any] | None,
+) -> dict[str, Any]:
+    """Apply the declared child allowlist before any query operation can observe it."""
+    recipe = manifest.record_presentation
+    if recipe is None:
+        return dict(values)
+    result = dict(values)
+    for table in recipe.tables:
+        rows = values.get(table.field)
+        if not isinstance(rows, list):
+            raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "presentation table is not an array")
+        safe_rows: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            child = _presentation_child(row, table, index)
+            if project_child_value is not None:
+                for column in table.columns:
+                    projected = project_child_value(child[column.field], column)
+                    if column.type == "link" and child[column.field] is not None and projected is None:
+                        child.pop(column.field)
+                    else:
+                        child[column.field] = projected
+            safe_rows.append(child)
+        result[table.field] = safe_rows
+    return result
+
+
+def _resolve_child_selector(
+    manifest: collections.CollectionManifest, expand_children: bool, expand_child: str | None
+) -> str | None:
+    if expand_children and expand_child is not None:
+        raise collections.CollectionError("INVALID_RECORD_QUERY", "use expand_child or expand_children, not both")
+    if expand_child is not None:
+        if type(expand_child) is not str or not expand_child:
+            raise collections.CollectionError("INVALID_RECORD_QUERY", "expand_child must name a declared child field")
+        if manifest.storage.strategy == "markdown-items":
+            if manifest.record_presentation is None or expand_child not in {table.field for table in manifest.record_presentation.tables}:
+                raise collections.CollectionError("INVALID_RECORD_QUERY", "expand_child is not a declared presentation table")
+            return expand_child
+        if manifest.storage.strategy == "markdown-log":
+            descriptor = manifest.storage.descriptor.get("child_rows")
+            if isinstance(descriptor, Mapping) and descriptor.get("container_field") == expand_child:
+                return expand_child
+        raise collections.CollectionError("INVALID_RECORD_QUERY", "expand_child is not available for this collection")
+    if not expand_children:
+        return None
+    if manifest.storage.strategy == "markdown-items":
+        tables = () if manifest.record_presentation is None else manifest.record_presentation.tables
+        if len(tables) != 1:
+            if tables:
+                raise collections.CollectionError(
+                    "INVALID_RECORD_QUERY",
+                    "expand_children needs one unambiguous child table",
+                    {"selectors": sorted(table.field for table in tables)},
+                )
+            raise collections.CollectionError(
+                "INVALID_RECORD_QUERY", "expand_children needs one unambiguous child table"
+            )
+        return tables[0].field
+    if manifest.storage.strategy == "markdown-log":
+        descriptor = manifest.storage.descriptor.get("child_rows")
+        if isinstance(descriptor, Mapping) and type(descriptor.get("container_field")) is str:
+            return descriptor["container_field"]
+    raise collections.CollectionError("INVALID_RECORD_QUERY", "expand_children has no eligible child field")
+
+
+def _validate_query_projection_fields(
+    manifest: collections.CollectionManifest,
+    *,
+    selected_child: str | None,
+    filters: list[dict] | None,
+    columns: list[str] | None,
+    sort_by: str | None,
+    aggregate: str | None,
+    date_column: str | None,
+) -> None:
+    """Refuse undeclared fields before canonical rows enter query machinery."""
+    profile = profile_for(manifest.semantic_profile)
+    allowed = collections._saved_view_selected_fields(
+        set(manifest.schema.fields)
+        | {
+            "collection_id",
+            profile.item_id_property,
+            "item_version",
+            "inferred",
+            "ambiguous",
+            "parent_record_id",
+        },
+        collections._saved_view_child_shapes(
+            manifest.storage, manifest.record_presentation
+        ),
+        selected_child,
+    )
+
+    requested: list[object] = []
+    if filters is not None:
+        requested.extend(
+            item.get("column") if isinstance(item, Mapping) else None for item in filters
+        )
+    if columns is not None:
+        requested.extend(columns)
+    requested.extend((sort_by, date_column))
+    if aggregate is not None and aggregate != "count" and ":" in aggregate:
+        requested.append(aggregate.split(":", 1)[1].strip())
+    for raw in requested:
+        if raw is None:
+            continue
+        if type(raw) is not str or not raw or raw.split(".", 1)[0] not in allowed:
+            raise collections.CollectionError(
+                "INVALID_RECORD_QUERY_FIELD", "query field is not available in the safe projection"
+            )
+
+
+def _enforce_selected_child_cap(records: tuple[Record, ...], selected_child: str | None) -> None:
+    """Count selected arrays only; never project a child before the global cap holds."""
+    if selected_child is None:
+        return
+    total = 0
+    for record in records:
+        if record.children and selected_child not in record.values:
+            total += len(record.children)
+        else:
+            values = record.values.get(selected_child)
+            if not isinstance(values, list):
+                raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "selected child field is not an array")
+            total += len(values)
+        if total > _MAX_CHILD_ROWS:
+            raise collections.CollectionError("RECORD_CHILD_LIMIT", "expanded child rows exceed the hard limit")
+
+
 def _query_rows(
-    records: tuple[Record, ...], expand_children: bool, *, include_item_version: bool, item_id_property: str = "record_id"
+    records: tuple[Record, ...],
+    expand_children: bool,
+    *,
+    selected_child: str | None,
+    include_item_version: bool,
+    item_id_property: str = "record_id",
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in records:
@@ -1697,10 +2103,33 @@ def _query_rows(
         if include_item_version:
             system["item_version"] = record.source.hash
         base = {**record.values, **system}
-        if expand_children:
-            for child in record.children:
+        if selected_child is not None:
+            children: Any
+            if record.children and selected_child not in record.values:
+                children = [child.values for child in record.children]
+            else:
+                children = record.values.get(selected_child)
+            if not isinstance(children, list):
+                raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "selected child field is not an array")
+            if len(rows) + len(children) > _MAX_CHILD_ROWS:
+                raise collections.CollectionError("RECORD_CHILD_LIMIT", "expanded child rows exceed the hard limit")
+            parent = {name: value for name, value in base.items() if name != selected_child}
+            if set(parent) & _EXPANDED_METADATA_FIELDS:
+                raise collections.CollectionError(
+                    "INVALID_RECORD_QUERY", "parent fields collide with expanded child metadata"
+                )
+            for index, child in enumerate(children):
+                child_values = child if isinstance(child, Mapping) else None
+                if child_values is None or set(child_values) & set(parent):
+                    raise collections.CollectionError("INVALID_RECORD_QUERY", "child fields collide with parent fields")
                 rows.append(
-                    {**base, **child.values, "parent_record_id": record.identity.key, **system}
+                    {
+                        **parent,
+                        **child_values,
+                        "parent_record_id": record.identity.key,
+                        "child_field": selected_child,
+                        "child_index": index,
+                    }
                 )
         else:
             rows.append(base)
@@ -1720,7 +2149,15 @@ def _encode_continuation(payload: dict[str, Any]) -> str:
         raise collections.CollectionError(
             "INVALID_RECORD_CONTINUATION", "query continuation is too large"
         )
-    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    compact = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    # The terminal egress scrubber deliberately treats long mixed-case
+    # alphanumeric runs as possible credentials. Continuations are opaque,
+    # round-tripping product identifiers, so bound every run below that
+    # heuristic without weakening the scrubber or changing the signed bytes.
+    encoded = "~".join(
+        compact[index : index + _CURSOR_CHUNK_CHARS]
+        for index in range(0, len(compact), _CURSOR_CHUNK_CHARS)
+    )
     checksum = hashlib.sha256(_CURSOR_DOMAIN + raw).hexdigest()
     token = f"{_CURSOR_VERSION}.{encoded}.{checksum}"
     if len(token.encode("utf-8")) > _MAX_TOKEN_ENVELOPE_BYTES:
@@ -1737,8 +2174,20 @@ def _decode_continuation(value: str) -> dict[str, Any]:
         version, encoded, checksum = value.split(".", 2)
         if version != _CURSOR_VERSION or len(checksum) != 64:
             raise ValueError
-        padded = encoded + "=" * (-len(encoded) % 4)
-        raw = base64.urlsafe_b64decode(padded)
+        chunks = encoded.split("~")
+        if not encoded or re.fullmatch(r"[A-Za-z0-9_~-]+", encoded) is None:
+            raise ValueError
+        if len(chunks) > 1 and (
+            any(
+                not chunk or len(chunk) > _CURSOR_CHUNK_CHARS
+                for chunk in chunks
+            )
+            or any(len(chunk) != _CURSOR_CHUNK_CHARS for chunk in chunks[:-1])
+        ):
+            raise ValueError
+        compact = "".join(chunks)
+        padded = compact + "=" * (-len(compact) % 4)
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
         if len(raw) > _MAX_TOKEN_PAYLOAD_BYTES:
             raise ValueError
         expected = hashlib.sha256(_CURSOR_DOMAIN + raw).hexdigest()
@@ -1767,10 +2216,20 @@ def validate_continuation(value: str, *, collection_id: str, snapshot: str, quer
     return (
         payload.get("collection_id") == collection_id
         and payload.get("snapshot") == snapshot
-        and payload.get("query") == query
+        and _continuation_query_matches(payload.get("query"), query)
         and type(payload.get("offset")) is int
         and payload["offset"] >= 0
     )
+
+
+def _continuation_query_matches(value: Any, expected: Mapping[str, Any]) -> bool:
+    """Compare v1 query identity with the one additive optional-field migration."""
+    if not isinstance(value, Mapping):
+        return False
+    candidate = dict(value)
+    if expected.get("expand_child") is None and "expand_child" in expected:
+        candidate.setdefault("expand_child", None)
+    return candidate == expected
 
 
 def _render_query(

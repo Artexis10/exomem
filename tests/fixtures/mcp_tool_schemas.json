@@ -3765,7 +3765,19 @@
             }
           ],
           "default": null,
-          "description": "Expand query child values."
+          "description": "Expand the one unambiguous child container for backward compatibility."
+        },
+        "expand_child": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact declared child table/container to project and expand."
         },
         "continuation": {
           "anyOf": [
@@ -3908,6 +3920,18 @@
           ],
           "default": null,
           "description": "Exact current item version for update."
+        },
+        "refresh_presentation": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Guardedly rebuild the managed Markdown presentation during update."
         },
         "response_detail": {
           "default": "compact",

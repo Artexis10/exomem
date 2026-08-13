@@ -6033,6 +6033,7 @@ def op_record_memory(
     date_to: str | None = None,
     date_column: str | None = None,
     expand_children: bool | None = None,
+    expand_child: str | None = None,
     continuation: str | None = None,
     include_agent_history: bool | None = None,
     output_format: Literal["json", "markdown", "csv"] | None = None,
@@ -6044,6 +6045,7 @@ def op_record_memory(
     body: str | None = None,
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
+    refresh_presentation: bool | None = None,
 ) -> dict[str, Any]:
     """Capture, inspect, and govern durable observed state in one Records command.
 
@@ -6069,7 +6071,8 @@ def op_record_memory(
         date_from: Inclusive query date lower bound.
         date_to: Inclusive query date upper bound.
         date_column: Query date property.
-        expand_children: Expand query child values.
+        expand_children: Expand the one unambiguous child container for backward compatibility.
+        expand_child: Exact declared child table/container to project and expand.
         continuation: Snapshot-bound query continuation.
         include_agent_history: Include bounded agent mutation history.
         output_format: json, markdown, or csv query output.
@@ -6081,6 +6084,7 @@ def op_record_memory(
         body: Optional Markdown body for append.
         changes: Targeted values for update.
         expected_item_version: Exact current item version for update.
+        refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -6101,6 +6105,7 @@ def op_record_memory(
         date_to=date_to,
         date_column=date_column,
         expand_children=expand_children,
+        expand_child=expand_child,
         continuation=continuation,
         include_agent_history=include_agent_history,
         output_format=output_format,
@@ -6112,6 +6117,7 @@ def op_record_memory(
         body=body,
         changes=changes,
         expected_item_version=expected_item_version,
+        refresh_presentation=refresh_presentation,
     )
 
 

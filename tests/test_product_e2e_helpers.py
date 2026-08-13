@@ -70,7 +70,43 @@ def test_records_fixture_cannot_prewrite_collection_or_source(tmp_path: Path) ->
     assert not manifest.exists()
     assert not source.exists()
     assert "semantic_profile: records" in fixture["manifest_text"]
+    assert "record_presentation:" in fixture["manifest_text"]
+    assert "field: movements" in fixture["manifest_text"]
     assert "views:" in fixture["manifest_text"]
+
+
+def test_records_presentation_query_assertion_requires_safe_complete_pagination() -> None:
+    parent = {
+        "rows": [
+            {
+                "record_id": "item",
+                "movements": [
+                    {"movement": "A", "band": "one", "repetitions": "1"},
+                    {"movement": "B", "band": "two", "repetitions": "2"},
+                    {"movement": "C", "band": "three", "repetitions": "3"},
+                ],
+            }
+        ]
+    }
+    pages = [
+        {
+            "rows": [
+                {"child_field": "movements", "child_index": 0},
+                {"child_field": "movements", "child_index": 1},
+            ],
+            "continuation": "next",
+        },
+        {
+            "rows": [{"child_field": "movements", "child_index": 2}],
+            "continuation": None,
+        },
+    ]
+
+    e2e_product_loop._assert_records_presentation_rows(parent, pages)
+
+    pages[1]["rows"][0]["private"] = "escaped"
+    with pytest.raises(RuntimeError, match="safe child projection"):
+        e2e_product_loop._assert_records_presentation_rows(parent, pages)
 
 
 def test_manual_records_fixture_preserves_template_ownership(tmp_path: Path) -> None:

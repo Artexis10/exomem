@@ -35,6 +35,7 @@ _ACTION_FIELDS = {
             "date_to",
             "date_column",
             "expand_children",
+            "expand_child",
             "continuation",
             "include_agent_history",
             "output_format",
@@ -51,6 +52,7 @@ _ACTION_FIELDS = {
             "expected_container_hash",
             "expected_item_version",
             "why",
+            "refresh_presentation",
         }
     ),
     "revise": frozenset(
@@ -71,7 +73,6 @@ _REQUIRED_FIELDS = {
         {
             "collection",
             "item_key",
-            "changes",
             "expected_container_hash",
             "expected_item_version",
             "why",
@@ -96,6 +97,7 @@ _QUERY_SHAPING_FIELDS = frozenset(
         "date_to",
         "date_column",
         "expand_children",
+        "expand_child",
     }
 )
 
@@ -119,6 +121,7 @@ def record_memory(
     date_to: str | None = None,
     date_column: str | None = None,
     expand_children: bool | None = None,
+    expand_child: str | None = None,
     continuation: str | None = None,
     include_agent_history: bool | None = None,
     output_format: Literal["json", "markdown", "csv"] | None = None,
@@ -130,6 +133,7 @@ def record_memory(
     body: str | None = None,
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
+    refresh_presentation: bool | None = None,
 ) -> dict[str, Any]:
     """Describe, validate, inspect, create, query, append, update, revise, or rebaseline Records.
 
@@ -154,7 +158,8 @@ def record_memory(
         date_from: Inclusive query date lower bound.
         date_to: Inclusive query date upper bound.
         date_column: Query date property.
-        expand_children: Expand child values in query results.
+        expand_children: Expand the one unambiguous child container for backward compatibility.
+        expand_child: Exact declared child table/container to project and expand.
         continuation: Snapshot-bound query continuation.
         include_agent_history: Include bounded governed agent mutation history.
         output_format: Query output format.
@@ -164,6 +169,7 @@ def record_memory(
         body: Optional Markdown item body for append.
         changes: Targeted changes for update.
         expected_item_version: Exact current item version for update.
+        refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
     """
     values = {
         "collection": collection,
@@ -182,6 +188,7 @@ def record_memory(
         "date_to": date_to,
         "date_column": date_column,
         "expand_children": expand_children,
+        "expand_child": expand_child,
         "continuation": continuation,
         "include_agent_history": include_agent_history,
         "output_format": output_format,
@@ -193,6 +200,7 @@ def record_memory(
         "body": body,
         "changes": changes,
         "expected_item_version": expected_item_version,
+        "refresh_presentation": refresh_presentation,
     }
     _validate_arguments(action, values)
     try:
@@ -251,6 +259,7 @@ def record_memory(
                 date_to=date_to,
                 date_column=date_column,
                 expand_children=False if expand_children is None else expand_children,
+                expand_child=expand_child,
                 continuation=continuation,
             )
             history = None
@@ -312,7 +321,7 @@ def record_memory(
             )
         assert collection is not None
         assert item_key is not None
-        assert changes is not None
+        assert changes is not None or refresh_presentation is True
         assert expected_container_hash is not None
         assert expected_item_version is not None
         assert why is not None
@@ -323,10 +332,11 @@ def record_memory(
             vault_root,
             manifest,
             item_key=item_key,
-            changes=changes,
+            changes={} if changes is None else changes,
             expected_container_hash=expected_container_hash,
             expected_item_version=expected_item_version,
             why=why,
+            refresh_presentation=refresh_presentation is True,
         )
     except (CollectionError, query_data.QueryDataError) as error:
         raise OpError(
@@ -370,11 +380,17 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     supplied = {name for name, value in values.items() if value is not None}
     if not _REQUIRED_FIELDS[action] <= supplied or not supplied <= _ACTION_FIELDS[action]:
         _invalid_arguments()
+    if action == "update" and values["changes"] is None and values["refresh_presentation"] is not True:
+        _invalid_arguments()
+    if action == "update" and values["refresh_presentation"] not in {None, True}:
+        _invalid_arguments()
     if action == "validate" and ((values["collection"] is None) == (values["manifest_path"] is None)):
         _invalid_arguments()
     if action == "validate" and values["collection"] is not None and values["scaffold"] is not None:
         _invalid_arguments()
     if action == "query" and values["view"] is not None and supplied & _QUERY_SHAPING_FIELDS:
+        _invalid_arguments()
+    if action == "query" and values["expand_children"] is True and values["expand_child"] is not None:
         _invalid_arguments()
 
 
