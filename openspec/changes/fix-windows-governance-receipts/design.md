@@ -2,7 +2,7 @@
 
 Receipt evidence is authoritative JSONL with a SQLite durable-head sidecar. Critical events advance that head only after the JSONL prefix and the directory chain through `Knowledge Base` are durable. POSIX implements the namespace operations with `dir_fd` and `O_NOFOLLOW`; native Windows currently falls through to `os.open(directory)`, which the CRT rejects with `PermissionError`.
 
-The repository already has two relevant primitives: retained non-reparse Windows directory/file handles in `mutation_lock.py`, and a cross-platform directory descriptor in `vault.py`. Native verification on the development host established the access contract: a Windows directory handle opened with `GENERIC_WRITE` can be flushed through `os.fsync`; metadata-only or read-only access receives access denied. Microsoft documents that directory handles require `FILE_FLAG_BACKUP_SEMANTICS`, and that `FlushFileBuffers` requires `GENERIC_WRITE`.
+The repository already has two relevant primitives: retained non-reparse Windows directory/file handles in `mutation_lock.py`, and a native directory handle substrate in `vault.py`. Native verification on the development host established the access contract: `FlushFileBuffers` succeeds on a raw Windows directory handle opened with `GENERIC_WRITE`; metadata-only or read-only access receives access denied, and passing the raw handle to `os.fsync` is invalid. Microsoft documents that directory handles require `FILE_FLAG_BACKUP_SEMANTICS`, and that `FlushFileBuffers` requires `GENERIC_WRITE`.
 
 ## Goals / Non-Goals
 

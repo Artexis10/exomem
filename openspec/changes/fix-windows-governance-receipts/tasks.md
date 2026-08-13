@@ -16,8 +16,9 @@
 ## 3. Critical Directory Durability
 
 - [ ] 3.1 Add red ordering tests proving every required directory flush precedes durable-head update and any open/fsync failure leaves both sidecar heads unchanged.
-- [ ] 3.2 Implement Windows directory durability with metadata-only retained ancestors, a write-capable raw handle for only the final no-follow directory, direct-child validation, `FlushFileBuffers`, and exact single-close ownership; keep POSIX behavior unchanged.
-- [ ] 3.3 Prove exact-ID retry and verified reconcile promote one file-ahead critical suffix only after directory durability succeeds and never append a duplicate.
+- [ ] 3.2 Add Windows red tests proving the raw handle is passed to `FlushFileBuffers`, directory `os.fsync` is never called, and `CloseHandle` runs exactly once on success and failure.
+- [ ] 3.3 Implement Windows directory durability with metadata-only retained ancestors, a write-capable raw handle for only the final no-follow directory, direct-child validation, `FlushFileBuffers`, and exact single-close ownership; keep POSIX behavior unchanged.
+- [ ] 3.4 Prove exact-ID retry and verified reconcile promote one file-ahead critical suffix only after directory durability succeeds and never append a duplicate.
 
 ## 4. Native Windows Regression Coverage
 

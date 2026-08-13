@@ -2,7 +2,7 @@
 
 ### Requirement: Receipt Filesystem Safety And Critical Durability Are Cross-Platform
 
-Receipt evidence opening and creation SHALL use platform-safe, no-follow filesystem operations on every supported operating system. The receipt instance directory and its existing ancestors SHALL remain pinned while a monthly JSONL child is opened or exclusively created. A monthly evidence handle SHALL resolve to a regular, non-reparse direct child of that retained instance directory.
+Receipt evidence opening and creation SHALL use platform-safe, no-follow filesystem operations on every supported operating system. POSIX SHALL retain the receipt instance directory and use descriptor-relative child access. Windows SHALL retain the instance directory and its existing ancestors while a monthly JSONL child is opened or exclusively created. A monthly evidence handle SHALL resolve to a regular, non-reparse direct child of that retained instance directory.
 
 Native Windows receipt operations SHALL NOT depend on the CRT opening a directory. They SHALL use native directory handles and validated child file handles while preserving the anti-symlink, anti-reparse, identity, and entry-swap guarantees of the POSIX directory-relative implementation. Ancestors SHALL be retained with metadata-only access; write access SHALL be requested only for the exact directory being flushed.
 
