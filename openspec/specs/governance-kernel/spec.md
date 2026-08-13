@@ -164,3 +164,230 @@ Mutation authorization and disclosure SHALL run through a precommit hook inside 
 #### Scenario: Publication failure does not forge governance commit evidence
 - **WHEN** precommit disclosure succeeds but guarded publication later rolls back
 - **THEN** the governance receipt records only the authorization attempt and does not claim that the Record mutation committed
+
+### Requirement: Guarded Fallback Never Serves An Open Policy
+
+The last-good policy cache exists so a transient authoring guard does not drop a governed
+vault to the fail-closed floor. It MUST NOT be able to reopen one. The cache SHALL only
+retain a compile that produced governance — a policy whose fingerprint is neither the
+empty sentinel nor the blocked sentinel. When a load is taken behind a pending or changed
+authoring guard and no such last-good compile exists for that vault, the loader SHALL
+return the blocked fail-closed policy rather than an empty-looking open one.
+
+The empty fast path is unaffected for a vault that has no governance tree at all: that
+load never consults the guarded fallback and MUST keep its existing byte-identical
+behaviour and latency budget.
+
+#### Scenario: a pending mutation on a previously ungoverned vault fails closed
+
+- **WHEN** a vault's policy has previously loaded as the empty open singleton, an authoring
+  guard is subsequently pending, and a content read arrives
+- **THEN** the loader returns a blocked policy carrying the guard finding
+- **AND** the returned policy is not empty, so no caller takes the open fast path
+- **AND** every content-returning surface withholds rather than releasing at full level
+
+#### Scenario: the cache refuses to retain an open compile
+
+- **WHEN** a load resolves to the empty open singleton with no error findings
+- **THEN** the last-good cache for that vault is left unchanged
+- **AND** a later guarded load for the same vault does not return an empty policy
+
+#### Scenario: a governed last-good compile is still served through the guard
+
+- **WHEN** a vault has previously loaded a successfully compiled policy and an authoring
+  guard is then pending
+- **THEN** the loader returns that compiled policy with the guard finding appended
+- **AND** its scopes, rules and grants are unchanged
+
+#### Scenario: two processes agree during activation
+
+- **WHEN** a policy mutation is pending and the same content read is issued from a process
+  that has served the vault since before governance existed and from a freshly started
+  process
+- **THEN** both return a policy that is neither empty nor open
+- **AND** the disclosure decision for a given item and audience is identical in both
+
+### Requirement: Sync Conflict Copies Refuse Policy Compile
+
+Policy authority is the document set on disk, so a file-synchronisation conflict copy MUST
+NOT be able to act as a policy document. Conflict-copy detection SHALL recognise the naming
+conventions of the synchronisation tools the vault supports, including both the parenthesised
+Obsidian marker and the hyphenated sync-conflict marker, and SHALL apply that detection
+consistently to policy document discovery, the governance file walk, and the receipt tree.
+
+A recognised conflict copy SHALL refuse compile and preserve the last good governed policy,
+exactly as an Obsidian conflict copy does today. It MUST NOT be admitted as a second,
+differently-named policy document, and it MUST NOT be able to reintroduce a deleted document.
+
+#### Scenario: a sync conflict copy of a deleted grant does not restore access
+
+- **WHEN** a grant document is deleted to revoke access and the synchronisation tool later
+  lands a conflict copy of that grant under a sync-conflict filename
+- **THEN** the compile is refused with a conflict finding
+- **AND** the revoked grant does not take effect
+- **AND** the previously compiled governed policy continues to be served
+
+#### Scenario: a sync conflict copy alongside its original is a conflict, not a duplicate
+
+- **WHEN** a policy document and a sync-conflict copy of it are both present
+- **THEN** the load is refused as a conflict before duplicate-identifier compilation is
+  attempted
+- **AND** the refusal does not fall back to a policy weaker than the last good governed one
+
+#### Scenario: a sync conflict copy in the receipt tree does not fork the chain
+
+- **WHEN** a sync-conflict copy appears inside the per-machine receipt tree
+- **THEN** the conflict is detected and receipt append fails closed
+- **AND** the hash chain is not extended from the conflicted record
+
+#### Scenario: an ordinary policy document with a similar name still compiles
+
+- **WHEN** a policy document has a name that contains neither conflict marker
+- **THEN** it compiles normally
+- **AND** no conflict finding is emitted
+
+### Requirement: A Conflict Copy Refuses Policy Authoring While Reads Continue
+
+A recognised conflict copy leaves the current policy ambiguous: the author cannot know
+which of the two documents a later compile will select, and prospective compilation
+excludes conflict copies from the tree it evaluates, so an authoring operation would be
+validated against a policy the live vault does not have. Every authoring operation SHALL
+therefore be refused while a conflict copy is present under the governance tree.
+
+Reads SHALL NOT be refused on that basis. A warm vault continues to serve its last good
+compiled policy, because flooring every read to the most restrictive level over a
+file-synchronisation artefact is a larger harm than the ambiguity it guards against.
+
+The refusal SHALL NOT create a sidecar, policy directory, receipt, or marker, preserving
+the guarantee that a rejected authoring operation leaves no state behind.
+
+#### Scenario: authoring is refused while a conflict copy is present
+
+- **WHEN** a conflict copy is present under the governance tree and any authoring
+  operation is invoked
+- **THEN** the operation is refused with a distinct conflict code
+- **AND** no policy document, sidecar row, receipt or marker is created
+
+#### Scenario: reads continue to serve the last good policy
+
+- **WHEN** the same vault serves a content read while that conflict copy is present
+- **THEN** the last good compiled policy is applied
+- **AND** the read is not floored to the most restrictive level
+
+#### Scenario: resolving the conflict restores authoring
+
+- **WHEN** the conflict copy is removed and an authoring operation is retried
+- **THEN** the operation proceeds normally
+
+### Requirement: A Scope May Deny Audiences It Does Not Name
+
+A scope MAY declare that the standing default for an audience is the most restrictive
+level rather than the most permissive one. Where a scope carries that declaration and an
+item is a member of it, an audience for which no standing rule matches SHALL resolve to no
+disclosure, instead of to full release.
+
+The declaration changes the DEFAULT only. It SHALL NOT override an authored rule: where a
+standing rule names the audience for that scope, that rule's ceiling applies exactly as it
+does today. Grants SHALL continue to only raise, organisation caps SHALL continue to only
+lower, and a declared purpose SHALL continue to only narrow.
+
+The owner SHALL never be subject to the declaration. An owner locked out of their own
+scope is a vault that has lost its own contents, which is not the confidentiality this
+expresses.
+
+Where an item is a member of several scopes and any one of them carries the declaration,
+the restrictive default applies — a scope cannot be widened by adding an undeclared scope
+alongside it.
+
+A vault with no governance tree SHALL remain on the empty fast path, unaffected.
+
+Authored audience-bearing fields SHALL NOT enter the evaluator's reserved NUL-prefixed
+namespace. A NUL in `audience` or `to_audience` SHALL produce an ERROR finding and refuse
+the compile, including the values reserved for unresolved principals and the unnamed-
+audience transition probe.
+
+Policy transition previews SHALL expose the post-change ceiling for the unnamed-audience
+default as `unnamed_audience_ceiling`, separately from the authored-audience
+`target_ceiling`. The field SHALL be present and nullable when no concrete membership can
+be evaluated.
+
+#### Scenario: an audience no rule names receives nothing
+
+- **WHEN** an item belongs to a scope carrying the declaration and a request arrives from
+  an audience for which no standing rule matches that scope and no matching grant applies
+- **THEN** the decision is no disclosure
+- **AND** outside the relevance-ranking signals `bm25_rank`, `keyword_rank`, `vector_rank`,
+  and `graph_in_degree`, its projected representation is indistinguishable from one that
+  does not exist
+- **AND** those signals reflect corpus position and are a known pre-existing channel
+  tracked separately from this change
+
+#### Scenario: non-owner inspection does not reveal a default-denied path
+
+- **WHEN** a non-owner uses `explain` or `simulate` for one path, first while it exists and
+  is denied at no disclosure and again after the same path is deleted
+- **THEN** both requests receive the same error class and text
+- **AND** owner inspection behaviour is unchanged
+- **AND** an established terminal `release_reason` remains inspectable
+
+#### Scenario: reserved audience ids refuse compilation
+
+- **WHEN** a rule or grant authors an `audience` or `to_audience` containing a NUL
+- **THEN** the compiler emits an ERROR finding
+- **AND** the policy compile is refused
+
+#### Scenario: a transition preview exposes the unnamed default
+
+- **WHEN** a declared scope has an L1 rule for `external` and a proposal removes the
+  declaration
+- **THEN** `target_ceiling` remains 1 for the authored audience
+- **AND** `unnamed_audience_ceiling` is 6 for the post-change default
+
+#### Scenario: a newly minted audience id is denied by default
+
+- **WHEN** a principal's credential is rotated so it resolves to an audience id that
+  appears in no policy document, and it requests an item in a declared scope
+- **THEN** the decision is no disclosure
+- **AND** the outcome is identical to the pre-rotation audience having been unnamed
+
+#### Scenario: an authored rule still governs the audience it names
+
+- **WHEN** a standing rule names an audience for a declared scope with a ceiling above no
+  disclosure
+- **THEN** that audience receives the rule's ceiling
+- **AND** the declaration does not lower it
+
+#### Scenario: a grant still raises above the default
+
+- **WHEN** an audience unnamed by any standing rule holds a grant for a declared scope
+- **THEN** the grant's ceiling applies
+- **AND** the declaration does not suppress it
+
+#### Scenario: an organisation cap still lowers
+
+- **WHEN** an organisation cap applies to a declared scope alongside a rule permitting a
+  higher level
+- **THEN** the lower of the two applies, unchanged by the declaration
+
+#### Scenario: the owner reads a declared scope
+
+- **WHEN** the owner requests an item in a declared scope for which no rule names the owner
+- **THEN** the owner receives full release
+
+#### Scenario: one declared scope denies across an overlapping undeclared scope
+
+- **WHEN** an item belongs to both a declared scope and an undeclared scope, and the
+  audience is named by no standing rule
+- **THEN** the decision is no disclosure
+
+#### Scenario: an undeclared scope keeps today's default
+
+- **WHEN** an item belongs only to scopes carrying no declaration and no standing rule
+  matches the audience
+- **THEN** the decision is full release, exactly as before this change
+
+#### Scenario: inspection explains a default denial
+
+- **WHEN** the owner explains the decision for an item withheld by the declaration
+- **THEN** the explanation identifies the declaring scope
+- **AND** it does not attribute the outcome to a standing rule that does not exist
