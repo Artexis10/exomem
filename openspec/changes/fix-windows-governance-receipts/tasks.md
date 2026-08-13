@@ -36,11 +36,11 @@
 
 ## 6. Receipt-First Runtime Bootstrap
 
-- [ ] 6.1 Add red native Windows tests proving first receipt use secures an absent writer-state root before any lock artifact and subsequent idempotency initialization succeeds.
-- [ ] 6.2 Add a red native Windows test proving a pre-existing unsafe root is unchanged, gains no lock child, and returns the exact-path remediation through the receipt boundary.
+- [x] 6.1 Add red native Windows tests proving first receipt use secures an absent writer-state root before any lock artifact and subsequent idempotency initialization succeeds.
+- [x] 6.2 Add a red native Windows test proving a pre-existing unsafe root is unchanged, gains no lock child, and returns the exact-path remediation through the receipt boundary.
 - [ ] 6.3 Harden the shared first-creation initializer for atomic-create races: only the winning creator applies a DACL, while losers use bounded validation-only stabilization and never repair an observed entry.
 - [ ] 6.4 Route both receipt-first and mutation-coordinator-first Windows lock initialization through that shared initializer while preserving the POSIX lock paths.
-- [ ] 6.5 Run real same-principal multiprocess first-use races from an absent root on Windows: receipt-versus-receipt and receipt-versus-coordinator; require every process to succeed, prove no lock artifact precedes validation, and prove the final root DACL is valid without fixture-created state.
+- [x] 6.5 Run real same-principal multiprocess first-use races from an absent root on Windows: receipt-versus-receipt and receipt-versus-coordinator; require every process to succeed, prove no lock artifact precedes validation, and prove the final root DACL is valid without fixture-created state.
 
 ## 7. Verification And Delivery
 
