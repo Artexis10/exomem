@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -70,8 +71,15 @@ def finalize_manifest(
     if not path.exists():
         raise ManifestError("manifest must be started before finalization")
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if status in {"VALID", "READINESS_UNVERIFIABLE"} and raw.get("provider_variant") is not None:
-        _validate_lifecycle_artifacts(Path(run_dir), required=True)
+    if status in {"VALID", "READINESS_UNVERIFIABLE"} and _has_direct_lifecycle_artifacts(
+        Path(run_dir), raw.get("provider_variant"),
+    ):
+        _validate_lifecycle_artifacts(
+            Path(run_dir),
+            required=True,
+            manifest_run_id=raw.get("run_id"),
+            manifest_provider_variant=raw.get("provider_variant"),
+        )
     raw["status"] = status
     raw["finalized_at"] = finalized_at
     # Always written, so a re-finalization can never leave a stale reason
@@ -142,18 +150,34 @@ def load_manifest(run_dir: Path | str) -> RunManifest:
         raise ManifestError(f"pre-registration identity refused: {exc}") from exc
     if not is_terminal(manifest.status):
         raise ManifestError("non-terminal manifest cannot be used for reports")
-    if manifest.status in {"VALID", "READINESS_UNVERIFIABLE"} and manifest.provider_variant is not None:
-        _validate_lifecycle_artifacts(Path(run_dir), required=True)
+    if manifest.status in {"VALID", "READINESS_UNVERIFIABLE"} and _has_direct_lifecycle_artifacts(
+        Path(run_dir), manifest.provider_variant,
+    ):
+        _validate_lifecycle_artifacts(
+            Path(run_dir),
+            required=True,
+            manifest_run_id=manifest.run_id,
+            manifest_provider_variant=manifest.provider_variant,
+        )
     return manifest
 
 
-def _validate_lifecycle_artifacts(run_dir: Path, *, required: bool = False) -> None:
+def _validate_lifecycle_artifacts(
+    run_dir: Path,
+    *,
+    required: bool = False,
+    manifest_run_id: str | None = None,
+    manifest_provider_variant: str | None = None,
+) -> None:
     environment_path = run_dir / "environment.json"
     if not environment_path.exists() and not required:
         return
     try:
         environment = json.loads(environment_path.read_text(encoding="utf-8"))
-        expected_instances = environment.get("lme", {}).get("lifecycle_expected_instances", [])
+        lme = environment.get("lme", {})
+        expected_instances = lme.get("lifecycle_expected_instances", [])
+        lifecycle_attempts = lme.get("lifecycle_attempts", [])
+        environment_provider_variant = lme.get("provider_variant")
     except (OSError, json.JSONDecodeError, AttributeError) as exc:
         raise ManifestError("lifecycle environment metadata is unavailable") from exc
     if not expected_instances and not required:
@@ -168,6 +192,63 @@ def _validate_lifecycle_artifacts(run_dir: Path, *, required: bool = False) -> N
             cleanup_records=None,
             evidence_root=run_dir / "evidence",
             run_dir=run_dir,
+            lifecycle_attempts=tuple(lifecycle_attempts),
+            manifest_run_id=manifest_run_id,
+            manifest_provider_variant=manifest_provider_variant,
+            environment_provider_variant=environment_provider_variant,
         )
     except (LifecycleCompletenessError, OSError, ValueError, KeyError) as exc:
-        raise ManifestError(f"lifecycle evidence is incomplete: {exc}") from exc
+        raise ManifestError("lifecycle evidence is incomplete") from exc
+
+
+def _has_direct_lifecycle_metadata(run_dir: Path) -> bool:
+    try:
+        environment = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+    lme = environment.get("lme") if isinstance(environment, dict) else None
+    return (
+        isinstance(lme, dict)
+        and (
+            bool(lme.get("lifecycle_attempts"))
+            or bool(lme.get("lifecycle_expected_instances"))
+        )
+    )
+
+
+def _has_direct_lifecycle_artifacts(run_dir: Path, provider_variant: object) -> bool:
+    if isinstance(provider_variant, str) and provider_variant:
+        return True
+    if _has_direct_lifecycle_metadata(run_dir):
+        return True
+    if (run_dir / "evidence").exists():
+        return True
+    from protocol.custody import CustodyError, hold_directory
+    from protocol.trace import MAX_TRACE_BYTES
+
+    run = None
+    traces = None
+    try:
+        run = hold_directory(run_dir, logical_ref=Path("."))
+        traces = run.open_dir("traces", logical_ref=Path("traces"))
+        try:
+            with os.scandir(traces.fd) as entries:
+                names = sorted(entry.name for entry in entries)
+        except OSError:
+            return True
+        for name in names:
+            try:
+                first = traces.read_regular_bounded(name, max_bytes=MAX_TRACE_BYTES).splitlines()[0]
+                row = json.loads(first)
+            except (CustodyError, IndexError, json.JSONDecodeError, UnicodeDecodeError):
+                return True
+            if isinstance(row, dict) and row.get("schema_version") == 2:
+                return True
+        return False
+    except CustodyError:
+        return (run_dir / "traces").exists()
+    finally:
+        if traces is not None:
+            traces.close()
+        if run is not None:
+            run.close()

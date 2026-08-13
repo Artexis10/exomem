@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -39,8 +40,25 @@ def _execute(out: Path, run_id: str, *, provider: str = "hybrid-rag-control", **
         )
 
 
+def _feedback6_config(out: Path, run_id: str, *, provider: str = "fixture"):
+    from lme.runner import RunConfig
+
+    return RunConfig(dataset=FIXTURE, out=out, run_id=run_id, provider=provider)
+
+
 def _manifest(run_dir: Path) -> dict:
     return json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+
+
+def _direct_session(run_dir: Path, logical_question_id: str | None) -> str:
+    environment = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
+    matches = [
+        str(item["internal_session_id"])
+        for item in environment["lme"]["lifecycle_attempts"]
+        if item["logical_question_id"] == logical_question_id
+    ]
+    assert len(matches) == 1
+    return matches[0]
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, factory) -> None:
@@ -62,6 +80,14 @@ def _install(monkeypatch: pytest.MonkeyPatch, factory) -> None:
         )
 
     monkeypatch.setattr(registry, "provider_spec", replacement)
+
+
+def _feedback6_install(monkeypatch: pytest.MonkeyPatch, factory) -> None:
+    """Replace only the factory while preserving every static descriptor field."""
+    from lme.providers import registry
+
+    original = registry.provider_spec("hybrid-rag-control")
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: replace(original, factory=factory))
 
 
 def test_legacy_provider_factory_is_a_compatible_inert_spec_accessor() -> None:
@@ -177,7 +203,10 @@ def test_traces_carry_per_session_ingest_search_answer_and_cleanup_records(clean
         sha256=hashlib.sha256(FIXTURE.read_bytes()).hexdigest(), case_count=CASE_COUNT,
     )
     question = dataset.questions[0]
-    records = list(CaseTraceReader(clean_run.run_dir, question.question_id))
+    records = list(CaseTraceReader(
+        clean_run.run_dir,
+        _direct_session(clean_run.run_dir, question.question_id),
+    ))
     kinds = [record.record for record in records]
     assert kinds.count("ingest") == len(question.sessions) + 1, "one record per session plus the canary session"
     assert {"search", "timing", "answer", "cleanup"} <= set(kinds)
@@ -324,7 +353,7 @@ def test_a_provider_whose_retrieve_raises_never_finalises_valid(
     assert manifest["status"] == "INVALID"
     assert _strict_validate(tmp_path / "crashing")[1] == "INVALID"
     failures = _rows(tmp_path / "crashing" / "failures.jsonl")
-    assert failures and failures[0]["detail"].startswith("RuntimeError")
+    assert failures and failures[0]["detail"] == "provider_operation_failed"
 
 
 def test_a_poisoned_cross_case_canary_invalidates_the_run_and_strict_validate_refuses(
@@ -633,3 +662,448 @@ def test_probe_inconclusiveness_follows_a_declared_capability_not_a_variant_name
     probes = _rows(tmp_path / "declared-capability" / "probes.jsonl")
     assert {row["outcome"] for row in probes} == {"inconclusive-by-design"}
     assert _manifest(tmp_path / "declared-capability")["provider_variant"] == "some-other-empty-control"
+
+
+def test_feedback6_preflight_and_execution_model_refuse_before_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers import registry
+    from lme.providers.base import ProviderDescriptor, ProviderSpec
+    from lme.reader import StubReader
+    from lme.runner import RunConfig, execute_run
+    from protocol.custody import CustodyUnsupported, HeldDirectory
+
+    registered = [registry.provider_spec(name) for name in registry.registered_provider_names()]
+    assert {spec.descriptor.execution_model for spec in registered} == {
+        "in-process-no-post-return-background"
+    }
+    factory_calls = 0
+
+    def factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("factory must not run")
+
+    original = registered[0]
+    declarations = ("background-capable", "unknown")
+    for declaration in declarations:
+        spec = ProviderSpec(
+            factory=factory,
+            descriptor=ProviderDescriptor(provider_id="fixture", execution_model=declaration),
+            namespace_kind=original.namespace_kind,
+            derive_namespace=original.derive_namespace,
+            runtime_binding=original.runtime_binding,
+        )
+        monkeypatch.setattr(registry, "provider_spec", lambda _name, value=spec: value)
+        config = RunConfig(dataset=FIXTURE, out=tmp_path / declaration, run_id="run", provider="fixture")
+        with pytest.raises(ValueError):
+            execute_run(config, reader=StubReader())
+
+    real_proof = HeldDirectory.prove_supported
+
+    def unsupported(_held):
+        raise CustodyUnsupported("unsupported")
+
+    foreground = ProviderSpec(
+        factory=factory,
+        descriptor=ProviderDescriptor(
+            provider_id="fixture", execution_model="in-process-no-post-return-background"
+        ),
+        namespace_kind=original.namespace_kind,
+        derive_namespace=original.derive_namespace,
+        runtime_binding=original.runtime_binding,
+    )
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: foreground)
+    monkeypatch.setattr(HeldDirectory, "prove_supported", unsupported)
+    try:
+        with pytest.raises(CustodyUnsupported):
+            execute_run(
+                RunConfig(dataset=FIXTURE, out=tmp_path / "unsupported", run_id="run", provider="fixture"),
+                reader=StubReader(),
+            )
+    finally:
+        monkeypatch.setattr(HeldDirectory, "prove_supported", real_proof)
+    assert factory_calls == 0
+
+
+def test_feedback6_constructor_and_setup_attempts_are_non_authorizing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers import registry
+    from lme.reader import StubReader
+    from lme.runner import LmeRunInvalid, execute_run
+
+    class SetupFailure:
+        cleanups = 0
+
+        def setup(self, _profile, _context):
+            raise RuntimeError("setup-secret")
+
+        def cleanup(self):
+            self.cleanups += 1
+
+        def variant_id(self):
+            raise AssertionError("variant must not be invented after failed setup")
+
+    for mode in ("constructor", "setup"):
+        provider = SetupFailure()
+        hooks: list[str] = []
+
+        class HostileConstructionError(RuntimeError):
+            def __str__(self):
+                hooks.append("str")
+                raise RuntimeError("constructor-render-hook")
+
+            def __repr__(self):
+                hooks.append("repr")
+                raise RuntimeError("constructor-render-hook")
+
+            def add_note(self, _note):
+                hooks.append("add_note")
+                raise RuntimeError("constructor-note-hook")
+
+        hostile = HostileConstructionError()
+
+        def factory():
+            if mode == "constructor":
+                raise hostile
+            return provider
+
+        if mode == "setup":
+            provider.setup = lambda *_args: (_ for _ in ()).throw(hostile)
+
+        _feedback6_install(monkeypatch, factory)
+        with pytest.raises(LmeRunInvalid) as rejected:
+            execute_run(
+                _feedback6_config(tmp_path / mode, f"feedback6-{mode}"),
+                reader=StubReader(),
+            )
+        environment = json.loads((rejected.value.run_dir / "environment.json").read_text(encoding="utf-8"))
+        attempts = environment["lme"]["lifecycle_attempts"]
+        assert len(attempts) == 1
+        attempt = attempts[0]
+        assert attempt["factory_returned"] is (mode == "setup")
+        assert attempt["setup_completed"] is False
+        assert attempt["provider_variant"] is None
+        assert attempt["failure_code"] == f"provider_{mode}_failed"
+        assert environment["lme"]["lifecycle_expected_instances"] == []
+        assert list((rejected.value.run_dir / "traces").glob("*.jsonl")) == []
+        assert list((rejected.value.run_dir / "evidence").rglob("provider-cleanup-observation.json")) == []
+        assert provider.cleanups == (1 if mode == "setup" else 0)
+        assert hooks == []
+        fd_targets = []
+        for descriptor in Path("/proc/self/fd").iterdir():
+            try:
+                fd_targets.append(os.readlink(descriptor))
+            except OSError:
+                continue
+        assert not any(
+            str(rejected.value.run_dir) in target
+            and str(attempt["internal_session_id"]) in target
+            for target in fd_targets
+        )
+
+
+def test_feedback6_direct_run_id_refuses_unsafe_components_before_factory_or_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers import registry
+    from lme.reader import StubReader
+    from lme.runner import execute_run
+
+    called = 0
+
+    def factory():
+        nonlocal called
+        called += 1
+        raise AssertionError("unsafe run id reached factory")
+
+    _feedback6_install(monkeypatch, factory)
+    violations: list[str] = []
+
+    def snapshot(root: Path) -> tuple[tuple[str, str, bytes], ...]:
+        rows: list[tuple[str, str, bytes]] = []
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                rows.append((relative, "symlink", os.readlink(path).encode()))
+            elif path.is_dir():
+                rows.append((relative, "directory", b""))
+            else:
+                rows.append((relative, "file", path.read_bytes()))
+        return tuple(rows)
+
+    for index, raw in enumerate(("", ".", "..", "../escape", "a/b", "a\\b", "/absolute")):
+        root = tmp_path / f"case-{index}"
+        outside = root / "outside"
+        outside.mkdir(parents=True)
+        (outside / "sentinel").write_bytes(b"outside")
+        before = snapshot(root)
+        try:
+            execute_run(_feedback6_config(root / "out", raw), reader=StubReader())
+        except ValueError:
+            pass
+        except BaseException:
+            violations.append(raw)
+        else:
+            violations.append(raw)
+        if snapshot(root) != before:
+            violations.append(f"disk:{raw}")
+    assert called == 0
+    assert violations == []
+
+
+def test_feedback6_raw_question_ids_are_logical_only_and_internal_ids_injective(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
+    from lme.reader import StubReader
+    from lme.runner import RunConfig, execute_run
+
+    rows = json.loads(FIXTURE.read_text(encoding="utf-8"))[:2]
+    raw_ids = ("../collision", "collision")
+    for row, raw_id in zip(rows, raw_ids, strict=True):
+        row["question_id"] = raw_id
+    dataset = tmp_path / "unsafe-ids.json"
+    dataset.write_text(json.dumps(rows), encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_sentinel = outside / "sentinel"
+    outside_sentinel.write_bytes(b"outside")
+    contexts = []
+
+    class Recording(HybridRagDirectProvider):
+        def setup(self, profile, context):
+            contexts.append(context)
+            return super().setup(profile, context)
+
+    _feedback6_install(monkeypatch, Recording)
+    with mock.patch.dict(os.environ, _fixture_env()):
+        result = execute_run(
+            RunConfig(
+                dataset=dataset, dataset_sha256=hashlib.sha256(dataset.read_bytes()).hexdigest(),
+                dataset_revision="fixture", pilot=2, out=tmp_path / "out", run_id="safe-run",
+                provider="hybrid-rag-control",
+            ),
+            reader=StubReader(),
+        )
+    environment = json.loads((result.run_dir / "environment.json").read_text(encoding="utf-8"))["lme"]
+    scored = [row for row in environment["lifecycle_attempts"] if row["logical_question_id"] is not None]
+    assert [row["logical_question_id"] for row in scored] == list(raw_ids)
+    internal = [row["internal_session_id"] for row in scored]
+    assert len(internal) == len(set(internal)) == 2
+    assert all(value not in raw_ids and "/" not in value and "\\" not in value for value in internal)
+    assert {path.stem for path in (result.run_dir / "traces").iterdir()} == {
+        row["internal_session_id"] for row in environment["lifecycle_attempts"] if row["factory_returned"]
+    }
+    serialized = "\n".join(
+        path.read_text(encoding="utf-8") for path in result.run_dir.rglob("*.json*") if path.is_file()
+    )
+    assert f"/proc/{os.getpid()}/fd/" not in serialized
+    assert not (result.run_dir / "collision.jsonl").exists()
+    assert outside_sentinel.read_bytes() == b"outside"
+    scored_contexts = contexts[1:]
+    assert len(scored_contexts) == 2
+    assert all(str(context.work_root).startswith(f"/proc/{os.getpid()}/fd/") for context in scored_contexts)
+    assert all(str(context.evidence_root).startswith(f"/proc/{os.getpid()}/fd/") for context in scored_contexts)
+    for context in scored_contexts:
+        assert not context.work_ref.is_absolute() and ".." not in context.work_ref.parts
+        assert not context.evidence_ref.is_absolute() and ".." not in context.evidence_ref.parts
+
+
+def test_feedback6_session_work_and_evidence_fds_exist_before_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers import registry
+    from lme.reader import StubReader
+    from lme.runner import LmeRunInvalid, execute_run
+
+    run_dir = tmp_path / "out" / "feedback6-prefactory-fds"
+    observed: dict[str, bool] = {}
+    replacements: list[Path] = []
+
+    def fd_holds(path: Path) -> bool:
+        identity = os.lstat(path)
+        for candidate in Path("/proc/self/fd").iterdir():
+            try:
+                status = os.stat(candidate)
+            except OSError:
+                continue
+            if (status.st_dev, status.st_ino) == (identity.st_dev, identity.st_ino):
+                return True
+        return False
+
+    class ConstructorStop(RuntimeError):
+        pass
+
+    def factory():
+        for label in ("sessions", "work", "evidence"):
+            parent = run_dir / label
+            children = list(parent.iterdir())
+            assert len(children) == 1
+            original = children[0]
+            observed[label] = fd_holds(original)
+            displaced = tmp_path / f"displaced-{label}"
+            original.rename(displaced)
+            original.mkdir()
+            sentinel = original / "replacement-sentinel"
+            sentinel.write_bytes(label.encode())
+            replacements.append(sentinel)
+        raise ConstructorStop()
+
+    _feedback6_install(monkeypatch, factory)
+    with pytest.raises(LmeRunInvalid):
+        execute_run(
+            _feedback6_config(tmp_path / "out", "feedback6-prefactory-fds"),
+            reader=StubReader(),
+        )
+    assert observed == {"sessions": True, "work": True, "evidence": True}
+    assert [path.read_bytes() for path in replacements] == [b"sessions", b"work", b"evidence"]
+
+
+def test_feedback6_hostile_runner_ledger_and_terminalization_never_mask_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lme.runner as runner
+    from lme.providers import registry
+    from lme.reader import StubReader
+
+    hooks: list[str] = []
+
+    class Hostile(BaseException):
+        @property
+        def fact(self):
+            hooks.append("fact")
+            raise RuntimeError("fact-hook-ran")
+
+        def __str__(self):
+            hooks.append("str")
+            raise RuntimeError("rendered-secret")
+
+        def __repr__(self):
+            hooks.append("repr")
+            raise RuntimeError("rendered-secret")
+
+        def add_note(self, _note):
+            hooks.append("add_note")
+            raise RuntimeError("mutated-primary")
+
+    primary = Hostile()
+    ledger_failure = Hostile()
+    terminal_failure = Hostile()
+
+    class Interrupting:
+        def setup(self, _profile, _context):
+            raise primary
+
+        def cleanup(self):
+            return None
+
+        def variant_id(self):
+            return "unreachable"
+
+    _feedback6_install(monkeypatch, Interrupting)
+    real_write_json = runner._write_json
+    environment_writes = 0
+
+    def write_json(path, payload):
+        nonlocal environment_writes
+        if path.name == "environment.json":
+            environment_writes += 1
+            if environment_writes > 1:
+                raise ledger_failure
+        return real_write_json(path, payload)
+
+    monkeypatch.setattr(runner, "_write_json", write_json)
+    monkeypatch.setattr(runner, "finalize_manifest", lambda *_args, **_kwargs: (_ for _ in ()).throw(terminal_failure))
+    caught: BaseException | None = None
+    try:
+        runner.execute_run(
+            _feedback6_config(tmp_path, "feedback6-hostile-runner"),
+            reader=StubReader(),
+        )
+    except BaseException as exc:
+        caught = exc
+    assert caught is primary
+    assert hooks == []
+    artifacts = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in (tmp_path / "feedback6-hostile-runner").rglob("*") if path.is_file()
+    )
+    assert "rendered-secret" not in artifacts
+
+
+def test_feedback7_runner_retirement_control_flow_keeps_exact_first_control_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
+    from lme.reader import StubReader
+    from lme.runner import execute_run
+    from protocol.custody import HeldDirectory
+
+    class RetirementControl(BaseException):
+        pass
+
+    control = RetirementControl()
+    real_retire = HeldDirectory.retire
+
+    def interrupt_work(held, **kwargs):
+        if held.logical_ref.parts and held.logical_ref.parts[0] == "work":
+            raise control
+        return real_retire(held, **kwargs)
+
+    _feedback6_install(monkeypatch, HybridRagDirectProvider)
+    monkeypatch.setattr(HeldDirectory, "retire", interrupt_work)
+    caught: BaseException | None = None
+    try:
+        execute_run(_feedback6_config(tmp_path, "feedback7-retirement"), reader=StubReader())
+    except BaseException as exc:
+        caught = exc
+
+    assert caught is control
+
+
+def test_feedback8_runner_retirement_keeps_first_control_and_closes_custody(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.reader import StubReader
+    from lme.runner import execute_run
+    from protocol.custody import HeldDirectory
+
+    class ProviderControl(BaseException):
+        pass
+
+    class RetirementControl(BaseException):
+        pass
+
+    primary = ProviderControl()
+    secondary = RetirementControl()
+    baseline = set(os.listdir("/proc/self/fd"))
+
+    class Interrupting:
+        def setup(self, _profile, _context) -> None:
+            raise primary
+
+        def cleanup(self) -> None:
+            return None
+
+        def variant_id(self) -> str:
+            return "unreachable"
+
+    real_retire = HeldDirectory.retire
+
+    def interrupt_retirement(held, **kwargs):
+        if held.logical_ref.parts and held.logical_ref.parts[0] == "work":
+            raise secondary
+        return real_retire(held, **kwargs)
+
+    _feedback6_install(monkeypatch, Interrupting)
+    monkeypatch.setattr(HeldDirectory, "retire", interrupt_retirement)
+    caught: BaseException | None = None
+    try:
+        execute_run(_feedback6_config(tmp_path, "feedback8-retirement"), reader=StubReader())
+    except BaseException as exc:
+        caught = exc
+
+    assert caught is primary
+    assert set(os.listdir("/proc/self/fd")) == baseline

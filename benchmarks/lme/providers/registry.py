@@ -9,7 +9,7 @@ from pathlib import Path
 
 from protocol.namespace import derive_namespace
 
-from .base import ProviderRuntimeBinding, ProviderSpec
+from .base import ProviderDescriptor, ProviderRuntimeBinding, ProviderSpec
 
 from .exomem_direct import ExomemDirectProvider
 from .hybrid_rag_direct import HybridRagDirectProvider
@@ -18,7 +18,12 @@ from .null_direct import NullDirectProvider
 def _root_lstat(context):
     root = context.work_root
     try:
-        mode = os.lstat(root).st_mode
+        capability_prefix = f"/proc/{os.getpid()}/fd/"
+        mode = (
+            os.stat(root).st_mode
+            if str(root).startswith(capability_prefix)
+            else os.lstat(root).st_mode
+        )
     except FileNotFoundError:
         path = {"kind": "path-lstat", "path": "session-root", "raw_kind": "missing", "entries": []}
     else:
@@ -75,10 +80,12 @@ _EXOMEM_BINDING = ProviderRuntimeBinding(("namespace-membership", "provider-stat
 _HYBRID_BINDING = ProviderRuntimeBinding(("namespace-membership", "provider-state", "session-root"), _hybrid_state)
 _NULL_BINDING = ProviderRuntimeBinding(("namespace-membership", "provider-state", "session-root"), _null_state)
 
+_FOREGROUND = "in-process-no-post-return-background"
+
 _REGISTRY: dict[str, ProviderSpec] = {
-    "exomem-source-only": ProviderSpec(ExomemDirectProvider, "exomem-source-only", "exomem", lambda run_id, session_id: derive_namespace(run_id, session_id, "exomem"), _EXOMEM_BINDING),
-    "hybrid-rag-control": ProviderSpec(HybridRagDirectProvider, "hybrid-rag-control", "hybrid-rag", lambda run_id, session_id: derive_namespace(run_id, session_id, "hybrid-rag"), _HYBRID_BINDING),
-    "no-memory": ProviderSpec(NullDirectProvider, "no-memory", "null", lambda run_id, session_id: derive_namespace(run_id, session_id, "null"), _NULL_BINDING),
+    "exomem-source-only": ProviderSpec(ExomemDirectProvider, ProviderDescriptor("exomem-source-only", _FOREGROUND), "exomem", lambda run_id, session_id: derive_namespace(run_id, session_id, "exomem"), _EXOMEM_BINDING),
+    "hybrid-rag-control": ProviderSpec(HybridRagDirectProvider, ProviderDescriptor("hybrid-rag-control", _FOREGROUND), "hybrid-rag", lambda run_id, session_id: derive_namespace(run_id, session_id, "hybrid-rag"), _HYBRID_BINDING),
+    "no-memory": ProviderSpec(NullDirectProvider, ProviderDescriptor("no-memory", _FOREGROUND), "null", lambda run_id, session_id: derive_namespace(run_id, session_id, "null"), _NULL_BINDING),
 }
 
 

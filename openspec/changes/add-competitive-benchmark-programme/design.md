@@ -372,6 +372,52 @@
     READINESS_UNVERIFIABLE terminalization and later report loading require
     exact expected-instance trace/observation completeness; a one-case run is
     isolation-unverifiable because it has no prior live session to probe.
+    Direct registration also declares an in-process, no-post-return-background
+    execution model; unknown or background-capable declarations refuse before
+    factory invocation.  On supported POSIX/Linux filesystems, the runner
+    functionally proves descriptor-relative custody and `/proc/<runner-pid>/fd`
+    reopening on the actual output filesystem, then holds distinct session,
+    work, and evidence directory capabilities before factory invocation.
+    Providers receive only work/evidence capability paths plus canonical logical
+    refs; PID/fd paths are never serialized.  Cleanup, exclusive bounded
+    observation publication/reopen, post-publication live re-observation, and
+    binding checks all precede expected-instance/trace registration; only then
+    may the runner descriptor-relatively retire the held work inode.  A rename
+    loses authority at the original edge, forces INVALID, and never authorizes
+    touching its replacement.
+
+    Provider-visible entries are atomically moved into a random mode-0700
+    runner-private quarantine and identity-checked.  Under the registered
+    in-process, no-post-return-background execution model, final removal of an
+    empty private quarantine container is outside the adversarial provider
+    boundary.  This does not claim resistance to arbitrary unrelated same-UID
+    actors that guess or replace that private name; that threat requires process
+    isolation or an amendment.  Original, provider-exposed, and public names
+    still require replacement survival or fail-closed behavior.
+
+    Direct v2 filesystem identity uses an injective runner-generated internal
+    session ID, while raw question IDs remain logical attempt metadata.  A
+    terminally publishable direct run requires the exact bijection
+    `factory-returned attempts == expected instances == v2 trace files == traces
+    with one cleanup row == reopened observations`, including run, namespace,
+    provider, variant, filename/session, path, and digest bindings.  Later load
+    inventories every trace/evidence entry with bounded no-follow traversal and
+    rejects unsafe names, unknown suffixes, nonregulars, empty/oversized/mixed
+    traces, duplicate or missing cleanup rows, and orphans.  It inventories and
+    validates every present direct marker and artifact.  Coherent erasure or
+    rewrite of every direct discriminator, v2 trace, and cleanup observation
+    can be byte-identical to a genuine legacy run and is outside this frozen v2
+    claim.  Stronger direct-versus-legacy provenance requires a versioned
+    manifest discriminator and, against hostile same-UID rewrite, an
+    authenticated external commitment; this design introduces neither.
+
+    This custody boundary deliberately covers direct-provider session
+    work/evidence roots and lifecycle-authorizing v2 traces/cleanup observations
+    only.  The caller-supplied run directory is the trust anchor for each
+    command.  Ordinary manifest, environment, dataset, budget, and report I/O
+    keeps its existing contract and is not claimed race-proof against same-UID
+    replacement of the entire run directory; later load starts a fresh
+    no-follow traversal and does not claim cross-command directory authenticity.
 
 ## Execution
 

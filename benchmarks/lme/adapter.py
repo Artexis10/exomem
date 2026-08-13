@@ -78,21 +78,16 @@ class LmeExomemAdapter(ExomemLocalAdapter):
                 from exomem import embeddings
 
                 embeddings.get_clip_model()
-        except AdapterEnvironmentError as exc:
+        except AdapterEnvironmentError:
             self.cleanup()
             raise AdapterEnvironmentError(
-                f"missing semantic capability: the {capability} could not load; "
-                "run `uv sync --extra embeddings` and warm the Hugging Face embedding "
-                f"model cache before an offline LME run ({exc})"
-            ) from exc
-        except Exception as exc:
+                "direct provider setup failed"
+            )
+        except Exception:
             self.cleanup()
             raise AdapterEnvironmentError(
-                f"missing semantic capability: the {capability} could not load "
-                f"({type(exc).__name__}: {str(exc)[:160]}); run "
-                "`uv sync --extra embeddings` and warm the Hugging Face embedding "
-                "model cache before an offline LME run"
-            ) from exc
+                "direct provider setup failed"
+            )
 
     @staticmethod
     def _slug(handle: CaseHandle, session_ordinal: int) -> str:
@@ -145,8 +140,8 @@ class LmeExomemAdapter(ExomemLocalAdapter):
                 ok, detail = True, None
             except AdapterEnvironmentError:
                 raise
-            except Exception as exc:  # failures remain in the question denominator
-                ok, detail = False, f"{type(exc).__name__}: {exc}"
+            except Exception:  # failures remain in the question denominator
+                ok, detail = False, "direct provider ingestion failed"
             results.append(
                 OpResult(
                     seq=sequence,

@@ -12,6 +12,21 @@ from unittest import mock
 import pytest
 
 
+def _attempts(run_dir: Path) -> list[dict[str, object]]:
+    environment = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
+    return environment["lme"]["lifecycle_attempts"]
+
+
+def _attempt_session(run_dir: Path, logical_question_id: str | None) -> str:
+    matches = [
+        str(item["internal_session_id"])
+        for item in _attempts(run_dir)
+        if item["logical_question_id"] == logical_question_id
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
 def _context(tmp_path: Path):
     from lme.providers.base import ProviderSessionContext
 
@@ -63,17 +78,20 @@ def _binding():
         required_surface_ids=("provider-state", "session-root"),
         observe=lambda _context, provider: (
             {"kind": "provider-state", "remaining_record_ids": list(provider.export_state()), "backend_active": False},
-            {"kind": "path-lstat", "path": "work", "raw_kind": "missing", "entries": []},
+            {"kind": "path-lstat", "path": "session-root", "raw_kind": "missing", "entries": []},
         ),
     )
 
 
 def test_provider_spec_is_inert_and_session_context_is_immutable(tmp_path: Path) -> None:
-    from lme.providers.base import ProviderSessionContext
+    from lme.providers.base import ProviderDescriptor, ProviderSessionContext
     from lme.providers.registry import provider_spec
 
     spec = provider_spec("no-memory")
-    assert spec.descriptor == "no-memory"
+    assert spec.descriptor == ProviderDescriptor(
+        provider_id="no-memory",
+        execution_model="in-process-no-post-return-background",
+    )
     assert spec.factory.__name__ == "NullDirectProvider"
     context = _context(tmp_path)
     with pytest.raises(FrozenInstanceError):
@@ -142,7 +160,8 @@ def test_constructor_failure_has_no_provider_state_claim_and_terminalizes(tmp_pa
     assert environment["lme"]["lifecycle_expected_instances"] == []
     assert not list((run_dir / "traces").glob("*.jsonl"))
     assert not list((run_dir / "evidence").rglob("provider-cleanup-observation.json"))
-    assert not (run_dir / "work").exists()
+    assert (run_dir / "work").is_dir()
+    assert list((run_dir / "work").iterdir()) == []
 
 
 def test_provider_claims_cannot_create_cleanup_truth(tmp_path: Path) -> None:
@@ -151,7 +170,10 @@ def test_provider_claims_cannot_create_cleanup_truth(tmp_path: Path) -> None:
     provider = _Provider()
     provider.cleanup = lambda: True  # type: ignore[method-assign]
     bad_binding = _binding()
-    object.__setattr__(bad_binding, "observe", lambda _context, _provider: ({"kind": "provider-state", "remaining_record_ids": ["still-here"], "backend_active": True},))
+    object.__setattr__(bad_binding, "observe", lambda _context, _provider: (
+        {"kind": "provider-state", "remaining_record_ids": ["still-here"], "backend_active": True},
+        {"kind": "path-lstat", "path": "session-root", "raw_kind": "missing", "entries": []},
+    ))
     with pytest.raises(CleanupUnproved, match="absence"):
         run_provider_lifecycle(
             provider=provider, profile=None, context=_context(tmp_path), binding=bad_binding,
@@ -263,12 +285,17 @@ def test_every_owned_stage_failure_cleans_once_and_terminalizes(tmp_path: Path, 
 
     if stage == "setup":
         provider.failure = RuntimeError(stage)
-    with pytest.raises(LifecycleRunError, match=stage) as failure:
+    with pytest.raises(LifecycleRunError) as failure:
         run_provider_lifecycle(
             provider=provider, profile=None, context=_context(tmp_path), binding=_binding(),
             requested_provider="fixture", operation=operation,
         )
     assert provider.cleanups == 1
+    assert str(failure.value) == "direct provider lifecycle failed"
+    assert failure.value.primary.args == (stage,)
+    assert failure.value.fact == (
+        "provider_setup_failed" if stage == "setup" else "provider_operation_failed"
+    )
     assert failure.value.terminal_status == "INVALID"
     if stage != "setup":
         assert stage in observed
@@ -284,13 +311,14 @@ def test_cleanup_and_observation_failures_are_secondary_to_primary_failure(tmp_p
         raise RuntimeError("cleanup failure")
 
     provider.cleanup = cleanup  # type: ignore[method-assign]
-    with pytest.raises(LifecycleRunError, match="primary") as failure:
+    with pytest.raises(LifecycleRunError) as failure:
         run_provider_lifecycle(
             provider=provider, profile=None, context=_context(tmp_path), binding=_binding(),
             requested_provider="fixture", operation=lambda _provider: (_ for _ in ()).throw(RuntimeError("primary")),
         )
     assert provider.cleanups == 1
-    assert "cleanup failure" in failure.value.secondary_failures
+    assert failure.value.primary.args == ("primary",)
+    assert failure.value.secondary_facts == ("provider_cleanup_failed",)
     assert failure.value.terminal_status == "INVALID"
 
 
@@ -327,7 +355,7 @@ def test_cleanup_observation_reobserves_snapshot_and_rejects_mutation(tmp_path: 
         remaining = [] if calls == 1 else ["mutated"]
         return (
             {"kind": "provider-state", "remaining_record_ids": remaining, "backend_active": False},
-            {"kind": "path-lstat", "path": "work", "raw_kind": "missing", "entries": []},
+            {"kind": "path-lstat", "path": "session-root", "raw_kind": "missing", "entries": []},
         )
 
     binding = _binding()
@@ -495,14 +523,17 @@ def test_feedback1_pre_owned_neutralization_failure_still_cleans_returned_provid
         providers.append(provider)
         return provider
 
-    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(lambda _spec: factory()))
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
     monkeypatch.setattr(runner, "neutralize", lambda *_args: (_ for _ in ()).throw(RuntimeError("neutralization failed")))
-    with pytest.raises(LmeRunInvalid, match="neutralization"):
+    with pytest.raises(LmeRunInvalid, match="provider_operation_failed"):
         execute_run(_mini_config(tmp_path, 1, "feedback1-pre-owner", provider="fixture"), reader=StubReader())
     assert len(providers) == 2
-    assert [provider.context.session_id for provider in providers] == ["__diagnostic__", "mini-single-user"]
-    assert all(provider.cleanups == 1 for provider in providers)
     run_dir = tmp_path / "feedback1-pre-owner"
+    assert [provider.context.session_id for provider in providers] == [
+        _attempt_session(run_dir, None),
+        _attempt_session(run_dir, "mini-single-user"),
+    ]
+    assert all(provider.cleanups == 1 for provider in providers)
     assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["status"] == "INVALID"
     assert not list((run_dir / "evidence").rglob("orphan*.json"))
 
@@ -512,7 +543,7 @@ def test_feedback1_runner_terminalizes_before_reraising_base_exception(tmp_path:
     from lme.reader import StubReader
     from lme.runner import execute_run
 
-    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(lambda _spec: _Provider(failure=KeyboardInterrupt())))
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(lambda: _Provider(failure=KeyboardInterrupt())))
     with pytest.raises(KeyboardInterrupt) as interrupted:
         execute_run(_mini_config(tmp_path, 1, "feedback1-base", provider="fixture"), reader=StubReader())
     assert interrupted.value.args == ()
@@ -538,8 +569,12 @@ def test_feedback1_diagnostics_use_a_separate_lifecycle_session_before_scoring(
     monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(Recording))
     with mock.patch.dict(os.environ, {"PROTOCOL_FIXTURE_EMBEDDER": "1", "EXOMEM_DISABLE_EMBEDDINGS": "1"}):
         execute_run(_mini_config(tmp_path, 2, "feedback1-diagnostic", provider="fixture"), reader=StubReader())
-    assert contexts[0].startswith("__diagnostic__")
-    assert contexts[1:] == ["mini-single-user", "mini-single-assistant_abs"]
+    run_dir = tmp_path / "feedback1-diagnostic"
+    assert contexts == [
+        _attempt_session(run_dir, None),
+        _attempt_session(run_dir, "mini-single-user"),
+        _attempt_session(run_dir, "mini-single-assistant_abs"),
+    ]
 
 
 def test_feedback1_variant_drift_after_retrieval_refuses_terminal_validity(
@@ -667,7 +702,7 @@ def test_feedback1_started_manifest_has_null_variant_until_factory_setup(tmp_pat
 
     observed = []
 
-    def factory(_spec):
+    def factory():
         observed.append(json.loads((tmp_path / "feedback1-started-null" / "manifest.json").read_text(encoding="utf-8"))["provider_variant"])
         return _Provider()
 
@@ -754,7 +789,7 @@ def test_feedback1_runner_failure_ledger_covers_all_post_factory_boundaries(
                 raise RuntimeError("retrieve")
             return []
 
-    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(lambda _spec: providers.append(FailingProvider()) or providers[-1]))
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(lambda: providers.append(FailingProvider()) or providers[-1]))
     if boundary == "neutralize":
         monkeypatch.setattr(runner, "neutralize", lambda *_args: (_ for _ in ()).throw(RuntimeError("neutralize")))
     elif boundary == "leakage":
@@ -839,8 +874,14 @@ def test_feedback1_dirfd_evidence_io_refuses_or_contains_races(tmp_path: Path, a
         (context.evidence_root / "provider-cleanup-observation.json").write_text("occupied", encoding="utf-8")
     else:
         (context.evidence_root / "provider-cleanup-observation.json").mkdir()
-    with pytest.raises(CleanupUnproved):
-        run_provider_lifecycle(provider=_Provider(), profile=None, context=context, binding=_binding(), requested_provider="fixture", operation=lambda _provider: None)
+    if attack == "intermediate":
+        run_provider_lifecycle(
+            provider=_Provider(), profile=None, context=context, binding=_binding(),
+            requested_provider="fixture", operation=lambda _provider: None,
+        )
+    else:
+        with pytest.raises(CleanupUnproved):
+            run_provider_lifecycle(provider=_Provider(), profile=None, context=context, binding=_binding(), requested_provider="fixture", operation=lambda _provider: None)
     assert not (outside / "provider-cleanup-observation.json").exists()
 
 
@@ -862,11 +903,18 @@ def _mini_config(tmp_path: Path, count: int, run_id: str, *, provider: str) -> o
 
 
 def _runner_spec(factory):
-    return type("Spec", (), {
-        "factory": factory, "descriptor": "fixture", "namespace_kind": "fixture",
-        "derive_namespace": staticmethod(lambda run_id, session_id: f"fixture-{run_id}-{session_id}"),
-        "runtime_binding": _binding(),
-    })()
+    from lme.providers.base import ProviderDescriptor, ProviderSpec
+
+    return ProviderSpec(
+        factory=factory,
+        descriptor=ProviderDescriptor(
+            provider_id="fixture",
+            execution_model="in-process-no-post-return-background",
+        ),
+        namespace_kind="fixture",
+        derive_namespace=lambda run_id, session_id: f"fixture-{run_id}-{session_id}",
+        runtime_binding=_binding(),
+    )
 
 
 def test_one_case_isolation_records_typed_na_without_a_foreign_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1006,7 +1054,10 @@ def test_runner_delegates_representative_failures_to_one_lifecycle_owner(
 
         monkeypatch.setattr(runner, "CaseTraceWriter", FailingWriter)
     with mock.patch.dict(os.environ, {"EXOMEM_DISABLE_EMBEDDINGS": "1"}):
-        with pytest.raises(LmeRunInvalid, match=stage) as rejected:
+        expected_code = (
+            "provider_setup_failed" if stage == "setup" else "provider_operation_failed"
+        )
+        with pytest.raises(LmeRunInvalid, match=expected_code) as rejected:
             execute_run(
                 _mini_config(tmp_path, 2, f"runner-{stage}", provider="fixture"),
                 reader=FailingReader(),
@@ -1243,7 +1294,8 @@ def test_feedback2_exomem_observer_uses_real_vault_bytes_not_allocated_wrapper(
         operation=lambda provider: provider.ingest_case(events, handle),
     )
     assert variant == "exomem-source-only"
-    assert not clean_context.work_root.exists()
+    assert clean_context.work_root.is_dir()
+    assert list(clean_context.work_root.iterdir()) == []
 
     retained_context = _feedback2_context(tmp_path / "retained", "exomem-retained")
     retained_provider = spec.factory()
@@ -1391,7 +1443,7 @@ def test_feedback2_blocking_leakage_after_factory_return_is_owned_and_ledgered(
 
     providers: list[_Provider] = []
 
-    def factory(_spec) -> _Provider:
+    def factory() -> _Provider:
         providers.append(_Provider())
         return providers[-1]
 
@@ -1401,7 +1453,7 @@ def test_feedback2_blocking_leakage_after_factory_return_is_owned_and_ledgered(
         "scan_ingest",
         lambda *_args, **_kwargs: [type("Finding", (), {"detector": "gold-answer"})()],
     )
-    with pytest.raises(LmeRunInvalid, match="leakage") as rejected:
+    with pytest.raises(LmeRunInvalid, match="provider_operation_failed") as rejected:
         execute_run(
             _mini_config(tmp_path, 1, "feedback2-owned-leakage", provider="fixture"),
             reader=StubReader(),
@@ -1410,8 +1462,16 @@ def test_feedback2_blocking_leakage_after_factory_return_is_owned_and_ledgered(
     assert [provider.cleanups for provider in providers] == [1, 1]
     environment = json.loads((rejected.value.run_dir / "environment.json").read_text(encoding="utf-8"))
     expected = environment["lme"]["lifecycle_expected_instances"]
-    assert {item["session_id"] for item in expected} == {"__diagnostic__", "mini-single-user"}
-    trace = list(CaseTraceReader(rejected.value.run_dir, "mini-single-user"))
+    returned = {
+        item["internal_session_id"]
+        for item in environment["lme"]["lifecycle_attempts"]
+        if item["factory_returned"]
+    }
+    assert {item["session_id"] for item in expected} == returned
+    trace = list(CaseTraceReader(
+        rejected.value.run_dir,
+        _attempt_session(rejected.value.run_dir, "mini-single-user"),
+    ))
     assert len([row for row in trace if row.record == "cleanup"]) == 1
 
 
@@ -1438,20 +1498,28 @@ def test_feedback2_failure_ledger_is_written_for_operation_and_cleanup_failures(
             if failure_mode == "cleanup":
                 raise RuntimeError("feedback2 cleanup failure")
 
-    def factory(_spec):
+    def factory():
         nonlocal calls
         calls += 1
         return _Feedback2RememberingProvider() if calls == 1 else Failing()
 
     monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
-    with pytest.raises(LmeRunInvalid, match=failure_mode) as rejected:
+    failure_code = (
+        "provider_operation_failed" if failure_mode == "retrieve" else "provider_cleanup_failed"
+    )
+    with pytest.raises(LmeRunInvalid, match=failure_code) as rejected:
         execute_run(
             _mini_config(tmp_path, 1, f"feedback2-ledger-{failure_mode}", provider="fixture"),
             reader=StubReader(),
         )
     environment = json.loads((rejected.value.run_dir / "environment.json").read_text(encoding="utf-8"))
     expected = environment["lme"]["lifecycle_expected_instances"]
-    assert {item["session_id"] for item in expected} == {"__diagnostic__", "mini-single-user"}
+    returned = {
+        item["internal_session_id"]
+        for item in environment["lme"]["lifecycle_attempts"]
+        if item["factory_returned"]
+    }
+    assert {item["session_id"] for item in expected} == returned
     assert all(
         set(item) == {
             "run_id", "requested_provider", "session_id", "namespace", "provider_variant",
@@ -1459,9 +1527,13 @@ def test_feedback2_failure_ledger_is_written_for_operation_and_cleanup_failures(
         }
         for item in expected
     )
-    cleanup_rows = [row for row in CaseTraceReader(rejected.value.run_dir, "mini-single-user") if row.record == "cleanup"]
+    scored_session = _attempt_session(rejected.value.run_dir, "mini-single-user")
+    cleanup_rows = [
+        row for row in CaseTraceReader(rejected.value.run_dir, scored_session)
+        if row.record == "cleanup"
+    ]
     assert len(cleanup_rows) == 1
-    expected_case = next(item for item in expected if item["session_id"] == "mini-single-user")
+    expected_case = next(item for item in expected if item["session_id"] == scored_session)
     assert cleanup_rows[0].observation_path == expected_case["observation_path"]
     assert cleanup_rows[0].observation_sha256 == expected_case["observation_sha256"]
 
@@ -1480,11 +1552,15 @@ def test_feedback2_constructor_control_flow_keeps_exact_identity_after_root_clea
     failure = ConstructorControl(failed_factory)
     run_id = f"feedback2-constructor-{failed_factory}"
     calls = 0
+    constructed_sessions: list[str] = []
 
-    def factory(_spec):
+    def factory():
         nonlocal calls
         calls += 1
-        session = "__diagnostic__" if calls == 1 else "mini-single-user"
+        work_children = list((tmp_path / run_id / "work").iterdir())
+        assert len(work_children) == 1
+        session = work_children[0].name
+        constructed_sessions.append(session)
         work = tmp_path / run_id / "work" / session
         evidence = tmp_path / run_id / "evidence" / session
         assert work.is_dir() and evidence.is_dir()
@@ -1496,7 +1572,7 @@ def test_feedback2_constructor_control_flow_keeps_exact_identity_after_root_clea
     with pytest.raises(ConstructorControl) as raised:
         execute_run(_mini_config(tmp_path, 1, run_id, provider="fixture"), reader=StubReader())
     assert raised.value is failure
-    failed_session = "__diagnostic__" if failed_factory == "diagnostic" else "mini-single-user"
+    failed_session = constructed_sessions[-1]
     assert not (tmp_path / run_id / "work" / failed_session).exists()
     assert not (tmp_path / run_id / "evidence" / failed_session).exists()
     manifest = json.loads((tmp_path / run_id / "manifest.json").read_text(encoding="utf-8"))
@@ -1512,22 +1588,26 @@ def test_feedback2_ordinary_diagnostic_constructor_failure_is_typed_and_cleans_r
 
     run_id = "feedback2-constructor-ordinary"
     calls = 0
+    failed_session: str | None = None
 
-    def factory(_spec):
-        nonlocal calls
+    def factory():
+        nonlocal calls, failed_session
         calls += 1
         if calls == 1:
-            assert (tmp_path / run_id / "work" / "__diagnostic__").is_dir()
-            assert (tmp_path / run_id / "evidence" / "__diagnostic__").is_dir()
+            work_children = list((tmp_path / run_id / "work").iterdir())
+            assert len(work_children) == 1
+            failed_session = work_children[0].name
+            assert (tmp_path / run_id / "evidence" / failed_session).is_dir()
             raise RuntimeError("ordinary constructor")
         return _Feedback2RememberingProvider()
 
     monkeypatch.setattr(registry, "provider_spec", lambda _name: _runner_spec(factory))
-    with pytest.raises(LmeRunInvalid, match="ProviderConstructionFailure") as rejected:
+    with pytest.raises(LmeRunInvalid, match="provider_constructor_failed") as rejected:
         execute_run(_mini_config(tmp_path, 1, run_id, provider="fixture"), reader=StubReader())
     assert calls == 1
-    assert not (rejected.value.run_dir / "work" / "__diagnostic__").exists()
-    assert not (rejected.value.run_dir / "evidence" / "__diagnostic__").exists()
+    assert failed_session is not None
+    assert not (rejected.value.run_dir / "work" / failed_session).exists()
+    assert not (rejected.value.run_dir / "evidence" / failed_session).exists()
 
 
 def test_feedback2_cleanup_only_control_flow_is_primary_after_finalized_evidence(
@@ -1549,7 +1629,7 @@ def test_feedback2_cleanup_only_control_flow_is_primary_after_finalized_evidence
             super().cleanup()
             raise failure
 
-    def factory(_spec):
+    def factory():
         nonlocal calls
         calls += 1
         return _Feedback2RememberingProvider() if calls == 1 else InterruptingCleanup()
@@ -1562,8 +1642,14 @@ def test_feedback2_cleanup_only_control_flow_is_primary_after_finalized_evidence
     run = tmp_path / run_id
     assert json.loads((run / "manifest.json").read_text(encoding="utf-8"))["status"] == "INVALID"
     expected = json.loads((run / "environment.json").read_text(encoding="utf-8"))["lme"]["lifecycle_expected_instances"]
-    assert {item["session_id"] for item in expected} == {"__diagnostic__", "mini-single-user"}
-    assert len([row for row in CaseTraceReader(run, "mini-single-user") if row.record == "cleanup"]) == 1
+    returned = {
+        item["internal_session_id"]
+        for item in _attempts(run)
+        if item["factory_returned"]
+    }
+    assert {item["session_id"] for item in expected} == returned
+    scored_session = _attempt_session(run, "mini-single-user")
+    assert len([row for row in CaseTraceReader(run, scored_session) if row.record == "cleanup"]) == 1
 
 
 def test_feedback2_semantic_probe_rejects_an_unrelated_hit() -> None:
@@ -1639,7 +1725,7 @@ def test_feedback2_observed_variant_is_immutable_across_all_run_sessions(
 
     calls = 0
 
-    def factory(_spec):
+    def factory():
         nonlocal calls
         calls += 1
         return _Feedback2RememberingProvider(variant="diagnostic-variant" if calls == 1 else "scored-variant")
@@ -1655,57 +1741,61 @@ def test_feedback2_observed_variant_is_immutable_across_all_run_sessions(
 def test_feedback2_existing_final_race_cannot_be_overwritten(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import lme.providers.lifecycle as lifecycle
+    import protocol.custody as custody_module
     from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
 
-    real_open = lifecycle.os.open
+    real_link = custody_module.os.link
     raced = False
 
-    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+    def racing_link(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
         nonlocal raced
-        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
-        if not raced and str(path).startswith(".provider-cleanup-observation.json.tmp") and dir_fd is not None:
-            raced = True
-            final = real_open(
-                "provider-cleanup-observation.json",
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-                dir_fd=dir_fd,
-            )
+        raced = True
+        final = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dst_dir_fd)
+        try:
             os.write(final, b"racer-owned")
+        finally:
             os.close(final)
-        return descriptor
+        return real_link(
+            src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
 
-    monkeypatch.setattr(lifecycle.os, "open", racing_open)
+    monkeypatch.setattr(custody_module.os, "link", racing_link)
     context = _feedback2_context(tmp_path, "existing-final-race")
-    with pytest.raises(CleanupUnproved, match="exist|publish|target"):
+    with pytest.raises(CleanupUnproved, match="publication"):
         run_provider_lifecycle(
             provider=_Provider(), profile=None, context=context, binding=_binding(),
             requested_provider="fixture", operation=lambda _provider: None,
         )
+    assert raced
     assert (context.evidence_root / "provider-cleanup-observation.json").read_bytes() == b"racer-owned"
 
 
 def test_feedback2_root_swap_cannot_substitute_the_reopened_observation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import lme.providers.lifecycle as lifecycle
+    import protocol.custody as custody_module
     from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
 
-    real_atomic_write = lifecycle._atomic_write
+    real_link = custody_module.os.link
     displaced = tmp_path / "held-evidence-root"
     outside = tmp_path / "substituted-evidence-root"
     context = _feedback2_context(tmp_path, "root-swap")
 
-    def swap_after_publish(root_fd: int, name: str, content: bytes) -> None:
-        real_atomic_write(root_fd, name, content)
+    def swap_after_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
+        result = real_link(
+            src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
         context.evidence_root.rename(displaced)
         outside.mkdir()
         context.evidence_root.symlink_to(outside, target_is_directory=True)
-        (outside / name).write_bytes(content)
+        source = displaced / str(dst)
+        (outside / str(dst)).write_bytes(source.read_bytes())
+        return result
 
-    monkeypatch.setattr(lifecycle, "_atomic_write", swap_after_publish)
-    with pytest.raises(CleanupUnproved, match="root|swap|binding|symlink"):
+    monkeypatch.setattr(custody_module.os, "link", swap_after_publish)
+    with pytest.raises(CleanupUnproved, match="publication"):
         run_provider_lifecycle(
             provider=_Provider(), profile=None,
             context=context, binding=_binding(),
@@ -1848,7 +1938,19 @@ def test_feedback3_runner_preserves_control_flow_after_local_write_and_terminali
         manifest = json.loads((tmp_path / run_id / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["status"] == "INVALID"
         environment = json.loads((tmp_path / run_id / "environment.json").read_text(encoding="utf-8"))
-        assert [item["session_id"] for item in environment["lme"]["lifecycle_expected_instances"]] == ["__diagnostic__"]
+        assert environment["lme"]["lifecycle_expected_instances"] == []
+        assert environment["lme"]["lifecycle_attempts"] == [
+            {
+                "internal_session_id": _attempt_session(tmp_path / run_id, None),
+                "logical_question_id": None,
+                "factory_returned": True,
+                "setup_completed": False,
+                "provider_variant": None,
+                "failure_code": "provider_control_flow",
+            }
+        ]
+        assert not list((tmp_path / run_id / "traces").glob("*.jsonl"))
+        assert not list((tmp_path / run_id / "evidence").rglob("provider-cleanup-observation.json"))
 
 
 @pytest.mark.parametrize("secondary", (KeyboardInterrupt(), SystemExit(7)))
@@ -1928,26 +2030,26 @@ def test_feedback4_runner_preserves_primary_when_terminalization_raises_custom_b
 def test_feedback4_persistence_never_reopens_a_swapped_intermediate_evidence_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import lme.providers.lifecycle as lifecycle
+    import protocol.custody as custody_module
     from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
 
     intermediate = tmp_path / "intermediate"
     intermediate.mkdir()
     context = _context(intermediate)
     displaced = tmp_path / "displaced"
-    real_open = lifecycle.os.open
+    real_open = custody_module.os.open
     swapped = False
 
     def swap_after_held_root(path, flags, mode=0o777, *, dir_fd=None):
         nonlocal swapped
         descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
-        if path == context.evidence_root and dir_fd is None and not swapped:
+        if path == context.evidence_root.name and dir_fd is not None and not swapped:
             swapped = True
             intermediate.rename(displaced)
             (intermediate / "evidence").mkdir(parents=True)
         return descriptor
 
-    monkeypatch.setattr(lifecycle.os, "open", swap_after_held_root)
+    monkeypatch.setattr(custody_module.os, "open", swap_after_held_root)
     with pytest.raises(CleanupUnproved, match="root|binding|changed"):
         run_provider_lifecycle(
             provider=_Provider(), profile=None, context=context, binding=_binding(),
@@ -2005,3 +2107,791 @@ def test_feedback5_constructor_cleanup_failure_never_replaces_base_exception(
     except BaseException as exc:
         caught = exc
     assert caught is primary
+
+
+def _feedback6_custodied_context(tmp_path: Path, label: str):
+    from lme.providers.base import ProviderSessionContext
+    from lme.providers.lifecycle import LifecycleCustody
+    from protocol.custody import hold_directory
+
+    run = hold_directory(tmp_path / label, create=True, logical_ref=Path("."))
+    session = run.mkdir("session", logical_ref=Path("sessions/session"))
+    work = session.mkdir("work", logical_ref=Path("work/session"))
+    evidence = session.mkdir("evidence", logical_ref=Path("evidence/session"))
+    custody = LifecycleCustody(session=session, work=work, evidence=evidence)
+    context = ProviderSessionContext(
+        run_id=f"feedback6-{label}",
+        session_id="session",
+        namespace="namespace",
+        work_root=work.capability_path,
+        evidence_root=evidence.capability_path,
+        work_ref=work.logical_ref,
+        evidence_ref=evidence.logical_ref,
+    )
+    return run, custody, context
+
+
+def test_feedback6_cleanup_orders_publish_reobserve_bind_register_then_retire(
+    tmp_path: Path,
+) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import run_provider_lifecycle
+
+    run, custody, context = _feedback6_custodied_context(tmp_path, "ordering")
+    events: list[str] = []
+
+    class Ordered(_Provider):
+        def cleanup(self) -> None:
+            super().cleanup()
+            events.append("cleanup")
+
+    def observe(_context, _provider):
+        final_exists = (custody.evidence.capability_path / "provider-cleanup-observation.json").exists()
+        events.append("observe:second" if final_exists else "observe:first")
+        return (
+            {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+            {"kind": "path-lstat", "path": "work", "raw_kind": "directory", "entries": []},
+        )
+
+    def finalized(evidence) -> None:
+        events.append("finalized")
+        payload = evidence.observation_path.read_bytes()
+        assert hashlib.sha256(payload).hexdigest() == evidence.observation_sha256
+        custody.assert_bound()
+        assert custody.work.capability_path.is_dir()
+
+    try:
+        run_provider_lifecycle(
+            provider=Ordered(), profile=None, context=context,
+            binding=ProviderRuntimeBinding(("provider-state", "work-root"), observe),
+            requested_provider="fixture", operation=lambda _provider: None,
+            finalized=finalized, custody=custody,
+        )
+        assert events == ["cleanup", "observe:first", "observe:second", "finalized"]
+        assert custody.work.retire(max_entries=32, max_depth=8) is True
+    finally:
+        custody.close()
+        run.close()
+
+
+def test_feedback6_post_publish_reappearance_or_snapshot_drift_invalidates(
+    tmp_path: Path,
+) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    missed: list[str] = []
+    for surface in ("provider-state", "namespace-membership", "path-lstat", "absent-but-different"):
+        run, custody, context = _feedback6_custodied_context(tmp_path, f"reappear-{surface}")
+        calls = 0
+
+        def observe(_context, _provider):
+            nonlocal calls
+            calls += 1
+            final_exists = (custody.evidence.capability_path / "provider-cleanup-observation.json").exists()
+            if calls == 2:
+                assert final_exists, "the second live observation must follow publication"
+            return (
+                {
+                    "kind": "provider-state",
+                    "remaining_record_ids": ["returned"] if calls == 2 and surface == "provider-state" else [],
+                    "backend_active": calls == 2 and surface == "provider-state",
+                },
+                {
+                    "kind": "namespace-membership",
+                    "expected_namespace": "namespace",
+                    "live_namespaces": ["namespace"] if calls == 2 and surface == "namespace-membership" else [],
+                },
+                {
+                    "kind": "path-lstat", "path": "work", "raw_kind": "directory",
+                    "entries": ["returned"] if calls == 2 and surface == "path-lstat" else [],
+                },
+            )
+
+        if surface == "absent-but-different":
+            def observe(_context, _provider):
+                nonlocal calls
+                calls += 1
+                final_exists = (custody.evidence.capability_path / "provider-cleanup-observation.json").exists()
+                if calls == 2:
+                    assert final_exists
+                return (
+                    {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+                    {"kind": "namespace-membership", "expected_namespace": "namespace", "live_namespaces": []},
+                    {
+                        "kind": "path-lstat", "path": "work",
+                        "raw_kind": "missing" if calls == 1 else "directory", "entries": [],
+                    },
+                )
+
+        try:
+            try:
+                run_provider_lifecycle(
+                    provider=_Provider(), profile=None, context=context,
+                    binding=ProviderRuntimeBinding(("provider-state", "namespace-membership", "work-root"), observe),
+                    requested_provider="fixture", operation=lambda _provider: None, custody=custody,
+                )
+            except CleanupUnproved:
+                pass
+            else:
+                missed.append(surface)
+            raw = json.loads(
+                (custody.evidence.capability_path / "provider-cleanup-observation.json").read_text(encoding="utf-8")
+            )
+            assert all(
+                not item.get("remaining_record_ids") and not item.get("live_namespaces") and not item.get("entries")
+                for item in raw["observations"]
+            )
+        finally:
+            custody.close()
+            run.close()
+    assert missed == []
+
+
+@pytest.mark.parametrize("substitution", ("bytes", "schema", "oversized"))
+def test_feedback6_post_publish_substitution_is_refused_before_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, substitution: str,
+) -> None:
+    import protocol.custody as custody_module
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    run, custody, context = _feedback6_custodied_context(tmp_path, f"substitute-{substitution}")
+    real_link = custody_module.os.link
+    callback_called = False
+
+    def substitute_after_link(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
+        real_link(
+            src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        os.unlink(dst, dir_fd=dst_dir_fd)
+        descriptor = os.open(
+            dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dst_dir_fd,
+        )
+        try:
+            if substitution == "bytes":
+                os.write(descriptor, b"substituted")
+            elif substitution == "schema":
+                os.write(descriptor, b'{}\n')
+            else:
+                os.ftruncate(descriptor, 1_048_577)
+        finally:
+            os.close(descriptor)
+
+    def finalized(_evidence) -> None:
+        nonlocal callback_called
+        callback_called = True
+
+    monkeypatch.setattr(custody_module.os, "link", substitute_after_link)
+    try:
+        with pytest.raises(CleanupUnproved):
+            run_provider_lifecycle(
+                provider=_Provider(), profile=None, context=context,
+                binding=ProviderRuntimeBinding(
+                    ("provider-state", "work-root"),
+                    lambda *_args: (
+                        {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+                        {"kind": "path-lstat", "path": "work", "raw_kind": "directory", "entries": []},
+                    ),
+                ),
+                requested_provider="fixture", operation=lambda _provider: None,
+                finalized=finalized, custody=custody,
+            )
+        assert callback_called is False
+    finally:
+        custody.close()
+        run.close()
+
+
+def test_feedback6_provider_residue_is_raw_evidence_before_runner_retirement(
+    tmp_path: Path,
+) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    run, custody, context = _feedback6_custodied_context(tmp_path, "residue")
+
+    class Residue(_Provider):
+        def cleanup(self) -> None:
+            super().cleanup()
+            (context.work_root / "provider-residue").write_bytes(b"retained")
+
+    def observe(_context, _provider):
+        return (
+            {"kind": "provider-state", "remaining_record_ids": ["provider-residue"], "backend_active": True},
+            {"kind": "path-lstat", "path": "work", "raw_kind": "directory", "entries": ["provider-residue"]},
+        )
+
+    provider = Residue()
+    try:
+        with pytest.raises(CleanupUnproved):
+            run_provider_lifecycle(
+                provider=provider, profile=None, context=context,
+                binding=ProviderRuntimeBinding(("provider-state", "work-root"), observe),
+                requested_provider="fixture", operation=lambda _provider: None, custody=custody,
+            )
+        observation = json.loads(
+            (custody.evidence.capability_path / "provider-cleanup-observation.json").read_text(encoding="utf-8")
+        )
+        assert any(item.get("entries") == ["provider-residue"] for item in observation["observations"])
+        assert (custody.work.capability_path / "provider-residue").is_file()
+        custody.work.empty_recursive(max_entries=32, max_depth=8)
+        assert list(custody.work.capability_path.iterdir()) == []
+        assert provider.cleanups == 1
+    finally:
+        custody.close()
+        run.close()
+
+
+def test_feedback6_moved_work_root_keeps_provider_on_held_inode_and_replacement_safe(
+    tmp_path: Path,
+) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    run, custody, context = _feedback6_custodied_context(tmp_path, "moved-work")
+    logical_work = tmp_path / "moved-work" / "session" / "work"
+    displaced = tmp_path / "displaced-work"
+    replacement_sentinel = logical_work / "replacement-sentinel"
+
+    class Moving(_Provider):
+        def setup(self, profile, supplied) -> None:
+            super().setup(profile, supplied)
+            (supplied.work_root / "setup").write_bytes(b"held")
+
+        def cleanup(self) -> None:
+            super().cleanup()
+            (context.work_root / "setup").unlink()
+            (context.work_root / "operation").unlink()
+
+    def operation(_provider):
+        logical_work.rename(displaced)
+        logical_work.mkdir()
+        replacement_sentinel.write_bytes(b"replacement")
+        (context.work_root / "operation").write_bytes(b"held")
+
+    try:
+        with pytest.raises(CleanupUnproved):
+            run_provider_lifecycle(
+                provider=Moving(), profile=None, context=context,
+                binding=ProviderRuntimeBinding(
+                    ("provider-state", "work-root"),
+                    lambda *_args: (
+                        {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+                        {"kind": "path-lstat", "path": "work", "raw_kind": "directory", "entries": []},
+                    ),
+                ),
+                requested_provider="fixture", operation=operation, custody=custody,
+            )
+        assert replacement_sentinel.read_bytes() == b"replacement"
+        assert sorted(item.name for item in displaced.iterdir()) == []
+        assert custody.work.retire(max_entries=32, max_depth=8) is False
+        assert replacement_sentinel.read_bytes() == b"replacement"
+    finally:
+        custody.close()
+        run.close()
+
+
+class _Feedback6HostileMeta(type):
+    def __getattribute__(cls, name: str):
+        if name in {"__name__", "__qualname__"}:
+            _FEEDBACK6_HOOKS.append(f"class:{name}")
+            raise RuntimeError("dynamic-name-hook-ran")
+        return super().__getattribute__(name)
+
+
+_FEEDBACK6_HOOKS: list[str] = []
+
+
+class _Feedback6HostileError(RuntimeError, metaclass=_Feedback6HostileMeta):
+    def __str__(self) -> str:
+        _FEEDBACK6_HOOKS.append("str")
+        raise RuntimeError("str-hook-ran")
+
+    def __repr__(self) -> str:
+        _FEEDBACK6_HOOKS.append("repr")
+        raise RuntimeError("repr-hook-ran")
+
+    def add_note(self, _note: str) -> None:
+        _FEEDBACK6_HOOKS.append("add_note")
+        raise RuntimeError("add-note-hook-ran")
+
+
+class _Feedback6HostileControl(BaseException, metaclass=_Feedback6HostileMeta):
+    __str__ = _Feedback6HostileError.__str__
+    __repr__ = _Feedback6HostileError.__repr__
+    add_note = _Feedback6HostileError.add_note
+
+
+def test_feedback6_hostile_lifecycle_boundaries_are_closed_and_never_rendered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import LifecycleRunError, run_provider_lifecycle
+    from protocol.custody import HeldDirectory
+
+    expected_facts = {
+        "setup": "provider_setup_failed", "operation": "provider_operation_failed",
+        "cleanup": "provider_cleanup_failed", "observation": "cleanup_observation_failed",
+        "publish": "cleanup_evidence_publish_failed", "callback": "lifecycle_callback_failed",
+    }
+    failures: list[str] = []
+    for boundary, expected_fact in expected_facts.items():
+        _FEEDBACK6_HOOKS.clear()
+        hostile = _Feedback6HostileError()
+        run, custody, context = _feedback6_custodied_context(tmp_path, f"hostile-{boundary}")
+
+        class HostileProvider(_Provider):
+            def setup(self, profile, supplied) -> None:
+                super().setup(profile, supplied)
+                if boundary == "setup":
+                    raise hostile
+
+            def cleanup(self) -> None:
+                super().cleanup()
+                if boundary == "cleanup":
+                    raise hostile
+
+        def operation(_provider):
+            if boundary == "operation":
+                raise hostile
+
+        def observe(_context, _provider):
+            if boundary == "observation":
+                raise hostile
+            return (
+                {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+                {"kind": "path-lstat", "path": "work", "raw_kind": "directory", "entries": []},
+            )
+
+        real_publish = HeldDirectory.publish_exclusive
+
+        def publish(held, *args, **kwargs):
+            if held is custody.evidence and boundary == "publish":
+                raise hostile
+            return real_publish(held, *args, **kwargs)
+
+        monkeypatch.setattr(HeldDirectory, "publish_exclusive", publish)
+        try:
+            caught: BaseException | None = None
+            try:
+                run_provider_lifecycle(
+                    provider=HostileProvider(), profile=None, context=context,
+                    binding=ProviderRuntimeBinding(("provider-state", "work-root"), observe),
+                    requested_provider="fixture", operation=operation,
+                    finalized=(lambda _evidence: (_ for _ in ()).throw(hostile)) if boundary == "callback" else None,
+                    custody=custody,
+                )
+            except BaseException as exc:
+                caught = exc
+            if not isinstance(caught, LifecycleRunError):
+                failures.append(f"{boundary}:wrapper")
+            else:
+                if caught.primary is not hostile:
+                    failures.append(f"{boundary}:identity")
+                if str(caught) != "direct provider lifecycle failed":
+                    failures.append(f"{boundary}:message")
+                if caught.fact != expected_fact:
+                    failures.append(f"{boundary}:fact")
+                if not isinstance(caught.secondary_facts, tuple):
+                    failures.append(f"{boundary}:secondary-facts")
+            if _FEEDBACK6_HOOKS:
+                failures.append(f"{boundary}:hooks={','.join(_FEEDBACK6_HOOKS)}")
+        finally:
+            monkeypatch.setattr(HeldDirectory, "publish_exclusive", real_publish)
+            custody.close()
+            run.close()
+    assert failures == []
+
+
+def test_feedback6_lifecycle_primary_precedence_matrix(tmp_path: Path) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import LifecycleRunError, run_provider_lifecycle
+
+    rows = (
+        ("ordinary", None, None, "operation", False),
+        ("ordinary", "ordinary", None, "operation", False),
+        ("ordinary", "control", None, "cleanup", True),
+        ("control", "ordinary", None, "operation", True),
+        ("control", "control", None, "operation", True),
+        (None, "ordinary", None, "cleanup", False),
+        (None, "control", None, "cleanup", True),
+        ("ordinary", None, "control", "observation", True),
+        (None, "ordinary", "control", "observation", True),
+        (None, "control", "control", "cleanup", True),
+        ("control", "control", "control", "operation", True),
+    )
+    mismatches: list[str] = []
+    for index, (operation_kind, cleanup_kind, observation_kind, selected, is_control) in enumerate(rows):
+        run, custody, context = _feedback6_custodied_context(tmp_path, f"precedence-{index}")
+        errors = {
+            "operation": _Feedback6HostileControl() if operation_kind == "control" else _Feedback6HostileError(),
+            "cleanup": _Feedback6HostileControl() if cleanup_kind == "control" else _Feedback6HostileError(),
+            "observation": _Feedback6HostileControl() if observation_kind == "control" else _Feedback6HostileError(),
+        }
+
+        class MatrixProvider(_Provider):
+            def cleanup(self) -> None:
+                super().cleanup()
+                if cleanup_kind is not None:
+                    raise errors["cleanup"]
+
+        def operation(_provider):
+            if operation_kind is not None:
+                raise errors["operation"]
+
+        def observe(_context, _provider):
+            if observation_kind is not None:
+                raise errors["observation"]
+            return (
+                {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+                {"kind": "path-lstat", "path": "work", "raw_kind": "directory", "entries": []},
+            )
+
+        try:
+            caught: BaseException | None = None
+            try:
+                run_provider_lifecycle(
+                    provider=MatrixProvider(), profile=None, context=context,
+                    binding=ProviderRuntimeBinding(("provider-state", "work-root"), observe),
+                    requested_provider="fixture", operation=operation, custody=custody,
+                )
+            except BaseException as exc:
+                caught = exc
+            expected = errors[selected]
+            if is_control:
+                if caught is not expected:
+                    mismatches.append(f"row-{index}:control")
+            elif not isinstance(caught, LifecycleRunError) or caught.primary is not expected:
+                mismatches.append(f"row-{index}:ordinary")
+        finally:
+            custody.close()
+            run.close()
+    assert mismatches == []
+
+
+def test_feedback6_execute_run_retires_work_only_after_lifecycle_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers import registry
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.reader import StubReader
+    from lme.runner import execute_run
+
+    events: dict[str, list[str]] = {}
+    contexts = []
+
+    class Emptying(_Feedback2RememberingProvider):
+        def setup(self, profile, context):
+            super().setup(profile, context)
+            contexts.append(context)
+
+        def retrieve(self, question, top_k, purpose):
+            from lme.providers.base import ProviderHit, RetrievalPurpose
+            from protocol.probes import known_answer_probe_specs
+
+            if purpose is RetrievalPurpose.ABSENCE_PROBE_EXPECTED_EMPTY:
+                return []
+            if purpose is RetrievalPurpose.POSITIVE_PROBE:
+                semantic = next(item for item in known_answer_probe_specs() if item.kind == "semantic-zero-overlap")
+                if question == semantic.query:
+                    text = next(record for record in self.records if semantic.fact in record)
+                    return [ProviderHit("probe", text, 1.0)]
+                return [ProviderHit("probe", question, 1.0)]
+            return super().retrieve(question, top_k, purpose)
+
+    def observe(context, provider):
+        session_events = events.setdefault(context.session_id, [])
+        final = context.evidence_root / "provider-cleanup-observation.json"
+        session_events.append("observe:post-publish" if final.exists() else "observe:first")
+        assert context.work_root.is_dir(), "runner retirement must follow both observations"
+        return (
+            {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+            {"kind": "path-lstat", "path": "work", "raw_kind": "directory", "entries": []},
+        )
+
+    spec = _runner_spec(Emptying)
+    object.__setattr__(spec, "runtime_binding", ProviderRuntimeBinding(("provider-state", "work-root"), observe))
+    monkeypatch.setattr(registry, "provider_spec", lambda _name: spec)
+    result = execute_run(
+        _mini_config(tmp_path, 2, "feedback6-runner-retirement", provider="fixture"),
+        reader=StubReader(),
+    )
+    assert contexts
+    assert all(value == ["observe:first", "observe:post-publish"] for value in events.values())
+    assert all(not (result.run_dir / context.work_ref).exists() for context in contexts)
+
+
+def test_feedback6_review_cleanup_observation_surfaces_match_the_declaration(tmp_path: Path) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    accepted: list[str] = []
+    cases = {
+        "empty": (),
+        "missing": ({"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},),
+        "wrong": (
+            {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+            {"kind": "path-lstat", "path": "session-root", "raw_kind": "directory", "entries": []},
+        ),
+        "extra": (
+            {"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},
+            {"kind": "path-lstat", "path": "work", "raw_kind": "directory", "entries": []},
+            {"kind": "namespace-membership", "expected_namespace": "namespace", "live_namespaces": []},
+        ),
+    }
+    for label, rows in cases.items():
+        run, custody, context = _feedback6_custodied_context(tmp_path, f"review-surfaces-{label}")
+        try:
+            try:
+                run_provider_lifecycle(
+                    provider=_Provider(), profile=None, context=context,
+                    binding=ProviderRuntimeBinding(("provider-state", "work-root"), lambda *_args: rows),
+                    requested_provider="fixture", operation=lambda _provider: None, custody=custody,
+                )
+            except CleanupUnproved:
+                pass
+            else:
+                accepted.append(label)
+        finally:
+            custody.close()
+            run.close()
+    assert accepted == []
+
+
+def test_feedback6_review_direct_adapter_failures_are_closed_and_unrendered(tmp_path: Path) -> None:
+    from membench.adapters.base import AdapterEnvironmentError
+    from lme.dataset import load_dataset
+    from lme.normalize import neutralize
+    from lme.providers.exomem_direct import ExomemDirectProvider
+    from protocol.models import CaseHandle, DatasetIdentity
+
+    hooks: list[str] = []
+
+    class Hostile(RuntimeError):
+        def __str__(self):
+            hooks.append("str")
+            raise RuntimeError("rendered")
+
+        def __repr__(self):
+            hooks.append("repr")
+            raise RuntimeError("rendered")
+
+    hostile = Hostile()
+    context = _context(tmp_path)
+
+    class BrokenSetup:
+        def setup(self, *_args):
+            raise hostile
+
+    provider = ExomemDirectProvider()
+    provider._adapter = BrokenSetup()  # type: ignore[assignment]
+    with pytest.raises(AdapterEnvironmentError, match="^direct provider setup failed$"):
+        provider.setup(None, context)
+
+    class BrokenIngest:
+        def ingest_case(self, *_args):
+            raise hostile
+
+    provider._adapter = BrokenIngest()  # type: ignore[assignment]
+    question = load_dataset(Path("benchmarks/lme/fixtures/mini.json")).questions[0]
+    identity = DatasetIdentity(
+        id="fixture", variant="mini", source="local", revision="review",
+        sha256=hashlib.sha256(Path("benchmarks/lme/fixtures/mini.json").read_bytes()).hexdigest(), case_count=6,
+    )
+    events = neutralize(question, identity)
+    handle = CaseHandle(case_id=question.question_id, case_ordinal=1, question_date=question.question_date_text)
+    with pytest.raises(RuntimeError, match="^direct provider ingestion failed$"):
+        provider.ingest_case(events, handle)
+    assert hooks == []
+
+
+def test_feedback7_real_adapter_setup_and_ingest_catches_are_closed_and_unrendered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from membench.adapters.base import AdapterEnvironmentError, Profile
+    from membench.adapters.exomem_local import ExomemLocalAdapter
+    from exomem import commands
+    from lme.adapter import LmeExomemAdapter
+    from lme.dataset import load_dataset
+    from lme.normalize import neutralize
+    from protocol.models import CaseHandle, DatasetIdentity
+
+    hooks: list[str] = []
+
+    class Hostile(RuntimeError):
+        def __str__(self) -> str:
+            hooks.append("str")
+            return "rendered-secret"
+
+        def __repr__(self) -> str:
+            hooks.append("repr")
+            return "rendered-secret"
+
+        @property
+        def args(self):
+            hooks.append("args")
+            return ()
+
+    hostile = Hostile()
+    adapter = LmeExomemAdapter()
+    monkeypatch.setattr(adapter, "cleanup", lambda: None)
+    monkeypatch.setattr(
+        ExomemLocalAdapter, "setup", lambda *_args: (_ for _ in ()).throw(hostile),
+    )
+    with pytest.raises(AdapterEnvironmentError, match="^direct provider setup failed$"):
+        adapter.setup(tmp_path / "work", Profile(name="fixture", settings={"EXOMEM_DISABLE_EMBEDDINGS": "1"}))
+
+    adapter._vault = object()
+    adapter._schema = object()
+    question = load_dataset(Path("benchmarks/lme/fixtures/mini.json")).questions[0]
+    identity = DatasetIdentity(
+        id="fixture", variant="mini", source="local", revision="review",
+        sha256=hashlib.sha256(Path("benchmarks/lme/fixtures/mini.json").read_bytes()).hexdigest(), case_count=6,
+    )
+    events = neutralize(question, identity)
+    handle = CaseHandle(case_id=question.question_id, case_ordinal=1, question_date=question.question_date_text)
+    monkeypatch.setattr(commands, "op_capture_source", lambda *_args, **_kwargs: (_ for _ in ()).throw(hostile))
+    result = adapter.ingest_case(events, handle)
+
+    assert result and all(not item.ok for item in result)
+    assert all(item.detail == "direct provider ingestion failed" for item in result)
+    assert hooks == []
+
+
+def test_feedback7_completeness_wrapping_never_renders_hostile_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lme.providers.lifecycle as lifecycle
+    from lme.providers.lifecycle import LifecycleCompletenessError, validate_lifecycle_completeness
+
+    hooks: list[str] = []
+
+    class Hostile(RuntimeError):
+        def __str__(self) -> str:
+            hooks.append("str")
+            return "rendered-secret"
+
+    hostile = Hostile()
+    monkeypatch.setattr(
+        lifecycle, "verify_cleanup_observation", lambda *_args, **_kwargs: (_ for _ in ()).throw(hostile),
+    )
+    with pytest.raises(LifecycleCompletenessError, match="^lifecycle cleanup observation is invalid$") as caught:
+        validate_lifecycle_completeness(
+            expected_instances=(),
+            cleanup_records=[{
+                "run_id": "run", "requested_provider": "fixture", "session_id": "session",
+                "namespace": "namespace", "observation_path": "evidence/session/cleanup.json",
+                "observation_sha256": "a" * 64,
+            }],
+            evidence_root=tmp_path,
+        )
+    assert caught.value.__cause__ is hostile
+    assert hooks == []
+
+
+def test_feedback6_review_constructor_retirement_control_flow_keeps_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lme.providers.lifecycle import terminalize_constructor_failure
+    from protocol.custody import HeldDirectory
+
+    class RetirementControl(BaseException):
+        pass
+
+    control = RetirementControl()
+    run, custody, context = _feedback6_custodied_context(tmp_path, "review-retirement-control")
+    real_retire = HeldDirectory.retire
+
+    def interrupt_work(held, **kwargs):
+        if held is custody.work:
+            raise control
+        return real_retire(held, **kwargs)
+
+    monkeypatch.setattr(HeldDirectory, "retire", interrupt_work)
+    try:
+        caught: BaseException | None = None
+        try:
+            terminalize_constructor_failure(
+                context, requested_provider="fixture", error=RuntimeError("constructor"), custody=custody,
+            )
+        except BaseException as exc:
+            caught = exc
+        assert caught is control
+    finally:
+        monkeypatch.setattr(HeldDirectory, "retire", real_retire)
+        custody.close()
+        run.close()
+
+
+def test_feedback8_finalized_callback_binding_loss_refuses_authorization(
+    tmp_path: Path,
+) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    run, custody, context = _feedback6_custodied_context(tmp_path, "callback-binding")
+    replacement = custody.session.capability_path / custody.work.name
+
+    def observe(_context, _provider):
+        return ({"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},)
+
+    def finalized(_evidence) -> None:
+        os.rename(
+            custody.work.name,
+            "displaced-work",
+            src_dir_fd=custody.work.parent_fd,
+            dst_dir_fd=custody.work.parent_fd,
+        )
+        os.mkdir(custody.work.name, dir_fd=custody.work.parent_fd)
+        (replacement / "sentinel").write_bytes(b"replacement")
+
+    try:
+        with pytest.raises(CleanupUnproved, match="custody binding"):
+            run_provider_lifecycle(
+                provider=_Provider(), profile=None, context=context,
+                binding=ProviderRuntimeBinding(("provider-state",), observe),
+                requested_provider="fixture", operation=lambda _provider: None,
+                finalized=finalized, custody=custody,
+            )
+        assert (replacement / "sentinel").read_bytes() == b"replacement"
+    finally:
+        custody.close()
+        run.close()
+
+
+def test_feedback12_finalized_registration_refuses_an_identical_cleanup_leaf_replacement(
+    tmp_path: Path,
+) -> None:
+    from lme.providers.base import ProviderRuntimeBinding
+    from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
+
+    run, custody, context = _feedback6_custodied_context(tmp_path, "cleanup-leaf-replacement")
+    registered = False
+
+    def observe(_context, _provider):
+        return ("provider-state",)
+
+    def finalized(evidence) -> None:
+        nonlocal registered
+        registered = True
+        replacement = evidence.observation_path.with_suffix(".replacement")
+        replacement.write_bytes(evidence.observation_path.read_bytes())
+        os.replace(replacement, evidence.observation_path)
+
+    try:
+        with pytest.raises(CleanupUnproved, match="cleanup evidence"):
+            run_provider_lifecycle(
+                provider=_Provider(), profile=None, context=context,
+                binding=ProviderRuntimeBinding(
+                    ("provider-state",),
+                    lambda *_args: ({"kind": "provider-state", "remaining_record_ids": [], "backend_active": False},),
+                ),
+                requested_provider="fixture", operation=lambda _provider: None,
+                finalized=finalized, custody=custody,
+            )
+        assert registered
+    finally:
+        custody.close()
+        run.close()

@@ -36,6 +36,16 @@ class ProviderSessionContext:
     namespace: str
     work_root: Path
     evidence_root: Path
+    work_ref: Path = Path("work")
+    evidence_ref: Path = Path("evidence")
+
+
+@dataclass(frozen=True)
+class ProviderDescriptor:
+    """Static provider identity and lifecycle execution responsibility."""
+
+    provider_id: str
+    execution_model: str
 
 
 @dataclass(frozen=True)
@@ -49,7 +59,7 @@ class ProviderRuntimeBinding:
 @dataclass(frozen=True)
 class ProviderSpec:
     factory: Callable[[], object]
-    descriptor: str
+    descriptor: ProviderDescriptor
     namespace_kind: str
     derive_namespace: Callable[[str, str], str]
     runtime_binding: ProviderRuntimeBinding

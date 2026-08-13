@@ -182,14 +182,68 @@ bind the latter only after setup, and refuse drift. Each constructed provider
 instance SHALL receive an immutable run/session/namespace/work/evidence
 context and SHALL have exactly one cleanup-owning outer lifecycle.
 
+The static descriptor SHALL declare an in-process,
+no-post-return-background execution model. Unknown or background-capable
+declarations, unsafe direct run IDs, and unsupported descriptor custody SHALL
+refuse before factory invocation. On supported POSIX/Linux filesystems the
+runner SHALL functionally prove required descriptor-relative operations and
+`/proc/<runner-pid>/fd/<fd>` reopening on the actual output filesystem, and
+SHALL hold separate session, work, and evidence directory capabilities before
+factory invocation. Providers SHALL receive capability paths plus canonical
+logical refs; capability paths SHALL NOT be serialized. Every authority
+operation SHALL revalidate the parent/name/child inode binding. Binding loss
+SHALL force INVALID, continue only on the held inode, and SHALL NOT touch a
+replacement installed at the original name.
+
+Provider-visible entries SHALL be atomically moved into a random mode-0700
+runner-private quarantine and identity-checked. Under the declared in-process,
+no-post-return-background execution model, final removal of an empty private
+quarantine container is outside the adversarial provider boundary. This
+requirement SHALL NOT claim resistance to arbitrary unrelated same-UID actors
+that guess or replace that private name; that threat requires process isolation
+or an amendment. Original, provider-exposed, and public names SHALL still
+survive replacement or fail closed.
+
 Cleanup observations SHALL be self-identifying raw facts only, written under
 the session evidence root and independently reopened, digest-checked, and
 re-observed by the runner. Provider-returned cleanup claims SHALL not establish
-absence. A direct trace SHALL use self-versioned case-trace v2 records; its
+absence. The accepted order SHALL be cleanup exactly once; complete normalized
+raw observation and independent absence derivation; exclusive bounded publish;
+same-fd bounded reopen, schema, exact-byte and digest validation; live
+post-publication re-observation with exact equality and independent absence;
+all custody binding checks; expected-instance and cleanup-trace registration;
+then bounded descriptor-relative runner retirement of the work inode. Provider
+residue SHALL remain in the raw observation and invalidate before retirement.
+A direct trace SHALL use self-versioned case-trace v2 records; its
 cleanup record binds only session identity and the contained observation
 reference. VALID and READINESS_UNVERIFIABLE terminalization and later artifact
 loading SHALL require exactly one validated cleanup record and observation for
-each factory-returned instance, with no downgrade, duplicate, or orphan.
+each factory-returned instance, with no downgrade, duplicate, or orphan. Direct
+v2 trace filenames and filesystem roots SHALL use an injective runner-generated
+internal session ID; raw question IDs SHALL remain logical attempt metadata.
+Terminal validation SHALL enforce the exact bijection among factory-returned
+attempts, expected instances, v2 trace filenames, exactly-one cleanup rows, and
+reopened observations, binding filename/session, run, namespace, requested
+provider, manifest/environment/observed variant, observation path, and digest.
+Later validation SHALL inventory every trace/evidence entry through bounded
+no-follow traversal and refuse unsafe names, unknown suffixes, nonregulars,
+empty or oversized files, invalid or mixed rows, and orphans.
+
+Later loading SHALL inventory and validate every present direct marker and
+artifact. Coherent erasure or rewrite of every direct discriminator, v2 trace,
+and cleanup observation can be byte-identical to a genuine legacy run and is
+outside this frozen v2 claim. Stronger direct-versus-legacy provenance requires
+a versioned manifest discriminator and, against hostile same-UID rewrite, an
+authenticated external commitment; this requirement introduces neither.
+
+This capability boundary SHALL cover only direct-provider session work/evidence
+roots and lifecycle-authorizing v2 traces/cleanup observations. The
+caller-supplied run directory remains the trust anchor for each command.
+Ordinary manifest, environment, dataset, budget, and report I/O retains its
+existing contract and is not claimed race-proof against same-UID replacement of
+the whole run directory. Later load SHALL begin a fresh no-follow traversal from
+the supplied run directory and SHALL NOT claim cross-command directory
+authenticity.
 
 #### Scenario: One live session cannot establish cross-case isolation
 - **WHEN** a direct run contains one scored case
@@ -200,6 +254,19 @@ each factory-returned instance, with no downgrade, duplicate, or orphan.
 - **WHEN** a cleanup observation is missing, unsafe, changed, duplicated,
   unobservable, or disagrees with independent re-observation
 - **THEN** absence is unproved and the run terminalizes INVALID
+
+#### Scenario: Held lifecycle root loses its name binding
+- **WHEN** a provider or concurrent actor renames a held session, work, or
+  evidence root and installs a replacement at the original name
+- **THEN** the lifecycle terminalizes INVALID, any bounded retirement remains
+  descriptor-relative to the held inode, and the replacement is untouched
+
+#### Scenario: Trace topology contains an unsafe or orphan entry
+- **WHEN** terminalization or later loading inventories a renamed, swapped,
+  cleanup-free, empty, duplicate-cleanup, orphan, symlink, FIFO, nonregular,
+  oversized, mixed-version, invalid-row, unknown-suffix, or unsafe-name trace
+- **THEN** lifecycle completeness is refused without following or blocking on
+  the entry
 
 ### Requirement: MemoryBench Export And Cleanup Wires Are Strict
 The programme-owned MemoryBench runner SHALL emit a strict

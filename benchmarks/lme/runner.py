@@ -17,6 +17,7 @@ from membench.environment import capture_environment
 from membench.judge.backends import ClaudeCliBackend, OpenAICompatBackend
 from protocol.budget import BudgetLedger
 from protocol.canary import canary_for, evaluate_probes
+from protocol.custody import HeldDirectory, hold_directory
 from protocol.leakage import scan_ingest
 from protocol.manifest import bind_started_manifest_provider, finalize_manifest, start_manifest
 from protocol.models import BudgetSummary, CaseGold, CaseHandle, DatasetIdentity, EventProvenance, LeakageSummary, ProtocolEvent, ProbeResult
@@ -24,9 +25,14 @@ from protocol.namespace import derive_namespace, namespace_pattern
 from protocol.readiness import validate as validate_readiness
 from protocol.trace import CaseTraceWriter
 
-from .providers.base import ProviderSessionContext, RetrievalPurpose
+from .providers.base import ProviderDescriptor, ProviderSessionContext, RetrievalPurpose
 from .providers.lifecycle import (
+    CleanupUnproved,
     LifecycleEvidence,
+    LifecycleCustody,
+    RETIRE_MAX_DEPTH,
+    RETIRE_MAX_ENTRIES,
+    ProviderConstructionFailure,
     LifecycleRunError,
     bind_observed_variant,
     reset_observed_variant,
@@ -97,6 +103,28 @@ def _safe_id(value: str) -> str:
     return cleaned[:100] or "question"
 
 
+_DIRECT_RUN_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_FOREGROUND_EXECUTION_MODEL = "in-process-no-post-return-background"
+
+
+def _direct_run_component(value: str) -> str:
+    if not isinstance(value, str) or _DIRECT_RUN_COMPONENT.fullmatch(value) is None:
+        raise ValueError("direct-provider run id must be one safe path component")
+    return value
+
+
+def _internal_session_id(ordinal: int, logical_id: str) -> str:
+    digest = hashlib.sha256(logical_id.encode("utf-8")).hexdigest()[:16]
+    return f"session-{ordinal:06d}-{digest}"
+
+
+def _closed_failure_code(error: BaseException, fallback: str) -> str:
+    if type(error) in {CleanupUnproved, LifecycleRunError, ProviderConstructionFailure}:
+        fact = error.fact
+        return fact if isinstance(fact, str) and fact else fallback
+    return fallback
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -105,13 +133,6 @@ def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     with path.open("x", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def _add_control_flow_note(control_flow: BaseException, note: str) -> None:
-    try:
-        control_flow.add_note(note)
-    except BaseException:
-        pass
 
 
 def _reader(config: RunConfig, run_dir: Path) -> Reader:
@@ -574,8 +595,22 @@ def execute_run(
         if config.pilot is not None
         else None
     )
-    run_id = config.run_id or _default_run_id()
+    run_id = _default_run_id() if config.run_id is None else config.run_id
+    provider_variant = None
+    provider_spec_value = None
+    provider_kind = "exomem"
     if config.provider:
+        from .providers.registry import provider_spec
+
+        _direct_run_component(run_id)
+        provider_spec_value = provider_spec(config.provider)
+        descriptor = provider_spec_value.descriptor
+        if (
+            not isinstance(descriptor, ProviderDescriptor)
+            or descriptor.execution_model != _FOREGROUND_EXECUTION_MODEL
+        ):
+            raise ValueError("direct provider has an unsupported execution model")
+        provider_kind = provider_spec_value.namespace_kind
         reset_observed_variant(run_id)
     run_dir = Path(config.out) / run_id
     # Reader approval and full-run evidence are preflight checks: a refusal
@@ -598,13 +633,10 @@ def execute_run(
         run_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError as exc:
         raise FileExistsError(f"run directory is immutable and already exists: {run_dir}") from exc
-    provider_variant = None
-    provider_spec_value = None
-    provider_kind = "exomem"
-    if config.provider:
-        from .providers.registry import provider_spec
-        provider_spec_value = provider_spec(config.provider)
-        provider_kind = provider_spec_value.namespace_kind
+    run_custody: HeldDirectory | None = None
+    session_parent: HeldDirectory | None = None
+    work_parent: HeldDirectory | None = None
+    evidence_parent: HeldDirectory | None = None
     start_manifest(
         run_dir, run_id=run_id, dataset=dataset_identity,
         started_at=dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
@@ -627,6 +659,7 @@ def execute_run(
     ledger.commit(ts=dt.datetime.now(dt.UTC).isoformat(), seq=1, actor="lme-runner", op="stub-reader-budget", units=0)
     dump_dataset(dataset, run_dir / "dataset.json")
     environment = capture_environment()
+    lifecycle_attempts: list[dict[str, object]] = []
     environment["lme"] = {
         "dataset_sha256": dataset_checksum,
         "dataset_source": "xiaowu0162/longmemeval-cleaned",
@@ -636,6 +669,7 @@ def execute_run(
         "provider_variant": provider_variant,
         "requested_provider": config.provider or "legacy-adapter",
         "diagnostic_harness_revision": "direct-lifecycle-2.3a",
+        "lifecycle_attempts": lifecycle_attempts,
         "lifecycle_expected_instances": [],
         "judge_protocol": "official evaluate_qa.py, unmodified",
         "judge_model": "gpt-4o",
@@ -670,9 +704,92 @@ def execute_run(
     control_flow: BaseException | None = None
     case_ids = [question.question_id for question in dataset.questions]
 
-    def prepare_context(context: ProviderSessionContext) -> None:
-        context.work_root.mkdir(parents=True, exist_ok=False)
-        context.evidence_root.mkdir(parents=True, exist_ok=False)
+    def prepare_direct_context(
+        *, internal_session_id: str, logical_question_id: str | None, namespace: str,
+    ) -> tuple[ProviderSessionContext, LifecycleCustody, dict[str, object]]:
+        assert session_parent is not None and work_parent is not None and evidence_parent is not None
+        session: HeldDirectory | None = None
+        work: HeldDirectory | None = None
+        evidence: HeldDirectory | None = None
+        try:
+            session = session_parent.mkdir(
+                internal_session_id,
+                logical_ref=Path("sessions") / internal_session_id,
+            )
+            work = work_parent.mkdir(
+                internal_session_id,
+                logical_ref=Path("work") / internal_session_id,
+            )
+            evidence = evidence_parent.mkdir(
+                internal_session_id,
+                logical_ref=Path("evidence") / internal_session_id,
+            )
+            custody = LifecycleCustody(session=session, work=work, evidence=evidence)
+            custody.assert_bound()
+        except BaseException:
+            for held in (evidence, work, session):
+                if held is not None:
+                    try:
+                        held.retire(max_entries=RETIRE_MAX_ENTRIES, max_depth=RETIRE_MAX_DEPTH)
+                    except BaseException:
+                        pass
+                    held.close()
+            raise
+        context = ProviderSessionContext(
+            run_id=run_id,
+            session_id=internal_session_id,
+            namespace=namespace,
+            work_root=work.capability_path,
+            evidence_root=evidence.capability_path,
+            work_ref=work.logical_ref,
+            evidence_ref=evidence.logical_ref,
+        )
+        attempt: dict[str, object] = {
+            "internal_session_id": internal_session_id,
+            "logical_question_id": logical_question_id,
+            "factory_returned": False,
+            "setup_completed": False,
+            "provider_variant": None,
+            "failure_code": None,
+        }
+        lifecycle_attempts.append(attempt)
+        return context, custody, attempt
+
+    def retire_direct_context(custody: LifecycleCustody) -> tuple[str, ...]:
+        facts: list[str] = []
+        try:
+            for label, held in (("work", custody.work), ("session", custody.session)):
+                try:
+                    if not held.retire(max_entries=RETIRE_MAX_ENTRIES, max_depth=RETIRE_MAX_DEPTH):
+                        facts.append(f"{label}_root_binding_lost")
+                except BaseException as exc:
+                    if not isinstance(exc, Exception):
+                        raise
+                    facts.append(f"{label}_root_retirement_failed")
+        finally:
+            custody.close()
+        return tuple(facts)
+
+    def preserve_failure_through_retirement(
+        primary: BaseException,
+        custody: LifecycleCustody,
+        attempt: dict[str, object],
+    ) -> None:
+        try:
+            retire_direct_context(custody)
+        except BaseException as secondary:
+            if isinstance(primary, Exception) and not isinstance(secondary, Exception):
+                raise secondary
+            attempt["secondary_failure_code"] = _closed_failure_code(
+                secondary,
+                "runner_retirement_control_flow" if not isinstance(secondary, Exception) else "runner_retirement_failed",
+            )
+        raise primary
+
+    def close_run_custody() -> None:
+        for held in (evidence_parent, work_parent, session_parent, run_custody):
+            if held is not None:
+                held.close()
 
     def record_lifecycle(evidence: LifecycleEvidence, trace_writer: Callable[[], CaseTraceWriter]) -> None:
         # Register the expected instance first. A trace persistence failure is
@@ -682,13 +799,22 @@ def execute_run(
 
     if config.provider:
         assert provider_spec_value is not None
-        diagnostic_id = "__diagnostic__"
-        diagnostic_context = ProviderSessionContext(
-            run_id=run_id, session_id=diagnostic_id,
-            namespace=provider_spec_value.derive_namespace(run_id, diagnostic_id),
-            work_root=run_dir / "work" / diagnostic_id,
-            evidence_root=run_dir / "evidence" / diagnostic_id,
-        )
+        diagnostic_logical_id = "__diagnostic__"
+        diagnostic_id = _internal_session_id(0, diagnostic_logical_id)
+        try:
+            run_custody = hold_directory(run_dir, logical_ref=Path("."))
+            run_custody.prove_supported()
+            session_parent = run_custody.mkdir("sessions", logical_ref=Path("sessions"))
+            work_parent = run_custody.mkdir("work", logical_ref=Path("work"))
+            evidence_parent = run_custody.mkdir("evidence", logical_ref=Path("evidence"))
+            diagnostic_context, diagnostic_custody, diagnostic_attempt = prepare_direct_context(
+                internal_session_id=diagnostic_id,
+                logical_question_id=None,
+                namespace=provider_spec_value.derive_namespace(run_id, diagnostic_logical_id),
+            )
+        except BaseException:
+            close_run_custody()
+            raise
         diagnostic_trace: CaseTraceWriter | None = None
 
         def get_diagnostic_trace() -> CaseTraceWriter:
@@ -711,6 +837,7 @@ def execute_run(
                 for probe in probes:
                     probe_file.write(probe.model_dump_json() + "\n")
             provider_variant = bind_observed_variant(diagnostic_context, candidate)
+            environment["lme"]["provider_variant"] = provider_variant
             config_value = getattr(candidate, "config", None)
             config_hash = getattr(config_value, "sha256", None)
             control_config_sha256 = config_hash() if callable(config_hash) else None
@@ -722,26 +849,46 @@ def execute_run(
             return diagnostic_result
 
         try:
-            prepare_context(diagnostic_context)
             try:
                 diagnostic_provider = provider_spec_value.factory()
+                diagnostic_attempt["factory_returned"] = True
             except BaseException as exc:
+                diagnostic_attempt["failure_code"] = "provider_constructor_failed"
                 terminalize_constructor_failure(
                     diagnostic_context,
                     requested_provider=config.provider,
                     error=exc,
+                    custody=diagnostic_custody,
                 )
-            (_diagnostic_result, _diagnostic_path, _diagnostic_digest, diagnostic_variant) = run_provider_lifecycle(
-                provider=diagnostic_provider, profile=lme_profile(), context=diagnostic_context,
-                binding=provider_spec_value.runtime_binding, requested_provider=config.provider,
-                operation=run_diagnostics,
-                finalized=lambda evidence: record_lifecycle(evidence, get_diagnostic_trace),
-            )
+            try:
+                (_diagnostic_result, _diagnostic_path, _diagnostic_digest, diagnostic_variant) = run_provider_lifecycle(
+                    provider=diagnostic_provider, profile=lme_profile(), context=diagnostic_context,
+                    binding=provider_spec_value.runtime_binding, requested_provider=config.provider,
+                    operation=run_diagnostics,
+                    finalized=lambda evidence: record_lifecycle(evidence, get_diagnostic_trace),
+                    custody=diagnostic_custody,
+                    setup_completed=lambda: diagnostic_attempt.__setitem__("setup_completed", True),
+                    variant_observed=lambda value: diagnostic_attempt.__setitem__("provider_variant", value),
+                )
+            except BaseException as primary:
+                if diagnostic_trace is not None:
+                    diagnostic_trace.close()
+                preserve_failure_through_retirement(primary, diagnostic_custody, diagnostic_attempt)
+            if diagnostic_trace is not None:
+                diagnostic_trace.close()
+            retirement_facts = retire_direct_context(diagnostic_custody)
+            if retirement_facts:
+                raise CleanupUnproved(
+                    "runner-owned lifecycle retirement failed",
+                    fact="runner_retirement_failed",
+                )
             assert diagnostic_variant == provider_variant
         except BaseException as exc:
-            failure = exc.primary if isinstance(exc, LifecycleRunError) else exc
-            invalid_reason = f"diagnostic provider failure {type(failure).__name__}: {failure}"
-            failures.append({"question_id": diagnostic_id, "phase": "diagnostic", "detail": f"{type(failure).__name__}: {failure}"})
+            code = _closed_failure_code(exc, "provider_control_flow" if not isinstance(exc, Exception) else "provider_diagnostic_failed")
+            if diagnostic_attempt["failure_code"] is None:
+                diagnostic_attempt["failure_code"] = code
+            invalid_reason = f"diagnostic provider failure: {code}"
+            failures.append({"question_id": diagnostic_logical_id, "phase": "diagnostic", "detail": code})
             if not isinstance(exc, Exception):
                 control_flow = exc
     started = time.perf_counter()
@@ -756,13 +903,19 @@ def execute_run(
         reader_started = question_started
         provider_answered = False
         trace: CaseTraceWriter | None = None
+        internal_case_session_id = (
+            _internal_session_id(case_ordinal, question.question_id)
+            if config.provider
+            else question.question_id
+        )
+        case_attempt: dict[str, object] | None = None
 
         def get_case_trace() -> CaseTraceWriter:
             nonlocal trace
             if trace is None:
                 trace = CaseTraceWriter(
                     run_dir,
-                    question.question_id,
+                    internal_case_session_id,
                     schema_version=2 if config.provider else 1,
                 )
             return trace
@@ -770,17 +923,22 @@ def execute_run(
         try:
             if config.provider:
                 assert provider_spec_value is not None
-                context = ProviderSessionContext(
-                    run_id=run_id, session_id=question.question_id,
+                context, case_custody, case_attempt = prepare_direct_context(
+                    internal_session_id=internal_case_session_id,
+                    logical_question_id=question.question_id,
                     namespace=provider_spec_value.derive_namespace(run_id, question.question_id),
-                    work_root=run_dir / "work" / _safe_id(question.question_id),
-                    evidence_root=run_dir / "evidence" / _safe_id(question.question_id),
                 )
-                prepare_context(context)
                 try:
                     provider = provider_spec_value.factory()
+                    case_attempt["factory_returned"] = True
                 except BaseException as exc:
-                    terminalize_constructor_failure(context, requested_provider=config.provider, error=exc)
+                    case_attempt["failure_code"] = "provider_constructor_failed"
+                    terminalize_constructor_failure(
+                        context,
+                        requested_provider=config.provider,
+                        error=exc,
+                        custody=case_custody,
+                    )
 
                 def _owned(candidate: object):
                     nonlocal prior_presence_token, reader_attempted, reader_started, reader_wall_time
@@ -858,15 +1016,32 @@ def execute_run(
                     prior_presence_token = token
                     return payload_shas, per_case_readiness, hits, retrieved, hypothesis
 
-                (payload_shas, per_case_readiness, hits, retrieved, hypothesis), _observation_path, _observation_digest, observed_variant = run_provider_lifecycle(
-                    provider=provider,
-                    profile=lme_profile(),
-                    context=context,
-                    binding=provider_spec_value.runtime_binding,
-                    requested_provider=config.provider,
-                    operation=_owned,
-                    finalized=lambda evidence: record_lifecycle(evidence, get_case_trace),
-                )
+                try:
+                    (payload_shas, per_case_readiness, hits, retrieved, hypothesis), _observation_path, _observation_digest, observed_variant = run_provider_lifecycle(
+                        provider=provider,
+                        profile=lme_profile(),
+                        context=context,
+                        binding=provider_spec_value.runtime_binding,
+                        requested_provider=config.provider,
+                        operation=_owned,
+                        finalized=lambda evidence: record_lifecycle(evidence, get_case_trace),
+                        custody=case_custody,
+                        setup_completed=lambda: case_attempt.__setitem__("setup_completed", True),
+                        variant_observed=lambda value: case_attempt.__setitem__("provider_variant", value),
+                    )
+                except BaseException as primary:
+                    if trace is not None:
+                        trace.close()
+                    assert case_attempt is not None
+                    preserve_failure_through_retirement(primary, case_custody, case_attempt)
+                if trace is not None:
+                    trace.close()
+                retirement_facts = retire_direct_context(case_custody)
+                if retirement_facts:
+                    raise CleanupUnproved(
+                        "runner-owned lifecycle retirement failed",
+                        fact="runner_retirement_failed",
+                    )
                 if provider_variant is None:
                     provider_variant = observed_variant
                     config_value = getattr(provider, "config", None)
@@ -911,10 +1086,19 @@ def execute_run(
                 trace.append({"record": "timing", "phase": "retrieve-and-read", "ms": (time.perf_counter() - question_started) * 1000.0})
                 trace.append({"record": "answer", "prompt_sha256": hashlib.sha256(question.question.encode()).hexdigest(), "model_id": _reader_model(active_reader, config), "response_ref": "inline:stub-response" if isinstance(active_reader, StubReader) else "reader-artifact", "input_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "input_tokens", 0) or 0), "output_tokens": int(getattr(getattr(active_reader, "last_call_metrics", None), "output_tokens", 0) or 0)})
         except AdapterEnvironmentError as exc:
-            invalid_reason = f"{question.question_id}: {exc}"
-            failures.append(
-                {"question_id": question.question_id, "phase": "environment", "detail": str(exc)}
-            )
+            if config.provider:
+                code = _closed_failure_code(exc, "provider_environment_failed")
+                if case_attempt is not None and case_attempt["failure_code"] is None:
+                    case_attempt["failure_code"] = code
+                invalid_reason = f"{question.question_id}: provider failure: {code}"
+                failures.append(
+                    {"question_id": question.question_id, "phase": "environment", "detail": code}
+                )
+            else:
+                invalid_reason = f"{question.question_id}: {exc}"
+                failures.append(
+                    {"question_id": question.question_id, "phase": "environment", "detail": str(exc)}
+                )
             break
         except Exception as exc:  # retained as a question failure, never dropped
             # Deliberately asymmetric. On the direct-provider path the provider
@@ -923,9 +1107,11 @@ def execute_run(
             # fails is a scored failure inside the denominator — that is the
             # established LME policy, and voiding the run instead would silently
             # change what the benchmark measures.
-            failure = exc.primary if isinstance(exc, LifecycleRunError) else exc
             if config.provider:
-                invalid_reason = f"{question.question_id}: provider failure {type(failure).__name__}: {failure}"
+                code = _closed_failure_code(exc, "provider_lifecycle_failed")
+                if case_attempt is not None and case_attempt["failure_code"] is None:
+                    case_attempt["failure_code"] = code
+                invalid_reason = f"{question.question_id}: provider failure: {code}"
             if reader_attempted:
                 reader_wall_time = time.perf_counter() - reader_started
             status = "failed"
@@ -934,19 +1120,21 @@ def execute_run(
                 {
                     "question_id": question.question_id,
                     "phase": "retrieve-or-read",
-                    "detail": f"{type(failure).__name__}: {failure}",
+                    "detail": code if config.provider else f"{type(exc).__name__}: {exc}",
                 }
             )
             if config.provider:
                 break
         except BaseException as exc:
             control_flow = exc
-            invalid_reason = f"{question.question_id}: provider control-flow {type(exc).__name__}: {exc}"
+            if case_attempt is not None and case_attempt["failure_code"] is None:
+                case_attempt["failure_code"] = "provider_control_flow"
+            invalid_reason = f"{question.question_id}: provider control-flow"
             failures.append(
                 {
                     "question_id": question.question_id,
                     "phase": "retrieve-or-read",
-                    "detail": f"{type(exc).__name__}: {exc}",
+                    "detail": "provider_control_flow",
                 }
             )
             break
@@ -966,6 +1154,7 @@ def execute_run(
             }
         )
 
+    close_run_custody()
     if control_flow is not None:
         # Preserve the provider's exact control-flow object.  Local evidence
         # writes are best-effort once it exists; none may replace it.
@@ -976,15 +1165,15 @@ def execute_run(
             _write_jsonl(bounds_dir / "null-abstain-floor.jsonl", [])
             _write_jsonl(run_dir / "failures.jsonl", failures)
             _write_jsonl(run_dir / "question-outcomes.jsonl", outcomes)
-        except BaseException as exc:
-            _add_control_flow_note(control_flow, f"local artifact persistence failed: {exc}")
+        except BaseException:
+            pass
         if config.provider:
             try:
                 _write_jsonl(run_dir / "isolation.jsonl", isolation_rows)
                 environment["lme"]["lifecycle_expected_instances"] = lifecycle_instances
                 _write_json(run_dir / "environment.json", environment)
-            except BaseException as exc:
-                _add_control_flow_note(control_flow, f"lifecycle ledger persistence failed: {exc}")
+            except BaseException:
+                pass
         try:
             finalize_manifest(
                 run_dir,
@@ -996,8 +1185,8 @@ def execute_run(
                 budget=_budget_summary(ledger),
                 invalid_reason=invalid_reason,
             )
-        except BaseException as exc:
-            _add_control_flow_note(control_flow, f"terminal manifest finalization failed: {exc}")
+        except BaseException:
+            pass
         raise control_flow
 
     bounds_dir = run_dir / "bounds"
