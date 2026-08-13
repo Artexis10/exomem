@@ -1784,6 +1784,19 @@ class GraphRebuildCoordinator:
             except BaseException as error:  # noqa: BLE001 - integration path
                 if isinstance(error, GraphRebuildRegistrationError):
                     projection = error
+                    if isinstance(error, GraphEpochIncoherent):
+                        try:
+                            state = status(self.vault_root)["state"]
+                        except Exception:  # noqa: BLE001 - status is fail-closed
+                            pass
+                        else:
+                            if state == "unavailable":
+                                projection = GraphRebuildRegistrationError(
+                                    error.code,
+                                    "Run maintain_memory(mode=\"reconcile\", dry_run=false, "
+                                    "rebuild_graph=true) to recover the derived graph.",
+                                )
+                                projection.__cause__ = error
                 else:
                     try:
                         state = status(self.vault_root)["state"]
@@ -1796,13 +1809,13 @@ class GraphRebuildCoordinator:
                             if state == "unavailable"
                             else "Retry the same mutation identity or run reconcile to recover the derived graph."
                         )
-                    logger.exception(
-                        "graph rebuild stopped checkpoint_sha256=%s generation=%s",
-                        required.checkpoint_sha256,
-                        required.generation,
-                    )
                     projection = GraphRebuildStopped(remediation)
                     projection.__cause__ = error
+                logger.exception(
+                    "graph rebuild stopped checkpoint_sha256=%s generation=%s",
+                    required.checkpoint_sha256,
+                    required.generation,
+                )
                 with self._condition:
                     self._error = projection
                     self._running = False

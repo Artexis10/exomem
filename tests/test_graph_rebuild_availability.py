@@ -991,6 +991,43 @@ def test_registered_builder_failure_logs_and_chains_a_content_free_state_aware_p
     assert checkpoint.checkpoint_sha256 in caplog.text
 
 
+def test_registered_unavailable_lineage_failure_projects_explicit_reset_without_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unavailable typed lineage failure keeps diagnostics out of the terminal."""
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    checkpoint = _checkpoint(1)
+    sentinel = "private lineage path C:\\vault\\Knowledge Base\\secret.md"
+    failure = graph_sync.GraphEpochIncoherent(sentinel)
+
+    monkeypatch.setattr(
+        graph_sync,
+        "status",
+        lambda _root: {"state": "unavailable", "generation": checkpoint.generation},
+    )
+
+    def fail(_checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        raise failure
+
+    caplog.set_level("ERROR")
+    waiter = coordinator.start_or_join(checkpoint, fail)
+    with pytest.raises(graph_sync.GraphRebuildRegistrationError) as stopped:
+        waiter.wait(1)
+
+    assert type(stopped.value) is graph_sync.GraphRebuildRegistrationError
+    assert stopped.value.__cause__ is failure
+    assert stopped.value.code == "GRAPH_SYNC_LINEAGE_CONFLICT"
+    assert stopped.value.remediation == (
+        "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
+        "to recover the derived graph."
+    )
+    assert sentinel not in str(stopped.value)
+    assert sentinel in caplog.text
+    assert checkpoint.checkpoint_sha256 in caplog.text
+
+
 def test_same_generation_with_a_different_digest_does_not_cover_a_waiter() -> None:
     first = _checkpoint(1)
     replacement = graph_sync.GraphSyncCheckpoint.create(
