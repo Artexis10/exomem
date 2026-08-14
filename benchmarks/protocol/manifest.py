@@ -13,8 +13,16 @@ from .contracts import (
     ContractIdentityError,
     derive_preregistration_identity,
     validate_preregistration_identity,
+    validate_working_preregistration,
 )
-from .models import BudgetSummary, DatasetIdentity, LaneReadiness, LeakageSummary, RunManifest
+from .models import (
+    BudgetSummary,
+    DatasetIdentity,
+    LaneReadiness,
+    LeakageSummary,
+    PreregistrationLineage,
+    RunManifest,
+)
 from .validity import is_terminal
 
 
@@ -36,9 +44,19 @@ def start_manifest(
 ) -> RunManifest:
     repository = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[2]
     try:
+        working_sha256 = None
+        if contract_revision is None:
+            working_sha256 = validate_working_preregistration(repository)
         preregistration_identity = derive_preregistration_identity(
             repository, contract_revision=contract_revision
         )
+        if (
+            working_sha256 is not None
+            and working_sha256 != preregistration_identity.effective.sha256
+        ):
+            raise ContractIdentityError(
+                "working pre-registration digest differs from the derived identity"
+            )
     except ContractIdentityError as exc:
         raise ManifestError(f"pre-registration identity refused: {exc}") from exc
     path = _path(run_dir)
@@ -53,6 +71,11 @@ def start_manifest(
         leakage=leakage or LeakageSummary(scanned_cases=0, invalidated_cases=0),
         contamination=contamination, budget=budget,
         preregistration_identity=preregistration_identity,
+        preregistration_lineage=(
+            PreregistrationLineage.from_identity(preregistration_identity)
+            if preregistration_identity.amendments
+            else None
+        ),
         provider_variant=provider_variant, control_config_sha256=control_config_sha256,
     )
     path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -185,7 +208,10 @@ def _validate_lifecycle_artifacts(
     if not expected_instances:
         raise ManifestError("lifecycle expected instances are unavailable")
     try:
-        from lme.providers.lifecycle import LifecycleCompletenessError, validate_lifecycle_completeness
+        from lme.providers.lifecycle import (
+            LifecycleCompletenessError,
+            validate_lifecycle_completeness,
+        )
 
         validate_lifecycle_completeness(
             expected_instances=tuple(expected_instances),

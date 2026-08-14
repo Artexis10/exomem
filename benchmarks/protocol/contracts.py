@@ -20,7 +20,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-
 CONTRACT_PATH = "benchmarks/epistemic/PREREGISTRATION.md"
 CONTRACTS_DIR = "benchmarks/epistemic/contracts"
 RATIFICATION_RECEIPT_PATH = f"{CONTRACTS_DIR}/ratification.v1.json"
@@ -34,11 +33,33 @@ RATIFICATION_RECEIPT_SHA256 = "31b74c6cdd69504da31af903e8464177f35fbf525f655c49e
 
 _SHA256 = r"^[0-9a-f]{64}$"
 _REVISION = r"^[0-9a-f]{40}$"
-_AMENDMENT_NAME = re.compile(r"^amendment-(?P<sequence>[0-9]{4})\.v1\.json$")
+_AMENDMENT_NAME = re.compile(
+    r"^amendment-(?:(?P<sequence>[0-9]{4})|(?P<slug>[0-9]{4}-[0-9]{2}-[a-z0-9][a-z0-9-]*))\.v1\.json$"
+)
 
 
 class ContractIdentityError(ValueError):
     """The pinned receipt chain cannot be reconstructed exactly."""
+
+
+class AmendmentAcknowledgmentPendingError(ContractIdentityError):
+    """An amendment exists but has not received complete founder acknowledgment."""
+
+
+class AmendmentChainMissingError(ContractIdentityError):
+    """Working bytes changed without an amendment receipt."""
+
+
+class AmendmentChainOrderError(ContractIdentityError):
+    """Amendment receipts are not a strict contiguous sequence."""
+
+
+class AmendmentChainMismatchError(ContractIdentityError):
+    """An amendment digest does not bind the preceding or current document."""
+
+
+class PreregistrationDriftError(ContractIdentityError):
+    """Working pre-registration bytes match neither the base nor a valid chain."""
 
 
 class _StrictModel(BaseModel):
@@ -73,11 +94,14 @@ class AmendmentReceipt(_StrictModel):
     contract_path: str = Field(min_length=1)
     parent_contract_sha256: str = Field(pattern=_SHA256)
     contract_sha256: str = Field(pattern=_SHA256)
-    repository_revision: str = Field(pattern=_REVISION)
+    repository_revision: str | None = Field(default=None, pattern=_REVISION)
     amended_on: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     affected_sections: tuple[str, ...] = Field(min_length=1)
     rationale: str = Field(min_length=1)
     effective_policy: str = Field(min_length=1)
+    ratifier: str | None = Field(default=None, min_length=1)
+    acknowledged_on: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    catastrophic_set_decision: Literal["accept", "strike"] | None = None
 
     @field_validator("affected_sections")
     @classmethod
@@ -85,6 +109,38 @@ class AmendmentReceipt(_StrictModel):
         if any(not item.strip() for item in value) or len(set(value)) != len(value):
             raise ValueError("affected sections must be nonblank and unique")
         return value
+
+    @model_validator(mode="after")
+    def _acknowledgment_is_complete_or_pending(self) -> AmendmentReceipt:
+        if (self.ratifier is None) != (self.acknowledged_on is None):
+            raise ValueError(
+                "founder acknowledgment must provide both ratifier and acknowledged_on"
+            )
+        if self.ratifier is None and self.catastrophic_set_decision is not None:
+            raise ValueError("catastrophic-set decision belongs to founder acknowledgment")
+        if self.ratifier is not None and self.ratifier != RATIFIER:
+            raise ValueError("ratifier differs from the pinned founder identity")
+        if self.ratifier is not None and self.repository_revision is None:
+            raise ValueError(
+                "amended-document repository revision is required at acknowledgment"
+            )
+        if (
+            self.ratifier is not None
+            and any("§3" in section and "candidacy" in section for section in self.affected_sections)
+            and self.catastrophic_set_decision is None
+        ):
+            raise ValueError("catastrophic-set candidacy requires an explicit decision")
+        return self
+
+    @property
+    def acknowledgment_status(self) -> Literal["pending", "acknowledged"]:
+        return "pending" if self.ratifier is None else "acknowledged"
+
+    def require_acknowledged(self) -> None:
+        if self.acknowledgment_status == "pending":
+            raise AmendmentAcknowledgmentPendingError(
+                f"amendment sequence {self.sequence} founder acknowledgment is pending"
+            )
 
 
 class ContractArtifactIdentity(_StrictModel):
@@ -117,7 +173,7 @@ class PreregistrationIdentity(_StrictModel):
     effective: ContractArtifactIdentity
 
     @model_validator(mode="after")
-    def _chain_is_self_consistent(self) -> "PreregistrationIdentity":
+    def _chain_is_self_consistent(self) -> PreregistrationIdentity:
         bootstrap = (
             self.contract_revision == RATIFICATION_REPOSITORY_REVISION
             and self.original.repository_revision == RATIFICATION_REPOSITORY_REVISION
@@ -159,6 +215,134 @@ def _strict_json(data: bytes, *, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ContractIdentityError(f"{label}: receipt must be an object")
     return value
+
+
+def fold_amendment_chain(
+    receipts: Iterable[AmendmentReceipt],
+    *,
+    base_sha256: str,
+    current_sha256: str,
+) -> str:
+    """Fold acknowledged receipt identities from a frozen base to working bytes."""
+
+    chain = tuple(receipts)
+    if not chain:
+        if current_sha256 == base_sha256:
+            return base_sha256
+        raise AmendmentChainMissingError(
+            "amendment receipt missing: "
+            f"expected base identity {base_sha256}; actual identity {current_sha256}"
+        )
+
+    expected_sha256 = base_sha256
+    for expected_sequence, receipt in enumerate(chain, 1):
+        receipt.require_acknowledged()
+        if receipt.sequence != expected_sequence:
+            raise AmendmentChainOrderError(
+                "amendment chain out of order: "
+                f"expected sequence {expected_sequence}; actual {receipt.sequence}"
+            )
+        if receipt.parent_contract_sha256 != expected_sha256:
+            raise AmendmentChainMismatchError(
+                f"amendment sequence {receipt.sequence} parent mismatch: "
+                f"expected identity {expected_sha256}; "
+                f"actual identity {receipt.parent_contract_sha256}"
+            )
+        expected_sha256 = receipt.contract_sha256
+
+    if expected_sha256 != current_sha256:
+        raise AmendmentChainMismatchError(
+            "amendment chain does not culminate in the working document: "
+            f"expected identity {expected_sha256}; actual identity {current_sha256}"
+        )
+    return expected_sha256
+
+
+def validate_preregistration_bytes(
+    data: bytes,
+    receipts: Iterable[AmendmentReceipt],
+    *,
+    base_sha256: str = RATIFICATION_CONTRACT_SHA256,
+) -> str:
+    """Require working bytes to equal the frozen base or an acknowledged chain."""
+
+    actual_sha256 = _sha256(data)
+    try:
+        return fold_amendment_chain(
+            receipts,
+            base_sha256=base_sha256,
+            current_sha256=actual_sha256,
+        )
+    except AmendmentAcknowledgmentPendingError:
+        raise
+    except (AmendmentChainMissingError, AmendmentChainOrderError, AmendmentChainMismatchError) as exc:
+        raise PreregistrationDriftError(
+            "working pre-registration drift: "
+            f"expected base identity {base_sha256} or an acknowledged amendment chain; "
+            f"actual identity {actual_sha256}; {exc}"
+        ) from exc
+
+
+def order_amendment_receipt_rows(
+    rows: Iterable[tuple[str, bytes]],
+) -> tuple[tuple[str, bytes], ...]:
+    """Validate amendment receipt rows and order them by declared sequence."""
+
+    parsed: list[tuple[int, str, bytes]] = []
+    for name, data in rows:
+        match = _AMENDMENT_NAME.fullmatch(name)
+        if match is None:
+            raise ContractIdentityError(f"amendment receipt name is invalid: {name}")
+        try:
+            _strict_json(data, label=name)
+            receipt = AmendmentReceipt.model_validate_json(data)
+        except ValidationError as exc:
+            raise ContractIdentityError(
+                f"amendment receipt schema invalid: {name}: {exc}"
+            ) from exc
+        filename_sequence = match.group("sequence")
+        if filename_sequence is not None and receipt.sequence != int(filename_sequence):
+            raise AmendmentChainOrderError("amendment filename and sequence differ")
+        parsed.append((receipt.sequence, name, data))
+    if len({sequence for sequence, _name, _data in parsed}) != len(parsed):
+        raise AmendmentChainOrderError("amendment chain contains duplicate sequences")
+    return tuple((name, data) for _sequence, name, data in sorted(parsed))
+
+
+def _working_amendment_receipts(root: Path) -> tuple[AmendmentReceipt, ...]:
+    contracts_dir = root / CONTRACTS_DIR
+    try:
+        paths = sorted(contracts_dir.glob("amendment-*.v1.json"))
+    except OSError as exc:
+        raise ContractIdentityError("working amendment receipts cannot be discovered") from exc
+    rows: list[tuple[str, bytes]] = []
+    for path in paths:
+        if _AMENDMENT_NAME.fullmatch(path.name) is None:
+            raise ContractIdentityError(f"working amendment receipt name is invalid: {path.name}")
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise ContractIdentityError(
+                f"working amendment receipt cannot be read: {path.name}"
+            ) from exc
+        rows.append((path.name, data))
+    ordered = order_amendment_receipt_rows(rows)
+    return tuple(AmendmentReceipt.model_validate_json(data) for _name, data in ordered)
+
+
+def validate_working_preregistration(
+    repo_root: Path | str,
+) -> str:
+    """Validate the live pre-registration and local receipt chain before a run."""
+
+    root = Path(repo_root).resolve()
+    try:
+        data = (root / CONTRACT_PATH).read_bytes()
+    except OSError as exc:
+        raise PreregistrationDriftError(
+            f"working pre-registration is missing: expected {CONTRACT_PATH}"
+        ) from exc
+    return validate_preregistration_bytes(data, _working_amendment_receipts(root))
 
 
 def derive_identity_from_receipt_bytes(
@@ -276,8 +460,10 @@ def derive_identity_from_receipt_bytes(
             receipt = AmendmentReceipt.model_validate_json(data)
         except ValidationError as exc:
             raise ContractIdentityError(f"amendment receipt schema invalid: {exc}") from exc
-        if receipt.sequence != int(match.group("sequence")):
+        filename_sequence = match.group("sequence")
+        if filename_sequence is not None and receipt.sequence != int(filename_sequence):
             raise ContractIdentityError("amendment filename and sequence differ")
+        receipt.require_acknowledged()
         if not is_revision_applicable(receipt.repository_revision, contract_revision):
             raise ContractIdentityError(
                 "amendment named amended-contract revision is not an ancestor of the pin"
@@ -431,8 +617,7 @@ def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     return subprocess.run(
         (str(executable), "-C", str(root), *args),
         check=check,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env=environment,
     )
 
@@ -522,10 +707,6 @@ def _git_receipt_introduction_revisions(
     if len(history_rows) > 128:
         raise ContractIdentityError("receipt history exceeds the bounded audit limit")
     history = _git_actual_path_events(root, history_rows, path)
-    if len(history) > 1:
-        raise ContractIdentityError(
-            "receipt history shows the receipt changed after its unique introduction commit"
-        )
     addition_rows = tuple(
         line
         for line in _git(
@@ -565,6 +746,41 @@ def _git_receipt_introduction_revisions(
     ).stdout.decode().splitlines()
     if any(line.startswith("R") for line in renamed):
         raise ContractIdentityError("receipt history contains a rename ambiguity")
+    if len(history) == 1:
+        return additions
+    if len(history) == 2 and len(additions) == 1 and history[-1] == additions[0]:
+        match = _AMENDMENT_NAME.fullmatch(Path(path).name)
+        if match is not None:
+            try:
+                pending_bytes = _git_show(root, additions[0], path)
+                acknowledged_bytes = _git_show(root, history[0], path)
+                _strict_json(pending_bytes, label=f"{path}@pending")
+                _strict_json(acknowledged_bytes, label=f"{path}@acknowledged")
+                pending = AmendmentReceipt.model_validate_json(pending_bytes)
+                acknowledged = AmendmentReceipt.model_validate_json(acknowledged_bytes)
+            except (ContractIdentityError, ValidationError):
+                pass
+            else:
+                mutable = {
+                    "acknowledged_on",
+                    "catastrophic_set_decision",
+                    "ratifier",
+                    "repository_revision",
+                }
+                pending_stable = pending.model_dump(exclude=mutable)
+                acknowledged_stable = acknowledged.model_dump(exclude=mutable)
+                if (
+                    pending.acknowledgment_status == "pending"
+                    and pending.repository_revision is None
+                    and acknowledged.acknowledgment_status == "acknowledged"
+                    and pending_stable == acknowledged_stable
+                ):
+                    return (history[0],)
+    if len(history) > 1:
+        raise ContractIdentityError(
+            "receipt changed outside the single allowed "
+            "pending-to-acknowledged transition"
+        )
     return additions
 
 
@@ -595,10 +811,18 @@ def _receipt_bytes_at_pin(root: Path, pin: str) -> tuple[tuple[str, bytes], ...]
         raise ContractIdentityError(
             "unrecognized receipt artifact(s) at the pin: " + ", ".join(sorted(unrecognized))
         )
-    ordered = [name for name in receipt_artifacts if name == "ratification.v1.json"]
-    ordered.extend(sorted(name for name in receipt_artifacts if _AMENDMENT_NAME.fullmatch(name)))
-    if ordered:
-        return tuple((name, _git_show(root, pin, f"{CONTRACTS_DIR}/{name}")) for name in ordered)
+    ratification_rows = tuple(
+        (name, _git_show(root, pin, f"{CONTRACTS_DIR}/{name}"))
+        for name in receipt_artifacts
+        if name == "ratification.v1.json"
+    )
+    amendment_rows = tuple(
+        (name, _git_show(root, pin, f"{CONTRACTS_DIR}/{name}"))
+        for name in receipt_artifacts
+        if _AMENDMENT_NAME.fullmatch(name)
+    )
+    if ratification_rows or amendment_rows:
+        return ratification_rows + order_amendment_receipt_rows(amendment_rows)
 
     # Bootstrap: the approved document revision necessarily predates the
     # additive receipt.  Only the byte-pinned canonical receipt is accepted.
@@ -683,12 +907,21 @@ def validate_preregistration_identity(
 
 
 __all__ = [
+    "AmendmentAcknowledgmentPendingError",
+    "AmendmentChainMismatchError",
+    "AmendmentChainMissingError",
+    "AmendmentChainOrderError",
     "AmendmentReceipt",
     "ContractIdentityError",
+    "PreregistrationDriftError",
     "PreregistrationIdentity",
     "RatificationReceipt",
     "derive_identity_from_receipt_bytes",
     "derive_preregistration_identity",
     "default_contract_revision",
+    "fold_amendment_chain",
+    "order_amendment_receipt_rows",
+    "validate_preregistration_bytes",
     "validate_preregistration_identity",
+    "validate_working_preregistration",
 ]

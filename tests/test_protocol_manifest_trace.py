@@ -1,24 +1,25 @@
 from __future__ import annotations
 
-from pathlib import Path
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 
 def test_manifest_starts_before_call_and_trace_refuses_unfinished_runs(tmp_path: Path) -> None:
+    from protocol.contracts import RATIFICATION_REPOSITORY_REVISION
     from protocol.manifest import ManifestError, finalize_manifest, load_manifest, start_manifest
     from protocol.trace import CaseTraceReader, CaseTraceWriter
 
-    start_manifest(tmp_path, run_id="run-1", dataset={"id": "fixture", "variant": "mini", "source": "local", "revision": "1", "sha256": "a" * 64, "case_count": 1}, started_at="2026-01-01T00:00:00Z")
+    start_manifest(tmp_path, run_id="run-1", dataset={"id": "fixture", "variant": "mini", "source": "local", "revision": "1", "sha256": "a" * 64, "case_count": 1}, started_at="2026-01-01T00:00:00Z", contract_revision=RATIFICATION_REPOSITORY_REVISION)
     assert (tmp_path / "manifest.json").is_file()
     assert start_manifest(
-        tmp_path / "second", run_id="run-2", dataset={"id": "fixture", "variant": "mini", "source": "local", "revision": "1", "sha256": "a" * 64, "case_count": 1}, started_at="2026-01-01T00:00:00Z"
+        tmp_path / "second", run_id="run-2", dataset={"id": "fixture", "variant": "mini", "source": "local", "revision": "1", "sha256": "a" * 64, "case_count": 1}, started_at="2026-01-01T00:00:00Z", contract_revision=RATIFICATION_REPOSITORY_REVISION
     ).schema_version == 2
     with pytest.raises(ManifestError, match="non-terminal"):
         load_manifest(tmp_path)
@@ -30,6 +31,7 @@ def test_manifest_starts_before_call_and_trace_refuses_unfinished_runs(tmp_path:
 
 
 def _feedback6_direct_run(run_dir: Path, *, finalize: bool = True) -> Path:
+    from protocol.contracts import RATIFICATION_REPOSITORY_REVISION
     from protocol.manifest import finalize_manifest, start_manifest
     from protocol.models import ProviderCleanupObservation
     from protocol.trace import CaseTraceWriter
@@ -44,6 +46,7 @@ def _feedback6_direct_run(run_dir: Path, *, finalize: bool = True) -> Path:
         },
         started_at="2026-01-01T00:00:00Z",
         provider_variant="observed",
+        contract_revision=RATIFICATION_REPOSITORY_REVISION,
     )
     expected = []
     attempts = []
@@ -99,7 +102,7 @@ def _feedback6_load_worker(run_dir: str, connection) -> None:
 
     try:
         load_manifest(Path(run_dir))
-    except BaseException:
+    except BaseException:  # noqa: BLE001 - subprocess must report any failed load
         connection.send("rejected")
     else:
         connection.send("accepted")
