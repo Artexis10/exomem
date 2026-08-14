@@ -42,6 +42,8 @@ _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _DEFAULT_LONG_HOLDER_SECONDS = 30.0
 _STATUS_TIMEOUT_SECONDS = 0.25
 _HOLDER_SCHEMA = 1
+_WINDOWS_DACL_STABILIZATION_SECONDS = 0.25
+_WINDOWS_DACL_STABILIZATION_POLL_SECONDS = 0.01
 
 # The most recent `wait_ms`/`hold_ms` this task/thread measured acquiring and
 # holding the vault mutation boundary — set by `VaultMutationCoordinator.hold()`
@@ -524,27 +526,18 @@ def prepare_windows_idempotency_runtime_paths(state_dir: Path, owners_dir: Path)
     """Create the two runtime directories with protected DACLs, never repair old ones."""
     if os.name != "nt":
         return
+    prepare_windows_private_state_root(state_dir)
+    _prepare_windows_private_directory(owners_dir)
     sid = _windows_current_user_sid()
-
-    def acquire(path: Path) -> tuple[_SecureDirectory, bool]:
-        try:
-            return _acquire_secure_directory(path, create=False), False
-        except FileNotFoundError:
-            return _acquire_secure_directory(path, create=True), True
-
-    state, state_created = acquire(state_dir)
+    state = _acquire_secure_directory(state_dir, create=False)
     try:
-        if state_created:
-            _windows_apply_private_dacl(state_dir, sid)
         _validate_windows_runtime_entry(
             state_dir, directory=True, sid=sid, handle=state.windows_handle
         )
-        owners, owners_created = acquire(owners_dir)
+        owners = _acquire_secure_directory(owners_dir, create=False)
         try:
             if not _windows_child_is_in_directory(state, owners.windows_handle):
                 raise OSError("Windows owner directory escaped its retained state directory")
-            if owners_created:
-                _windows_apply_private_dacl(owners_dir, sid)
             _validate_windows_runtime_entry(
                 owners_dir, directory=True, sid=sid, handle=owners.windows_handle
             )
@@ -552,6 +545,64 @@ def prepare_windows_idempotency_runtime_paths(state_dir: Path, owners_dir: Path)
             owners.close()
     finally:
         state.close()
+
+
+def prepare_windows_private_state_root(state_dir: Path) -> None:
+    """Establish or validate the private Windows root before any lock artifact."""
+    if os.name != "nt":
+        return
+    _prepare_windows_private_directory(Path(state_dir))
+
+
+def _prepare_windows_private_directory(path: Path) -> None:
+    """Create exactly one private directory or validate an observed entry.
+
+    A process sets permissions only on the exact entry its own ``mkdir``
+    created.  A concurrent loser waits briefly for that creator to finish its
+    DACL write, then validates without repairing the observed entry.
+    """
+    target = Path(path).expanduser().absolute()
+    created = False
+    created_identity: os.stat_result | None = None
+    try:
+        directory = _acquire_secure_directory(target, create=False)
+    except FileNotFoundError:
+        try:
+            target.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        else:
+            created = True
+            created_identity = os.lstat(target)
+            _after_windows_secure_directory_create(target)
+        directory = _acquire_secure_directory(target, create=False)
+    sid = _windows_current_user_sid()
+    try:
+        if created:
+            if (
+                created_identity is None
+                or not os.path.samestat(created_identity, os.lstat(target))
+                or not _same_directory_path(directory)
+            ):
+                raise OSError("Windows directory changed during creation")
+            _windows_apply_private_dacl(target, sid)
+            _validate_windows_runtime_entry(
+                target, directory=True, sid=sid, handle=directory.windows_handle
+            )
+            return
+        deadline = time.monotonic() + _WINDOWS_DACL_STABILIZATION_SECONDS
+        while True:
+            try:
+                _validate_windows_runtime_entry(
+                    target, directory=True, sid=sid, handle=directory.windows_handle
+                )
+                return
+            except WindowsRuntimeDaclError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(_WINDOWS_DACL_STABILIZATION_POLL_SECONDS)
+    finally:
+        directory.close()
 
 
 def validate_windows_idempotency_runtime_paths(
@@ -617,6 +668,53 @@ def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
     return info.volume_serial, info.file_index_high, info.file_index_low
 
 
+@contextlib.contextmanager
+def _open_windows_directory_for_flush(path: Path) -> Iterator[int]:
+    """Retain one native directory leaf suitable for a durability flush."""
+    expected = os.lstat(path)
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(expected.st_mode)
+        or not stat.S_ISDIR(expected.st_mode)
+        or getattr(expected, "st_file_attributes", 0) & reparse_point
+    ):
+        raise OSError("Windows durability directory is not a real directory")
+    with contextlib.ExitStack() as stack:
+        parent = stack.enter_context(_open_secure_directory(path.parent, create=False))
+        handle = _windows_open_path(
+            path,
+            directory=True,
+            access=0x40000000,  # GENERIC_WRITE only on the exact final directory
+            share=0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; never FILE_SHARE_DELETE
+        )
+        stack.callback(_windows_close_handle, handle)
+        if not _windows_child_is_in_directory(parent, handle):
+            raise OSError("Windows durability directory escaped its retained parent")
+        _windows_handle_identity(handle)
+        if not os.path.samestat(expected, os.lstat(path)):
+            raise OSError("Windows durability directory changed during open")
+        yield handle
+
+
+def _windows_flush_directory(path: Path) -> None:
+    """Flush one no-follow Windows directory entry with exact handle ownership."""
+    with _open_windows_directory_for_flush(path) as handle:
+        _windows_flush_directory_handle(handle)
+
+
+def _windows_flush_directory_handle(handle: int) -> None:
+    """Flush one raw native directory handle without taking ownership of it."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _windows_library(ctypes, "kernel32")
+    flush = kernel32.FlushFileBuffers
+    flush.argtypes = [wintypes.HANDLE]
+    flush.restype = wintypes.BOOL
+    if not flush(handle):
+        raise OSError(_windows_last_error(ctypes), "cannot flush Windows directory")
+
+
 def _open_posix_directory(path: Path, *, create: bool, mode: int) -> int:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     current_fd = os.open(path.anchor or "/", flags)
@@ -661,7 +759,13 @@ def _acquire_windows_secure_directory(
                 if not create:
                     raise
                 current.mkdir(mode=mode)
+                created = os.lstat(current)
+                _after_windows_secure_directory_create(current)
+                if not os.path.samestat(created, os.lstat(current)):
+                    raise OSError("Windows directory changed during creation") from None
                 handles.append(open_path(current, directory=True))
+                if not os.path.samestat(created, os.lstat(current)):
+                    raise OSError("Windows directory changed during creation") from None
         return _SecureDirectory(
             absolute, windows_handles=handles, close_windows_handle=close_handle
         )
@@ -669,6 +773,10 @@ def _acquire_windows_secure_directory(
         while handles:
             close_handle(handles.pop())
         raise
+
+
+def _after_windows_secure_directory_create(_path: Path) -> None:
+    """Test seam between native directory creation and retained-handle open."""
 
 
 def _acquire_secure_directory(
@@ -785,7 +893,10 @@ def _open_secure_file_at(
             access = 0xC0000000  # GENERIC_READ | GENERIC_WRITE
         elif flags & os.O_WRONLY:
             access = 0x40000000  # GENERIC_WRITE
-        creation = 4 if flags & os.O_CREAT else 3  # OPEN_ALWAYS / OPEN_EXISTING
+        if flags & os.O_CREAT and flags & os.O_EXCL:
+            creation = 1  # CREATE_NEW
+        else:
+            creation = 4 if flags & os.O_CREAT else 3  # OPEN_ALWAYS / OPEN_EXISTING
         handle = _windows_open_path(
             directory.path / name,
             directory=False,
@@ -799,10 +910,13 @@ def _open_secure_file_at(
         except BaseException:
             _windows_close_handle(handle)
             raise
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode):
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("lock path is not a regular file")
+    except BaseException:
         os.close(fd)
-        raise OSError("lock path is not a regular file")
+        raise
     return fd
 
 
@@ -1101,6 +1215,7 @@ class VaultMutationCoordinator:
 
     def _open_lock_file(self, path: Path) -> BinaryIO:
         try:
+            prepare_windows_private_state_root(self.state_root)
             path.parent.mkdir(parents=True, exist_ok=True)
             handle = path.open("a+b")
             handle.seek(0, os.SEEK_END)

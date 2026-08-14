@@ -698,12 +698,16 @@ class GraphLifecycleTransition:
     def rename(self) -> None:
         from .governance import lifecycle
 
-        lifecycle.atomic_rename(
-            self.operation,
-            source=self.source,
-            destination=self.destination,
-            recovery=self.recovery,
-        )
+        try:
+            lifecycle.atomic_rename(
+                self.operation,
+                source=self.source,
+                destination=self.destination,
+                recovery=self.recovery,
+            )
+        except lifecycle._PostRenameDurabilityError as error:
+            self.renamed = True
+            raise lifecycle.LifecycleError(error.code, error.reason) from error
         self.renamed = True
 
     def publish_checkpoint(self) -> None:
@@ -721,7 +725,7 @@ class GraphLifecycleTransition:
                     self.operation,
                     source=self.destination,
                     destination=self.source,
-                    recovery=True,
+                    recovery=not self.recovery,
                 )
                 self.renamed = False
             if self.epoch is not None:
@@ -1524,9 +1528,14 @@ def _restore_epoch_artifacts(
             post_commit_fanout=False,
             commit_point=False,
         )
+    windows_flushes: list[Path] = []
     for path, raw in restores:
         if raw is None and path.exists():
             path.unlink()
+            if os.name == "nt":
+                if path.parent not in windows_flushes:
+                    windows_flushes.append(path.parent)
+                continue
             try:
                 directory_fd = os.open(
                     path.parent,
@@ -1538,6 +1547,11 @@ def _restore_epoch_artifacts(
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+    if windows_flushes:
+        from . import mutation_lock
+
+        for path in windows_flushes:
+            mutation_lock._windows_flush_directory(path)
 
 
 def publish_deletion_checkpoint(

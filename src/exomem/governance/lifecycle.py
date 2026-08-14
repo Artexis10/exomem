@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus, index_paths, media_types, memory_refs, semantic_index
+from .. import find_corpus, index_paths, media_types, memory_refs, mutation_lock, semantic_index
 from ..kbdir import kb_dirname
 from ..vault import parse_frontmatter
 from . import membership, receipts
@@ -42,6 +42,10 @@ class LifecycleError(Exception):
 
     def __str__(self) -> str:
         return f"{self.code}: {self.reason}"
+
+
+class _PostRenameDurabilityError(LifecycleError):
+    """Internal signal that canonical placement changed before durability failed."""
 
 
 @dataclass(frozen=True)
@@ -337,6 +341,14 @@ def _placement_descriptor(manifest: tuple[ManifestItem, ...], state: str) -> dic
 
 
 def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        try:
+            mutation_lock._windows_flush_directory(path)
+        except OSError as exc:
+            raise LifecycleError(
+                "LIFECYCLE_PATH_UNSAFE", "lifecycle durable directory fsync failed"
+            ) from exc
+        return
     try:
         entry = os.lstat(path)
     except OSError as exc:
@@ -588,10 +600,17 @@ def atomic_rename(
     except OSError as exc:
         code = "CROSS_DEVICE_MOVE" if exc.errno == errno.EXDEV else "ATOMIC_MOVE_FAILED"
         raise LifecycleError(code, "atomic lifecycle rename failed") from exc
-    _fsync_directory(source.parent)
-    if destination.parent != source.parent:
-        _fsync_directory(destination.parent)
-    _checkpoint("recovery_moved" if recovery else "deletion_moved")
+    try:
+        _fsync_directory(source.parent)
+        if destination.parent != source.parent:
+            _fsync_directory(destination.parent)
+        _checkpoint("recovery_moved" if recovery else "deletion_moved")
+    except LifecycleError as exc:
+        raise _PostRenameDurabilityError(exc.code, exc.reason) from exc
+    except OSError as exc:
+        raise _PostRenameDurabilityError(
+            "LIFECYCLE_PATH_UNSAFE", "lifecycle durable directory fsync failed"
+        ) from exc
 
 
 def _read_json(vault_root: Path, path: Path) -> dict[str, Any] | None:
