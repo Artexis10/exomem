@@ -2492,7 +2492,11 @@ def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
     assert status["count"] == 1
     assert status["next_action"] == f'exomem index --vault "{vault}" --scope vault'
 
-    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_a, **_kw: True)
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda *_a, **_kw: _verified_media_fanout_report(vault, sidecar),
+    )
     assert index_sync.drain_deferred_work(vault) == 1
     assert deferred_index.full_status(vault)["count"] == 0
     assert calls == 1
