@@ -2902,16 +2902,17 @@ def test_directory_window_cursor_is_bounded_and_eventually_visits_every_entry(
 
     with checkpoint._open_secure_directory(root_path, create=False) as root:
         for _ in range(40):
-            started = time.monotonic()
             names, cursor, exhausted, inspected = checkpoint._directory_window(
                 root,
                 cursor=cursor,
                 limit=checkpoint.MAX_PRUNE_ENUM_ENTRIES,
                 deadline=time.monotonic() + checkpoint.MAX_PRUNE_LOCK_SECONDS,
             )
-            elapsed = time.monotonic() - started
+            # `inspected` is the bound this test is named for: the window
+            # enumerates at most MAX_PRUNE_ENUM_ENTRIES per call whatever the
+            # deadline does. The wall-clock assertion that used to sit here
+            # measured the runner instead — see the portable variant below.
             assert inspected <= checkpoint.MAX_PRUNE_ENUM_ENTRIES
-            assert elapsed < checkpoint.MAX_PRUNE_LOCK_SECONDS + 0.05
             seen.update(names)
             if exhausted:
                 break
@@ -2934,7 +2935,6 @@ def test_portable_directory_window_cursor_never_replays_a_growing_prefix(
 
     with checkpoint._open_secure_directory(root_path, create=False) as root:
         for _ in range(40):
-            started = time.monotonic()
             names, cursor, exhausted, inspected = checkpoint._directory_window(
                 root,
                 cursor=cursor,
@@ -2943,8 +2943,17 @@ def test_portable_directory_window_cursor_never_replays_a_growing_prefix(
                 force_portable=True,
             )
             inspected_windows.append(inspected)
+            # Cursor semantics, not timing. The former
+            # `elapsed < MAX_PRUNE_LOCK_SECONDS + 0.05` here was a 50 ms
+            # tolerance on a 50 ms budget, asserted 40 times: on a contended
+            # shared runner one iteration took 326 ms and failed CI on a PR that
+            # touches neither this file nor the prune path. Budget enforcement is
+            # covered on its own by
+            # `test_prune_respects_total_budget_when_root_lock_is_held`, which is
+            # the same reasoning
+            # `test_many_busy_prune_candidates_do_not_starve_supported_writer`
+            # already records for widening its budget.
             assert inspected <= checkpoint.MAX_PRUNE_ENUM_ENTRIES
-            assert time.monotonic() - started < checkpoint.MAX_PRUNE_LOCK_SECONDS + 0.05
             seen.update(names)
             if exhausted:
                 break
