@@ -2071,7 +2071,7 @@ def test_manager_rebuild_graph_finalizes_unavailable_reset_after_publication(
     assert "_graph_rebuild_handoff" not in repr(result)
 
 
-def test_manager_rebuild_graph_resumes_canonical_handoff_after_finalizer_crash(
+def test_manager_rebuild_graph_resumes_canonical_handoff_after_restart_without_waiter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A canonical reset handoff survives the crash window and clears on replay."""
@@ -2112,8 +2112,11 @@ def test_manager_rebuild_graph_resumes_canonical_handoff_after_finalizer_crash(
     assert state == "canonically_committed"
     assert "_graph_rebuild_handoff" in canonical["leaf_result"]
 
+    graph_sync._PENDING_WAITERS.set(None)
+    assert graph_sync.registered_checkpoint(tmp_path, state_root=tmp_path / "state") is None
     monkeypatch.setattr(graph_sync, "wait_for_registered", original_wait)
-    resumed = manager.invoke(
+    restarted = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    resumed = restarted.invoke(
         command,
         (tmp_path,),
         {"rebuild_graph": True, "response_detail": "full"},
@@ -2122,7 +2125,7 @@ def test_manager_rebuild_graph_resumes_canonical_handoff_after_finalizer_crash(
 
     assert resumed["diagnostics"]["graph_rebuild_status"] == "cleared"
     assert "_graph_rebuild_handoff" not in repr(resumed)
-    with manager.idempotency._connect() as connection:
+    with restarted.idempotency._connect() as connection:
         state, payload = connection.execute(
             "SELECT state, result FROM mutations"
         ).fetchone()

@@ -2693,6 +2693,22 @@ class LeaseManager:
                     else value
                 )
 
+            def finalize_graph_rebuild_handoff(value: Any) -> Any:
+                if not isinstance(value, Mapping) or root is None:
+                    return value
+                from . import reconcile as reconcile_module
+
+                leaf = value.get("leaf_result", value)
+                if not (
+                    isinstance(leaf, Mapping)
+                    and isinstance(leaf.get("_graph_rebuild_handoff"), Mapping)
+                ):
+                    return value
+                finalized = reconcile_module.finalize_graph_rebuild_handoff(
+                    root, leaf, state_root=self.config.state_dir
+                )
+                return {**value, "leaf_result": finalized} if "leaf_result" in value else finalized
+
             try:
                 from . import graph_sync
                 from .epistemic_graph import EpistemicGraphIndex
@@ -2713,21 +2729,6 @@ class LeaseManager:
                 if isinstance(result, _CanonicalCommittedFailure):
                     committed_failure = result.payload
                     result = result.result
-                if isinstance(result, Mapping) and root is not None:
-                    from . import reconcile as reconcile_module
-
-                    leaf = result.get("leaf_result", result)
-                    if isinstance(leaf, Mapping) and isinstance(
-                        leaf.get("_graph_rebuild_handoff"), Mapping
-                    ):
-                        finalized = reconcile_module.finalize_graph_rebuild_handoff(
-                            root, leaf, state_root=self.config.state_dir
-                        )
-                        result = (
-                            {**result, "leaf_result": finalized}
-                            if "leaf_result" in result
-                            else finalized
-                        )
                 if result is None:
                     if not isinstance(evidence, graph_sync.GraphCommitReceipt):
                         raise ValueError("canonical receipt terminal projection is unavailable")
@@ -2827,6 +2828,7 @@ class LeaseManager:
                     key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
                 }
                 if graph_sync.status(root)["state"] == "current":
+                    terminal = finalize_graph_rebuild_handoff(terminal)
                     return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
                 return retain_failure(with_graph_outcome(terminal, graph_sync.committed_graph_failure(required)))
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
