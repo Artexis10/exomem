@@ -560,6 +560,55 @@ def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -
     assert note.read_bytes() == b"canonical"
 
 
+def test_unavailable_companion_only_lineage_is_previewed_and_quarantined(tmp_path: Path) -> None:
+    """A missing primary database does not make a safe retained companion invisible."""
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    companion = tmp_path / "Knowledge Base/.graph.sqlite-wal"
+    companion.parent.mkdir()
+    companion.write_bytes(b"wal")
+
+    dry_run = reconcile_module.reconcile(tmp_path, dry_run=True, rebuild_graph=True)
+
+    assert dry_run.graph_rebuild_applicable is True
+    assert dry_run.graph_rebuild_status == "would_quarantine"
+    assert companion.exists()
+    reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)
+    assert reset is not None
+    assert (companion.parent / f".graph-reset-{reset.operation_id}" / companion.name).exists()
+
+
+def test_explicit_rebuild_adopts_an_isolated_reset_before_epoch_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-isolation/pre-checkpoint crash cut resumes even if live state looks current."""
+    reset = graph_sync.GraphReset("a" * 24, (".graph.sqlite",), "isolated")
+    checkpoint = _checkpoint(3)
+    monkeypatch.setattr(
+        graph_sync, "recover_isolated_graph_lineage_reset", lambda _root: reset
+    )
+    monkeypatch.setattr(
+        graph_sync, "classify_epoch", lambda _root: pytest.fail("must adopt reset first")
+    )
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "current", "generation": 3})
+    monkeypatch.setattr(graph_sync, "reconcile_checkpoint", lambda _root: checkpoint)
+    from exomem import epistemic_graph
+
+    monkeypatch.setattr(
+        epistemic_graph, "_registered_or_failure",
+        lambda *_args: SimpleNamespace(outcome="registered", checkpoint=checkpoint),
+    )
+
+    report = reconcile_module.reconcile(tmp_path, rebuild_graph=True)
+
+    assert report.graph_quarantine_id == reset.operation_id
+    assert report._graph_rebuild_handoff == {
+        "operation_id": reset.operation_id,
+        "checkpoint": checkpoint.as_dict(),
+        "graph_refreshed": 0,
+    }
+
+
 def test_post_publication_cleanup_requires_a_current_covered_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

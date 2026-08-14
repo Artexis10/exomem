@@ -1864,6 +1864,14 @@ def _recover_interrupted_reset(vault_root: Path) -> GraphReset | None:
         parent.close()
 
 
+def recover_isolated_graph_lineage_reset(vault_root: Path) -> GraphReset | None:
+    """Adopt one durable isolated reset on an explicit recovery invocation."""
+    reset = _recover_interrupted_reset(vault_root)
+    if reset is not None and reset.phase != "isolated":
+        raise GraphResetFailed()
+    return reset
+
+
 def census_unavailable_graph_lineage(vault_root: Path) -> tuple[str, ...]:
     """Return the exact safe live derived set without moving or registering work."""
     from .mutation_lock import retain_regular_child_file, retain_secure_directory, retained_regular_child_names
@@ -1880,7 +1888,7 @@ def census_unavailable_graph_lineage(vault_root: Path) -> tuple[str, ...]:
         retained = []
         try:
             members = retained_regular_child_names(parent, _RESET_MEMBERS)
-            if ".graph.sqlite" not in members:
+            if not members:
                 raise GraphResetFailed()
             for name in members:
                 retained.append(retain_regular_child_file(parent, name))

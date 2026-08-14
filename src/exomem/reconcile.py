@@ -546,52 +546,66 @@ def reconcile(
         if rebuild_graph:
             report.graph_rebuild_status = "not_applicable"
     else:
-        initial_epoch = epistemic_graph.graph_sync.status(vault_root)
         index = epistemic_graph.EpistemicGraphIndex(vault_root)
         reset_registered = False
         if rebuild_graph:
-            epoch = epistemic_graph.graph_sync.classify_epoch(vault_root)
-            if epoch.kind == "unavailable":
-                census = epistemic_graph.graph_sync.census_unavailable_graph_lineage(
-                    vault_root
-                )
-                report.graph_rebuild_applicable = bool(census)
-                if dry_run:
-                    report.graph_rebuild_status = "would_quarantine"
-                else:
-                    reset = epistemic_graph.graph_sync.isolate_unavailable_graph_lineage(
+            # A process can crash after durable isolation but before the new
+            # checkpoint is written.  That leaves the live root looking
+            # legacy/current, so explicit recovery must adopt this first.
+            reset = (
+                epistemic_graph.graph_sync.recover_isolated_graph_lineage_reset(vault_root)
+                if not dry_run
+                else None
+            )
+            if reset is not None:
+                report.graph_rebuild_applicable = True
+                report.graph_rebuild_status = "quarantined"
+                report.graph_quarantine_id = reset.operation_id
+            else:
+                epoch = epistemic_graph.graph_sync.classify_epoch(vault_root)
+                if epoch.kind == "unavailable":
+                    census = epistemic_graph.graph_sync.census_unavailable_graph_lineage(
                         vault_root
                     )
-                    if reset is not None:
-                        report.graph_rebuild_status = "quarantined"
-                        report.graph_quarantine_id = reset.operation_id
-                        try:
-                            checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
-                                vault_root
-                            )
-                            dispatch = epistemic_graph._registered_or_failure(
-                                vault_root,
-                                checkpoint,
-                                index,
-                                index._canonical_mutation_coordinator(),
-                            )
-                        except Exception:  # noqa: BLE001 - canonical reset isolation remains durable
-                            report.graph_rebuild_status = "retained"
-                            report.graph_rebuild_warning = "GRAPH_REBUILD_REGISTRATION_FAILED"
-                        else:
-                            if _is_graph_rebuild_handoff(dispatch, checkpoint):
-                                report._graph_reconcile_registered = 0
-                                report._graph_rebuild_handoff = {
-                                    "operation_id": reset.operation_id,
-                                    "checkpoint": checkpoint.as_dict(),
-                                    "graph_refreshed": len(initial_graph_drift),
-                                }
-                                reset_registered = True
-                            else:
-                                report.graph_rebuild_status = "retained"
-                                report.graph_rebuild_warning = dispatch.code
-            else:
-                report.graph_rebuild_status = "not_applicable"
+                    report.graph_rebuild_applicable = bool(census)
+                    if dry_run:
+                        report.graph_rebuild_status = "would_quarantine"
+                    else:
+                        reset = epistemic_graph.graph_sync.isolate_unavailable_graph_lineage(
+                            vault_root
+                        )
+                        if reset is not None:
+                            report.graph_rebuild_status = "quarantined"
+                            report.graph_quarantine_id = reset.operation_id
+                else:
+                    report.graph_rebuild_status = "not_applicable"
+            if reset is not None and not dry_run:
+                try:
+                    checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
+                        vault_root
+                    )
+                    dispatch = epistemic_graph._registered_or_failure(
+                        vault_root,
+                        checkpoint,
+                        index,
+                        index._canonical_mutation_coordinator(),
+                    )
+                except Exception:  # noqa: BLE001 - canonical reset isolation remains durable
+                    report.graph_rebuild_status = "retained"
+                    report.graph_rebuild_warning = "GRAPH_REBUILD_REGISTRATION_FAILED"
+                else:
+                    if _is_graph_rebuild_handoff(dispatch, checkpoint):
+                        report._graph_reconcile_registered = 0
+                        report._graph_rebuild_handoff = {
+                            "operation_id": reset.operation_id,
+                            "checkpoint": checkpoint.as_dict(),
+                            "graph_refreshed": len(initial_graph_drift),
+                        }
+                        reset_registered = True
+                    else:
+                        report.graph_rebuild_status = "retained"
+                        report.graph_rebuild_warning = dispatch.code
+        initial_epoch = epistemic_graph.graph_sync.status(vault_root)
         needs_repair = (
             bool(initial_graph_drift)
             or initial_epoch["state"] != "current"
