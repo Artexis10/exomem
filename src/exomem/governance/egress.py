@@ -53,7 +53,7 @@ from . import bridges, lifecycle, receipts, scrubber, store, tokens
 from . import membership as membership_module
 from . import policy as policy_module
 from .decisions import Decision, decide
-from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy, StandingGrant
+from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
 from .principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
 
 log = logging.getLogger(__name__)
@@ -1073,13 +1073,7 @@ def _decide_path(
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
 
-    session_rows, session_identity = store.active_session_grants(
-        vault_root,
-        audience=audience,
-        authorization_session=authorization_session,
-        rel_path=rel_path,
-        purpose=purpose,
-    )
+    session_identity = "v3-session-grants-unscoped"
     key = (
         str(vault_root),
         policy.fingerprint,
@@ -1106,8 +1100,14 @@ def _decide_path(
         # enumerated in the walk; permitted media stopped downloading for
         # everyone, owner included) and logged a `utf-8 codec` warning per
         # decision on the way. Path/ref selectors decide a binary with no
-        # parse at all; a sidecar page supplies frontmatter when one exists.
-        scope_ids = membership_module.evaluate_path_only(vault_root, rel_path, policy)
+        # parse at all; semantic selectors remain explicitly unresolved until
+        # companion descriptors are implemented.
+        try:
+            scope_ids = membership_module.evaluate_path_only(
+                vault_root, rel_path, policy
+            ).require_classified()
+        except membership_module.MembershipUnresolved:
+            return None
     else:
         page = find_corpus.parse_page(full_path, mtime, vault_root, content=raw)
         if page is None:
@@ -1124,22 +1124,12 @@ def _decide_path(
             # was stattable one line ago and is not now — which is exactly
             # when guessing is least defensible.
             return None
-    session_grants = tuple(
-        StandingGrant(
-            id=str(row["grant_id"]),
-            source="session",
-            scope_ids=tuple(scope_ids),
-            audience=audience,
-            ceiling=int(row["ceiling"]),
-        )
-        for row in session_rows
-    )
     decision = decide(
         scope_ids,
         audience=audience,
         purpose=purpose,
         policy=policy,
-        active_grants=(*policy.grants, *session_grants),
+        active_grants=policy.grants,
     )
     if raw is not None:
         admission = bridges.admit(
@@ -1679,29 +1669,12 @@ def annotate_page(
         scope_ids = membership_module.evaluate_snapshot(
             parsed, policy, content_hash=snapshot_hash
         )
-        session_rows, _session_identity = store.active_session_grants(
-            vault_root,
-            audience=who.audience_id,
-            authorization_session=who.authorization_session_id,
-            rel_path=rel_path,
-            purpose=declared_purpose,
-        )
-        session_grants = tuple(
-            StandingGrant(
-                id=str(row["grant_id"]),
-                source="session",
-                scope_ids=tuple(scope_ids),
-                audience=who.audience_id,
-                ceiling=int(row["ceiling"]),
-            )
-            for row in session_rows
-        )
         decision = decide(
             scope_ids,
             audience=who.audience_id,
             purpose=declared_purpose,
             policy=policy,
-            active_grants=(*policy.grants, *session_grants),
+            active_grants=policy.grants,
         )
         admission = bridges.admit(
             vault_root,
@@ -2064,8 +2037,6 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
         scan_all=command_name
         in {"continue_adoption", "adoption_run", "adoption_runs", "adoption_studio"},
     )
-    if not scrubber.enabled(vault_root):
-        return result
     if hasattr(result, "content") and hasattr(result, "structured_content"):
         cleaned, blocked = _scrub_tool_result(result, vault_root)
         if blocked:
@@ -2211,15 +2182,13 @@ def postfilter_error(
         purpose=None,
         exempt=_caller_supplied_references(request_kwargs),
     )
-    scrub = scrubber.enabled(vault_root)
     blocked = False
 
     def _clean(value: Any) -> Any:
         nonlocal blocked
         cleaned = gate.gate_payload(value, scan_strings=True)
-        if scrub:
-            cleaned, hit = scrubber.scrub_value(cleaned)
-            blocked = blocked or hit
+        cleaned, hit = scrubber.scrub_value(cleaned)
+        blocked = blocked or hit
         return cleaned
 
     code = getattr(error, "code", None)
@@ -2863,12 +2832,12 @@ def release_level_for_path_only(
     who = principal if principal is not None else effective_principal()
     if policy.blocked or not who.resolved:
         return DISCLOSURE_MIN
-    if any(
-        scope.projects or scope.tags or scope.types or scope.classes
-        for scope in policy.scopes.values()
-    ):
+    try:
+        scope_ids = membership_module.evaluate_path_only(
+            vault_root, rel_path, policy
+        ).require_classified()
+    except membership_module.MembershipUnresolved:
         return DISCLOSURE_MIN
-    scope_ids = membership_module.evaluate_path_only(vault_root, rel_path, policy)
     decision = decide(
         scope_ids,
         audience=who.audience_id,

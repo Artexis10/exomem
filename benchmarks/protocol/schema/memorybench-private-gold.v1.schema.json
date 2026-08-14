@@ -1,0 +1,145 @@
+{
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "else": {
+        "properties": {
+          "missing_fields": {
+            "not": {
+              "contains": {
+                "const": "gold.answer_session_ids"
+              }
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "answer_session_ids": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "answer_session_ids"
+        ]
+      },
+      "then": {
+        "properties": {
+          "missing_fields": {
+            "contains": {
+              "const": "gold.answer_session_ids"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "answer_session_ids": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Answer Session Ids"
+    },
+    "artifact_type": {
+      "const": "memorybench-private-gold.v1",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "canonical_result_path": {
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//).+$",
+      "title": "Canonical Result Path",
+      "type": "string"
+    },
+    "canonical_result_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Canonical Result Sha256",
+      "type": "string"
+    },
+    "case_id_hmac_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Case Id Hmac Sha256",
+      "type": "string"
+    },
+    "checkpoint_path": {
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//).+$",
+      "title": "Checkpoint Path",
+      "type": "string"
+    },
+    "checkpoint_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Checkpoint Sha256",
+      "type": "string"
+    },
+    "container_tag": {
+      "title": "Container Tag",
+      "type": "string"
+    },
+    "ground_truth": {
+      "title": "Ground Truth",
+      "type": "string"
+    },
+    "missing_fields": {
+      "items": {
+        "const": "gold.answer_session_ids",
+        "type": "string"
+      },
+      "title": "Missing Fields",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "question": {
+      "title": "Question",
+      "type": "string"
+    },
+    "question_id": {
+      "title": "Question Id",
+      "type": "string"
+    },
+    "question_type": {
+      "title": "Question Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "schema_version",
+    "artifact_type",
+    "case_id_hmac_sha256",
+    "question_id",
+    "container_tag",
+    "question",
+    "question_type",
+    "ground_truth",
+    "answer_session_ids",
+    "checkpoint_path",
+    "checkpoint_sha256",
+    "canonical_result_path",
+    "canonical_result_sha256",
+    "missing_fields"
+  ],
+  "title": "MemoryBenchPrivateGold",
+  "type": "object"
+}

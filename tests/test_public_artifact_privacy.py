@@ -279,6 +279,26 @@ def test_new_unclassified_root_format_fails_closed(tmp_path: Path) -> None:
     ]
 
 
+def test_patch_artifacts_are_scanned_as_text(tmp_path: Path) -> None:
+    artifact = tmp_path / "registration.patch"
+    private_path = "C:" + "\\Users\\" + "SyntheticOperator\\private-vault"
+    artifact.write_text(
+        "diff --git a/provider.ts b/provider.ts\n"
+        "--- a/provider.ts\n"
+        "+++ b/provider.ts\n"
+        "@@ -1 +1 @@\n"
+        "-generic\n"
+        f"+{private_path}\n",
+        encoding="utf-8",
+    )
+
+    findings = scan_artifact(artifact, label="benchmarks/registration.patch")
+
+    assert [(item.rule, item.file, item.line) for item in findings] == [
+        ("absolute_local_path", "benchmarks/registration.patch", 6)
+    ]
+
+
 def test_new_or_binary_format_fails_without_explicit_provenance(tmp_path: Path) -> None:
     opaque = tmp_path / "new-format.bin"
     opaque.write_bytes(b"\x00\x01\x02")

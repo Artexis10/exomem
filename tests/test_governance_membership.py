@@ -10,6 +10,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from exomem import find_corpus
 from exomem.governance import membership, policy
 
@@ -250,3 +252,85 @@ def test_unresolvable_membership_makes_the_decision_fail_closed(
         grants_hash="",
     )
     assert decision is None
+
+
+@pytest.mark.parametrize(
+    ("selector", "value"),
+    [
+        ("projects", "acmeco"),
+        ("tags", "confidential"),
+        ("types", "source"),
+        ("classes", "pii"),
+    ],
+)
+def test_missing_non_markdown_companion_is_unresolved_for_semantic_selectors(
+    vault: Path, selector: str, value: str
+) -> None:
+    _write_scope(
+        vault,
+        selector,
+        f"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n{selector}: [\"{value}\"]\n",
+    )
+    pol = policy.load(vault)
+    asset = vault / "Knowledge Base/Notes/asset.bin"
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    asset.write_bytes(b"\\x00binary")
+
+    outcome = membership.evaluate_path_only(vault, "Knowledge Base/Notes/asset.bin", pol)
+
+    # A bare empty set means "not in any scope", which fail-opens through
+    # decisions.decide.  Missing descriptor-like companions must instead be
+    # explicit, non-iterable unresolved membership.
+    assert type(outcome).__name__ == "MembershipOutcome"
+    assert outcome.state == "unresolved"
+    assert outcome.reason == "companion_required"
+
+
+def test_path_only_non_markdown_membership_is_classified_empty(vault: Path) -> None:
+    _write_scope(
+        vault,
+        "paths",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Knowledge Base/Private/**"]\n',
+    )
+    pol = policy.load(vault)
+
+    outcome = membership.evaluate_path_only(vault, "Knowledge Base/Notes/asset.bin", pol)
+
+    assert type(outcome).__name__ == "MembershipOutcome"
+    assert outcome.state == "classified"
+    assert outcome.scope_ids == frozenset()
+
+
+def test_path_exclusion_proves_non_markdown_scope_is_excluded(vault: Path) -> None:
+    _write_scope(
+        vault,
+        "excluded",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ntypes: ["source"]\nexclude:\n  paths: ["Knowledge Base/Notes/asset.bin"]\n',
+    )
+    pol = policy.load(vault)
+
+    outcome = membership.evaluate_path_only(vault, "Knowledge Base/Notes/asset.bin", pol)
+
+    assert type(outcome).__name__ == "MembershipOutcome"
+    assert outcome.state == "classified"
+    assert outcome.scope_ids == frozenset()
+
+
+def test_path_match_does_not_erase_an_unresolved_semantic_sibling(vault: Path) -> None:
+    _write_scope(
+        vault,
+        "path",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Knowledge Base/Notes/asset.bin"]\n',
+    )
+    _write_scope(
+        vault,
+        "semantic",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\ntags: ["confidential"]\n',
+    )
+    pol = policy.load(vault)
+
+    outcome = membership.evaluate_path_only(vault, "Knowledge Base/Notes/asset.bin", pol)
+
+    assert type(outcome).__name__ == "MembershipOutcome"
+    assert outcome.state == "unresolved"
+    assert outcome.scope_ids == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"})

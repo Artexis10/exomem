@@ -671,7 +671,9 @@ def _committed_policy(vault: Path) -> None:
     )
 
 
-def test_grant_compound_receipts_activate_exact_session_items_in_lattice(vault: Path) -> None:
+def test_grant_compound_receipts_leave_schema_v3_session_grant_inert_until_v4(
+    vault: Path,
+) -> None:
     from exomem.find_types import Hit
     from exomem.governance import egress, receipts, tokens
     from exomem.governance.tool import op_govern_memory
@@ -709,11 +711,22 @@ def test_grant_compound_receipts_activate_exact_session_items_in_lattice(vault: 
     }
     assert len({record["event_id"] for record in child_intents}) == 2
 
+    rel_path = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
+    active, identity = store.active_session_grants(
+        vault,
+        audience="external",
+        authorization_session="conversation-a",
+        rel_path=rel_path,
+        purpose=None,
+    )
+    assert active == []
+    assert identity == "v3-session-grants-unscoped"
+
     result = egress.annotate_hits(
         vault,
         [
             Hit(
-                path="Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md",
+                path=rel_path,
                 type="pattern",
                 scope=None,
                 title="restricted",
@@ -724,7 +737,8 @@ def test_grant_compound_receipts_activate_exact_session_items_in_lattice(vault: 
         principal=_external(),
         limit=1,
     )
-    assert len(result.hits) == 1
+    assert result.hits == []
+    assert "allowed excerpt" not in repr(result)
     with pytest.raises(Exception, match="TOKEN_CONSUMED"):
         op_govern_memory(
             vault,

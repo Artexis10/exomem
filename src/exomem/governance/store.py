@@ -408,94 +408,12 @@ def active_session_grants(
     """Return exact unchanged active grants and their decision identity."""
     if not authorization_session or not sidecar_path(vault_root).exists():
         return [], "no-session-grants"
-    moment = __import__("time").time() if now is None else float(now)
-    conn = open_readonly_connection(vault_root)
-    if conn is None:
-        return [], "unavailable-session-grants"
-    try:
-        rows = conn.execute(
-            "SELECT grant_id, purpose, ceiling, paths, fingerprints, expires_at, "
-            "membership_manifest, policy_fingerprint "
-            "FROM governance_session_grants WHERE authorization_session=? AND audience=? "
-            "AND status='active' AND expires_at>=? ORDER BY grant_id",
-            (authorization_session, audience, moment),
-        ).fetchall()
-        purpose_row = conn.execute(
-            "SELECT purpose, expires_at FROM governance_session_purpose "
-            "WHERE authorization_session=? AND principal_id=? AND status='active'",
-            (authorization_session, audience),
-        ).fetchone()
-    finally:
-        conn.close()
-    effective_purpose = purpose
-    if effective_purpose is None and purpose_row is not None and float(purpose_row[1]) >= moment:
-        effective_purpose = str(purpose_row[0])
-    from .. import find_corpus
-    from . import membership as membership_module
-    from . import policy as policy_module
-
-    current_policy = policy_module.load(vault_root)
-    active: list[dict[str, object]] = []
-    for (
-        grant_id,
-        grant_purpose,
-        ceiling,
-        raw_paths,
-        raw_fingerprints,
-        expires_at,
-        raw_membership,
-        policy_fingerprint,
-    ) in rows:
-        paths = tuple(__import__("json").loads(str(raw_paths)))
-        fingerprints = tuple(__import__("json").loads(str(raw_fingerprints)))
-        if rel_path not in paths or (grant_purpose is not None and grant_purpose != effective_purpose):
-            continue
-        current = []
-        for path_value in paths:
-            target = Path(vault_root) / str(path_value)
-            try:
-                current.append(__import__("hashlib").sha256(target.read_bytes()).hexdigest())
-            except OSError:
-                current.append("")
-        if tuple(current) != fingerprints:
-            continue
-        if current_policy.blocked:
-            continue
-        resolved_membership: list[dict[str, object]] = []
-        try:
-            for path_value in paths:
-                path_text = str(path_value)
-                target = Path(vault_root) / path_text
-                if target.suffix.casefold() == ".md":
-                    page = find_corpus.parse_page(
-                        target, target.stat().st_mtime, Path(vault_root)
-                    )
-                    if page is None:
-                        raise membership_module.MembershipUnresolved(path_text)
-                    scope_ids = membership_module.evaluate(page, current_policy)
-                else:
-                    scope_ids = membership_module.evaluate_path_only(
-                        Path(vault_root), path_text, current_policy
-                    )
-                resolved_membership.append(
-                    {"path": path_text, "scope_ids": sorted(scope_ids)}
-                )
-        except (OSError, UnicodeError, membership_module.MembershipUnresolved):
-            continue
-        if resolved_membership != __import__("json").loads(str(raw_membership)):
-            continue
-        active.append(
-            {
-                "grant_id": str(grant_id),
-                "ceiling": int(ceiling),
-                "expires_at": float(expires_at),
-                "policy_fingerprint": str(policy_fingerprint),
-            }
-        )
-    identity = __import__("hashlib").sha256(
-        repr((authorization_session, audience, effective_purpose, active)).encode("utf-8")
-    ).hexdigest()[:16]
-    return active, identity
+    # Schema-v3 rows bind paths and a membership snapshot, but do not persist
+    # the exact reviewed scope IDs. Re-evaluating current item membership and
+    # treating it as a grant binding would let a legacy row authorise sibling
+    # scopes it never reviewed. v4 will store that proof; v3 grants are inert.
+    del audience, rel_path, purpose, now
+    return [], "v3-session-grants-unscoped"
 
 
 def active_session_purpose(

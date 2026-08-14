@@ -50,6 +50,18 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import model_validator
+
+from protocol.contracts import (
+    ContractIdentityError,
+    PreregistrationIdentity,
+    derive_preregistration_identity,
+    validate_preregistration_identity,
+)
+from protocol.models import StrictModel
+from protocol.version import PROTOCOL_VERSION
 
 from membench.adapters.base import (
     GOVERNANCE_STATES,
@@ -194,6 +206,7 @@ class RunSpec:
     #: where a reproduction was claimed. ``None`` records the environment and
     #: reports it as unverified.
     reference_environment: dict | Path | str | None = None
+    contract_revision: str | None = None
 
 
 @dataclass
@@ -206,6 +219,105 @@ class RunResult:
     #: are kept in their own file: a caller cannot fold them into
     #: ``dimensions`` without meaning to.
     judged: dict[str, object] = field(default_factory=dict)
+
+
+class MembenchProfileIdentity(StrictModel):
+    name: str
+    settings: dict[str, object]
+
+
+class MembenchResultManifest(StrictModel):
+    """Strict comparative result identity for the independent Membench runner."""
+
+    protocol_version: Literal[PROTOCOL_VERSION] = PROTOCOL_VERSION
+    schema_version: Literal[2] = 2
+    artifact_type: Literal["membench-result-manifest.v2"] = "membench-result-manifest.v2"
+    run_id: str
+    status: Literal["started", "VALID", "INVALID"]
+    preregistration_identity: PreregistrationIdentity
+    provider: str
+    profile: MembenchProfileIdentity
+    top_k: int
+    corpus_dir: str
+    governance_state: str | None = None
+    started_utc: str
+    ended_utc: str | None = None
+    invalid: bool
+    invalid_reason: str | None
+    environment_verification: dict[str, object]
+    retrieval_floor: dict[str, object]
+    ingestion_altitude: str | None = None
+    answer_mode: str | None = None
+    publication_label: str | None = None
+    provider_version: dict[str, object] | None = None
+    judge: dict[str, object] | None = None
+    run_failures: int = 0
+
+    @model_validator(mode="after")
+    def _terminal_state_is_coherent(self) -> "MembenchResultManifest":
+        if self.status == "started":
+            if self.ended_utc is not None or self.invalid:
+                raise ValueError("started Membench result cannot be terminal")
+        else:
+            if self.ended_utc is None or (self.status == "INVALID") != self.invalid:
+                raise ValueError("terminal Membench result status is inconsistent")
+        return self
+
+
+def _strict_manifest_json(data: bytes) -> dict[str, Any]:
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Membench result manifest has duplicate JSON members")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            data,
+            object_pairs_hook=unique,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                ValueError("Membench result manifest has nonfinite JSON")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Membench result manifest JSON is invalid") from exc
+    if not isinstance(value, dict):
+        raise ValueError("Membench result manifest must be an object")
+    return value
+
+
+def _write_result_manifest(path: Path, payload: dict[str, object]) -> MembenchResultManifest:
+    manifest = MembenchResultManifest.model_validate(payload)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return manifest
+
+
+def load_membench_result_manifest(
+    run_dir: Path | str, *, require_terminal: bool = True
+) -> MembenchResultManifest:
+    path = Path(run_dir) / "manifest.json"
+    try:
+        data = path.read_bytes()
+        raw = _strict_manifest_json(data)
+    except OSError as exc:
+        raise ValueError("historical-untrusted Membench result manifest is missing") from exc
+    if raw.get("schema_version") != 2 or raw.get("artifact_type") != "membench-result-manifest.v2":
+        raise ValueError("historical-untrusted Membench result manifest is refused")
+    try:
+        manifest = MembenchResultManifest.model_validate_json(data)
+        validate_preregistration_identity(
+            manifest.preregistration_identity,
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+    except (ValueError, ContractIdentityError) as exc:
+        raise ValueError("Membench result manifest identity/schema is invalid") from exc
+    if require_terminal and manifest.status == "started":
+        raise ValueError("non-terminal Membench result manifest is refused")
+    return manifest
 
 
 #: Below this many attempted retrieval queries the floor guard does not fire.
@@ -611,10 +723,11 @@ def _judge_phase(
 
 
 def execute_run(spec: RunSpec) -> RunResult:
+    preregistration_identity = derive_preregistration_identity(
+        Path(__file__).resolve().parents[2],
+        contract_revision=spec.contract_revision,
+    )
     corpus_dir = Path(spec.corpus_dir)
-    governance_state = _governance_state(spec.adapter)
-    ingestion_altitude = _ingestion_altitude(spec.adapter)
-    governed = governance_state == "wired"
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_id = spec.run_id or (
         f"{stamp}-{spec.adapter.name}-{spec.label or spec.profile.name}-{uuid.uuid4().hex[:6]}"
@@ -622,6 +735,37 @@ def execute_run(spec: RunSpec) -> RunResult:
     run_dir = Path(spec.runs_root) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)  # collision = abort, never overwrite
     (run_dir / "traces").mkdir()
+
+    manifest: dict[str, object] = {
+        "protocol_version": PROTOCOL_VERSION,
+        "schema_version": 2,
+        "artifact_type": "membench-result-manifest.v2",
+        "run_id": run_id,
+        "status": "started",
+        "preregistration_identity": preregistration_identity,
+        "provider": spec.adapter.name,
+        "profile": {"name": spec.profile.name, "settings": spec.profile.settings},
+        "top_k": spec.top_k,
+        "corpus_dir": str(corpus_dir),
+        "governance_state": None,
+        "started_utc": stamp,
+        "ended_utc": None,
+        "invalid": False,
+        "invalid_reason": None,
+        "environment_verification": {"status": "pending"},
+        "retrieval_floor": evaluate_retrieval_floor(0, 0, 0).as_dict(),
+        "ingestion_altitude": None,
+        "answer_mode": None,
+        "publication_label": _publication_label(spec.adapter.name),
+        "provider_version": None,
+        "judge": None,
+        "run_failures": 0,
+    }
+    _write_result_manifest(run_dir / "manifest.json", manifest)
+
+    governance_state = _governance_state(spec.adapter)
+    ingestion_altitude = _ingestion_altitude(spec.adapter)
+    governed = governance_state == "wired"
 
     # Captured ONCE, before anything is measured, and reused as both the
     # written artifact and the thing that gets verified: a run must not
@@ -636,45 +780,28 @@ def execute_run(spec: RunSpec) -> RunResult:
         if comparison.blocked:
             environment_mismatch = f"environment: {comparison.summary()}"
 
-    manifest: dict[str, object] = {
-        "run_id": run_id,
-        "provider": spec.adapter.name,
-        "profile": {"name": spec.profile.name, "settings": spec.profile.settings},
-        "top_k": spec.top_k,
-        "corpus_dir": str(corpus_dir),
-        "governance_state": governance_state,
-        "started_utc": stamp,
-        "invalid": False,
-        "invalid_reason": None,
-        "environment_verification": (
-            comparison.as_dict()
-            if comparison is not None
-            else {
-                "status": "unverified",
-                "summary": (
-                    "no reference environment supplied: this run's environment is "
-                    "recorded but was not compared to anything, so it cannot be "
-                    "claimed to reproduce another run"
-                ),
-                "blocking": [],
-                "reported": [],
-            }
-        ),
-        "retrieval_floor": evaluate_retrieval_floor(0, 0, 0).as_dict(),
-        # Present from the start so an early-invalidated run still records who
-        # would have authored its answers; overwritten below once capabilities
-        # are read. A missing key would read as "unknown mode" and silently
-        # dodge the mixed-mode comparability check.
-        "ingestion_altitude": ingestion_altitude,
-        "answer_mode": (
-            ANSWER_MODE_NATIVE
-            if Capability.NATIVE_ANSWER in spec.adapter.capabilities()
-            else ANSWER_MODE_HARNESS
-        ),
-    }
-    publication_label = _publication_label(spec.adapter.name)
-    if publication_label:
-        manifest["publication_label"] = publication_label
+    manifest["governance_state"] = governance_state
+    manifest["environment_verification"] = (
+        comparison.as_dict()
+        if comparison is not None
+        else {
+            "status": "unverified",
+            "summary": (
+                "no reference environment supplied: this run's environment is "
+                "recorded but was not compared to anything, so it cannot be "
+                "claimed to reproduce another run"
+            ),
+            "blocking": [],
+            "reported": [],
+        }
+    )
+    manifest["ingestion_altitude"] = ingestion_altitude
+    manifest["answer_mode"] = (
+        ANSWER_MODE_NATIVE
+        if Capability.NATIVE_ANSWER in spec.adapter.capabilities()
+        else ANSWER_MODE_HARNESS
+    )
+    _write_result_manifest(run_dir / "manifest.json", manifest)
     corpus_manifest = (corpus_dir / "manifest.json").read_text(encoding="utf-8")
     (run_dir / "corpus-manifest.json").write_text(corpus_manifest, encoding="utf-8")
 
@@ -997,12 +1124,11 @@ def execute_run(spec: RunSpec) -> RunResult:
     manifest["invalid_reason"] = invalid_reason
     manifest["run_failures"] = run_failures
     manifest["ended_utc"] = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    manifest["status"] = "INVALID" if invalid_reason is not None else "VALID"
     (run_dir / "environment.json").write_text(
         json.dumps(environment, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (run_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    _write_result_manifest(run_dir / "manifest.json", manifest)
 
     dimensions_out: dict[str, dict[str, int]] = {}
     scores_path = run_dir / "deterministic-scores.json"

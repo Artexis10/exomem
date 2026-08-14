@@ -257,7 +257,9 @@ def _derived_residue_paths(vault_root: Path, source_rel: str) -> tuple[str, ...]
 def _scope_ids(vault_root: Path, item: ManifestItem, policy: policy_module.Policy) -> frozenset[str] | None:
     source = Path(vault_root) / item.source_path
     if not item.source_path.lower().endswith(".md"):
-        return membership.evaluate_path_only(vault_root, item.source_path, policy)
+        return membership.evaluate_path_only(
+            vault_root, item.source_path, policy
+        ).require_classified()
     try:
         raw = source.read_bytes()
         stat = source.stat()
@@ -1149,9 +1151,13 @@ def _is_governed_for_restore(vault_root: Path, manifest: tuple[ManifestItem, ...
     restricting = _restricting_scope_ids(policy)
     for item in manifest:
         if not item.source_path.lower().endswith(".md"):
-            if restricting.intersection(
-                membership.evaluate_path_only(vault_root, item.source_path, policy)
-            ):
+            try:
+                scope_ids = membership.evaluate_path_only(
+                    vault_root, item.source_path, policy
+                ).require_classified()
+            except membership.MembershipUnresolved:
+                return True
+            if restricting.intersection(scope_ids):
                 return True
             continue
         try:

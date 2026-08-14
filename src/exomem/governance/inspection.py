@@ -120,6 +120,32 @@ def inspect_operation(
         # from a non-owner while disclosing rule ids — a default denial must
         # not become the one place a third party learns the scope structure.
         declaring_scopes = [] if decision is None else list(decision.default_deny_scope_ids)
+        scope_contributions = (
+            []
+            if decision is None
+            else [
+                {
+                    "scope_id": contribution.scope_id,
+                    "purpose_branch": contribution.purpose_branch,
+                    "standing_floor": contribution.standing_floor,
+                    "default_deny_supplied_floor": (
+                        contribution.default_deny_supplied_floor
+                    ),
+                    "standing_rule_ids": list(contribution.standing_rule_ids),
+                    "grant_ids": list(contribution.grant_ids),
+                    "grant_ceiling": contribution.grant_ceiling,
+                    "grant_contribution": contribution.grant_contribution,
+                    "organization_cap_ids": list(
+                        contribution.organization_cap_ids
+                    ),
+                    "organization_cap": contribution.organization_cap,
+                    "option_values": dict(contribution.option_values),
+                    "option_ambiguities": list(contribution.option_ambiguities),
+                    "final_ceiling": contribution.final_ceiling,
+                }
+                for contribution in decision.scope_contributions
+            ]
+        )
         return {
             "enabled": True,
             "effective_ceiling": level,
@@ -128,6 +154,11 @@ def inspect_operation(
             **(
                 {"default_deny_scope_ids": declaring_scopes}
                 if owner and declaring_scopes
+                else {}
+            ),
+            **(
+                {"scope_contributions": scope_contributions}
+                if owner
                 else {}
             ),
             **(

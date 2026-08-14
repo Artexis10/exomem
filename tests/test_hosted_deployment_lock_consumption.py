@@ -17,6 +17,9 @@ LEGACY_CONTRACT = (
     ROOT
     / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.39.2.json"
 )
+FORWARD_CONTRACT = (
+    ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/forward-contract.json"
+)
 LEGACY_MANIFEST = (
     ROOT
     / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-manifest-0.39.2.json"
@@ -64,6 +67,17 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
     agent_gateway_digest = "7828c5b2b0281d11eab810e89f8d59aa88d755371f13ed02585cabd49a046078"
     pair = json.loads(LOCK_PAIR.read_text(encoding="utf-8"))
     legacy_contract = json.loads(LEGACY_CONTRACT.read_text(encoding="utf-8"))
+    forward_contract = json.loads(FORWARD_CONTRACT.read_text(encoding="utf-8"))
+    expected_contracts = {
+        (legacy_contract["releaseVersion"], legacy_contract["protocolVersion"]): (
+            legacy_contract,
+            LEGACY_CONTRACT,
+        ),
+        (forward_contract["releaseVersion"], forward_contract["protocolVersion"]): (
+            forward_contract,
+            FORWARD_CONTRACT,
+        ),
+    }
 
     assert len(pair["locks"]) == 2
     expand, contract = pair["locks"]
@@ -72,13 +86,18 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
 
     for member in (expand, contract):
         units = member["composition"]["legacyCatalog"]
-        assert len(units) == 1
-        unit = units[0]
-        assert (unit["releaseVersion"], unit["protocolVersion"]) == ("0.39.2", "1")
-        assert unit["contract"] == legacy_contract
-        assert unit["contractSha256"] == hashlib.sha256(LEGACY_CONTRACT.read_bytes()).hexdigest()
-        assert unit["contract"]["gatewayContractDigest"] == private_gateway_digest
-        assert unit["contract"]["gatewayContractDigest"] != agent_gateway_digest
+        unit_by_identity = {
+            (unit["releaseVersion"], unit["protocolVersion"]): unit for unit in units
+        }
+        assert set(unit_by_identity) == set(expected_contracts)
+        assert ("0.49.0", "1") in unit_by_identity
+        for identity, (expected_contract, evidence_path) in expected_contracts.items():
+            unit = unit_by_identity[identity]
+            assert evidence_path.read_bytes() == _canonical(expected_contract)
+            assert unit["contract"] == expected_contract
+            assert unit["contractSha256"] == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        assert unit_by_identity[("0.39.2", "1")]["contract"]["gatewayContractDigest"] == private_gateway_digest
+        assert unit_by_identity[("0.39.2", "1")]["contract"]["gatewayContractDigest"] != agent_gateway_digest
         assert member["rollback"]["legacyManifestSha256"] == hashlib.sha256(
             LEGACY_MANIFEST.read_bytes()
         ).hexdigest()

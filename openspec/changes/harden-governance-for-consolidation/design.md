@@ -255,7 +255,8 @@ closed physical family is exactly `Knowledge Base/.governance.sqlite` plus SQLit
 same-directory `Knowledge Base/.governance.sqlite-wal`,
 `Knowledge Base/.governance.sqlite-shm`, and
 `Knowledge Base/.governance.sqlite-journal`. Those logical names are reserved whether
-or not a file exists, and every physical alias of an existing family member is reserved.
+or not a file exists, and every retained or published physical identity of an existing
+family member is reserved at protected acquisition.
 Only the internal activation/session-store subsystem may open them, using a private
 non-serializable authority and the same held-parent, no-follow primitives described in
 Decision 4. No owner/L6 decision, non-Markdown classifier, dataset/media route, recovery
@@ -325,10 +326,12 @@ derived from the complete before/after lattice: proven narrowing may install onl
 receipt-backed fail-closed overlay early; widening/unknown keeps the predecessor. The
 tuple transaction atomically applies target dependent-grant state and policy generation.
 A content/companion race makes one side stale. Undo's archived source bytes may be
-mirrored to `_Governance` only by the separate no-overwrite CAS; mirror failure cannot
+mirrored to `_Governance` only under the cooperative writer fence with held-parent and
+descriptor-identity checks; an observed drift refuses that mirror. Mirror failure cannot
 change published authority, while an invalid resulting workspace still blocks serving.
-Crash recovery completes only the exact recorded tuple/registry acknowledgement and
-never replays suspend/resume/undo semantics or re-resolves mutable YAML.
+Direct OS-owner mutation is outside the cooperative writer fence. Crash recovery
+completes only the exact recorded tuple/registry acknowledgement and never replays
+suspend/resume/undo semantics or re-resolves mutable YAML.
 
 The successful tuple transaction is the authority-publication linearization point and
 increments `activation_epoch`. It also stores the resulting activation-state digest.
@@ -343,16 +346,17 @@ registry parity is restored. No reader can observe a partial policy/catalog comb
 or infer authority from current workspace files or mutable index state.
 
 Mirroring the reviewed target documents back into `_Governance` is a separate,
-handle-relative compare-and-swap against the proposal's exact workspace snapshot. It
-MUST NOT replace a file whose bytes or stable identity differ, including an edit that
-races or follows snapshot acquisition. A failed mirror does not mutate the external
-bytes or reinterpret the reviewed generation: those workspace bytes remain pending
-input to a future proposal and owner-only diagnostics report source/active-generation
-divergence. A successful mirror may happen before or after the tuple transaction, but
-the receipt records both outcomes and recovery never treats mirror completion as policy
-activation. Thus an uncoordinated workspace write need not abort publication merely
-because it occurred before the tuple switch; it cannot alter, overwrite, or become
-part of the reviewed generation.
+handle-relative operation under the cooperative writer fence. It retains held-parent and
+descriptor identities from the proposal, refuses an observed byte or identity drift, and
+records that outcome. It does not assert a portable final-component or file-level
+filesystem guarantee against direct OS-owner mutation. A failed mirror
+does not reinterpret the reviewed generation: observed divergent workspace bytes remain
+pending input to a future proposal and owner-only diagnostics report source/active-
+generation divergence. A successful mirror may happen before or after the tuple
+transaction, but the receipt records both outcomes and recovery never treats mirror
+completion as policy activation. Thus an uncoordinated workspace write need not abort
+publication merely because it occurred before the tuple switch; it cannot become part of
+the reviewed generation.
 
 Source/generation parity is proved from the immutable source byte map in the generation,
 not from mutable workspace state: recompile of those stored bytes must reproduce the
@@ -392,11 +396,11 @@ in one transaction, and records the exact external expected tuple before any new
 serves traffic. An invalid or changing workspace blocks migration; an old direct-source
 binary is fenced from the upgraded store.
 
-**Alternative considered:** compare/exchange each mutable YAML file and call the final
-filesystem check the activation cut. That requires every external editor to cooperate
-with a whole-tree fence and still conflates pending authoring input with runtime
-authority. The immutable policy/catalog tuple gives readers one atomic authority while
-preserving later workspace edits for the next review.
+**Alternative considered:** make mutable YAML filesystem state the activation cut. That
+would require every external editor to cooperate with a whole-tree fence and still
+conflates pending authoring input with runtime authority. The immutable policy/catalog
+tuple gives readers one atomic authority while preserving later workspace edits for the
+next review.
 
 ### 4. Centralize reserved administration path authority
 
@@ -427,6 +431,14 @@ or index lane cannot start until its descriptor and registry-total tests land.
 Both `/**` descriptors reserve the named directory itself and every descendant, not only
 currently recognized receipt or projection leaf formats.
 
+Reserved-path enforcement is a boundary on Exomem commands and cooperating Exomem
+subsystems. Untrusted principals reach vault state only through those commands. Direct
+filesystem or block-device access as the OS vault owner is owner-equivalent and outside
+the zero-effect and universal-detection claims: it can disclose, corrupt, move, or delete
+state. The command boundary fails closed only when drift is observable against retained
+logical, catalogue, registry, or filesystem-identity anchors; it makes no claim to detect
+or undo an unobservable out-of-band owner action.
+
 This initial registry is derived and audited from every current private-state owner and
 path factory—including governance, lexical/vector/CLIP/graph/reference/claims, graph
 handoff/receipts, review state, deferred/media/idempotency, voice, and projection
@@ -436,8 +448,8 @@ registry. Owner-inventory coverage enumerates each primary, transactional siblin
 temporary, quarantine, receipt directory, and physical identity form; an owner/path
 factory without exactly one descriptor fails startup/tests before it can create state.
 
-The classifier identifies every registry entry and its physical aliases after all of
-the following:
+The classifier identifies every registry entry and retained or published physical alias
+after all of the following:
 
 - strip the configured knowledge-base prefix and normalize separators, including
   backslashes;
@@ -450,16 +462,17 @@ the following:
   guarding both the logical spelling and the physical target so an alias or symlink into
   a reserved tree is still reserved.
 
-Filesystem identity aliases are covered too: a hard link or bind-style alias to a
-reserved file remains reserved. Reserved-tree writers reject multiply linked or
-otherwise ambiguous files, and the secure target check compares stable device/file
-identity where the platform exposes it rather than assuming `realpath` detects every
-alias. Every owning subsystem publishes the stable identities of currently open primary,
-WAL, SHM, journal, lock, temp, and immutable-index files under the same coordination
-primitive used by generic leaves; a new journal or staged-index identity becomes
-reserved before its bytes are reachable. A generic operation racing create, checkpoint,
-rename, link, swap, deletion, or rebuild therefore observes a reserved logical/physical
-identity or fails closed—there is no unclassified creation window.
+At protected acquisition, a stable pre-existing symlink, reparse point, hard link, or
+physical alias to a reserved family member is refused. Reserved-tree writers reject
+multiply linked or otherwise ambiguous files, and the secure target check compares stable
+device/file identity where the platform exposes it rather than assuming `realpath`
+detects every alias. Every owning subsystem retains and publishes stable identities for
+currently open primary, WAL, SHM, journal, lock, temp, and immutable-index files under
+the same cooperative coordination primitive used by generic leaves. SQLite primary/WAL/
+SHM identities are published before that coordination is released, not before filesystem
+reachability. A generic operation fails closed when its retained anchors expose a
+create, checkpoint, rename, link, swap, deletion, or rebuild discrepancy; it does not
+claim universal detection of direct owner-level races.
 
 The check runs at the shared command dispatcher before existence checks, parsing,
 candidate counting, mutation planning, or filesystem effects. Registry metadata names
@@ -467,19 +480,28 @@ every path/ref-bearing parameter and selector variant; startup coverage fails wh
 new route is not classified. This logical preflight routes the request but is not the
 leaf authorization: check-then-reopen by pathname remains unsafe.
 
-Every filesystem leaf therefore executes inside a handle-relative reserved-path
-transaction. It opens the vault root and each parent without following links, holds
-those handles through the leaf operation, classifies stable volume/device + file IDs,
-and performs create/read/write/rename/link/unlink relative to the held handles. POSIX
+Every filesystem leaf therefore executes inside a descriptor-bound, handle-relative
+reserved-path transaction. It opens the vault root and each parent without following
+links, holds those handles through the read or mutation, classifies stable volume/device
+file IDs, and performs relative create/read/write/rename/link/unlink operations. POSIX
 implementations use `openat2` with beneath/no-symlink/no-magic-link constraints or an
-equivalent iterative `openat`/`O_NOFOLLOW` design; Windows uses handle-relative,
-reparse-point-aware primitives with final volume/file identity. Moves hold both parents;
-cross-device copies read from the held source and publish a verified temporary under the
-held destination. Recursive recovery walks by handles and refuses mount, bind, reparse,
-hard-link, or alias ambiguity atomically. Parent swaps, rename/link races, hard links,
-reparse points, and bind aliases are revalidated at the kernel mutation/read operation,
-not by a later `realpath`. A platform without an equivalent no-follow handle/CAS path
-fails closed for generic operations that could reach a reserved identity.
+equivalent iterative dirfd/`openat`/`O_NOFOLLOW` design. Windows uses `NtCreateFile` with
+`RootDirectory` and a relative name plus `NtSetInformationFile` rename/disposition
+semantics, reparse-aware handles, and final volume/file identity. The Windows route is
+enabled only after a runtime actual-filesystem capability probe proves those exact
+handle-relative primitives, no-follow/reparse behaviour, and final identity checks;
+otherwise it is disabled and returns the registered refusal without a fallback. A required
+windows-latest CI gate runs on NTFS and covers junction, reparse, hard-link, 8.3, and
+rename/disposition fixtures plus fallback-disable behaviour; that gate is a required
+input to the combined release verification. Same-device rename, trash, and recovery hold
+both parent handles and run under cooperative coordination. Cross-device move, trash,
+and recovery are refused. A copy reads a held source and publishes a destination
+atomically under the held destination parent; it is never source-and-destination atomic.
+Recursive and multi-entry power-loss behaviour is a saga with recovery, not a cross-file
+or recursive atomicity claim. Parent swaps, rename/link races, hard links, reparse
+points, and bind aliases are revalidated at the kernel read/mutation operation against
+retained anchors, not by a later `realpath`. A platform without an equivalent no-follow
+handle-relative path disables the affected generic route.
 
 `govern_memory` owns `_Governance` through its receipt-first lifecycle and receives an
 internal, non-serializable authority token rather than a public bypass flag.
@@ -499,6 +521,11 @@ file as ordinary knowledge.
 **Alternative considered:** add checks to the currently known create/edit leaves. That
 leaves recovery destinations, aliases, dataset/media readers, and future registry
 routes as bypasses and cannot survive path spelling differences.
+
+Delivery is deliberately split. PR A lands the primitives, capability probes, and
+internal identity publication; PR B lands the closed registry, every public leaf, and
+surface parity. No public security claim is made until both PRs land and their combined
+verification, including the Windows gate, passes.
 
 ### 5. Project direct reads before honoring `include_raw`
 
@@ -897,8 +924,9 @@ exist.
   inside each lane and require the non-waivable exact-capacity timing gate.
 - **[Risk] A mutable workspace diverges from the active compiled generation.** → Keep
   mutable bytes pending, preserve exact source bytes in append-only generations, expose
-  owner-only parity diagnostics, CAS mirrors without overwrite, and make the verified
-  SQLite policy/projector/catalog tuple the only runtime authority.
+  owner-only parity diagnostics, refuse observed drift under the cooperative writer
+  fence, and make the verified SQLite policy/projector/catalog tuple the only runtime
+  authority; direct OS-owner mutation remains outside that filesystem guarantee.
 - **[Risk] Unicode/platform path alias handling diverges across Linux and Windows.** →
   Test logical and physical normalization separately, include NFKC/case/backslash/short-
   name/symlink fixtures, and require secure leaf resolution in addition to registry

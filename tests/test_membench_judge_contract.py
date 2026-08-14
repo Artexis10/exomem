@@ -33,6 +33,8 @@ from membench.reporting import (
     build_comparison_report,
     merge_judge_scores,
 )
+from membench.runner import MembenchResultManifest
+from protocol.contracts import derive_preregistration_identity
 
 _DIMENSIONS_OK = {
     "factual_qa": {"pass": 1, "fail": 0, "not_applicable": 0, "unsupported": 0},
@@ -81,24 +83,34 @@ def _make_run_dir(
 
     run_dir = tmp_path / "runs" / run_id
     run_dir.mkdir(parents=True)
-    manifest = {
-        "run_id": run_id,
-        "provider": provider,
-        "profile": {"name": profile, "settings": {}},
-        "top_k": 10,
-        "corpus_dir": "corpus/s1",
+    identity = derive_preregistration_identity(
+        Path(__file__).resolve().parents[1],
+        contract_revision="7cd15e6d6c67eb914e4f57bd943f98f7d1894b7f",
+    )
+    manifest = MembenchResultManifest(
+        run_id=run_id,
+        status="INVALID" if invalid else "VALID",
+        preregistration_identity=identity,
+        provider=provider,
+        profile={"name": profile, "settings": {}},
+        top_k=10,
+        corpus_dir="corpus/s1",
         # Wired keeps governance dimensions comparable in these fixtures
         # (matching runner.py, which always records governance_state); the
         # default-open exclusion path has its own tests in the wiring suite.
-        "governance_state": "wired",
-        "started_utc": "20260101T000000Z",
-        "ended_utc": "20260101T000001Z",
-        "invalid": invalid,
-        "invalid_reason": invalid_reason,
-        "run_failures": 0,
-    }
+        governance_state="wired",
+        started_utc="20260101T000000Z",
+        ended_utc="20260101T000001Z",
+        invalid=invalid,
+        invalid_reason=invalid_reason,
+        environment_verification={"status": "unverified"},
+        retrieval_floor={"status": "not_applicable"},
+        ingestion_altitude="raw_source",
+        answer_mode="harness",
+        run_failures=0,
+    )
     (run_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        manifest.model_dump_json(indent=2) + "\n", encoding="utf-8"
     )
     (run_dir / "failures.jsonl").write_text("", encoding="utf-8")
     if not invalid:

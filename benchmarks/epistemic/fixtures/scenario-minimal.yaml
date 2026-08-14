@@ -1,0 +1,76 @@
+# Minimal VALID scenario trajectory: the loader contract in one file.
+# Not a scored scenario — the pre-registered family fixtures land in a later
+# lane. Every assertion name here resolves against the frozen registry.
+scenario_id: minimal-explicit-correction
+family_id: f01
+kind: corpus
+public_coverage: "partial: knowledge-update overlap reports state metrics only"
+phases:
+  - phase_id: p1-ingest
+    ops:
+      - op: ingest_source
+        ref: src-retrieval-budget
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: evidence_path_exists
+        subject: claim-budget-v1
+  - phase_id: p2-correct
+    ops:
+      - op: agent_turn
+        ref: turn-correction
+      - op: snapshot
+        ref: s2
+    expect:
+      - assert: exactly_one_current_revision
+        subject: chain-budget
+      - assert: prior_revision_retained
+        subject: claim-budget-v2
+      - assert: revision_links_to_predecessor
+        subject: claim-budget-v2
+        counterpart: claim-budget-v1
+      - assert: no_retired_state_served_as_current
+    catastrophic_if_failed:
+      - no_retired_state_served_as_current
+      - prior_revision_retained
+fairness:
+  why_neutral: >-
+    A reader who corrects a conclusion and is later served the retracted one
+    acts on state the system was told is wrong. The harm is independent of how
+    any product stores revisions.
+  public_coverage_subtraction: >-
+    The answer-accuracy half of this family is measured by the public-suite
+    lane; this scenario reports state invariants only.
+  mechanisms:
+    - provider_role: subject
+      mechanism: explicit supersession edge recorded in stored state
+      verdict: satisfiable
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:67
+    - provider_role: comparator-a
+      mechanism: version chain exposed by the documented history endpoint
+      verdict: satisfiable
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:69
+    - provider_role: comparator-b
+      mechanism: retained superseded artifact reachable via the documented list surface
+      verdict: satisfiable
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:68
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: corpus.ingest
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: corpus source ingestion
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:16
+      reason: The same neutral corpus source is ingested for this fixture row.
+      competitor_surface: documented write/ingest endpoint
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, prior_revision_retained and
+    revision_links_to_predecessor.

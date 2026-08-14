@@ -1,0 +1,31 @@
+# RED fixture: family_id outside the pre-registered §1 family table.
+scenario_id: red-unregistered-family
+family_id: f99
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1
+    ops:
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: uncertainty_declared
+        subject: claim-1
+fairness:
+  why_neutral: red fixture; never scored
+  public_coverage_subtraction: none
+  mechanisms:
+    - provider_role: subject
+      mechanism: none
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:14
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+  acceptance_predicate: none

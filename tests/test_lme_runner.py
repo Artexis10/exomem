@@ -18,8 +18,8 @@ FIXTURE = Path("benchmarks/lme/fixtures/mini.json")
 
 
 class FixtureAdapter:
-    def run_question(self, question: LmeQuestion, workdir: Path, *, limit: int = 10) -> list[str]:
-        del limit
+    def run_question(self, question: LmeQuestion, workdir: Path, *, dataset_identity, case_ordinal: int, limit: int = 10) -> list[str]:
+        del limit, dataset_identity, case_ordinal
         workdir.mkdir(parents=True, exist_ok=True)
         self.last_ingest_results = tuple(
             OpResult(
@@ -79,7 +79,10 @@ def test_runner_writes_official_hypotheses_bounds_environment_and_ability_report
     ):
         assert ability in report
     assert "abstention" in report
-    assert "| single-session-assistant | 0 |" in report
+    # Every report names the row that produced it, so all three entry points
+    # (runner, judge re-render, artifact-only regeneration) render one shape.
+    assert "| Ability | Variant | Questions |" in report
+    assert "| single-session-assistant | exomem-source-only | 0 |" in report
     assert "UNVERIFIED" in report
 
     with pytest.raises(FileExistsError, match="immutable"):
@@ -131,6 +134,7 @@ def test_pilot_is_stratified_and_records_measured_evidence(tmp_path: Path) -> No
         RunConfig(
             dataset=parent,
             dataset_sha256=file_sha256(parent),
+            dataset_revision="fixture-copy",
             out=tmp_path,
             run_id="pilot",
             pilot=9,
@@ -175,8 +179,8 @@ def test_bound_presence_is_derived_from_artifacts_minus_failures(tmp_path: Path)
             return "answer"
 
     class MainOnlyAdapter:
-        def run_question(self, question, workdir, *, limit=10):
-            del question, limit
+        def run_question(self, question, workdir, *, dataset_identity, case_ordinal, limit=10):
+            del question, dataset_identity, case_ordinal, limit
             workdir.mkdir(parents=True, exist_ok=True)
             self.last_ingest_results = ()
             return ["main"]
@@ -203,6 +207,7 @@ def test_generated_pilot_evidence_unlocks_an_approved_non_pilot_run(
         RunConfig(
             dataset=parent,
             dataset_sha256=checksum,
+            dataset_revision="fixture-copy",
             out=tmp_path,
             run_id="pilot-source",
             pilot=6,
@@ -214,6 +219,7 @@ def test_generated_pilot_evidence_unlocks_an_approved_non_pilot_run(
         RunConfig(
             dataset=parent,
             dataset_sha256=checksum,
+            dataset_revision="fixture-copy",
             out=tmp_path,
             run_id="approved-full",
             pilot_evidence=pilot.run_dir / "pilot-evidence.json",
@@ -324,8 +330,165 @@ def test_non_fixture_dataset_requires_recorded_parent_checksum(tmp_path: Path) -
             RunConfig(
                 dataset=dataset,
                 dataset_sha256=file_sha256(dataset),
+                dataset_revision="fixture-copy",
                 out=tmp_path,
                 run_id="full-gated",
             )
         )
     assert not (tmp_path / "full-gated").exists()
+
+
+def test_real_dataset_requires_explicit_revision_before_reader_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lme.runner as runner
+
+    dataset = tmp_path / "real.json"
+    dataset.write_bytes(FIXTURE.read_bytes())
+    constructed: list[object] = []
+
+    def reader_constructor(*_args, **_kwargs):
+        constructed.append(object())
+        return StubReader()
+
+    monkeypatch.setattr(runner, "_reader", reader_constructor)
+    with pytest.raises(ValueError, match="dataset-revision"):
+        runner.execute_run(
+            RunConfig(
+                dataset=dataset,
+                dataset_sha256=file_sha256(dataset),
+                out=tmp_path,
+                run_id="missing-revision",
+                pilot=6,
+            ),
+            adapter_factory=FixtureAdapter,
+        )
+    assert constructed == []
+    assert not (tmp_path / "missing-revision").exists()
+
+
+def test_canonical_twenty_five_case_tier_does_not_require_full_run_approval() -> None:
+    from lme.runner import validate_full_run_gate
+
+    assert validate_full_run_gate(
+        question_count=25,
+        reader_name="openai",
+        pilot_evidence=None,
+        full_run_approval=None,
+        is_pilot=False,
+        is_canonical_selection=True,
+    ) is None
+
+
+def test_started_manifest_precedes_reader_construction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import lme.runner as runner
+
+    observed: list[bool] = []
+
+    def reader_constructor(_config, run_dir):
+        observed.append((run_dir / "manifest.json").is_file())
+        return StubReader()
+
+    monkeypatch.setattr(runner, "_reader", reader_constructor)
+    runner.execute_run(
+        RunConfig(dataset=FIXTURE, out=tmp_path, run_id="reader-order"),
+        adapter_factory=FixtureAdapter,
+    )
+    assert observed == [True]
+
+
+def test_artifact_only_report_refuses_missing_wrong_or_substituted_canonical_evidence(
+    tmp_path: Path,
+) -> None:
+    from lme.report import render_run_report
+
+    result = execute_run(
+        RunConfig(dataset=FIXTURE, out=tmp_path, run_id="canonical-report"),
+        reader=StubReader(),
+        adapter_factory=FixtureAdapter,
+    )
+    artifact_path = Path("benchmarks/equivalence/subsets/lme-s-25.json")
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    pins = {
+        "selection_artifact_path": "benchmarks/equivalence/subsets/lme-s-25.json",
+        "selection_artifact_sha256": file_sha256(artifact_path),
+        "selection_algorithm_version": artifact["selection_algorithm_version"],
+    }
+    row = json.loads(FIXTURE.read_text(encoding="utf-8"))[0]
+    dataset_rows = []
+    for question_id in artifact["target_question_ids"]:
+        copied = dict(row)
+        copied["question_id"] = question_id
+        dataset_rows.append(copied)
+    (result.run_dir / "dataset.json").write_text(json.dumps(dataset_rows), encoding="utf-8")
+    for relative in (
+        "hypotheses.jsonl",
+        "bounds/gold-evidence-ceiling.jsonl",
+        "bounds/null-abstain-floor.jsonl",
+    ):
+        (result.run_dir / relative).write_text(
+            "".join(json.dumps({"question_id": question_id, "hypothesis": "fixture"}) + "\n" for question_id in artifact["target_question_ids"]),
+            encoding="utf-8",
+        )
+    manifest_path = result.run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["pins"] = pins
+    manifest["dataset"] = {
+        "id": "longmemeval", "variant": "LongMemEval-S cleaned September 2025",
+        "source": "xiaowu0162/longmemeval-cleaned",
+        "revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+        "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+        "case_count": 500,
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    environment_path = result.run_dir / "environment.json"
+    environment = json.loads(environment_path.read_text(encoding="utf-8"))
+    environment["lme"]["canonical_selection"] = True
+    environment["lme"]["selection_mode"] = "canonical"
+    environment["lme"]["selection"] = pins
+    environment_path.write_text(json.dumps(environment), encoding="utf-8")
+
+    assert "LongMemEval-S per-ability report" in render_run_report(result.run_dir, offline=True)
+
+    for mutation in (
+        lambda: manifest.update(pins={}),
+        lambda: manifest.update(pins={**pins, "selection_artifact_sha256": "0" * 64}),
+        lambda: (result.run_dir / "dataset.json").write_text(json.dumps(list(reversed(dataset_rows))), encoding="utf-8"),
+        lambda: (result.run_dir / "dataset.json").write_text(
+            json.dumps([{**dataset_rows[0], "question_id": "replaced-question"}, *dataset_rows[1:]]),
+            encoding="utf-8",
+        ),
+    ):
+        manifest["pins"] = pins
+        (result.run_dir / "dataset.json").write_text(json.dumps(dataset_rows), encoding="utf-8")
+        mutation()
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(ValueError, match="canonical selection"):
+            render_run_report(result.run_dir, offline=True)
+
+
+def test_canonical_twenty_five_report_refuses_stripped_claims_and_judge_bypass(tmp_path: Path) -> None:
+    from lme.judge_io import rerender_report
+
+    result = execute_run(RunConfig(dataset=FIXTURE, out=tmp_path, run_id="twenty-five", pilot=6), reader=StubReader(), adapter_factory=FixtureAdapter)
+    rows = json.loads((result.run_dir / "dataset.json").read_text())
+    expanded = [dict(row, question_id=f"q-{index}") for index, row in enumerate(rows * 5)][:25]
+    (result.run_dir / "dataset.json").write_text(json.dumps(expanded), encoding="utf-8")
+    with pytest.raises(ValueError, match="selection"):
+        rerender_report(result.run_dir)
+
+
+def test_canonical_ids_cannot_be_downgraded_to_generic_pilot(tmp_path: Path) -> None:
+    from lme.report import validate_selection_evidence
+    from equivalence.selection import load_frozen_lme_selection
+
+    result = execute_run(RunConfig(dataset=FIXTURE, out=tmp_path, run_id="downgrade"), reader=StubReader(), adapter_factory=FixtureAdapter)
+    artifact, _ = load_frozen_lme_selection()
+    row = json.loads(FIXTURE.read_text())[0]
+    rows = [{**row, "question_id": question_id} for question_id in artifact["target_question_ids"]]
+    (result.run_dir / "dataset.json").write_text(json.dumps(rows))
+    environment = json.loads((result.run_dir / "environment.json").read_text())
+    environment["lme"].update({"selection_mode": "generic-pilot", "pilot": {"size": 25, "question_ids": artifact["target_question_ids"]}, "canonical_selection": False})
+    (result.run_dir / "environment.json").write_text(json.dumps(environment))
+    with pytest.raises(ValueError, match="canonical"):
+        validate_selection_evidence(result.run_dir)

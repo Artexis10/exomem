@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "LaneReadiness": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "title": "Evidence",
+          "type": "string"
+        },
+        "fallback_detected": {
+          "default": false,
+          "title": "Fallback Detected",
+          "type": "boolean"
+        },
+        "lane": {
+          "title": "Lane",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "index-count",
+            "config-state",
+            "semantic-probe",
+            "memories-canary",
+            "doctor-check",
+            "readiness-unverifiable"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "requested": {
+          "title": "Requested",
+          "type": "boolean"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lane",
+        "requested",
+        "verified",
+        "method",
+        "evidence"
+      ],
+      "title": "LaneReadiness",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "lanes": {
+      "items": {
+        "$ref": "#/$defs/LaneReadiness"
+      },
+      "title": "Lanes",
+      "type": "array"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reasons",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "enum": [
+        "VALID",
+        "INVALID",
+        "READINESS_UNVERIFIABLE"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "status",
+    "lanes"
+  ],
+  "title": "ReadinessReport",
+  "type": "object"
+}

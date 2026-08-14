@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "DatasetIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "case_count": {
+          "minimum": 0,
+          "title": "Case Count",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "variant": {
+          "title": "Variant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "variant",
+        "source",
+        "revision",
+        "sha256",
+        "case_count"
+      ],
+      "title": "DatasetIdentity",
+      "type": "object"
+    },
+    "EventProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "converter": {
+          "title": "Converter",
+          "type": "string"
+        },
+        "converter_version": {
+          "title": "Converter Version",
+          "type": "string"
+        },
+        "dataset_row_index": {
+          "minimum": 0,
+          "title": "Dataset Row Index",
+          "type": "integer"
+        },
+        "upstream_session_id_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Upstream Session Id Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataset_row_index",
+        "upstream_session_id_sha256",
+        "converter",
+        "converter_version"
+      ],
+      "title": "EventProvenance",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "case_id": {
+      "title": "Case Id",
+      "type": "string"
+    },
+    "content": {
+      "title": "Content",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "dataset": {
+      "$ref": "#/$defs/DatasetIdentity"
+    },
+    "ingestion_ordinal": {
+      "minimum": 0,
+      "title": "Ingestion Ordinal",
+      "type": "integer"
+    },
+    "original_timestamp": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Original Timestamp"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "provenance": {
+      "$ref": "#/$defs/EventProvenance"
+    },
+    "role": {
+      "title": "Role",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sequence": {
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "session_ordinal": {
+      "minimum": 1,
+      "title": "Session Ordinal",
+      "type": "integer"
+    },
+    "timestamp_semantics": {
+      "enum": [
+        "event_time_declared_by_dataset",
+        "ingestion_order_only"
+      ],
+      "title": "Timestamp Semantics",
+      "type": "string"
+    },
+    "turn_ordinal": {
+      "minimum": 1,
+      "title": "Turn Ordinal",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "dataset",
+    "case_id",
+    "session_ordinal",
+    "sequence",
+    "role",
+    "turn_ordinal",
+    "content",
+    "content_sha256",
+    "timestamp_semantics",
+    "ingestion_ordinal",
+    "provenance"
+  ],
+  "title": "ProtocolEvent",
+  "type": "object"
+}

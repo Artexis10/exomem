@@ -1,0 +1,18 @@
+{
+  "suite": "memoryagentbench",
+  "paper": "arXiv:2507.05257 (ICLR 2026)",
+  "repo_url": "https://github.com/HUST-AI-HYZ/MemoryAgentBench",
+  "commit_sha": "455306dcabc3842526eb83cd4e225e5d486c5c5d",
+  "upstream_last_commit": "2026-05-21",
+  "license_spdx": "MIT",
+  "license_sha256": "94d735aad92355b4880c969fa309e824eb12fdeeb271ae51cf6143866cf78cf7",
+  "dataset": {
+    "hf_id": "ai-hyz/MemoryAgentBench",
+    "license_spdx": "MIT",
+    "splits": {"Accurate_Retrieval": 22, "Test_Time_Learning": 6, "Long_Range_Understanding": 110, "Conflict_Resolution": 8}
+  },
+  "checkout_env_var": "SUITE_MAB_HOME",
+  "runability": "runnable-with-cost",
+  "verified_at_utc": "2026-08-09",
+  "notes": "The rescope design's named watch item, now locked. Conflict_Resolution = 8 large rows (60-100 questions each) — still the thinnest slice: never over-claim from it alone; pair with STALE (400 instances). No documented plug-in contract: extend AgentWrapper following the vendored mem0/cognee/letta patterns. Heavy clone (vendored third-party trees). Dormant since 2026-05-21."
+}

@@ -925,8 +925,8 @@ spec:
                 - name: HOME
                   value: /tmp
               resources:
-                requests: {cpu: 10m, memory: 64Mi}
-                limits: {cpu: 100m, memory: 128Mi}
+                requests: {cpu: 10m, memory: 128Mi}
+                limits: {cpu: 250m, memory: 256Mi}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

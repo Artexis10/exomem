@@ -52,6 +52,37 @@ def test_open_connection_is_idempotent(vault: Path) -> None:
         second.close()
 
 
+def test_v3_session_grant_rows_are_non_authoritative(vault: Path) -> None:
+    conn = store.open_connection(vault)
+    try:
+        conn.execute(
+            "INSERT INTO governance_session_grants "
+            "(grant_id, authorization_session, audience, purpose, ceiling, paths, "
+            "fingerprints, token_jti, status, created_at, expires_at, "
+            "membership_manifest, policy_fingerprint) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "grant-1", "session-1", "external", None, 6, '["Notes/a.md"]',
+                '["hash"]', "token-1", "active", 0.0, 4_000_000_000.0,
+                '[{"path":"Notes/a.md","scope_ids":["scope-a"]}]', "policy",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    active, identity = store.active_session_grants(
+        vault,
+        audience="external",
+        authorization_session="session-1",
+        rel_path="Notes/a.md",
+        purpose=None,
+    )
+
+    assert active == []
+    assert identity == "v3-session-grants-unscoped"
+
+
 def test_existing_v3_sidecar_gets_purpose_staging_table_idempotently(vault: Path) -> None:
     conn = store.open_connection(vault)
     conn.execute("DROP TABLE governance_session_purpose_staging")

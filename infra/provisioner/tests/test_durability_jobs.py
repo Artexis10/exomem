@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -319,13 +320,28 @@ async def test_kubernetes_deletion_launcher_uses_scoped_template_and_content_fre
         def __init__(self) -> None:
             self.items: list[object] = []
             self.created: list[tuple[str, dict[str, object]]] = []
+            self.request_timeouts: list[tuple[int, int]] = []
 
-        def list_namespaced_job(self, namespace: str, *, label_selector: str):
+        def list_namespaced_job(
+            self,
+            namespace: str,
+            *,
+            label_selector: str,
+            _request_timeout: tuple[int, int],
+        ):
             assert namespace == "exomem-platform"
             assert label_selector == "exomem.io/deletion-job=true"
+            self.request_timeouts.append(_request_timeout)
             return SimpleNamespace(items=self.items)
 
-        def create_namespaced_job(self, namespace: str, body: dict[str, object]):
+        def create_namespaced_job(
+            self,
+            namespace: str,
+            body: dict[str, object],
+            *,
+            _request_timeout: tuple[int, int],
+        ):
+            self.request_timeouts.append(_request_timeout)
             self.created.append((namespace, body))
 
     template = {
@@ -372,6 +388,77 @@ async def test_kubernetes_deletion_launcher_uses_scoped_template_and_content_fre
     assert set(annotations) == {"exomem.io/deletion-operation-sha256"}
     assert annotations["exomem.io/deletion-operation-sha256"] != "operation-sensitive-opaque"
     assert "operation-sensitive-opaque" not in str(body)
+    assert batch.request_timeouts == [(2, 5), (2, 5)]
+
+
+@pytest.mark.asyncio
+async def test_deletion_dispatcher_uses_an_explicit_retry_free_kubernetes_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created_clients: list[object] = []
+
+    class Configuration:
+        def __init__(self) -> None:
+            self.retries: object | None = None
+
+        @classmethod
+        def get_default_copy(cls) -> Configuration:
+            return cls()
+
+    class ApiClient:
+        def __init__(self, configuration: Configuration) -> None:
+            self.configuration = configuration
+            created_clients.append(self)
+
+    class BatchV1Api:
+        def __init__(self, api_client: ApiClient) -> None:
+            self.api_client = api_client
+
+        def list_namespaced_job(
+            self,
+            namespace: str,
+            *,
+            label_selector: str,
+            _request_timeout: tuple[int, int],
+        ) -> SimpleNamespace:
+            return SimpleNamespace(
+                items=[SimpleNamespace(status=SimpleNamespace(completion_time=None, failed=0))]
+            )
+
+    client = SimpleNamespace(
+        Configuration=Configuration,
+        ApiClient=ApiClient,
+        BatchV1Api=BatchV1Api,
+    )
+    config = SimpleNamespace(load_incluster_config=lambda: None)
+    monkeypatch.setitem(sys.modules, "kubernetes", SimpleNamespace(client=client, config=config))
+    monkeypatch.setitem(sys.modules, "kubernetes.client", client)
+    monkeypatch.setitem(sys.modules, "kubernetes.config", config)
+
+    class Engine:
+        async def dispose(self) -> None:
+            return None
+
+    monkeypatch.setattr(durability_jobs, "create_async_engine", lambda *args, **kwargs: Engine())
+    monkeypatch.setattr(durability_jobs, "async_sessionmaker", lambda *args, **kwargs: object())
+    template = tmp_path / "deletion-job.json"
+    template.write_text(
+        '{"apiVersion":"batch/v1","kind":"Job","metadata":{"generateName":"exomem-deletion-","labels":{"exomem.io/deletion-job":"true"}},"spec":{"activeDeadlineSeconds":240,"backoffLimit":0,"ttlSecondsAfterFinished":300,"template":{"spec":{"serviceAccountName":"exomem-deletion-worker","restartPolicy":"Never","containers":[{"name":"deletion-worker","command":["exomem-deletion-worker"]}]}}}}',
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(
+        database_url=SimpleNamespace(get_secret_value=lambda: "postgresql+asyncpg://test"),
+        database_schema="exomem_provisioner",
+        database_role="exomem_provisioner_runtime",
+        namespace="exomem-platform",
+        job_template_path=template,
+    )
+
+    await durability_jobs._run_deletion_dispatcher(settings)
+
+    assert len(created_clients) == 1
+    assert created_clients[0].configuration.retries == 0  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

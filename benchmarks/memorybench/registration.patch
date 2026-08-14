@@ -1,0 +1,67 @@
+diff --git a/src/providers/index.ts b/src/providers/index.ts
+index 5f71566a9b9055c9d3d34ba30d0ddb9cd2444c68..bac5674dd3acd6c58d6e03b105a204bef38fb536 100644
+--- a/src/providers/index.ts
++++ b/src/providers/index.ts
+@@ -5,6 +5,8 @@ import { Mem0Provider } from "./mem0"
+ import { ZepProvider } from "./zep"
+ import { FilesystemProvider } from "./filesystem"
+ import { RAGProvider } from "./rag"
++import { ExomemProvider } from "./exomem"
++import { BasicMemoryProvider } from "./basic-memory"
+ 
+ const providers: Record<ProviderName, new () => Provider> = {
+   supermemory: SupermemoryProvider,
+@@ -12,6 +14,8 @@ const providers: Record<ProviderName, new () => Provider> = {
+   zep: ZepProvider,
+   filesystem: FilesystemProvider,
+   rag: RAGProvider,
++  exomem: ExomemProvider,
++  "basic-memory": BasicMemoryProvider,
+ }
+ 
+ export function createProvider(name: ProviderName): Provider {
+@@ -39,4 +43,12 @@ export function getProviderInfo(name: ProviderName): {
+   }
+ }
+ 
+-export { SupermemoryProvider, Mem0Provider, ZepProvider, FilesystemProvider, RAGProvider }
++export {
++  SupermemoryProvider,
++  Mem0Provider,
++  ZepProvider,
++  FilesystemProvider,
++  RAGProvider,
++  ExomemProvider,
++  BasicMemoryProvider,
++}
+diff --git a/src/types/provider.ts b/src/types/provider.ts
+index cdc02281d67e35ec339822256f216d7e08e6eb9b..614dd36237a618172c07df95f3d87ade7686473e 100644
+--- a/src/types/provider.ts
++++ b/src/types/provider.ts
+@@ -47,4 +47,11 @@ export interface Provider {
+   clear(containerTag: string): Promise<void>
+ }
+ 
+-export type ProviderName = "supermemory" | "mem0" | "zep" | "filesystem" | "rag"
++export type ProviderName =
++  | "supermemory"
++  | "mem0"
++  | "zep"
++  | "filesystem"
++  | "rag"
++  | "exomem"
++  | "basic-memory"
+diff --git a/src/utils/config.ts b/src/utils/config.ts
+index 8ac126849dff8a61c95f4b2b843469e620640c3a..609272586edfb19f7996161932acb086a28c3fef 100644
+--- a/src/utils/config.ts
++++ b/src/utils/config.ts
+@@ -30,6 +30,9 @@ export function getProviderConfig(provider: string): { apiKey: string; baseUrl?:
+       return { apiKey: config.openaiApiKey } // Filesystem uses OpenAI for memory extraction
+     case "rag":
+       return { apiKey: config.openaiApiKey } // RAG provider uses OpenAI for embeddings
++    case "exomem":
++    case "basic-memory":
++      return { apiKey: "none" }
+     default:
+       throw new Error(`Unknown provider: ${provider}`)
+   }
