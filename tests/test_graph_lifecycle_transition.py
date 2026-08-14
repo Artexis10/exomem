@@ -14,8 +14,8 @@ from exomem import (
     index_sync,
     recall_policy,
     recover_from_trash,
+    writer_lease,
 )
-from exomem import writer_lease
 from exomem.governance import lifecycle
 
 
@@ -25,6 +25,10 @@ def _note(vault: Path, name: str = "transition.md") -> tuple[str, Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("# transition\n", encoding="utf-8")
     return relative, path
+
+
+def _synthetic_windows_path(*parts: str) -> str:
+    return "\\".join(("C:", "example", *parts))
 
 
 def test_lifecycle_epoch_staging_never_marks_an_active_mutation_committed(
@@ -149,7 +153,7 @@ def test_raw_post_rename_fsync_error_durably_inverses_before_restoring_epoch(
     def fail_forward_fsync(path: Path) -> None:
         flushed.append(path)
         if len(flushed) == 1:
-            raise OSError(r"C:\\private\\post-rename-fsync")
+            raise OSError(_synthetic_windows_path("private", "post-rename-fsync"))
         original_fsync(path)
 
     monkeypatch.setattr(lifecycle, "_fsync_directory", fail_forward_fsync)
@@ -158,7 +162,7 @@ def test_raw_post_rename_fsync_error_durably_inverses_before_restoring_epoch(
         delete_file.delete_file(tmp_path, path=relative, confirm=True)
 
     assert error.value.code == "LIFECYCLE_PATH_UNSAFE"
-    assert "C:\\private\\post-rename-fsync" not in str(error.value)
+    assert _synthetic_windows_path("private", "post-rename-fsync") not in str(error.value)
     assert source.exists()
     assert not list((tmp_path / "Knowledge Base" / "_trash").rglob("*raw-fsync-refusal.md"))
     assert graph_sync.floor_path(tmp_path).exists() is False

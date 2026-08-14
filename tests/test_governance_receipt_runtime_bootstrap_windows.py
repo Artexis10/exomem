@@ -13,7 +13,6 @@ from exomem.governance import receipts
 from exomem.mutation_lock import VaultMutationCoordinator
 from exomem.writer_lease import IdempotencyStore
 
-
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows receipt runtime bootstrap")
 
 
@@ -230,7 +229,7 @@ def test_windows_concurrent_receipt_first_bootstrap_converges_on_one_private_roo
     """Eight simultaneous first receipts must all serialize through one valid root."""
     state_root = tmp_path / "concurrent-receipt-first-state"
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(state_root))
-    outcomes = _run_concurrent_first_use(vault, state_root, ("receipt",) * 8)
+    _run_concurrent_first_use(vault, state_root, ("receipt",) * 8)
 
     _assert_private_directory_dacl(state_root)
 
@@ -241,7 +240,7 @@ def test_windows_mixed_concurrent_first_use_converges_on_one_private_root(
     """Receipt and coordinator first users share one same-principal bootstrap race."""
     state_root = tmp_path / "mixed-concurrent-first-state"
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(state_root))
-    outcomes = _run_concurrent_first_use(
+    _run_concurrent_first_use(
         vault, state_root, ("receipt", "coordinator") * 4
     )
 

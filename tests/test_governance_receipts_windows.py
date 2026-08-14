@@ -11,8 +11,11 @@ import pytest
 from exomem import mutation_lock
 from exomem.governance import receipts
 
-
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows receipt contract")
+
+
+def _synthetic_windows_path(*parts: str) -> str:
+    return "\\".join(("C:", "example", *parts))
 
 
 def _month(instance_dir: Path) -> Path:
@@ -195,7 +198,7 @@ def test_windows_month_open_normalizes_a_direct_child_open_refusal(
     instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / ("b" * 32)
     instance_dir.mkdir(parents=True)
     month = _month(instance_dir)
-    detail = r"native child denial C:\\private\\receipt.jsonl"
+    detail = f"native child denial {_synthetic_windows_path('private', 'receipt.jsonl')}"
     original_open = receipts._open_secure_file_at
 
     def deny_child(directory, name, flags, mode=0o600):  # noqa: ANN001
@@ -217,7 +220,7 @@ def test_windows_month_open_normalizes_child_identity_and_reparse_refusals(
     instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / ("d" * 32)
     instance_dir.mkdir(parents=True)
     month = _month(instance_dir)
-    detail = r"reparse target C:\\private\\outside"
+    detail = f"reparse target {_synthetic_windows_path('private', 'outside')}"
 
     monkeypatch.setattr(mutation_lock, "_windows_child_is_in_directory", lambda *_args: False)
     with pytest.raises(receipts.ReceiptError, match="evidence path") as identity_error:
@@ -246,7 +249,7 @@ def test_windows_month_open_normalizes_yielded_io_failure_without_path_detail(
     instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / ("e" * 32)
     instance_dir.mkdir(parents=True)
     month = _month(instance_dir)
-    detail = r"I/O error C:\\private\\receipt.jsonl"
+    detail = f"I/O error {_synthetic_windows_path('private', 'receipt.jsonl')}"
     with pytest.raises(receipts.ReceiptError, match="evidence path") as exc_info:
         with receipts._open_month_fd(instance_dir, month.name):
             raise OSError(detail)
@@ -276,7 +279,7 @@ def test_windows_raw_directory_flush_failure_is_content_free(
     """A raw-handle flush failure remains a content-free durable-directory refusal."""
     directory = vault / "Knowledge Base" / "_Governance" / "events"
     directory.mkdir(parents=True)
-    detail = r"FlushFileBuffers C:\\private\\receipt-directory"
+    detail = f"FlushFileBuffers {_synthetic_windows_path('private', 'receipt-directory')}"
     handles: list[int] = []
 
     def fail_flush(handle: int) -> None:

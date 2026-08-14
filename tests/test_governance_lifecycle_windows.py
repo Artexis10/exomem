@@ -11,11 +11,14 @@ import pytest
 from exomem import delete_file, mutation_lock, recover_from_trash
 from exomem.governance import lifecycle
 
-
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows lifecycle contract")
 
 _SCOPE = "00000000-0000-4000-8000-0000000000d1"
 _RULE = "00000000-0000-4000-8000-0000000000d2"
+
+
+def _synthetic_windows_path(*parts: str) -> str:
+    return "\\".join(("C:", "example", *parts))
 
 
 def _write_restricting_policy(vault: Path, pattern: str) -> None:
@@ -102,7 +105,7 @@ def test_windows_lifecycle_directory_flush_refusals_are_content_free(
     """Unsafe native path and raw flush errors preserve the lifecycle error boundary."""
     directory = vault / "Knowledge Base" / "_Governance" / "deletion-tombstones"
     directory.mkdir(parents=True)
-    detail = r"FlushFileBuffers C:\\private\\lifecycle"
+    detail = f"FlushFileBuffers {_synthetic_windows_path('private', 'lifecycle')}"
 
     def fail_flush(_handle: int) -> None:
         raise OSError(detail)
@@ -121,7 +124,7 @@ def test_windows_lifecycle_directory_refuses_direct_child_and_identity_changes(
     """A native leaf that escapes its retained parent or changes identity is refused."""
     directory = vault / "Knowledge Base" / "_Governance" / "deletion-tombstones"
     directory.mkdir(parents=True)
-    detail = r"C:\\private\\replacement"
+    detail = _synthetic_windows_path("private", "replacement")
 
     monkeypatch.setattr(mutation_lock, "_windows_child_is_in_directory", lambda *_args: False)
     with pytest.raises(lifecycle.LifecycleError) as direct_child_error:

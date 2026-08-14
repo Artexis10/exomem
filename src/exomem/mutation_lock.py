@@ -762,10 +762,10 @@ def _acquire_windows_secure_directory(
                 created = os.lstat(current)
                 _after_windows_secure_directory_create(current)
                 if not os.path.samestat(created, os.lstat(current)):
-                    raise OSError("Windows directory changed during creation")
+                    raise OSError("Windows directory changed during creation") from None
                 handles.append(open_path(current, directory=True))
                 if not os.path.samestat(created, os.lstat(current)):
-                    raise OSError("Windows directory changed during creation")
+                    raise OSError("Windows directory changed during creation") from None
         return _SecureDirectory(
             absolute, windows_handles=handles, close_windows_handle=close_handle
         )

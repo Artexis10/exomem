@@ -35,7 +35,9 @@ Alternative rejected: keep pathname opens with pre/post `lstat`. It can detect m
 
 One helper in the secure mutation-lock substrate will retain target ancestors with metadata-only access, open only the final exact non-reparse directory through `CreateFileW` using `GENERIC_WRITE`, `FILE_FLAG_BACKUP_SEMANTICS`, and no delete sharing, verify direct-child identity, call `FlushFileBuffers`, and close exactly once. Receipt and lifecycle wrappers translate failure into their own content-free errors. POSIX remains unchanged.
 
-Write access must not propagate to the drive root or ordinary ancestors: valid user vaults cannot open `C:\` or `C:\Users` with `GENERIC_WRITE`, and those ancestors do not need it for flushing the leaf.
+Write access must not propagate to a volume root or ordinary home-directory
+ancestors: valid user vaults cannot open those ancestors with `GENERIC_WRITE`,
+and they do not need it for flushing the leaf.
 
 Alternative rejected: skip directory fsync on Windows. That would advance the receipt head or lifecycle checkpoint without satisfying the contract represented.
 

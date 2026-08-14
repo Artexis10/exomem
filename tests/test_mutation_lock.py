@@ -22,6 +22,10 @@ from exomem.mutation_lock import (
 )
 
 
+def _synthetic_windows_path(*parts: str) -> Path:
+    return Path("\\".join(("C:", "example", *parts)))
+
+
 def test_windows_path_inspection_access_has_dacl_read_right_without_mutation_rights() -> None:
     signature = inspect.signature(mutation_lock_module._windows_open_path)
     access = signature.parameters["access"].default
@@ -45,7 +49,7 @@ def test_windows_retained_directory_ancestors_keep_metadata_only_access() -> Non
         return len(opened)
 
     directory = mutation_lock_module._acquire_windows_secure_directory(
-        Path(r"C:\\vault\\Knowledge Base\\_Governance\\events"),
+        _synthetic_windows_path("vault", "Knowledge Base", "_Governance", "events"),
         create=False,
         mode=0o700,
         open_path=open_path,
@@ -139,7 +143,7 @@ def test_windows_secure_child_preserves_open_disposition_and_exclusive_create(
         return 73
 
     directory = mutation_lock_module._SecureDirectory(
-        Path(r"C:\\vault\\state"),
+        _synthetic_windows_path("vault", "state"),
         windows_handles=[71],
         close_windows_handle=lambda _handle: None,
     )
@@ -175,7 +179,7 @@ def test_windows_secure_child_closes_descriptor_when_post_open_fstat_fails(
     """A CRT descriptor owns the raw handle after conversion, even on inspection failure."""
     closed: list[int] = []
     directory = mutation_lock_module._SecureDirectory(
-        Path(r"C:\\vault\\state"),
+        _synthetic_windows_path("vault", "state"),
         windows_handles=[71],
         close_windows_handle=lambda _handle: None,
     )

@@ -30,10 +30,10 @@ from typing import Any
 from .. import memory_refs, mutation_lock
 from ..mutation_lock import (
     VaultMutationCoordinator,
-    _SecureDirectory,
     _open_secure_directory,
     _open_secure_file_at,
     _release_os_lock,
+    _SecureDirectory,
     _try_os_lock,
     _windows_child_is_in_directory,
     _windows_close_handle,

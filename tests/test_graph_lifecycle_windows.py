@@ -11,7 +11,6 @@ import pytest
 from exomem import delete_file, graph_sync, mutation_lock, recall_policy, recover_from_trash
 from exomem.governance import lifecycle
 
-
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows lifecycle contract")
 
 
