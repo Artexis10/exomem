@@ -2026,6 +2026,110 @@ def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
     assert graph_sync.status(tmp_path)["state"] == "current"
 
 
+def test_manager_rebuild_graph_finalizes_unavailable_reset_after_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manager sees the private handoff, clears once, and never returns it."""
+    from exomem.commands import commands_for
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/rebuild-finalizer.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "# Rebuild finalizer\n")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    stale_graph = tmp_path / "Knowledge Base/.graph.sqlite"
+    stale_graph.write_bytes(b"unavailable graph")
+    cleaned: list[tuple[Path, str, graph_sync.GraphSyncCheckpoint]] = []
+    original_cleanup = graph_sync.cleanup_published_graph_lineage_reset
+
+    def observe_cleanup(
+        root: Path, operation_id: str, checkpoint: graph_sync.GraphSyncCheckpoint
+    ) -> bool:
+        cleaned.append((root, operation_id, checkpoint))
+        return original_cleanup(root, operation_id, checkpoint)
+
+    monkeypatch.setattr(
+        graph_sync, "cleanup_published_graph_lineage_reset", observe_cleanup
+    )
+    command = next(command for command in commands_for("mcp") if command.name == "reconcile")
+    result = LeaseManager(LeaseConfig(state_dir=tmp_path / "state")).invoke(
+        command,
+        (tmp_path,),
+        {"rebuild_graph": True, "response_detail": "full"},
+        idempotency_key="unavailable-reset-finalizer",
+    )
+
+    assert result["diagnostics"]["graph_rebuild_status"] == "cleared"
+    assert len(cleaned) == 1
+    assert result["diagnostics"]["graph_quarantine_id"] == cleaned[0][1]
+    assert cleaned[0][0] == tmp_path
+    assert cleaned[0][2] == graph_sync.read_checkpoint(tmp_path)
+    assert "_graph_rebuild_handoff" not in repr(result)
+
+
+def test_manager_rebuild_graph_resumes_canonical_handoff_after_finalizer_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canonical reset handoff survives the crash window and clears on replay."""
+    import pickle
+
+    from exomem.commands import commands_for
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/rebuild-resume.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "# Rebuild resume\n")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    (tmp_path / "Knowledge Base/.graph.sqlite").write_bytes(b"unavailable graph")
+    command = next(command for command in commands_for("mcp") if command.name == "reconcile")
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    original_wait = graph_sync.wait_for_registered
+
+    def crash_before_finalization(*_args: object, **_kwargs: object) -> None:
+        raise SystemExit("synthetic finalizer crash")
+
+    monkeypatch.setattr(graph_sync, "wait_for_registered", crash_before_finalization)
+    with pytest.raises(SystemExit, match="synthetic finalizer crash"):
+        manager.invoke(
+            command,
+            (tmp_path,),
+            {"rebuild_graph": True},
+            idempotency_key="unavailable-reset-resume",
+        )
+    with manager.idempotency._connect() as connection:
+        state, payload = connection.execute(
+            "SELECT state, result FROM mutations"
+        ).fetchone()
+    canonical = pickle.loads(payload)
+    assert state == "canonically_committed"
+    assert "_graph_rebuild_handoff" in canonical["leaf_result"]
+
+    monkeypatch.setattr(graph_sync, "wait_for_registered", original_wait)
+    resumed = manager.invoke(
+        command,
+        (tmp_path,),
+        {"rebuild_graph": True, "response_detail": "full"},
+        idempotency_key="unavailable-reset-resume",
+    )
+
+    assert resumed["diagnostics"]["graph_rebuild_status"] == "cleared"
+    assert "_graph_rebuild_handoff" not in repr(resumed)
+    with manager.idempotency._connect() as connection:
+        state, payload = connection.execute(
+            "SELECT state, result FROM mutations"
+        ).fetchone()
+    assert state == "completed"
+    assert "_graph_rebuild_handoff" not in pickle.loads(payload)["leaf_result"]
+
+
 def test_legacy_refresh_releases_canonical_boundary_before_missing_sidecar_rebuild(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

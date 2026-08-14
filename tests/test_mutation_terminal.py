@@ -88,7 +88,7 @@ def test_compact_terminal_retains_finalized_graph_rebuild_fields() -> None:
     assert "_graph_rebuild_handoff" not in compact
 
 
-def test_terminal_and_replay_views_strip_graph_rebuild_handoff() -> None:
+def test_public_terminal_views_strip_graph_rebuild_handoff_after_internal_finalization() -> None:
     mutation_terminal = _terminal_module()
     terminal = mutation_terminal.committed_terminal(
         {
@@ -102,7 +102,7 @@ def test_terminal_and_replay_views_strip_graph_rebuild_handoff() -> None:
         idempotency_key=None,
     )
 
-    assert "_graph_rebuild_handoff" not in terminal["leaf_result"]
+    assert "_graph_rebuild_handoff" in terminal["leaf_result"]
     assert "_graph_rebuild_handoff" not in mutation_terminal.project_terminal(
         terminal, "full"
     )["diagnostics"]

@@ -286,7 +286,6 @@ def committed_terminal(
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     """Own one canonical successful result before receipt persistence."""
-    leaf_result = _without_graph_rebuild_handoff(leaf_result)
     terminal: dict[str, Any] = {
         "_terminal": _TERMINAL_MARKER,
         "version": _TERMINAL_VERSION,
@@ -321,7 +320,6 @@ def replayed_terminal(
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     """Present a verified Records no-op replay without fabricating a commit."""
-    leaf_result = _without_graph_rebuild_handoff(leaf_result)
     lifecycle_replay = (
         isinstance(leaf_result, Mapping)
         and leaf_result.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION
@@ -431,12 +429,12 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         or "leaf_result" not in result
     ):
         return result
+    leaf = _without_graph_rebuild_handoff(result["leaf_result"])
     if detail == "legacy":
-        return result["leaf_result"]
+        return leaf
     compact = {key: result[key] for key in _ENVELOPE_KEYS if key in result}
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
-    leaf = result["leaf_result"]
     if _is_record_receipt(leaf):
         if leaf["receipt_version"] == _LIFECYCLE_RECEIPT_VERSION:
             compact.update(
@@ -490,7 +488,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
             compact["graph_rebuild_warning"] = warning
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
-        compact["diagnostics"] = result["leaf_result"]
+        compact["diagnostics"] = leaf
     return compact
 
 
