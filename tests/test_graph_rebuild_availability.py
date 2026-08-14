@@ -411,6 +411,67 @@ def test_ahead_floor_never_accepts_or_reuses_an_old_checkpoint(tmp_path: Path) -
     assert graph_sync.read_floor(tmp_path).generation == 3
 
 
+def test_reconcile_report_defaults_to_no_graph_reset() -> None:
+    report = reconcile_module.ReconcileReport()
+
+    assert report.graph_rebuild_requested is False
+    assert report.graph_rebuild_applicable is False
+    assert report.graph_rebuild_status == "not_requested"
+    assert report.graph_quarantine_id is None
+
+
+def test_rebuild_graph_dry_run_previews_unavailable_reset_without_mutating(
+    tmp_path: Path,
+) -> None:
+    checkpoint = _checkpoint(1)
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    graph_sync._write_checkpoint(tmp_path, checkpoint)
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True, exist_ok=True)
+    live.write_bytes(b"old graph")
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path), live)
+    }
+
+    report = reconcile_module.reconcile(tmp_path, dry_run=True, rebuild_graph=True)
+
+    assert report.graph_rebuild_requested is True
+    assert report.graph_rebuild_applicable is True
+    assert report.graph_rebuild_status == "would_quarantine"
+    assert report.graph_quarantine_id is None
+    assert graph_sync.registered_checkpoint(tmp_path) is None
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path), live)
+    } == before
+
+
+def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -> None:
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    kb = tmp_path / "Knowledge Base"
+    live = kb / ".graph.sqlite"
+    companion = kb / ".graph.sqlite-wal"
+    receipt = kb / ".graph-commit-receipts" / "receipt.json"
+    note = kb / "Notes/unchanged.md"
+    live.write_bytes(b"main")
+    companion.write_bytes(b"wal")
+    receipt.parent.mkdir()
+    receipt.write_bytes(b"receipt")
+    note.parent.mkdir()
+    note.write_bytes(b"canonical")
+
+    reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)
+
+    assert reset is not None
+    quarantine = kb / f".graph-reset-{reset.operation_id}"
+    assert (quarantine / ".graph.sqlite").read_bytes() == b"main"
+    assert (quarantine / ".graph.sqlite-wal").read_bytes() == b"wal"
+    assert receipt.read_bytes() == b"receipt"
+    assert note.read_bytes() == b"canonical"
+
+
 def test_nonlegacy_malformed_floor_cannot_be_overwritten_by_a_new_write(tmp_path: Path) -> None:
     note = tmp_path / "Knowledge Base/Notes/Insights/malformed-floor.md"
     vault_module.batch_atomic_write(

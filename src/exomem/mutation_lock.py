@@ -134,6 +134,102 @@ def nofollow_regular_file_identity(path: Path) -> tuple[int, int, int, int, int]
     )
 
 
+@dataclass
+class RetainedRegularFile:
+    """One no-follow regular file pinned until an atomic same-volume rename."""
+
+    path: Path
+    directory: _SecureDirectory
+    fd: int
+    identity: tuple[int, ...]
+
+    def close(self) -> None:
+        try:
+            os.close(self.fd)
+        finally:
+            self.directory.close()
+
+
+def retain_regular_file(path: Path) -> RetainedRegularFile:
+    """Pin one regular child without following aliases or replacement races."""
+    target = Path(path)
+    if target.name != target.as_posix().split("/")[-1]:
+        raise OSError("retained file target must be one child basename")
+    directory = _acquire_secure_directory(target.parent, create=False)
+    try:
+        fd = _open_secure_file_at(directory, target.name, os.O_RDONLY)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or not _same_file_entry(directory, target.name, fd):
+                raise OSError("regular file changed while being retained")
+            if os.name == "nt":
+                import msvcrt
+
+                identity: tuple[int, ...] = _windows_handle_identity(msvcrt.get_osfhandle(fd))
+            else:
+                identity = (int(info.st_dev), int(info.st_ino))
+            return RetainedRegularFile(target, directory, fd, identity)
+        except BaseException:
+            os.close(fd)
+            raise
+    except BaseException:
+        directory.close()
+        raise
+
+
+def rename_retained_regular_file(source: RetainedRegularFile, destination: Path) -> None:
+    """Rename the exact retained source to a new sibling in a retained directory."""
+    target = Path(destination)
+    if target.name != target.as_posix().split("/")[-1]:
+        raise OSError("retained rename destination must be one child basename")
+    directory = _acquire_secure_directory(target.parent, create=False)
+    try:
+        if not _same_directory_path(source.directory) or not _same_directory_path(directory):
+            raise OSError("retained rename directory changed")
+        try:
+            os.lstat(target)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError("retained rename destination exists")
+        if os.name != "nt":
+            assert source.directory.fd is not None and directory.fd is not None
+            os.rename(
+                source.path.name,
+                target.name,
+                src_dir_fd=source.directory.fd,
+                dst_dir_fd=directory.fd,
+            )
+            return
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class _RenameInfo(ctypes.Structure):
+            _fields_ = [
+                ("replace", wintypes.BOOLEAN),
+                ("root", wintypes.HANDLE),
+                ("length", wintypes.DWORD),
+            ]
+
+        name = target.name.encode("utf-16-le")
+        size = ctypes.sizeof(_RenameInfo) + len(name)
+        raw = ctypes.create_string_buffer(size)
+        info = _RenameInfo.from_buffer(raw)
+        info.replace = False
+        info.root = directory.windows_handle
+        info.length = len(name)
+        ctypes.memmove(ctypes.addressof(raw) + ctypes.sizeof(_RenameInfo), name, len(name))
+        kernel32 = _windows_library(ctypes, "kernel32")
+        rename = kernel32.SetFileInformationByHandle
+        rename.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        rename.restype = wintypes.BOOL
+        if not rename(msvcrt.get_osfhandle(source.fd), 3, raw, size):
+            raise OSError(_windows_last_error(ctypes), "retained Windows rename refused")
+    finally:
+        directory.close()
+
+
 class _SecureDirectory:
     """A retained non-reparse directory handle used for runtime lock files."""
 

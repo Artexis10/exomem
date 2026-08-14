@@ -2039,7 +2039,8 @@ def op_audit_fix(
 
 
 def op_reconcile(
-    vault_root: Path,dry_run: bool = False) -> dict:
+    vault_root: Path, dry_run: bool = False, rebuild_graph: bool = False
+) -> dict:
     """Heal vault drift from out-of-band edits in one pass.
 
     The writers keep the embedding sidecar, index.md count rows, and log.md
@@ -2073,7 +2074,9 @@ def op_reconcile(
          remaining_drift: [<audit findings>],
          dry_run: bool}
     """
-    report = reconcile_module.reconcile(vault_root, dry_run=dry_run)
+    report = reconcile_module.reconcile(
+        vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph
+    )
     return report.as_dict()
 
 
@@ -5526,6 +5529,7 @@ def op_maintain_memory(
     categories: list[str] | None = None,
     dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
+    rebuild_graph: bool = False,
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
@@ -5557,6 +5561,8 @@ def op_maintain_memory(
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
     """
+    if rebuild_graph and mode != "reconcile":
+        raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -5571,7 +5577,11 @@ def op_maintain_memory(
             rebuild_embeddings=rebuild_embeddings,
         )
     if mode == "reconcile":
-        return op_reconcile(vault_root, dry_run=False if dry_run is None else dry_run)
+        return op_reconcile(
+            vault_root,
+            dry_run=False if dry_run is None else dry_run,
+            rebuild_graph=rebuild_graph,
+        )
     if mode == "backfill-ids":
         return memory_refs_module.backfill_ids(
             vault_root, dry_run=True if dry_run is None else dry_run

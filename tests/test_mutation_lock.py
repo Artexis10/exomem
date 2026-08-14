@@ -20,6 +20,22 @@ from exomem.mutation_lock import (
 )
 
 
+def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite"
+    destination = tmp_path / "quarantine" / "source.sqlite"
+    source.write_bytes(b"graph")
+    destination.parent.mkdir()
+
+    retained = mutation_lock_module.retain_regular_file(source)
+    try:
+        mutation_lock_module.rename_retained_regular_file(retained, destination)
+    finally:
+        retained.close()
+
+    assert not source.exists()
+    assert destination.read_bytes() == b"graph"
+
+
 def test_windows_path_inspection_access_has_dacl_read_right_without_mutation_rights() -> None:
     access = inspect.signature(mutation_lock_module._windows_open_path).parameters["access"].default
 

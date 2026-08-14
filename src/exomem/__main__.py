@@ -2050,6 +2050,11 @@ def _simple_maintain_main(argv: list[str]) -> int:
         help="with --fix, rebuild text embeddings",
     )
     parser.add_argument(
+        "--rebuild-graph",
+        action="store_true",
+        help="with --reconcile, quarantine unavailable graph lineage and rebuild it",
+    )
+    parser.add_argument(
         "--category",
         dest="categories",
         action="append",
@@ -2061,6 +2066,8 @@ def _simple_maintain_main(argv: list[str]) -> int:
 
     if args.fix and args.reconcile:
         parser.error("choose only one of --fix or --reconcile")
+    if args.rebuild_graph and not args.reconcile:
+        parser.error("--rebuild-graph requires --reconcile")
     if args.fix:
         core = ["maintain_memory", "--mode", "fix"]
         if args.dry_run:
@@ -2071,6 +2078,8 @@ def _simple_maintain_main(argv: list[str]) -> int:
         core = ["maintain_memory", "--mode", "reconcile"]
         if args.dry_run:
             core.append("--dry-run")
+        if args.rebuild_graph:
+            core.append("--rebuild-graph")
     else:
         core = ["maintain_memory", "--mode", "audit"]
         _append_repeated(core, "--categories", args.categories)

@@ -32,6 +32,16 @@ _TEMP_PREFIX = ".graph-rebuild-"
 _CHECKPOINT_FILENAME = ".graph-sync.json"
 _FLOOR_FILENAME = ".graph-sync-floor.json"
 _RECEIPT_DIRNAME = ".graph-commit-receipts"
+_RESET_PREFIX = ".graph-reset-"
+_RESET_MANIFEST = ".manifest.json"
+_RESET_MEMBERS = (
+    ".graph.sqlite",
+    ".graph.sqlite-journal",
+    ".graph.sqlite-wal",
+    ".graph.sqlite-shm",
+    _CHECKPOINT_FILENAME,
+    _FLOOR_FILENAME,
+)
 # A maximal v1 paths checkpoint is 1,000 paths of 1,024 UTF-8 bytes plus
 # hashes and a duplicated created-path array. Keep a small format margin while
 # still refusing arbitrary multi-megabyte synced inputs.
@@ -1609,6 +1619,127 @@ class GraphEpochIncoherent(GraphRebuildRegistrationError):
             "Reconcile the graph epoch before retrying this mutation.",
         )
         self.args = (f"{_message}: {self.args[0]}",)
+
+
+class GraphResetFailed(GraphRebuildRegistrationError):
+    """An explicit lineage reset could not safely isolate its derived inputs."""
+
+    def __init__(self, code: str = "GRAPH_SYNC_RESET_REFUSED") -> None:
+        super().__init__(code, "Release graph readers or repair the graph lineage before retrying.")
+
+
+@dataclass(frozen=True)
+class GraphReset:
+    operation_id: str
+    members: tuple[str, ...]
+    phase: str
+
+
+def _reset_directory(vault_root: Path, operation_id: str) -> Path:
+    from .vault import kb_root
+
+    return kb_root(vault_root) / f"{_RESET_PREFIX}{operation_id}"
+
+
+def _write_reset_manifest(directory: Path, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> None:
+    payload = {
+        "version": 1,
+        "operation_id": reset.operation_id,
+        "members": list(reset.members),
+        "identities": {name: list(identities[name]) for name in reset.members},
+        "phase": reset.phase,
+    }
+    raw = _canonical_json(payload)
+    path = directory / _RESET_MANIFEST
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, raw)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _advance_reset_manifest(directory: Path, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> None:
+    current = directory / _RESET_MANIFEST
+    staged = directory / f"{_RESET_MANIFEST}.new"
+    payload = GraphReset(reset.operation_id, reset.members, reset.phase)
+    raw = _canonical_json({
+        "version": 1, "operation_id": payload.operation_id, "members": list(payload.members),
+        "identities": {name: list(identities[name]) for name in payload.members}, "phase": payload.phase,
+    })
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, raw); os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(staged, current)
+
+
+def isolate_unavailable_graph_lineage(vault_root: Path) -> GraphReset | None:
+    """Durably quarantine only the exact derived graph set for an unavailable epoch."""
+    from .mutation_lock import rename_retained_regular_file, retain_regular_file
+    root = Path(vault_root)
+    if classify_epoch(root).kind != "unavailable":
+        return None
+    kb = _reset_directory(root, "0" * 24).parent
+    members = tuple(name for name in _RESET_MEMBERS if (kb / name).exists())
+    if ".graph.sqlite" not in members:
+        raise GraphResetFailed()
+    retained = []
+    try:
+        for name in members:
+            retained.append(retain_regular_file(kb / name))
+        identities = {item.path.name: item.identity for item in retained}
+        operation_id = secrets.token_hex(12)
+        directory = _reset_directory(root, operation_id)
+        directory.mkdir(mode=0o700)
+        reset = GraphReset(operation_id, members, "prepared")
+        _write_reset_manifest(directory, reset, identities)
+        moved = []
+        try:
+            _advance_reset_manifest(directory, GraphReset(operation_id, members, "moving"), identities)
+            for item in retained:
+                rename_retained_regular_file(item, directory / item.path.name)
+                moved.append(item)
+            _advance_reset_manifest(directory, GraphReset(operation_id, members, "isolated"), identities)
+            return GraphReset(operation_id, members, "isolated")
+        except Exception as error:
+            rollback_failed = False
+            for item in reversed(moved):
+                try:
+                    moved_item = retain_regular_file(directory / item.path.name)
+                    try:
+                        rename_retained_regular_file(moved_item, kb / item.path.name)
+                    finally:
+                        moved_item.close()
+                except Exception:
+                    rollback_failed = True
+            raise GraphResetFailed("GRAPH_SYNC_RESET_ROLLBACK_FAILED" if rollback_failed else "GRAPH_SYNC_RESET_REFUSED") from error
+    finally:
+        for item in retained:
+            item.close()
+
+
+def cleanup_graph_lineage_reset(vault_root: Path, operation_id: str) -> bool:
+    """Best-effort, non-recursive cleanup of one manifest-recorded quarantine."""
+    directory = _reset_directory(Path(vault_root), operation_id)
+    try:
+        payload = json.loads((directory / _RESET_MANIFEST).read_text(encoding="utf-8"))
+        members = payload.get("members")
+        if not isinstance(members, list) or any(name not in _RESET_MEMBERS for name in members):
+            return False
+        for name in members:
+            (directory / name).unlink(missing_ok=True)
+        (directory / _RESET_MANIFEST).unlink(missing_ok=True)
+        directory.rmdir()
+        return True
+    except OSError:
+        return False
 
 
 class GraphRebuildLockUnavailable(GraphRebuildRegistrationError):

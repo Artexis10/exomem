@@ -85,6 +85,10 @@ class ReconcileReport:
     remaining_drift: list[dict] = field(default_factory=list)
     receipt_reconcile: dict = field(default_factory=dict)
     dry_run: bool = False
+    graph_rebuild_requested: bool = False
+    graph_rebuild_applicable: bool = False
+    graph_rebuild_status: str = "not_requested"
+    graph_quarantine_id: str | None = None
     _graph_reconcile_registered: int | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict:
@@ -132,6 +136,10 @@ class ReconcileReport:
             "remaining_drift": self.remaining_drift,
             "receipt_reconcile": self.receipt_reconcile,
             "dry_run": self.dry_run,
+            "graph_rebuild_requested": self.graph_rebuild_requested,
+            "graph_rebuild_applicable": self.graph_rebuild_applicable,
+            "graph_rebuild_status": self.graph_rebuild_status,
+            "graph_quarantine_id": self.graph_quarantine_id,
         }
         registered = self._graph_reconcile_registered
         if registered is not None:
@@ -206,12 +214,14 @@ def _dangling_frame_dirs(vault_root: Path) -> list[tuple[Path, Path]]:
     return out
 
 
-def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
+def reconcile(
+    vault_root: Path, *, dry_run: bool = False, rebuild_graph: bool = False
+) -> ReconcileReport:
     """Heal index-count + embedding drift from out-of-band edits.
 
     See the module docstring. Read-only when `dry_run=True`.
     """
-    report = ReconcileReport(dry_run=dry_run)
+    report = ReconcileReport(dry_run=dry_run, graph_rebuild_requested=rebuild_graph)
     if not dry_run:
         from .activation_manifest import ensure_manifest
 
@@ -458,9 +468,39 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
     # ---- 2c. Derived epistemic graph sidecar ----
     if os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX"):
         report.graph_status = "disabled"
+        if rebuild_graph:
+            report.graph_rebuild_status = "not_applicable"
     else:
         initial_epoch = epistemic_graph.graph_sync.status(vault_root)
         index = epistemic_graph.EpistemicGraphIndex(vault_root)
+        reset_registered = False
+        if rebuild_graph:
+            epoch = epistemic_graph.graph_sync.classify_epoch(vault_root)
+            if epoch.kind == "unavailable":
+                report.graph_rebuild_applicable = True
+                if dry_run:
+                    report.graph_rebuild_status = "would_quarantine"
+                else:
+                    reset = epistemic_graph.graph_sync.isolate_unavailable_graph_lineage(
+                        vault_root
+                    )
+                    if reset is not None:
+                        report.graph_rebuild_status = "quarantined"
+                        report.graph_quarantine_id = reset.operation_id
+                        checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
+                            vault_root
+                        )
+                        dispatch = epistemic_graph._registered_or_failure(
+                            vault_root,
+                            checkpoint,
+                            index,
+                            index._canonical_mutation_coordinator(),
+                        )
+                        if dispatch.outcome == "registered":
+                            report._graph_reconcile_registered = 0
+                            reset_registered = True
+            else:
+                report.graph_rebuild_status = "not_applicable"
         needs_repair = (
             bool(initial_graph_drift)
             or initial_epoch["state"] != "current"
@@ -478,7 +518,11 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
                 == "recoverable"
             ):
                 epistemic_graph.graph_sync.recover_checkpoint(vault_root)
-            if needs_repair and epistemic_graph.graph_sync.status(vault_root)["state"] != "unavailable":
+            if (
+                needs_repair
+                and not reset_registered
+                and epistemic_graph.graph_sync.status(vault_root)["state"] != "unavailable"
+            ):
                 if audit_module._check_graph_drift(vault_root) or not index.available():
                     checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
                         vault_root
