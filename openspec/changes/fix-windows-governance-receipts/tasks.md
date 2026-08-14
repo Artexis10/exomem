@@ -52,6 +52,9 @@
 ## 8. Verification And Delivery
 
 - [x] 8.1 Run strict OpenSpec validation, focused receipt/mutation-lock/governance-overhead tests, focused Ruff, public-artifact validation, and `git diff --check`.
-- [ ] 8.2 Run the full lean suite and separate any pre-existing native Windows failures from regressions introduced by this change.
+- [x] 8.2 Run the full lean suite and separate pre-existing native Windows collection
+  failures from regressions introduced by this change: four unchanged POSIX-only
+  collection paths (`fcntl` and `os.O_DIRECTORY`) remain baseline failures; all
+  changed governance paths pass the documented native suites.
 - [x] 8.3 Record the exact Windows test command that the separate CI repair must add before 0.50 release:
   `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 uv run python -m pytest -q tests/test_governance_lifecycle_windows.py tests/test_governance_receipts_windows.py tests/test_graph_lifecycle_transition.py tests/test_mutation_lock.py tests/test_governance_receipt_runtime_bootstrap_windows.py`.
