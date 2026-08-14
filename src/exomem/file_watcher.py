@@ -505,8 +505,25 @@ class FileWatcher:
             except Exception:  # noqa: BLE001 - discovery must never kill the watcher
                 log.exception("file watcher: periodic media reconciliation failed")
         if seed:
-            if baselines_current:
-                self._validate_existing_graph_on_seed()
+            if baselines_current and self._validate_existing_graph_on_seed():
+                from . import deferred_index
+
+                full_limit = self._watcher_policy().max_reconcile_embed_files
+                full_paths = [
+                    self._vault_root / receipt.rel_path
+                    for receipt in deferred_index.snapshot_full(
+                        self._vault_root, limit=full_limit
+                    )
+                ]
+                if full_paths:
+                    try:
+                        index_sync.drain_deferred_work(
+                            self._vault_root,
+                            paths=full_paths,
+                            limit=full_limit,
+                        )
+                    except Exception:  # noqa: BLE001 - queued work remains retryable
+                        log.exception("file watcher: startup deferred full-index drain failed")
             return
         policy = self._watcher_policy()
         drift_admission = 0
@@ -617,7 +634,7 @@ class FileWatcher:
                 pass
             log.exception("file watcher: persisted graph barrier recovery failed")
 
-    def _validate_existing_graph_on_seed(self) -> None:
+    def _validate_existing_graph_on_seed(self) -> bool:
         """Rebuild an existing graph after startup's exact disk baselines.
 
         A process can die before watchdog delivers an edit or while the event is
@@ -631,23 +648,27 @@ class FileWatcher:
         from . import vault as vault_module
 
         if not epistemic_graph.sidecar_path(self._vault_root).exists():
-            return
+            return True
         graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
         try:
-            graph.suspend_reads()
             if not epistemic_graph.graph_enabled():
-                return
+                return True
+            graph.suspend_reads()
             find_module.evict_resolver_caches(self._vault_root)
             vault_module.evict_inbound_index(self._vault_root)
+            if not index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False):
+                raise RuntimeError("startup graph epoch recovery did not complete")
             graph.rebuild_all()
             if not graph.available():
                 raise RuntimeError("startup graph rebuild did not publish availability")
+            return True
         except Exception:  # noqa: BLE001 - persisted barrier keeps reads fail-closed
             try:
                 graph.suspend_reads()
             except Exception:  # noqa: BLE001 - rebuild failure already withdrew markers
                 pass
             log.exception("file watcher: startup graph validation failed")
+            return False
 
     def _dispatch_reconcile_delta(
         self,

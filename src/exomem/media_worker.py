@@ -29,8 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import (
+    deferred_index,
     embeddings,
     extract,
+    graph_sync,
     index_sync,
     preserve,
     recall_policy,
@@ -50,7 +52,16 @@ from .media_jobs import (
 from .media_jobs import (
     MediaJob as _Job,
 )
-from .vault import content_hash, post_commit_batch_fanout
+from .vault import (
+    MISSING_CONTENT_HASH,
+    DeferredGraphCompletion,
+    PathGuard,
+    PlannedWrite,
+    batch_atomic_write,
+    content_hash,
+    post_commit_batch_fanout,
+    read_bounded_guarded_bytes,
+)
 from .writer_lease import get_manager
 
 log = logging.getLogger(__name__)
@@ -454,51 +465,57 @@ class MediaWorker:
         speakers: list[dict] | None = None,
         speaker_verification: str | None = None,
     ) -> bool:
-        written: list[Path] = []
-        try:
-            with get_manager().mutation_guard(
-                self._vault_root,
-                operation="background_media_extraction_commit",
-                holder_kind="background",
-            ):
-                if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                    return False
-                try:
-                    current_content = job.sidecar_path.read_text(encoding="utf-8")
-                except (OSError, UnicodeError):
-                    current_content = ""
-                from . import media_processing
+        token: DeferredGraphCompletion | None = None
+        receipts: list[deferred_index.DeferredReceipt] = []
+        with get_manager().mutation_guard(
+            self._vault_root,
+            operation="background_media_extraction_commit",
+            holder_kind="background",
+        ):
+            if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                return False
+            try:
+                current_content = job.sidecar_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                current_content = ""
+            from . import media_processing
 
-                current_sidecar = _content_digest(job.sidecar_path)
-                current_binary = _binary_identity(job.binary_path)
-                if current_sidecar != expected_sidecar or current_binary != expected_binary:
-                    log.warning(
-                        "extraction result stale for %s; newer canonical input preserved",
-                        job.sidecar_path.name,
-                    )
-                    return False
-                if media_processing.has_completed_transcript(
-                    current_content, media_type=job.media_type
-                ):
-                    log.info(
-                        "completed transcript appeared before commit for %s; preserving it",
-                        job.sidecar_path.name,
-                    )
-                    return False
-                written = preserve.update_sidecar_extraction(
-                    self._vault_root,
-                    job.sidecar_path,
-                    text=text,
-                    engine=engine,
-                    speakers=speakers,
-                    speaker_verification=speaker_verification,
-                    attempts=max(1, job.attempts),
-                    defer_index_fanout=True,
+            current_sidecar = _content_digest(job.sidecar_path)
+            current_binary = _binary_identity(job.binary_path)
+            if current_sidecar != expected_sidecar or current_binary != expected_binary:
+                log.warning(
+                    "extraction result stale for %s; newer canonical input preserved",
+                    job.sidecar_path.name,
                 )
-                return True
-        finally:
-            if written:
-                post_commit_batch_fanout(self._vault_root, written, None, None)
+                return False
+            if media_processing.has_completed_transcript(
+                current_content, media_type=job.media_type
+            ):
+                log.info(
+                    "completed transcript appeared before commit for %s; preserving it",
+                    job.sidecar_path.name,
+                )
+                return False
+            receipts = deferred_index.add_full_receipts(
+                self._vault_root,
+                [job.sidecar_path.relative_to(self._vault_root).as_posix()],
+            )
+            handoff = preserve.update_sidecar_extraction(
+                self._vault_root,
+                job.sidecar_path,
+                text=text,
+                engine=engine,
+                speakers=speakers,
+                speaker_verification=speaker_verification,
+                attempts=max(1, job.attempts),
+                defer_index_fanout=True,
+                defer_graph_completion=True,
+            )
+            assert isinstance(handoff, DeferredGraphCompletion)
+            token = handoff
+        assert token is not None
+        self._complete_deferred_graph_completion(token, receipts)
+        return True
 
     def _commit_processing_failure(
         self,
@@ -510,51 +527,125 @@ class MediaWorker:
         error: str,
         next_action: str,
     ) -> bool:
-        written: list[Path] = []
+        token: DeferredGraphCompletion | None = None
+        receipts: list[deferred_index.DeferredReceipt] = []
+        with get_manager().mutation_guard(
+            self._vault_root,
+            operation="background_media_failure_commit",
+            holder_kind="background",
+        ):
+            if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                return False
+            current_sidecar = _content_digest(job.sidecar_path)
+            current_binary = _binary_identity(job.binary_path)
+            if current_sidecar != expected_sidecar or current_binary != expected_binary:
+                log.warning(
+                    "processing failure stale for %s; newer canonical input preserved",
+                    job.sidecar_path.name,
+                )
+                return False
+            try:
+                current_content = job.sidecar_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                current_content = ""
+            from . import media_processing
+
+            if media_processing.has_completed_transcript(
+                current_content, media_type=job.media_type
+            ):
+                log.info(
+                    "completed transcript appeared before failure commit for %s; preserving it",
+                    job.sidecar_path.name,
+                )
+                return False
+            receipts = deferred_index.add_full_receipts(
+                self._vault_root,
+                [job.sidecar_path.relative_to(self._vault_root).as_posix()],
+            )
+            handoff = preserve.update_sidecar_processing_failure(
+                self._vault_root,
+                job.sidecar_path,
+                state=state,
+                attempts=max(1, job.attempts),
+                error=error,
+                retryable=True,
+                next_action=next_action,
+                defer_index_fanout=True,
+                defer_graph_completion=True,
+            )
+            assert isinstance(handoff, DeferredGraphCompletion)
+            token = handoff
+        assert token is not None
+        self._complete_deferred_graph_completion(token, receipts)
+        return True
+
+    def _complete_deferred_graph_completion(
+        self,
+        token: DeferredGraphCompletion,
+        receipts: list[deferred_index.DeferredReceipt],
+    ) -> None:
         try:
             with get_manager().mutation_guard(
                 self._vault_root,
-                operation="background_media_failure_commit",
+                operation="background_media_graph_completion",
                 holder_kind="background",
             ):
-                if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                    return False
-                current_sidecar = _content_digest(job.sidecar_path)
-                current_binary = _binary_identity(job.binary_path)
-                if current_sidecar != expected_sidecar or current_binary != expected_binary:
-                    log.warning(
-                        "processing failure stale for %s; newer canonical input preserved",
-                        job.sidecar_path.name,
-                    )
-                    return False
+                floor_path = graph_sync.floor_path(self._vault_root)
+                checkpoint_path = graph_sync.checkpoint_path(self._vault_root)
+                floor_relative = floor_path.relative_to(self._vault_root).as_posix()
+                checkpoint_relative = checkpoint_path.relative_to(self._vault_root).as_posix()
                 try:
-                    current_content = job.sidecar_path.read_text(encoding="utf-8")
-                except (OSError, UnicodeError):
-                    current_content = ""
-                from . import media_processing
-
-                if media_processing.has_completed_transcript(
-                    current_content, media_type=job.media_type
-                ):
-                    log.info(
-                        "completed transcript appeared before failure commit for %s; preserving it",
-                        job.sidecar_path.name,
+                    floor_raw, floor_guard = read_bounded_guarded_bytes(
+                        self._vault_root,
+                        floor_relative,
+                        limit=graph_sync._FLOOR_READ_LIMIT,
                     )
-                    return False
-                written = preserve.update_sidecar_processing_failure(
-                    self._vault_root,
-                    job.sidecar_path,
-                    state=state,
-                    attempts=max(1, job.attempts),
-                    error=error,
-                    retryable=True,
-                    next_action=next_action,
-                    defer_index_fanout=True,
+                except FileNotFoundError:
+                    return
+                floor = graph_sync.GraphSyncGenerationFloor.parse(floor_raw)
+                if floor is None or floor.generation != token.checkpoint.generation:
+                    return
+                try:
+                    checkpoint_raw, checkpoint_guard = read_bounded_guarded_bytes(
+                        self._vault_root,
+                        checkpoint_relative,
+                        limit=graph_sync._CHECKPOINT_READ_LIMIT,
+                    )
+                except FileNotFoundError:
+                    predecessor = None
+                    checkpoint_guard = PathGuard.capture(
+                        self._vault_root,
+                        checkpoint_relative,
+                        leaf_policy="absent",
+                    )
+                    checkpoint_hash = MISSING_CONTENT_HASH
+                else:
+                    predecessor = graph_sync.GraphSyncCheckpoint.parse(checkpoint_raw)
+                    if predecessor is None:
+                        return
+                    checkpoint_hash = checkpoint_guard.expected_content_hash
+                if predecessor != token.predecessor or checkpoint_hash is None:
+                    return
+                batch_atomic_write(
+                    [
+                        PlannedWrite(
+                            checkpoint_path,
+                            token.checkpoint.render(),
+                            guard=checkpoint_guard,
+                            expected_hash=checkpoint_hash,
+                        )
+                    ],
+                    vault_root=self._vault_root,
+                    required_guards=(floor_guard,),
+                    post_commit_fanout=False,
                 )
-                return True
-        finally:
-            if written:
-                post_commit_batch_fanout(self._vault_root, written, None, None)
+            completed = post_commit_batch_fanout(
+                self._vault_root, list(token.replaced), None, None
+            )
+            if completed is True:
+                deferred_index.clear_full_receipts(self._vault_root, receipts)
+        except Exception:  # noqa: BLE001 - canonical media is already committed
+            log.exception("media deferred graph completion failed")
 
     def _run_clip(self, job: _Job) -> None:
         """CLIP-embed an image (one vector) or a video (per-keyframe vectors) so it's

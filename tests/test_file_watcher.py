@@ -1206,6 +1206,32 @@ def test_missing_baseline_and_post_reconcile_watcher_do_not_phantom_fanout(
     index_sync = file_watcher.index_sync
     index_sync.clear_deferred_work(vault)
     calls = _spy_reconcile_fanout(monkeypatch)
+
+    def complete_upsert(root: Path, paths: list[Path], **_kwargs):  # noqa: ANN001
+        calls["upsert"].append(list(paths))
+        rels = tuple(path.relative_to(root).as_posix() for path in paths)
+        return file_watcher.index_sync.IndexSyncReport(
+            "upsert",
+            rels,
+            rels,
+            tuple(
+                file_watcher.index_sync.IndexComponentOutcome(
+                    component,
+                    "not_required" if component == "epistemic_graph" else "completed",
+                    "not_required" if component == "epistemic_graph" else "completed",
+                )
+                for component in (
+                    "memory_refs",
+                    "resolver",
+                    "semantic_purge",
+                    "lexstore",
+                    "epistemic_graph",
+                    "embeddings",
+                )
+            ),
+        )
+
+    monkeypatch.setattr(file_watcher.index_sync, "upsert_after_write", complete_upsert)
     watcher = file_watcher.FileWatcher(vault)
 
     watcher._reconcile_once(seed=False)

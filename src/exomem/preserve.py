@@ -38,6 +38,7 @@ from . import indexes, memory_refs, privacy_log, temporal
 from .kbdir import kb_prefix
 from .vault import (
     ContentHashMismatchError,
+    DeferredGraphCompletion,
     PlannedWrite,
     batch_atomic_write,
     escape_wikilinks_for_log,
@@ -648,7 +649,8 @@ def update_sidecar_extraction(
     speaker_verification: str | None = None,
     attempts: int | None = None,
     defer_index_fanout: bool = False,
-) -> list[Path]:
+    defer_graph_completion: bool = False,
+) -> list[Path] | DeferredGraphCompletion:
     """Fill a pending media sidecar with extracted text + engine, and re-embed.
 
     Called by the extraction worker once ASR/OCR/PDF text is ready: sets
@@ -691,6 +693,7 @@ def update_sidecar_extraction(
         [PlannedWrite(path=sidecar_path, content=content)],
         vault_root=vault_root,
         post_commit_fanout=not defer_index_fanout,
+        defer_graph_completion=defer_graph_completion,
     )
 
 
@@ -704,7 +707,8 @@ def update_sidecar_processing_failure(
     retryable: bool,
     next_action: str,
     defer_index_fanout: bool = False,
-) -> list[Path]:
+    defer_graph_completion: bool = False,
+) -> list[Path] | DeferredGraphCompletion:
     """Persist actionable worker state without replacing a pending transcript."""
     content = sidecar_path.read_text(encoding="utf-8")
     content = render_sidecar_processing_failure(
@@ -719,6 +723,7 @@ def update_sidecar_processing_failure(
         [PlannedWrite(path=sidecar_path, content=content)],
         vault_root=vault_root,
         post_commit_fanout=not defer_index_fanout,
+        defer_graph_completion=defer_graph_completion,
     )
 
 

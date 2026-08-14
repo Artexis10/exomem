@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,102 @@ import pytest
 
 from exomem import deferred_index, doctor, file_watcher, index_sync, mode, mutation_lock
 from exomem.__main__ import _index_main, _mode_main
+
+
+def _completed_full_upsert_report(paths: list[Path]) -> index_sync.IndexSyncReport:
+    rels = tuple(
+        Path(*path.parts[next(i for i, part in enumerate(path.parts) if part == "Knowledge Base") :]).as_posix()
+        for path in paths
+    )
+    return index_sync.IndexSyncReport(
+        "upsert",
+        rels,
+        rels,
+        tuple(
+            index_sync.IndexComponentOutcome(component, "completed", "completed")
+            for component in (
+                "memory_refs",
+                "resolver",
+                "semantic_purge",
+                "lexstore",
+                "epistemic_graph",
+                "embeddings",
+            )
+        ),
+    )
+
+
+def test_add_full_receipts_returns_its_atomic_revision_when_a_readd_races(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full receipt's return value cannot be reconstructed from a later snapshot."""
+    rels = ["Knowledge Base/racing-receipt.md", "Knowledge Base/racing-other.md"]
+    for rel in rels:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# {target.stem}\n", encoding="utf-8")
+    deferred_index.add_full(vault, rels)
+    original_connect = deferred_index._connect
+    main_thread = threading.current_thread()
+    race_started = threading.Event()
+    race_finished = threading.Event()
+    race_thread: threading.Thread | None = None
+
+    def concurrent_readd() -> None:
+        deferred_index.add_full(vault, [rels[0]])
+        race_finished.set()
+
+    def release_competitor_after_commit() -> None:
+        nonlocal race_thread
+        if race_started.is_set():
+            return
+        race_started.set()
+        race_thread = threading.Thread(target=concurrent_readd)
+        race_thread.start()
+        assert race_finished.wait(timeout=5)
+
+    class _ConnectionProxy:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002
+            result = self._connection.__exit__(*args)
+            release_competitor_after_commit()
+            return result
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+        def commit(self) -> None:
+            self._connection.commit()
+            release_competitor_after_commit()
+
+    def connect(*args, **kwargs):  # noqa: ANN002, ANN003
+        connection = original_connect(*args, **kwargs)
+        if threading.current_thread() is main_thread:
+            return _ConnectionProxy(connection)
+        return connection
+
+    monkeypatch.setattr(deferred_index, "_connect", connect)
+
+    admitted = deferred_index.add_full_receipts(vault, rels)
+
+    assert race_started.is_set()
+    assert race_thread is not None
+    race_thread.join(timeout=5)
+    assert race_finished.is_set()
+    assert admitted == [
+        deferred_index.DeferredReceipt(rels[1], 2),
+        deferred_index.DeferredReceipt(rels[0], 2),
+    ]
+    assert deferred_index.snapshot_full(vault) == [
+        deferred_index.DeferredReceipt(rels[1], 2),
+        deferred_index.DeferredReceipt(rels[0], 3),
+    ]
 
 
 def test_index_command_clears_both_deferred_queues(
@@ -158,7 +255,7 @@ def test_full_drain_preserves_work_requeued_during_dispatch(
     def dispatch(root: Path, paths: list[Path]):
         assert paths == [target]
         deferred_index.add_full(root, [rel])
-        return SimpleNamespace(reconcile_required=False)
+        return _completed_full_upsert_report(paths)
 
     monkeypatch.setattr(index_sync, "upsert_after_write", dispatch)
 
@@ -166,6 +263,40 @@ def test_full_drain_preserves_work_requeued_during_dispatch(
     [remaining] = deferred_index.snapshot_full(vault)
     assert remaining.rel_path == rel
     assert remaining.revision == 2
+
+
+def test_targeted_full_drain_reads_only_the_bounded_requested_receipts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Media-targeted replay must not materialize either complete backlog."""
+    rels = [f"Knowledge Base/backlog-{index:02d}.md" for index in range(24)]
+    for rel in rels:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# queued\n", encoding="utf-8")
+    deferred_index.add_full(vault, rels)
+    snapshots: list[tuple[int | None, set[str] | None]] = []
+    real_snapshot_full = deferred_index.snapshot_full
+
+    def observe_snapshot_full(root: Path, *, limit=None, paths=None):  # noqa: ANN001
+        snapshots.append((limit, paths))
+        return real_snapshot_full(root, limit=limit, paths=paths)
+
+    dispatched: list[list[Path]] = []
+    monkeypatch.setattr(deferred_index, "snapshot_full", observe_snapshot_full)
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda _root, paths: dispatched.append(paths) or _completed_full_upsert_report(paths),
+    )
+
+    assert index_sync.drain_deferred_work(
+        vault,
+        paths=[vault / rels[3], vault / rels[7]],
+        limit=1,
+    ) == 1
+    assert snapshots == [(1, {rels[3], rels[7]})]
+    assert dispatched == [[vault / rels[3]]]
 
 
 def test_legacy_full_queue_migrates_to_revisioned_receipts(vault: Path) -> None:
@@ -204,7 +335,7 @@ def test_unbounded_manual_drain_reconciles_semantic_work_created_by_full_refresh
     def dispatch(root: Path, paths: list[Path]):
         assert paths == [target]
         deferred_index.add(root, [rel])
-        return SimpleNamespace(reconcile_required=False)
+        return _completed_full_upsert_report(paths)
 
     monkeypatch.setattr(index_sync, "upsert_after_write", dispatch)
     monkeypatch.setattr(
@@ -241,7 +372,11 @@ def test_full_drain_isolates_a_failed_receipt_from_later_work(
             if rel == bad_rel
             else ()
         )
-        return index_sync.IndexSyncReport("upsert", (rel,), (rel,), outcomes)
+        return (
+            index_sync.IndexSyncReport("upsert", (rel,), (rel,), outcomes)
+            if outcomes
+            else _completed_full_upsert_report(paths)
+        )
 
     monkeypatch.setattr(index_sync, "upsert_after_write", dispatch)
 
@@ -272,7 +407,7 @@ def test_failed_full_prefix_rotates_so_later_work_is_not_starved(
                 tuple(rels),
                 (index_sync.IndexComponentOutcome("lexstore", "degraded", "failed"),),
             )
-        return index_sync.IndexSyncReport("upsert", tuple(rels), tuple(rels), ())
+        return _completed_full_upsert_report(paths)
 
     monkeypatch.setattr(index_sync, "upsert_after_write", dispatch)
 
