@@ -19,9 +19,9 @@
 
 ## 4. Windows semantic-sidecar audit
 
-- [ ] 4.1 Add red platform-seam tests for truthful unsupported classification and native Windows tests for a healthy sidecar, reparse refusal, identity change, handle closure, and later replacement.
-- [ ] 4.2 Implement retained no-follow Windows sidecar bindings and distinct absent/readable/unreadable/schema-unreadable/unsupported census outcomes.
-- [ ] 4.3 Rerun semantic-isolation census, exact-row purge, Records reconcile, Windows path/alias, and scaffold leak tests.
+- [x] 4.1 Add red platform-seam tests for truthful unsupported classification and native Windows tests for a healthy sidecar, reparse refusal, identity change, handle closure, and later replacement.
+- [x] 4.2 Implement retained no-follow Windows sidecar bindings and distinct absent/readable/unreadable/schema-unreadable/unsupported census outcomes.
+- [x] 4.3 Rerun semantic-isolation census, exact-row purge, Records reconcile, Windows path/alias, and scaffold leak tests.
 
 ## 5. Verification and delivery
 
