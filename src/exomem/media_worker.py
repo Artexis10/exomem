@@ -53,8 +53,8 @@ from .media_jobs import (
     MediaJob as _Job,
 )
 from .vault import (
-    DeferredGraphCompletion,
     MISSING_CONTENT_HASH,
+    DeferredGraphCompletion,
     PathGuard,
     PlannedWrite,
     batch_atomic_write,
