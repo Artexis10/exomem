@@ -33,6 +33,60 @@ _FOLDERS = (
     "Evidence",
 )
 
+#: Scaffold entries the PRODUCT owns: the governance contract the agent follows.
+#: `install-skill` redeploys its copy of these from this same source on every
+#: upgrade, but `init` is skipped once a Knowledge Base exists, so the vault
+#: copy stayed frozen at whatever version created the vault. The two then drift,
+#: and both are live — `product_invoke` resolves the vault copy while agents
+#: read the deployed one — which makes it a correctness problem, not clutter
+#: (#488).
+#:
+#: Everything NOT matched here is per-vault configuration the user owns
+#: (project-keys.yaml, relation-registry.yaml, semantic-language-registry.yaml,
+#: traversal-profiles.yaml) or their own content, and is never overwritten.
+_SHIPPED_SCHEMA_GLOBS = (
+    "_Schema/SKILL.md",
+    "_Schema/references/*.md",
+    "_Schema/workflow-skills/*/SKILL.md",
+)
+
+
+def shipped_schema_sources() -> list[Path]:
+    """Product-owned scaffold files, resolved from the bundled package."""
+    found: list[Path] = []
+    for pattern in _SHIPPED_SCHEMA_GLOBS:
+        found.extend(sorted(_SCAFFOLD.glob(pattern)))
+    return found
+
+
+def refresh_shipped_schema(vault_root: Path) -> list[str]:
+    """Re-deploy the product-owned governance docs into an existing vault.
+
+    Returns the vault-relative paths actually rewritten — empty when already
+    current, so a caller can say "nothing to do" honestly. Only files whose
+    bytes differ are touched, so this is a no-op on a current vault and never
+    churns mtimes for the file watcher.
+
+    Deliberately NOT `init_vault(force=True)`: that overlays the whole scaffold,
+    including the per-vault YAML registries the user is expected to edit.
+    """
+    vault_root = Path(vault_root)
+    kb = vault_root / kb_dirname()
+    if not kb.is_dir():
+        return []
+    refreshed: list[str] = []
+    for src in shipped_schema_sources():
+        dest = kb / src.relative_to(_SCAFFOLD)
+        try:
+            if dest.is_file() and dest.read_bytes() == src.read_bytes():
+                continue
+        except OSError:
+            pass
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        refreshed.append(dest.relative_to(vault_root).as_posix())
+    return refreshed
+
 
 def init_vault(vault_root: Path, *, force: bool = False) -> dict:
     """Create `<vault_root>/Knowledge Base/` with the starter scaffold.

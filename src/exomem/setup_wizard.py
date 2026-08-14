@@ -686,7 +686,23 @@ def run_setup(
         init_module.init_vault(vault_path)
         report("init", f"[done] {kb_prefix()} scaffold created")
     except FileExistsError:
-        report("init", f"[skipped: {kb_prefix()} already exists]")
+        # The vault already has a Knowledge Base, so init is skipped — but the
+        # governance docs inside it are product-owned and were last written by
+        # whatever version created the vault, while `install-skill` below
+        # redeploys its copy on every run. Left alone the two drift, and both
+        # stay live. Only the shipped docs refresh; the per-vault YAML
+        # registries the user edits are untouched.
+        try:
+            refreshed = init_module.refresh_shipped_schema(vault_path)
+        except OSError as exc:
+            report("init", f"[skipped: {kb_prefix()} already exists] (refresh failed: {exc})")
+        else:
+            suffix = (
+                f"; refreshed {len(refreshed)} shipped schema file(s)"
+                if refreshed
+                else "; shipped schema already current"
+            )
+            report("init", f"[skipped: {kb_prefix()} already exists]{suffix}")
 
     # 3b. packs — product guidance for fresh vaults and suggested routes for existing vaults
     try:

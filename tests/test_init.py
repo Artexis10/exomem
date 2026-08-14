@@ -159,3 +159,78 @@ def test_init_vault_accepts_writes_and_stays_clean(
     assert "## [2026-05-31] add" in (kb / "log.md").read_text(encoding="utf-8")
     report = audit_module.audit(tmp_path, categories=["broken_wikilink", "index_drift"])
     assert not report.findings, [f.as_dict() for f in report.findings]
+
+
+# --- #488: the vault copy of the shipped contract must not freeze ------------
+
+
+def _shipped(kb: Path) -> Path:
+    return kb / "_Schema" / "SKILL.md"
+
+
+def test_refresh_rewrites_a_stale_shipped_doc(tmp_path: Path) -> None:
+    """install-skill redeploys its copy every upgrade; init is skipped once the
+    KB exists, so the vault copy froze at the version that created it. Both are
+    live — product_invoke resolves the vault copy, agents read the deployed one."""
+    from exomem import init as init_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    init_module.init_vault(vault)
+    kb = vault / "Knowledge Base"
+    _shipped(kb).write_text("stale contract from an older release\n", encoding="utf-8")
+
+    refreshed = init_module.refresh_shipped_schema(vault)
+
+    assert "Knowledge Base/_Schema/SKILL.md" in refreshed
+    packaged = (Path(init_module.__file__).parent / "_scaffold" / "_Schema" / "SKILL.md")
+    assert _shipped(kb).read_bytes() == packaged.read_bytes()
+
+
+def test_refresh_is_a_no_op_when_already_current(tmp_path: Path) -> None:
+    """No churn on a current vault — the file watcher sees no spurious mtimes."""
+    from exomem import init as init_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    init_module.init_vault(vault)
+
+    assert init_module.refresh_shipped_schema(vault) == []
+
+
+def test_refresh_never_touches_per_vault_configuration(tmp_path: Path) -> None:
+    """project-keys.yaml and the registries are the user's to edit, not ours.
+
+    This is the line between the two halves of _Schema: shipped governance docs
+    are product-owned, the YAML registries are per-vault configuration.
+    """
+    from exomem import init as init_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    init_module.init_vault(vault)
+    kb = vault / "Knowledge Base"
+
+    user_edits = {
+        "project-keys.yaml": "my-own-project: Notes/Research/Mine\n",
+        "relation-registry.yaml": "# my registry\n",
+        "semantic-language-registry.yaml": "# my language\n",
+        "traversal-profiles.yaml": "# my profiles\n",
+    }
+    for name, body in user_edits.items():
+        (kb / "_Schema" / name).write_text(body, encoding="utf-8")
+    _shipped(kb).write_text("stale\n", encoding="utf-8")
+
+    init_module.refresh_shipped_schema(vault)
+
+    for name, body in user_edits.items():
+        assert (kb / "_Schema" / name).read_text(encoding="utf-8") == body
+
+
+def test_refresh_on_a_vault_without_a_knowledge_base_is_inert(tmp_path: Path) -> None:
+    from exomem import init as init_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    assert init_module.refresh_shipped_schema(vault) == []
