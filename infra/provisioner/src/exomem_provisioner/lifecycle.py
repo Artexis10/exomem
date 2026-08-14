@@ -1548,6 +1548,8 @@ def _fixed_helm_values(
             "tenantDigest": metadata.kubernetes_annotations["exomem.io/tenant-digest"],
         },
         "resourceName": metadata.resource_name,
+        "recordsReaderVersion": 2,
+        "lifecycleActionsEnabled": False,
         "routes": {"controlHostname": config.control_hostname, "enabled": False},
         "runtimeGid": 10001,
         "runtimeUid": 10001,
@@ -1567,7 +1569,6 @@ def _fixed_helm_values(
         if records_reader_version < 2:
             raise MetadataConflict("Records reader compatibility is not admitted")
         values["recordsReaderVersion"] = records_reader_version
-        target = config.runtime_target_for(request, v2=has_runtime_target)
         values["lifecycleActionsEnabled"] = bool(
             getattr(config, "lifecycle_actions_enabled", False)
             and target.get("agentProfile") == "hosted-alpha-agent-v2"

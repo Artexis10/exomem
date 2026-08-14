@@ -228,14 +228,22 @@ class DeletionClaimAuthority:
             raise RuntimeError("database clock is unavailable")
         checked_at = _utc(checked_at)
         tenant_fence = await session.get(TenantFence, tenant_id, with_for_update=True)
-        operation = await session.scalar(
-            select(Operation)
-            .where(
-                Operation.external_operation_id == operation_id,
-                Operation.tenant_id == tenant_id,
+        operation = (
+            await session.execute(
+                select(Operation)
+                .where(
+                    Operation.external_operation_id == operation_id,
+                    Operation.tenant_id == tenant_id,
+                    Operation.action.in_(DELETION_OPERATION_ACTIONS),
+                    Operation.state == OperationState.CLAIMED,
+                    Operation.fence_generation == fence,
+                    Operation.claim_token.is_not(None),
+                    Operation.claim_expires_at.is_not(None),
+                    Operation.claim_expires_at > checked_at,
+                )
+                .with_for_update()
             )
-            .with_for_update()
-        )
+        ).scalar_one_or_none()
         if (
             tenant_fence is None
             or tenant_fence.fence_generation != fence

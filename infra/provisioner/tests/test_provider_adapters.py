@@ -345,7 +345,7 @@ async def test_maintenance_lease_rejects_concurrent_owner_and_releases_with_prec
             self.lease.spec.holder_identity = body["spec"]["holderIdentity"]
             self.lease.spec.renew_time = body["spec"]["renewTime"]
 
-        def delete_namespaced_lease(self, name, namespace, body):
+        def delete_namespaced_lease(self, name, namespace, *, body):
             self.deleted = body
             self.lease = None
 

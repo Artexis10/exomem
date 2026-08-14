@@ -17,6 +17,10 @@ LEGACY_CONTRACT = (
     ROOT
     / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.39.2.json"
 )
+RETAINED_CONTRACT_049 = (
+    ROOT
+    / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.49.0.json"
+)
 FORWARD_CONTRACT = (
     ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/forward-contract.json"
 )
@@ -67,15 +71,19 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
     agent_gateway_digest = "7828c5b2b0281d11eab810e89f8d59aa88d755371f13ed02585cabd49a046078"
     pair = json.loads(LOCK_PAIR.read_text(encoding="utf-8"))
     legacy_contract = json.loads(LEGACY_CONTRACT.read_text(encoding="utf-8"))
+    retained_contract_049 = json.loads(RETAINED_CONTRACT_049.read_text(encoding="utf-8"))
     forward_contract = json.loads(FORWARD_CONTRACT.read_text(encoding="utf-8"))
     expected_contracts = {
         (legacy_contract["releaseVersion"], legacy_contract["protocolVersion"]): (
             legacy_contract,
             LEGACY_CONTRACT,
         ),
-        (forward_contract["releaseVersion"], forward_contract["protocolVersion"]): (
-            forward_contract,
-            FORWARD_CONTRACT,
+        (
+            retained_contract_049["releaseVersion"],
+            retained_contract_049["protocolVersion"],
+        ): (
+            retained_contract_049,
+            RETAINED_CONTRACT_049,
         ),
     }
 
@@ -98,6 +106,17 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
             assert unit["contractSha256"] == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
         assert unit_by_identity[("0.39.2", "1")]["contract"]["gatewayContractDigest"] == private_gateway_digest
         assert unit_by_identity[("0.39.2", "1")]["contract"]["gatewayContractDigest"] != agent_gateway_digest
+        assert member["runtimeTarget"] == {
+            key: forward_contract[key]
+            for key in (
+                "releaseVersion",
+                "protocolVersion",
+                "agentProfile",
+                "gatewayContractDigest",
+                "commandFingerprint",
+                "schemaDigest",
+            )
+        }
         assert member["rollback"]["legacyManifestSha256"] == hashlib.sha256(
             LEGACY_MANIFEST.read_bytes()
         ).hexdigest()

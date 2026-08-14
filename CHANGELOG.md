@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.50.0](https://github.com/Artexis10/exomem/compare/v0.49.0...v0.50.0) (2026-08-14)
+
+
+### Features
+
+* **benchmarks:** add competitive evaluation programme substrate ([#468](https://github.com/Artexis10/exomem/issues/468)) ([a9b0039](https://github.com/Artexis10/exomem/commit/a9b003945442f5232fef90097558d420c3ebd9cb))
+* **hosted:** compose 0.49 deployment lock ([#465](https://github.com/Artexis10/exomem/issues/465)) ([304ee5d](https://github.com/Artexis10/exomem/commit/304ee5dc645d34bc024b2ae441519e9f09c9440b))
+
+
+### Bug Fixes
+
+* **benchmarks:** retire direct-provider lease state ([3684859](https://github.com/Artexis10/exomem/commit/36848591d337f3d894e9c368a1d5c3eca63b4e2a))
+* **benchmarks:** secure direct lifecycle custody ([96ea961](https://github.com/Artexis10/exomem/commit/96ea9611e94a0b42d7dbe6c71188ce2fb07939bb))
+* **ci:** enable benchmark sandbox execution ([8f9efd6](https://github.com/Artexis10/exomem/commit/8f9efd63eb1c112d469ed68b535bc80293d75dc8))
+* **ci:** provision benchmark contract dependencies ([90e1c64](https://github.com/Artexis10/exomem/commit/90e1c646a951b4d4774e12c1a0fa19b70d2c57c7))
+* **ci:** stabilize benchmark verification ([1e68d2b](https://github.com/Artexis10/exomem/commit/1e68d2b6c0d358cb76bceadcb2a33c4337753bae))
+* **governance:** close disclosure crossover ([#464](https://github.com/Artexis10/exomem/issues/464)) ([1a02d95](https://github.com/Artexis10/exomem/commit/1a02d9594019669b075c3a02bbeaa61be1d8d0da))
+* **governance:** fail closed on unresolved binary membership ([5165668](https://github.com/Artexis10/exomem/commit/5165668527349263417d10d0de5ed6418d4c0390))
+* **governance:** lazy-load membership sidecars ([#470](https://github.com/Artexis10/exomem/issues/470)) ([28615f7](https://github.com/Artexis10/exomem/commit/28615f7f3f8113ef1c5e9b256f59c44b872423d5))
+* **governance:** update archived spec test paths ([#461](https://github.com/Artexis10/exomem/issues/461)) ([fc5b698](https://github.com/Artexis10/exomem/commit/fc5b698c0a64015a31883494752043ca492fd57b))
+* **hosted:** align provisioner namespace contract ([#474](https://github.com/Artexis10/exomem/issues/474)) ([7deb3dd](https://github.com/Artexis10/exomem/commit/7deb3dd379c56b3188e99095688c9a118d7c07b6))
+* **hosted:** bound deletion dispatcher calls ([#469](https://github.com/Artexis10/exomem/issues/469)) ([716924a](https://github.com/Artexis10/exomem/commit/716924ac07c3a60e446c8cfa31e9a59db075822d))
+* **hosted:** refresh v2 client artifacts ([#463](https://github.com/Artexis10/exomem/issues/463)) ([52454f0](https://github.com/Artexis10/exomem/commit/52454f05aef15c130815b7c2d1064f007d416877))
+* make media graph completion durable ([#473](https://github.com/Artexis10/exomem/issues/473)) ([e5b13f0](https://github.com/Artexis10/exomem/commit/e5b13f0e8093bdd1bf43dd4c7512c98a43a8404a))
+* restore Windows governance durability ([#471](https://github.com/Artexis10/exomem/issues/471)) ([3e0bac4](https://github.com/Artexis10/exomem/commit/3e0bac4c63b93c277c4b06abdfbb13d6b4efede7))
+
 ## [0.49.0](https://github.com/Artexis10/exomem/compare/v0.48.0...v0.49.0) (2026-08-13)
 
 
