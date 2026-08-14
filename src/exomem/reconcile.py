@@ -477,7 +477,10 @@ def reconcile(
         if rebuild_graph:
             epoch = epistemic_graph.graph_sync.classify_epoch(vault_root)
             if epoch.kind == "unavailable":
-                report.graph_rebuild_applicable = True
+                census = epistemic_graph.graph_sync.census_unavailable_graph_lineage(
+                    vault_root
+                )
+                report.graph_rebuild_applicable = bool(census)
                 if dry_run:
                     report.graph_rebuild_status = "would_quarantine"
                 else:

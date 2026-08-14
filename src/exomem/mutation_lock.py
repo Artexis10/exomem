@@ -157,7 +157,9 @@ def retain_regular_file(path: Path) -> RetainedRegularFile:
         raise OSError("retained file target must be one child basename")
     directory = _acquire_secure_directory(target.parent, create=False)
     try:
-        fd = _open_secure_file_at(directory, target.name, os.O_RDONLY)
+        fd = _open_secure_file_at(
+            directory, target.name, os.O_RDONLY, delete_access=True
+        )
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or not _same_file_entry(directory, target.name, fd):
@@ -200,7 +202,21 @@ def rename_retained_regular_file(source: RetainedRegularFile, destination: Path)
                 src_dir_fd=source.directory.fd,
                 dst_dir_fd=directory.fd,
             )
-            return
+            destination_info = os.stat(
+                target.name, dir_fd=directory.fd, follow_symlinks=False
+            )
+            source_info = os.fstat(source.fd)
+            if (
+                not stat.S_ISREG(destination_info.st_mode)
+                or destination_info.st_dev != source_info.st_dev
+                or destination_info.st_ino != source_info.st_ino
+            ):
+                raise OSError("retained rename destination identity changed")
+            try:
+                os.stat(source.path.name, dir_fd=source.directory.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            raise OSError("retained rename source still exists")
         import ctypes
         import msvcrt
         from ctypes import wintypes
@@ -226,6 +242,18 @@ def rename_retained_regular_file(source: RetainedRegularFile, destination: Path)
         rename.restype = wintypes.BOOL
         if not rename(msvcrt.get_osfhandle(source.fd), 3, raw, size):
             raise OSError(_windows_last_error(ctypes), "retained Windows rename refused")
+        destination_handle = _windows_open_path(directory.path / target.name, directory=False)
+        try:
+            if _windows_handle_identity(destination_handle) != source.identity:
+                raise OSError("retained Windows rename destination identity changed")
+        finally:
+            _windows_close_handle(destination_handle)
+        try:
+            replacement = _windows_open_path(source.directory.path / source.path.name, directory=False)
+        except FileNotFoundError:
+            return
+        _windows_close_handle(replacement)
+        raise OSError("retained Windows rename source still exists")
     finally:
         directory.close()
 
@@ -864,11 +892,135 @@ def _same_file_entry(directory: _SecureDirectory, name: str, fd: int) -> bool:
         return False
 
 
+def retain_secure_directory(path: Path) -> _SecureDirectory:
+    """Pin one existing no-follow directory for bounded child operations."""
+    directory = _acquire_secure_directory(Path(path), create=False)
+    if not _same_directory_path(directory):
+        directory.close()
+        raise OSError("retained directory changed")
+    return directory
+
+
+def create_retained_child_directory(parent: _SecureDirectory, name: str) -> _SecureDirectory:
+    """Create one child exclusively from a retained parent, then pin it."""
+    if not name or Path(name).name != name or "/" in name or "\\" in name:
+        raise OSError("retained directory child must be one basename")
+    if not _same_directory_path(parent):
+        raise OSError("retained parent changed")
+    if os.name != "nt":
+        assert parent.fd is not None
+        os.mkdir(name, 0o700, dir_fd=parent.fd)
+        os.fsync(parent.fd)
+        fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent.fd,
+        )
+        return _SecureDirectory(parent.path / name, fd=fd)
+    child_path = parent.path / name
+    child_path.mkdir(mode=0o700)
+    child = _acquire_secure_directory(child_path, create=False)
+    try:
+        if not _windows_child_is_in_directory(parent, child.windows_handle):
+            raise OSError("Windows child directory escaped its retained parent")
+        return child
+    except BaseException:
+        child.close()
+        raise
+
+
+def retained_write_file(
+    directory: _SecureDirectory, name: str, content: bytes, *, replace: bool = False
+) -> None:
+    """Durably write one bounded regular child through its retained parent."""
+    if not name or Path(name).name != name or "/" in name or "\\" in name:
+        raise OSError("retained file child must be one basename")
+    if not _same_directory_path(directory):
+        raise OSError("retained directory changed")
+    if os.name != "nt":
+        assert directory.fd is not None
+        if not replace:
+            try:
+                os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError("retained destination exists")
+        staging = f".{name}.new"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(staging, flags, 0o600, dir_fd=directory.fd)
+        try:
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if replace:
+            os.rename(staging, name, src_dir_fd=directory.fd, dst_dir_fd=directory.fd)
+        else:
+            # link() is no-replace: unlike rename(), it cannot overwrite a
+            # destination that appeared after the retained-directory census.
+            os.link(
+                staging,
+                name,
+                src_dir_fd=directory.fd,
+                dst_dir_fd=directory.fd,
+                follow_symlinks=False,
+            )
+            os.unlink(staging, dir_fd=directory.fd)
+        os.fsync(directory.fd)
+        return
+    target = directory.path / name
+    staging = directory.path / f".{name}.new"
+    if staging.exists():
+        raise FileExistsError("retained Windows staging entry exists")
+    fd = _open_secure_file_at(directory, staging.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        os.write(fd, content)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    if not replace and target.exists():
+        raise FileExistsError("retained Windows destination exists")
+    os.replace(staging, target)
+
+
+def retained_read_file(directory: _SecureDirectory, name: str, *, limit: int) -> bytes:
+    """Read one no-follow regular child from a retained directory."""
+    if limit <= 0 or not name or Path(name).name != name:
+        raise OSError("invalid retained file read")
+    fd = _open_secure_file_at(directory, name, os.O_RDONLY)
+    try:
+        if not _same_file_entry(directory, name, fd):
+            raise OSError("retained file changed")
+        data = os.read(fd, limit + 1)
+        if len(data) > limit:
+            raise OSError("retained file exceeds bounded read")
+        return data
+    finally:
+        os.close(fd)
+
+
+def retained_unlink_file(directory: _SecureDirectory, name: str) -> None:
+    """Remove one existing retained regular child; never recurse."""
+    held = retain_regular_file(directory.path / name)
+    try:
+        if os.name != "nt":
+            assert directory.fd is not None
+            os.unlink(name, dir_fd=directory.fd)
+            os.fsync(directory.fd)
+        else:
+            os.unlink(directory.path / name)
+    finally:
+        held.close()
+
+
 def _open_secure_file_at(
     directory: _SecureDirectory,
     name: str,
     flags: int,
     mode: int = 0o600,
+    *,
+    delete_access: bool = False,
 ) -> int:
     if not name or Path(name).name != name or "/" in name or "\\" in name:
         raise OSError("lock operations require one child basename")
@@ -881,6 +1033,8 @@ def _open_secure_file_at(
             access = 0xC0000000  # GENERIC_READ | GENERIC_WRITE
         elif flags & os.O_WRONLY:
             access = 0x40000000  # GENERIC_WRITE
+        if delete_access:
+            access |= 0x00010000  # DELETE, required by SetFileInformationByHandle
         creation = 4 if flags & os.O_CREAT else 3  # OPEN_ALWAYS / OPEN_EXISTING
         handle = _windows_open_path(
             directory.path / name,

@@ -472,6 +472,32 @@ def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -
     assert note.read_bytes() == b"canonical"
 
 
+def test_unavailable_reset_rolls_back_a_partial_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import mutation_lock
+
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    kb = tmp_path / "Knowledge Base"
+    (kb / ".graph.sqlite").write_bytes(b"main")
+    (kb / ".graph.sqlite-wal").write_bytes(b"wal")
+    original = mutation_lock.rename_retained_regular_file
+    calls = 0
+
+    def fail_second(source, destination):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError("move denied")
+        return original(source, destination)
+
+    monkeypatch.setattr(mutation_lock, "rename_retained_regular_file", fail_second)
+    with pytest.raises(graph_sync.GraphResetFailed, match="GRAPH_SYNC_RESET_REFUSED"):
+        graph_sync.isolate_unavailable_graph_lineage(tmp_path)
+
+    assert (kb / ".graph.sqlite").read_bytes() == b"main"
+    assert (kb / ".graph.sqlite-wal").read_bytes() == b"wal"
+
+
 def test_nonlegacy_malformed_floor_cannot_be_overwritten_by_a_new_write(tmp_path: Path) -> None:
     note = tmp_path / "Knowledge Base/Notes/Insights/malformed-floor.md"
     vault_module.batch_atomic_write(
