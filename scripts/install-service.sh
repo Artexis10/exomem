@@ -231,14 +231,14 @@ trap cleanup EXIT
 
 # Parse dotenv with the package's own dependency, render systemd/launchd-safe
 # forms, and create a shell-quoted temporary export file for doctor.
+EXOMEM_PROFILE_EMBED_BACKEND="$EMBED_BACKEND" \
 "$VENV_PYTHON" - \
     "$ENV_FILE" \
     "$SERVICE_ENV_FILE" \
     "$PROCESS_ENV_FILE" \
     "$LAUNCHD_ENV_FILE" \
     "$LOG_DIR" \
-    "$LEGACY_MCP_COMPAT" \
-    "$EMBED_BACKEND" <<'PY'
+    "$LEGACY_MCP_COMPAT" <<'PY'
 from __future__ import annotations
 
 import os
@@ -250,7 +250,11 @@ from xml.sax.saxutils import escape
 
 from dotenv import dotenv_values
 
-env_path, systemd_path, process_path, xml_path, log_dir, legacy, embed_backend = sys.argv[1:]
+env_path, systemd_path, process_path, xml_path, log_dir, legacy = sys.argv[1:]
+# Passed through the environment rather than as an eighth positional: the
+# renderer invocations here are told apart by argv length, so a new positional
+# would silently alias this call onto a different renderer.
+embed_backend = os.environ.get("EXOMEM_PROFILE_EMBED_BACKEND", "")
 values = {
     key: str(value)
     for key, value in dotenv_values(env_path).items()
