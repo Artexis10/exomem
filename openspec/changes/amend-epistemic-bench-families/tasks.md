@@ -23,3 +23,11 @@
 
 - [x] 4.1 Ruff on changed files; lean pytest for the touched test modules; `openspec validate --specs --strict` green.
 - [x] 4.2 Record verification evidence below (test output, shas, receipt path).
+
+## Review follow-ups (minor; from the fresh independent review, none blocking)
+
+- Fold-order: `fold_amendment_chain` checks acknowledgment before culmination, so a silently-edited working file reports pending rather than a drift error while the receipt is pending (suite still catches the edit via the live-bytes binding test); swapping the order would make the error precise.
+- `start_manifest` unreceipted-working-state refusal applies only when `contract_revision` is unpinned; no production caller pins, but the spec scenario reads unconditionally — doc note or follow-up guard.
+- Ratification-receipt tamper message in exotic 2-event histories says "outside the single allowed pending-to-acknowledged transition" though no transition is allowed for that receipt kind; fail-closed preserved, message imprecise.
+- Untested branches: fold "does not culminate in working document" and manifest lineage base-sha/receipt-order mismatches (only effective-sha mismatch is covered).
+- Benign unplanned churn noted and accepted: models.py import re-sort/annotation unquoting, `_git` capture_output refactor, exception-type tightening in pre-existing tests.
