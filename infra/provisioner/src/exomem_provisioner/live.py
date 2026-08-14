@@ -394,6 +394,12 @@ class KubernetesProviderRegistry:
                 "exomem.io/vault-id": helm_values["vaultId"],
                 "exomem.io/expected-release": helm_values["expectedRelease"],
                 "exomem.io/worker-policy-digest": helm_values["workerPolicyDigest"],
+                "exomem.io/records-reader-version": str(
+                    helm_values["recordsReaderVersion"]
+                ),
+                "exomem.io/lifecycle-actions-enabled": str(
+                    helm_values["lifecycleActionsEnabled"]
+                ).lower(),
                 "exomem.io/browser-origin": helm_values["browserOrigin"],
                 "exomem.io/transfer-hostname": helm_values["transferHostname"],
                 "helm.sh/resource-policy": "keep",

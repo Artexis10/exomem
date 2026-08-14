@@ -318,6 +318,8 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
             "vaultId": metadata.tenant_id,
             "expectedRelease": "0.22.0",
             "workerPolicyDigest": "a" * 64,
+            "recordsReaderVersion": 2,
+            "lifecycleActionsEnabled": False,
             "browserOrigin": "https://substratesystems.io",
             "transferHostname": "transfer.example.invalid",
         },
@@ -422,6 +424,8 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
         "exomem.io/worker-policy-digest": hashlib.sha256(
             b'{"media":false,"semantic":true,"workerCount":2}'
         ).hexdigest(),
+        "exomem.io/records-reader-version": "2",
+        "exomem.io/lifecycle-actions-enabled": "false",
         "exomem.io/browser-origin": "https://substratesystems.io",
         "exomem.io/transfer-hostname": "transfer.example.invalid",
     }
@@ -689,6 +693,8 @@ async def test_registry_rejects_unowned_existing_namespace() -> None:
                 "vaultId": metadata.tenant_id,
                 "expectedRelease": "0.22.0",
                 "workerPolicyDigest": "a" * 64,
+                "recordsReaderVersion": 2,
+                "lifecycleActionsEnabled": False,
                 "browserOrigin": "https://substratesystems.io",
                 "transferHostname": "transfer.example.invalid",
             },

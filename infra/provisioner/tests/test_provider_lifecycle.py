@@ -179,6 +179,20 @@ def test_fixed_helm_values_use_one_selected_rollback_runtime_unit() -> None:
     assert values["lifecycleActionsEnabled"] is False
 
 
+def test_fixed_helm_values_keep_legacy_runtime_records_lifecycle_read_only() -> None:
+    config = replace(
+        _config(),
+        runtime_target=_runtime_target(agentProfile="hosted-alpha-agent-v2"),
+        records_reader_version=2,
+        lifecycle_actions_enabled=True,
+    )
+
+    values = _fixed_helm_values(_metadata(), _request(), config)
+
+    assert values["recordsReaderVersion"] == 2
+    assert values["lifecycleActionsEnabled"] is False
+
+
 @pytest.mark.asyncio
 async def test_release_unit_mismatch_is_terminal_before_any_provider_effect() -> None:
     plane = HighFidelityProviderPlane(location="fsn1")
@@ -799,6 +813,8 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         },
         "providerRecoveryEnvelopes": request["_providerRecoveryEnvelopes"],
         "resourceName": _metadata().resource_name,
+        "recordsReaderVersion": 2,
+        "lifecycleActionsEnabled": False,
         "routes": {"controlHostname": "control.example.invalid", "enabled": False},
         "runtimeGid": 10001,
         "runtimeUid": 10001,
