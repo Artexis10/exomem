@@ -149,15 +149,19 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     sidecar (observed 2026-07-04: dup warnings flagging trash entries).
     """
     segments = rel_path.replace("\\", "/").split("/")
-    return any(
-        seg in VAULT_SCAN_SKIP_DIRS
-        or any(seg.startswith(prefix) for prefix in VAULT_SCAN_SKIP_DIR_PREFIXES)
-        for seg in segments
-    ) or (
+    if (
         len(segments) >= 2
+        and segments[1].startswith(".graph-reset-")
         and segments[0] == kb_dirname()
         and is_graph_reset_runtime_dir_name(segments[1])
-    )
+    ):
+        return True
+    for segment in segments:
+        if segment in VAULT_SCAN_SKIP_DIRS or segment.startswith(
+            VAULT_SCAN_SKIP_DIR_PREFIXES
+        ):
+            return True
+    return False
 
 
 # `[[Target]]` or `[[Target|Alias]]`.

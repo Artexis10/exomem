@@ -101,15 +101,13 @@ _IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts"})
 
 def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
     """Whether a directory is runtime state rather than canonical Markdown."""
-    return (
-        directory == kb
-        and (
-            name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
-            or vault.is_graph_reset_runtime_dir_name(name)
-        )
-    ) or any(
-        name.startswith(prefix) for prefix in vault.VAULT_SCAN_SKIP_DIR_PREFIXES
-    )
+    if name.startswith(vault.VAULT_SCAN_SKIP_DIR_PREFIXES):
+        return True
+    if name in _IDENTITY_CENSUS_RESERVED_KB_DIRS:
+        return directory == kb
+    if not name.startswith(".graph-reset-"):
+        return False
+    return directory == kb and vault.is_graph_reset_runtime_dir_name(name)
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
