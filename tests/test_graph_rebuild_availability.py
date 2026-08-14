@@ -567,12 +567,13 @@ def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -
 
 def test_unavailable_companion_only_lineage_is_previewed_and_quarantined(tmp_path: Path) -> None:
     """A missing primary database does not make a safe retained companion invisible."""
-    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
-    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(2))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(1))
     companion = tmp_path / "Knowledge Base/.graph.sqlite-wal"
     companion.parent.mkdir(exist_ok=True)
     companion.write_bytes(b"wal")
 
+    assert graph_sync.classify_epoch(tmp_path).kind == "unavailable"
     dry_run = reconcile_module.reconcile(tmp_path, dry_run=True, rebuild_graph=True)
 
     assert dry_run.graph_rebuild_applicable is True
@@ -610,7 +611,7 @@ def test_explicit_rebuild_adopts_an_isolated_reset_before_epoch_classification(
     assert report._graph_rebuild_handoff == {
         "operation_id": reset.operation_id,
         "checkpoint": checkpoint.as_dict(),
-        "graph_refreshed": 0,
+        "graph_refreshed": 1,
     }
 
 
