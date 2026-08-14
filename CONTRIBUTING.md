@@ -16,22 +16,32 @@ git worktree remove ../exomem-<topic>
 Commit and push from the worktree; leave the primary checkout on whatever branch
 the other session is using.
 
-## uv: a floor here, the exact version in CI
+## uv is pinned — install it project-locally, don't downgrade your global one
 
-`required-version` in `pyproject.toml` is `>=0.11.28`, not `==`. uv is normally
-one shared installation managing many unrelated tools, so an exact pin made a
-fresh-checkout `uv sync` fail outright and tell you to run
-`uv self update 0.11.28` — a global downgrade to satisfy one repo.
+`uv sync` in a fresh checkout fails on any uv other than the pinned writer
+version:
 
-The pin still exists where it matters. Lockfile marker normalization can only
-diverge when something *writes* the lock, so CI pins uv to the exact writer
-version (`0.11.28`) on the job that runs `uv lock --check`. If you regenerate
-`uv.lock` and CI disagrees with your local result, match that version without
-touching your global install:
+```
+error: Required uv version `==0.11.28` does not match the running version `0.11.31`.
+Update `uv` by running `uv self update 0.11.28`.
+```
+
+**Do not run that suggestion.** uv is normally one shared installation managing
+many unrelated tools, and `uv self update` downgrades all of them to satisfy this
+repo. Install the pinned version project-locally instead:
 
 ```
 UV_INSTALL_DIR=.uvbin curl -LsSf https://astral.sh/uv/0.11.28/install.sh | sh
+PATH="$PWD/.uvbin:$PATH" uv sync
 ```
+
+The pin is deliberate and is not just about this file. A single writer version
+keeps lockfile marker normalization identical across Windows, WSL, Docker and
+CI, and `required-version` is what makes that bind — `Dockerfile`,
+`infra/tool-versions.env` and `.github/workflows/hosted-infrastructure.yml` all
+declare the same version, and
+`tests/test_uv_lock_policy.py::test_uv_writer_version_is_pinned_across_repository_surfaces`
+fails if any of the four drifts. Bumping uv means bumping all four together.
 
 ## Installing the service on a CPU-only host
 

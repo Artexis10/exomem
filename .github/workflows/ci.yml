@@ -49,12 +49,6 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          # The single writer version. `required-version` in pyproject is a
-          # floor, so a contributor is not forced to downgrade a shared global
-          # uv to run `uv sync`; the exact version is enforced HERE, where
-          # lockfile marker normalization actually matters — this is the job
-          # that runs `uv lock --check`.
-          version: "0.11.28"
       - name: Verify lockfile is current
         run: uv lock --check
       - name: Run tests (lean — BM25/keyword, server media extraction off)
