@@ -28,8 +28,10 @@ Idempotent; `dry_run=True` reports without writing.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -85,7 +87,13 @@ class ReconcileReport:
     remaining_drift: list[dict] = field(default_factory=list)
     receipt_reconcile: dict = field(default_factory=dict)
     dry_run: bool = False
+    graph_rebuild_requested: bool = False
+    graph_rebuild_applicable: bool = False
+    graph_rebuild_status: str = "not_requested"
+    graph_quarantine_id: str | None = None
+    graph_rebuild_warning: str | None = None
     _graph_reconcile_registered: int | None = field(default=None, repr=False)
+    _graph_rebuild_handoff: dict | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict:
         result = {
@@ -132,11 +140,86 @@ class ReconcileReport:
             "remaining_drift": self.remaining_drift,
             "receipt_reconcile": self.receipt_reconcile,
             "dry_run": self.dry_run,
+            "graph_rebuild_requested": self.graph_rebuild_requested,
+            "graph_rebuild_applicable": self.graph_rebuild_applicable,
+            "graph_rebuild_status": self.graph_rebuild_status,
+            "graph_quarantine_id": self.graph_quarantine_id,
+            "graph_rebuild_warning": self.graph_rebuild_warning,
         }
         registered = self._graph_reconcile_registered
         if registered is not None:
             result["_graph_reconcile_registered"] = registered
+        if self._graph_rebuild_handoff is not None:
+            result["_graph_rebuild_handoff"] = self._graph_rebuild_handoff
         return result
+
+
+def _graph_rebuild_is_current(vault_root: Path) -> bool:
+    from . import epistemic_graph
+
+    return (
+        epistemic_graph.graph_sync.status(vault_root)["state"] == "current"
+        and epistemic_graph.EpistemicGraphIndex(vault_root).available()
+        and not audit_module._check_graph_drift(vault_root)
+    )
+
+
+def _is_graph_rebuild_handoff(dispatch: object, checkpoint: object) -> bool:
+    return (
+        getattr(dispatch, "outcome", None) in {"registered", "completed"}
+        and getattr(dispatch, "checkpoint", None) == checkpoint
+    )
+
+
+def finalize_graph_rebuild_handoff(
+    vault_root: Path, result: Mapping, *, state_root: Path | None = None
+) -> dict:
+    """Join one registered reset after its outer mutation boundary has exited."""
+    from . import graph_sync
+
+    final = dict(result)
+    handoff = final.pop("_graph_rebuild_handoff", None)
+    if not isinstance(handoff, Mapping):
+        return final
+    operation_id = handoff.get("operation_id")
+    raw_checkpoint = handoff.get("checkpoint")
+    if not (
+        isinstance(operation_id, str)
+        and len(operation_id) == 24
+        and all(character in "0123456789abcdef" for character in operation_id)
+        and isinstance(raw_checkpoint, Mapping)
+    ):
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_HANDOFF_INVALID"
+        return final
+    checkpoint = graph_sync.GraphSyncCheckpoint.parse(
+        json.dumps(raw_checkpoint, sort_keys=True, separators=(",", ":"))
+    )
+    if checkpoint is None:
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_HANDOFF_INVALID"
+        return final
+    try:
+        graph_sync.wait_for_registered(vault_root, state_root=state_root)
+    except Exception:  # noqa: BLE001 - canonical reconcile already completed
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_RETAINED"
+        return final
+    if not _graph_rebuild_is_current(vault_root):
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_RETAINED"
+        return final
+    final["graph_status"] = "refreshed"
+    final["graph_refreshed"] = handoff.get("graph_refreshed", 0)
+    if graph_sync.cleanup_published_graph_lineage_reset(
+        vault_root, operation_id, checkpoint
+    ):
+        final["graph_rebuild_status"] = "cleared"
+        final["graph_rebuild_warning"] = None
+    else:
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_RETAINED"
+    return final
 
 
 def _rel(path: Path, vault_root: Path) -> str:
@@ -206,12 +289,14 @@ def _dangling_frame_dirs(vault_root: Path) -> list[tuple[Path, Path]]:
     return out
 
 
-def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
+def reconcile(
+    vault_root: Path, *, dry_run: bool = False, rebuild_graph: bool = False
+) -> ReconcileReport:
     """Heal index-count + embedding drift from out-of-band edits.
 
     See the module docstring. Read-only when `dry_run=True`.
     """
-    report = ReconcileReport(dry_run=dry_run)
+    report = ReconcileReport(dry_run=dry_run, graph_rebuild_requested=rebuild_graph)
     if not dry_run:
         from .activation_manifest import ensure_manifest
 
@@ -458,9 +543,69 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
     # ---- 2c. Derived epistemic graph sidecar ----
     if os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX"):
         report.graph_status = "disabled"
+        if rebuild_graph:
+            report.graph_rebuild_status = "not_applicable"
     else:
-        initial_epoch = epistemic_graph.graph_sync.status(vault_root)
         index = epistemic_graph.EpistemicGraphIndex(vault_root)
+        reset_registered = False
+        if rebuild_graph:
+            # A process can crash after durable isolation but before the new
+            # checkpoint is written.  That leaves the live root looking
+            # legacy/current, so explicit recovery must adopt this first.
+            reset = (
+                epistemic_graph.graph_sync.recover_isolated_graph_lineage_reset(vault_root)
+                if not dry_run
+                else None
+            )
+            if reset is not None:
+                report.graph_rebuild_applicable = True
+                report.graph_rebuild_status = "quarantined"
+                report.graph_quarantine_id = reset.operation_id
+            else:
+                epoch = epistemic_graph.graph_sync.classify_epoch(vault_root)
+                if epoch.kind == "unavailable":
+                    census = epistemic_graph.graph_sync.census_unavailable_graph_lineage(
+                        vault_root
+                    )
+                    report.graph_rebuild_applicable = bool(census)
+                    if dry_run:
+                        report.graph_rebuild_status = "would_quarantine"
+                    else:
+                        reset = epistemic_graph.graph_sync.isolate_unavailable_graph_lineage(
+                            vault_root
+                        )
+                        if reset is not None:
+                            report.graph_rebuild_status = "quarantined"
+                            report.graph_quarantine_id = reset.operation_id
+                else:
+                    report.graph_rebuild_status = "not_applicable"
+            if reset is not None and not dry_run:
+                try:
+                    checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
+                        vault_root
+                    )
+                    dispatch = epistemic_graph._registered_or_failure(
+                        vault_root,
+                        checkpoint,
+                        index,
+                        index._canonical_mutation_coordinator(),
+                    )
+                except Exception:  # noqa: BLE001 - canonical reset isolation remains durable
+                    report.graph_rebuild_status = "retained"
+                    report.graph_rebuild_warning = "GRAPH_REBUILD_REGISTRATION_FAILED"
+                else:
+                    if _is_graph_rebuild_handoff(dispatch, checkpoint):
+                        report._graph_reconcile_registered = 0
+                        report._graph_rebuild_handoff = {
+                            "operation_id": reset.operation_id,
+                            "checkpoint": checkpoint.as_dict(),
+                            "graph_refreshed": len(initial_graph_drift),
+                        }
+                        reset_registered = True
+                    else:
+                        report.graph_rebuild_status = "retained"
+                        report.graph_rebuild_warning = dispatch.code
+        initial_epoch = epistemic_graph.graph_sync.status(vault_root)
         needs_repair = (
             bool(initial_graph_drift)
             or initial_epoch["state"] != "current"
@@ -474,11 +619,16 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
                 state_root=index._canonical_mutation_coordinator().state_root,
             )
             if (
-                epistemic_graph.graph_sync.classify_epoch(vault_root).kind
+                not reset_registered
+                and epistemic_graph.graph_sync.classify_epoch(vault_root).kind
                 == "recoverable"
             ):
                 epistemic_graph.graph_sync.recover_checkpoint(vault_root)
-            if needs_repair and epistemic_graph.graph_sync.status(vault_root)["state"] != "unavailable":
+            if (
+                needs_repair
+                and not reset_registered
+                and epistemic_graph.graph_sync.status(vault_root)["state"] != "unavailable"
+            ):
                 if audit_module._check_graph_drift(vault_root) or not index.available():
                     checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
                         vault_root

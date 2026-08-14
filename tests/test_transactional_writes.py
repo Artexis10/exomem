@@ -9,6 +9,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1022,6 +1023,67 @@ def test_batch_atomic_write_restores_source_times_when_snapshot_capture_fails(
     assert (target_info.st_atime_ns, target_info.st_mtime_ns) == source_times
     assert target.read_bytes() == b"old"
     assert _workspaces(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "should_raise"),
+    (("st_atime_ns", False), ("st_mtime_ns", True)),
+)
+def test_restore_bound_source_timestamps_distinguishes_read_and_write_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_field: str,
+    should_raise: bool,
+) -> None:
+    target = tmp_path / "target.md"
+    target.write_bytes(b"old")
+    source = vault_module._BatchArtifactGuard.capture(target)
+    descriptor = vault_module._open_bound_artifact(source)
+    source_info = os.fstat(descriptor)
+    real_fstat = os.fstat
+    descriptor_observations = 0
+
+    def changed_fstat(candidate: int):
+        nonlocal descriptor_observations
+        info = real_fstat(candidate)
+        if candidate != descriptor:
+            return info
+        descriptor_observations += 1
+        if descriptor_observations != 2:
+            return info
+        changed = {
+            "st_dev": info.st_dev,
+            "st_ino": info.st_ino,
+            "st_mode": info.st_mode,
+            "st_atime_ns": info.st_atime_ns,
+            "st_mtime_ns": info.st_mtime_ns,
+        }
+        changed[changed_field] += 1
+        return SimpleNamespace(**changed)
+
+    monkeypatch.setattr(vault_module.os, "fstat", changed_fstat)
+    try:
+        if should_raise:
+            with pytest.raises(vault_module.PathGuardError) as error:
+                vault_module._restore_bound_source_timestamps(
+                    source,
+                    descriptor,
+                    source_info.st_atime_ns,
+                    source_info.st_mtime_ns,
+                )
+            assert error.value.code == "PATH_GUARD_CHANGED"
+        else:
+            vault_module._restore_bound_source_timestamps(
+                source,
+                descriptor,
+                source_info.st_atime_ns,
+                source_info.st_mtime_ns,
+            )
+    finally:
+        os.close(descriptor)
+
+    assert descriptor_observations == 2
+    source.recheck()
 
 
 def test_batch_atomic_write_retries_partial_and_interrupted_stage_and_restore_writes(

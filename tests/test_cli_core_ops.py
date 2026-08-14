@@ -859,6 +859,24 @@ def test_simple_review_connect_and_maintain_aliases(vault: Path, capsys) -> None
     assert isinstance(connect_payload["data"], list)
 
 
+def test_simple_maintain_reconcile_forwards_the_graph_reset_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_module = importlib.import_module("exomem.__main__")
+    captured: list[str] = []
+    monkeypatch.setattr(
+        main_module,
+        "_core_op_main",
+        lambda argv: captured.extend(argv) or 0,
+    )
+
+    assert main_module._simple_maintain_main(["--reconcile", "--rebuild-graph"]) == 0
+    assert captured == ["maintain_memory", "--mode", "reconcile", "--rebuild-graph"]
+
+    with pytest.raises(SystemExit):
+        main_module._simple_maintain_main(["--rebuild-graph"])
+
+
 def test_simple_review_human_output_and_triage(vault: Path, capsys) -> None:
     code, out, err = _run(["review", "--limit", "1"], capsys)
     assert code == 0, err

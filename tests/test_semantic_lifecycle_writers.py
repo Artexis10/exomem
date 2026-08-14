@@ -12,11 +12,13 @@ import pytest
 
 from exomem import (
     activation_manifest,
+    commands,
     index_sync,
     memory_schema,
     relation_review,
     semantic_contract,
     semantic_writes,
+    temporal,
     vault,
 )
 from exomem import (
@@ -2694,39 +2696,98 @@ def test_set_frontmatter_draft_to_active_commits_exact_reviewed_none(
     assert relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
 
 
-def test_tier2_overwrite_validate_and_commit_use_existing_coordinator(
+def test_manage_memory_file_replays_existing_overwrite_draft_token_by_name(
     tmp_path: Path,
 ) -> None:
     source = _source("A")
     page = _write(tmp_path, _PAGE, source)
     after = source.replace("A\n\n## Relations", "B\n\n## Relations")
 
-    preview = create_file_module.create_file(
+    preview = commands.op_manage_memory_file(
         tmp_path,
+        operation="create",
         path=_PAGE,
         content=after,
         overwrite=True,
         validate_only=True,
-        today=dt.date(2026, 7, 14),
     )
-    assert isinstance(preview, semantic_writes.ExistingPreflight)
-    assert preview.operation == "tier2_overwrite"
-    assert preview.mutated is False
+    assert preview["operation"] == "tier2_overwrite"
+    assert preview["mutated"] is False
+    assert preview["draft_token"] == preview["transition_token"]
+    assert "semantic_transition_token" not in preview
     assert page.read_text(encoding="utf-8") == source
 
-    committed = create_file_module.create_file(
+    ordinary_preview = semantic_writes.preflight_existing(
         tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    ).as_dict()
+    assert "draft_token" not in ordinary_preview
+
+    committed = commands.op_manage_memory_file(
+        tmp_path,
+        operation="create",
         path=_PAGE,
         content=after,
         overwrite=True,
-        draft_token=preview.transition_token,
-        today=dt.date(2026, 7, 14),
+        draft_token=preview["draft_token"],
     )
-    assert committed.semantic is not None
-    assert committed.semantic["operation"] == "tier2_overwrite"
-    assert committed.semantic["mutated"] is True
+    assert committed["semantic"] is not None
+    assert committed["semantic"]["operation"] == "tier2_overwrite"
+    assert committed["semantic"]["mutated"] is True
     assert page.read_text(encoding="utf-8") == after
-    assert set(committed.as_dict()) == {"path", "warnings", "semantic"}
+    assert set(committed) == {"path", "warnings", "semantic"}
+
+
+def test_manage_memory_file_replays_overwrite_frontmatter_across_clock_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    frontmatter = {
+        "title": "Lifecycle",
+        "type": "insight",
+        "status": "active",
+        "exomem_id": _ID,
+    }
+    ticks = iter(
+        [
+            dt.datetime(2026, 7, 14, 12, 0, 0, tzinfo=dt.UTC),
+            dt.datetime(2026, 7, 14, 12, 0, 1, tzinfo=dt.UTC),
+        ]
+    )
+    monkeypatch.setattr(temporal, "now", lambda: next(ticks))
+
+    preview = commands.op_manage_memory_file(
+        tmp_path,
+        operation="create",
+        path=_PAGE,
+        content="B\n\n## Relations\n",
+        frontmatter=frontmatter,
+        overwrite=True,
+        validate_only=True,
+    )
+    validated_after_hash = preview["after_hash"]
+
+    committed = commands.op_manage_memory_file(
+        tmp_path,
+        operation="create",
+        path=_PAGE,
+        content="B\n\n## Relations\n",
+        frontmatter=frontmatter,
+        overwrite=True,
+        draft_token=preview["draft_token"],
+    )
+
+    committed_source = page.read_text(encoding="utf-8")
+    committed_frontmatter, _, _ = vault.parse_frontmatter(
+        committed_source, strict=True
+    )
+    assert committed["semantic"]["mutated"] is True
+    assert vault.content_hash(committed_source) == validated_after_hash
+    assert committed_frontmatter["created"] == "2026-07-14T12:00:00Z"
+    assert committed_frontmatter["updated"] == "2026-07-14T12:00:00Z"
 
 
 def test_tier2_overwrite_true_on_absent_path_preserves_creation_behavior(

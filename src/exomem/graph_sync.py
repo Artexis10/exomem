@@ -6,6 +6,7 @@ import atexit
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 if TYPE_CHECKING:
+    from .mutation_lock import _SecureDirectory
     from .vault import PlannedWrite
 
 
@@ -31,6 +33,16 @@ _TEMP_PREFIX = ".graph-rebuild-"
 _CHECKPOINT_FILENAME = ".graph-sync.json"
 _FLOOR_FILENAME = ".graph-sync-floor.json"
 _RECEIPT_DIRNAME = ".graph-commit-receipts"
+_RESET_PREFIX = ".graph-reset-"
+_RESET_MANIFEST = ".manifest.json"
+_RESET_MEMBERS = (
+    ".graph.sqlite",
+    ".graph.sqlite-journal",
+    ".graph.sqlite-wal",
+    ".graph.sqlite-shm",
+    _CHECKPOINT_FILENAME,
+    _FLOOR_FILENAME,
+)
 # A maximal v1 paths checkpoint is 1,000 paths of 1,024 UTF-8 bytes plus
 # hashes and a duplicated created-path array. Keep a small format margin while
 # still refusing arbitrary multi-megabyte synced inputs.
@@ -90,6 +102,7 @@ _PENDING_WAITERS: ContextVar[
 ] = (
     ContextVar("exomem_pending_graph_rebuild_waiters", default=None)
 )
+logger = logging.getLogger(__name__)
 
 
 def _canonical_json(value: object) -> bytes:
@@ -1607,10 +1620,13 @@ class GraphWaiterCapacityError(GraphRebuildRegistrationError):
 class GraphRebuildStopped(GraphRebuildRegistrationError):
     """A registered builder exited before producing coverage."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        remediation: str = "Retry the same mutation identity or run reconcile to recover the derived graph.",
+    ) -> None:
         super().__init__(
             "GRAPH_SYNC_REBUILD_STOPPED",
-            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+            remediation,
         )
 
 
@@ -1634,6 +1650,463 @@ class GraphEpochIncoherent(GraphRebuildRegistrationError):
             "Reconcile the graph epoch before retrying this mutation.",
         )
         self.args = (f"{_message}: {self.args[0]}",)
+
+
+class GraphResetFailed(GraphRebuildRegistrationError):
+    """An explicit lineage reset could not safely isolate its derived inputs."""
+
+    def __init__(self, code: str = "GRAPH_SYNC_RESET_REFUSED") -> None:
+        super().__init__(code, "Release graph readers or repair the graph lineage before retrying.")
+
+
+@dataclass(frozen=True)
+class GraphReset:
+    operation_id: str
+    members: tuple[str, ...]
+    phase: str
+
+
+def _reset_directory(vault_root: Path, operation_id: str) -> Path:
+    from .vault import kb_root
+
+    return kb_root(vault_root) / f"{_RESET_PREFIX}{operation_id}"
+
+
+def _reset_manifest_raw(reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> bytes:
+    return _canonical_json({
+        "version": 1,
+        "operation_id": reset.operation_id,
+        "members": list(reset.members),
+        "identities": {name: list(identities[name]) for name in reset.members},
+        "phase": reset.phase,
+    })
+
+
+def _write_reset_manifest(directory: Any, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> None:
+    from .mutation_lock import retain_secure_directory, retained_write_file
+
+    raw = _reset_manifest_raw(reset, identities)
+    retained = directory if hasattr(directory, "fd") and hasattr(directory, "path") else retain_secure_directory(directory)
+    try:
+        retained_write_file(retained, _RESET_MANIFEST, raw)
+    finally:
+        if retained is not directory:
+            retained.close()
+
+
+def _advance_reset_manifest(directory: Any, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> None:
+    from .mutation_lock import retain_secure_directory, retained_write_file
+
+    raw = _reset_manifest_raw(reset, identities)
+    retained = directory if hasattr(directory, "fd") and hasattr(directory, "path") else retain_secure_directory(directory)
+    try:
+        retained_write_file(retained, _RESET_MANIFEST, raw, replace=True)
+    finally:
+        if retained is not directory:
+            retained.close()
+
+
+def _parse_reset_manifest(directory: Any, raw: bytes) -> tuple[GraphReset, dict[str, tuple[int, ...]]]:
+    """Parse only the closed, content-free reset manifest shape."""
+    try:
+        value = json.loads(raw)
+        operation_id = value["operation_id"]
+        members = value["members"]
+        identities = value["identities"]
+        phase = value["phase"]
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise GraphResetFailed() from error
+    if (
+        not isinstance(operation_id, str)
+        or not re.fullmatch(r"[0-9a-f]{24}", operation_id)
+        or Path(directory.path if hasattr(directory, "path") else directory).name != f"{_RESET_PREFIX}{operation_id}"
+        or not isinstance(members, list)
+        or not members
+        or any(not isinstance(name, str) or name not in _RESET_MEMBERS for name in members)
+        or len(set(members)) != len(members)
+        or phase not in {"prepared", "moving", "isolated"}
+        or not isinstance(identities, dict)
+    ):
+        raise GraphResetFailed()
+    parsed: dict[str, tuple[int, ...]] = {}
+    for name in members:
+        identity = identities.get(name)
+        if not isinstance(identity, list) or not identity or any(type(item) is not int for item in identity):
+            raise GraphResetFailed()
+        parsed[name] = tuple(identity)
+    reset = GraphReset(operation_id, tuple(members), phase)
+    if raw != _reset_manifest_raw(reset, parsed):
+        raise GraphResetFailed()
+    return reset, parsed
+
+
+def _read_reset_manifest(directory: Any) -> tuple[GraphReset, dict[str, tuple[int, ...]]]:
+    """Parse only the closed, content-free reset manifest shape."""
+    from .mutation_lock import retain_secure_directory, retained_read_file
+
+    retained = directory if hasattr(directory, "fd") and hasattr(directory, "path") else retain_secure_directory(directory)
+    try:
+        return _parse_reset_manifest(retained, retained_read_file(retained, _RESET_MANIFEST, limit=8_192))
+    except OSError as error:
+        raise GraphResetFailed() from error
+    finally:
+        if retained is not directory:
+            retained.close()
+
+
+def _reset_manifest_placement(parent: Any, directory: Any, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> str:
+    """Classify one crash cut from exact retained live/quarantine identities."""
+    from .mutation_lock import retain_regular_child_file
+
+    live = quarantined = 0
+    for name in reset.members:
+        live_item = quarantine_item = None
+        try:
+            try:
+                live_item = retain_regular_child_file(parent, name)
+            except FileNotFoundError:
+                pass
+            try:
+                quarantine_item = retain_regular_child_file(directory, name)
+            except FileNotFoundError:
+                pass
+            if live_item is not None and quarantine_item is not None:
+                raise GraphResetFailed()
+            item = live_item or quarantine_item
+            if item is None or item.identity != identities[name]:
+                raise GraphResetFailed()
+            if live_item is not None:
+                live += 1
+            else:
+                quarantined += 1
+        finally:
+            if live_item is not None:
+                live_item.close()
+            if quarantine_item is not None:
+                quarantine_item.close()
+    if live == len(reset.members):
+        return "prepared"
+    if quarantined == len(reset.members):
+        return "isolated"
+    return "moving"
+
+
+def _resolve_reset_manifest_residue(parent: Any, directory: Any) -> tuple[GraphReset, dict[str, tuple[int, ...]]]:
+    """Resolve a crash-left staging/current transition from object identities, never phase text."""
+    from .mutation_lock import retained_read_file, retained_unlink_file, retained_write_file
+
+    try:
+        current_raw = retained_read_file(directory, _RESET_MANIFEST, limit=8_192)
+    except FileNotFoundError:
+        current_raw = None
+    try:
+        staged_raw = retained_read_file(directory, f".{_RESET_MANIFEST}.new", limit=8_192)
+    except FileNotFoundError:
+        staged_raw = None
+    if staged_raw is None:
+        if current_raw is None:
+            raise GraphResetFailed()
+        return _parse_reset_manifest(directory, current_raw)
+    staged, staged_identities = _parse_reset_manifest(directory, staged_raw)
+    if current_raw is not None:
+        current, current_identities = _parse_reset_manifest(directory, current_raw)
+        if (
+            current.operation_id != staged.operation_id
+            or current.members != staged.members
+            or current_identities != staged_identities
+        ):
+            raise GraphResetFailed()
+    placement = _reset_manifest_placement(parent, directory, staged, staged_identities)
+    adopted = GraphReset(staged.operation_id, staged.members, placement)
+    # The selected phase is derived from placement, so a cut before or after
+    # either manifest publish makes the same deterministic next decision.
+    retained_unlink_file(directory, f".{_RESET_MANIFEST}.new")
+    retained_write_file(directory, _RESET_MANIFEST, _reset_manifest_raw(adopted, staged_identities), replace=current_raw is not None)
+    return adopted, staged_identities
+
+
+def _recover_interrupted_reset(vault_root: Path) -> GraphReset | None:
+    """Reverse a partial transaction only when its retained identities prove it safe."""
+    from .mutation_lock import (
+        rename_retained_regular_file,
+        retain_child_directory,
+        retain_regular_child_file,
+        retain_secure_directory,
+    )
+    kb = _reset_directory(vault_root, "0" * 24).parent
+    parent = retain_secure_directory(kb)
+    try:
+        entries = os.listdir(parent.fd) if parent.fd is not None else os.listdir(parent.path)
+        candidates: list[tuple[Path, Any]] = []
+        for name in entries:
+            if not name.startswith(_RESET_PREFIX):
+                continue
+            candidate = kb / name
+            held = retain_child_directory(parent, name, delete_access=True)
+            candidates.append((candidate, held))
+    except BaseException:
+        parent.close()
+        raise
+    if not candidates:
+        parent.close()
+        return None
+    if len(candidates) != 1:
+        for _candidate, held in candidates:
+            held.close()
+        parent.close()
+        raise GraphResetFailed()
+    directory, retained_directory = candidates[0]
+    try:
+        reset, identities = _resolve_reset_manifest_residue(parent, retained_directory)
+        if reset.phase == "isolated":
+            if not _isolated_reset_matches(retained_directory, parent, reset.members, identities):
+                raise GraphResetFailed()
+            return reset
+        for name in reset.members:
+            try:
+                retained = retain_regular_child_file(retained_directory, name)
+            except FileNotFoundError:
+                retained = None
+            if retained is not None:
+                try:
+                    if retained.identity != identities[name]:
+                        raise GraphResetFailed()
+                    rename_retained_regular_file(retained, kb / name, destination_directory=parent)
+                finally:
+                    retained.close()
+            else:
+                try:
+                    retained = retain_regular_child_file(parent, name)
+                except FileNotFoundError as error:
+                    raise GraphResetFailed() from error
+                try:
+                    if retained.identity != identities[name]:
+                        raise GraphResetFailed()
+                finally:
+                    retained.close()
+        _advance_reset_manifest(retained_directory, GraphReset(reset.operation_id, reset.members, "prepared"), identities)
+        if not _cleanup_graph_lineage_reset_retained(parent, retained_directory, reset):
+            raise GraphResetFailed("GRAPH_SYNC_RESET_ROLLBACK_FAILED")
+        retained_directory = None
+        return None
+    finally:
+        if retained_directory is not None:
+            retained_directory.close()
+        parent.close()
+
+
+def recover_isolated_graph_lineage_reset(vault_root: Path) -> GraphReset | None:
+    """Adopt one durable isolated reset on an explicit recovery invocation."""
+    reset = _recover_interrupted_reset(vault_root)
+    if reset is not None and reset.phase != "isolated":
+        raise GraphResetFailed()
+    return reset
+
+
+def census_unavailable_graph_lineage(vault_root: Path) -> tuple[str, ...]:
+    """Return the exact safe live derived set without moving or registering work."""
+    from .mutation_lock import (
+        retain_regular_child_file,
+        retain_secure_directory,
+        retained_regular_child_names,
+    )
+    from .writer_lease import active_manager
+
+    root = Path(vault_root)
+    coordinator = active_manager()._mutation_coordinator_for(root)
+    with coordinator.hold(operation="graph_lineage_reset_census", holder_kind="graph"):
+        if classify_epoch(root).kind != "unavailable":
+            return ()
+        kb = _reset_directory(root, "0" * 24).parent
+        parent = retain_secure_directory(kb)
+        retained = []
+        try:
+            members = retained_regular_child_names(parent, _RESET_MEMBERS)
+            if not members:
+                raise GraphResetFailed()
+            for name in members:
+                retained.append(retain_regular_child_file(parent, name))
+            return members
+        finally:
+            for item in retained:
+                item.close()
+            parent.close()
+
+
+def _isolated_reset_matches(
+    directory: Any, parent: Any, members: tuple[str, ...], identities: dict[str, tuple[int, ...]]
+) -> bool:
+    from .mutation_lock import retain_regular_child_file, retained_regular_child_names
+
+    try:
+        if retained_regular_child_names(parent, _RESET_MEMBERS):
+            return False
+        for name in members:
+            held = retain_regular_child_file(directory, name)
+            try:
+                if held.identity != identities[name]:
+                    return False
+            finally:
+                held.close()
+        return True
+    except OSError:
+        return False
+
+
+def isolate_unavailable_graph_lineage(vault_root: Path) -> GraphReset | None:
+    """Durably quarantine only the exact derived graph set for an unavailable epoch."""
+    from .mutation_lock import rename_retained_regular_file, retain_regular_file
+    from .writer_lease import active_manager
+
+    root = Path(vault_root)
+    coordinator = active_manager()._mutation_coordinator_for(root)
+    with coordinator.hold(operation="graph_lineage_reset", holder_kind="graph"):
+        if classify_epoch(root).kind != "unavailable":
+            return None
+        interrupted = _recover_interrupted_reset(root)
+        if interrupted is not None:
+            return interrupted
+        kb = _reset_directory(root, "0" * 24).parent
+        members = census_unavailable_graph_lineage(root)
+        retained = []
+        try:
+            for name in members:
+                retained.append(retain_regular_file(kb / name))
+            identities = {item.path.name: item.identity for item in retained}
+            operation_id = secrets.token_hex(12)
+            from .mutation_lock import create_retained_child_directory, retain_secure_directory
+
+            parent = retain_secure_directory(kb)
+            try:
+                created = create_retained_child_directory(parent, f"{_RESET_PREFIX}{operation_id}")
+                directory = created.path
+                reset = GraphReset(operation_id, members, "prepared")
+                _write_reset_manifest(created, reset, identities)
+                moved = []
+                try:
+                    _advance_reset_manifest(created, GraphReset(operation_id, members, "moving"), identities)
+                    for item in retained:
+                        moved.append(item)
+                        rename_retained_regular_file(item, directory / item.path.name, destination_directory=created)
+                        _advance_reset_manifest(created, GraphReset(operation_id, members, "moving"), identities)
+                    _advance_reset_manifest(created, GraphReset(operation_id, members, "isolated"), identities)
+                    if not _isolated_reset_matches(created, parent, members, identities):
+                        raise GraphResetFailed()
+                    return GraphReset(operation_id, members, "isolated")
+                except Exception as error:
+                    rollback_failed = False
+                    for item in reversed(moved):
+                        try:
+                            target = directory / item.path.name
+                            if not target.exists():
+                                if (kb / item.path.name).exists():
+                                    continue
+                                raise FileNotFoundError(item.path.name)
+                            moved_item = retain_regular_file(target)
+                            try:
+                                rename_retained_regular_file(moved_item, kb / item.path.name, destination_directory=parent)
+                            finally:
+                                moved_item.close()
+                        except Exception:  # noqa: BLE001 - rollback must absorb any cleanup failure
+                            rollback_failed = True
+                    raise GraphResetFailed("GRAPH_SYNC_RESET_ROLLBACK_FAILED" if rollback_failed else "GRAPH_SYNC_RESET_REFUSED") from error
+            finally:
+                parent.close()
+                if 'created' in locals():
+                    created.close()
+        finally:
+            for item in retained:
+                item.close()
+
+
+def _cleanup_graph_lineage_reset_retained(parent: Any, directory: Any, reset: GraphReset) -> bool:
+    """Remove one proven rollback quarantine while both parent handles remain pinned."""
+    from .mutation_lock import remove_retained_child_directory, retained_unlink_file
+
+    try:
+        for name in reset.members:
+            try:
+                retained_unlink_file(directory, name)
+            except FileNotFoundError:
+                pass
+        retained_unlink_file(directory, _RESET_MANIFEST)
+        try:
+            retained_unlink_file(directory, f".{_RESET_MANIFEST}.new")
+        except FileNotFoundError:
+            pass
+        remove_retained_child_directory(parent, directory, directory.path.name)
+        return True
+    except OSError:
+        return False
+
+
+def cleanup_graph_lineage_reset(vault_root: Path, operation_id: str) -> bool:
+    """Best-effort, non-recursive cleanup of one manifest-recorded quarantine."""
+    from .mutation_lock import retain_child_directory, retain_secure_directory
+
+    kb = _reset_directory(Path(vault_root), operation_id).parent
+    name = f"{_RESET_PREFIX}{operation_id}"
+    try:
+        parent = retain_secure_directory(kb)
+        try:
+            directory: _SecureDirectory | None = retain_child_directory(
+                parent, name, delete_access=True
+            )
+            try:
+                reset, _identities = _resolve_reset_manifest_residue(parent, directory)
+                if reset.phase != "prepared":
+                    return False
+                cleaned = _cleanup_graph_lineage_reset_retained(parent, directory, reset)
+                directory = None
+                return cleaned
+            finally:
+                if directory is not None:
+                    directory.close()
+        finally:
+            parent.close()
+    except OSError:
+        return False
+
+
+def cleanup_published_graph_lineage_reset(
+    vault_root: Path, operation_id: str, checkpoint: GraphSyncCheckpoint
+) -> bool:
+    """Remove one isolated reset only after its registered checkpoint is current."""
+    root = Path(vault_root)
+    try:
+        observed = read_checkpoint(root)
+        if (
+            status(root)["state"] != "current"
+            or observed is None
+            or observed.generation < checkpoint.generation
+            or (
+                observed.generation == checkpoint.generation
+                and observed.checkpoint_sha256 != checkpoint.checkpoint_sha256
+            )
+        ):
+            return False
+        from .mutation_lock import retain_child_directory, retain_secure_directory
+
+        kb = _reset_directory(root, operation_id).parent
+        parent = retain_secure_directory(kb)
+        try:
+            directory: _SecureDirectory | None = retain_child_directory(
+                parent, f"{_RESET_PREFIX}{operation_id}", delete_access=True
+            )
+            try:
+                reset, _identities = _resolve_reset_manifest_residue(parent, directory)
+                if reset.phase != "isolated":
+                    return False
+                cleaned = _cleanup_graph_lineage_reset_retained(parent, directory, reset)
+                directory = None
+                return cleaned
+            finally:
+                if directory is not None:
+                    directory.close()
+        finally:
+            parent.close()
+    except (OSError, GraphResetFailed):
+        return False
 
 
 class GraphRebuildLockUnavailable(GraphRebuildRegistrationError):
@@ -1807,12 +2280,42 @@ class GraphRebuildCoordinator:
             try:
                 outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
+                if isinstance(error, GraphRebuildRegistrationError):
+                    projection = error
+                    if isinstance(error, GraphEpochIncoherent):
+                        try:
+                            state = status(self.vault_root)["state"]
+                        except Exception:  # noqa: BLE001 - status is fail-closed
+                            pass
+                        else:
+                            if state == "unavailable":
+                                projection = GraphRebuildRegistrationError(
+                                    error.code,
+                                    "Run maintain_memory(mode=\"reconcile\", dry_run=false, "
+                                    "rebuild_graph=true) to recover the derived graph.",
+                                )
+                                projection.__cause__ = error
+                else:
+                    try:
+                        state = status(self.vault_root)["state"]
+                    except Exception:  # noqa: BLE001 - status is fail-closed
+                        remediation = "Run reconcile to recover the derived graph."
+                    else:
+                        remediation = (
+                            "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
+                            "to recover the derived graph."
+                            if state == "unavailable"
+                            else "Retry the same mutation identity or run reconcile to recover the derived graph."
+                        )
+                    projection = GraphRebuildStopped(remediation)
+                    projection.__cause__ = error
+                logger.exception(
+                    "graph rebuild stopped checkpoint_sha256=%s generation=%s",
+                    required.checkpoint_sha256,
+                    required.generation,
+                )
                 with self._condition:
-                    self._error = (
-                        error
-                        if isinstance(error, GraphRebuildRegistrationError)
-                        else GraphRebuildStopped()
-                    )
+                    self._error = projection
                     self._running = False
                     self._condition.notify_all()
                 return

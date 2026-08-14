@@ -166,10 +166,10 @@ def set_frontmatter_field(
     m = _FM_PATTERN.match(text)
     if not m:
         raise SetFrontmatterError(
-            code="UNREADABLE",
+            code="FRONTMATTER_REQUIRED",
             reason=(
-                f"{rel_path} has no frontmatter delimiters; this op refuses "
-                f"to synthesize them. Use `create_file` for new files."
+                f"{rel_path} has no frontmatter delimiters; this operation "
+                "requires frontmatter and refuses to synthesize it."
             ),
         )
     fm_text = m.group(1)

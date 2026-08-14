@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from exomem import freshness, graph_sync, runtime_readiness
+from exomem import mutation_lock as mutation_lock_module
 from exomem import reconcile as reconcile_module
 from exomem import vault as vault_module
 
@@ -409,6 +410,266 @@ def test_ahead_floor_never_accepts_or_reuses_an_old_checkpoint(tmp_path: Path) -
     assert recovered.scope == "full"
     assert recovered.generation == 3
     assert graph_sync.read_floor(tmp_path).generation == 3
+
+
+def test_reconcile_report_defaults_to_no_graph_reset() -> None:
+    report = reconcile_module.ReconcileReport()
+
+    assert report.graph_rebuild_requested is False
+    assert report.graph_rebuild_applicable is False
+    assert report.graph_rebuild_status == "not_requested"
+    assert report.graph_quarantine_id is None
+
+
+def test_post_join_finalizer_clears_the_checkpoint_bound_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = _checkpoint(2)
+    handoff = {
+        "graph_status": "unavailable",
+        "graph_refreshed": 0,
+        "graph_rebuild_status": "quarantined",
+        "graph_quarantine_id": "a" * 24,
+        "_graph_rebuild_handoff": {
+            "operation_id": "a" * 24,
+            "checkpoint": checkpoint.as_dict(),
+            "graph_refreshed": 1,
+        },
+    }
+    monkeypatch.setattr(
+        graph_sync, "wait_for_registered", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "current"})
+    monkeypatch.setattr(
+        graph_sync,
+        "cleanup_published_graph_lineage_reset",
+        lambda root, operation_id, required: (
+            root == tmp_path and operation_id == "a" * 24 and required == checkpoint
+        ),
+    )
+    monkeypatch.setattr(
+        reconcile_module,
+        "_graph_rebuild_is_current",
+        lambda _root: True,
+    )
+
+    result = reconcile_module.finalize_graph_rebuild_handoff(tmp_path, handoff)
+
+    assert result["graph_status"] == "refreshed"
+    assert result["graph_refreshed"] == 1
+    assert result["graph_rebuild_status"] == "cleared"
+    assert result["graph_quarantine_id"] == "a" * 24
+    assert "_graph_rebuild_handoff" not in result
+
+
+def test_completed_dispatch_is_a_valid_checkpoint_bound_reset_handoff() -> None:
+    checkpoint = _checkpoint(2)
+    completed = SimpleNamespace(outcome="completed", checkpoint=checkpoint)
+
+    assert reconcile_module._is_graph_rebuild_handoff(completed, checkpoint)
+
+
+def test_rebuild_graph_dry_run_previews_unavailable_reset_without_mutating(
+    tmp_path: Path,
+) -> None:
+    checkpoint = _checkpoint(1)
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    graph_sync._write_checkpoint(tmp_path, checkpoint)
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True, exist_ok=True)
+    live.write_bytes(b"old graph")
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path), live)
+    }
+
+    report = reconcile_module.reconcile(tmp_path, dry_run=True, rebuild_graph=True)
+
+    assert report.graph_rebuild_requested is True
+    assert report.graph_rebuild_applicable is True
+    assert report.graph_rebuild_status == "would_quarantine"
+    assert report.graph_quarantine_id is None
+    assert graph_sync.registered_checkpoint(tmp_path) is None
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path), live)
+    } == before
+
+
+def test_dry_run_census_never_recovers_an_interrupted_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    kb = tmp_path / "Knowledge Base"
+    (kb / ".graph.sqlite").write_bytes(b"graph")
+
+    monkeypatch.setattr(
+        graph_sync,
+        "_recover_interrupted_reset",
+        lambda _root: pytest.fail("dry-run must not recover a transaction"),
+    )
+
+    assert graph_sync.census_unavailable_graph_lineage(tmp_path) == (
+        ".graph.sqlite",
+        ".graph-sync.json",
+        ".graph-sync-floor.json",
+    )
+
+
+def test_recovered_isolated_reset_requires_exact_quarantine_identity(
+    tmp_path: Path,
+) -> None:
+    reset = graph_sync.GraphReset("a" * 24, (".graph.sqlite",), "isolated")
+    kb = tmp_path / "Knowledge Base"
+    kb.mkdir()
+    quarantine = kb / f".graph-reset-{'a' * 24}"
+    quarantine.mkdir()
+    graph = quarantine / ".graph.sqlite"
+    graph.write_bytes(b"quarantined")
+    held = mutation_lock_module.retain_regular_file(graph)
+    try:
+        identities = {".graph.sqlite": held.identity}
+    finally:
+        held.close()
+    (quarantine / ".manifest.json").write_bytes(graph_sync._reset_manifest_raw(reset, identities))
+    graph.unlink()
+    graph.write_bytes(b"replacement with different metadata")
+
+    with pytest.raises(graph_sync.GraphResetFailed):
+        graph_sync._recover_interrupted_reset(tmp_path)
+
+
+def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -> None:
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    kb = tmp_path / "Knowledge Base"
+    live = kb / ".graph.sqlite"
+    companion = kb / ".graph.sqlite-wal"
+    receipt = kb / ".graph-commit-receipts" / "receipt.json"
+    note = kb / "Notes/unchanged.md"
+    live.write_bytes(b"main")
+    companion.write_bytes(b"wal")
+    receipt.parent.mkdir()
+    receipt.write_bytes(b"receipt")
+    note.parent.mkdir()
+    note.write_bytes(b"canonical")
+
+    reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)
+
+    assert reset is not None
+    quarantine = kb / f".graph-reset-{reset.operation_id}"
+    assert (quarantine / ".graph.sqlite").read_bytes() == b"main"
+    assert (quarantine / ".graph.sqlite-wal").read_bytes() == b"wal"
+    assert receipt.read_bytes() == b"receipt"
+    assert note.read_bytes() == b"canonical"
+
+
+def test_unavailable_companion_only_lineage_is_previewed_and_quarantined(tmp_path: Path) -> None:
+    """A missing primary database does not make a safe retained companion invisible."""
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(2))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(1))
+    companion = tmp_path / "Knowledge Base/.graph.sqlite-wal"
+    companion.parent.mkdir(exist_ok=True)
+    companion.write_bytes(b"wal")
+
+    assert graph_sync.classify_epoch(tmp_path).kind == "unavailable"
+    dry_run = reconcile_module.reconcile(tmp_path, dry_run=True, rebuild_graph=True)
+
+    assert dry_run.graph_rebuild_applicable is True
+    assert dry_run.graph_rebuild_status == "would_quarantine"
+    assert companion.exists()
+    reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)
+    assert reset is not None
+    assert (companion.parent / f".graph-reset-{reset.operation_id}" / companion.name).exists()
+
+
+def test_explicit_rebuild_adopts_an_isolated_reset_before_epoch_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-isolation/pre-checkpoint crash cut resumes even if live state looks current."""
+    reset = graph_sync.GraphReset("a" * 24, (".graph.sqlite",), "isolated")
+    checkpoint = _checkpoint(3)
+    monkeypatch.setattr(
+        graph_sync, "recover_isolated_graph_lineage_reset", lambda _root: reset
+    )
+    monkeypatch.setattr(
+        graph_sync, "classify_epoch", lambda _root: pytest.fail("must adopt reset first")
+    )
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "current", "generation": 3})
+    monkeypatch.setattr(graph_sync, "reconcile_checkpoint", lambda _root: checkpoint)
+    from exomem import epistemic_graph
+
+    monkeypatch.setattr(
+        epistemic_graph, "_registered_or_failure",
+        lambda *_args: SimpleNamespace(outcome="registered", checkpoint=checkpoint),
+    )
+
+    report = reconcile_module.reconcile(tmp_path, rebuild_graph=True)
+
+    assert report.graph_quarantine_id == reset.operation_id
+    assert report._graph_rebuild_handoff == {
+        "operation_id": reset.operation_id,
+        "checkpoint": checkpoint.as_dict(),
+        "graph_refreshed": 1,
+    }
+
+
+def test_post_publication_cleanup_requires_a_current_covered_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a covered rebuild may remove its exact isolated reset evidence."""
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True, exist_ok=True)
+    live.write_bytes(b"old")
+
+    reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)
+
+    assert reset is not None
+    quarantine = live.parent / f".graph-reset-{reset.operation_id}"
+    covered = _checkpoint(3)
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _root: covered)
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "unavailable"})
+
+    assert not graph_sync.cleanup_published_graph_lineage_reset(
+        tmp_path, reset.operation_id, covered
+    )
+    assert quarantine.exists()
+
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "current"})
+
+    assert graph_sync.cleanup_published_graph_lineage_reset(
+        tmp_path, reset.operation_id, covered
+    )
+    assert not quarantine.exists()
+
+
+def test_unavailable_reset_rolls_back_a_partial_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import mutation_lock
+
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    kb = tmp_path / "Knowledge Base"
+    (kb / ".graph.sqlite").write_bytes(b"main")
+    (kb / ".graph.sqlite-wal").write_bytes(b"wal")
+    original = mutation_lock.rename_retained_regular_file
+    calls = 0
+
+    def fail_second(source, destination):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError("move denied")
+        return original(source, destination)
+
+    monkeypatch.setattr(mutation_lock, "rename_retained_regular_file", fail_second)
+    with pytest.raises(graph_sync.GraphResetFailed, match="GRAPH_SYNC_RESET_REFUSED"):
+        graph_sync.isolate_unavailable_graph_lineage(tmp_path)
+
+    assert (kb / ".graph.sqlite").read_bytes() == b"main"
+    assert (kb / ".graph.sqlite-wal").read_bytes() == b"wal"
 
 
 def test_nonlegacy_malformed_floor_cannot_be_overwritten_by_a_new_write(tmp_path: Path) -> None:
@@ -936,6 +1197,96 @@ def test_single_flight_retries_for_new_checkpoint_and_never_releases_stale_waite
     assert first.wait(2).covers(_checkpoint(1))
     assert second.wait(2).covers(_checkpoint(2))
     assert observed == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_remediation"),
+    [
+        (
+            "current",
+            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+        ),
+        (
+            "recovery_required",
+            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+        ),
+        (
+            "unavailable",
+            "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
+            "to recover the derived graph.",
+        ),
+    ],
+)
+def test_registered_builder_failure_logs_and_chains_a_content_free_state_aware_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    state: str,
+    expected_remediation: str,
+) -> None:
+    """Arbitrary builder failures retain diagnostics without leaking into terminals."""
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    checkpoint = _checkpoint(1)
+    sentinel = "private builder path <vault>/Knowledge Base/secret.md"
+    failure = RuntimeError(sentinel)
+
+    monkeypatch.setattr(
+        graph_sync,
+        "status",
+        lambda _root: {"state": state, "generation": checkpoint.generation},
+    )
+
+    def fail(_checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        raise failure
+
+    caplog.set_level("ERROR")
+    waiter = coordinator.start_or_join(checkpoint, fail)
+    with pytest.raises(graph_sync.GraphRebuildStopped) as stopped:
+        waiter.wait(1)
+
+    assert stopped.value.__cause__ is failure
+    assert stopped.value.code == "GRAPH_SYNC_REBUILD_STOPPED"
+    assert stopped.value.remediation == expected_remediation
+    assert sentinel not in str(stopped.value)
+    assert sentinel in caplog.text
+    assert checkpoint.checkpoint_sha256 in caplog.text
+
+
+def test_registered_unavailable_lineage_failure_projects_explicit_reset_without_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unavailable typed lineage failure keeps diagnostics out of the terminal."""
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    checkpoint = _checkpoint(1)
+    sentinel = "private lineage path <vault>/Knowledge Base/secret.md"
+    failure = graph_sync.GraphEpochIncoherent(sentinel)
+
+    monkeypatch.setattr(
+        graph_sync,
+        "status",
+        lambda _root: {"state": "unavailable", "generation": checkpoint.generation},
+    )
+
+    def fail(_checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        raise failure
+
+    caplog.set_level("ERROR")
+    waiter = coordinator.start_or_join(checkpoint, fail)
+    with pytest.raises(graph_sync.GraphRebuildRegistrationError) as stopped:
+        waiter.wait(1)
+
+    assert type(stopped.value) is graph_sync.GraphRebuildRegistrationError
+    assert stopped.value.__cause__ is failure
+    assert stopped.value.code == "GRAPH_SYNC_LINEAGE_CONFLICT"
+    assert stopped.value.remediation == (
+        "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
+        "to recover the derived graph."
+    )
+    assert sentinel not in str(stopped.value)
+    assert sentinel in caplog.text
+    assert checkpoint.checkpoint_sha256 in caplog.text
 
 
 def test_same_generation_with_a_different_digest_does_not_cover_a_waiter() -> None:
@@ -1728,6 +2079,113 @@ def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
     assert reconcile_result[0]["graph_status"] == "refreshed", reconcile_result
     assert reconcile_result[0]["graph_refreshed"] == 1
     assert graph_sync.status(tmp_path)["state"] == "current"
+
+
+def test_manager_rebuild_graph_finalizes_unavailable_reset_after_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manager sees the private handoff, clears once, and never returns it."""
+    from exomem.commands import commands_for
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/rebuild-finalizer.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "# Rebuild finalizer\n")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    stale_graph = tmp_path / "Knowledge Base/.graph.sqlite"
+    stale_graph.write_bytes(b"unavailable graph")
+    cleaned: list[tuple[Path, str, graph_sync.GraphSyncCheckpoint]] = []
+    original_cleanup = graph_sync.cleanup_published_graph_lineage_reset
+
+    def observe_cleanup(
+        root: Path, operation_id: str, checkpoint: graph_sync.GraphSyncCheckpoint
+    ) -> bool:
+        cleaned.append((root, operation_id, checkpoint))
+        return original_cleanup(root, operation_id, checkpoint)
+
+    monkeypatch.setattr(
+        graph_sync, "cleanup_published_graph_lineage_reset", observe_cleanup
+    )
+    command = next(command for command in commands_for("mcp") if command.name == "reconcile")
+    result = LeaseManager(LeaseConfig(state_dir=tmp_path / "state")).invoke(
+        command,
+        (tmp_path,),
+        {"rebuild_graph": True, "response_detail": "full"},
+        idempotency_key="unavailable-reset-finalizer",
+    )
+
+    assert result["diagnostics"]["graph_rebuild_status"] == "cleared"
+    assert len(cleaned) == 1
+    assert result["diagnostics"]["graph_quarantine_id"] == cleaned[0][1]
+    assert cleaned[0][0] == tmp_path
+    assert cleaned[0][2] == graph_sync.read_checkpoint(tmp_path)
+    assert "_graph_rebuild_handoff" not in repr(result)
+
+
+def test_manager_rebuild_graph_resumes_canonical_handoff_after_restart_without_waiter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canonical reset handoff survives the crash window and clears on replay."""
+    import pickle
+
+    from exomem.commands import commands_for
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/rebuild-resume.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "# Rebuild resume\n")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    (tmp_path / "Knowledge Base/.graph.sqlite").write_bytes(b"unavailable graph")
+    command = next(command for command in commands_for("mcp") if command.name == "reconcile")
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    original_wait = graph_sync.wait_for_registered
+
+    def crash_before_finalization(*_args: object, **_kwargs: object) -> None:
+        raise SystemExit("synthetic finalizer crash")
+
+    monkeypatch.setattr(graph_sync, "wait_for_registered", crash_before_finalization)
+    with pytest.raises(SystemExit, match="synthetic finalizer crash"):
+        manager.invoke(
+            command,
+            (tmp_path,),
+            {"rebuild_graph": True},
+            idempotency_key="unavailable-reset-resume",
+        )
+    with manager.idempotency._connect() as connection:
+        state, payload = connection.execute(
+            "SELECT state, result FROM mutations"
+        ).fetchone()
+    canonical = pickle.loads(payload)
+    assert state == "canonically_committed"
+    assert "_graph_rebuild_handoff" in canonical["leaf_result"]
+
+    graph_sync._PENDING_WAITERS.set(None)
+    assert graph_sync.registered_checkpoint(tmp_path, state_root=tmp_path / "state") is None
+    monkeypatch.setattr(graph_sync, "wait_for_registered", original_wait)
+    restarted = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    resumed = restarted.invoke(
+        command,
+        (tmp_path,),
+        {"rebuild_graph": True, "response_detail": "full"},
+        idempotency_key="unavailable-reset-resume",
+    )
+
+    assert resumed["diagnostics"]["graph_rebuild_status"] == "cleared"
+    assert "_graph_rebuild_handoff" not in repr(resumed)
+    with restarted.idempotency._connect() as connection:
+        state, payload = connection.execute(
+            "SELECT state, result FROM mutations"
+        ).fetchone()
+    assert state == "completed"
+    assert "_graph_rebuild_handoff" not in pickle.loads(payload)["leaf_result"]
 
 
 def test_legacy_refresh_releases_canonical_boundary_before_missing_sidecar_rebuild(

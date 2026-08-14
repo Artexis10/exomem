@@ -127,10 +127,27 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         "_Adoption",
     }
 )
+VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
+_GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
+_GRAPH_REBUILD_RUNTIME_FILE_NAME = re.compile(
+    r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite"
+    r"(?:-(?:journal|wal|shm))?$",
+    re.ASCII,
+)
+
+
+def is_graph_reset_runtime_dir_name(name: str) -> bool:
+    """Whether ``name`` is one exact graph-lineage reset workspace."""
+    return _GRAPH_RESET_RUNTIME_DIR_NAME.fullmatch(name) is not None
+
+
+def is_graph_rebuild_runtime_file_name(name: str) -> bool:
+    """Whether ``name`` is one exact graph rebuild SQLite artifact."""
+    return _GRAPH_REBUILD_RUNTIME_FILE_NAME.fullmatch(name) is not None
 
 
 def in_excluded_scan_dir(rel_path: str) -> bool:
-    """True when any segment of `rel_path` is one of VAULT_SCAN_SKIP_DIRS.
+    """True when any segment of `rel_path` is a reserved scan directory.
 
     The incremental-path counterpart of the exclusion every FULL walk applies
     (walk_vault_md, find's walker, the inbound scan): event-driven patchers
@@ -141,7 +158,20 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
     sidecar (observed 2026-07-04: dup warnings flagging trash entries).
     """
-    return any(seg in VAULT_SCAN_SKIP_DIRS for seg in rel_path.replace("\\", "/").split("/"))
+    segments = rel_path.replace("\\", "/").split("/")
+    if (
+        len(segments) >= 2
+        and segments[1].startswith(".graph-reset-")
+        and segments[0] == kb_dirname()
+        and is_graph_reset_runtime_dir_name(segments[1])
+    ):
+        return True
+    for segment in segments:
+        if segment in VAULT_SCAN_SKIP_DIRS or segment.startswith(
+            VAULT_SCAN_SKIP_DIR_PREFIXES
+        ):
+            return True
+    return False
 
 
 # `[[Target]]` or `[[Target|Alias]]`.
@@ -1526,7 +1556,13 @@ def _restore_bound_source_timestamps(
     elif os.utime in getattr(os, "supports_follow_symlinks", set()):
         os.utime(source.path, ns=(atime_ns, mtime_ns), follow_symlinks=False)
     elif os.name == "nt":
-        _set_windows_path_timestamps(source.path, source.identity, atime_ns, mtime_ns)
+        _set_windows_path_timestamps(
+            source.path,
+            source.identity,
+            atime_ns,
+            mtime_ns,
+            verify_atime=False,
+        )
     else:  # pragma: no cover - supported Python platforms expose one safe form
         raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
     restored = os.fstat(descriptor)
@@ -1537,8 +1573,8 @@ def _restore_bound_source_timestamps(
         or not stat.S_ISREG(restored_path.st_mode)
         or stat.S_ISLNK(restored_path.st_mode)
         or _is_reparse(restored_path)
-        or restored.st_atime_ns != atime_ns
         or restored.st_mtime_ns != mtime_ns
+        or restored_path.st_mtime_ns != mtime_ns
     ):
         raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata capture changed")
 
@@ -1637,6 +1673,7 @@ def _reset_restored_timestamps(
                 expected_identity,
                 snapshot.atime_ns,
                 snapshot.mtime_ns,
+                verify_atime=False,
             )
         elif os.utime in getattr(os, "supports_follow_symlinks", set()):
             os.utime(
@@ -1664,8 +1701,8 @@ def _reset_restored_timestamps(
         if (
             not _same_identity(expected_identity, restored)
             or not _same_identity(expected_identity, restored_path)
-            or restored.st_atime_ns != snapshot.atime_ns
             or restored.st_mtime_ns != snapshot.mtime_ns
+            or restored_path.st_mtime_ns != snapshot.mtime_ns
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
     finally:
@@ -2607,6 +2644,8 @@ def _set_windows_path_timestamps(
     expected_identity: PathIdentity,
     atime_ns: int,
     mtime_ns: int,
+    *,
+    verify_atime: bool = True,
 ) -> None:
     """Set Windows timestamps through the exact identity-checked file handle."""
     import ctypes
@@ -2650,7 +2689,7 @@ def _set_windows_path_timestamps(
         after = os.fstat(descriptor)
         if (
             not _same_identity(expected_identity, after)
-            or after.st_atime_ns != atime_ns
+            or (verify_atime and after.st_atime_ns != atime_ns)
             or after.st_mtime_ns != mtime_ns
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
@@ -3944,7 +3983,7 @@ def walk_vault_md(vault_root: Path):
             return
         for child in children:
             if child.is_dir():
-                if child.name in VAULT_SCAN_SKIP_DIRS:
+                if in_excluded_scan_dir(child.relative_to(vault_root).as_posix()):
                     continue
                 yield from walk(child)
             elif (

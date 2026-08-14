@@ -203,6 +203,8 @@ def create_file(
             )
         date_iso = token_value.render_date
         stamp_iso = token_value.stamp()
+    elif draft_token is not None and is_markdown and existing_file and overwrite:
+        stamp_iso = semantic_writes.reviewed_transition_stamp(draft_token, now) or stamp_iso
 
     # For markdown files, normalize wikilinks in the body to canonical form.
     # Skip non-md files (skill manifests, JSON, scratch) — their `[[...]]`
@@ -358,6 +360,7 @@ def create_file(
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
+                stamp=stamp_iso,
                 validate_only=validate_only,
             )
         except semantic_writes.SemanticWriteError as error:

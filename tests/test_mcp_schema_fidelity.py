@@ -152,7 +152,7 @@ def test_full_mcp_discovery_surface_matches_packaged_contract(
     )
 
 
-def test_manage_memory_file_schema_exposes_append_review_protocol(
+def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,9 +168,19 @@ def test_manage_memory_file_schema_exposes_append_review_protocol(
 
     assert required <= set(properties)
     assert "create or append" in properties["validate_only"]["description"]
+    assert "overwrite preview's `draft_token`" in properties["draft_token"]["description"]
     assert "append transition token" in properties["semantic_transition_token"][
         "description"
     ]
+
+
+def test_maintain_memory_schema_documents_the_reconcile_only_graph_reset() -> None:
+    schema = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["maintain_memory"]
+    rebuild_graph = schema["inputSchema"]["properties"]["rebuild_graph"]
+
+    assert rebuild_graph["default"] is False
+    assert "reconcile" in rebuild_graph["description"].lower()
+    assert "unavailable" in rebuild_graph["description"].lower()
 
 
 def test_remember_discovery_schema_is_vault_invariant(

@@ -620,13 +620,48 @@ class _BoundSidecarRepair:
     fds: tuple[int, ...]
     path: Path
     checks: tuple[tuple[int, str, tuple[int, int], bool], ...]
-    signatures: tuple[tuple[str, tuple[int, int, int, int]], ...]
+    signatures: tuple[tuple[str, tuple[int, ...]], ...]
+    windows_handles: tuple[int, ...] = ()
+    windows_checks: tuple[tuple[Path, bool, tuple[int, int, int], int | None], ...] = ()
 
     def close(self) -> None:
+        if self.windows_handles:
+            from . import mutation_lock
+
+            for handle in reversed(self.windows_handles):
+                mutation_lock._windows_close_handle(handle)
         for fd in reversed(self.fds):
             os.close(fd)
 
     def entry_matches(self) -> bool:
+        if self.windows_checks:
+            from . import mutation_lock
+
+            handles: list[int] = []
+            try:
+                for path, is_directory, windows_identity, parent_index in self.windows_checks:
+                    handle = mutation_lock._windows_open_path(
+                        path,
+                        directory=is_directory,
+                        access=0x80000000,  # GENERIC_READ
+                        share=0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+                    )
+                    handles.append(handle)
+                    if mutation_lock._windows_handle_identity(handle) != windows_identity:
+                        return False
+                    if parent_index is not None:
+                        parent = mutation_lock._SecureDirectory(  # noqa: SLF001 - retained primitive
+                            self.windows_checks[parent_index][0],
+                            windows_handles=[handles[parent_index]],
+                        )
+                        if not mutation_lock._windows_child_is_in_directory(parent, handle):
+                            return False
+                return True
+            except OSError:
+                return False
+            finally:
+                for handle in reversed(handles):
+                    mutation_lock._windows_close_handle(handle)
         for parent_fd, name, identity, is_directory in self.checks:
             try:
                 info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -641,17 +676,64 @@ class _BoundSidecarRepair:
         return True
 
 
-def _bind_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidecarRepair | None]:
-    """Pin a standard sidecar through no-follow vault-root and KB dirfds."""
-    if os.name != "posix" or not all(
+def _sidecar_platform() -> Literal["posix", "windows", "unsupported"]:
+    """Select the local no-follow binding primitive without mutating process state."""
+    if os.name == "posix" and all(
         hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_CLOEXEC", "O_DIRECTORY")
     ):
-        return "invalid", None
+        return "posix"
+    if os.name == "nt":
+        return "windows"
+    return "unsupported"
+
+
+def _windows_handle_signature(handle: int) -> tuple[int, int, int, int, int]:
+    """Return a stable identity and revision marker from one retained Windows handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    from . import mutation_lock
+
+    class _FileInfo(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("access_time", wintypes.FILETIME),
+            ("write_time", wintypes.FILETIME),
+            ("volume_serial", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    info = _FileInfo()
+    kernel32 = mutation_lock._windows_library(ctypes, "kernel32")  # noqa: SLF001
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(_FileInfo)]
+    get_info.restype = wintypes.BOOL
+    if not get_info(handle, ctypes.byref(info)):
+        raise OSError(
+            mutation_lock._windows_last_error(ctypes),  # noqa: SLF001
+            "cannot read retained Windows sidecar revision",
+        )
+    return (
+        int(info.volume_serial),
+        int(info.file_index_high),
+        int(info.file_index_low),
+        (int(info.size_high) << 32) | int(info.size_low),
+        (int(info.write_time.dwHighDateTime) << 32) | int(info.write_time.dwLowDateTime),
+    )
+
+
+def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidecarRepair | None]:
+    """Pin a standard sidecar through no-follow vault-root and KB dirfds."""
     vault_root = path.parent.parent
     flags = os.O_CLOEXEC | os.O_NOFOLLOW
     fds: list[int] = []
     checks: list[tuple[int, str, tuple[int, int], bool]] = []
-    signatures: list[tuple[str, tuple[int, int, int, int]]] = []
+    signatures: list[tuple[str, tuple[int, ...]]] = []
     bound: _BoundSidecarRepair | None = None
     try:
         root_fd = os.open(vault_root, os.O_RDONLY | os.O_DIRECTORY | flags)
@@ -695,15 +777,81 @@ def _bind_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidecarRepa
     except FileNotFoundError:
         return "absent", None
     except OSError:
-        return "invalid", None
+        return "unreadable", None
     finally:
         if bound is None:
             for fd in reversed(fds):
                 os.close(fd)
 
 
+def _bind_windows_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidecarRepair | None]:
+    """Retain Windows no-delete handles for one standard SQLite sidecar."""
+    from . import mutation_lock
+
+    vault_root = path.parent.parent
+    handles: list[int] = []
+    checks: list[tuple[Path, bool, tuple[int, int, int], int | None]] = []
+    signatures: list[tuple[str, tuple[int, ...]]] = []
+    bound: _BoundSidecarRepair | None = None
+
+    def open_entry(candidate: Path, *, directory: bool, parent_index: int | None) -> int:
+        handle = mutation_lock._windows_open_path(
+            candidate,
+            directory=directory,
+            access=0x80000000,  # GENERIC_READ
+            share=0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; deliberately no delete share
+        )
+        handles.append(handle)
+        if parent_index is not None:
+            parent = mutation_lock._SecureDirectory(  # noqa: SLF001 - retained primitive
+                checks[parent_index][0], windows_handles=[handles[parent_index]]
+            )
+            if not mutation_lock._windows_child_is_in_directory(parent, handle):
+                raise OSError("Windows sidecar entry escaped its retained directory")
+        identity = mutation_lock._windows_handle_identity(handle)
+        checks.append((candidate, directory, identity, parent_index))
+        return handle
+
+    try:
+        open_entry(vault_root, directory=True, parent_index=None)
+        open_entry(path.parent, directory=True, parent_index=0)
+        leaf_handle = open_entry(path, directory=False, parent_index=1)
+        signatures.append((path.name, _windows_handle_signature(leaf_handle)))
+        for suffix in ("-wal", "-shm", "-journal"):
+            companion = path.with_name(path.name + suffix)
+            try:
+                companion_handle = open_entry(companion, directory=False, parent_index=1)
+            except FileNotFoundError:
+                continue
+            signatures.append(
+                (companion.name, _windows_handle_signature(companion_handle))
+            )
+        bound = _BoundSidecarRepair(
+            (), path, (), tuple(signatures), tuple(handles), tuple(checks)
+        )
+        return "regular", bound
+    except FileNotFoundError:
+        return "absent", None
+    except OSError:
+        return "unreadable", None
+    finally:
+        if bound is None:
+            for handle in reversed(handles):
+                mutation_lock._windows_close_handle(handle)
+
+
+def _bind_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidecarRepair | None]:
+    """Bind one standard sidecar through the local no-follow platform primitive."""
+    platform = _sidecar_platform()
+    if platform == "posix":
+        return _bind_posix_sidecar(path, writable=writable)
+    if platform == "windows":
+        return _bind_windows_sidecar(path, writable=writable)
+    return "unsupported", None
+
+
 def _bound_sidecar_repair(path: Path) -> _BoundSidecarRepair | None:
-    """Bind an existing POSIX sidecar inode for an exact-row repair."""
+    """Bind an existing sidecar identity for an exact-row repair."""
     state, binding = _bind_sidecar(path, writable=True)
     return binding if state == "regular" else None
 
@@ -753,6 +901,8 @@ def _sidecar_rows(
     state, binding = _bind_sidecar(path, writable=False)
     if state == "absent":
         return [], 0, None, None
+    if state == "unsupported":
+        return [], 0, None, "sidecar_unsupported"
     if state != "regular" or binding is None:
         return [], 0, None, "sidecar_unreadable"
     import sqlite3

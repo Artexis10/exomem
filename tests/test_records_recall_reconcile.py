@@ -424,6 +424,255 @@ def test_census_rejects_reparse_point_sidecar_seam(
     assert census.incomplete["vector"] == "sidecar_unreadable"
 
 
+def test_census_reports_unsupported_sidecar_platform_without_claiming_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import embedding_index, index_paths
+
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    with index._connect() as conn:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
+        )
+    monkeypatch.setattr(audit_module, "_sidecar_platform", lambda: "unsupported")
+
+    census = audit_module.semantic_recall_isolation_census(tmp_path)
+
+    assert census.corrupt_rows == ()
+    assert census.incomplete["vector"] == "sidecar_unsupported"
+    assert "sidecar_unreadable" not in census.incomplete.values()
+    assert index_paths.sidecar_path(tmp_path).is_file()
+
+
+def test_sidecar_rows_maps_actual_safe_open_failure_to_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import index_paths
+
+    monkeypatch.setattr(audit_module, "_bind_sidecar", lambda *_args, **_kwargs: ("unreadable", None))
+
+    assert audit_module._sidecar_rows(
+        tmp_path,
+        index_paths.sidecar_path(tmp_path),
+        "SELECT file_path FROM chunks WHERE file_path > ? ORDER BY file_path",
+        after="",
+        limit=1,
+    ) == ([], 0, None, "sidecar_unreadable")
+
+
+def test_sidecar_rows_keeps_sqlite_schema_failure_distinct(tmp_path: Path) -> None:
+    from exomem import index_paths
+
+    sidecar = index_paths.sidecar_path(tmp_path)
+    sidecar.parent.mkdir(parents=True)
+    with sqlite3.connect(sidecar):
+        pass
+
+    assert audit_module._sidecar_rows(
+        tmp_path,
+        sidecar,
+        "SELECT missing_column FROM missing_table WHERE missing_column > ?",
+        after="",
+        limit=1,
+    ) == ([], 0, None, "sidecar_schema_unreadable")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows retained handles")
+def test_windows_census_reads_healthy_regular_sidecar(tmp_path: Path) -> None:
+    from exomem import embedding_index
+
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    with index._connect() as conn:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
+        )
+
+    census = audit_module.semantic_recall_isolation_census(tmp_path)
+
+    assert census.incomplete.get("vector") is None
+    assert {row.component for row in census.corrupt_rows} == {"vector"}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows retained handles")
+def test_windows_sidecar_signature_changes_after_in_place_sqlite_write(tmp_path: Path) -> None:
+    from exomem import embedding_index, index_paths
+
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    conn = index._connect()
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../first.md', 0, 'private', X'00', 0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    sidecar = index_paths.sidecar_path(tmp_path)
+    before = audit_module._sidecar_signature(tmp_path, sidecar)
+
+    conn = sqlite3.connect(sidecar)
+    try:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../second.md', 0, 'private', X'00', 0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert audit_module._sidecar_signature(tmp_path, sidecar) != before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows reparse points")
+@pytest.mark.parametrize("reparse_target", ["sidecar", "knowledge_base"])
+def test_windows_census_rejects_reparse_before_sqlite_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reparse_target: str
+) -> None:
+    from exomem import embedding_index, index_paths
+
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    conn = index._connect()
+    try:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    sidecar = index_paths.sidecar_path(tmp_path)
+    external_root = tmp_path / "external"
+    external_root.mkdir()
+    if reparse_target == "sidecar":
+        external = external_root / sidecar.name
+        sidecar.replace(external)
+        try:
+            sidecar.symlink_to(external)
+        except OSError:
+            pytest.skip("cannot create native Windows sidecar reparse fixture")
+    else:
+        kb = sidecar.parent
+        external_kb = external_root / "Knowledge Base"
+        kb.replace(external_kb)
+        try:
+            kb.symlink_to(external_kb, target_is_directory=True)
+        except OSError:
+            pytest.skip("cannot create native Windows ancestor reparse fixture")
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *_args, **_kwargs: pytest.fail("SQLite followed reparse"))
+    _rows, _truncated, _last, failure = audit_module._sidecar_rows(
+        tmp_path,
+        sidecar,
+        "SELECT file_path FROM chunks WHERE file_path > ? ORDER BY file_path",
+        after="",
+        limit=1,
+    )
+
+    assert failure == "sidecar_unreadable"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows retained handles")
+def test_windows_sidecar_binding_allows_sqlite_reads_and_releases_replacement(tmp_path: Path) -> None:
+    from exomem import embedding_index, index_paths
+
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    conn = index._connect()
+    try:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    sidecar = index_paths.sidecar_path(tmp_path)
+    replacement = tmp_path / "replacement.sqlite"
+    replacement.write_bytes(sidecar.read_bytes())
+
+    state, binding = audit_module._bind_sidecar(sidecar, writable=False)
+
+    assert state == "regular"
+    assert binding is not None
+    try:
+        conn = sqlite3.connect(f"{binding.path.as_uri()}?mode=ro", uri=True)
+        try:
+            assert conn.execute("SELECT file_path FROM chunks").fetchall() == [("../../corrupt.md",)]
+        finally:
+            conn.close()
+        with pytest.raises(OSError):
+            replacement.replace(sidecar)
+    finally:
+        binding.close()
+    replacement.replace(sidecar)
+    assert sidecar.read_bytes()
+
+
+def test_corrupt_purge_suppresses_credit_after_final_identity_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import embedding_index
+
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    with index._connect() as conn:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
+        )
+    closed: list[bool] = []
+    binding = SimpleNamespace(
+        path=index.path,
+        entry_matches=lambda: False,
+        close=lambda: closed.append(True),
+    )
+    monkeypatch.setattr(
+        audit_module,
+        "_bound_sidecar_repair",
+        lambda path: binding if path == index.path else None,
+    )
+    monkeypatch.setattr(
+        embedding_index.EmbeddingIndex,
+        "purge_exact_persisted_rows",
+        lambda self, values, **_kwargs: len(values),
+    )
+
+    assert audit_module.purge_corrupt_semantic_recall_isolation_rows(
+        tmp_path,
+        (audit_module._SemanticIsolationRow("vector", "../../corrupt.md", None),),
+    ) == {}
+    assert closed == [True]
+
+
+def test_windows_binder_closes_partial_open_handles_in_reverse_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import index_paths, mutation_lock
+
+    sidecar = index_paths.sidecar_path(tmp_path)
+    opened: list[int] = []
+    closed: list[int] = []
+
+    def open_path(path: Path, **_kwargs) -> int:
+        if path.name.endswith("-shm"):
+            raise OSError("forced partial-open failure")
+        handle = len(opened) + 1
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(audit_module, "_sidecar_platform", lambda: "windows")
+    monkeypatch.setattr(mutation_lock, "_windows_open_path", open_path)
+    monkeypatch.setattr(mutation_lock, "_windows_close_handle", closed.append)
+    monkeypatch.setattr(mutation_lock, "_windows_child_is_in_directory", lambda *_args: True)
+    monkeypatch.setattr(mutation_lock, "_windows_handle_identity", lambda handle: (0, 0, handle))
+    monkeypatch.setattr(audit_module, "_windows_handle_signature", lambda handle: (0, 0, handle, 0, 0))
+
+    assert audit_module._bind_sidecar(sidecar, writable=False) == ("unreadable", None)
+    assert opened == [1, 2, 3, 4]
+    assert closed == [4, 3, 2, 1]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX no-follow descriptor binding")
 def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

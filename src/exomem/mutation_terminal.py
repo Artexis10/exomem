@@ -94,6 +94,14 @@ def _operation_id(result: Any) -> str | None:
     return None
 
 
+def _without_graph_rebuild_handoff(result: Any) -> Any:
+    if isinstance(result, Mapping) and "_graph_rebuild_handoff" in result:
+        return {
+            key: value for key, value in result.items() if key != "_graph_rebuild_handoff"
+        }
+    return result
+
+
 def _warning_count(result: Any) -> int:
     if not isinstance(result, Mapping):
         return 0
@@ -421,12 +429,12 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         or "leaf_result" not in result
     ):
         return result
+    leaf = _without_graph_rebuild_handoff(result["leaf_result"])
     if detail == "legacy":
-        return result["leaf_result"]
+        return leaf
     compact = {key: result[key] for key in _ENVELOPE_KEYS if key in result}
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
-    leaf = result["leaf_result"]
     if _is_record_receipt(leaf):
         if leaf["receipt_version"] == _LIFECYCLE_RECEIPT_VERSION:
             compact.update(
@@ -450,9 +458,37 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
             value = graph_result.get(key)
             if isinstance(value, str):
                 compact[key] = value
+    if isinstance(leaf, Mapping) and all(
+        type(leaf.get(key)) is bool
+        for key in ("graph_rebuild_requested", "graph_rebuild_applicable")
+    ) and leaf.get("graph_rebuild_status") in {
+        "not_requested",
+        "not_applicable",
+        "would_quarantine",
+        "quarantined",
+        "cleared",
+        "retained",
+        "failed",
+    }:
+        compact.update(
+            {
+                key: leaf[key]
+                for key in (
+                    "graph_rebuild_requested",
+                    "graph_rebuild_applicable",
+                    "graph_rebuild_status",
+                )
+            }
+        )
+        quarantine_id = leaf.get("graph_quarantine_id")
+        if isinstance(quarantine_id, str) and len(quarantine_id) == 24:
+            compact["graph_quarantine_id"] = quarantine_id
+        warning = leaf.get("graph_rebuild_warning")
+        if isinstance(warning, str) and 0 < len(warning) <= 128:
+            compact["graph_rebuild_warning"] = warning
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
-        compact["diagnostics"] = result["leaf_result"]
+        compact["diagnostics"] = leaf
     return compact
 
 

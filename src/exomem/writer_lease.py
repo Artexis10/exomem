@@ -2468,6 +2468,14 @@ class LeaseManager:
                 if isinstance(result, Mapping)
                 else result
             )
+            reconcile_leaf = (
+                terminal_result.get("leaf_result", terminal_result)
+                if isinstance(terminal_result, Mapping)
+                else None
+            )
+            has_reconcile_handoff = isinstance(reconcile_leaf, Mapping) and isinstance(
+                reconcile_leaf.get("_graph_rebuild_handoff"), Mapping
+            )
 
             def finish_reconcile_graph_status(value: Any, *, current: bool) -> Any:
                 if not isinstance(value, Mapping):
@@ -2502,13 +2510,30 @@ class LeaseManager:
                 required = graph_sync.registered_checkpoint(
                     root, state_root=self.config.state_dir
                 )
-                if required is None:
+                if required is None and not has_reconcile_handoff:
                     return terminal_result
-                graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
+                if required is not None:
+                    graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
                 terminal_result = finish_reconcile_graph_status(
                     terminal_result, current=False
                 )
+                if has_reconcile_handoff and isinstance(terminal_result, Mapping):
+                    if root is None:
+                        return terminal_result
+                    from . import reconcile as reconcile_module
+
+                    leaf = terminal_result.get("leaf_result")
+                    if isinstance(leaf, Mapping):
+                        return {
+                            **terminal_result,
+                            "leaf_result": reconcile_module.finalize_graph_rebuild_handoff(
+                                root, leaf, state_root=self.config.state_dir
+                            ),
+                        }
+                    return reconcile_module.finalize_graph_rebuild_handoff(
+                        root, terminal_result, state_root=self.config.state_dir
+                    )
                 if isinstance(result, Mapping) and required is not None:
                     return with_graph_outcome(
                         terminal_result, graph_failure(required, error)
@@ -2533,6 +2558,21 @@ class LeaseManager:
                 terminal_result = finish_reconcile_graph_status(
                     terminal_result, current=graph_current
                 )
+                if has_reconcile_handoff and isinstance(terminal_result, Mapping):
+                    from . import reconcile as reconcile_module
+
+                    leaf = terminal_result.get("leaf_result")
+                    if isinstance(leaf, Mapping):
+                        terminal_result = {
+                            **terminal_result,
+                            "leaf_result": reconcile_module.finalize_graph_rebuild_handoff(
+                                root, leaf, state_root=self.config.state_dir
+                            ),
+                        }
+                    else:
+                        terminal_result = reconcile_module.finalize_graph_rebuild_handoff(
+                            root, terminal_result, state_root=self.config.state_dir
+                        )
             if isinstance(terminal_result, Mapping):
                 return with_graph_outcome(terminal_result, {"graph_sync": "completed"})
             return terminal_result
@@ -2657,6 +2697,22 @@ class LeaseManager:
                     else value
                 )
 
+            def finalize_graph_rebuild_handoff(value: Any) -> Any:
+                if not isinstance(value, Mapping) or root is None:
+                    return value
+                from . import reconcile as reconcile_module
+
+                leaf = value.get("leaf_result", value)
+                if not (
+                    isinstance(leaf, Mapping)
+                    and isinstance(leaf.get("_graph_rebuild_handoff"), Mapping)
+                ):
+                    return value
+                finalized = reconcile_module.finalize_graph_rebuild_handoff(
+                    root, leaf, state_root=self.config.state_dir
+                )
+                return {**value, "leaf_result": finalized} if "leaf_result" in value else finalized
+
             try:
                 from . import graph_sync
                 from .epistemic_graph import EpistemicGraphIndex
@@ -2776,6 +2832,7 @@ class LeaseManager:
                     key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
                 }
                 if graph_sync.status(root)["state"] == "current":
+                    terminal = finalize_graph_rebuild_handoff(terminal)
                     return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
                 return retain_failure(with_graph_outcome(terminal, graph_sync.committed_graph_failure(required)))
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal

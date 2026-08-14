@@ -69,6 +69,18 @@ def test_literal_param_choices_are_retained_by_the_canonical_registry_projection
     assert operation.choices == ("process", "status", "retry")
 
 
+def test_reconcile_graph_reset_guidance_is_shared_by_rest_and_cli_registry() -> None:
+    for surface in ("rest", "cli"):
+        command = next(
+            item for item in commands_module.commands_for(surface) if item.name == "reconcile"
+        )
+        rebuild_graph = next(item for item in command.params if item.name == "rebuild_graph")
+
+        assert rebuild_graph.required is False
+        assert "reconcile only" in rebuild_graph.help.lower()
+        assert "unavailable" in rebuild_graph.help.lower()
+
+
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     for leaky in (

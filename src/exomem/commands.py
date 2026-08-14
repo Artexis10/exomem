@@ -2039,7 +2039,8 @@ def op_audit_fix(
 
 
 def op_reconcile(
-    vault_root: Path,dry_run: bool = False) -> dict:
+    vault_root: Path, dry_run: bool = False, rebuild_graph: bool = False
+) -> dict:
     """Heal vault drift from out-of-band edits in one pass.
 
     The writers keep the embedding sidecar, index.md count rows, and log.md
@@ -2065,6 +2066,8 @@ def op_reconcile(
     Args:
         dry_run: If true, compute what would change without writing.
             Default false.
+        rebuild_graph: For reconcile only, quarantine unavailable derived graph
+            lineage and rebuild it from canonical Markdown. Default false.
 
     Returns:
         {indexes_updated: [<index path>, ...],
@@ -2073,8 +2076,25 @@ def op_reconcile(
          remaining_drift: [<audit findings>],
          dry_run: bool}
     """
-    report = reconcile_module.reconcile(vault_root, dry_run=dry_run)
-    return report.as_dict()
+    from .writer_lease import (
+        active_direct_mutation_guard,
+        active_manager,
+        active_mutation_request_id,
+    )
+
+    if rebuild_graph and active_mutation_request_id() is None and active_direct_mutation_guard(
+        vault_root, state_root=active_manager().config.state_dir
+    ):
+        raise ValueError(
+            "MUTATION_BOUNDARY_ACTIVE: rebuild_graph must run outside a direct mutation boundary"
+        )
+    report = reconcile_module.reconcile(
+        vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph
+    )
+    result = report.as_dict()
+    if active_mutation_request_id() is None:
+        return reconcile_module.finalize_graph_rebuild_handoff(vault_root, result)
+    return result
 
 
 def op_provenance_report(
@@ -2349,13 +2369,14 @@ def op_edit(
       `allow_curated=true` for curated trees (was `set_frontmatter_field`).
     Otherwise the default (composable) body/tags/surgical modes:
     - `new_body` — replace the WHOLE body. Heavyweight; you re-send
-      everything after the frontmatter.
-    - `tags` — replace the `tags:` frontmatter field.
+      everything after frontmatter, or the complete ordinary Markdown page
+      when it has no frontmatter.
+    - `tags` — replace the `tags:` frontmatter field (requires frontmatter).
     - `old_string`/`new_string` — **surgical** string-replace inside the
       body. Token-cheap: send only the changed snippet, not the whole
       page. Ideal for filling a `[take: ]` row or appending one opinion
       (replace a section heading with itself + the new line). `updated:`
-      is always bumped to today.
+      is bumped to today on frontmatter-backed pages.
 
     Surgical-mode rules (mirrors a precise find-and-replace):
     - `old_string` must match the file EXACTLY, including whitespace.
@@ -2371,26 +2392,31 @@ def op_edit(
     - All other frontmatter fields (type, project, status, sources,
       superseded_by, etc.). If you need to change those, use `replace`.
 
-    No type allowlist: any frontmatter-bearing page outside Sources/
-    Evidence is editable, regardless of `type:`. Works on novel page
-    types (`identity`, future types) without code changes.
+    Whole-body, surgical string, batch-string, and section edits preserve
+    ordinary Markdown without synthesizing YAML. There is no type allowlist:
+    any page outside Sources/Evidence is eligible for those body operations,
+    including frontmatter-less templates and novel page types (`identity`,
+    future types). Tags, frontmatter patch, and take-row operations still
+    require frontmatter.
 
     Refuses:
     - Sources/ and Evidence/ paths (rule 2: append-only). Add a
       corrective source or compile a downstream note instead.
-    - Pages without a frontmatter block (won't synthesize one).
+    - Frontmatter-less pages for tags, frontmatter patch, or take-row
+      operations (won't synthesize a frontmatter block).
     - Pages already marked `status: superseded` (don't edit history;
       supersede the active page instead).
 
     Args:
-        path: Vault-relative path to the compiled page (same shape as
+        path: Vault-relative path to the existing page (same shape as
             `get` accepts).
         why: One-line rationale for the edit. Required — lands in the
             log entry so the change is auditable.
-        new_body: New markdown body (everything after frontmatter).
-            Omit to keep the existing body.
+        new_body: New Markdown body. On an ordinary frontmatter-less page,
+            this is the complete page content. Omit to keep the existing body.
         tags: New tags list (replaces existing). Lowercase dash-
-            separated; the server normalizes. Omit to keep existing tags.
+            separated; the server normalizes. Requires frontmatter. Omit to
+            keep existing tags.
         old_string: Exact snippet to find in the body (surgical mode).
         new_string: Replacement snippet (required with old_string; must
             differ from it).
@@ -2406,11 +2432,11 @@ def op_edit(
         edits: Batch-surgical mode — list of {old_string, new_string,
             replace_all?} applied sequentially in one atomic commit.
         row_key: Take-row mode — natural leading text of the row to fill
-            (e.g. "Whiplash (2014)"). Requires `take`.
+            (e.g. "Whiplash (2014)"). Requires `take` and frontmatter.
         take: Text to write between `[take:` and `]` (take-row mode).
         overwrite: In take-row mode, also replace an already-filled take.
-        field: Frontmatter-patch mode — the single frontmatter key to set
-            (cannot be `updated`, which is auto-bumped).
+        field: Frontmatter-patch mode — the single frontmatter key to set.
+            Requires frontmatter and cannot be `updated`, which is auto-bumped.
         value: New value for `field` (scalar/list/dict).
         allow_curated: Allow a frontmatter patch under a curated tree.
         expected_hash: Optional drift guard. Pass the `content_hash` you
@@ -2439,6 +2465,7 @@ def op_edit(
         STRING_NOT_FOUND (surgical snippet absent); AMBIGUOUS_MATCH
         (snippet not unique and replace_all=False); ALREADY_SUPERSEDED;
         STALE_EDIT (expected_hash mismatch — file changed since read);
+        FRONTMATTER_REQUIRED (a metadata operation targeted ordinary Markdown);
         UNREADABLE.
     """
     active = [n for n, on in (
@@ -4240,6 +4267,10 @@ def op_edit_memory(
     fills, or one frontmatter field. Substantial rewrites should use
     `replace_memory` so history stays explicit.
 
+    Whole-body, surgical string, batch-string, and section edits preserve
+    ordinary Markdown without synthesizing YAML. Tags, frontmatter patch, and
+    take-row operations still require frontmatter.
+
     When `RELATION_DISPOSITION_STALE` or `RELATION_DISPOSITION_MISSING` blocks
     an edit, first call the identical operation with `validate_only=true`.
     Then commit it unchanged with `transition_token=<returned transition_token>`,
@@ -5515,6 +5546,7 @@ def op_maintain_memory(
     categories: list[str] | None = None,
     dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
+    rebuild_graph: bool = False,
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
@@ -5543,9 +5575,13 @@ def op_maintain_memory(
             fix/backfill-ids (safety net) and false for reconcile (matches
             `op_reconcile`'s own default). Pass explicitly to override either way.
         rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
+        rebuild_graph: For reconcile only, quarantine unavailable derived graph
+            lineage and rebuild it from canonical Markdown. Default false.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
     """
+    if rebuild_graph and mode != "reconcile":
+        raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -5560,7 +5596,11 @@ def op_maintain_memory(
             rebuild_embeddings=rebuild_embeddings,
         )
     if mode == "reconcile":
-        return op_reconcile(vault_root, dry_run=False if dry_run is None else dry_run)
+        return op_reconcile(
+            vault_root,
+            dry_run=False if dry_run is None else dry_run,
+            rebuild_graph=rebuild_graph,
+        )
     if mode == "backfill-ids":
         return memory_refs_module.backfill_ids(
             vault_root, dry_run=True if dry_run is None else dry_run
@@ -5896,7 +5936,9 @@ def op_manage_memory_file(
         validate_only: Validate a Markdown create or append operation without writing.
         draft_id: Draft identity returned by validate_only.
         draft_hash: Exact reviewed draft hash returned by validate_only.
-        draft_token: Opaque destination/date token returned by validate_only.
+        draft_token: Opaque destination/date token returned by validate_only. For an
+            existing Markdown overwrite, replay the overwrite preview's `draft_token`
+            unchanged on commit.
         semantic_transition_token: Opaque append transition token from validate_only.
         relation_disposition: Reviewed relation outcome for semantic create or append.
         relation_review_hash: Draft or transition hash covered by the relation review.

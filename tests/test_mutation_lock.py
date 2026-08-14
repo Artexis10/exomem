@@ -22,6 +22,50 @@ from exomem.mutation_lock import (
 )
 
 
+def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite"
+    destination = tmp_path / "quarantine" / "source.sqlite"
+    source.write_bytes(b"graph")
+    destination.parent.mkdir()
+
+    retained = mutation_lock_module.retain_regular_file(source)
+    try:
+        if os.name != "nt":
+            assert retained.identity == mutation_lock_module.nofollow_regular_file_identity(
+                source
+            )
+        mutation_lock_module.rename_retained_regular_file(retained, destination)
+    finally:
+        retained.close()
+
+    assert not source.exists()
+    assert destination.read_bytes() == b"graph"
+
+
+def test_windows_retained_rename_uses_file_rename_info_filename_offset() -> None:
+    source = inspect.getsource(mutation_lock_module._windows_rename_handle)
+
+    assert "filename_offset = _RenameInfo.filename.offset" in source
+    assert "ctypes.sizeof(_RenameInfo) + len(encoded)" in source
+
+
+def test_windows_retained_child_and_cleanup_use_exact_native_handles() -> None:
+    create = inspect.getsource(mutation_lock_module._windows_create_child_directory_handle)
+    publish = inspect.getsource(mutation_lock_module.retained_write_file)
+    cleanup = inspect.getsource(mutation_lock_module.retained_unlink_file)
+
+    assert "NtCreateFile" in create
+    assert "parent.windows_handle" in create
+    assert "_windows_rename_handle(source_handle" in publish
+    assert "_windows_delete_handle(msvcrt.get_osfhandle(held.fd))" in cleanup
+
+
+def test_windows_nt_child_creation_requests_synchronize_access() -> None:
+    source = inspect.getsource(mutation_lock_module._windows_create_child_directory_handle)
+
+    assert "0x00130080" in source  # SYNCHRONIZE | DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES
+
+
 def _synthetic_windows_path(*parts: str) -> Path:
     return Path("\\".join(("C:", "example", *parts)))
 
@@ -167,6 +211,7 @@ def test_windows_secure_child_preserves_open_disposition_and_exclusive_create(
             "path": directory.path / "receipt.jsonl",
             "directory": False,
             "access": 0x40000000 if flags & os.O_WRONLY else (0xC0000000 if flags & os.O_RDWR else 0x80000000),
+            "share": 0x3,
             "creation": expected_creation,
         }
     ]
