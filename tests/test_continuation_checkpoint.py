@@ -3449,12 +3449,22 @@ def test_prune_recovers_authorized_crash_tombstone_only(tmp_path: Path) -> None:
     except OSError:
         symlink = None
 
-    removed = checkpoint.prune_expired(
-        home,
-        client,
-        current_session="other",
-        now_ns=100 + checkpoint.RETENTION_NS + 2,
-    )
+    # Bounded sweeps, not one: the 50 ms MAX_PRUNE_LOCK_SECONDS deadline can be
+    # exhausted by a contended runner before the authorized tombstone is
+    # reached, and the sweep resumes from its stored cursor on the next call.
+    # This test is about WHICH entries the sweep is allowed to remove, not about
+    # how many calls it takes — asserting on a single call made it fail on main
+    # (2026-08-14, py3.11 shard 2/4) with `assert 0 == 1`.
+    removed = 0
+    for _ in range(20):
+        removed += checkpoint.prune_expired(
+            home,
+            client,
+            current_session="other",
+            now_ns=100 + checkpoint.RETENTION_NS + 2,
+        )
+        if not (root_path / tombstone_name).exists():
+            break
 
     assert removed == 1
     assert not (root_path / tombstone_name).exists()
@@ -3597,14 +3607,24 @@ def test_true_kill_after_pending_temp_fsync_is_cleaned_boundedly(
     root = checkpoint.client_state_root(home, "codex")
     assert list(root.glob(".pending-*.tmp-*"))
 
-    if cleanup == "retry":
-        checkpoint.write_checkpoint(
-            _event(client="codex", session_id=session),
-            home,
-            observed_at_ns=200,
-        )
-    else:
-        for _ in range(20):
+    # "Cleaned boundedly" means within a bounded number of sweeps, not within
+    # one. Each sweep runs under MAX_PRUNE_LOCK_SECONDS (50 ms) and resumes from
+    # a stored cursor, so a contended runner can exhaust the deadline having done
+    # little work and leave the temp for the next call — the intended
+    # degradation, not a failure. Asserting after a SINGLE retry sweep is what
+    # made this runner-load-sensitive: #284 saw it fail four times consecutively
+    # on py3.11 while never reproducing locally. The prune variant already
+    # looped; both do now.
+    for _ in range(20):
+        if not list(root.glob(".pending-*.tmp-*")):
+            break
+        if cleanup == "retry":
+            checkpoint.write_checkpoint(
+                _event(client="codex", session_id=session),
+                home,
+                observed_at_ns=200,
+            )
+        else:
             checkpoint.prune_expired(
                 home,
                 "codex",
