@@ -14,8 +14,8 @@ from exomem import (
     index_sync,
     recall_policy,
     recover_from_trash,
+    writer_lease,
 )
-from exomem import writer_lease
 from exomem.governance import lifecycle
 
 
@@ -25,6 +25,10 @@ def _note(vault: Path, name: str = "transition.md") -> tuple[str, Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("# transition\n", encoding="utf-8")
     return relative, path
+
+
+def _synthetic_windows_path(*parts: str) -> str:
+    return "\\".join(("C:", "example", *parts))
 
 
 def test_lifecycle_epoch_staging_never_marks_an_active_mutation_committed(
@@ -136,6 +140,36 @@ def test_rename_failure_after_floor_restores_prior_epoch_and_aborts_lifecycle(
     assert source.exists()
     assert graph_sync.floor_path(tmp_path).exists() is False
     assert graph_sync.checkpoint_path(tmp_path).exists() is False
+
+
+def test_raw_post_rename_fsync_error_durably_inverses_before_restoring_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raw POSIX fsync refusal cannot bypass graph lifecycle rollback."""
+    relative, source = _note(tmp_path, "raw-fsync-refusal.md")
+    flushed: list[Path] = []
+    original_fsync = lifecycle._fsync_directory
+
+    def fail_forward_fsync(path: Path) -> None:
+        flushed.append(path)
+        if len(flushed) == 1:
+            raise OSError(_synthetic_windows_path("private", "post-rename-fsync"))
+        original_fsync(path)
+
+    monkeypatch.setattr(lifecycle, "_fsync_directory", fail_forward_fsync)
+
+    with pytest.raises(delete_file.DeleteFileError) as error:
+        delete_file.delete_file(tmp_path, path=relative, confirm=True)
+
+    assert error.value.code == "LIFECYCLE_PATH_UNSAFE"
+    assert _synthetic_windows_path("private", "post-rename-fsync") not in str(error.value)
+    assert source.exists()
+    assert not list((tmp_path / "Knowledge Base" / "_trash").rglob("*raw-fsync-refusal.md"))
+    assert graph_sync.floor_path(tmp_path).exists() is False
+    assert graph_sync.checkpoint_path(tmp_path).exists() is False
+    assert len(flushed) == 3
+    assert flushed[0] == source.parent
+    assert flushed[-1] == source.parent
 
 
 def test_checkpoint_failure_after_rename_restores_exact_prior_checkpoint(

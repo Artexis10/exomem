@@ -5,9 +5,11 @@ import json
 import logging
 import multiprocessing
 import os
+import stat
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,14 +22,185 @@ from exomem.mutation_lock import (
 )
 
 
+def _synthetic_windows_path(*parts: str) -> Path:
+    return Path("\\".join(("C:", "example", *parts)))
+
+
 def test_windows_path_inspection_access_has_dacl_read_right_without_mutation_rights() -> None:
-    access = inspect.signature(mutation_lock_module._windows_open_path).parameters["access"].default
+    signature = inspect.signature(mutation_lock_module._windows_open_path)
+    access = signature.parameters["access"].default
+    share = signature.parameters["share"].default
 
     assert isinstance(access, int)
     assert access & 0x00000080  # FILE_READ_ATTRIBUTES
     assert access & 0x00020000  # READ_CONTROL, required by GetSecurityInfo(DACL)
     assert not access & 0x40000000  # GENERIC_WRITE
     assert not access & 0x00010000  # DELETE
+    assert isinstance(share, int)
+    assert not share & 0x4  # FILE_SHARE_DELETE
+
+
+def test_windows_retained_directory_ancestors_keep_metadata_only_access() -> None:
+    """Retaining an ancestor must not request write or delete rights."""
+    opened: list[tuple[Path, dict[str, object]]] = []
+
+    def open_path(path: Path, **kwargs: object) -> int:
+        opened.append((path, kwargs))
+        return len(opened)
+
+    directory = mutation_lock_module._acquire_windows_secure_directory(
+        _synthetic_windows_path("vault", "Knowledge Base", "_Governance", "events"),
+        create=False,
+        mode=0o700,
+        open_path=open_path,
+        close_handle=lambda _handle: None,
+    )
+    try:
+        metadata_access = inspect.signature(mutation_lock_module._windows_open_path).parameters["access"].default
+        assert all(kwargs == {"directory": True} for _path, kwargs in opened)
+        assert metadata_access == 0x00020080  # READ_CONTROL | FILE_READ_ATTRIBUTES
+        assert not metadata_access & 0x40000000  # GENERIC_WRITE
+        assert not metadata_access & 0x00010000  # DELETE
+    finally:
+        directory.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-directory branch")
+def test_windows_secure_directory_refuses_ordinary_replacement_after_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A created component must not be replaceable before its retained handle opens."""
+    target = tmp_path / "created"
+    replaced = False
+
+    def replace_created(path: Path) -> None:
+        nonlocal replaced
+        if path == target:
+            path.rmdir()
+            path.mkdir()
+            replaced = True
+
+    monkeypatch.setattr(mutation_lock_module, "_after_windows_secure_directory_create", replace_created)
+
+    with pytest.raises(OSError, match="changed during creation"):
+        mutation_lock_module._acquire_windows_secure_directory(target, create=True, mode=0o700)
+
+    assert replaced is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-directory branch")
+def test_windows_private_root_refuses_replacement_before_dacl_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the retained entry created by this process may receive the DACL."""
+    state_root = tmp_path / "state"
+    replaced = False
+    applied: list[Path] = []
+    original_apply = mutation_lock_module._windows_apply_private_dacl
+
+    def replace_created(path: Path) -> None:
+        nonlocal replaced
+        if path == state_root:
+            path.rmdir()
+            path.mkdir()
+            replaced = True
+
+    def apply(path: Path, sid: str) -> None:
+        applied.append(path)
+        original_apply(path, sid)
+
+    monkeypatch.setattr(
+        mutation_lock_module, "_after_windows_secure_directory_create", replace_created
+    )
+    monkeypatch.setattr(mutation_lock_module, "_windows_apply_private_dacl", apply)
+
+    with pytest.raises(OSError, match="changed during creation"):
+        mutation_lock_module.prepare_windows_private_state_root(state_root)
+
+    assert replaced is True
+    assert applied == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-child branch")
+@pytest.mark.parametrize(
+    ("flags", "expected_creation"),
+    [
+        (os.O_RDONLY, 3),  # OPEN_EXISTING
+        (os.O_WRONLY, 3),  # OPEN_EXISTING
+        (os.O_RDWR, 3),  # OPEN_EXISTING
+        (os.O_WRONLY | os.O_CREAT, 4),  # OPEN_ALWAYS
+        (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 1),  # CREATE_NEW
+    ],
+)
+def test_windows_secure_child_preserves_open_disposition_and_exclusive_create(
+    monkeypatch: pytest.MonkeyPatch, flags: int, expected_creation: int
+) -> None:
+    """The Windows native open must retain POSIX exclusive-create semantics."""
+    calls: list[dict[str, object]] = []
+
+    def open_path(path: Path, **kwargs: object) -> int:
+        calls.append({"path": path, **kwargs})
+        return 73
+
+    directory = mutation_lock_module._SecureDirectory(
+        _synthetic_windows_path("vault", "state"),
+        windows_handles=[71],
+        close_windows_handle=lambda _handle: None,
+    )
+    monkeypatch.setattr(mutation_lock_module, "_windows_open_path", open_path)
+    monkeypatch.setattr(mutation_lock_module, "_windows_child_is_in_directory", lambda *_args: True)
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: 79),
+    )
+    monkeypatch.setattr(
+        mutation_lock_module.os,
+        "fstat",
+        lambda _fd: SimpleNamespace(st_mode=stat.S_IFREG),
+    )
+    monkeypatch.setattr(mutation_lock_module.os, "close", lambda _fd: None)
+
+    assert mutation_lock_module._open_secure_file_at(directory, "receipt.jsonl", flags) == 79
+    assert calls == [
+        {
+            "path": directory.path / "receipt.jsonl",
+            "directory": False,
+            "access": 0x40000000 if flags & os.O_WRONLY else (0xC0000000 if flags & os.O_RDWR else 0x80000000),
+            "creation": expected_creation,
+        }
+    ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-child branch")
+def test_windows_secure_child_closes_descriptor_when_post_open_fstat_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CRT descriptor owns the raw handle after conversion, even on inspection failure."""
+    closed: list[int] = []
+    directory = mutation_lock_module._SecureDirectory(
+        _synthetic_windows_path("vault", "state"),
+        windows_handles=[71],
+        close_windows_handle=lambda _handle: None,
+    )
+    monkeypatch.setattr(mutation_lock_module, "_windows_open_path", lambda *_args, **_kwargs: 73)
+    monkeypatch.setattr(mutation_lock_module, "_windows_child_is_in_directory", lambda *_args: True)
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "msvcrt",
+        SimpleNamespace(open_osfhandle=lambda _handle, _flags: 79),
+    )
+    monkeypatch.setattr(
+        mutation_lock_module.os,
+        "fstat",
+        lambda _fd: (_ for _ in ()).throw(OSError("injected fstat failure")),
+    )
+    monkeypatch.setattr(mutation_lock_module.os, "close", closed.append)
+
+    with pytest.raises(OSError, match="injected fstat failure"):
+        mutation_lock_module._open_secure_file_at(directory, "receipt.jsonl", os.O_RDONLY)
+
+    assert closed == [79]
 
 
 def test_windows_private_dacl_deduplicates_local_system_principal() -> None:
@@ -353,7 +526,9 @@ def test_stale_or_malformed_metadata_cannot_report_a_verified_holder(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    state_root = tmp_path / "state"
+    mutation_lock_module.prepare_windows_private_state_root(state_root)
+    coordinator = VaultMutationCoordinator(state_root, vault)
     coordinator.metadata_path.parent.mkdir(parents=True, exist_ok=True)
     coordinator.metadata_path.write_text(payload, encoding="utf-8")
 
@@ -469,6 +644,7 @@ def test_probe_cleanup_cannot_delete_a_new_holders_metadata(
     state_root = tmp_path / "state"
     vault = tmp_path / "vault"
     vault.mkdir()
+    mutation_lock_module.prepare_windows_private_state_root(state_root)
     status_coordinator = VaultMutationCoordinator(state_root, vault)
     status_coordinator.metadata_path.parent.mkdir(parents=True, exist_ok=True)
     status_coordinator.metadata_path.write_text("stale", encoding="utf-8")
@@ -724,7 +900,9 @@ def test_orphan_snapshot_reports_real_age_when_metadata_mutex_is_contended(
     unknown holder at age 0."""
     vault = tmp_path / "vault"
     vault.mkdir()
-    coordinator = VaultMutationCoordinator(tmp_path / "state", vault, long_holder_seconds=60.0)
+    state_root = tmp_path / "state"
+    mutation_lock_module.prepare_windows_private_state_root(state_root)
+    coordinator = VaultMutationCoordinator(state_root, vault, long_holder_seconds=60.0)
 
     acquired_at = time.time() - 5.0
     holder = {
@@ -761,7 +939,9 @@ def test_orphan_snapshot_reports_real_age_when_metadata_mutex_is_contended(
 def test_orphan_snapshot_reports_real_overdue_state(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    coordinator = VaultMutationCoordinator(tmp_path / "state", vault, long_holder_seconds=1.0)
+    state_root = tmp_path / "state"
+    mutation_lock_module.prepare_windows_private_state_root(state_root)
+    coordinator = VaultMutationCoordinator(state_root, vault, long_holder_seconds=1.0)
 
     holder = {
         "schema": 1,
