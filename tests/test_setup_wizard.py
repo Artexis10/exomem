@@ -213,8 +213,10 @@ def test_hook_step_permission_error_reports_a_step_not_a_traceback(
     """
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
 
+    guarded = home / ".claude"
+
     def _guard_rejects(**_kwargs):
-        raise PermissionError(1, "unsafe writable or foreign-owned directory: /home/u/.claude")
+        raise PermissionError(1, f"unsafe writable or foreign-owned directory: {guarded}")
 
     monkeypatch.setattr(setup_wizard.hook_module, "install_hook", _guard_rejects)
 
