@@ -38,6 +38,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -916,28 +917,51 @@ def _has_audio_stream(path: Path) -> bool:
 _TESSERACT_READY = False
 
 
+#: Standard install locations for the UB-Mannheim Windows package, which does
+#: not put the binary on PATH.
+TESSERACT_INSTALL_CANDIDATES: tuple[str, ...] = (
+    "C:" + r"\Program Files\Tesseract-OCR\tesseract.exe",
+    "C:" + r"\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+)
+
+
+def resolve_tesseract_cmd() -> str | None:
+    """The Tesseract binary this install will actually use, or None.
+
+    THE single discovery answer, shared with `doctor`. Doctor previously kept
+    its own narrower set — `EXOMEM_TESSERACT_CMD` plus PATH — so on a host with
+    the UB-Mannheim package at its documented location it reported
+    `tool.tesseract` FAIL while extraction would have found and used the binary.
+    That made `scripts/upgrade.ps1 -Profile media` refuse a safe restart with
+    the release already staged. A dependency the runtime will use must pass
+    doctor, so the two cannot hold separate candidate sets.
+    """
+    explicit = (os.environ.get("EXOMEM_TESSERACT_CMD") or "").strip()
+    if explicit:
+        return explicit
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    return next((cand for cand in TESSERACT_INSTALL_CANDIDATES if Path(cand).is_file()), None)
+
+
 def _ensure_tesseract_cmd() -> None:
     """Point pytesseract at the Tesseract binary when it isn't on PATH.
 
     The UB-Mannheim Windows installer doesn't add Tesseract to PATH, and the
-    service process may not inherit a shell PATH that has it. Honor an explicit
-    `EXOMEM_TESSERACT_CMD`, else probe the standard install locations. Idempotent.
+    service process may not inherit a shell PATH that has it. Idempotent.
     """
     global _TESSERACT_READY
     if _TESSERACT_READY:
         return
-    import shutil
-
     import pytesseract
 
     explicit = os.environ.get("EXOMEM_TESSERACT_CMD")
     if explicit:
         pytesseract.pytesseract.tesseract_cmd = explicit
     elif not shutil.which("tesseract"):
-        for cand in (
-            "C:" + r"\Program Files\Tesseract-OCR\tesseract.exe",
-            "C:" + r"\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        ):
+        # Same candidate set doctor probes — that shared tuple is the point.
+        for cand in TESSERACT_INSTALL_CANDIDATES:
             if Path(cand).is_file():
                 pytesseract.pytesseract.tesseract_cmd = cand
                 break
