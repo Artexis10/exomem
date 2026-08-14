@@ -355,6 +355,54 @@ def _successful_kb_write(tool: dict) -> bool:
     return True
 
 
+#: Written by `install-hook`, cleared once an exomem MCP tool is observed. The
+#: hooks take effect for the CURRENT session, but the MCP server they reference
+#: is not loaded until the client restarts — so on a fresh install the very
+#: first thing the product does is ask for `remember` / `edit_memory` /
+#: `connect_memory`, none of which exist yet, and there is no CLI fallback for
+#: the write side. The nudge's own escape hatch ("no Knowledge Base configured,
+#: do nothing") cannot detect this case.
+PENDING_RESTART_MARKER = "pending-restart"
+
+#: Upper bound on the silence. The marker normally clears the moment an exomem
+#: tool appears, but a user who installs and never calls one would otherwise be
+#: muted forever — and the nudge is what prompts the first capture. After this,
+#: assume the restart happened.
+_PENDING_RESTART_MAX_AGE_SEC = 24 * 3600
+
+
+def _pending_restart_marker() -> Path:
+    return _hook_home() / ".cache" / "exomem-nudge" / PENDING_RESTART_MARKER
+
+
+def _exomem_tool_seen(tools: list[dict]) -> bool:
+    """Whether any exomem MCP tool appears this turn — read-only counts.
+
+    A read proves the server is loaded just as well as a write does, and this is
+    only ever used to answer "did the client restart yet".
+    """
+    return any(
+        re.search(r"exomem|knowledge[_-]?base", str(tool.get("name") or ""), re.I)
+        for tool in tools
+    )
+
+
+def _restart_pending(tools: list[dict]) -> bool:
+    """True while the MCP write tools the reminder asks for cannot exist yet."""
+    marker = _pending_restart_marker()
+    try:
+        if not marker.exists():
+            return False
+        if _exomem_tool_seen(tools) or (
+            time.time() - marker.stat().st_mtime > _PENDING_RESTART_MAX_AGE_SEC
+        ):
+            marker.unlink(missing_ok=True)
+            return False
+    except OSError:
+        return False
+    return True
+
+
 def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
     """Per-session timestamp file (mtime-based, so we never parse content)."""
     state_dir = _hook_home() / ".cache" / "exomem-nudge"
@@ -421,6 +469,8 @@ def main() -> int:
     transcript_text, tools = _latest_turn(tpath) if tpath else ("", [])
     assistant_text = event_assistant_text or transcript_text
     if any(_successful_kb_write(tool) for tool in tools):  # already captured this turn
+        return 0
+    if _restart_pending(tools):  # hooks are live but the MCP server is not loaded yet
         return 0
     if re.search(r"Saved\s*(?:->|→|:)", assistant_text):
         return 0
