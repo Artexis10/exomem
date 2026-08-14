@@ -3822,3 +3822,57 @@ def test_nested_repository_dirty_paths_survive_the_validator_round_trip(
     ]
     assert rejected == [], f"writer emitted paths its validator rejects: {rejected}"
     assert checkpoint._valid_workspace(workspace)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_trusted_directory_error_names_the_failing_ancestor_not_the_leaf(
+    tmp_path: Path,
+) -> None:
+    """#477: the guard walks ancestors but the message always named the leaf.
+
+    On a `umask 0002` box — the Debian/Ubuntu default — `~/.claude` and
+    `~/.claude/hooks` are both 0775, so a first install fails naming
+    `.claude/hooks`. Chmod that, and it fails again with the same path, because
+    the real offender is the ancestor. The reporter needed three runs to install.
+    """
+    home = tmp_path / "home"
+    hooks = home / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    (home / ".claude").chmod(0o775)  # the real offender
+    hooks.chmod(0o700)  # already fine
+
+    offenders = checkpoint.unsafe_trusted_directory_ancestors(hooks)
+
+    named = [path for path, _reason in offenders]
+    assert str(home / ".claude") in named
+    assert str(hooks) not in named
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_trusted_directory_reports_every_offender_in_one_pass(tmp_path: Path) -> None:
+    """One run must surface the whole chain, so one chmod clears it."""
+    home = tmp_path / "home"
+    hooks = home / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    (home / ".claude").chmod(0o775)
+    hooks.chmod(0o775)
+
+    offenders = checkpoint.unsafe_trusted_directory_ancestors(hooks)
+    named = [path for path, _reason in offenders]
+
+    assert str(home / ".claude") in named
+    assert str(hooks) in named
+    remediation = checkpoint.trusted_directory_remediation(offenders)
+    assert remediation.startswith("chmod g-w,o-w ")
+    assert str(home / ".claude") in remediation and str(hooks) in remediation
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_trusted_directory_accepts_a_clean_chain(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    hooks = home / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    for path in (home, home / ".claude", hooks):
+        path.chmod(0o755)
+
+    assert checkpoint.unsafe_trusted_directory_ancestors(hooks) == []
