@@ -25,6 +25,29 @@ from exomem import deferred_index, find_corpus, index_sync
 from exomem.vault import in_excluded_scan_dir, walk_vault_md
 
 
+def _completed_full_upsert_report(
+    vault_root: Path, paths: list[Path]
+) -> index_sync.IndexSyncReport:
+    root = vault_root.resolve()
+    rels = tuple(path.resolve().relative_to(root).as_posix() for path in paths)
+    return index_sync.IndexSyncReport(
+        "upsert",
+        rels,
+        rels,
+        tuple(
+            index_sync.IndexComponentOutcome(component, "completed", "completed")
+            for component in (
+                "memory_refs",
+                "resolver",
+                "semantic_purge",
+                "lexstore",
+                "epistemic_graph",
+                "embeddings",
+            )
+        ),
+    )
+
+
 def test_excluded_scan_dir_predicate() -> None:
     kb = "Knowledge Base"
     assert in_excluded_scan_dir(f"{kb}/_trash/2026-07-04/foo.md")
@@ -533,8 +556,8 @@ def test_full_index_drain_keeps_work_when_embeddings_report_incomplete(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("# full retry\n", encoding="utf-8")
     deferred_index.add_full(vault, [target.relative_to(vault).as_posix()])
-    monkeypatch.setattr(lexstore, "upsert_after_write", lambda *_a, **_kw: None)
-    monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_a, **_kw: None)
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda *_a, **_kw: True)
+    monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_a, **_kw: True)
     monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_a, **_kw: None)
     monkeypatch.setattr(
         epistemic_graph,
@@ -580,7 +603,7 @@ def test_full_index_drain_can_target_one_sidecar(
         vault,
         [first.relative_to(vault).as_posix(), second.relative_to(vault).as_posix()],
     )
-    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_a, **_kw: True)
+    monkeypatch.setattr(index_sync, "upsert_after_write", _completed_full_upsert_report)
 
     assert index_sync.drain_deferred_work(vault, paths=[first]) == 1
     assert deferred_index.full_status(vault)["paths"] == [
