@@ -495,6 +495,37 @@ def test_windows_census_reads_healthy_regular_sidecar(tmp_path: Path) -> None:
     assert {row.component for row in census.corrupt_rows} == {"vector"}
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows retained handles")
+def test_windows_sidecar_signature_changes_after_in_place_sqlite_write(tmp_path: Path) -> None:
+    from exomem import embedding_index, index_paths
+
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    conn = index._connect()
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../first.md', 0, 'private', X'00', 0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    sidecar = index_paths.sidecar_path(tmp_path)
+    before = audit_module._sidecar_signature(tmp_path, sidecar)
+
+    conn = sqlite3.connect(sidecar)
+    try:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../second.md', 0, 'private', X'00', 0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert audit_module._sidecar_signature(tmp_path, sidecar) != before
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows reparse points")
 @pytest.mark.parametrize("reparse_target", ["sidecar", "knowledge_base"])
 def test_windows_census_rejects_reparse_before_sqlite_connect(
@@ -635,6 +666,7 @@ def test_windows_binder_closes_partial_open_handles_in_reverse_order(
     monkeypatch.setattr(mutation_lock, "_windows_close_handle", closed.append)
     monkeypatch.setattr(mutation_lock, "_windows_child_is_in_directory", lambda *_args: True)
     monkeypatch.setattr(mutation_lock, "_windows_handle_identity", lambda handle: (0, 0, handle))
+    monkeypatch.setattr(audit_module, "_windows_handle_signature", lambda handle: (0, 0, handle, 0, 0))
 
     assert audit_module._bind_sidecar(sidecar, writable=False) == ("unreadable", None)
     assert opened == [1, 2, 3, 4]

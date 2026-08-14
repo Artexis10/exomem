@@ -687,6 +687,46 @@ def _sidecar_platform() -> Literal["posix", "windows", "unsupported"]:
     return "unsupported"
 
 
+def _windows_handle_signature(handle: int) -> tuple[int, int, int, int, int]:
+    """Return a stable identity and revision marker from one retained Windows handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    from . import mutation_lock
+
+    class _FileInfo(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("access_time", wintypes.FILETIME),
+            ("write_time", wintypes.FILETIME),
+            ("volume_serial", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    info = _FileInfo()
+    kernel32 = mutation_lock._windows_library(ctypes, "kernel32")  # noqa: SLF001
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(_FileInfo)]
+    get_info.restype = wintypes.BOOL
+    if not get_info(handle, ctypes.byref(info)):
+        raise OSError(
+            mutation_lock._windows_last_error(ctypes),  # noqa: SLF001
+            "cannot read retained Windows sidecar revision",
+        )
+    return (
+        int(info.volume_serial),
+        int(info.file_index_high),
+        int(info.file_index_low),
+        (int(info.size_high) << 32) | int(info.size_low),
+        (int(info.write_time.dwHighDateTime) << 32) | int(info.write_time.dwLowDateTime),
+    )
+
+
 def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidecarRepair | None]:
     """Pin a standard sidecar through no-follow vault-root and KB dirfds."""
     vault_root = path.parent.parent
@@ -776,7 +816,7 @@ def _bind_windows_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSid
         open_entry(vault_root, directory=True, parent_index=None)
         open_entry(path.parent, directory=True, parent_index=0)
         leaf_handle = open_entry(path, directory=False, parent_index=1)
-        signatures.append((path.name, mutation_lock._windows_handle_identity(leaf_handle)))
+        signatures.append((path.name, _windows_handle_signature(leaf_handle)))
         for suffix in ("-wal", "-shm", "-journal"):
             companion = path.with_name(path.name + suffix)
             try:
@@ -784,7 +824,7 @@ def _bind_windows_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSid
             except FileNotFoundError:
                 continue
             signatures.append(
-                (companion.name, mutation_lock._windows_handle_identity(companion_handle))
+                (companion.name, _windows_handle_signature(companion_handle))
             )
         bound = _BoundSidecarRepair(
             (), path, (), tuple(signatures), tuple(handles), tuple(checks)
