@@ -1347,36 +1347,83 @@ def _require_private_state_directory(directory: _SecureDirectory) -> None:
         raise OSError(f"state directory permissions are too broad: {mode:04o}")
 
 
-def _require_trusted_directory(directory: _SecureDirectory) -> None:
-    """Reject hook/config directories writable by another local principal."""
+def unsafe_trusted_directory_ancestors(path: Path) -> list[tuple[str, str]]:
+    """Every ancestor of `path` (and `path`) that fails the trusted-directory rule.
+
+    Returns `[(offending path, reason)]`, nearest-root first, empty when the whole
+    chain is trusted. Separated from the raise so a preflight can report the full
+    chain before anything is attempted: the guard rejects any ancestor, but the
+    caller only ever learns about one path per run, and on a `umask 0002` box
+    (the Debian/Ubuntu default) three separate directories fail in sequence.
+    Fixing them one failed run at a time is three installs to get one.
+    """
     if os.name == "nt":
-        return
+        return []
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     handles: list[int] = []
+    offenders: list[tuple[str, str]] = []
+    absolute = Path(path).absolute()
     try:
-        current = os.open(directory.path.anchor or "/", flags)
+        current = os.open(absolute.anchor or "/", flags)
         handles.append(current)
-        parts = directory.path.absolute().parts[1:]
+        parts = absolute.parts[1:]
+        walked = Path(absolute.anchor or "/")
         for index, part in enumerate(parts):
             child = os.open(part, flags, dir_fd=current)
             handles.append(child)
             current = child
+            walked = walked / part
             info = os.fstat(child)
             mode = stat.S_IMODE(info.st_mode)
-            final = index == len(parts) - 1
-            if final:
-                unsafe = info.st_uid != os.geteuid() or bool(mode & 0o022)
+            if index == len(parts) - 1:
+                if info.st_uid != os.geteuid():
+                    offenders.append((str(walked), "owned by another user"))
+                elif mode & 0o022:
+                    offenders.append((str(walked), f"group/other-writable ({mode:04o})"))
             else:
                 sticky_trusted = bool(mode & stat.S_ISVTX) and info.st_uid in {
                     0,
                     os.geteuid(),
                 }
-                unsafe = bool(mode & 0o022) and not sticky_trusted
-            if unsafe:
-                raise OSError(
-                    errno.EPERM,
-                    f"unsafe writable or foreign-owned directory: {directory.path}",
-                )
+                if mode & 0o022 and not sticky_trusted:
+                    offenders.append((str(walked), f"group/other-writable ({mode:04o})"))
+    finally:
+        while handles:
+            os.close(handles.pop())
+    return offenders
+
+
+def trusted_directory_remediation(offenders: list[tuple[str, str]]) -> str:
+    """A single command that clears every offending path in one go."""
+    return "chmod g-w,o-w " + " ".join(path for path, _reason in offenders)
+
+
+def _require_trusted_directory(directory: _SecureDirectory) -> None:
+    """Reject hook/config directories writable by another local principal."""
+    if os.name == "nt":
+        return
+    offenders = unsafe_trusted_directory_ancestors(directory.path)
+    if offenders:
+        detail = "; ".join(f"{path} ({reason})" for path, reason in offenders)
+        leaf = str(Path(directory.path).absolute())
+        # Name the path that actually failed. Interpolating the leaf sent users
+        # to chmod a directory that was already fine while the real offender —
+        # an ancestor — went unnamed.
+        scope = detail if offenders[-1][0] == leaf else f"{detail} (ancestor(s) of {leaf})"
+        raise OSError(
+            errno.EPERM,
+            f"unsafe writable or foreign-owned directory: {scope}; "
+            f"fix: {trusted_directory_remediation(offenders)}",
+        )
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    handles: list[int] = []
+    try:
+        current = os.open(directory.path.anchor or "/", flags)
+        handles.append(current)
+        for part in directory.path.absolute().parts[1:]:
+            child = os.open(part, flags, dir_fd=current)
+            handles.append(child)
+            current = child
         retained = os.fstat(directory.fd)
         reopened = os.fstat(current)
         if (retained.st_dev, retained.st_ino) != (reopened.st_dev, reopened.st_ino):
