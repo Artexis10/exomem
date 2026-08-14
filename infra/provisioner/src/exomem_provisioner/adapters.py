@@ -698,7 +698,7 @@ class KubernetesMaintenanceLeaseAdapter:
             self._coordination.delete_namespaced_lease,
             name,
             namespace,
-            {
+            body={
                 "preconditions": {
                     "uid": lease.metadata.uid,
                     "resourceVersion": lease.metadata.resource_version,
