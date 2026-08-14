@@ -211,6 +211,7 @@ def test_windows_secure_child_preserves_open_disposition_and_exclusive_create(
             "path": directory.path / "receipt.jsonl",
             "directory": False,
             "access": 0x40000000 if flags & os.O_WRONLY else (0xC0000000 if flags & os.O_RDWR else 0x80000000),
+            "share": 0x3,
             "creation": expected_creation,
         }
     ]
