@@ -93,6 +93,18 @@ _RECEIPT_TERMINAL_STATES = frozenset({"committed", "rejected"})
 _RECEIPT_TERMINAL_STATUSES = frozenset({"committed", "replayed", "rejected"})
 MAX_GRAPH_REBUILD_WAITERS = 128
 MAX_GRAPH_REBUILD_ATTEMPTS = 4
+
+#: `reconcile` is an internal registry name, not something a caller can run.
+#: The MCP surface is `maintain_memory(mode="reconcile")` and the CLI dispatches
+#: on the public product names (`exomem maintain --reconcile`); "run reconcile"
+#: matched neither, so a user following the remediation got a usage error from
+#: the server argument parser — the same defect as the doctor strings in #479.
+_RECONCILE_CALL = (
+    'maintain_memory(mode="reconcile") — `exomem maintain --reconcile` from a shell'
+)
+_RECONCILE_HINT = f"run {_RECONCILE_CALL} to recover the derived graph."
+_RECONCILE_REMEDIATION = f"Run {_RECONCILE_CALL} to recover the derived graph."
+_RETRY_OR_RECONCILE = f"Retry the same mutation identity, or {_RECONCILE_HINT}"
 _COORDINATORS: dict[str, GraphRebuildCoordinator] = {}
 _COORDINATORS_LOCK = threading.Lock()
 _LIVE_TEMPORARIES: set[Path] = set()
@@ -1613,7 +1625,7 @@ class GraphWaiterCapacityError(GraphRebuildRegistrationError):
     def __init__(self) -> None:
         super().__init__(
             "GRAPH_SYNC_WAITER_CAPACITY",
-            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+            f"Retry the same mutation identity, or {_RECONCILE_HINT}",
         )
 
 
@@ -1622,7 +1634,7 @@ class GraphRebuildStopped(GraphRebuildRegistrationError):
 
     def __init__(
         self,
-        remediation: str = "Retry the same mutation identity or run reconcile to recover the derived graph.",
+        remediation: str = f"Retry the same mutation identity, or {_RECONCILE_HINT}",
     ) -> None:
         super().__init__(
             "GRAPH_SYNC_REBUILD_STOPPED",
@@ -1636,7 +1648,7 @@ class GraphSidecarReplaceUnavailable(GraphRebuildRegistrationError):
     def __init__(self, _message: str = "live graph sidecar has an open reader") -> None:
         super().__init__(
             "GRAPH_SYNC_PLATFORM_SHARING_REFUSED",
-            "Release graph sidecar readers, then run reconcile to recover the derived graph.",
+            f"Release graph sidecar readers, then {_RECONCILE_HINT}",
         )
         self.args = (f"{_message}: {self.args[0]}",)
 
@@ -2234,7 +2246,7 @@ class GraphRebuildCoordinator:
                 self._running = False
                 self._error = GraphRebuildRegistrationError(
                     "GRAPH_SYNC_START_FAILED",
-                    "Retry the same mutation identity or run reconcile to recover the derived graph.",
+                    f"Retry the same mutation identity, or {_RECONCILE_HINT}",
                 )
                 self._condition.notify_all()
                 return GraphRebuildStart(False)
@@ -2299,13 +2311,13 @@ class GraphRebuildCoordinator:
                     try:
                         state = status(self.vault_root)["state"]
                     except Exception:  # noqa: BLE001 - status is fail-closed
-                        remediation = "Run reconcile to recover the derived graph."
+                        remediation = _RECONCILE_REMEDIATION
                     else:
                         remediation = (
                             "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
                             "to recover the derived graph."
                             if state == "unavailable"
-                            else "Retry the same mutation identity or run reconcile to recover the derived graph."
+                            else f"Retry the same mutation identity, or {_RECONCILE_HINT}"
                         )
                     projection = GraphRebuildStopped(remediation)
                     projection.__cause__ = error
@@ -2389,7 +2401,7 @@ def register_deferred(
         checkpoint,
         GraphRebuildRegistrationError(
             "GRAPH_SYNC_SCHEDULING_DISABLED",
-            "Enable graph scheduling or run reconcile to recover the derived graph.",
+            f"Enable graph scheduling, or {_RECONCILE_HINT}",
         ),
         admitted=False,
     )

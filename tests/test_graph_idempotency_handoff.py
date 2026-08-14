@@ -5,6 +5,11 @@ from pathlib import Path
 
 import pytest
 
+# Module scope because the parametrized remediation expectations below are built
+# at collection time. They reference the shared strings rather than re-pinning
+# copies: the wording is allowed to change, the semantics are not.
+from exomem import graph_sync
+
 
 def _receipt(root: Path, *, digest: str, attempt: object) -> None:
     from exomem import graph_sync
@@ -730,7 +735,7 @@ def test_compact_terminal_retains_deferred_graph_failure_from_real_lease_manager
     assert result["graph_sync_code"] == "GRAPH_SYNC_SCHEDULING_DISABLED"
     assert result["graph_sync_checkpoint"]
     assert result["graph_sync_remediation"] == (
-        "Enable graph scheduling or run reconcile to recover the derived graph."
+        f"Enable graph scheduling, or {graph_sync._RECONCILE_HINT}"
     )
 
 
@@ -845,12 +850,12 @@ def test_compact_terminal_retains_typed_platform_graph_failure(
         (
             "GraphSidecarReplaceUnavailable",
             "GRAPH_SYNC_PLATFORM_SHARING_REFUSED",
-            "Release graph sidecar readers, then run reconcile to recover the derived graph.",
+            f"Release graph sidecar readers, then {graph_sync._RECONCILE_HINT}",
         ),
         (
             "RuntimeError",
             "GRAPH_SYNC_REBUILD_STOPPED",
-            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+            graph_sync._RETRY_OR_RECONCILE,
         ),
     ],
 )
@@ -937,7 +942,7 @@ def test_lease_manager_preserves_graph_thread_start_failure(
     assert result["graph_sync"] == "failed"
     assert result["graph_sync_code"] == "GRAPH_SYNC_START_FAILED"
     assert result["graph_sync_remediation"] == (
-        "Retry the same mutation identity or run reconcile to recover the derived graph."
+        graph_sync._RETRY_OR_RECONCILE
     )
     assert replay == result
     assert calls == 1
