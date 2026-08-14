@@ -53,6 +53,93 @@ def _outside_target(tmp_path: Path, component: str) -> Path:
     return outside
 
 
+def test_windows_native_receipt_append_critical_chain_and_exact_retry_in_fresh_vault(
+    vault: Path,
+) -> None:
+    """Native handles support the complete ordinary-and-critical receipt protocol."""
+    ordinary = receipts.append_event(
+        vault,
+        event_type="disclosure",
+        payload={"outcomes": [{"ref": "Notes/native", "size": 1}]},
+    )
+    intent_kwargs = {
+        "operation": "delete",
+        "prior": "a" * 64,
+        "target": "b" * 64,
+        "affected_ids": ["native-note"],
+    }
+    intent = receipts.begin_event(vault, **intent_kwargs)
+    assert receipts.begin_event(vault, **intent_kwargs)["hash"] == intent["hash"]
+    terminal = receipts.commit_event(vault, intent["event_id"], outcome="deleted")
+    assert receipts.commit_event(vault, intent["event_id"], outcome="deleted")["hash"] == terminal[
+        "hash"
+    ]
+
+    verification = receipts.verify_chain(vault)
+    assert verification["valid"] is True
+    instance = verification["instances"][ordinary["instance_id"]]
+    assert instance["tail_seq"] == 3
+    head = receipts._read_sidecar_head(vault, ordinary["instance_id"])
+    assert head is not None
+    assert (head[0], head[2]) == (terminal["seq"], terminal["seq"])
+
+
+def test_windows_critical_directory_flush_failure_keeps_sidecar_heads_until_exact_retry(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file-ahead critical suffix cannot promote either sidecar head prematurely."""
+    ordinary = receipts.append_event(
+        vault,
+        event_type="disclosure",
+        payload={"outcomes": [{"ref": "Notes/flush", "size": 1}]},
+    )
+    instance_id = ordinary["instance_id"]
+    before_head = receipts._read_sidecar_head(vault, instance_id)
+    assert before_head is not None
+    intent_kwargs = {
+        "operation": "delete",
+        "prior": "a" * 64,
+        "target": "b" * 64,
+        "affected_ids": ["flush-note"],
+    }
+    original_flush = mutation_lock._windows_flush_directory_handle
+
+    def refuse_directory_flush(_handle: int) -> None:
+        raise OSError("injected shared directory flush refusal")
+
+    monkeypatch.setattr(
+        mutation_lock, "_windows_flush_directory_handle", refuse_directory_flush
+    )
+    with pytest.raises(receipts.ReceiptError, match="durable directory"):
+        receipts.begin_event(vault, **intent_kwargs)
+
+    assert receipts._read_sidecar_head(vault, instance_id) == before_head
+    instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / instance_id
+    records, issues = receipts._chain_state(instance_dir)
+    assert issues == []
+    assert len(records) == 2
+    assert records[-1]["phase"] == "intent"
+
+    monkeypatch.setattr(
+        mutation_lock, "_windows_flush_directory_handle", original_flush
+    )
+    retry = receipts.begin_event(vault, **intent_kwargs)
+
+    assert retry["hash"] == records[-1]["hash"]
+    records_after, issues_after = receipts._chain_state(instance_dir)
+    assert issues_after == []
+    assert len(records_after) == 2
+    recovered_head = receipts._read_sidecar_head(vault, instance_id)
+    assert recovered_head is not None
+    assert (recovered_head[0], recovered_head[1]) == (retry["seq"], retry["hash"])
+    assert (recovered_head[2], recovered_head[3]) == (retry["seq"], retry["hash"])
+    terminal = receipts.commit_event(vault, retry["event_id"], outcome="deleted")
+    assert receipts.verify_chain(vault)["valid"] is True
+    after_head = receipts._read_sidecar_head(vault, instance_id)
+    assert after_head is not None
+    assert (after_head[0], after_head[2]) == (terminal["seq"], terminal["seq"])
+
+
 def test_windows_month_open_never_uses_crt_to_open_retained_directory(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

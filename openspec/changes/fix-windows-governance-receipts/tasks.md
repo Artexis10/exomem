@@ -22,9 +22,9 @@
 
 ## 4. Native Windows Regression Coverage
 
-- [ ] 4.1 Add a Windows-only test for ordinary append, critical intent/terminal append, chain verification, and idempotent exact-ID retry in a fresh vault.
+- [x] 4.1 Add a Windows-only test for ordinary append, critical intent/terminal append, chain verification, and idempotent exact-ID retry in a fresh vault.
 - [x] 4.2 Add Windows-only reparse and namespace-swap probes proving no outside read, write, or creation occurs.
-- [ ] 4.3 Add a Windows-only injected directory-flush failure proving critical sidecar state does not advance.
+- [x] 4.3 Add a Windows-only injected directory-flush failure proving critical sidecar state does not advance.
 - [ ] 4.4 Run the native Windows module with the service-compatible Python runtime and record the result for the CI/release handoff.
 
 ## 5. Shared Lifecycle Durability
