@@ -32,6 +32,12 @@ Red evidence (2026-08-14): focused parser/status tests fail because no batch-fai
 
 ## 5. Verification And Delivery
 
-- [ ] 5.1 Run strict OpenSpec validation and focused transactional/media/deferred tests on native Windows.
-- [ ] 5.2 Run focused Ruff, public-artifact validation, and `git diff --check`.
+- [x] 5.1 Run strict OpenSpec validation and focused transactional/media/deferred tests on native Windows.
+- [x] 5.2 Run focused Ruff, public-artifact validation, and `git diff --check`.
 - [ ] 5.3 Run the full lean suite and separate baseline native Windows failures from introduced regressions.
+
+Native verification (2026-08-14): strict OpenSpec validation, public-artifact validation,
+changed-file Ruff, and `git diff --check` pass. Focused media-job (43), media-processing
+(68), deferred-drain (26), deferred-index (10), preserve (17), and graph-recovery (4)
+suites pass. Native full collection remains blocked by the same four POSIX-only collection
+errors as `origin/main`; the supported Linux lean gate remains required for 5.3.
