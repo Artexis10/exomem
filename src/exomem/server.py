@@ -535,6 +535,41 @@ def _legacy_mcp_commands(
     )
 
 
+#: Hosts that cannot receive a packet from another machine. `localhost` is
+#: excluded on purpose: it is a NAME, and what it resolves to is decided by
+#: /etc/hosts, so it is not a property this gate can verify.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "[::1]"})
+
+
+def local_http_allowed(bind_host: str) -> bool:
+    """Whether HTTP may skip GitHub OAuth for a purely local server.
+
+    `EXOMEM_REST_API_KEY` documents `/api/*` as a personal loopback facade, and
+    the retrieve hook builds exactly that URL — but no HTTP transport would
+    start without the full remote OAuth block, so the local path was
+    unreachable (#482).
+
+    All three conditions are required, and the gate fails closed on anything it
+    cannot verify:
+
+    - the bind host is literally loopback, so no other machine can connect;
+    - `EXOMEM_BASE_URL` is unset — a public base URL is remote intent, and this
+      must never be what a misconfigured remote deployment silently falls into;
+    - `EXOMEM_REST_API_KEY` is set, which is the operator stating they want the
+      local facade. Nobody sets a bearer key by accident.
+
+    `/api/*` keeps its own independent bearer check (`server_rest._rest_gate`)
+    and is unaffected by this. What this actually relaxes is the MCP endpoints,
+    which become reachable by any local process — the boundary a local stdio
+    server already has.
+    """
+    if bind_host.strip() not in _LOOPBACK_HOSTS:
+        return False
+    if os.environ.get("EXOMEM_BASE_URL", "").strip():
+        return False
+    return bool(os.environ.get("EXOMEM_REST_API_KEY", "").strip())
+
+
 def run(
     *,
     transport: str = "stdio",
@@ -549,14 +584,26 @@ def run(
         log_dir if log_dir is not None else resolve_log_dir(), process="server"
     )
 
-    require_auth = transport != "stdio"
+    resolved_host = os.environ.get("EXOMEM_HOST") or host or "127.0.0.1"
+    require_auth = transport != "stdio" and not local_http_allowed(resolved_host)
+    if transport != "stdio" and not require_auth:
+        log.warning(
+            "exomem starting LOOPBACK-ONLY on %s: GitHub OAuth is skipped because "
+            "the bind host is loopback, EXOMEM_BASE_URL is unset, and "
+            "EXOMEM_REST_API_KEY is set. /api/* still requires that bearer key. "
+            "The MCP endpoints are reachable by any local process — the same "
+            "boundary a local stdio server already has, but wider than a "
+            "single-parent stdio pipe on a shared machine. Set EXOMEM_BASE_URL "
+            "and the GitHub OAuth block for a remote connector.",
+            resolved_host,
+        )
     mcp = build_server(require_auth=require_auth)
 
     if transport == "stdio":
         log.info("exomem starting on stdio")
         mcp.run(transport="stdio")
     else:
-        host = os.environ.get("EXOMEM_HOST") or host or "127.0.0.1"
+        host = resolved_host
         log.info("exomem starting on %s host=%s port=%s", transport, host, port)
         mcp.run(
             transport=transport,
