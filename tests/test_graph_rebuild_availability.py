@@ -480,7 +480,8 @@ def test_recovered_isolated_reset_requires_exact_quarantine_identity(
     finally:
         held.close()
     (quarantine / ".manifest.json").write_bytes(graph_sync._reset_manifest_raw(reset, identities))
-    graph.write_bytes(b"replaced")
+    graph.unlink()
+    graph.write_bytes(b"replacement")
 
     with pytest.raises(graph_sync.GraphResetFailed):
         graph_sync._recover_interrupted_reset(tmp_path)
