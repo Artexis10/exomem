@@ -931,6 +931,18 @@ def run_setup(
             report("hooks", "[done] installed + wired")
         except FileNotFoundError as e:
             report("hooks", f"[failed: {e}]")
+        except OSError as e:
+            # The trusted-directory guard raises PermissionError, which is an
+            # OSError — uncaught, it escaped as a raw traceback after register,
+            # register-codex and skill had already succeeded. scripts/install.sh
+            # holds the line that a user never sees a stack trace; the wizard
+            # has to hold it too, and say that the earlier steps stuck.
+            report("hooks", f"[failed: {e}]")
+            print_fn("")
+            print_fn(
+                "  Setup is idempotent — fix the above and re-run the same command; "
+                "the completed steps are skipped."
+            )
     else:
         report("hooks", "[skipped]")
 
