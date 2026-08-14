@@ -3264,19 +3264,24 @@ def _disposition_finding(
         # succeeds and reliably leaves the cause in place, so the next edit
         # blocks again at three tool calls apiece, forever. Lead with the fix
         # that actually resolves it and say plainly what the fallback costs.
+        # Kept terse deliberately. Findings share a bounded response budget, and
+        # a wordier draft of this string pushed omitted contract results from 1
+        # to 17 in the 120 KB directory-review validation. The size guard in
+        # test_disposition_remediation_is_route_neutral is the ceiling to
+        # respect when editing it.
         remediation=(
             (
-                "Add a qualifying typed relation (resolves the cause). Or, "
-                "re-triggers next edit: validate_only=true; re-issue "
-                "the same edit with transition_token=<returned>, "
+                "Fix: add a qualifying typed relation. Retriggers: "
+                "validate_only=true; re-issue the same edit with "
+                "transition_token=<returned>, "
                 "relation_disposition=\"reviewed_none\", "
                 "relation_review_hash=<returned>, "
                 "relation_review_reason."
             )
             if existing
             else (
-                "Add a qualifying typed relation (resolves the cause). Or, "
-                "re-triggers next edit: call validate_only=true, then "
+                "Fix: add a qualifying typed relation. Retriggers: "
+                "call validate_only=true, then "
                 "re-issue the same creation unchanged with draft_id=<returned draft_id>, "
                 "draft_hash=<returned draft_hash>, draft_token=<returned "
                 "draft_token>, relation_disposition=\"reviewed_none\", "

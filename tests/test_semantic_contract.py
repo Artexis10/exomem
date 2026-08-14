@@ -2212,8 +2212,6 @@ def test_remediation_leads_with_the_fix_and_says_the_fallback_re_triggers(
         f for f in result.findings if f.code == "RELATION_DISPOSITION_STALE"
     )
     # The causal fix reads first, and the fallback is labelled with its cost.
-    assert finding.remediation.startswith("Add a qualifying typed relation (resolves the cause)")
-    assert "re-triggers next edit" in finding.remediation
-    assert finding.remediation.index("resolves the cause") < finding.remediation.index(
-        "reviewed_none"
-    )
+    assert finding.remediation.startswith("Fix: add a qualifying typed relation.")
+    assert "Retriggers:" in finding.remediation
+    assert finding.remediation.index("Fix:") < finding.remediation.index("reviewed_none")
