@@ -5,9 +5,9 @@ import os
 import pickle
 import re
 import stat
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest

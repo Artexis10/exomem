@@ -180,8 +180,6 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
 ) -> None:
     """Failure-state media commits own the same guarded deferred-token postlude."""
     result = _preserve_media_stub(vault, filename="guarded-failure.mp3")
-    sidecar = vault / result.sidecar_path
-    rel = sidecar.relative_to(vault).as_posix()
     manager = _RecordingMutationManager(vault)
     fanout_depths: list[int] = []
     floor_path = graph_sync.floor_path(vault)
