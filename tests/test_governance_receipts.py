@@ -1500,14 +1500,24 @@ def test_final_month_open_permission_error_is_normalized(vault: Path, monkeypatc
     event = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
     instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
     name = next(instance_dir.glob("*.jsonl")).name
-    original_open = receipts._open_secure_file_at
+    if receipts._is_windows():
+        original_secure_open = receipts._open_secure_file_at
 
-    def deny_final_entry(directory, child_name, flags, mode=0o600):
-        if child_name == name:
-            raise PermissionError("denied")
-        return original_open(directory, child_name, flags, mode)
+        def deny_final_entry(directory, child_name, flags, mode=0o600):
+            if child_name == name:
+                raise PermissionError("denied")
+            return original_secure_open(directory, child_name, flags, mode)
 
-    monkeypatch.setattr(receipts, "_open_secure_file_at", deny_final_entry)
+        monkeypatch.setattr(receipts, "_open_secure_file_at", deny_final_entry)
+    else:
+        original_os_open = receipts.os.open
+
+        def deny_final_entry(path, *args, **kwargs):
+            if Path(path).name == name:
+                raise PermissionError("denied")
+            return original_os_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(receipts.os, "open", deny_final_entry)
     with pytest.raises(receipts.ReceiptError, match="evidence path"):
         with receipts._open_month_fd(instance_dir, name):
             pass
@@ -1517,14 +1527,24 @@ def test_exclusive_month_create_permission_error_is_normalized(vault: Path, monk
     receipts.append_event(
         vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-06-30T12:00:00Z"
     )
-    original_open = receipts._open_secure_file_at
+    if receipts._is_windows():
+        original_secure_open = receipts._open_secure_file_at
 
-    def deny_create(directory, _name, flags, mode=0o600):
-        if flags & os.O_CREAT:
-            raise PermissionError("denied")
-        return original_open(directory, _name, flags, mode)
+        def deny_create(directory, _name, flags, mode=0o600):
+            if flags & os.O_CREAT:
+                raise PermissionError("denied")
+            return original_secure_open(directory, _name, flags, mode)
 
-    monkeypatch.setattr(receipts, "_open_secure_file_at", deny_create)
+        monkeypatch.setattr(receipts, "_open_secure_file_at", deny_create)
+    else:
+        original_os_open = receipts.os.open
+
+        def deny_create(path, flags, *args, **kwargs):
+            if flags & os.O_CREAT:
+                raise PermissionError("denied")
+            return original_os_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(receipts.os, "open", deny_create)
     with pytest.raises(receipts.ReceiptError, match="evidence path"):
         receipts.append_event(
             vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-07-01T00:00:00Z"
