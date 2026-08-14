@@ -9,6 +9,7 @@ this derived database is safe because startup scans reconstruct missing work.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import sqlite3
@@ -47,6 +48,122 @@ _TRANSIENT_OPERATION_CODES = frozenset(
         "WRITER_LEASE_REQUIRED",
     }
 )
+_BATCH_WRITE_ERROR_PREFIX = "BatchWriteError: "
+_MAX_BATCH_WRITE_ERROR_BYTES = 4096
+_MAX_BATCH_TARGET_LENGTH = 1024
+_RECONCILIATION_MESSAGE = "BatchWriteError: reconciliation required"
+_VALID_ROLLBACK_MESSAGE = "BATCH_ROLLBACK_INCOMPLETE: reconciliation required"
+_VALID_BATCH_ROLLBACK_PUBLIC_MESSAGE = "The batch could not be fully rolled back."
+_VALID_BATCH_ROLLBACK_PUBLIC_REMEDIATION = (
+    "Reconcile retained workspace state, then retry with fresh guards if the intended "
+    "write is still needed."
+)
+_RECONCILIATION_ACTION = (
+    "reconcile this media item's sidecar provenance with the current binary, then use targeted media retry"
+)
+
+
+@dataclass(frozen=True)
+class _BatchWriteFailure:
+    failure_code: str | None
+    targets: tuple[str, ...]
+    affected_count: int | None
+    omitted_target_count: int | None
+    reconciliation_required: bool
+    retryable: bool
+    message: str
+
+
+def _is_safe_batch_target(target: object) -> bool:
+    if not isinstance(target, str) or not target:
+        return False
+    try:
+        if len(target.encode("utf-8")) > _MAX_BATCH_TARGET_LENGTH:
+            return False
+    except UnicodeEncodeError:
+        return False
+    if "\\" in target or "\x00" in target or target.startswith("/") or ":" in target:
+        return False
+    return all(part and part not in {".", ".."} for part in target.split("/"))
+
+
+def _untrusted_batch_write_failure() -> _BatchWriteFailure:
+    return _BatchWriteFailure(
+        None,
+        (),
+        None,
+        None,
+        reconciliation_required=True,
+        retryable=False,
+        message=_RECONCILIATION_MESSAGE,
+    )
+
+
+def _classify_batch_write_failure(error: str | None) -> _BatchWriteFailure | None:
+    """Classify only a bounded, complete retained rollback envelope.
+
+    Stored worker text is untrusted. A trusted type prefix is enough to require
+    reconciliation, but target details are authoritative only when every
+    envelope field has the exact public ``BatchWriteError`` shape.
+    """
+    if not isinstance(error, str) or not error.startswith(_BATCH_WRITE_ERROR_PREFIX):
+        return None
+    payload = error.removeprefix(_BATCH_WRITE_ERROR_PREFIX)
+    if not payload or len(payload.encode("utf-8")) > _MAX_BATCH_WRITE_ERROR_BYTES:
+        return _untrusted_batch_write_failure()
+    try:
+        envelope = json.loads(payload)
+    except (TypeError, ValueError):
+        return _untrusted_batch_write_failure()
+    if not isinstance(envelope, dict):
+        return _untrusted_batch_write_failure()
+    outcome = envelope.get("outcome")
+    if (
+        set(envelope) != {"code", "message", "remediation", "outcome"}
+        or
+        envelope.get("code") != "BATCH_ROLLBACK_INCOMPLETE"
+        or envelope.get("message") != _VALID_BATCH_ROLLBACK_PUBLIC_MESSAGE
+        or envelope.get("remediation") != _VALID_BATCH_ROLLBACK_PUBLIC_REMEDIATION
+        or not isinstance(outcome, dict)
+        or set(outcome)
+        != {
+            "kind",
+            "committed",
+            "incomplete",
+            "affected_count",
+            "targets",
+            "omitted_target_count",
+        }
+        or outcome.get("kind") != "rollback_incomplete"
+        or outcome.get("committed") is not False
+        or outcome.get("incomplete") is not True
+    ):
+        return _untrusted_batch_write_failure()
+    affected_count = outcome.get("affected_count")
+    omitted_target_count = outcome.get("omitted_target_count")
+    targets = outcome.get("targets")
+    if (
+        isinstance(affected_count, bool)
+        or not isinstance(affected_count, int)
+        or affected_count < 0
+        or isinstance(omitted_target_count, bool)
+        or not isinstance(omitted_target_count, int)
+        or omitted_target_count < 0
+        or not isinstance(targets, list)
+        or len(targets) > 16
+        or affected_count != len(targets) + omitted_target_count
+        or not all(_is_safe_batch_target(target) for target in targets)
+    ):
+        return _untrusted_batch_write_failure()
+    return _BatchWriteFailure(
+        "BATCH_ROLLBACK_INCOMPLETE",
+        tuple(targets),
+        affected_count,
+        omitted_target_count,
+        reconciliation_required=True,
+        retryable=False,
+        message=_VALID_ROLLBACK_MESSAGE,
+    )
 
 
 def _is_transient_operation_error(error: str | None) -> bool:
@@ -508,6 +625,16 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def get_by_binary(self, binary_path: Path) -> MediaJob | None:
+        """Return the exact durable row for one vault-relative binary."""
+        binary_rel = self._relative(binary_path)
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM jobs WHERE binary_rel = ?", (binary_rel,)).fetchone()
+            return self._row_to_job(row) if row is not None else None
+        finally:
+            conn.close()
+
     def has_binary(self, binary_path: Path) -> bool:
         """Whether the ledger has work for this exact vault-relative binary."""
         binary_rel = self._relative(binary_path)
@@ -622,40 +749,62 @@ class MediaJobStore:
         *,
         include_failed: bool = False,
         binary_path: Path | None = None,
+        allow_reconciliation_required: bool = False,
     ) -> int:
         states = [BLOCKED]
         if include_failed:
             states.append(FAILED)
         placeholders = ",".join("?" for _ in states)
         target_clause = ""
-        params: list[object] = [time.time(), *states]
+        params: list[object] = [*states]
         if binary_path is not None:
             target_clause = " AND binary_rel = ?"
             params.append(self._relative(binary_path))
         conn = self._connect()
         try:
             with conn:
-                changed = conn.execute(
-                    f"UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
-                    f"WHERE state IN ({placeholders}){target_clause}",
+                candidates = conn.execute(
+                    f"SELECT id, state, last_error FROM jobs WHERE state IN ({placeholders}){target_clause}",
                     params,
-                ).rowcount
+                ).fetchall()
+                admitted = [
+                    (int(row["id"]), str(row["state"]), row["last_error"])
+                    for row in candidates
+                    if allow_reconciliation_required
+                    or _classify_batch_write_failure(row["last_error"]) is None
+                ]
+                if not admitted:
+                    return 0
+                now = time.time()
+                changed = 0
+                for job_id, state, error in admitted:
+                    changed += conn.execute(
+                        "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
+                        "WHERE id = ? AND state = ? AND last_error IS ?",
+                        (now, job_id, state, error),
+                    ).rowcount
                 return int(changed)
         finally:
             conn.close()
 
     def retryable_jobs(self, *, limit: int = STATUS_JOB_LIMIT) -> list[MediaJob]:
-        """Return a bounded, deterministic snapshot of blocked/failed work."""
+        """Return the first bounded eligible retry set without ambiguous starvation."""
         if isinstance(limit, bool) or limit <= 0:
             raise ValueError("media retry limit must be a positive integer")
         conn = self._connect()
         try:
             rows = conn.execute(
                 "SELECT * FROM jobs WHERE state IN ('blocked', 'failed') "
-                "ORDER BY id LIMIT ?",
-                (limit,),
-            ).fetchall()
-            return [self._row_to_job(row) for row in rows]
+                "ORDER BY id"
+            )
+            eligible: list[MediaJob] = []
+            for row in rows:
+                if _classify_batch_write_failure(row["last_error"]) is not None:
+                    continue
+                eligible.append(self._row_to_job(row))
+                if len(eligible) == limit:
+                    break
+            return eligible
         finally:
             conn.close()
 
@@ -764,7 +913,7 @@ class MediaJobStore:
 
 def _read_status_rows(
     conn: sqlite3.Connection,
-) -> tuple[list[Any], Any, list[Any], list[Any]]:
+) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
     rows = conn.execute("SELECT state, count(*) AS n FROM jobs GROUP BY state").fetchall()
     runtime = conn.execute(
         "SELECT worker_pid, idle_seconds FROM runtime WHERE singleton = 1"
@@ -778,7 +927,10 @@ def _read_status_rows(
         "FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
         (STATUS_JOB_LIMIT,),
     ).fetchall()
-    return rows, runtime, errors, jobs
+    reconciliation_rows = conn.execute(
+        "SELECT last_error FROM jobs WHERE state IN ('blocked', 'failed')"
+    ).fetchall()
+    return rows, runtime, errors, jobs, reconciliation_rows
 
 
 def _sqlite_file_identity(path: Path) -> tuple[int, int, int, int]:
@@ -796,7 +948,7 @@ def _sqlite_sidecar_exists(sidecars: tuple[Path, Path]) -> bool:
 
 def _diagnostic_snapshot_rows(
     path: Path,
-) -> tuple[list[Any], Any, list[Any], list[Any]]:
+) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
     sidecars = _sqlite_sidecars(path)
     if _sqlite_sidecar_exists(sidecars):
         raise OSError("media job database has live SQLite companions")
@@ -833,6 +985,7 @@ def status(
         "worker_active": False,
         "worker_pid": None,
         "idle_seconds": None,
+        "reconciliation_required_count": 0,
         "jobs": [],
         "errors": [],
     }
@@ -843,32 +996,34 @@ def status(
         return empty
     try:
         if diagnostic_snapshot:
-            rows, runtime, errors, jobs = _diagnostic_snapshot_rows(path)
+            rows, runtime, errors, jobs, reconciliation_rows = _diagnostic_snapshot_rows(path)
         else:
             store = MediaJobStore(vault_root, create=False)
             conn = store._connect(readonly=True)
             try:
-                rows, runtime, errors, jobs = _read_status_rows(conn)
+                rows, runtime, errors, jobs, reconciliation_rows = _read_status_rows(conn)
             finally:
                 conn.close()
         counts = {state: 0 for state in STATES}
         counts.update({str(row["state"]): int(row["n"]) for row in rows})
         pid = int(runtime["worker_pid"]) if runtime and runtime["worker_pid"] else None
         active = pid_alive(pid)
+        reconciliation_required_count = sum(
+            _classify_batch_write_failure(row["last_error"]) is not None
+            for row in reconciliation_rows
+        )
         return {
             "store": str(path),
-            "healthy": True,
+            "healthy": reconciliation_required_count == 0,
             "counts": counts,
             "worker_active": active,
             "worker_pid": pid if active else None,
             "idle_seconds": float(runtime["idle_seconds"])
             if runtime and runtime["idle_seconds"] is not None
             else None,
+            "reconciliation_required_count": reconciliation_required_count,
             "jobs": [_status_job(row) for row in jobs],
-            "errors": [
-                {"state": str(row["state"]), "message": str(row["last_error"] or "")}
-                for row in errors
-            ],
+            "errors": [_status_error(row) for row in errors],
         }
     except (OSError, sqlite3.Error) as exc:
         return {**empty, "store": str(path), "healthy": False, "errors": [str(exc)]}
@@ -896,7 +1051,7 @@ def _status_job(row: Any) -> dict[str, Any]:
         actions[FAILED] = "review the sidecar changes, then retry media processing"
     elif state == FAILED and error and error.startswith("stale extraction:"):
         actions[FAILED] = "retry media processing"
-    return {
+    result = {
         "id": int(row["id"]),
         "path": str(row["binary_rel"]),
         "sidecar_path": str(row["sidecar_rel"]),
@@ -907,3 +1062,48 @@ def _status_job(row: Any) -> dict[str, Any]:
         "retryable": state in {BLOCKED, FAILED},
         "next_action": actions[state],
     }
+    failure = _classify_batch_write_failure(error)
+    if failure is None:
+        return result
+    result.update(
+        {
+            "error": failure.message,
+            "retryable": failure.retryable,
+            "reconciliation_required": failure.reconciliation_required,
+            "next_action": _RECONCILIATION_ACTION,
+        }
+    )
+    if failure.failure_code is not None:
+        result.update(
+            {
+                "failure_code": failure.failure_code,
+                "targets": list(failure.targets),
+                "affected_count": failure.affected_count,
+                "omitted_target_count": failure.omitted_target_count,
+            }
+        )
+    return result
+
+
+def _status_error(row: Any) -> dict[str, Any]:
+    error = str(row["last_error"] or "")
+    result: dict[str, Any] = {"state": str(row["state"]), "message": error}
+    failure = _classify_batch_write_failure(error)
+    if failure is None:
+        return result
+    result.update(
+        {
+            "message": failure.message,
+            "reconciliation_required": failure.reconciliation_required,
+        }
+    )
+    if failure.failure_code is not None:
+        result.update(
+            {
+                "failure_code": failure.failure_code,
+                "targets": list(failure.targets),
+                "affected_count": failure.affected_count,
+                "omitted_target_count": failure.omitted_target_count,
+            }
+        )
+    return result
