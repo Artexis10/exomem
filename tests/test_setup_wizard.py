@@ -200,6 +200,35 @@ def test_legacy_skill_is_migrated(tmp_path: Path) -> None:
     assert "removed stale" in out
 
 
+def test_hook_step_permission_error_reports_a_step_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#478: the trusted-directory guard raises PermissionError, an OSError.
+
+    Only FileNotFoundError was caught, so the guard's rejection escaped as a raw
+    stack trace — after register, register-codex and skill had already applied.
+    scripts/install.sh keeps failures in plain language precisely so users never
+    see a traceback; the wizard has to hold the same line, and has to say the
+    earlier steps stuck so a user does not assume nothing happened.
+    """
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+
+    def _guard_rejects(**_kwargs):
+        raise PermissionError(1, "unsafe writable or foreign-owned directory: /home/u/.claude")
+
+    monkeypatch.setattr(setup_wizard.hook_module, "install_hook", _guard_rejects)
+
+    code, out = _setup(vault, home, Recorder(), with_hooks=True)
+
+    assert code == 1
+    assert "Traceback" not in out
+    assert "hooks: [failed:" in out
+    assert "unsafe writable" in out
+    # The steps that did apply are named, so the user knows the state they are in.
+    assert "skill" in out
+    assert "idempotent" in out
+
+
 def test_setup_generates_access_policy(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
     code, out = _setup(vault, home, Recorder())
