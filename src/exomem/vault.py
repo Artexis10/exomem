@@ -128,6 +128,12 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
     }
 )
 VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
+_GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
+
+
+def is_graph_reset_runtime_dir_name(name: str) -> bool:
+    """Whether ``name`` is one exact graph-lineage reset workspace."""
+    return _GRAPH_RESET_RUNTIME_DIR_NAME.fullmatch(name) is not None
 
 
 def in_excluded_scan_dir(rel_path: str) -> bool:
@@ -142,10 +148,15 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
     sidecar (observed 2026-07-04: dup warnings flagging trash entries).
     """
+    segments = rel_path.replace("\\", "/").split("/")
     return any(
         seg in VAULT_SCAN_SKIP_DIRS
         or any(seg.startswith(prefix) for prefix in VAULT_SCAN_SKIP_DIR_PREFIXES)
-        for seg in rel_path.replace("\\", "/").split("/")
+        for seg in segments
+    ) or (
+        len(segments) >= 2
+        and segments[0] == kb_dirname()
+        and is_graph_reset_runtime_dir_name(segments[1])
     )
 
 
@@ -3949,7 +3960,7 @@ def walk_vault_md(vault_root: Path):
             return
         for child in children:
             if child.is_dir():
-                if in_excluded_scan_dir(child.name):
+                if in_excluded_scan_dir(child.relative_to(vault_root).as_posix()):
                     continue
                 yield from walk(child)
             elif (

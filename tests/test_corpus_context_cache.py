@@ -25,6 +25,7 @@ from exomem import (
     semantic_writes,
 )
 from exomem import find as find_module
+from exomem import vault as vault_module
 from exomem.vault import WikilinkResolver
 
 _PAGE_REL = "Knowledge Base/Notes/Insights/one.md"
@@ -69,6 +70,7 @@ def test_reserved_runtime_trees_do_not_enter_identity_census_or_cache_token(
     vault: Path,
 ) -> None:
     receipt_root = vault / "Knowledge Base" / ".graph-commit-receipts"
+    reset_root = vault / "Knowledge Base" / f".graph-reset-{'c' * 24}"
     batch_root = (
         vault
         / "Knowledge Base"
@@ -76,26 +78,48 @@ def test_reserved_runtime_trees_do_not_enter_identity_census_or_cache_token(
         / "Insights"
         / f".exomem-batch-{'a' * 32}"
     )
+    nested_reset_root = (
+        vault / "Knowledge Base" / "Notes" / f".graph-reset-{'1' * 24}"
+    )
     receipt_root.mkdir()
+    reset_root.mkdir()
     batch_root.mkdir()
+    nested_reset_root.mkdir()
     receipt_page = receipt_root / "private.md"
+    reset_page = reset_root / "private.md"
     batch_page = batch_root / "stage.md"
+    nested_reset_page = nested_reset_root / "page.md"
     invalid_runtime_page = "---\nexomem_id: not-a-stable-id\n---\n"
     receipt_page.write_text(invalid_runtime_page, encoding="utf-8")
+    reset_page.write_text(invalid_runtime_page, encoding="utf-8")
     batch_page.write_text(invalid_runtime_page, encoding="utf-8")
+    nested_reset_page.write_text(
+        _page(title="Nested reset lookalike"), encoding="utf-8"
+    )
 
     first = semantic_contract.build_corpus_context(vault)
 
     assert set(first.pages) == {
         "Knowledge Base/Notes/Insights/one.md",
         "Knowledge Base/Notes/Insights/two.md",
+        f"Knowledge Base/Notes/.graph-reset-{'1' * 24}/page.md",
     }
     assert {entry.path for entry in first.identity_census.entries} == set(first.pages)
 
     receipt_page.write_text(invalid_runtime_page + "receipt changed\n", encoding="utf-8")
+    reset_page.write_text(invalid_runtime_page + "reset changed\n", encoding="utf-8")
     batch_page.write_text(invalid_runtime_page + "batch changed\n", encoding="utf-8")
 
     assert semantic_contract.build_corpus_context(vault) is first
+
+    nested_reset_page.write_text(
+        _page(title="Changed nested reset lookalike"), encoding="utf-8"
+    )
+    changed = semantic_contract.build_corpus_context(vault)
+    assert changed is not first
+    assert changed.pages[
+        f"Knowledge Base/Notes/.graph-reset-{'1' * 24}/page.md"
+    ].title == "Changed nested reset lookalike"
 
     kb = vault / "Knowledge Base"
     assert not semantic_contract._prune_identity_census_directory(
@@ -103,6 +127,21 @@ def test_reserved_runtime_trees_do_not_enter_identity_census_or_cache_token(
     )
     assert not semantic_contract._prune_identity_census_directory(
         kb, kb / "Notes", f".EXOMEM-BATCH-{'b' * 32}"
+    )
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb, f".GRAPH-RESET-{'d' * 24}"
+    )
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb, ".graph-reset-not-an-operation-id"
+    )
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb / "Notes", f".graph-reset-{'e' * 24}"
+    )
+    assert vault_module.in_excluded_scan_dir(
+        f"Knowledge Base/.graph-reset-{'f' * 24}/private.md"
+    )
+    assert not vault_module.in_excluded_scan_dir(
+        f"Knowledge Base/Notes/.graph-reset-{'f' * 24}/private.md"
     )
 
 

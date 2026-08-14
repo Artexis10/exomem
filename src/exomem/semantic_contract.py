@@ -101,7 +101,13 @@ _IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts"})
 
 def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
     """Whether a directory is runtime state rather than canonical Markdown."""
-    return (directory == kb and name in _IDENTITY_CENSUS_RESERVED_KB_DIRS) or any(
+    return (
+        directory == kb
+        and (
+            name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
+            or vault.is_graph_reset_runtime_dir_name(name)
+        )
+    ) or any(
         name.startswith(prefix) for prefix in vault.VAULT_SCAN_SKIP_DIR_PREFIXES
     )
 
@@ -1267,7 +1273,7 @@ def _corpus_census(root: Path) -> tuple | None:
         for child in os.scandir(directory):
             path = Path(child.path)
             if child.is_dir():
-                if vault.in_excluded_scan_dir(child.name):
+                if vault.in_excluded_scan_dir(path.relative_to(root).as_posix()):
                     continue
                 loose_walk(path)
             elif (
