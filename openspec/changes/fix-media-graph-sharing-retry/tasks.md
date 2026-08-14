@@ -34,10 +34,15 @@ Red evidence (2026-08-14): focused parser/status tests fail because no batch-fai
 
 - [x] 5.1 Run strict OpenSpec validation and focused transactional/media/deferred tests on native Windows.
 - [x] 5.2 Run focused Ruff, public-artifact validation, and `git diff --check`.
-- [ ] 5.3 Run the full lean suite and separate baseline native Windows failures from introduced regressions.
+- [x] 5.3 Run the full lean suite and separate baseline native Windows failures from introduced regressions.
 
 Native verification (2026-08-14): strict OpenSpec validation, public-artifact validation,
 changed-file Ruff, and `git diff --check` pass. Focused media-job (43), media-processing
 (68), deferred-drain (26), deferred-index (10), preserve (17), and graph-recovery (4)
 suites pass. Native full collection remains blocked by the same four POSIX-only collection
-errors as `origin/main`; the supported Linux lean gate remains required for 5.3.
+errors as `origin/main`. Supported Linux verification at `29e5793e` passed all eight lean
+Python 3.11/3.13 shards plus the required CI gate. The run also caught and corrected stale
+full-index test doubles that returned unverified legacy values; the related index/deferred
+regression set then passed 58 tests. One unrelated continuation-prune deadline assertion
+failed once under full-suite load, passed as an exact Linux 3.13 reproduction, and passed on
+the clean failed-job retry.
