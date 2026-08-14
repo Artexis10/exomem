@@ -96,6 +96,14 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
 
 log = logging.getLogger(__name__)
 _REVIEW_FINGERPRINT_UNSET = object()
+_IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts"})
+
+
+def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
+    """Whether a directory is runtime state rather than canonical Markdown."""
+    return (directory == kb and name in _IDENTITY_CENSUS_RESERVED_KB_DIRS) or any(
+        name.startswith(prefix) for prefix in vault.VAULT_SCAN_SKIP_DIR_PREFIXES
+    )
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
@@ -1223,8 +1231,8 @@ def _corpus_cache_key(root: Path) -> tuple[str, str]:
 def _corpus_census(root: Path) -> tuple | None:
     """Stat census of every filesystem input ``build_corpus_context`` reads.
 
-    Mirrors both production walks — ``_build_identity_census`` (every ``.md``
-    under the KB, refusing filesystem aliases) and ``vault.walk_vault_md``
+    Mirrors both production walks — ``_build_identity_census`` (every canonical
+    ``.md`` under the KB, refusing filesystem aliases) and ``vault.walk_vault_md``
     (the full vault minus skip dirs and sync-conflict copies) — and appends
     the non-Markdown inputs: ``_access.yaml`` (page eligibility via
     ``access.access_tier``) and the two ``_Schema`` registry files. Returns
@@ -1235,8 +1243,11 @@ def _corpus_census(root: Path) -> tuple | None:
     kb = vault.kb_root(root)
 
     def strict_walk(directory: Path) -> None:
-        # Mirror of _build_identity_census: every entry under KB, alias-free.
+        # Mirror of _build_identity_census: every canonical entry under KB,
+        # alias-free. Closed runtime namespaces are never knowledge inputs.
         for child in os.scandir(directory):
+            if _prune_identity_census_directory(kb, directory, child.name):
+                continue
             path = Path(child.path)
             info = child.stat(follow_symlinks=False)
             if child.is_symlink() or vault._is_reparse(info):
@@ -1256,7 +1267,7 @@ def _corpus_census(root: Path) -> tuple | None:
         for child in os.scandir(directory):
             path = Path(child.path)
             if child.is_dir():
-                if child.name in vault.VAULT_SCAN_SKIP_DIRS:
+                if vault.in_excluded_scan_dir(child.name):
                     continue
                 loose_walk(path)
             elif (
@@ -1593,8 +1604,9 @@ def _reconcile_markdown_delta(
 ) -> SemanticCorpusContext:
     """Apply current Markdown bytes to an already-materialized context.
 
-    The stable-identity census intentionally covers every Markdown file under
-    the KB, including scan-excluded paths. The semantic page map mirrors
+    The stable-identity census intentionally covers every canonical Markdown
+    file under the KB, including scan-excluded paths. Closed runtime namespaces
+    remain excluded. The semantic page map mirrors
     ``vault.walk_vault_md`` and therefore excludes trash/schema/sync-conflict
     paths. Any read or identity ambiguity raises through the same full-build
     validation types instead of blessing partial state.
@@ -2079,7 +2091,7 @@ def _build_corpus_context_uncached(
 def _build_identity_census(
     root: Path,
 ) -> tuple[StableIdentityCensus, Mapping[str, str]]:
-    """Read every Markdown file below KB once without following aliases."""
+    """Read every canonical Markdown file below KB without following aliases."""
     kb = vault.kb_root(root)
     entries: list[StableIdentityEntry] = []
     sources: dict[str, str] = {}
@@ -2093,6 +2105,8 @@ def _build_identity_census(
                 "could not enumerate the stable-identity census",
             ) from error
         for child in children:
+            if _prune_identity_census_directory(kb, directory, child.name):
+                continue
             path = Path(child.path)
             try:
                 info = child.stat(follow_symlinks=False)

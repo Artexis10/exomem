@@ -65,6 +65,47 @@ def test_unchanged_corpus_is_reused(vault: Path) -> None:
     }
 
 
+def test_reserved_runtime_trees_do_not_enter_identity_census_or_cache_token(
+    vault: Path,
+) -> None:
+    receipt_root = vault / "Knowledge Base" / ".graph-commit-receipts"
+    batch_root = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Insights"
+        / f".exomem-batch-{'a' * 32}"
+    )
+    receipt_root.mkdir()
+    batch_root.mkdir()
+    receipt_page = receipt_root / "private.md"
+    batch_page = batch_root / "stage.md"
+    invalid_runtime_page = "---\nexomem_id: not-a-stable-id\n---\n"
+    receipt_page.write_text(invalid_runtime_page, encoding="utf-8")
+    batch_page.write_text(invalid_runtime_page, encoding="utf-8")
+
+    first = semantic_contract.build_corpus_context(vault)
+
+    assert set(first.pages) == {
+        "Knowledge Base/Notes/Insights/one.md",
+        "Knowledge Base/Notes/Insights/two.md",
+    }
+    assert {entry.path for entry in first.identity_census.entries} == set(first.pages)
+
+    receipt_page.write_text(invalid_runtime_page + "receipt changed\n", encoding="utf-8")
+    batch_page.write_text(invalid_runtime_page + "batch changed\n", encoding="utf-8")
+
+    assert semantic_contract.build_corpus_context(vault) is first
+
+    kb = vault / "Knowledge Base"
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb, ".GRAPH-COMMIT-RECEIPTS"
+    )
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb / "Notes", f".EXOMEM-BATCH-{'b' * 32}"
+    )
+
+
 def test_content_change_rebuilds(vault: Path) -> None:
     first = semantic_contract.build_corpus_context(vault)
     (vault / _PAGE_REL).write_text(

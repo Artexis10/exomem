@@ -124,10 +124,11 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         "_Adoption",
     }
 )
+VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
 
 
 def in_excluded_scan_dir(rel_path: str) -> bool:
-    """True when any segment of `rel_path` is one of VAULT_SCAN_SKIP_DIRS.
+    """True when any segment of `rel_path` is a reserved scan directory.
 
     The incremental-path counterpart of the exclusion every FULL walk applies
     (walk_vault_md, find's walker, the inbound scan): event-driven patchers
@@ -138,7 +139,11 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
     sidecar (observed 2026-07-04: dup warnings flagging trash entries).
     """
-    return any(seg in VAULT_SCAN_SKIP_DIRS for seg in rel_path.replace("\\", "/").split("/"))
+    return any(
+        seg in VAULT_SCAN_SKIP_DIRS
+        or any(seg.startswith(prefix) for prefix in VAULT_SCAN_SKIP_DIR_PREFIXES)
+        for seg in rel_path.replace("\\", "/").split("/")
+    )
 
 
 # `[[Target]]` or `[[Target|Alias]]`.
@@ -3897,7 +3902,7 @@ def walk_vault_md(vault_root: Path):
             return
         for child in children:
             if child.is_dir():
-                if child.name in VAULT_SCAN_SKIP_DIRS:
+                if in_excluded_scan_dir(child.name):
                     continue
                 yield from walk(child)
             elif (
