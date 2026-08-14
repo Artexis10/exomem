@@ -1252,6 +1252,27 @@ def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
     raise RuntimeError(f"concurrent hook config changes persisted at {path}")
 
 
+def _mark_restart_pending(hook_dir: Path) -> None:
+    """Record that hooks are live but the MCP server is not loaded yet.
+
+    Installing hooks takes effect for the CURRENT session; the MCP server they
+    were just registered alongside does not, until the client restarts. So on a
+    fresh install the Stop nudge fires immediately and asks for `remember`,
+    `edit_memory` and `connect_memory` — all MCP-only, none of which exist yet,
+    and the write side has no CLI fallback. The nudge reads this marker and
+    stays silent until an exomem tool proves the server is loaded.
+
+    Best-effort: a marker that cannot be written costs a premature nudge, never
+    a failed install, so this must not raise into the install path.
+    """
+    marker = hook_dir.parent / ".cache" / "exomem-nudge" / "pending-restart"
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def install_hook(
     *,
     hook_dir: Path | None = None,
@@ -1302,6 +1323,8 @@ def install_hook(
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_SCRIPT, hook_dir / _CONTINUATION_SCRIPT)
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_WRAPPER, hook_dir / _CONTINUATION_WRAPPER)
         installed.extend(_continuation_items(hook_dir, client))
+
+    _mark_restart_pending(hook_dir)
 
     result = {
         "installed": installed,

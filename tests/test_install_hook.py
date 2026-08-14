@@ -2078,3 +2078,70 @@ def test_retrieve_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path:
     assert (home / ".codex" / ".cache" / "exomem-nudge" / "retrieve_codex-ret").exists()
     assert (home / ".codex" / "exomem-retrieve-nudge.log").exists()
     assert not (home / ".claude" / "exomem-retrieve-nudge.log").exists()
+
+
+# --- #484: the nudge must not ask for MCP tools that cannot exist yet -----------
+
+
+def test_install_hook_marks_a_pending_restart(tmp_path: Path) -> None:
+    """Hooks take effect this session; the MCP server does not until a restart."""
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    marker = tmp_path / ".cache" / "exomem-nudge" / "pending-restart"
+    assert marker.is_file()
+
+
+def test_capture_nudge_is_silent_while_a_restart_is_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem._hooks import exomem_capture_nudge as capture_hook
+
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
+    marker = tmp_path / ".cache" / "exomem-nudge" / "pending-restart"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(time.time()), encoding="utf-8")
+
+    assert capture_hook._restart_pending([]) is True
+
+
+def test_an_observed_exomem_tool_clears_the_pending_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any exomem tool — read or write — proves the server is loaded."""
+    from exomem._hooks import exomem_capture_nudge as capture_hook
+
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
+    marker = tmp_path / ".cache" / "exomem-nudge" / "pending-restart"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(time.time()), encoding="utf-8")
+
+    assert capture_hook._restart_pending([{"name": "mcp__exomem__ask_memory"}]) is False
+    assert not marker.exists(), "the marker must be cleared, not just ignored"
+
+
+def test_a_stale_pending_restart_stops_muting_the_nudge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The nudge is what prompts the first capture, so it cannot mute forever."""
+    from exomem._hooks import exomem_capture_nudge as capture_hook
+
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
+    marker = tmp_path / ".cache" / "exomem-nudge" / "pending-restart"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("old", encoding="utf-8")
+    stale = time.time() - capture_hook._PENDING_RESTART_MAX_AGE_SEC - 60
+    os.utime(marker, (stale, stale))
+
+    assert capture_hook._restart_pending([]) is False
+    assert not marker.exists()
+
+
+def test_no_marker_means_the_nudge_behaves_exactly_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem._hooks import exomem_capture_nudge as capture_hook
+
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
+
+    assert capture_hook._restart_pending([]) is False
