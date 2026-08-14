@@ -28,4 +28,4 @@
 - [ ] 5.1 Validate the OpenSpec change strictly; run Ruff, targeted Mypy, `git diff --check`, focused suites, and the embeddings-disabled project suite with clean temporary/runtime roots.
 - [ ] 5.2 Build the wheel and run installed-wheel product reproductions for frontmatter-less editing, overwrite token replay, graph failure/recovery, and Windows census; retain exact command evidence.
 - [ ] 5.3 Obtain an independent code/security review and independent end-to-end verifier pass, fix confirmed findings, and rerun invalidated gates.
-- [ ] 5.4 Commit only intended scope, integrate the current remote default branch safely in this worktree, push, and open a ready Conventional Commit pull request with rationale and verification evidence.
+- [x] 5.4 Commit only intended scope, integrate the current remote default branch safely in this worktree, push, and open a ready Conventional Commit pull request with rationale and verification evidence.
