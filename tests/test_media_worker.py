@@ -16,6 +16,7 @@ from exomem import (
     embeddings,
     extract,
     graph_sync,
+    index_sync,
     media_jobs,
     media_worker,
     preserve,
@@ -164,7 +165,11 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
         {
             "operation": "background_media_extraction_commit",
             "holder_kind": "background",
-        }
+        },
+        {
+            "operation": "background_media_graph_completion",
+            "holder_kind": "background",
+        },
     ]
     assert fanout_depths == [0]
     assert manager.depth == 0
@@ -183,7 +188,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     checkpoint_path = graph_sync.checkpoint_path(vault)
     original_add_full = deferred_index.add_full
     original_batch = preserve.batch_atomic_write
-    original_read_artifact = graph_sync._read_bounded_bytes
+    original_read_artifact = media_worker.read_bounded_guarded_bytes
     original_replace = vault_module.os.replace
     token = None
     postlude_reads: list[str] = []
@@ -208,7 +213,8 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
             token = result
         return result
 
-    def read_postlude_artifact(path, *args, **kwargs):  # noqa: ANN001
+    def read_postlude_artifact(root, target, *args, **kwargs):  # noqa: ANN001
+        path = Path(root) / target
         if (
             len(manager.guard_metadata) >= 2
             and not checkpoint_published
@@ -216,7 +222,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         ):
             assert manager.depth > 0
             postlude_reads.append("floor" if Path(path) == floor_path else "predecessor")
-        return original_read_artifact(path, *args, **kwargs)
+        return original_read_artifact(root, target, *args, **kwargs)
 
     def replace_checkpoint_inside_postlude(source, destination, *args, **kwargs):  # noqa: ANN001
         nonlocal checkpoint_published, checkpoint_replaced
@@ -233,6 +239,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         assert token is not None
         assert graph_sync.read_checkpoint(root) == token.checkpoint
         fanout_depths.append(manager.depth)
+        return True
 
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager)
     monkeypatch.setattr(extract, "extract_text", unavailable)
@@ -240,7 +247,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         deferred_index, "add_full_receipts", admit_full_receipts, raising=False
     )
     monkeypatch.setattr(preserve, "batch_atomic_write", capture_token)
-    monkeypatch.setattr(graph_sync, "_read_bounded_bytes", read_postlude_artifact)
+    monkeypatch.setattr(media_worker, "read_bounded_guarded_bytes", read_postlude_artifact)
     monkeypatch.setattr(vault_module.os, "replace", replace_checkpoint_inside_postlude)
     monkeypatch.setattr(
         media_worker, "post_commit_batch_fanout", completed_fanout
@@ -329,7 +336,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     manager = _RecordingMutationManager(vault)
     floor = graph_sync.floor_path(vault)
     checkpoint = graph_sync.checkpoint_path(vault)
-    original_read_artifact = graph_sync._read_bounded_bytes
+    original_read_artifact = media_worker.read_bounded_guarded_bytes
     original_replace = vault_module.os.replace
     postlude_reads: list[str] = []
     checkpoint_replaced = False
@@ -344,11 +351,12 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     )
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager)
 
-    def read_artifact_inside_postlude(path, *args, **kwargs):  # noqa: ANN001
+    def read_artifact_inside_postlude(root, target, *args, **kwargs):  # noqa: ANN001
+        path = Path(root) / target
         if len(manager.guard_metadata) >= 2 and Path(path) in {floor, checkpoint}:
             assert manager.depth > 0
             postlude_reads.append("floor" if Path(path) == floor else "predecessor")
-        return original_read_artifact(path, *args, **kwargs)
+        return original_read_artifact(root, target, *args, **kwargs)
 
     def replace_checkpoint_inside_postlude(source, destination, *args, **kwargs):  # noqa: ANN001
         nonlocal checkpoint_replaced
@@ -360,8 +368,11 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     def fanout_after_postlude(*_args, **_kwargs):
         assert manager.depth == 0
         fanout_depths.append(manager.depth)
+        return True
 
-    monkeypatch.setattr(graph_sync, "_read_bounded_bytes", read_artifact_inside_postlude)
+    monkeypatch.setattr(
+        media_worker, "read_bounded_guarded_bytes", read_artifact_inside_postlude
+    )
     monkeypatch.setattr(vault_module.os, "replace", replace_checkpoint_inside_postlude)
     monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout_after_postlude)
 
@@ -607,6 +618,236 @@ def test_checkpoint_only_mismatch_suppresses_media_postlude_and_retains_receipt(
     )
 
 
+def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_token(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guarded checkpoint write rejects artifacts replaced after its CAS reads."""
+    result = _preserve_media_stub(vault, filename="external-postlude-race.m4a")
+    sidecar = vault / result.sidecar_path
+    rel = sidecar.relative_to(vault).as_posix()
+    floor_path = graph_sync.floor_path(vault)
+    checkpoint_path = graph_sync.checkpoint_path(vault)
+    original_batch = media_worker.batch_atomic_write
+    fanout_calls: list[object] = []
+    swapped = False
+
+    def replace_after_cas(writes, **kwargs):  # noqa: ANN001
+        nonlocal swapped
+        [write] = writes
+        if write.path == checkpoint_path and not swapped:
+            swapped = True
+            old_floor = graph_sync.read_floor(vault)
+            old_checkpoint = graph_sync.read_checkpoint(vault)
+            assert old_floor is not None and old_checkpoint is not None
+            replacement_floor = graph_sync.GraphSyncGenerationFloor.create(
+                old_floor.generation + 17
+            )
+            replacement_checkpoint = graph_sync.GraphSyncCheckpoint.create(
+                generation=old_checkpoint.generation + 23,
+                mutation_id="e" * 24,
+                paths=(),
+                created_paths=(),
+                scope="full",
+            )
+            floor_swap = floor_path.with_name(".floor-external-swap")
+            checkpoint_swap = checkpoint_path.with_name(".checkpoint-external-swap")
+            floor_swap.write_text(replacement_floor.render(), encoding="utf-8")
+            checkpoint_swap.write_text(replacement_checkpoint.render(), encoding="utf-8")
+            os.replace(floor_swap, floor_path)
+            os.replace(checkpoint_swap, checkpoint_path)
+            replace_after_cas.floor = replacement_floor
+            replace_after_cas.checkpoint = replacement_checkpoint
+        return original_batch(writes, **kwargs)
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="external race transcript", media_type="audio", engine="test"
+        ),
+    )
+    monkeypatch.setattr(media_worker, "batch_atomic_write", replace_after_cas)
+    monkeypatch.setattr(
+        media_worker,
+        "post_commit_batch_fanout",
+        lambda *_args, **_kwargs: fanout_calls.append(object()) or True,
+    )
+
+    outcome = media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert outcome.state == "complete"
+    assert swapped
+    assert graph_sync.read_floor(vault) == replace_after_cas.floor
+    assert graph_sync.read_checkpoint(vault) == replace_after_cas.checkpoint
+    assert fanout_calls == []
+    assert deferred_index.snapshot_full(vault) == [deferred_index.DeferredReceipt(rel, 1)]
+
+
+def test_absent_media_predecessor_refuses_new_malformed_checkpoint(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An absent predecessor cannot authorize replacing a malformed new leaf."""
+    result = _preserve_media_stub(vault, filename="absent-predecessor.m4a")
+    sidecar = vault / result.sidecar_path
+    rel = sidecar.relative_to(vault).as_posix()
+    checkpoint_path = graph_sync.checkpoint_path(vault)
+    checkpoint_path.unlink()
+    original_update = preserve.update_sidecar_extraction
+    fanout_calls: list[object] = []
+
+    def commit_then_add_malformed_checkpoint(*args, **kwargs):  # noqa: ANN002, ANN003
+        handoff = original_update(*args, **kwargs)
+        assert isinstance(handoff, vault_module.DeferredGraphCompletion)
+        assert handoff.predecessor is None
+        checkpoint_path.write_text("malformed checkpoint", encoding="utf-8")
+        return handoff
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="absent predecessor transcript", media_type="audio", engine="test"
+        ),
+    )
+    monkeypatch.setattr(
+        preserve,
+        "update_sidecar_extraction",
+        commit_then_add_malformed_checkpoint,
+    )
+    monkeypatch.setattr(
+        media_worker,
+        "post_commit_batch_fanout",
+        lambda *_args, **_kwargs: fanout_calls.append(object()) or True,
+    )
+
+    outcome = media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert outcome.state == "complete"
+    assert checkpoint_path.read_text(encoding="utf-8") == "malformed checkpoint"
+    assert fanout_calls == []
+    assert deferred_index.snapshot_full(vault) == [deferred_index.DeferredReceipt(rel, 1)]
+
+
+@pytest.mark.parametrize("fanout_result", [None, "accepted_unverified"])
+def test_media_postlude_retains_receipt_without_literal_true_fanout(
+    vault, monkeypatch: pytest.MonkeyPatch, fanout_result: str | None
+) -> None:
+    """Only a positively verified fanout may retire media's write-ahead work."""
+    result = _preserve_media_stub(vault, filename=f"fanout-{fanout_result}.m4a")
+    sidecar = vault / result.sidecar_path
+    rel = sidecar.relative_to(vault).as_posix()
+
+    def unverified_fanout(root, written, *_args, **_kwargs):  # noqa: ANN001
+        if fanout_result is None:
+            return None
+        return index_sync.unverified_upsert_report(root, written)
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="fanout verification transcript", media_type="audio", engine="test"
+        ),
+    )
+    monkeypatch.setattr(media_worker, "post_commit_batch_fanout", unverified_fanout)
+
+    outcome = media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert outcome.state == "complete"
+    assert deferred_index.snapshot_full(vault) == [deferred_index.DeferredReceipt(rel, 1)]
+
+
+def test_post_commit_batch_fanout_refuses_accepted_unverified_report(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fanout result itself never upgrades unobserved legacy completion."""
+    result = _preserve_media_stub(vault, filename="unverified-report.m4a")
+    sidecar = vault / result.sidecar_path
+    report = index_sync.unverified_upsert_report(vault, [sidecar])
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_args, **_kwargs: report)
+
+    assert vault_module.post_commit_batch_fanout(vault, [sidecar], None, None) is False
+
+
+def _verified_media_fanout_report(vault, sidecar) -> index_sync.IndexSyncReport:
+    rel = sidecar.relative_to(vault).as_posix()
+    return index_sync.IndexSyncReport(
+        "upsert",
+        (rel,),
+        (rel,),
+        (
+            index_sync.IndexComponentOutcome("memory_refs", "completed", "dispatch_completed"),
+            index_sync.IndexComponentOutcome("resolver", "completed", "dispatch_completed"),
+            index_sync.IndexComponentOutcome(
+                "semantic_purge", "completed", "purge_completed"
+            ),
+            index_sync.IndexComponentOutcome("lexstore", "completed", "dispatch_completed"),
+            index_sync.IndexComponentOutcome(
+                "epistemic_graph", "completed", "incremental_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "embeddings", "accepted", "embeddings_disabled"
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("missing_component", ["epistemic_graph", "lexstore"])
+def test_post_commit_batch_fanout_refuses_missing_required_media_component(
+    vault, monkeypatch: pytest.MonkeyPatch, missing_component: str
+) -> None:
+    """A partial report cannot claim verified media fanout completion."""
+    result = _preserve_media_stub(vault, filename=f"missing-{missing_component}.m4a")
+    sidecar = vault / result.sidecar_path
+    report = _verified_media_fanout_report(vault, sidecar)
+    report = index_sync.IndexSyncReport(
+        report.operation,
+        report.requested_paths,
+        report.eligible_paths,
+        tuple(item for item in report.components if item.component != missing_component),
+    )
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_args, **_kwargs: report)
+
+    assert vault_module.post_commit_batch_fanout(vault, [sidecar], None, None) is False
+
+
+def test_post_commit_batch_fanout_rejects_cross_component_no_work_spoof(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only embeddings may claim the explicit embeddings-disabled no-work code."""
+    result = _preserve_media_stub(vault, filename="spoofed-resolver.m4a")
+    sidecar = vault / result.sidecar_path
+    report = _verified_media_fanout_report(vault, sidecar)
+    report = index_sync.with_component(
+        report,
+        index_sync.IndexComponentOutcome("resolver", "accepted", "embeddings_disabled"),
+    )
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_args, **_kwargs: report)
+
+    assert vault_module.post_commit_batch_fanout(vault, [sidecar], None, None) is False
+
+
 def test_media_postlude_cas_clears_only_admitted_receipt_after_checkpoint_and_fanout(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -650,6 +891,7 @@ def test_media_postlude_cas_clears_only_admitted_receipt_after_checkpoint_and_fa
         assert token is not None
         assert graph_sync.read_checkpoint(root) == token.checkpoint
         events.append("fanout")
+        return True
 
     def readd_before_cas_clear(root, receipts):  # noqa: ANN001
         assert token is not None

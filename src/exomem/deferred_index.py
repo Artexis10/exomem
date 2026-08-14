@@ -309,7 +309,62 @@ def _add_receipts(
 
 def add_full(vault_root: Path, rel_paths: list[str]) -> int:
     """Durably queue a complete lexical/resolver/graph/semantic refresh."""
-    return _add(vault_root, rel_paths, table="full_upserts")
+    _receipts, added = _add_full_receipts(vault_root, rel_paths)
+    return added
+
+
+def add_full_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredReceipt]:
+    """Queue full refreshes and return their exact transaction-local revisions."""
+    receipts, _added = _add_full_receipts(vault_root, rel_paths)
+    return receipts
+
+
+def _add_full_receipts(
+    vault_root: Path, rel_paths: list[str]
+) -> tuple[list[DeferredReceipt], int]:
+    rels = sorted(
+        {
+            rel
+            for raw in rel_paths
+            if (rel := _safe_markdown_rel_path(raw)) is not None
+        }
+    )
+    if not rels:
+        return [], 0
+    now = time.time()
+    receipts: list[DeferredReceipt] = []
+    added = 0
+    conn = _connect(vault_root, create=True)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for rel in rels:
+                row = conn.execute(
+                    "SELECT revision FROM full_upserts WHERE rel_path = ?", (rel,)
+                ).fetchone()
+                if row is None:
+                    revision = 1
+                    added += 1
+                    conn.execute(
+                        "INSERT INTO full_upserts"
+                        "(rel_path, created_at, updated_at, revision) VALUES (?, ?, ?, ?)",
+                        (rel, now, now, revision),
+                    )
+                else:
+                    revision = int(row[0]) + 1
+                    conn.execute(
+                        "UPDATE full_upserts SET updated_at = ?, revision = ? "
+                        "WHERE rel_path = ?",
+                        (now, revision, rel),
+                    )
+                receipts.append(DeferredReceipt(rel, revision))
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
+        return receipts, added
+    finally:
+        conn.close()
 
 
 def _add(vault_root: Path, rel_paths: list[str], *, table: str) -> int:
