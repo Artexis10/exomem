@@ -44,6 +44,13 @@
 
 ## 7. Verification And Delivery
 
-- [ ] 7.1 Run strict OpenSpec validation, focused receipt/mutation-lock/governance-overhead tests, focused Ruff, public-artifact validation, and `git diff --check`.
-- [ ] 7.2 Run the full lean suite and separate any pre-existing native Windows failures from regressions introduced by this change.
-- [ ] 7.3 Record the exact Windows test command that the separate CI repair must add before 0.50 release.
+- [ ] 7.1 Add red native Windows tests proving lifecycle graph-epoch abort uses the shared directory flush, preserves the original refusal after successful rollback, and remains graph-rollback-failed if the epoch flush is refused.
+- [ ] 7.2 Add deletion and recovery public-path tests for a post-rename directory-flush failure: successful durable inverse restores placement/marker/epoch truth, while inverse failure retains floor/checkpoint and lifecycle evidence for reconciliation.
+- [ ] 7.3 Route graph epoch restoration's directory barrier through the shared Windows primitive and carry post-rename state into graph lifecycle abort; preserve the POSIX descriptor/fsync path.
+- [ ] 7.4 Run the masked lifecycle refusal regressions, post-rename failure regressions, and full governance receipt suite on native Windows.
+
+## 8. Verification And Delivery
+
+- [ ] 8.1 Run strict OpenSpec validation, focused receipt/mutation-lock/governance-overhead tests, focused Ruff, public-artifact validation, and `git diff --check`.
+- [ ] 8.2 Run the full lean suite and separate any pre-existing native Windows failures from regressions introduced by this change.
+- [ ] 8.3 Record the exact Windows test command that the separate CI repair must add before 0.50 release.

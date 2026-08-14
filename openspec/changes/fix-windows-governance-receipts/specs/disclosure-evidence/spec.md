@@ -12,6 +12,10 @@ A file-ahead critical suffix left by such a refusal SHALL remain eligible for th
 
 Native Windows lifecycle tombstone writes and unlinks plus deletion/recovery source and destination rename barriers SHALL use the same retained, no-follow, write-capable final-directory durability primitive rather than CRT directory opens. A lifecycle directory open, identity, or flush failure SHALL remain fail-closed at the existing checkpoint and SHALL NOT report the tombstone, unlink, deletion, recovery, or rename durable.
 
+When deletion or recovery abort restores graph epoch state by removing a newly staged floor or checkpoint, native Windows SHALL flush that exact parent directory through the same primitive. The original lifecycle refusal SHALL be returned only after the prior graph state is durably restored. An epoch unlink or directory-flush failure SHALL remain a graph lifecycle rollback failure requiring reconciliation.
+
+If the canonical rename succeeds but a following source or destination directory flush fails, the transition SHALL record that placement changed before propagating the durability refusal. Abort SHALL durably inverse-rename before restoring the prior graph epoch. If the inverse move or its durability barrier cannot be proven, the staged graph floor/checkpoint and lifecycle evidence SHALL remain for reconciliation and SHALL NOT be erased as though canonical placement were unchanged.
+
 When one or more same-principal receipt or mutation-coordinator processes are the first owners of an absent native Windows writer-state root, Exomem SHALL establish the existing protected principal-private runtime DACL before creating any mutation-lock directory or file. The winning creator alone SHALL apply the DACL to the exact directory it created; concurrent same-principal losers SHALL tolerate atomic-create races and wait only a short bounded interval for the winner's DACL to validate. A pre-existing unsafe or different-principal root SHALL be refused with the exact offending path and remediation command, SHALL NOT be repaired implicitly, and SHALL NOT gain a lock artifact. LocalSystem service and normal-user direct CLI processes SHALL use separate writer-state roots.
 
 #### Scenario: Native Windows appends and verifies ordinary evidence
@@ -69,6 +73,20 @@ When one or more same-principal receipt or mutation-coordinator processes are th
 - **WHEN** a lifecycle directory is a reparse point, changes identity, cannot be opened securely, or cannot be flushed
 - **THEN** the operation fails closed with a content-free lifecycle error
 - **AND** no later durability checkpoint is reported
+
+#### Scenario: Lifecycle abort durably restores graph epoch state
+
+- **WHEN** deletion or recovery refuses after staging a graph floor or checkpoint that was previously absent
+- **THEN** abort removes the staged artifact and durably flushes its parent without a CRT directory open
+- **AND** the original lifecycle refusal is preserved only after the exact prior graph state is restored
+- **AND** a removal or flush failure reports graph lifecycle rollback failure instead
+
+#### Scenario: Post-rename durability failure retains truthful graph state
+
+- **WHEN** deletion or recovery atomically renames canonical content but a following source or destination directory flush fails
+- **THEN** abort recognizes that canonical placement changed and attempts a durable inverse rename before restoring graph epoch artifacts
+- **AND** successful inverse durability restores the exact prior placement and epoch before returning the original refusal
+- **AND** inverse failure retains the graph floor/checkpoint and lifecycle marker for reconciliation rather than exposing a falsely current graph
 
 #### Scenario: Receipt-first startup establishes the private runtime
 
