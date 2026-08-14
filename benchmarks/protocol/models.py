@@ -363,8 +363,29 @@ class ProviderCleanupPathLstat(StrictModel):
         return _require_sorted_unique(value, "entries")
 
 
+class ProviderCleanupProcessGroup(StrictModel):
+    """Absence fact for a row declaring an owned-subprocess execution model.
+
+    Carries a canonical logical ref and counts only: raw PIDs, ports, and
+    bearer tokens are never serialized into cleanup evidence.
+    """
+
+    kind: Literal["process-group"] = "process-group"
+    group_ref: str
+    remaining_count: int = Field(ge=0)
+    listener_bound: bool
+
+    @field_validator("group_ref")
+    @classmethod
+    def _group_ref_is_canonical(cls, value: str) -> str:
+        return _canonical_relative_path(value)
+
+
 ProviderCleanupRawObservation = Annotated[
-    ProviderCleanupNamespaceMembership | ProviderCleanupProviderState | ProviderCleanupPathLstat,
+    ProviderCleanupNamespaceMembership
+    | ProviderCleanupProviderState
+    | ProviderCleanupPathLstat
+    | ProviderCleanupProcessGroup,
     Field(discriminator="kind"),
 ]
 

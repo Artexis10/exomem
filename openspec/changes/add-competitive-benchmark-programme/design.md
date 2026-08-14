@@ -419,6 +419,40 @@
     replacement of the entire run directory; later load starts a fresh
     no-follow traversal and does not claim cross-command directory authenticity.
 
+15. **Controlled-direct competitor rows run out of process, and prove it.**
+    Decision 1 requires a competitor's provider class to run under its own
+    project environment, so a competitor direct row cannot be in-process: its
+    dependency tree is not ours to merge, and importing it here would make the
+    configuration author us again.  Decision 14's single
+    `in-process-no-post-return-background` execution model therefore cannot
+    carry these rows, and declaring it for a subprocess-backed provider would
+    assert exactly the kind of unevidenced status field this programme refuses.
+    Registration gains a second, explicitly named model,
+    `owned-subprocess-terminated-at-cleanup`, and the runner admits only these
+    two; unknown and background-capable declarations still refuse before factory
+    invocation.
+
+    A row declaring it MAY own exactly one sidecar process, started in its own
+    process group and bound to loopback with a per-session bearer token.  Every
+    provider method stays a blocking round trip, so no provider activity
+    overlaps a returned call; the idle sidecar is the only thing that persists
+    between calls, and it persists precisely because the competitor's harness
+    charges reindexing to whoever restarts it.  `cleanup()` SHALL terminate the
+    whole owned process group and reap it before returning.
+
+    Because a surviving process is now possible in principle, absence under this
+    model is proven rather than assumed.  The runner-owned runtime binding
+    observes an additional `process-group` surface, and the cleanup observation
+    schema gains a matching additive raw fact carrying a canonical logical group
+    ref, a count of live owned processes, and whether the loopback listener
+    still accepts.  Absence requires both zero and unbound.  Raw PIDs, ports,
+    and tokens are never serialized, consistent with decision 14's treatment of
+    PID/fd paths.  Decision 14's quarantine caveat — that final removal of an
+    empty private container sits outside the adversarial provider boundary —
+    is scoped to the in-process model and does NOT extend here; under this
+    model the provider is a separate process and its residue is observed, not
+    trusted.
+
 ## Execution
 
 fable-delegate discipline: Stage-0 packet → Codex/Claude implementer lanes in

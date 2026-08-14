@@ -71,6 +71,38 @@
       "title": "ProviderCleanupPathLstat",
       "type": "object"
     },
+    "ProviderCleanupProcessGroup": {
+      "additionalProperties": false,
+      "description": "Absence fact for a row declaring an owned-subprocess execution model.\n\nCarries a canonical logical ref and counts only: raw PIDs, ports, and\nbearer tokens are never serialized into cleanup evidence.",
+      "properties": {
+        "group_ref": {
+          "title": "Group Ref",
+          "type": "string"
+        },
+        "kind": {
+          "const": "process-group",
+          "default": "process-group",
+          "title": "Kind",
+          "type": "string"
+        },
+        "listener_bound": {
+          "title": "Listener Bound",
+          "type": "boolean"
+        },
+        "remaining_count": {
+          "minimum": 0,
+          "title": "Remaining Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "group_ref",
+        "remaining_count",
+        "listener_bound"
+      ],
+      "title": "ProviderCleanupProcessGroup",
+      "type": "object"
+    },
     "ProviderCleanupProviderState": {
       "additionalProperties": false,
       "properties": {
@@ -123,6 +155,7 @@
           "mapping": {
             "namespace-membership": "#/$defs/ProviderCleanupNamespaceMembership",
             "path-lstat": "#/$defs/ProviderCleanupPathLstat",
+            "process-group": "#/$defs/ProviderCleanupProcessGroup",
             "provider-state": "#/$defs/ProviderCleanupProviderState"
           },
           "propertyName": "kind"
@@ -136,6 +169,9 @@
           },
           {
             "$ref": "#/$defs/ProviderCleanupPathLstat"
+          },
+          {
+            "$ref": "#/$defs/ProviderCleanupProcessGroup"
           }
         ]
       },

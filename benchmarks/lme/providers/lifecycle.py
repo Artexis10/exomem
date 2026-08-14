@@ -208,6 +208,7 @@ def _normalize(binding: ProviderRuntimeBinding, context: ProviderSessionContext,
         "namespace-membership": ("namespace-membership", context.namespace),
         "session-root": ("path-lstat", "session-root"),
         "work-root": ("path-lstat", "work"),
+        "process-group": ("process-group", ""),
     }
     try:
         expected = {required[surface] for surface in binding.required_surface_ids}
@@ -227,6 +228,10 @@ def _absence(surfaces: Iterable[dict[str, object]]) -> bool:
         if item["kind"] == "path-lstat" and not (
             item["raw_kind"] == "missing" or (item["raw_kind"] == "directory" and not item["entries"])
         ):
+            return False
+        # An owned sidecar is absent only when nothing of it survives: a live
+        # process and a listener that still accepts are each disqualifying.
+        if item["kind"] == "process-group" and (item["remaining_count"] or item["listener_bound"]):
             return False
     return True
 
@@ -654,6 +659,8 @@ def _observed_surface_ids(observation: ProviderCleanupObservation) -> list[str]:
             surface_ids.append("session-root")
         elif item.kind == "path-lstat" and item.path == "work":
             surface_ids.append("work-root")
+        elif item.kind == "process-group":
+            surface_ids.append("process-group")
         else:
             raise LifecycleCompletenessError("cleanup observation contains an unknown surface")
     return sorted(surface_ids)

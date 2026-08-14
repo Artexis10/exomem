@@ -104,6 +104,14 @@ def _safe_id(value: str) -> str:
 
 _DIRECT_RUN_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _FOREGROUND_EXECUTION_MODEL = "in-process-no-post-return-background"
+# A competitor row runs its own provider class under its own project
+# environment (design decision 1), so it cannot be in-process.  Declaring the
+# foreground model for it would assert an execution property nothing proves,
+# so it declares its own and owes the extra process-absence surface instead.
+_OWNED_SUBPROCESS_EXECUTION_MODEL = "owned-subprocess-terminated-at-cleanup"
+_SUPPORTED_EXECUTION_MODELS = frozenset(
+    {_FOREGROUND_EXECUTION_MODEL, _OWNED_SUBPROCESS_EXECUTION_MODEL}
+)
 
 
 def _direct_run_component(value: str) -> str:
@@ -605,7 +613,7 @@ def execute_run(
         descriptor = provider_spec_value.descriptor
         if (
             not isinstance(descriptor, ProviderDescriptor)
-            or descriptor.execution_model != _FOREGROUND_EXECUTION_MODEL
+            or descriptor.execution_model not in _SUPPORTED_EXECUTION_MODELS
         ):
             raise ValueError("direct provider has an unsupported execution model")
         provider_kind = provider_spec_value.namespace_kind
