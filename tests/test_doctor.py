@@ -837,7 +837,98 @@ def test_sidecar_present_but_stack_missing_skips_probe(
     check = doctor_module._check_embedding_sidecar(vault)
 
     assert check.status == "warn"
-    assert "vector stack" in check.message
+    # The finding names the lane actually configured to serve, so an ONNX
+    # install is never told the torch stack is the thing it is missing.
+    assert "serving stack isn't installed" in check.message
+
+
+def test_sidecar_probe_uses_the_onnx_lane_when_that_is_what_is_installed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#487: gating the probe on torch reported a working ONNX lane as absent.
+
+    `embeddings-onnx` installs neither torch nor sentence_transformers by design,
+    so a torch-shaped probe concludes "no vector stack" on an install whose
+    vector search demonstrably works — and doctor then offers no way to prove
+    readiness, which `docs/benchmark-fairness-contract.md` requires.
+    """
+    _sidecar(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    monkeypatch.setattr(
+        doctor_module,
+        "_module_available",
+        lambda m: m in {"onnxruntime", "tokenizers"},
+    )
+
+    check = doctor_module._check_embedding_sidecar(vault)
+
+    # It must get past the stack gate. Whatever it reports next is about the
+    # sidecar or the model cache — never "the stack isn't installed".
+    assert "serving stack isn't installed" not in check.message
+
+
+def test_rebuild_remediations_name_a_command_the_cli_actually_dispatches() -> None:
+    """#479: `kb reconcile` / `kb audit_fix` fall through to the server parser.
+
+    Both are internal registry names; the CLI dispatches on the public product
+    names, so the remediation has to name `maintain` / `maintain_memory`.
+    """
+    assert "reconcile" in doctor_module._REBUILD_VECTORS_CMD
+    assert "maintain" in doctor_module._REBUILD_VECTORS_CMD
+    source = Path(doctor_module.__file__).read_text(encoding="utf-8")
+    assert "kb reconcile" not in source
+    assert "kb audit_fix" not in source
+
+
+def test_warm_exits_zero_when_only_the_withheld_torch_models_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """#480: `warm` exited 1 on a successful `embeddings-onnx` run.
+
+    The bi-encoder — the only model that lane can serve — loads fine. The
+    reranker and CLIP raise ImportError because `embeddings-onnx` withholds
+    sentence-transformers by design, which is the documented trade-off, not a
+    failure. Reporting it as one also called the install "lean".
+    """
+    from exomem import embeddings as embeddings_module
+
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+
+    def _no_sentence_transformers():
+        raise ImportError("No module named 'sentence_transformers'")
+
+    monkeypatch.setattr(embeddings_module, "get_model", lambda: object())
+    monkeypatch.setattr(embeddings_module, "get_reranker", _no_sentence_transformers)
+    monkeypatch.setattr(embeddings_module, "get_clip_model", _no_sentence_transformers)
+    monkeypatch.setattr(embeddings_module, "clip_enabled", lambda: True)
+
+    code, out, _err = _run(["warm"], capsys)
+
+    assert code == 0
+    assert "lean install" not in out
+    assert "onnx" in out
+
+
+def test_models_cache_does_not_demand_torch_models_on_the_onnx_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#480/#487: the reranker and CLIP can never be cached on an ONNX install.
+
+    `exomem warm` — the stated remediation — cannot fetch them there either, so
+    the WARN is permanent noise that no action clears.
+    """
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    monkeypatch.setattr(
+        doctor_module, "_model_cached", lambda _hub, dirname: "bge-base" in dirname
+    )
+
+    check = doctor_module._check_models_cache()
+
+    assert check.status == "pass"
+    assert "reranker" not in check.message.lower()
 
 
 def test_sidecar_present_but_model_not_cached_skips_probe(

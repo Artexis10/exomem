@@ -66,6 +66,13 @@ HA_AUTH_ENV_KEYS = (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: How a user actually rebuilds vectors from a shell. `reconcile` and `audit_fix`
+#: are internal registry names, not CLI surface — the CLI dispatches on the
+#: PRODUCT_PUBLIC_NAMES, where this operation is `maintain_memory --mode
+#: reconcile` (or the `maintain` alias). Remediation strings named the internal
+#: ops, so every one of them fell through to the server argument parser.
+_REBUILD_VECTORS_CMD = "exomem maintain --reconcile"
+
 
 @dataclass
 class DoctorCheck:
@@ -381,6 +388,45 @@ def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
     return checks
 
 
+def _resolved_embedding_backend() -> str:
+    """The runtime actually configured to serve the bi-encoder.
+
+    Every embedding-related finding must be phrased about *this* lane. Probing
+    for torch and reporting its absence as "the vector stack isn't installed"
+    tells an ONNX install that a working vector lane is missing, which is how a
+    correct deployment comes to be benchmarked as lexical-only.
+    """
+    from . import embedding_backend
+
+    try:
+        return embedding_backend.resolve_backend(is_available=_module_available)
+    except ValueError:
+        # A misconfigured backend is reported by its own check; fall back to the
+        # default lane rather than raising out of a diagnostic command.
+        return embedding_backend.TORCH
+
+
+def _vector_stack_available(backend: str) -> bool:
+    """Whether the resolved lane's serving modules are importable."""
+    from . import embedding_backend
+
+    if backend == embedding_backend.ONNX:
+        return _module_available("onnxruntime") and _module_available("tokenizers")
+    return _module_available("sentence_transformers") and _module_available("torch")
+
+
+def _serves_reranker_and_clip(backend: str) -> bool:
+    """Whether this lane can load the reranker and CLIP at all.
+
+    Both are sentence-transformers models, so the ONNX lane withholds them by
+    design. Listing them as cache misses there produces a WARN that no action
+    can ever clear.
+    """
+    from . import embedding_backend
+
+    return backend != embedding_backend.ONNX
+
+
 def _embedding_requirements() -> tuple[str, list[tuple[str, str]]]:
     """`(extra, [(distribution, import name)])` for the configured embedding backend.
 
@@ -392,12 +438,7 @@ def _embedding_requirements() -> tuple[str, list[tuple[str, str]]]:
     """
     from . import embedding_backend
 
-    try:
-        backend = embedding_backend.resolve_backend(is_available=_module_available)
-    except ValueError:
-        # A misconfigured backend is reported by its own check; fall back to the
-        # default lane rather than raising out of a diagnostic command.
-        backend = embedding_backend.TORCH
+    backend = _resolved_embedding_backend()
     if backend == embedding_backend.ONNX:
         return "embeddings-onnx", [
             ("onnxruntime", "onnxruntime"),
@@ -940,7 +981,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "embeddings.sidecar",
             "warn",
             "Embedding sidecar is missing; hybrid search will degrade until vectors are built.",
-            "After installing embeddings, run `kb reconcile` or `kb audit_fix --rebuild-embeddings true`.",
+            f"After installing embeddings, run `{_REBUILD_VECTORS_CMD}`.",
         )
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return _check(
@@ -950,13 +991,15 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "probe was skipped.",
             "Unset EXOMEM_DISABLE_EMBEDDINGS to run the embed+search probe against it.",
         )
-    if not (_module_available("sentence_transformers") and _module_available("torch")):
+    backend = _resolved_embedding_backend()
+    if not _vector_stack_available(backend):
+        extra, _ = _embedding_requirements()
         return _check(
             "embeddings.sidecar",
             "warn",
-            "Embedding sidecar exists but the vector stack isn't installed, so it can't "
-            "be probed.",
-            "Install it with `uv sync --extra embeddings` to enable hybrid search.",
+            f"Embedding sidecar exists but the {backend} serving stack isn't installed, "
+            "so it can't be probed.",
+            f"Install it with `uv sync --extra {extra}` to enable hybrid search.",
         )
     from . import embeddings
 
@@ -980,7 +1023,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "embeddings.sidecar",
             "fail",
             f"Embedding sidecar is present but a live embed+search probe failed: {e}",
-            "Rebuild vectors: `kb reconcile` or `kb audit_fix --rebuild-embeddings true`.",
+            f"Rebuild vectors: `{_REBUILD_VECTORS_CMD}`.",
         )
     if not hits:
         return _check(
@@ -988,12 +1031,33 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "warn",
             "Embedding sidecar loads and the model embeds, but a probe query returned no "
             "vectors — the index is empty.",
-            "Build vectors: `kb reconcile` or `kb audit_fix --rebuild-embeddings true`.",
+            f"Build vectors: `{_REBUILD_VECTORS_CMD}`.",
         )
+    # Readiness must be provable, not merely un-refuted: report the serving
+    # backend, the vector count behind the hit, and the model fingerprint that
+    # identifies the vector space. A benchmark contender is disqualified when it
+    # cannot show it is serving semantically (docs/benchmark-fairness-contract.md),
+    # and until now an ONNX install had no way to show that from doctor.
+    from . import embedding_backend
+
+    fingerprint = embedding_backend.fingerprint(embeddings.MODEL_NAME)
+    try:
+        metadata, _matrix = index.all_vectors()
+        vector_count: int | None = len(metadata)
+    except Exception:  # noqa: BLE001 — the probe already proved the lane serves
+        vector_count = None
+    counted = f"{vector_count} vector(s)" if vector_count is not None else "vectors present"
     return _check(
         "embeddings.sidecar",
         "pass",
-        f"Embedding sidecar live: embed+search returned {len(hits)} hit(s).",
+        f"Embedding sidecar live via {backend}: embed+search over {counted} returned "
+        f"{len(hits)} hit(s) ({fingerprint}).",
+        details={
+            "backend": backend,
+            "vector_count": vector_count,
+            "fingerprint": fingerprint,
+            "model": embeddings.MODEL_NAME,
+        },
     )
 
 
@@ -1026,22 +1090,44 @@ def _check_models_cache() -> DoctorCheck:
     from . import embeddings
 
     hub = _hf_hub_dir()
+    backend = _resolved_embedding_backend()
 
     expected = {
         embeddings.MODEL_NAME: "models--" + embeddings.MODEL_NAME.replace("/", "--"),
-        embeddings.RERANKER_NAME: "models--" + embeddings.RERANKER_NAME.replace("/", "--"),
-        # sentence-transformers resolves bare names under its org.
-        embeddings.CLIP_MODEL_NAME: "models--sentence-transformers--" + embeddings.CLIP_MODEL_NAME,
     }
+    # The reranker and CLIP are sentence-transformers models. On a lane that
+    # withholds torch they can never be cached, so listing them as misses is a
+    # WARN no action can clear — and `exomem warm`, the remediation, cannot
+    # fetch them either.
+    if _serves_reranker_and_clip(backend):
+        expected[embeddings.RERANKER_NAME] = "models--" + embeddings.RERANKER_NAME.replace(
+            "/", "--"
+        )
+        # sentence-transformers resolves bare names under its org.
+        expected[embeddings.CLIP_MODEL_NAME] = (
+            "models--sentence-transformers--" + embeddings.CLIP_MODEL_NAME
+        )
 
     missing = [name for name, dirname in expected.items() if not _model_cached(hub, dirname)]
     if not missing:
-        return _check("models.cache", "pass", "Search models are present in the local HF cache.")
+        return _check(
+            "models.cache",
+            "pass",
+            f"Search models for the {backend} lane are present in the local HF cache.",
+        )
+    # Only claim degraded recall when the bi-encoder itself is absent — with it
+    # cached and serving, finds are semantic whatever else is still downloading.
+    bi_encoder_missing = embeddings.MODEL_NAME in missing
+    consequence = (
+        " The first server start downloads them in the background; hybrid finds are "
+        "lexical-only meanwhile."
+        if bi_encoder_missing
+        else " Hybrid finds already run semantically on the cached bi-encoder."
+    )
     return _check(
         "models.cache",
         "warn",
-        f"Not yet in the local HF cache: {', '.join(missing)}. The first server "
-        "start downloads them in the background; hybrid finds are lexical-only meanwhile.",
+        f"Not yet in the local HF cache: {', '.join(missing)}.{consequence}",
         "Run `exomem warm` to pre-download them now (~1-2 GB).",
     )
 
