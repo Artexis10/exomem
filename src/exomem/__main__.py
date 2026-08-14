@@ -979,12 +979,24 @@ def _warm_main(argv: list[str]) -> int:
         )
         return 0
 
-    from . import embeddings
+    from . import embedding_backend, embeddings
+
+    # Which models this install can actually load. The reranker and CLIP are
+    # sentence-transformers models, so the `embeddings-onnx` lane withholds both
+    # by design. Reporting their absence as a warm failure means a correct ONNX
+    # install exits 1 on a successful run, and calls itself "lean" while holding
+    # a working embedder.
+    try:
+        backend = embedding_backend.resolve_backend()
+    except ValueError:
+        backend = embedding_backend.TORCH
+    lane_serves_torch_models = backend != embedding_backend.ONNX
 
     failed = False
     missing_extra = False
+    optional_unavailable: list[str] = []
 
-    def _step(label: str, fn) -> None:
+    def _step(label: str, fn, *, required: bool = True) -> None:
         nonlocal failed, missing_extra
         t0 = time.perf_counter()
         try:
@@ -992,7 +1004,13 @@ def _warm_main(argv: list[str]) -> int:
             print(f"  {label}: ready ({time.perf_counter() - t0:.1f}s)")
         except ImportError as e:
             # A lean install has no ML stack — that's a missing extra, not a
-            # download problem, and the remediation must say so.
+            # download problem, and the remediation must say so. On a lane that
+            # never carries this model, the same ImportError is the expected
+            # state and must not fail the run.
+            if not required:
+                optional_unavailable.append(label)
+                print(f"  {label}: unavailable on the {backend} lane (skipped)")
+                return
             failed = True
             missing_extra = True
             print(f"  {label}: FAILED ({e})", file=sys.stderr)
@@ -1002,9 +1020,17 @@ def _warm_main(argv: list[str]) -> int:
 
     print("exomem warm — downloading/loading search models (first run can take minutes)")
     _step(f"embedding model {embeddings.MODEL_NAME}", embeddings.get_model)
-    _step(f"reranker {embeddings.RERANKER_NAME}", embeddings.get_reranker)
+    _step(
+        f"reranker {embeddings.RERANKER_NAME}",
+        embeddings.get_reranker,
+        required=lane_serves_torch_models,
+    )
     if embeddings.clip_enabled():
-        _step(f"CLIP model {embeddings.CLIP_MODEL_NAME}", embeddings.get_clip_model)
+        _step(
+            f"CLIP model {embeddings.CLIP_MODEL_NAME}",
+            embeddings.get_clip_model,
+            required=lane_serves_torch_models,
+        )
     else:
         print("  CLIP: skipped (EXOMEM_DISABLE_CLIP)")
 
@@ -1026,6 +1052,14 @@ def _warm_main(argv: list[str]) -> int:
             return 1
         print("warm: one or more models failed — check network/proxy and retry.", file=sys.stderr)
         return 1
+    if optional_unavailable:
+        print(
+            f"warm: done on the {backend} lane. Not carried by this lane: "
+            f"{', '.join(optional_unavailable)} — that is the documented "
+            "`embeddings-onnx` trade-off, not a failure. Install the `embeddings` "
+            "extra if you need reranking or image search."
+        )
+        return 0
     print("warm: done. Server starts will now warm from disk in seconds.")
     return 0
 

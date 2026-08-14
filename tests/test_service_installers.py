@@ -369,7 +369,41 @@ def test_help_and_invalid_profile_are_non_mutating() -> None:
     assert "--repo-dev" in help_result.stdout
     assert 'MODE="repo-dev"' in INSTALL_SH.read_text(encoding="utf-8")
     assert invalid_result.returncode != 0
-    assert "lean, hybrid, standard, or media" in invalid_result.stderr
+    assert "lean, onnx, hybrid, standard, or media" in invalid_result.stderr
+
+
+def test_onnx_profile_installs_the_cpu_lane_and_preflights_as_hybrid(tmp_path: Path) -> None:
+    """#481: a GPU-less host had no way to get vectors without a CUDA torch wheel.
+
+    `torch` is pinned to the CUDA index for Linux, so `--profile hybrid` pulled
+    multi-GB of wheel that can never be used, and `lean` gave no vectors at all.
+    `onnx` is an install lane rather than a doctor profile — it expects exactly
+    the vector lane `hybrid` expects, so the preflight maps onto that.
+    """
+    env, service_root, env_file = _fixture(tmp_path)
+    subprocess.run(
+        [
+            "bash",
+            str(INSTALL_SH),
+            "--release",
+            "--profile",
+            "onnx",
+            "--service-root",
+            str(service_root),
+            "--env-file",
+            str(env_file),
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    trace = Path(env["TRACE_FILE"]).read_text(encoding="utf-8")
+    assert "exomem[embeddings-onnx]" in trace
+    assert "exomem[embeddings]\n" not in trace, "must not pull the CUDA torch lane"
+    assert "doctor hybrid" in trace
 
 
 def test_windows_installer_gates_remote_and_verifies_before_success() -> None:
