@@ -126,6 +126,143 @@ async def test_deletion_authority_requires_the_live_claim_and_exact_current_fenc
         await database.dispose()
 
 
+@pytest.mark.asyncio
+async def test_deletion_authority_ignores_final_maintenance_rows_sharing_external_operation_id(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path / "shared-operation-id.sqlite")
+    database = ProvisionerDatabase(settings)
+    await database.create_for_tests()
+    repository = OperationRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+    )
+    authority = DeletionClaimAuthority(database.session_factory)
+    tenant_id = "tenant-alpha"
+    operation_id = "provider-deletion-alpha"
+    try:
+        for action in ("quiesce", "seal"):
+            submitted = await repository.submit(
+                action,
+                f"{action}-shared-operation",
+                _request(operation_id=operation_id, tenant_id=tenant_id),
+            )
+            claimed = await repository.claim_next(
+                f"{action}-worker",
+                allowed_actions=frozenset({OperationAction(action)}),
+            )
+            assert (
+                claimed is not None
+                and claimed.id == submitted.id
+                and claimed.claim_token is not None
+            )
+            await repository.complete(
+                claimed.id,
+                {},
+                worker_id=f"{action}-worker",
+                claim_token=claimed.claim_token,
+                claim_generation=claimed.claim_generation,
+            )
+
+        destroy = await repository.submit(
+            "destroy",
+            "destroy-shared-operation",
+            _request(operation_id=operation_id, tenant_id=tenant_id),
+        )
+        claimed_destroy = await repository.claim_next(
+            "deletion-worker",
+            allowed_actions=frozenset({OperationAction.DESTROY}),
+        )
+        assert claimed_destroy is not None and claimed_destroy.id == destroy.id
+
+        assert await authority.acquire(tenant_id, operation_id, 8) is True
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_deletion_authority_ignores_final_discard_sharing_external_operation_id(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path / "discard-shared-operation-id.sqlite")
+    database = ProvisionerDatabase(settings)
+    await database.create_for_tests()
+    repository = OperationRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+    )
+    authority = DeletionClaimAuthority(database.session_factory)
+    tenant_id = "tenant-alpha"
+    operation_id = "provider-deletion-alpha"
+    try:
+        discard = await repository.submit(
+            "discard",
+            "discard-shared-operation",
+            _request(operation_id=operation_id, tenant_id=tenant_id),
+        )
+        claimed_discard = await repository.claim_next(
+            "deletion-worker",
+            allowed_actions=frozenset({OperationAction.DISCARD}),
+        )
+        assert (
+            claimed_discard is not None
+            and claimed_discard.id == discard.id
+            and claimed_discard.claim_token is not None
+        )
+        await repository.complete(
+            claimed_discard.id,
+            {},
+            worker_id="deletion-worker",
+            claim_token=claimed_discard.claim_token,
+            claim_generation=claimed_discard.claim_generation,
+        )
+        destroy = await repository.submit(
+            "destroy",
+            "destroy-shared-operation",
+            _request(operation_id=operation_id, tenant_id=tenant_id),
+        )
+        claimed_destroy = await repository.claim_next(
+            "deletion-worker",
+            allowed_actions=frozenset({OperationAction.DESTROY}),
+        )
+        assert claimed_destroy is not None and claimed_destroy.id == destroy.id
+
+        assert await authority.acquire(tenant_id, operation_id, 8) is True
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_deletion_authority_rejects_non_deletion_rows_sharing_external_operation_id(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path / "maintenance-only.sqlite")
+    database = ProvisionerDatabase(settings)
+    await database.create_for_tests()
+    repository = OperationRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+    )
+    authority = DeletionClaimAuthority(database.session_factory)
+    tenant_id = "tenant-alpha"
+    operation_id = "provider-maintenance-alpha"
+    try:
+        await repository.submit(
+            "quiesce",
+            "quiesce-maintenance-only",
+            _request(operation_id=operation_id, tenant_id=tenant_id),
+        )
+        claimed = await repository.claim_next(
+            "quiesce-worker",
+            allowed_actions=frozenset({OperationAction.QUIESCE}),
+        )
+        assert claimed is not None and claimed.claim_token is not None
+
+        assert await authority.acquire(tenant_id, operation_id, 8) is False
+    finally:
+        await database.dispose()
+
+
 def test_deletion_settings_are_verifier_only_and_bind_exact_bucket_contract() -> None:
     from exomem_provisioner.provider_recovery import ProviderRecoveryIdentityCodec
 
