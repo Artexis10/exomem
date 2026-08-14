@@ -1032,10 +1032,10 @@ def test_reconcile_rebuild_graph_forwards_the_opt_in_flag(
 
     monkeypatch.setattr(commands.reconcile_module, "reconcile", reconcile)
 
-    result = commands.op_reconcile(Path("C:/graph-reconcile"), rebuild_graph=True)
+    result = commands.op_reconcile(Path("fixture-vault"), rebuild_graph=True)
 
     assert captured == {
-        "vault_root": Path("C:/graph-reconcile"),
+        "vault_root": Path("fixture-vault"),
         "dry_run": False,
         "rebuild_graph": True,
     }
@@ -1053,7 +1053,7 @@ def test_reconcile_rebuild_graph_refuses_an_active_direct_boundary(
     )
 
     with pytest.raises(ValueError, match="MUTATION_BOUNDARY_ACTIVE"):
-        commands.op_reconcile(Path("C:/graph-reconcile"), rebuild_graph=True)
+        commands.op_reconcile(Path("fixture-vault"), rebuild_graph=True)
 
 
 def test_reconcile_refreshes_source_indexes_and_total_rows(vault: Path) -> None:

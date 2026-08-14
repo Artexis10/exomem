@@ -873,7 +873,7 @@ def test_lease_manager_preserves_real_wait_path_graph_failure_code(
     note = vault / "Knowledge Base/Notes/wait-failure.md"
     calls = 0
     failure_type = RuntimeError if failure_kind == "RuntimeError" else getattr(graph_sync, failure_kind)
-    sentinel = "private builder path C:\\vault\\Knowledge Base\\secret.md"
+    sentinel = "private builder path <vault>/Knowledge Base/secret.md"
     failure = failure_type(sentinel)
 
     def fail_builder(_self: EpistemicGraphIndex) -> dict[str, int]:

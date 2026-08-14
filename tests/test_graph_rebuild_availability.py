@@ -1222,7 +1222,7 @@ def test_registered_builder_failure_logs_and_chains_a_content_free_state_aware_p
     """Arbitrary builder failures retain diagnostics without leaking into terminals."""
     coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
     checkpoint = _checkpoint(1)
-    sentinel = "private builder path C:\\vault\\Knowledge Base\\secret.md"
+    sentinel = "private builder path <vault>/Knowledge Base/secret.md"
     failure = RuntimeError(sentinel)
 
     monkeypatch.setattr(
@@ -1255,7 +1255,7 @@ def test_registered_unavailable_lineage_failure_projects_explicit_reset_without_
     """An unavailable typed lineage failure keeps diagnostics out of the terminal."""
     coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
     checkpoint = _checkpoint(1)
-    sentinel = "private lineage path C:\\vault\\Knowledge Base\\secret.md"
+    sentinel = "private lineage path <vault>/Knowledge Base/secret.md"
     failure = graph_sync.GraphEpochIncoherent(sentinel)
 
     monkeypatch.setattr(
