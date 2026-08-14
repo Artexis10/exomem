@@ -510,7 +510,11 @@ def test_dry_run_census_never_recovers_an_interrupted_reset(
         lambda _root: pytest.fail("dry-run must not recover a transaction"),
     )
 
-    assert graph_sync.census_unavailable_graph_lineage(tmp_path) == (".graph.sqlite",)
+    assert graph_sync.census_unavailable_graph_lineage(tmp_path) == (
+        ".graph.sqlite",
+        ".graph-sync.json",
+        ".graph-sync-floor.json",
+    )
 
 
 def test_recovered_isolated_reset_requires_exact_quarantine_identity(
@@ -530,7 +534,7 @@ def test_recovered_isolated_reset_requires_exact_quarantine_identity(
         held.close()
     (quarantine / ".manifest.json").write_bytes(graph_sync._reset_manifest_raw(reset, identities))
     graph.unlink()
-    graph.write_bytes(b"replacement")
+    graph.write_bytes(b"replacement with different metadata")
 
     with pytest.raises(graph_sync.GraphResetFailed):
         graph_sync._recover_interrupted_reset(tmp_path)
@@ -566,7 +570,7 @@ def test_unavailable_companion_only_lineage_is_previewed_and_quarantined(tmp_pat
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
     companion = tmp_path / "Knowledge Base/.graph.sqlite-wal"
-    companion.parent.mkdir()
+    companion.parent.mkdir(exist_ok=True)
     companion.write_bytes(b"wal")
 
     dry_run = reconcile_module.reconcile(tmp_path, dry_run=True, rebuild_graph=True)
@@ -617,7 +621,7 @@ def test_post_publication_cleanup_requires_a_current_covered_checkpoint(
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
     live = tmp_path / "Knowledge Base/.graph.sqlite"
-    live.parent.mkdir(parents=True)
+    live.parent.mkdir(parents=True, exist_ok=True)
     live.write_bytes(b"old")
 
     reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)

@@ -2781,10 +2781,13 @@ def test_manage_memory_file_replays_overwrite_frontmatter_across_clock_tick(
     )
 
     committed_source = page.read_text(encoding="utf-8")
+    committed_frontmatter, _, _ = vault.parse_frontmatter(
+        committed_source, strict=True
+    )
     assert committed["semantic"]["mutated"] is True
     assert vault.content_hash(committed_source) == validated_after_hash
-    assert "created: 2026-07-14T12:00:00Z" in committed_source
-    assert "updated: 2026-07-14T12:00:00Z" in committed_source
+    assert committed_frontmatter["created"] == "2026-07-14T12:00:00Z"
+    assert committed_frontmatter["updated"] == "2026-07-14T12:00:00Z"
 
 
 def test_tier2_overwrite_true_on_absent_path_preserves_creation_behavior(

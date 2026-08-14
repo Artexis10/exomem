@@ -171,7 +171,13 @@ def retain_regular_file(path: Path) -> RetainedRegularFile:
 
                 identity: tuple[int, ...] = _windows_handle_identity(msvcrt.get_osfhandle(fd))
             else:
-                identity = (int(info.st_dev), int(info.st_ino))
+                identity = (
+                    int(info.st_dev),
+                    int(info.st_ino),
+                    int(info.st_mode),
+                    int(info.st_size),
+                    int(info.st_mtime_ns),
+                )
             return RetainedRegularFile(target, directory, fd, identity)
         except BaseException:
             os.close(fd)
@@ -197,7 +203,13 @@ def retain_regular_child_file(directory: _SecureDirectory, name: str) -> Retaine
 
             identity: tuple[int, ...] = _windows_handle_identity(msvcrt.get_osfhandle(fd))
         else:
-            identity = (int(info.st_dev), int(info.st_ino))
+            identity = (
+                int(info.st_dev),
+                int(info.st_ino),
+                int(info.st_mode),
+                int(info.st_size),
+                int(info.st_mtime_ns),
+            )
         return RetainedRegularFile(directory.path / name, directory, fd, identity, owns_directory=False)
     except BaseException:
         os.close(fd)

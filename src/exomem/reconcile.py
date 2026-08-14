@@ -619,7 +619,8 @@ def reconcile(
                 state_root=index._canonical_mutation_coordinator().state_root,
             )
             if (
-                epistemic_graph.graph_sync.classify_epoch(vault_root).kind
+                not reset_registered
+                and epistemic_graph.graph_sync.classify_epoch(vault_root).kind
                 == "recoverable"
             ):
                 epistemic_graph.graph_sync.recover_checkpoint(vault_root)

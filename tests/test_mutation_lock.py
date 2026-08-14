@@ -28,6 +28,10 @@ def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> 
 
     retained = mutation_lock_module.retain_regular_file(source)
     try:
+        if os.name != "nt":
+            assert retained.identity == mutation_lock_module.nofollow_regular_file_identity(
+                source
+            )
         mutation_lock_module.rename_retained_regular_file(retained, destination)
     finally:
         retained.close()

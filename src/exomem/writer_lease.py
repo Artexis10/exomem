@@ -2510,6 +2510,8 @@ class LeaseManager:
                 required = graph_sync.registered_checkpoint(
                     root, state_root=self.config.state_dir
                 )
+                if required is None and not has_reconcile_handoff:
+                    return terminal_result
                 if required is not None:
                     graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
