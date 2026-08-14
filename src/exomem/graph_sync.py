@@ -1798,9 +1798,9 @@ def _recover_interrupted_reset(vault_root: Path) -> GraphReset | None:
     """Reverse a partial transaction only when its retained identities prove it safe."""
     from .mutation_lock import (
         rename_retained_regular_file,
+        retain_child_directory,
         retain_regular_child_file,
         retain_secure_directory,
-        retain_child_directory,
     )
     kb = _reset_directory(vault_root, "0" * 24).parent
     parent = retain_secure_directory(kb)
@@ -1874,8 +1874,11 @@ def recover_isolated_graph_lineage_reset(vault_root: Path) -> GraphReset | None:
 
 def census_unavailable_graph_lineage(vault_root: Path) -> tuple[str, ...]:
     """Return the exact safe live derived set without moving or registering work."""
-    from .mutation_lock import retain_regular_child_file, retain_secure_directory, retained_regular_child_names
-
+    from .mutation_lock import (
+        retain_regular_child_file,
+        retain_secure_directory,
+        retained_regular_child_names,
+    )
     from .writer_lease import active_manager
 
     root = Path(vault_root)
@@ -1973,7 +1976,7 @@ def isolate_unavailable_graph_lineage(vault_root: Path) -> GraphReset | None:
                                 rename_retained_regular_file(moved_item, kb / item.path.name, destination_directory=parent)
                             finally:
                                 moved_item.close()
-                        except Exception:
+                        except Exception:  # noqa: BLE001 - rollback must absorb any cleanup failure
                             rollback_failed = True
                     raise GraphResetFailed("GRAPH_SYNC_RESET_ROLLBACK_FAILED" if rollback_failed else "GRAPH_SYNC_RESET_REFUSED") from error
             finally:

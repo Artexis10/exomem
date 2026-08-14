@@ -945,7 +945,7 @@ def _same_file_entry(directory: _SecureDirectory, name: str, fd: int) -> bool:
         current_handle = _windows_open_path(directory.path / name, directory=False)
         try:
             return _windows_handle_identity(current_handle) == _windows_handle_identity(
-                getattr(msvcrt, "get_osfhandle")(fd)
+                getattr(msvcrt, "get_osfhandle")(fd)  # noqa: B009 - Windows compatibility seam
             )
         finally:
             _windows_close_handle(current_handle)
@@ -1258,7 +1258,7 @@ def _open_secure_file_at(
         try:
             if not _windows_child_is_in_directory(directory, handle):
                 raise OSError("Windows runtime file escaped its retained directory")
-            fd = getattr(msvcrt, "open_osfhandle")(handle, flags | getattr(os, "O_BINARY", 0))
+            fd = getattr(msvcrt, "open_osfhandle")(handle, flags | getattr(os, "O_BINARY", 0))  # noqa: B009 - Windows compatibility seam
         except BaseException:
             _windows_close_handle(handle)
             raise
@@ -1701,7 +1701,7 @@ def _try_os_lock(
     *,
     _windows: bool = os.name == "nt",
     _locking: Callable[[int, int, int], Any] | None = (
-        getattr(msvcrt, "locking", None) if os.name == "nt" else None
+        getattr(msvcrt, "locking", None) if os.name == "nt" else None  # noqa: B008 - injectable platform seam
     ),
     _flock: Callable[[int, int], Any] | None = (
         None if os.name == "nt" else fcntl.flock
@@ -1749,7 +1749,7 @@ def _release_os_lock(
     *,
     _windows: bool = os.name == "nt",
     _locking: Callable[[int, int, int], Any] | None = (
-        getattr(msvcrt, "locking", None) if os.name == "nt" else None
+        getattr(msvcrt, "locking", None) if os.name == "nt" else None  # noqa: B008 - injectable platform seam
     ),
     _flock: Callable[[int, int], Any] | None = (
         None if os.name == "nt" else fcntl.flock

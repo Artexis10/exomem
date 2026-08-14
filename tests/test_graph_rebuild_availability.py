@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import freshness, graph_sync, mutation_lock as mutation_lock_module, runtime_readiness
+from exomem import freshness, graph_sync, runtime_readiness
+from exomem import mutation_lock as mutation_lock_module
 from exomem import reconcile as reconcile_module
 from exomem import vault as vault_module
 
