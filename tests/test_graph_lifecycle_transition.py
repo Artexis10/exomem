@@ -138,6 +138,36 @@ def test_rename_failure_after_floor_restores_prior_epoch_and_aborts_lifecycle(
     assert graph_sync.checkpoint_path(tmp_path).exists() is False
 
 
+def test_raw_post_rename_fsync_error_durably_inverses_before_restoring_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raw POSIX fsync refusal cannot bypass graph lifecycle rollback."""
+    relative, source = _note(tmp_path, "raw-fsync-refusal.md")
+    flushed: list[Path] = []
+    original_fsync = lifecycle._fsync_directory
+
+    def fail_forward_fsync(path: Path) -> None:
+        flushed.append(path)
+        if len(flushed) == 1:
+            raise OSError(r"C:\\private\\post-rename-fsync")
+        original_fsync(path)
+
+    monkeypatch.setattr(lifecycle, "_fsync_directory", fail_forward_fsync)
+
+    with pytest.raises(delete_file.DeleteFileError) as error:
+        delete_file.delete_file(tmp_path, path=relative, confirm=True)
+
+    assert error.value.code == "LIFECYCLE_PATH_UNSAFE"
+    assert "C:\\private\\post-rename-fsync" not in str(error.value)
+    assert source.exists()
+    assert not list((tmp_path / "Knowledge Base" / "_trash").rglob("*raw-fsync-refusal.md"))
+    assert graph_sync.floor_path(tmp_path).exists() is False
+    assert graph_sync.checkpoint_path(tmp_path).exists() is False
+    assert len(flushed) == 3
+    assert flushed[0] == source.parent
+    assert flushed[-1] == source.parent
+
+
 def test_checkpoint_failure_after_rename_restores_exact_prior_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

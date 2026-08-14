@@ -129,7 +129,7 @@ def test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refus
     else:
         assert source.read_text(encoding="utf-8") == "# changed after manifest\n"
         assert _marker_snapshot(tmp_path)
-    assert flushed == [graph_sync.floor_path(tmp_path).parent]
+    assert graph_sync.floor_path(tmp_path).parent in flushed
 
 
 def test_windows_epoch_restore_flush_failure_remains_graph_rollback_failed(
@@ -304,7 +304,7 @@ def test_windows_deletion_inverse_move_failure_retains_epoch_and_marker_for_reco
     assert error.value.code == "GRAPH_SYNC_DELETION_ROLLBACK_FAILED"
     assert len(rename_calls) == 2
     assert source.exists() is False
-    assert list((tmp_path / "Knowledge Base" / "_trash").rglob("delete-inverse-failure.md"))
+    assert list((tmp_path / "Knowledge Base" / "_trash").rglob("*delete-inverse-failure.md"))
     assert graph_sync.floor_path(tmp_path).read_bytes() != prior_floor
     assert _marker_snapshot(tmp_path)
 

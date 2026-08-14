@@ -44,6 +44,10 @@ class LifecycleError(Exception):
         return f"{self.code}: {self.reason}"
 
 
+class _PostRenameDurabilityError(LifecycleError):
+    """Internal signal that canonical placement changed before durability failed."""
+
+
 @dataclass(frozen=True)
 class ManifestItem:
     source_path: str
@@ -596,10 +600,17 @@ def atomic_rename(
     except OSError as exc:
         code = "CROSS_DEVICE_MOVE" if exc.errno == errno.EXDEV else "ATOMIC_MOVE_FAILED"
         raise LifecycleError(code, "atomic lifecycle rename failed") from exc
-    _fsync_directory(source.parent)
-    if destination.parent != source.parent:
-        _fsync_directory(destination.parent)
-    _checkpoint("recovery_moved" if recovery else "deletion_moved")
+    try:
+        _fsync_directory(source.parent)
+        if destination.parent != source.parent:
+            _fsync_directory(destination.parent)
+        _checkpoint("recovery_moved" if recovery else "deletion_moved")
+    except LifecycleError as exc:
+        raise _PostRenameDurabilityError(exc.code, exc.reason) from exc
+    except OSError as exc:
+        raise _PostRenameDurabilityError(
+            "LIFECYCLE_PATH_UNSAFE", "lifecycle durable directory fsync failed"
+        ) from exc
 
 
 def _read_json(vault_root: Path, path: Path) -> dict[str, Any] | None:
