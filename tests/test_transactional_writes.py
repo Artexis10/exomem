@@ -362,6 +362,45 @@ def test_windows_held_checkpoint_does_not_block_deferred_media_sidecar_commit(tm
     assert _workspaces(checkpoint.parent) == []
 
 
+def test_graph_internal_deletion_epoch_keeps_floor_caller_checkpoint_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph's own false-fanout protocol remains a complete epoch."""
+    _prime_graph_epoch(tmp_path)
+    target = _graph_write(tmp_path, "delete-me.md").path
+    vault_module.batch_atomic_write(
+        [_graph_write(tmp_path, "delete-me.md")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    rel = target.relative_to(tmp_path).as_posix()
+    events: list[str] = []
+    original_replace = vault_module.os.replace
+
+    def observe_graph_protocol(source, destination, *args, **kwargs):  # noqa: ANN001
+        if _leaf(source).startswith("stage-"):
+            if Path(destination) == graph_sync.floor_path(tmp_path):
+                events.append("floor")
+            elif Path(destination) == graph_sync.checkpoint_path(tmp_path):
+                events.append("checkpoint")
+        return original_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "replace", observe_graph_protocol)
+    epoch = graph_sync.prepare_deletion_epoch(tmp_path, [rel])
+    assert epoch is not None
+    assert events == ["floor"]
+
+    target.unlink()
+    events.append("caller")
+    graph_sync.commit_deletion_epoch(epoch)
+
+    assert events == ["floor", "caller", "checkpoint"]
+    checkpoint = graph_sync.read_checkpoint(tmp_path)
+    floor = graph_sync.read_floor(tmp_path)
+    assert checkpoint == epoch.checkpoint
+    assert floor is not None and floor.generation == checkpoint.generation
+
+
 def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

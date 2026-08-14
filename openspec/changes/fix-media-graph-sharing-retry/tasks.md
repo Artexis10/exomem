@@ -9,13 +9,13 @@
 
 - [x] 2.1 Add the narrow deferred-completion option with exact checkpoint output, floor retention, checkpoint omission, and unchanged defaults.
 - [ ] 2.2 Wire only explicit media call sites; re-enter the canonical coordinator and CAS-publish the exact checkpoint only when floor/predecessor still match before fanout.
-- [ ] 2.3 Add a deterministic two-writer test proving a newer epoch supersedes a stale media token without regression, false fanout success, or receipt clearing.
-- [ ] 2.4 Prove all graph-internal and ordinary false-fanout callers retain their epoch behavior.
+- [x] 2.3 Add a deterministic two-writer test proving a newer epoch supersedes a stale media token without regression, false fanout success, or receipt clearing.
+- [x] 2.4 Prove all graph-internal and ordinary false-fanout callers retain their epoch behavior.
 
 ## 3. Durable Convergence Without Re-Extraction
 
-- [ ] 3.1 Add red tests proving receipt admission failure aborts before mutation and CAS-only clearing occurs after checkpoint plus completed or verified exact downstream handoffs, including concurrent revision.
-- [ ] 3.2 Prove checkpoint/fanout failure completes media once, retains the receipt, and never stores rollback-incomplete.
+- [x] 3.1 Add red tests proving receipt admission failure aborts before mutation and CAS-only clearing occurs after checkpoint plus completed or verified exact downstream handoffs, including concurrent revision.
+- [x] 3.2 Prove checkpoint/fanout failure completes media once, retains the receipt, and never stores rollback-incomplete.
 - [ ] 3.3 Prove real full-receipt drain recovers floor-ahead state, converges graph, and CAS-clears only completed work without extraction.
 - [ ] 3.4 Prove real watcher startup recovers floor-ahead state before rebuild and does not re-extract a committed transcript.
 - [ ] 3.5 Wire only missing recovery behavior using existing graph, watcher, and deferred-work owners.

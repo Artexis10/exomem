@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,79 @@ import pytest
 
 from exomem import deferred_index, doctor, file_watcher, index_sync, mode, mutation_lock
 from exomem.__main__ import _index_main, _mode_main
+
+
+def test_add_full_receipts_returns_its_atomic_revision_when_a_readd_races(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full receipt's return value cannot be reconstructed from a later snapshot."""
+    rels = ["Knowledge Base/racing-receipt.md", "Knowledge Base/racing-other.md"]
+    for rel in rels:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# {target.stem}\n", encoding="utf-8")
+    deferred_index.add_full(vault, rels)
+    original_connect = deferred_index._connect
+    main_thread = threading.current_thread()
+    race_started = threading.Event()
+    race_finished = threading.Event()
+    race_thread: threading.Thread | None = None
+
+    def concurrent_readd() -> None:
+        deferred_index.add_full(vault, [rels[0]])
+        race_finished.set()
+
+    def release_competitor_after_commit() -> None:
+        nonlocal race_thread
+        if race_started.is_set():
+            return
+        race_started.set()
+        race_thread = threading.Thread(target=concurrent_readd)
+        race_thread.start()
+        assert race_finished.wait(timeout=5)
+
+    class _ConnectionProxy:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002
+            result = self._connection.__exit__(*args)
+            release_competitor_after_commit()
+            return result
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+        def commit(self) -> None:
+            self._connection.commit()
+            release_competitor_after_commit()
+
+    def connect(*args, **kwargs):  # noqa: ANN002, ANN003
+        connection = original_connect(*args, **kwargs)
+        if threading.current_thread() is main_thread:
+            return _ConnectionProxy(connection)
+        return connection
+
+    monkeypatch.setattr(deferred_index, "_connect", connect)
+
+    admitted = deferred_index.add_full_receipts(vault, rels)
+
+    assert race_started.is_set()
+    assert race_thread is not None
+    race_thread.join(timeout=5)
+    assert race_finished.is_set()
+    assert admitted == [
+        deferred_index.DeferredReceipt(rels[1], 2),
+        deferred_index.DeferredReceipt(rels[0], 2),
+    ]
+    assert deferred_index.snapshot_full(vault) == [
+        deferred_index.DeferredReceipt(rels[1], 2),
+        deferred_index.DeferredReceipt(rels[0], 3),
+    ]
 
 
 def test_index_command_clears_both_deferred_queues(
