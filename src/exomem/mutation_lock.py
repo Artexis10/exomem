@@ -196,6 +196,8 @@ def rename_retained_regular_file(source: RetainedRegularFile, destination: Path)
             raise FileExistsError("retained rename destination exists")
         if os.name != "nt":
             assert source.directory.fd is not None and directory.fd is not None
+            if not _same_file_entry(source.directory, source.path.name, source.fd):
+                raise OSError("retained rename source identity changed")
             os.rename(
                 source.path.name,
                 target.name,
@@ -226,16 +228,18 @@ def rename_retained_regular_file(source: RetainedRegularFile, destination: Path)
                 ("replace", wintypes.BOOLEAN),
                 ("root", wintypes.HANDLE),
                 ("length", wintypes.DWORD),
+                ("filename", wintypes.WCHAR * 1),
             ]
 
         name = target.name.encode("utf-16-le")
-        size = ctypes.sizeof(_RenameInfo) + len(name)
+        filename_offset = _RenameInfo.filename.offset
+        size = filename_offset + len(name)
         raw = ctypes.create_string_buffer(size)
         info = _RenameInfo.from_buffer(raw)
         info.replace = False
         info.root = directory.windows_handle
         info.length = len(name)
-        ctypes.memmove(ctypes.addressof(raw) + ctypes.sizeof(_RenameInfo), name, len(name))
+        ctypes.memmove(ctypes.addressof(raw) + filename_offset, name, len(name))
         kernel32 = _windows_library(ctypes, "kernel32")
         rename = kernel32.SetFileInformationByHandle
         rename.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
@@ -918,11 +922,40 @@ def create_retained_child_directory(parent: _SecureDirectory, name: str) -> _Sec
         )
         return _SecureDirectory(parent.path / name, fd=fd)
     child_path = parent.path / name
+    # Win32 has no exposed handle-relative mkdir primitive here. Pin the parent
+    # identity before and after the operation, then pin/prove the new child is
+    # immediately below that same parent before returning it.
     child_path.mkdir(mode=0o700)
+    if not _same_directory_path(parent):
+        raise OSError("retained Windows parent changed during child creation")
     child = _acquire_secure_directory(child_path, create=False)
     try:
         if not _windows_child_is_in_directory(parent, child.windows_handle):
             raise OSError("Windows child directory escaped its retained parent")
+        return child
+    except BaseException:
+        child.close()
+        raise
+
+
+def retain_child_directory(parent: _SecureDirectory, name: str) -> _SecureDirectory:
+    """Pin an existing direct child and prove it still belongs to the parent."""
+    if not name or Path(name).name != name or "/" in name or "\\" in name:
+        raise OSError("retained directory child must be one basename")
+    if not _same_directory_path(parent):
+        raise OSError("retained parent changed")
+    if os.name != "nt":
+        assert parent.fd is not None
+        fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent.fd,
+        )
+        return _SecureDirectory(parent.path / name, fd=fd)
+    child = _acquire_secure_directory(parent.path / name, create=False)
+    try:
+        if not _same_directory_path(parent) or not _windows_child_is_in_directory(parent, child.windows_handle):
+            raise OSError("retained Windows child directory changed or escaped parent")
         return child
     except BaseException:
         child.close()
@@ -982,6 +1015,8 @@ def retained_write_file(
     if not replace and target.exists():
         raise FileExistsError("retained Windows destination exists")
     os.replace(staging, target)
+    if not _same_directory_path(directory):
+        raise OSError("retained Windows directory changed during file publish")
 
 
 def retained_read_file(directory: _SecureDirectory, name: str, *, limit: int) -> bytes:
@@ -1010,8 +1045,43 @@ def retained_unlink_file(directory: _SecureDirectory, name: str) -> None:
             os.fsync(directory.fd)
         else:
             os.unlink(directory.path / name)
+            if not _same_directory_path(directory):
+                raise OSError("retained Windows directory changed during unlink")
     finally:
         held.close()
+
+
+def retained_regular_child_names(directory: _SecureDirectory, names: tuple[str, ...]) -> tuple[str, ...]:
+    """Census only exact regular no-follow children under one pinned parent."""
+    if not _same_directory_path(directory):
+        raise OSError("retained directory changed")
+    present: list[str] = []
+    if os.name != "nt":
+        assert directory.fd is not None
+        entries = set(os.listdir(directory.fd))
+        for name in names:
+            if name not in entries:
+                continue
+            fd = _open_secure_file_at(directory, name, os.O_RDONLY)
+            try:
+                if not _same_file_entry(directory, name, fd):
+                    raise OSError("retained child identity changed")
+            finally:
+                os.close(fd)
+            present.append(name)
+        return tuple(present)
+    for name in names:
+        try:
+            held = retain_regular_file(directory.path / name)
+        except FileNotFoundError:
+            continue
+        try:
+            if not _same_directory_path(directory):
+                raise OSError("retained Windows parent changed during census")
+            present.append(name)
+        finally:
+            held.close()
+    return tuple(present)
 
 
 def _open_secure_file_at(

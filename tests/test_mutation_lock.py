@@ -36,6 +36,13 @@ def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> 
     assert destination.read_bytes() == b"graph"
 
 
+def test_windows_retained_rename_uses_file_rename_info_filename_offset() -> None:
+    source = inspect.getsource(mutation_lock_module.rename_retained_regular_file)
+
+    assert "filename_offset = _RenameInfo.filename.offset" in source
+    assert "size = filename_offset + len(name)" in source
+
+
 def test_windows_path_inspection_access_has_dacl_read_right_without_mutation_rights() -> None:
     access = inspect.signature(mutation_lock_module._windows_open_path).parameters["access"].default
 

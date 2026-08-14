@@ -1720,9 +1720,28 @@ def _read_reset_manifest(directory: Path) -> tuple[GraphReset, dict[str, tuple[i
 
 def _recover_interrupted_reset(vault_root: Path) -> GraphReset | None:
     """Reverse a partial transaction only when its retained identities prove it safe."""
-    from .mutation_lock import rename_retained_regular_file, retain_regular_file
+    from .mutation_lock import (
+        rename_retained_regular_file,
+        retain_regular_file,
+        retain_secure_directory,
+        retain_child_directory,
+    )
     kb = _reset_directory(vault_root, "0" * 24).parent
-    candidates = [entry for entry in kb.iterdir() if entry.name.startswith(_RESET_PREFIX)]
+    parent = retain_secure_directory(kb)
+    try:
+        entries = os.listdir(parent.fd) if parent.fd is not None else os.listdir(parent.path)
+        candidates = []
+        for name in entries:
+            if not name.startswith(_RESET_PREFIX):
+                continue
+            candidate = kb / name
+            held = retain_child_directory(parent, name)
+            try:
+                candidates.append(candidate)
+            finally:
+                held.close()
+    finally:
+        parent.close()
     if not candidates:
         return None
     if len(candidates) != 1:
@@ -1769,9 +1788,14 @@ def census_unavailable_graph_lineage(vault_root: Path) -> tuple[str, ...]:
     with coordinator.hold(operation="graph_lineage_reset_census", holder_kind="graph"):
         if classify_epoch(root).kind != "unavailable":
             return ()
-        _recover_interrupted_reset(root)
         kb = _reset_directory(root, "0" * 24).parent
-        members = tuple(name for name in _RESET_MEMBERS if (kb / name).exists())
+        from .mutation_lock import retain_secure_directory, retained_regular_child_names
+
+        parent = retain_secure_directory(kb)
+        try:
+            members = retained_regular_child_names(parent, _RESET_MEMBERS)
+        finally:
+            parent.close()
         if ".graph.sqlite" not in members:
             raise GraphResetFailed()
         retained = []
@@ -1782,6 +1806,24 @@ def census_unavailable_graph_lineage(vault_root: Path) -> tuple[str, ...]:
         finally:
             for item in retained:
                 item.close()
+
+
+def _isolated_reset_matches(
+    directory: Path, kb: Path, members: tuple[str, ...], identities: dict[str, tuple[int, ...]]
+) -> bool:
+    from .mutation_lock import retain_regular_file
+
+    try:
+        for name in members:
+            held = retain_regular_file(directory / name)
+            try:
+                if held.identity != identities[name] or (kb / name).exists():
+                    return False
+            finally:
+                held.close()
+        return True
+    except OSError:
+        return False
 
 
 def isolate_unavailable_graph_lineage(vault_root: Path) -> GraphReset | None:
@@ -1821,18 +1863,25 @@ def isolate_unavailable_graph_lineage(vault_root: Path) -> GraphReset | None:
             try:
                 _advance_reset_manifest(directory, GraphReset(operation_id, members, "moving"), identities)
                 for item in retained:
-                    rename_retained_regular_file(item, directory / item.path.name)
                     moved.append(item)
+                    rename_retained_regular_file(item, directory / item.path.name)
                     _advance_reset_manifest(
                         directory, GraphReset(operation_id, members, "moving"), identities
                     )
                 _advance_reset_manifest(directory, GraphReset(operation_id, members, "isolated"), identities)
+                if not _isolated_reset_matches(directory, kb, members, identities):
+                    raise GraphResetFailed()
                 return GraphReset(operation_id, members, "isolated")
             except Exception as error:
                 rollback_failed = False
                 for item in reversed(moved):
                     try:
-                        moved_item = retain_regular_file(directory / item.path.name)
+                        target = directory / item.path.name
+                        if not target.exists():
+                            if (kb / item.path.name).exists():
+                                continue
+                            raise FileNotFoundError(item.path.name)
+                        moved_item = retain_regular_file(target)
                         try:
                             rename_retained_regular_file(moved_item, kb / item.path.name)
                         finally:

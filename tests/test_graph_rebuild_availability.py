@@ -447,6 +447,23 @@ def test_rebuild_graph_dry_run_previews_unavailable_reset_without_mutating(
     } == before
 
 
+def test_dry_run_census_never_recovers_an_interrupted_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    kb = tmp_path / "Knowledge Base"
+    (kb / ".graph.sqlite").write_bytes(b"graph")
+
+    monkeypatch.setattr(
+        graph_sync,
+        "_recover_interrupted_reset",
+        lambda _root: pytest.fail("dry-run must not recover a transaction"),
+    )
+
+    assert graph_sync.census_unavailable_graph_lineage(tmp_path) == (".graph.sqlite",)
+
+
 def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -> None:
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
