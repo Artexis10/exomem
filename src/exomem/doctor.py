@@ -1133,11 +1133,23 @@ def _check_models_cache() -> DoctorCheck:
 
 
 def _check_tesseract(*, required: bool = True) -> DoctorCheck:
+    """Report what the RUNTIME will resolve, not a narrower guess.
+
+    Doctor checked only `EXOMEM_TESSERACT_CMD` and PATH, while
+    `extract._ensure_tesseract_cmd` also probes the standard install locations.
+    The UB-Mannheim Windows package installs to one of those and does not touch
+    PATH, so doctor reported FAIL on a host where OCR demonstrably worked — and
+    `scripts/upgrade.ps1 -Profile media` then refused a safe service restart
+    with the release already staged. Sharing one resolver is what stops the two
+    drifting again.
+    """
+    from . import extract
+
     configured = os.environ.get("EXOMEM_TESSERACT_CMD")
     if configured and Path(configured).exists():
         return _check("tool.tesseract", "pass", f"Tesseract configured at {configured}.")
-    found = shutil.which("tesseract")
-    if found:
+    found = extract.resolve_tesseract_cmd()
+    if found and Path(found).exists():
         return _check("tool.tesseract", "pass", f"Tesseract found at {found}.")
     return _check(
         "tool.tesseract",

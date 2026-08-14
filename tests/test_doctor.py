@@ -662,14 +662,53 @@ def test_process_memory_mixed_rows_keep_physical_and_rss_totals_separate() -> No
 def test_standard_profile_accepts_missing_tesseract_as_degraded_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from exomem import extract as extract_module
+
     monkeypatch.delenv("EXOMEM_TESSERACT_CMD", raising=False)
     monkeypatch.setattr(doctor_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(extract_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(extract_module, "TESSERACT_INSTALL_CANDIDATES", ())
 
     check = doctor_module._check_tesseract(required=False)
 
     assert check.status == "warn"
     assert "Tesseract" in check.message
 
+
+def test_doctor_finds_tesseract_at_a_standard_install_location_off_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#302: doctor FAILed on a host where extraction would have worked.
+
+    The UB-Mannheim Windows package installs to a documented location and does
+    not add it to PATH. Doctor checked only EXOMEM_TESSERACT_CMD and PATH, so
+    `scripts/upgrade.ps1 -Profile media` refused a safe restart on an install
+    whose runtime dependency was present and usable.
+    """
+    from exomem import extract as extract_module
+
+    installed = tmp_path / "Tesseract-OCR" / "tesseract.exe"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("binary", encoding="utf-8")
+
+    monkeypatch.delenv("EXOMEM_TESSERACT_CMD", raising=False)
+    monkeypatch.setattr(extract_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(extract_module, "TESSERACT_INSTALL_CANDIDATES", (str(installed),))
+
+    check = doctor_module._check_tesseract(required=True)
+
+    assert check.status == "pass"
+    assert str(installed) in check.message
+
+
+def test_doctor_and_runtime_cannot_hold_separate_tesseract_candidate_sets() -> None:
+    """The drift guard #302 asks for: one discovery function, not two lists."""
+    from exomem import extract as extract_module
+
+    source = Path(doctor_module.__file__).read_text(encoding="utf-8")
+    assert "resolve_tesseract_cmd" in source, "doctor must use the shared resolver"
+    for candidate in extract_module.TESSERACT_INSTALL_CANDIDATES:
+        assert candidate not in source, "doctor must not re-declare install locations"
 
 
 def test_doctor_missing_vault_fails(monkeypatch: pytest.MonkeyPatch) -> None:
