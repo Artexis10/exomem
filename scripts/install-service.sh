@@ -36,7 +36,9 @@ Modes:
   --repo-dev                Use the checkout .venv (default for compatibility)
 
 Options:
-  --profile lean|hybrid|standard|media
+  --profile lean|onnx|hybrid|standard|media
+                            onnx is the CPU-only vector lane: same model as
+                            hybrid, served by ONNX Runtime, no CUDA torch wheel
   --service-root PATH       Override release state/venv location
   --package-version VERSION Pin the PyPI release version
   --env-file PATH           Dotenv file (default: <repo>/.env)
@@ -115,9 +117,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$PROFILE" in
-    lean|hybrid|standard|media) ;;
-    *) die "--profile must be lean, hybrid, standard, or media" ;;
+    lean|onnx|hybrid|standard|media) ;;
+    *) die "--profile must be lean, onnx, hybrid, standard, or media" ;;
 esac
+
+# `onnx` is an install lane, not a doctor profile. It expects exactly the vector
+# lane `hybrid` expects — same model, same sidecar — and only the serving runtime
+# differs, which doctor already resolves from EXOMEM_EMBED_BACKEND.
+DOCTOR_PROFILE="$PROFILE"
+EMBED_BACKEND=""
+if [[ "$PROFILE" == "onnx" ]]; then
+    DOCTOR_PROFILE="hybrid"
+    EMBED_BACKEND="onnx"
+fi
 if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     die "--port must be an integer from 1 to 65535"
 fi
@@ -170,6 +182,13 @@ if [[ "$MODE" == "release" ]]; then
         lean)
             EXTRAS=""
             ;;
+        onnx)
+            # `torch` is pinned to the CUDA index for Linux and Windows, so on a
+            # GPU-less host `hybrid` downloads a multi-GB wheel that can never be
+            # used. This lane serves the identical model through ONNX Runtime —
+            # the right default for a CPU-only host, which is most of them.
+            EXTRAS="embeddings-onnx"
+            ;;
         hybrid)
             EXTRAS="embeddings"
             ;;
@@ -218,7 +237,8 @@ trap cleanup EXIT
     "$PROCESS_ENV_FILE" \
     "$LAUNCHD_ENV_FILE" \
     "$LOG_DIR" \
-    "$LEGACY_MCP_COMPAT" <<'PY'
+    "$LEGACY_MCP_COMPAT" \
+    "$EMBED_BACKEND" <<'PY'
 from __future__ import annotations
 
 import os
@@ -230,7 +250,7 @@ from xml.sax.saxutils import escape
 
 from dotenv import dotenv_values
 
-env_path, systemd_path, process_path, xml_path, log_dir, legacy = sys.argv[1:]
+env_path, systemd_path, process_path, xml_path, log_dir, legacy, embed_backend = sys.argv[1:]
 values = {
     key: str(value)
     for key, value in dotenv_values(env_path).items()
@@ -245,6 +265,10 @@ for key, value in values.items():
 if not values.get("EXOMEM_VAULT_PATH", "").strip():
     raise SystemExit(f"EXOMEM_VAULT_PATH is required in {env_path}")
 values.setdefault("EXOMEM_LOG_DIR", log_dir)
+# setdefault, not assignment: an explicit choice in the dotenv outranks the
+# profile's default, so `--profile onnx` never silently overrides it.
+if embed_backend:
+    values.setdefault("EXOMEM_EMBED_BACKEND", embed_backend)
 if os.environ.get("PATH"):
     values.setdefault("PATH", os.environ["PATH"])
 if legacy == "1":
@@ -278,9 +302,9 @@ PY
 source "$PROCESS_ENV_FILE"
 rm -f "$PROCESS_ENV_FILE"
 
-echo "Preflight: exomem doctor --profile $PROFILE..."
+echo "Preflight: exomem doctor --profile $DOCTOR_PROFILE..."
 "$VENV_PYTHON" -m exomem doctor \
-    --profile "$PROFILE" \
+    --profile "$DOCTOR_PROFILE" \
     --vault "$EXOMEM_VAULT_PATH"
 echo "Preflight: exomem doctor --profile remote..."
 "$VENV_PYTHON" -m exomem doctor \

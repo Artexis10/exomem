@@ -235,8 +235,14 @@ markers = [
 # index out of general resolution. Multi-host GPU bring-up is documented in README.
 [tool.uv]
 # A single writer version prevents harmless-but-noisy marker normalization
-# differences between Windows, WSL, Docker, and CI.
-required-version = "==0.11.28"
+# differences between Windows, WSL, Docker, and CI. This is a FLOOR, not a pin:
+# uv is usually one shared installation managing many unrelated tools, so `==`
+# made `uv sync` in a fresh checkout fail with "Update `uv` by running `uv self
+# update 0.11.28`" — a global downgrade to satisfy one repo, which is a real
+# cost to a first-time contributor and not obviously safe. The exact writer
+# version is enforced in CI (.github/workflows/ci.yml, the `uv lock --check`
+# job), which is the only place lockfile normalization can actually diverge.
+required-version = ">=0.11.28"
 
 [tool.uv.sources]
 torch = [
