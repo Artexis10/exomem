@@ -634,6 +634,119 @@ def _is_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _require_media_access(vault: Path, binary: Path) -> str:
+    rel_binary = binary.relative_to(vault).as_posix()
+    tier = access.access_tier(vault, rel_binary)
+    if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
+        raise MediaProcessingError(
+            "MEDIA_PATH_ACCESS_DENIED",
+            f"media path is {tier} under _access.yaml: {rel_binary}",
+        )
+    return rel_binary
+
+
+def _pending_sidecar_matches_current_provenance(
+    content: str,
+    *,
+    vault: Path,
+    binary: Path,
+    media_type: str,
+    provenance: _BinaryProvenance,
+) -> bool:
+    frontmatter, _body, raw_frontmatter = parse_frontmatter(content)
+    if raw_frontmatter is None or not _is_pending_sidecar_shape(
+        vault, binary, frontmatter, media_type
+    ):
+        return False
+    values = _provenance_values(provenance)
+    return all(frontmatter.get(field) == values[field] for field in _PROVENANCE_FIELDS)
+
+
+def _block_ambiguous_retry(
+    store: media_jobs.MediaJobStore,
+    job: media_jobs.MediaJob,
+    sidecar: Path,
+) -> ReconcileResult:
+    assert job.id is not None
+    store.mark(
+        job.id,
+        media_jobs.BLOCKED,
+        job.last_error or "BatchWriteError: reconciliation required",
+    )
+    return ReconcileResult(job.media_type, media_jobs.BLOCKED, sidecar, job.id)
+
+
+def _retry_ambiguous_batch_failure(
+    vault: Path,
+    binary: Path,
+    job: media_jobs.MediaJob,
+    *,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None,
+) -> ReconcileResult:
+    """Resolve only current canonical provenance; retained batches remain inspect-only."""
+    sidecar = binary.with_name(binary.name + ".md")
+    resolved_binary = _confine_to_knowledge_base(vault, binary)
+    _require_media_access(vault, binary)
+    boundary = commit_guard() if commit_guard is not None else nullcontext()
+    with boundary:
+        store = media_jobs.MediaJobStore(vault)
+        durable = store.get_by_binary(binary)
+        if durable is None:
+            return ReconcileResult(job.media_type, media_jobs.BLOCKED, sidecar, job.id)
+        if media_jobs._classify_batch_write_failure(durable.last_error) is None:
+            return ReconcileResult(
+                durable.media_type,
+                durable.state,
+                durable.sidecar_path,
+                durable.id,
+            )
+        _require_media_access(vault, binary)
+        try:
+            _confine_sidecar(vault, sidecar)
+            provenance = _read_provenance(vault, binary, resolved_binary)
+            original = sidecar.read_text(encoding="utf-8")
+        except (OSError, UnicodeError, MediaProcessingError):
+            return _block_ambiguous_retry(store, durable, sidecar)
+
+        try:
+            _verify_binary_identity(binary, resolved_binary, provenance)
+            current = sidecar.read_text(encoding="utf-8") if sidecar.exists() else None
+        except (OSError, UnicodeError, MediaProcessingError):
+            return _block_ambiguous_retry(store, durable, sidecar)
+        if current != original:
+            return _block_ambiguous_retry(store, durable, sidecar)
+
+        completed = _completed_provenance_state(
+            original, media_type=durable.media_type, provenance=provenance
+        )
+        if completed == "valid":
+            store.discard(durable)
+            return ReconcileResult(durable.media_type, "completed", sidecar, None)
+        if not _pending_sidecar_matches_current_provenance(
+            original,
+            vault=vault,
+            binary=binary,
+            media_type=durable.media_type,
+            provenance=provenance,
+        ):
+            return _block_ambiguous_retry(store, durable, sidecar)
+
+        requeued = store.retry(
+            binary_path=binary,
+            include_failed=True,
+            allow_reconciliation_required=True,
+        )
+        if requeued == 0:
+            return _block_ambiguous_retry(store, durable, sidecar)
+        return ReconcileResult(
+            durable.media_type,
+            media_jobs.PENDING,
+            sidecar,
+            durable.id,
+            requeued=requeued,
+        )
+
+
 def retry_media(
     vault_root: Path,
     binary_path: str | Path,
@@ -646,6 +759,17 @@ def retry_media(
     if not binary.is_absolute():
         binary = vault / binary
     binary = Path(os.path.abspath(binary))
+
+    if media_jobs.job_store_path(vault).exists():
+        store = media_jobs.MediaJobStore(vault, create=False)
+        job = store.get_by_binary(binary)
+        if job is not None and media_jobs._classify_batch_write_failure(job.last_error) is not None:
+            return _retry_ambiguous_batch_failure(
+                vault,
+                binary,
+                job,
+                commit_guard=commit_guard,
+            )
 
     result = reconcile_media(vault, binary, commit_guard=commit_guard)
     if result.state == "completed" or result.job_id is None:

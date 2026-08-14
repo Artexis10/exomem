@@ -7,6 +7,7 @@ import importlib
 import logging
 import os
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ import yaml
 
 from exomem import commands as commands_module
 from exomem import media_jobs
+from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 
 
@@ -45,6 +47,55 @@ def _frontmatter_and_body(path: Path) -> tuple[dict[str, object], str]:
 
 def _job_count(vault: Path) -> int:
     return sum(media_jobs.status(vault)["counts"].values())
+
+
+def _ambiguous_batch_error() -> str:
+    error = vault_module.BatchWriteError(
+        "BATCH_ROLLBACK_INCOMPLETE",
+        vault_module.BatchTargetSummary(1, ("Knowledge Base/Evidence/Audio/item.m4a.md",), 0),
+        committed=False,
+    )
+    return f"BatchWriteError: {error}"
+
+
+def _mark_ambiguous_terminal_job(
+    vault: Path, binary: Path
+) -> tuple[object, media_jobs.MediaJobStore]:
+    media_processing = _media_processing()
+    reconciled = media_processing.reconcile_media(vault, binary)
+    assert reconciled is not None and reconciled.job_id is not None
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == reconciled.job_id
+    store.mark(claimed.id, media_jobs.FAILED, _ambiguous_batch_error())
+    return reconciled, store
+
+
+def _retained_batch_workspace(sidecar: Path) -> tuple[Path, dict[Path, tuple[bytes, tuple[int, int, int, int]]]]:
+    workspace = sidecar.parent / f".exomem-batch-{'a' * 32}"
+    workspace.mkdir()
+    staged = workspace / "stage-0.tmp"
+    sentinel = workspace / "sentinel.txt"
+    staged.write_bytes(b"retained staged content must never be replayed")
+    sentinel.write_bytes(b"retained workspace sentinel")
+    paths = (workspace, staged, sentinel)
+    return workspace, {
+        path: (
+            path.read_bytes() if path.is_file() else b"",
+            (path.stat().st_dev, path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns),
+        )
+        for path in paths
+    }
+
+
+def _assert_retained_workspace_unchanged(
+    workspace: Path, before: dict[Path, tuple[bytes, tuple[int, int, int, int]]]
+) -> None:
+    assert workspace.exists()
+    for path, (content, metadata) in before.items():
+        assert path.exists()
+        assert (path.read_bytes() if path.is_file() else b"") == content
+        assert (path.stat().st_dev, path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns) == metadata
 
 
 def test_classifies_m4a_case_insensitively_as_audio() -> None:
@@ -1126,6 +1177,248 @@ def test_retry_all_media_reconciles_stale_completed_before_requeue(vault: Path) 
     assert jobs[failed_binary.relative_to(vault).as_posix()]["state"] == media_jobs.PENDING
 
 
+def test_retry_all_media_excludes_every_ambiguous_batch_failure(vault: Path) -> None:
+    media_processing = _media_processing()
+    limit = 2
+    ambiguous = [_drop_media(vault, f"ambiguous-{index}.m4a") for index in range(limit + 2)]
+    ordinary = _drop_media(vault, "ordinary-failure.m4a")
+    for binary in ambiguous:
+        _mark_ambiguous_terminal_job(vault, binary)
+
+    ordinary_reconciled = media_processing.reconcile_media(vault, ordinary)
+    assert ordinary_reconciled is not None and ordinary_reconciled.job_id is not None
+    store = media_jobs.MediaJobStore(vault)
+    ordinary_claim = store.claim_next()
+    assert ordinary_claim is not None and ordinary_claim.id == ordinary_reconciled.job_id
+    store.mark(ordinary_claim.id, media_jobs.FAILED, "InvalidDataError: retryable")
+
+    assert media_processing.retry_all_media(vault, limit=limit) == 1
+
+    jobs = {job["path"]: job for job in media_jobs.status(vault)["jobs"]}
+    for binary in ambiguous:
+        reported = jobs[binary.relative_to(vault).as_posix()]
+        assert reported["state"] == media_jobs.FAILED
+        assert reported["retryable"] is False
+        assert reported["reconciliation_required"] is True
+    assert jobs[ordinary.relative_to(vault).as_posix()]["state"] == media_jobs.PENDING
+
+
+def test_targeted_retry_resolves_matching_completed_transcript_without_extraction(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "ambiguous-completed.m4a")
+    reconciled, _store = _mark_ambiguous_terminal_job(vault, binary)
+    sidecar = reconciled.sidecar_path
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += "\n## Extracted text\n\n[0:00] Provenance-matched transcript.\n"
+    sidecar.write_text(completed, encoding="utf-8")
+    before = sidecar.read_bytes()
+    workspace, workspace_before = _retained_batch_workspace(sidecar)
+
+    retried = media_processing.retry_media(vault, binary)
+
+    assert retried.state == "completed"
+    assert retried.requeued == 0
+    assert sidecar.read_bytes() == before
+    _assert_retained_workspace_unchanged(workspace, workspace_before)
+    assert media_jobs.status(vault)["jobs"] == []
+
+
+def test_targeted_retry_keeps_completed_transcript_without_provenance_unresolved(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "ambiguous-completed-missing-provenance.m4a")
+    reconciled, _store = _mark_ambiguous_terminal_job(vault, binary)
+    sidecar = reconciled.sidecar_path
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed = completed.replace("binary_sha256:", "missing_sha256:")
+    completed += "\n## Extracted text\n\n[0:00] Do not backfill this transcript.\n"
+    sidecar.write_text(completed, encoding="utf-8")
+    before = sidecar.read_bytes()
+    workspace, workspace_before = _retained_batch_workspace(sidecar)
+
+    retried = media_processing.retry_media(vault, binary)
+
+    assert retried.requeued == 0
+    assert sidecar.read_bytes() == before
+    _assert_retained_workspace_unchanged(workspace, workspace_before)
+    [reported] = media_jobs.status(vault)["jobs"]
+    assert reported["state"] in {media_jobs.BLOCKED, media_jobs.FAILED}
+    assert reported["retryable"] is False
+    assert reported["reconciliation_required"] is True
+    assert reported["failure_code"] == "BATCH_ROLLBACK_INCOMPLETE"
+    assert reported["targets"] == ["Knowledge Base/Evidence/Audio/item.m4a.md"]
+
+
+def test_targeted_retry_allows_one_fresh_attempt_for_matching_pending_sidecar(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "ambiguous-pending.m4a")
+    reconciled, _store = _mark_ambiguous_terminal_job(vault, binary)
+    before = reconciled.sidecar_path.read_bytes()
+    workspace, workspace_before = _retained_batch_workspace(reconciled.sidecar_path)
+
+    retried = media_processing.retry_media(vault, binary)
+
+    assert retried.job_id == reconciled.job_id
+    assert retried.state == media_jobs.PENDING
+    assert retried.requeued == 1
+    assert reconciled.sidecar_path.read_bytes() == before
+    _assert_retained_workspace_unchanged(workspace, workspace_before)
+    [reported] = media_jobs.status(vault)["jobs"]
+    assert reported["state"] == media_jobs.PENDING
+    assert reported["error"] is None
+
+
+def test_targeted_retry_blocks_when_binary_changes_after_initial_provenance(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "ambiguous-binary-race.m4a")
+    reconciled, store = _mark_ambiguous_terminal_job(vault, binary)
+    sidecar = reconciled.sidecar_path
+    before = sidecar.read_bytes()
+    workspace, workspace_before = _retained_batch_workspace(sidecar)
+    durable = store.get(reconciled.job_id)
+    assert durable is not None and durable.last_error is not None
+    original_error = durable.last_error
+    original_read_provenance = media_processing._read_provenance
+
+    def _change_binary_after_provenance(*args: object, **kwargs: object):
+        provenance = original_read_provenance(*args, **kwargs)
+        binary.write_bytes(b"replacement bytes after provenance")
+        return provenance
+
+    monkeypatch.setattr(media_processing, "_read_provenance", _change_binary_after_provenance)
+
+    retried = media_processing.retry_media(vault, binary)
+
+    assert retried.state == media_jobs.BLOCKED
+    assert retried.requeued == 0
+    assert sidecar.read_bytes() == before
+    _assert_retained_workspace_unchanged(workspace, workspace_before)
+    durable = store.get(reconciled.job_id)
+    assert durable is not None
+    assert durable.state == media_jobs.BLOCKED
+    assert durable.last_error == original_error
+
+
+def test_targeted_retry_blocks_when_sidecar_is_replaced_after_initial_read(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "ambiguous-sidecar-race.m4a")
+    reconciled, store = _mark_ambiguous_terminal_job(vault, binary)
+    sidecar = reconciled.sidecar_path
+    workspace, workspace_before = _retained_batch_workspace(sidecar)
+    durable = store.get(reconciled.job_id)
+    assert durable is not None and durable.last_error is not None
+    original_error = durable.last_error
+    original_read_text = Path.read_text
+    replaced = False
+
+    def _replace_sidecar_after_read(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal replaced
+        content = original_read_text(path, *args, **kwargs)
+        if path == sidecar and not replaced:
+            replaced = True
+            replacement = sidecar.with_name(sidecar.name + ".replacement")
+            replacement.write_text(content + "\nmanual replacement\n", encoding="utf-8")
+            os.replace(replacement, sidecar)
+        return content
+
+    monkeypatch.setattr(Path, "read_text", _replace_sidecar_after_read)
+
+    retried = media_processing.retry_media(vault, binary)
+
+    assert retried.state == media_jobs.BLOCKED
+    assert retried.requeued == 0
+    assert sidecar.read_text(encoding="utf-8").endswith("manual replacement\n")
+    _assert_retained_workspace_unchanged(workspace, workspace_before)
+    durable = store.get(reconciled.job_id)
+    assert durable is not None
+    assert durable.state == media_jobs.BLOCKED
+    assert durable.last_error == original_error
+
+
+@pytest.mark.parametrize("tier", ("readonly", "excluded"))
+def test_targeted_retry_rechecks_access_policy_inside_guard(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tier: str
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, f"ambiguous-access-{tier}.m4a")
+    reconciled, store = _mark_ambiguous_terminal_job(vault, binary)
+    sidecar = reconciled.sidecar_path
+    before = sidecar.read_bytes()
+    workspace, workspace_before = _retained_batch_workspace(sidecar)
+    durable = store.get(reconciled.job_id)
+    assert durable is not None and durable.last_error is not None
+    original_error = durable.last_error
+    store.mark(reconciled.job_id, media_jobs.BLOCKED, original_error)
+    access_config = vault / "Knowledge Base" / "_access.yaml"
+
+    @contextmanager
+    def _policy_drift():
+        access_config.write_text(f"{tier}:\n  - Evidence/Audio\n", encoding="utf-8")
+        yield
+
+    with pytest.raises(media_processing.MediaProcessingError) as exc:
+        media_processing.retry_media(vault, binary, commit_guard=_policy_drift)
+
+    assert exc.value.code == "MEDIA_PATH_ACCESS_DENIED"
+    assert sidecar.read_bytes() == before
+    _assert_retained_workspace_unchanged(workspace, workspace_before)
+    durable = store.get(reconciled.job_id)
+    assert durable is not None
+    assert durable.state == media_jobs.BLOCKED
+    assert durable.last_error == original_error
+
+
+@pytest.mark.parametrize("provenance_state", ["missing", "conflicting", "changed-identity"])
+def test_targeted_retry_refuses_ambiguous_job_without_matching_current_provenance(
+    vault: Path, provenance_state: str
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, f"ambiguous-{provenance_state}.m4a")
+    reconciled, _store = _mark_ambiguous_terminal_job(vault, binary)
+    sidecar = reconciled.sidecar_path
+    if provenance_state == "missing":
+        sidecar.write_text(
+            sidecar.read_text(encoding="utf-8").replace("binary_sha256:", "missing_sha256:"),
+            encoding="utf-8",
+        )
+    elif provenance_state == "conflicting":
+        sidecar.write_text(
+            sidecar.read_text(encoding="utf-8").replace(
+                "binary_sha256: ", "binary_sha256: " + ("0" * 64) + " # "
+            ),
+            encoding="utf-8",
+        )
+    else:
+        binary.write_bytes(b"different current binary identity")
+    before = sidecar.read_bytes()
+    workspace, workspace_before = _retained_batch_workspace(sidecar)
+
+    retried = media_processing.retry_media(vault, binary)
+
+    assert retried.requeued == 0
+    assert sidecar.read_bytes() == before
+    _assert_retained_workspace_unchanged(workspace, workspace_before)
+    [reported] = media_jobs.status(vault)["jobs"]
+    assert reported["state"] in {media_jobs.BLOCKED, media_jobs.FAILED}
+    assert reported["retryable"] is False
+    assert reported["reconciliation_required"] is True
+    assert reported["failure_code"] == "BATCH_ROLLBACK_INCOMPLETE"
+    assert reported["targets"] == ["Knowledge Base/Evidence/Audio/item.m4a.md"]
+
+
 def test_retry_all_media_caps_each_pass(vault: Path) -> None:
     media_processing = _media_processing()
     store = media_jobs.MediaJobStore(vault)
@@ -1195,7 +1488,24 @@ def test_process_media_surfaces_and_retries_targeted_full_index_work(
             other.relative_to(vault).as_posix(),
         ],
     )
-    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_a, **_kw: True)
+    def _completed_full_upsert(
+        root: Path, paths: list[Path], **_kwargs: object
+    ) -> index_sync.IndexSyncReport:
+        rels = tuple(path.relative_to(root).as_posix() for path in paths)
+        outcomes = tuple(
+            index_sync.IndexComponentOutcome(component, "completed", "completed")
+            for component in (
+                "memory_refs",
+                "resolver",
+                "semantic_purge",
+                "lexstore",
+                "epistemic_graph",
+                "embeddings",
+            )
+        )
+        return index_sync.IndexSyncReport("upsert", rels, rels, outcomes)
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", _completed_full_upsert)
 
     status = commands_module.op_process_media(vault, operation="status")
     assert status["index_refresh"]["count"] == 2
