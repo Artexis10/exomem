@@ -129,11 +129,21 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
 )
 VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
 _GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
+_GRAPH_REBUILD_RUNTIME_FILE_NAME = re.compile(
+    r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite"
+    r"(?:-(?:journal|wal|shm))?$",
+    re.ASCII,
+)
 
 
 def is_graph_reset_runtime_dir_name(name: str) -> bool:
     """Whether ``name`` is one exact graph-lineage reset workspace."""
     return _GRAPH_RESET_RUNTIME_DIR_NAME.fullmatch(name) is not None
+
+
+def is_graph_rebuild_runtime_file_name(name: str) -> bool:
+    """Whether ``name`` is one exact graph rebuild SQLite artifact."""
+    return _GRAPH_REBUILD_RUNTIME_FILE_NAME.fullmatch(name) is not None
 
 
 def in_excluded_scan_dir(rel_path: str) -> bool:
