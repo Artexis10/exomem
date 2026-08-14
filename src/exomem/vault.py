@@ -1556,7 +1556,13 @@ def _restore_bound_source_timestamps(
     elif os.utime in getattr(os, "supports_follow_symlinks", set()):
         os.utime(source.path, ns=(atime_ns, mtime_ns), follow_symlinks=False)
     elif os.name == "nt":
-        _set_windows_path_timestamps(source.path, source.identity, atime_ns, mtime_ns)
+        _set_windows_path_timestamps(
+            source.path,
+            source.identity,
+            atime_ns,
+            mtime_ns,
+            verify_atime=False,
+        )
     else:  # pragma: no cover - supported Python platforms expose one safe form
         raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
     restored = os.fstat(descriptor)
@@ -1567,8 +1573,8 @@ def _restore_bound_source_timestamps(
         or not stat.S_ISREG(restored_path.st_mode)
         or stat.S_ISLNK(restored_path.st_mode)
         or _is_reparse(restored_path)
-        or restored.st_atime_ns != atime_ns
         or restored.st_mtime_ns != mtime_ns
+        or restored_path.st_mtime_ns != mtime_ns
     ):
         raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata capture changed")
 
@@ -1667,6 +1673,7 @@ def _reset_restored_timestamps(
                 expected_identity,
                 snapshot.atime_ns,
                 snapshot.mtime_ns,
+                verify_atime=False,
             )
         elif os.utime in getattr(os, "supports_follow_symlinks", set()):
             os.utime(
@@ -1694,8 +1701,8 @@ def _reset_restored_timestamps(
         if (
             not _same_identity(expected_identity, restored)
             or not _same_identity(expected_identity, restored_path)
-            or restored.st_atime_ns != snapshot.atime_ns
             or restored.st_mtime_ns != snapshot.mtime_ns
+            or restored_path.st_mtime_ns != snapshot.mtime_ns
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
     finally:
@@ -2637,6 +2644,8 @@ def _set_windows_path_timestamps(
     expected_identity: PathIdentity,
     atime_ns: int,
     mtime_ns: int,
+    *,
+    verify_atime: bool = True,
 ) -> None:
     """Set Windows timestamps through the exact identity-checked file handle."""
     import ctypes
@@ -2680,7 +2689,7 @@ def _set_windows_path_timestamps(
         after = os.fstat(descriptor)
         if (
             not _same_identity(expected_identity, after)
-            or after.st_atime_ns != atime_ns
+            or (verify_atime and after.st_atime_ns != atime_ns)
             or after.st_mtime_ns != mtime_ns
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
