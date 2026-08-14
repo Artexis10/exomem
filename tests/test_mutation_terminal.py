@@ -88,6 +88,29 @@ def test_compact_terminal_retains_finalized_graph_rebuild_fields() -> None:
     assert "_graph_rebuild_handoff" not in compact
 
 
+def test_terminal_and_replay_views_strip_graph_rebuild_handoff() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "graph_rebuild_requested": True,
+            "graph_rebuild_applicable": True,
+            "graph_rebuild_status": "cleared",
+            "_graph_rebuild_handoff": {"private": "must not escape"},
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    assert "_graph_rebuild_handoff" not in terminal["leaf_result"]
+    assert "_graph_rebuild_handoff" not in mutation_terminal.project_terminal(
+        terminal, "full"
+    )["diagnostics"]
+    assert "_graph_rebuild_handoff" not in mutation_terminal.project_terminal(
+        terminal, "legacy"
+    )
+
+
 def test_full_projection_adds_the_complete_leaf_result_only_under_diagnostics() -> None:
     mutation_terminal = _terminal_module()
     raw = {

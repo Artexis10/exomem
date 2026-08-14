@@ -2713,6 +2713,21 @@ class LeaseManager:
                 if isinstance(result, _CanonicalCommittedFailure):
                     committed_failure = result.payload
                     result = result.result
+                if isinstance(result, Mapping) and root is not None:
+                    from . import reconcile as reconcile_module
+
+                    leaf = result.get("leaf_result", result)
+                    if isinstance(leaf, Mapping) and isinstance(
+                        leaf.get("_graph_rebuild_handoff"), Mapping
+                    ):
+                        finalized = reconcile_module.finalize_graph_rebuild_handoff(
+                            root, leaf, state_root=self.config.state_dir
+                        )
+                        result = (
+                            {**result, "leaf_result": finalized}
+                            if "leaf_result" in result
+                            else finalized
+                        )
                 if result is None:
                     if not isinstance(evidence, graph_sync.GraphCommitReceipt):
                         raise ValueError("canonical receipt terminal projection is unavailable")

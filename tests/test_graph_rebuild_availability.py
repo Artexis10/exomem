@@ -461,6 +461,13 @@ def test_post_join_finalizer_clears_the_checkpoint_bound_quarantine(
     assert "_graph_rebuild_handoff" not in result
 
 
+def test_completed_dispatch_is_a_valid_checkpoint_bound_reset_handoff() -> None:
+    checkpoint = _checkpoint(2)
+    completed = SimpleNamespace(outcome="completed", checkpoint=checkpoint)
+
+    assert reconcile_module._is_graph_rebuild_handoff(completed, checkpoint)
+
+
 def test_rebuild_graph_dry_run_previews_unavailable_reset_without_mutating(
     tmp_path: Path,
 ) -> None:

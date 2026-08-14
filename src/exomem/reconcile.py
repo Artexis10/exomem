@@ -164,6 +164,13 @@ def _graph_rebuild_is_current(vault_root: Path) -> bool:
     )
 
 
+def _is_graph_rebuild_handoff(dispatch: object, checkpoint: object) -> bool:
+    return (
+        getattr(dispatch, "outcome", None) in {"registered", "completed"}
+        and getattr(dispatch, "checkpoint", None) == checkpoint
+    )
+
+
 def finalize_graph_rebuild_handoff(
     vault_root: Path, result: Mapping, *, state_root: Path | None = None
 ) -> dict:
@@ -558,26 +565,31 @@ def reconcile(
                     if reset is not None:
                         report.graph_rebuild_status = "quarantined"
                         report.graph_quarantine_id = reset.operation_id
-                        checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
-                            vault_root
-                        )
-                        dispatch = epistemic_graph._registered_or_failure(
-                            vault_root,
-                            checkpoint,
-                            index,
-                            index._canonical_mutation_coordinator(),
-                        )
-                        if dispatch.outcome == "registered":
-                            report._graph_reconcile_registered = 0
-                            report._graph_rebuild_handoff = {
-                                "operation_id": reset.operation_id,
-                                "checkpoint": checkpoint.as_dict(),
-                                "graph_refreshed": len(initial_graph_drift),
-                            }
-                            reset_registered = True
-                        else:
+                        try:
+                            checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
+                                vault_root
+                            )
+                            dispatch = epistemic_graph._registered_or_failure(
+                                vault_root,
+                                checkpoint,
+                                index,
+                                index._canonical_mutation_coordinator(),
+                            )
+                        except Exception:  # noqa: BLE001 - canonical reset isolation remains durable
                             report.graph_rebuild_status = "retained"
-                            report.graph_rebuild_warning = dispatch.code
+                            report.graph_rebuild_warning = "GRAPH_REBUILD_REGISTRATION_FAILED"
+                        else:
+                            if _is_graph_rebuild_handoff(dispatch, checkpoint):
+                                report._graph_reconcile_registered = 0
+                                report._graph_rebuild_handoff = {
+                                    "operation_id": reset.operation_id,
+                                    "checkpoint": checkpoint.as_dict(),
+                                    "graph_refreshed": len(initial_graph_drift),
+                                }
+                                reset_registered = True
+                            else:
+                                report.graph_rebuild_status = "retained"
+                                report.graph_rebuild_warning = dispatch.code
             else:
                 report.graph_rebuild_status = "not_applicable"
         needs_repair = (

@@ -94,6 +94,14 @@ def _operation_id(result: Any) -> str | None:
     return None
 
 
+def _without_graph_rebuild_handoff(result: Any) -> Any:
+    if isinstance(result, Mapping) and "_graph_rebuild_handoff" in result:
+        return {
+            key: value for key, value in result.items() if key != "_graph_rebuild_handoff"
+        }
+    return result
+
+
 def _warning_count(result: Any) -> int:
     if not isinstance(result, Mapping):
         return 0
@@ -278,6 +286,7 @@ def committed_terminal(
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     """Own one canonical successful result before receipt persistence."""
+    leaf_result = _without_graph_rebuild_handoff(leaf_result)
     terminal: dict[str, Any] = {
         "_terminal": _TERMINAL_MARKER,
         "version": _TERMINAL_VERSION,
@@ -312,6 +321,7 @@ def replayed_terminal(
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     """Present a verified Records no-op replay without fabricating a commit."""
+    leaf_result = _without_graph_rebuild_handoff(leaf_result)
     lifecycle_replay = (
         isinstance(leaf_result, Mapping)
         and leaf_result.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION

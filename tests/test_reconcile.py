@@ -1017,6 +1017,45 @@ def test_reconcile_via_maintain_memory_heals_out_of_band_count_drift(vault: Path
     ), res2
 
 
+def test_reconcile_rebuild_graph_forwards_the_opt_in_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Report:
+        def as_dict(self) -> dict[str, object]:
+            return {"graph_rebuild_requested": True}
+
+    def reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool) -> Report:
+        captured.update(vault_root=vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph)
+        return Report()
+
+    monkeypatch.setattr(commands.reconcile_module, "reconcile", reconcile)
+
+    result = commands.op_reconcile(Path("C:/graph-reconcile"), rebuild_graph=True)
+
+    assert captured == {
+        "vault_root": Path("C:/graph-reconcile"),
+        "dry_run": False,
+        "rebuild_graph": True,
+    }
+    assert result["graph_rebuild_requested"] is True
+
+
+def test_reconcile_rebuild_graph_refuses_an_active_direct_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import writer_lease
+
+    monkeypatch.setattr(writer_lease, "active_mutation_request_id", lambda: None)
+    monkeypatch.setattr(
+        writer_lease, "active_direct_mutation_guard", lambda *_args, **_kwargs: True
+    )
+
+    with pytest.raises(ValueError, match="MUTATION_BOUNDARY_ACTIVE"):
+        commands.op_reconcile(Path("C:/graph-reconcile"), rebuild_graph=True)
+
+
 def test_reconcile_refreshes_source_indexes_and_total_rows(vault: Path) -> None:
     kb = vault / "Knowledge Base"
     extra = kb / "Sources" / "Articles" / "manual-source.md"

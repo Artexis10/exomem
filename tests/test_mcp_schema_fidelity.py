@@ -174,6 +174,15 @@ def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
     ]
 
 
+def test_maintain_memory_schema_documents_the_reconcile_only_graph_reset() -> None:
+    schema = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["maintain_memory"]
+    rebuild_graph = schema["inputSchema"]["properties"]["rebuild_graph"]
+
+    assert rebuild_graph["default"] is False
+    assert "reconcile" in rebuild_graph["description"].lower()
+    assert "unavailable" in rebuild_graph["description"].lower()
+
+
 def test_remember_discovery_schema_is_vault_invariant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

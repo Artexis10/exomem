@@ -2278,6 +2278,11 @@
           "description": "For fix mode, rebuild embeddings when explicitly requested.",
           "type": "boolean"
         },
+        "rebuild_graph": {
+          "default": false,
+          "description": "For reconcile only, quarantine unavailable derived graph lineage and rebuild it from canonical Markdown. Default false.",
+          "type": "boolean"
+        },
         "detail": {
           "default": "actionable",
           "description": "Audit output detail: actionable (default) or full.",

@@ -2066,6 +2066,8 @@ def op_reconcile(
     Args:
         dry_run: If true, compute what would change without writing.
             Default false.
+        rebuild_graph: For reconcile only, quarantine unavailable derived graph
+            lineage and rebuild it from canonical Markdown. Default false.
 
     Returns:
         {indexes_updated: [<index path>, ...],
@@ -2074,12 +2076,22 @@ def op_reconcile(
          remaining_drift: [<audit findings>],
          dry_run: bool}
     """
+    from .writer_lease import (
+        active_direct_mutation_guard,
+        active_manager,
+        active_mutation_request_id,
+    )
+
+    if rebuild_graph and active_mutation_request_id() is None and active_direct_mutation_guard(
+        vault_root, state_root=active_manager().config.state_dir
+    ):
+        raise ValueError(
+            "MUTATION_BOUNDARY_ACTIVE: rebuild_graph must run outside a direct mutation boundary"
+        )
     report = reconcile_module.reconcile(
         vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph
     )
     result = report.as_dict()
-    from .writer_lease import active_mutation_request_id
-
     if active_mutation_request_id() is None:
         return reconcile_module.finalize_graph_rebuild_handoff(vault_root, result)
     return result
@@ -5563,6 +5575,8 @@ def op_maintain_memory(
             fix/backfill-ids (safety net) and false for reconcile (matches
             `op_reconcile`'s own default). Pass explicitly to override either way.
         rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
+        rebuild_graph: For reconcile only, quarantine unavailable derived graph
+            lineage and rebuild it from canonical Markdown. Default false.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
     """
