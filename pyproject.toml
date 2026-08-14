@@ -235,7 +235,17 @@ markers = [
 # index out of general resolution. Multi-host GPU bring-up is documented in README.
 [tool.uv]
 # A single writer version prevents harmless-but-noisy marker normalization
-# differences between Windows, WSL, Docker, and CI.
+# differences between Windows, WSL, Docker, and CI. Deliberately `==`, and one
+# leg of a four-surface invariant enforced by
+# tests/test_uv_lock_policy.py::test_uv_writer_version_is_pinned_across_repository_surfaces
+# alongside the Dockerfile, infra/tool-versions.env and the hosted-infrastructure
+# workflow — this is the leg that makes the other three bind, so loosening it
+# would leave them declaring a version nothing enforces.
+#
+# The cost lands on contributors: uv is usually one shared installation managing
+# many unrelated tools, and uv's own error suggests `uv self update 0.11.28`, a
+# global downgrade to satisfy one repo. Do not do that — CONTRIBUTING.md
+# documents a project-local install instead.
 required-version = "==0.11.28"
 
 [tool.uv.sources]
