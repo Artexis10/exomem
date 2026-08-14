@@ -1061,3 +1061,49 @@ def test_process_media_rest_uses_shared_actionable_error_envelope(
     assert error["code"] == expected_code
     assert error["message"]
     assert "remediation" in error
+
+
+# --- #482: the documented loopback REST facade must be startable --------------
+
+
+def test_loopback_http_skips_oauth_only_with_all_three_conditions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EXOMEM_REST_API_KEY documents /api/* as a personal loopback facade, and the
+    retrieve hook builds that exact URL — but no HTTP transport would start
+    without a public base URL and a GitHub OAuth app, so it was unreachable."""
+    from exomem import server as server_module
+
+    monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "local-key")
+
+    assert server_module.local_http_allowed("127.0.0.1") is True
+    assert server_module.local_http_allowed("::1") is True
+
+
+def test_loopback_gate_fails_closed_on_every_non_local_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import server as server_module
+
+    monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "local-key")
+
+    # A routable bind host can receive packets from other machines.
+    assert server_module.local_http_allowed("0.0.0.0") is False
+    assert server_module.local_http_allowed("192.168.1.10") is False
+    # `localhost` is a NAME; /etc/hosts decides what it means, so the gate
+    # cannot verify it and must not accept it.
+    assert server_module.local_http_allowed("localhost") is False
+
+    # A public base URL is remote intent — a misconfigured remote deployment
+    # must never silently degrade into an unauthenticated server.
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://memory.example.test")
+    assert server_module.local_http_allowed("127.0.0.1") is False
+    monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
+
+    # Without the REST key there is no operator statement of local intent.
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    assert server_module.local_http_allowed("127.0.0.1") is False
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "   ")
+    assert server_module.local_http_allowed("127.0.0.1") is False
