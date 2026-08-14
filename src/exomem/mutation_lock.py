@@ -142,12 +142,14 @@ class RetainedRegularFile:
     directory: _SecureDirectory
     fd: int
     identity: tuple[int, ...]
+    owns_directory: bool = True
 
     def close(self) -> None:
         try:
             os.close(self.fd)
         finally:
-            self.directory.close()
+            if self.owns_directory:
+                self.directory.close()
 
 
 def retain_regular_file(path: Path) -> RetainedRegularFile:
@@ -179,6 +181,29 @@ def retain_regular_file(path: Path) -> RetainedRegularFile:
         raise
 
 
+def retain_regular_child_file(directory: _SecureDirectory, name: str) -> RetainedRegularFile:
+    """Pin one exact regular child while its caller keeps the parent retained."""
+    if not name or Path(name).name != name or "/" in name or "\\" in name:
+        raise OSError("retained file child must be one basename")
+    if not _same_directory_path(directory):
+        raise OSError("retained file parent changed")
+    fd = _open_secure_file_at(directory, name, os.O_RDONLY, delete_access=True)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not _same_file_entry(directory, name, fd):
+            raise OSError("regular file changed while being retained")
+        if os.name == "nt":
+            import msvcrt
+
+            identity: tuple[int, ...] = _windows_handle_identity(msvcrt.get_osfhandle(fd))
+        else:
+            identity = (int(info.st_dev), int(info.st_ino))
+        return RetainedRegularFile(directory.path / name, directory, fd, identity, owns_directory=False)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _windows_rename_handle(handle: int, directory: _SecureDirectory, name: str, *, replace: bool) -> None:
     """Move one exact native handle into its retained parent and prove identity."""
     import ctypes
@@ -193,19 +218,30 @@ def _windows_rename_handle(handle: int, directory: _SecureDirectory, name: str, 
         ]
 
     encoded = name.encode("utf-16-le")
-    offset = _RenameInfo.filename.offset
-    raw = ctypes.create_string_buffer(offset + len(encoded))
+    filename_offset = _RenameInfo.filename.offset
+    # FILE_RENAME_INFO declares a trailing WCHAR[1]; SetFileInformationByHandle
+    # requires that declared element as well as the variable-length name bytes.
+    size = ctypes.sizeof(_RenameInfo) + len(encoded)
+    raw = ctypes.create_string_buffer(size)
     info = _RenameInfo.from_buffer(raw)
     info.replace = replace
     info.root = directory.windows_handle
     info.length = len(encoded)
-    ctypes.memmove(ctypes.addressof(raw) + offset, encoded, len(encoded))
-    kernel32 = _windows_library(ctypes, "kernel32")
-    rename = kernel32.SetFileInformationByHandle
-    rename.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
-    rename.restype = wintypes.BOOL
-    if not rename(handle, 3, raw, len(raw)):
-        raise OSError(_windows_last_error(ctypes), "retained Windows rename refused")
+    ctypes.memmove(ctypes.addressof(raw) + filename_offset, encoded, len(encoded))
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_long), ("information", ctypes.c_size_t)]
+
+    status = _IoStatusBlock()
+    ntdll = _windows_library(ctypes, "ntdll")
+    rename = ntdll.NtSetInformationFile
+    rename.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(_IoStatusBlock), ctypes.c_void_p,
+        wintypes.ULONG, ctypes.c_int,
+    ]
+    rename.restype = ctypes.c_long
+    code = rename(handle, ctypes.byref(status), raw, size, 10)  # FileRenameInformation
+    if code < 0:
+        raise OSError(int(code), "retained Windows rename refused")
 
 
 def _windows_delete_handle(handle: int) -> None:
@@ -960,7 +996,7 @@ def _windows_create_child_directory_handle(parent: _SecureDirectory, name: str) 
     ]
     create.restype = ctypes.c_long
     code = create(
-        ctypes.byref(result), 0x00120080, ctypes.byref(attributes), ctypes.byref(status), None,
+        ctypes.byref(result), 0x00130080, ctypes.byref(attributes), ctypes.byref(status), None,
         0, 0x7, 2, 0x00200021, None, 0,
     )
     if code < 0:
@@ -995,7 +1031,9 @@ def create_retained_child_directory(parent: _SecureDirectory, name: str) -> _Sec
         raise
 
 
-def retain_child_directory(parent: _SecureDirectory, name: str) -> _SecureDirectory:
+def retain_child_directory(
+    parent: _SecureDirectory, name: str, *, delete_access: bool = False
+) -> _SecureDirectory:
     """Pin an existing direct child and prove it still belongs to the parent."""
     if not name or Path(name).name != name or "/" in name or "\\" in name:
         raise OSError("retained directory child must be one basename")
@@ -1009,7 +1047,11 @@ def retain_child_directory(parent: _SecureDirectory, name: str) -> _SecureDirect
             dir_fd=parent.fd,
         )
         return _SecureDirectory(parent.path / name, fd=fd)
-    child = _acquire_secure_directory(parent.path / name, create=False)
+    if delete_access:
+        handle = _windows_open_path(parent.path / name, directory=True, access=0x00030080)
+        child = _SecureDirectory(parent.path / name, windows_handles=[handle])
+    else:
+        child = _acquire_secure_directory(parent.path / name, create=False)
     try:
         if not _same_directory_path(parent) or not _windows_child_is_in_directory(parent, child.windows_handle):
             raise OSError("retained Windows child directory changed or escaped parent")
@@ -1112,7 +1154,7 @@ def retained_read_file(directory: _SecureDirectory, name: str, *, limit: int) ->
 
 def retained_unlink_file(directory: _SecureDirectory, name: str) -> None:
     """Remove one existing retained regular child; never recurse."""
-    held = retain_regular_file(directory.path / name)
+    held = retain_regular_child_file(directory, name)
     try:
         if os.name != "nt":
             assert directory.fd is not None
@@ -1126,6 +1168,29 @@ def retained_unlink_file(directory: _SecureDirectory, name: str) -> None:
                 raise OSError("retained Windows directory changed during unlink")
     finally:
         held.close()
+
+
+def remove_retained_child_directory(
+    parent: _SecureDirectory, child: _SecureDirectory, name: str
+) -> None:
+    """Remove exactly one proven empty child directory without a path reopen gap."""
+    if not _same_directory_path(parent):
+        raise OSError("retained directory relationship changed")
+    if os.name == "nt" and not _windows_child_is_in_directory(parent, child.windows_handle):
+        raise OSError("retained Windows directory escaped parent")
+    if os.name != "nt":
+        assert parent.fd is not None
+        child.close()
+        os.rmdir(name, dir_fd=parent.fd)
+        os.fsync(parent.fd)
+        return
+    _windows_delete_handle(child.windows_handle)
+    child.close()
+    try:
+        retain_child_directory(parent, name)
+    except FileNotFoundError:
+        return
+    raise OSError("retained Windows directory removal did not complete")
 
 
 def retained_regular_child_names(directory: _SecureDirectory, names: tuple[str, ...]) -> tuple[str, ...]:
@@ -1149,7 +1214,7 @@ def retained_regular_child_names(directory: _SecureDirectory, names: tuple[str, 
         return tuple(present)
     for name in names:
         try:
-            held = retain_regular_file(directory.path / name)
+            held = retain_regular_child_file(directory, name)
         except FileNotFoundError:
             continue
         try:

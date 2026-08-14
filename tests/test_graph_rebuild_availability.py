@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import freshness, graph_sync, runtime_readiness
+from exomem import freshness, graph_sync, mutation_lock as mutation_lock_module, runtime_readiness
 from exomem import reconcile as reconcile_module
 from exomem import vault as vault_module
 
@@ -465,14 +465,22 @@ def test_dry_run_census_never_recovers_an_interrupted_reset(
 
 
 def test_recovered_isolated_reset_requires_exact_quarantine_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     reset = graph_sync.GraphReset("a" * 24, (".graph.sqlite",), "isolated")
-    monkeypatch.setattr(graph_sync, "_read_reset_manifest", lambda _directory: (reset, {".graph.sqlite": (1, 2)}))
-    monkeypatch.setattr(graph_sync, "_isolated_reset_matches", lambda *_args: False)
     kb = tmp_path / "Knowledge Base"
     kb.mkdir()
-    (kb / f".graph-reset-{'a' * 24}").mkdir()
+    quarantine = kb / f".graph-reset-{'a' * 24}"
+    quarantine.mkdir()
+    graph = quarantine / ".graph.sqlite"
+    graph.write_bytes(b"quarantined")
+    held = mutation_lock_module.retain_regular_file(graph)
+    try:
+        identities = {".graph.sqlite": held.identity}
+    finally:
+        held.close()
+    (quarantine / ".manifest.json").write_bytes(graph_sync._reset_manifest_raw(reset, identities))
+    graph.write_bytes(b"replaced")
 
     with pytest.raises(graph_sync.GraphResetFailed):
         graph_sync._recover_interrupted_reset(tmp_path)
