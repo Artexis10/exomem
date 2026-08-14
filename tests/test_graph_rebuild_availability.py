@@ -420,6 +420,47 @@ def test_reconcile_report_defaults_to_no_graph_reset() -> None:
     assert report.graph_quarantine_id is None
 
 
+def test_post_join_finalizer_clears_the_checkpoint_bound_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = _checkpoint(2)
+    handoff = {
+        "graph_status": "unavailable",
+        "graph_refreshed": 0,
+        "graph_rebuild_status": "quarantined",
+        "graph_quarantine_id": "a" * 24,
+        "_graph_rebuild_handoff": {
+            "operation_id": "a" * 24,
+            "checkpoint": checkpoint.as_dict(),
+            "graph_refreshed": 1,
+        },
+    }
+    monkeypatch.setattr(
+        graph_sync, "wait_for_registered", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "current"})
+    monkeypatch.setattr(
+        graph_sync,
+        "cleanup_published_graph_lineage_reset",
+        lambda root, operation_id, required: (
+            root == tmp_path and operation_id == "a" * 24 and required == checkpoint
+        ),
+    )
+    monkeypatch.setattr(
+        reconcile_module,
+        "_graph_rebuild_is_current",
+        lambda _root: True,
+    )
+
+    result = reconcile_module.finalize_graph_rebuild_handoff(tmp_path, handoff)
+
+    assert result["graph_status"] == "refreshed"
+    assert result["graph_refreshed"] == 1
+    assert result["graph_rebuild_status"] == "cleared"
+    assert result["graph_quarantine_id"] == "a" * 24
+    assert "_graph_rebuild_handoff" not in result
+
+
 def test_rebuild_graph_dry_run_previews_unavailable_reset_without_mutating(
     tmp_path: Path,
 ) -> None:
@@ -510,6 +551,37 @@ def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -
     assert (quarantine / ".graph.sqlite-wal").read_bytes() == b"wal"
     assert receipt.read_bytes() == b"receipt"
     assert note.read_bytes() == b"canonical"
+
+
+def test_post_publication_cleanup_requires_a_current_covered_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a covered rebuild may remove its exact isolated reset evidence."""
+    graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
+    graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True)
+    live.write_bytes(b"old")
+
+    reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)
+
+    assert reset is not None
+    quarantine = live.parent / f".graph-reset-{reset.operation_id}"
+    covered = _checkpoint(3)
+    monkeypatch.setattr(graph_sync, "read_checkpoint", lambda _root: covered)
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "unavailable"})
+
+    assert not graph_sync.cleanup_published_graph_lineage_reset(
+        tmp_path, reset.operation_id, covered
+    )
+    assert quarantine.exists()
+
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "current"})
+
+    assert graph_sync.cleanup_published_graph_lineage_reset(
+        tmp_path, reset.operation_id, covered
+    )
+    assert not quarantine.exists()
 
 
 def test_unavailable_reset_rolls_back_a_partial_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

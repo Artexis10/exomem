@@ -2024,6 +2024,47 @@ def cleanup_graph_lineage_reset(vault_root: Path, operation_id: str) -> bool:
         return False
 
 
+def cleanup_published_graph_lineage_reset(
+    vault_root: Path, operation_id: str, checkpoint: GraphSyncCheckpoint
+) -> bool:
+    """Remove one isolated reset only after its registered checkpoint is current."""
+    root = Path(vault_root)
+    try:
+        observed = read_checkpoint(root)
+        if (
+            status(root)["state"] != "current"
+            or observed is None
+            or observed.generation < checkpoint.generation
+            or (
+                observed.generation == checkpoint.generation
+                and observed.checkpoint_sha256 != checkpoint.checkpoint_sha256
+            )
+        ):
+            return False
+        from .mutation_lock import retain_child_directory, retain_secure_directory
+
+        kb = _reset_directory(root, operation_id).parent
+        parent = retain_secure_directory(kb)
+        try:
+            directory = retain_child_directory(
+                parent, f"{_RESET_PREFIX}{operation_id}", delete_access=True
+            )
+            try:
+                reset, _identities = _resolve_reset_manifest_residue(parent, directory)
+                if reset.phase != "isolated":
+                    return False
+                cleaned = _cleanup_graph_lineage_reset_retained(parent, directory, reset)
+                directory = None
+                return cleaned
+            finally:
+                if directory is not None:
+                    directory.close()
+        finally:
+            parent.close()
+    except (OSError, GraphResetFailed):
+        return False
+
+
 class GraphRebuildLockUnavailable(GraphRebuildRegistrationError):
     """Secure rebuild-lock setup failed before an owner could be determined."""
 

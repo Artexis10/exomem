@@ -450,6 +450,34 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
             value = graph_result.get(key)
             if isinstance(value, str):
                 compact[key] = value
+    if isinstance(leaf, Mapping) and all(
+        type(leaf.get(key)) is bool
+        for key in ("graph_rebuild_requested", "graph_rebuild_applicable")
+    ) and leaf.get("graph_rebuild_status") in {
+        "not_requested",
+        "not_applicable",
+        "would_quarantine",
+        "quarantined",
+        "cleared",
+        "retained",
+        "failed",
+    }:
+        compact.update(
+            {
+                key: leaf[key]
+                for key in (
+                    "graph_rebuild_requested",
+                    "graph_rebuild_applicable",
+                    "graph_rebuild_status",
+                )
+            }
+        )
+        quarantine_id = leaf.get("graph_quarantine_id")
+        if isinstance(quarantine_id, str) and len(quarantine_id) == 24:
+            compact["graph_quarantine_id"] = quarantine_id
+        warning = leaf.get("graph_rebuild_warning")
+        if isinstance(warning, str) and 0 < len(warning) <= 128:
+            compact["graph_rebuild_warning"] = warning
     compact["warnings_count"] = result["warnings_count"]
     if detail == "full":
         compact["diagnostics"] = result["leaf_result"]

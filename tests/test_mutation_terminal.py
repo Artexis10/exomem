@@ -64,6 +64,30 @@ def test_compact_terminal_retains_completed_graph_sync_fields() -> None:
     assert projected["graph_sync_checkpoint"] == "a" * 64
     assert projected["graph_sync_remediation"] == "Run reconcile to recover the derived graph."
 
+
+def test_compact_terminal_retains_finalized_graph_rebuild_fields() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "graph_rebuild_requested": True,
+            "graph_rebuild_applicable": True,
+            "graph_rebuild_status": "cleared",
+            "graph_quarantine_id": "a" * 24,
+            "graph_rebuild_warning": None,
+            "_graph_rebuild_handoff": {"private": "must not escape"},
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["graph_rebuild_status"] == "cleared"
+    assert compact["graph_quarantine_id"] == "a" * 24
+    assert "_graph_rebuild_handoff" not in compact
+
+
 def test_full_projection_adds_the_complete_leaf_result_only_under_diagnostics() -> None:
     mutation_terminal = _terminal_module()
     raw = {

@@ -28,8 +28,10 @@ Idempotent; `dry_run=True` reports without writing.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -89,7 +91,9 @@ class ReconcileReport:
     graph_rebuild_applicable: bool = False
     graph_rebuild_status: str = "not_requested"
     graph_quarantine_id: str | None = None
+    graph_rebuild_warning: str | None = None
     _graph_reconcile_registered: int | None = field(default=None, repr=False)
+    _graph_rebuild_handoff: dict | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict:
         result = {
@@ -140,11 +144,75 @@ class ReconcileReport:
             "graph_rebuild_applicable": self.graph_rebuild_applicable,
             "graph_rebuild_status": self.graph_rebuild_status,
             "graph_quarantine_id": self.graph_quarantine_id,
+            "graph_rebuild_warning": self.graph_rebuild_warning,
         }
         registered = self._graph_reconcile_registered
         if registered is not None:
             result["_graph_reconcile_registered"] = registered
+        if self._graph_rebuild_handoff is not None:
+            result["_graph_rebuild_handoff"] = self._graph_rebuild_handoff
         return result
+
+
+def _graph_rebuild_is_current(vault_root: Path) -> bool:
+    from . import epistemic_graph
+
+    return (
+        epistemic_graph.graph_sync.status(vault_root)["state"] == "current"
+        and epistemic_graph.EpistemicGraphIndex(vault_root).available()
+        and not audit_module._check_graph_drift(vault_root)
+    )
+
+
+def finalize_graph_rebuild_handoff(
+    vault_root: Path, result: Mapping, *, state_root: Path | None = None
+) -> dict:
+    """Join one registered reset after its outer mutation boundary has exited."""
+    from . import graph_sync
+
+    final = dict(result)
+    handoff = final.pop("_graph_rebuild_handoff", None)
+    if not isinstance(handoff, Mapping):
+        return final
+    operation_id = handoff.get("operation_id")
+    raw_checkpoint = handoff.get("checkpoint")
+    if not (
+        isinstance(operation_id, str)
+        and len(operation_id) == 24
+        and all(character in "0123456789abcdef" for character in operation_id)
+        and isinstance(raw_checkpoint, Mapping)
+    ):
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_HANDOFF_INVALID"
+        return final
+    checkpoint = graph_sync.GraphSyncCheckpoint.parse(
+        json.dumps(raw_checkpoint, sort_keys=True, separators=(",", ":"))
+    )
+    if checkpoint is None:
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_HANDOFF_INVALID"
+        return final
+    try:
+        graph_sync.wait_for_registered(vault_root, state_root=state_root)
+    except Exception:  # noqa: BLE001 - canonical reconcile already completed
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_RETAINED"
+        return final
+    if not _graph_rebuild_is_current(vault_root):
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_RETAINED"
+        return final
+    final["graph_status"] = "refreshed"
+    final["graph_refreshed"] = handoff.get("graph_refreshed", 0)
+    if graph_sync.cleanup_published_graph_lineage_reset(
+        vault_root, operation_id, checkpoint
+    ):
+        final["graph_rebuild_status"] = "cleared"
+        final["graph_rebuild_warning"] = None
+    else:
+        final["graph_rebuild_status"] = "retained"
+        final["graph_rebuild_warning"] = "GRAPH_REBUILD_RETAINED"
+    return final
 
 
 def _rel(path: Path, vault_root: Path) -> str:
@@ -501,7 +569,15 @@ def reconcile(
                         )
                         if dispatch.outcome == "registered":
                             report._graph_reconcile_registered = 0
+                            report._graph_rebuild_handoff = {
+                                "operation_id": reset.operation_id,
+                                "checkpoint": checkpoint.as_dict(),
+                                "graph_refreshed": len(initial_graph_drift),
+                            }
                             reset_registered = True
+                        else:
+                            report.graph_rebuild_status = "retained"
+                            report.graph_rebuild_warning = dispatch.code
             else:
                 report.graph_rebuild_status = "not_applicable"
         needs_repair = (

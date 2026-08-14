@@ -2077,7 +2077,12 @@ def op_reconcile(
     report = reconcile_module.reconcile(
         vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph
     )
-    return report.as_dict()
+    result = report.as_dict()
+    from .writer_lease import active_mutation_request_id
+
+    if active_mutation_request_id() is None:
+        return reconcile_module.finalize_graph_rebuild_handoff(vault_root, result)
+    return result
 
 
 def op_provenance_report(
