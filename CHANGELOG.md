@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.0](https://github.com/Artexis10/exomem/compare/v0.50.0...v0.51.0) (2026-08-14)
+
+
+### Features
+
+* **hosted:** compose 0.50 deployment lock ([#475](https://github.com/Artexis10/exomem/issues/475)) ([cb9ccea](https://github.com/Artexis10/exomem/commit/cb9ccea6e7327078df01556f3917a181b991bdc7))
+* **server:** allow a loopback-only HTTP server without GitHub OAuth ([#500](https://github.com/Artexis10/exomem/issues/500)) ([458cf05](https://github.com/Artexis10/exomem/commit/458cf05868f6eb0b4754259fad45ec05f06910e4))
+
+
+### Bug Fixes
+
+* **doctor:** prove the ONNX vector lane instead of reporting it absent ([#493](https://github.com/Artexis10/exomem/issues/493)) ([d79d4d7](https://github.com/Artexis10/exomem/commit/d79d4d7d779bf411406cee018a6da698722a923a))
+* **doctor:** resolve Tesseract the way the runtime does ([#499](https://github.com/Artexis10/exomem/issues/499)) ([609e2da](https://github.com/Artexis10/exomem/commit/609e2da9e9f4c5c184b286915a29bd1a689e4bd3))
+* **hooks:** stay silent until the client has loaded the MCP server ([#496](https://github.com/Artexis10/exomem/issues/496)) ([1cc824f](https://github.com/Artexis10/exomem/commit/1cc824f5bbe39a9e0dec673ae2926346932cfa27))
+* **hosted:** compose destroy authority lock ([#492](https://github.com/Artexis10/exomem/issues/492)) ([19b918d](https://github.com/Artexis10/exomem/commit/19b918d796a6d23390ef41fb5460b6804bf86f19))
+* **hosted:** compose maintenance lease provisioner lock ([#490](https://github.com/Artexis10/exomem/issues/490)) ([3ce6220](https://github.com/Artexis10/exomem/commit/3ce62203fb4e3c6bf85f780c71fa8179bda60a75))
+* **hosted:** release maintenance leases with Kubernetes 35 ([#489](https://github.com/Artexis10/exomem/issues/489)) ([a7c35f4](https://github.com/Artexis10/exomem/commit/a7c35f49e98266c4bde608262c4630d4bab734d1))
+* **hosted:** scope deletion authority to destructive actions ([#491](https://github.com/Artexis10/exomem/issues/491)) ([c5dc218](https://github.com/Artexis10/exomem/commit/c5dc218703f92fe268b5b3c99add18daf7d827ba))
+* **init:** refresh the vault's shipped schema docs instead of freezing them ([#502](https://github.com/Artexis10/exomem/issues/502)) ([890e0fe](https://github.com/Artexis10/exomem/commit/890e0fe46b3a2bb7c07de29e6440f4e7fa7dbe48))
+* **install:** add a CPU-only ONNX profile; document the uv pin workaround ([#495](https://github.com/Artexis10/exomem/issues/495)) ([3205aef](https://github.com/Artexis10/exomem/commit/3205aef460369a60c7129650dd457207c513284f))
+* **memory:** stop re-reviewing a relation disposition that cannot have changed ([#497](https://github.com/Artexis10/exomem/issues/497)) ([885a753](https://github.com/Artexis10/exomem/commit/885a7532c8710a0ae2b6007d5922c5059e84799b))
+* repair template write recovery ([#472](https://github.com/Artexis10/exomem/issues/472)) ([659e01f](https://github.com/Artexis10/exomem/commit/659e01f8fd11ba52d9616c6c990672b4cd983cd5))
+* **setup:** name the failing ancestor and stop the hook step tracebacking ([#494](https://github.com/Artexis10/exomem/issues/494)) ([87de21c](https://github.com/Artexis10/exomem/commit/87de21c46055a8b8836c8ca00d9aa5b851ca7952))
+
 ## [0.50.0](https://github.com/Artexis10/exomem/compare/v0.49.0...v0.50.0) (2026-08-14)
 
 
