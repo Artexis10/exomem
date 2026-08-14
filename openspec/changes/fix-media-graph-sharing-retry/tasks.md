@@ -8,7 +8,7 @@
 ## 2. Canonical And Derived Boundary
 
 - [x] 2.1 Add the narrow deferred-completion option with exact checkpoint output, floor retention, checkpoint omission, and unchanged defaults.
-- [ ] 2.2 Wire only explicit media call sites; re-enter the canonical coordinator and CAS-publish the exact checkpoint only when floor/predecessor still match before fanout.
+- [x] 2.2 Wire only explicit media call sites; re-enter the canonical coordinator and CAS-publish the exact checkpoint only when floor/predecessor still match before fanout.
 - [x] 2.3 Add a deterministic two-writer test proving a newer epoch supersedes a stale media token without regression, false fanout success, or receipt clearing.
 - [x] 2.4 Prove all graph-internal and ordinary false-fanout callers retain their epoch behavior.
 
@@ -16,17 +16,19 @@
 
 - [x] 3.1 Add red tests proving receipt admission failure aborts before mutation and CAS-only clearing occurs after checkpoint plus completed or verified exact downstream handoffs, including concurrent revision.
 - [x] 3.2 Prove checkpoint/fanout failure completes media once, retains the receipt, and never stores rollback-incomplete.
-- [ ] 3.3 Prove real full-receipt drain recovers floor-ahead state, converges graph, and CAS-clears only completed work without extraction.
-- [ ] 3.4 Prove real watcher startup recovers floor-ahead state before rebuild and does not re-extract a committed transcript.
+- [x] 3.3 Prove real full-receipt drain recovers floor-ahead state, converges graph, and CAS-clears only completed work without extraction.
+- [x] 3.4 Prove real watcher startup recovers floor-ahead state before rebuild and does not re-extract a committed transcript.
 - [ ] 3.5 Wire only missing recovery behavior using existing graph, watcher, and deferred-work owners.
 
 ## 4. Truthful Legacy Reconciliation
 
-- [ ] 4.1 Add pure red tests for valid envelopes, trusted malformed/truncated/oversized/malicious prefixes, and unrelated error text.
-- [ ] 4.2 Add status tests for validated code/targets, bounded sanitized `jobs[].error` and top-level errors, non-retryability, reconciliation count, unhealthy aggregate, and targeted-safe remediation.
-- [ ] 4.3 Prove automatic retry-all excludes every ambiguous job.
-- [ ] 4.4 Add targeted retry tests for matching complete transcript, matching pending sidecar, missing/conflicting provenance, and changed identity.
+- [x] 4.1 Add pure red tests for valid envelopes, trusted malformed/truncated/oversized/malicious prefixes, and unrelated error text.
+- [x] 4.2 Add status tests for validated code/targets, bounded sanitized `jobs[].error` and top-level errors, non-retryability, reconciliation count, unhealthy aggregate, and targeted-safe remediation.
+- [x] 4.3 Prove automatic retry-all excludes every ambiguous job.
+- [x] 4.4 Add targeted retry tests for matching complete transcript, matching pending sidecar, missing/conflicting provenance, and changed identity.
 - [ ] 4.5 Implement strict classification and provenance-governed transitions without replaying ambiguous batches or mutating retained workspaces.
+
+Red evidence (2026-08-14): focused parser/status tests fail because no batch-failure classifier or status projection exists; retry-all filters after its capped fetch and starves ordinary eligible work behind ambiguous jobs; targeted retry requeues missing/conflicting/changed provenance and rewrites a completed transcript missing provenance. Aggregate health misses an old ambiguous failure beyond both bounded status projections. Matching complete and matching pending-sidecar reconciliation preserve retained batch workspaces without replay.
 
 ## 5. Verification And Delivery
 
