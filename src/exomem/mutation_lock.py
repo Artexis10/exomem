@@ -42,6 +42,8 @@ _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _DEFAULT_LONG_HOLDER_SECONDS = 30.0
 _STATUS_TIMEOUT_SECONDS = 0.25
 _HOLDER_SCHEMA = 1
+_WINDOWS_DACL_STABILIZATION_SECONDS = 0.25
+_WINDOWS_DACL_STABILIZATION_POLL_SECONDS = 0.01
 
 # The most recent `wait_ms`/`hold_ms` this task/thread measured acquiring and
 # holding the vault mutation boundary — set by `VaultMutationCoordinator.hold()`
@@ -524,27 +526,18 @@ def prepare_windows_idempotency_runtime_paths(state_dir: Path, owners_dir: Path)
     """Create the two runtime directories with protected DACLs, never repair old ones."""
     if os.name != "nt":
         return
+    prepare_windows_private_state_root(state_dir)
+    _prepare_windows_private_directory(owners_dir)
     sid = _windows_current_user_sid()
-
-    def acquire(path: Path) -> tuple[_SecureDirectory, bool]:
-        try:
-            return _acquire_secure_directory(path, create=False), False
-        except FileNotFoundError:
-            return _acquire_secure_directory(path, create=True), True
-
-    state, state_created = acquire(state_dir)
+    state = _acquire_secure_directory(state_dir, create=False)
     try:
-        if state_created:
-            _windows_apply_private_dacl(state_dir, sid)
         _validate_windows_runtime_entry(
             state_dir, directory=True, sid=sid, handle=state.windows_handle
         )
-        owners, owners_created = acquire(owners_dir)
+        owners = _acquire_secure_directory(owners_dir, create=False)
         try:
             if not _windows_child_is_in_directory(state, owners.windows_handle):
                 raise OSError("Windows owner directory escaped its retained state directory")
-            if owners_created:
-                _windows_apply_private_dacl(owners_dir, sid)
             _validate_windows_runtime_entry(
                 owners_dir, directory=True, sid=sid, handle=owners.windows_handle
             )
@@ -552,6 +545,64 @@ def prepare_windows_idempotency_runtime_paths(state_dir: Path, owners_dir: Path)
             owners.close()
     finally:
         state.close()
+
+
+def prepare_windows_private_state_root(state_dir: Path) -> None:
+    """Establish or validate the private Windows root before any lock artifact."""
+    if os.name != "nt":
+        return
+    _prepare_windows_private_directory(Path(state_dir))
+
+
+def _prepare_windows_private_directory(path: Path) -> None:
+    """Create exactly one private directory or validate an observed entry.
+
+    A process sets permissions only on the exact entry its own ``mkdir``
+    created.  A concurrent loser waits briefly for that creator to finish its
+    DACL write, then validates without repairing the observed entry.
+    """
+    target = Path(path).expanduser().absolute()
+    created = False
+    created_identity: os.stat_result | None = None
+    try:
+        directory = _acquire_secure_directory(target, create=False)
+    except FileNotFoundError:
+        try:
+            target.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        else:
+            created = True
+            created_identity = os.lstat(target)
+            _after_windows_secure_directory_create(target)
+        directory = _acquire_secure_directory(target, create=False)
+    sid = _windows_current_user_sid()
+    try:
+        if created:
+            if (
+                created_identity is None
+                or not os.path.samestat(created_identity, os.lstat(target))
+                or not _same_directory_path(directory)
+            ):
+                raise OSError("Windows directory changed during creation")
+            _windows_apply_private_dacl(target, sid)
+            _validate_windows_runtime_entry(
+                target, directory=True, sid=sid, handle=directory.windows_handle
+            )
+            return
+        deadline = time.monotonic() + _WINDOWS_DACL_STABILIZATION_SECONDS
+        while True:
+            try:
+                _validate_windows_runtime_entry(
+                    target, directory=True, sid=sid, handle=directory.windows_handle
+                )
+                return
+            except WindowsRuntimeDaclError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(_WINDOWS_DACL_STABILIZATION_POLL_SECONDS)
+    finally:
+        directory.close()
 
 
 def validate_windows_idempotency_runtime_paths(
@@ -1164,6 +1215,7 @@ class VaultMutationCoordinator:
 
     def _open_lock_file(self, path: Path) -> BinaryIO:
         try:
+            prepare_windows_private_state_root(self.state_root)
             path.parent.mkdir(parents=True, exist_ok=True)
             handle = path.open("a+b")
             handle.seek(0, os.SEEK_END)

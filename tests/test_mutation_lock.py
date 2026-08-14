@@ -84,6 +84,39 @@ def test_windows_secure_directory_refuses_ordinary_replacement_after_creation(
     assert replaced is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-directory branch")
+def test_windows_private_root_refuses_replacement_before_dacl_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the retained entry created by this process may receive the DACL."""
+    state_root = tmp_path / "state"
+    replaced = False
+    applied: list[Path] = []
+    original_apply = mutation_lock_module._windows_apply_private_dacl
+
+    def replace_created(path: Path) -> None:
+        nonlocal replaced
+        if path == state_root:
+            path.rmdir()
+            path.mkdir()
+            replaced = True
+
+    def apply(path: Path, sid: str) -> None:
+        applied.append(path)
+        original_apply(path, sid)
+
+    monkeypatch.setattr(
+        mutation_lock_module, "_after_windows_secure_directory_create", replace_created
+    )
+    monkeypatch.setattr(mutation_lock_module, "_windows_apply_private_dacl", apply)
+
+    with pytest.raises(OSError, match="changed during creation"):
+        mutation_lock_module.prepare_windows_private_state_root(state_root)
+
+    assert replaced is True
+    assert applied == []
+
+
 @pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows secure-child branch")
 @pytest.mark.parametrize(
     ("flags", "expected_creation"),
@@ -489,7 +522,9 @@ def test_stale_or_malformed_metadata_cannot_report_a_verified_holder(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+    state_root = tmp_path / "state"
+    mutation_lock_module.prepare_windows_private_state_root(state_root)
+    coordinator = VaultMutationCoordinator(state_root, vault)
     coordinator.metadata_path.parent.mkdir(parents=True, exist_ok=True)
     coordinator.metadata_path.write_text(payload, encoding="utf-8")
 
@@ -605,6 +640,7 @@ def test_probe_cleanup_cannot_delete_a_new_holders_metadata(
     state_root = tmp_path / "state"
     vault = tmp_path / "vault"
     vault.mkdir()
+    mutation_lock_module.prepare_windows_private_state_root(state_root)
     status_coordinator = VaultMutationCoordinator(state_root, vault)
     status_coordinator.metadata_path.parent.mkdir(parents=True, exist_ok=True)
     status_coordinator.metadata_path.write_text("stale", encoding="utf-8")
@@ -860,7 +896,9 @@ def test_orphan_snapshot_reports_real_age_when_metadata_mutex_is_contended(
     unknown holder at age 0."""
     vault = tmp_path / "vault"
     vault.mkdir()
-    coordinator = VaultMutationCoordinator(tmp_path / "state", vault, long_holder_seconds=60.0)
+    state_root = tmp_path / "state"
+    mutation_lock_module.prepare_windows_private_state_root(state_root)
+    coordinator = VaultMutationCoordinator(state_root, vault, long_holder_seconds=60.0)
 
     acquired_at = time.time() - 5.0
     holder = {
@@ -897,7 +935,9 @@ def test_orphan_snapshot_reports_real_age_when_metadata_mutex_is_contended(
 def test_orphan_snapshot_reports_real_overdue_state(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    coordinator = VaultMutationCoordinator(tmp_path / "state", vault, long_holder_seconds=1.0)
+    state_root = tmp_path / "state"
+    mutation_lock_module.prepare_windows_private_state_root(state_root)
+    coordinator = VaultMutationCoordinator(state_root, vault, long_holder_seconds=1.0)
 
     holder = {
         "schema": 1,

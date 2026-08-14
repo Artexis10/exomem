@@ -941,8 +941,13 @@ def _receipt_lock(vault_root: Path):
     former ``VaultMutationCoordinator.hold`` implementation.
     """
     root = Path(vault_root).resolve()
+    state_root = LeaseConfig.from_env().state_dir
+    try:
+        mutation_lock.prepare_windows_private_state_root(state_root)
+    except mutation_lock.WindowsRuntimeDaclError as exc:
+        raise ReceiptError(str(exc)) from exc
     coordinator = VaultMutationCoordinator(
-        LeaseConfig.from_env().state_dir,
+        state_root,
         f"receipt:{root}",
     )
     lock_path = coordinator.lock_path
