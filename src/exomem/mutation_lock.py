@@ -1001,7 +1001,7 @@ def _windows_create_child_directory_handle(parent: _SecureDirectory, name: str) 
     )
     if code < 0:
         raise OSError(int(code), "NtCreateFile directory creation refused")
-    return int(result.value)
+    return int(cast(int, result.value))
 
 
 def create_retained_child_directory(parent: _SecureDirectory, name: str) -> _SecureDirectory:
@@ -1102,11 +1102,11 @@ def retained_write_file(
         os.fsync(directory.fd)
         return
     target = directory.path / name
-    staging = directory.path / f".{name}.new"
-    if staging.exists():
+    staging_path = directory.path / f".{name}.new"
+    if staging_path.exists():
         raise FileExistsError("retained Windows staging entry exists")
     fd = _open_secure_file_at(
-        directory, staging.name, os.O_RDWR | os.O_CREAT | os.O_EXCL, delete_access=True
+        directory, staging_path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL, delete_access=True
     )
     try:
         os.write(fd, content)

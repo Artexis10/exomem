@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 if TYPE_CHECKING:
+    from .mutation_lock import _SecureDirectory
     from .vault import PlannedWrite
 
 
@@ -2018,7 +2019,9 @@ def cleanup_graph_lineage_reset(vault_root: Path, operation_id: str) -> bool:
     try:
         parent = retain_secure_directory(kb)
         try:
-            directory = retain_child_directory(parent, name, delete_access=True)
+            directory: _SecureDirectory | None = retain_child_directory(
+                parent, name, delete_access=True
+            )
             try:
                 reset, _identities = _resolve_reset_manifest_residue(parent, directory)
                 if reset.phase != "prepared":
@@ -2057,7 +2060,7 @@ def cleanup_published_graph_lineage_reset(
         kb = _reset_directory(root, operation_id).parent
         parent = retain_secure_directory(kb)
         try:
-            directory = retain_child_directory(
+            directory: _SecureDirectory | None = retain_child_directory(
                 parent, f"{_RESET_PREFIX}{operation_id}", delete_access=True
             )
             try:

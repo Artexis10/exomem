@@ -2517,6 +2517,8 @@ class LeaseManager:
                     terminal_result, current=False
                 )
                 if has_reconcile_handoff and isinstance(terminal_result, Mapping):
+                    if root is None:
+                        return terminal_result
                     from . import reconcile as reconcile_module
 
                     leaf = terminal_result.get("leaf_result")
