@@ -752,14 +752,14 @@ def test_critical_append_fsyncs_the_entire_new_durable_prefix(vault: Path, monke
     receipts.append_event(
         vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-06-30T12:00:00Z"
     )
-    fsynced: list[Path] = []
-    original_fsync = receipts.os.fsync
+    fsynced: list[str] = []
+    original_fsync_path = receipts._fsync_path
 
-    def record_fsync(fd: int) -> None:
-        fsynced.append(Path(f"/proc/self/fd/{fd}").resolve())
-        original_fsync(fd)
+    def record_fsync(path: Path) -> None:
+        fsynced.append(path.name)
+        original_fsync_path(path)
 
-    monkeypatch.setattr(receipts.os, "fsync", record_fsync)
+    monkeypatch.setattr(receipts, "_fsync_path", record_fsync)
     receipts.append_event(
         vault,
         event_type="deletion",
@@ -768,7 +768,7 @@ def test_critical_append_fsyncs_the_entire_new_durable_prefix(vault: Path, monke
         timestamp="2026-07-01T12:00:00Z",
     )
 
-    assert {path.name for path in fsynced if path.suffix == ".jsonl"} == {"2026-06.jsonl", "2026-07.jsonl"}
+    assert set(fsynced) == {"2026-06.jsonl", "2026-07.jsonl"}
 
 
 def test_successful_deterministic_intent_retry_does_not_append_twice(vault: Path) -> None:
@@ -1401,14 +1401,12 @@ def test_append_rejects_a_tail_whose_timestamp_does_not_match_its_month(vault: P
 
 def test_critical_directory_fsync_precedes_the_sidecar_commit(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
-    original_fsync = receipts.os.fsync
+    original_fsync_path = receipts._fsync_path
     original_update = receipts._update_durable_head
 
-    def track_fsync(fd: int) -> None:
-        path = Path(f"/proc/self/fd/{fd}").resolve()
-        if path.suffix == ".jsonl":
-            order.append("file")
-        original_fsync(fd)
+    def track_fsync(path: Path) -> None:
+        order.append("file")
+        original_fsync_path(path)
 
     def track_directories(*args, **kwargs) -> None:
         order.append("directory")
@@ -1417,7 +1415,7 @@ def test_critical_directory_fsync_precedes_the_sidecar_commit(vault: Path, monke
         order.append("sidecar")
         original_update(*args, **kwargs)
 
-    monkeypatch.setattr(receipts.os, "fsync", track_fsync)
+    monkeypatch.setattr(receipts, "_fsync_path", track_fsync)
     monkeypatch.setattr(receipts, "_fsync_durable_directories", track_directories)
     monkeypatch.setattr(receipts, "_update_durable_head", track_sidecar)
     receipts.append_event(
@@ -1492,7 +1490,7 @@ def test_file_ahead_critical_promotion_requires_directory_durability(
 
     conn = store.open_connection(vault)
     try:
-        assert conn.execute("SELECT durable_seq FROM receipts_head").fetchone()[0] == 0
+        assert conn.execute("SELECT durable_seq, observed_seq FROM receipts_head").fetchone() == (0, 0)
     finally:
         conn.close()
     assert event["seq"] == 1
@@ -1502,14 +1500,24 @@ def test_final_month_open_permission_error_is_normalized(vault: Path, monkeypatc
     event = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
     instance_dir = vault / "Knowledge Base" / "_Governance" / "events" / event["instance_id"]
     name = next(instance_dir.glob("*.jsonl")).name
-    original_open = receipts.os.open
+    if receipts._is_windows():
+        original_secure_open = receipts._open_secure_file_at
 
-    def deny_final_entry(path, *args, **kwargs):
-        if Path(path).name == name:
-            raise PermissionError("denied")
-        return original_open(path, *args, **kwargs)
+        def deny_final_entry(directory, child_name, flags, mode=0o600):
+            if child_name == name:
+                raise PermissionError("denied")
+            return original_secure_open(directory, child_name, flags, mode)
 
-    monkeypatch.setattr(receipts.os, "open", deny_final_entry)
+        monkeypatch.setattr(receipts, "_open_secure_file_at", deny_final_entry)
+    else:
+        original_os_open = receipts.os.open
+
+        def deny_final_entry(path, *args, **kwargs):
+            if Path(path).name == name:
+                raise PermissionError("denied")
+            return original_os_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(receipts.os, "open", deny_final_entry)
     with pytest.raises(receipts.ReceiptError, match="evidence path"):
         with receipts._open_month_fd(instance_dir, name):
             pass
@@ -1519,14 +1527,24 @@ def test_exclusive_month_create_permission_error_is_normalized(vault: Path, monk
     receipts.append_event(
         vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-06-30T12:00:00Z"
     )
-    original_open = receipts.os.open
+    if receipts._is_windows():
+        original_secure_open = receipts._open_secure_file_at
 
-    def deny_create(path, flags, *args, **kwargs):
-        if flags & os.O_CREAT:
-            raise PermissionError("denied")
-        return original_open(path, flags, *args, **kwargs)
+        def deny_create(directory, _name, flags, mode=0o600):
+            if flags & os.O_CREAT:
+                raise PermissionError("denied")
+            return original_secure_open(directory, _name, flags, mode)
 
-    monkeypatch.setattr(receipts.os, "open", deny_create)
+        monkeypatch.setattr(receipts, "_open_secure_file_at", deny_create)
+    else:
+        original_os_open = receipts.os.open
+
+        def deny_create(path, flags, *args, **kwargs):
+            if flags & os.O_CREAT:
+                raise PermissionError("denied")
+            return original_os_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(receipts.os, "open", deny_create)
     with pytest.raises(receipts.ReceiptError, match="evidence path"):
         receipts.append_event(
             vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2026-07-01T00:00:00Z"
