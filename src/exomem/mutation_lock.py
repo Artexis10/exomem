@@ -179,6 +179,49 @@ def retain_regular_file(path: Path) -> RetainedRegularFile:
         raise
 
 
+def _windows_rename_handle(handle: int, directory: _SecureDirectory, name: str, *, replace: bool) -> None:
+    """Move one exact native handle into its retained parent and prove identity."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _RenameInfo(ctypes.Structure):
+        _fields_ = [
+            ("replace", wintypes.BOOLEAN),
+            ("root", wintypes.HANDLE),
+            ("length", wintypes.DWORD),
+            ("filename", wintypes.WCHAR * 1),
+        ]
+
+    encoded = name.encode("utf-16-le")
+    offset = _RenameInfo.filename.offset
+    raw = ctypes.create_string_buffer(offset + len(encoded))
+    info = _RenameInfo.from_buffer(raw)
+    info.replace = replace
+    info.root = directory.windows_handle
+    info.length = len(encoded)
+    ctypes.memmove(ctypes.addressof(raw) + offset, encoded, len(encoded))
+    kernel32 = _windows_library(ctypes, "kernel32")
+    rename = kernel32.SetFileInformationByHandle
+    rename.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    rename.restype = wintypes.BOOL
+    if not rename(handle, 3, raw, len(raw)):
+        raise OSError(_windows_last_error(ctypes), "retained Windows rename refused")
+
+
+def _windows_delete_handle(handle: int) -> None:
+    """Mark the exact DELETE-capable file handle for deletion on close."""
+    import ctypes
+    from ctypes import wintypes
+
+    delete = wintypes.BOOLEAN(True)
+    kernel32 = _windows_library(ctypes, "kernel32")
+    disposition = kernel32.SetFileInformationByHandle
+    disposition.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    disposition.restype = wintypes.BOOL
+    if not disposition(handle, 4, ctypes.byref(delete), ctypes.sizeof(delete)):
+        raise OSError(_windows_last_error(ctypes), "retained Windows delete refused")
+
+
 def rename_retained_regular_file(source: RetainedRegularFile, destination: Path) -> None:
     """Rename the exact retained source to a new sibling in a retained directory."""
     target = Path(destination)
@@ -219,33 +262,8 @@ def rename_retained_regular_file(source: RetainedRegularFile, destination: Path)
             except FileNotFoundError:
                 return
             raise OSError("retained rename source still exists")
-        import ctypes
         import msvcrt
-        from ctypes import wintypes
-
-        class _RenameInfo(ctypes.Structure):
-            _fields_ = [
-                ("replace", wintypes.BOOLEAN),
-                ("root", wintypes.HANDLE),
-                ("length", wintypes.DWORD),
-                ("filename", wintypes.WCHAR * 1),
-            ]
-
-        name = target.name.encode("utf-16-le")
-        filename_offset = _RenameInfo.filename.offset
-        size = filename_offset + len(name)
-        raw = ctypes.create_string_buffer(size)
-        info = _RenameInfo.from_buffer(raw)
-        info.replace = False
-        info.root = directory.windows_handle
-        info.length = len(name)
-        ctypes.memmove(ctypes.addressof(raw) + filename_offset, name, len(name))
-        kernel32 = _windows_library(ctypes, "kernel32")
-        rename = kernel32.SetFileInformationByHandle
-        rename.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
-        rename.restype = wintypes.BOOL
-        if not rename(msvcrt.get_osfhandle(source.fd), 3, raw, size):
-            raise OSError(_windows_last_error(ctypes), "retained Windows rename refused")
+        _windows_rename_handle(msvcrt.get_osfhandle(source.fd), directory, target.name, replace=False)
         destination_handle = _windows_open_path(directory.path / target.name, directory=False)
         try:
             if _windows_handle_identity(destination_handle) != source.identity:
@@ -905,6 +923,48 @@ def retain_secure_directory(path: Path) -> _SecureDirectory:
     return directory
 
 
+def _windows_create_child_directory_handle(parent: _SecureDirectory, name: str) -> int:
+    """Atomically create a direct directory child and return its native handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [("length", wintypes.USHORT), ("maximum", wintypes.USHORT), ("buffer", wintypes.LPWSTR)]
+
+    class _ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.ULONG), ("root", wintypes.HANDLE), ("name", ctypes.POINTER(_UnicodeString)),
+            ("attributes", wintypes.ULONG), ("security", wintypes.LPVOID), ("quality", wintypes.LPVOID),
+        ]
+
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_long), ("information", ctypes.c_size_t)]
+
+    value = ctypes.create_unicode_buffer(name)
+    encoded_len = len(name.encode("utf-16-le"))
+    unicode_name = _UnicodeString(encoded_len, encoded_len + 2, value)
+    attributes = _ObjectAttributes(
+        ctypes.sizeof(_ObjectAttributes), parent.windows_handle, ctypes.pointer(unicode_name), 0x40, None, None
+    )
+    result = wintypes.HANDLE()
+    status = _IoStatusBlock()
+    ntdll = _windows_library(ctypes, "ntdll")
+    create = ntdll.NtCreateFile
+    create.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_ObjectAttributes),
+        ctypes.POINTER(_IoStatusBlock), wintypes.LPVOID, wintypes.ULONG, wintypes.ULONG,
+        wintypes.ULONG, wintypes.ULONG, wintypes.LPVOID, wintypes.ULONG,
+    ]
+    create.restype = ctypes.c_long
+    code = create(
+        ctypes.byref(result), 0x00020080, ctypes.byref(attributes), ctypes.byref(status), None,
+        0, 0x7, 2, 0x00200021, None, 0,
+    )
+    if code < 0:
+        raise OSError(int(code), "NtCreateFile directory creation refused")
+    return int(result.value)
+
+
 def create_retained_child_directory(parent: _SecureDirectory, name: str) -> _SecureDirectory:
     """Create one child exclusively from a retained parent, then pin it."""
     if not name or Path(name).name != name or "/" in name or "\\" in name:
@@ -921,16 +981,10 @@ def create_retained_child_directory(parent: _SecureDirectory, name: str) -> _Sec
             dir_fd=parent.fd,
         )
         return _SecureDirectory(parent.path / name, fd=fd)
-    child_path = parent.path / name
-    # Win32 has no exposed handle-relative mkdir primitive here. Pin the parent
-    # identity before and after the operation, then pin/prove the new child is
-    # immediately below that same parent before returning it.
-    child_path.mkdir(mode=0o700)
-    if not _same_directory_path(parent):
-        raise OSError("retained Windows parent changed during child creation")
-    child = _acquire_secure_directory(child_path, create=False)
+    handle = _windows_create_child_directory_handle(parent, name)
+    child = _SecureDirectory(parent.path / name, windows_handles=[handle])
     try:
-        if not _windows_child_is_in_directory(parent, child.windows_handle):
+        if not _same_directory_path(parent) or not _windows_child_is_in_directory(parent, child.windows_handle):
             raise OSError("Windows child directory escaped its retained parent")
         return child
     except BaseException:
@@ -1006,17 +1060,35 @@ def retained_write_file(
     staging = directory.path / f".{name}.new"
     if staging.exists():
         raise FileExistsError("retained Windows staging entry exists")
-    fd = _open_secure_file_at(directory, staging.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    fd = _open_secure_file_at(
+        directory, staging.name, os.O_RDWR | os.O_CREAT | os.O_EXCL, delete_access=True
+    )
     try:
         os.write(fd, content)
         os.fsync(fd)
+        import msvcrt
+
+        source_handle = msvcrt.get_osfhandle(fd)
+        source_identity = _windows_handle_identity(source_handle)
+        if not replace:
+            try:
+                existing = _windows_open_path(target, directory=False)
+            except FileNotFoundError:
+                pass
+            else:
+                _windows_close_handle(existing)
+                raise FileExistsError("retained Windows destination exists")
+        _windows_rename_handle(source_handle, directory, name, replace=replace)
+        published = _windows_open_path(target, directory=False)
+        try:
+            if _windows_handle_identity(published) != source_identity:
+                raise OSError("retained Windows manifest identity changed")
+        finally:
+            _windows_close_handle(published)
+        if not _same_directory_path(directory):
+            raise OSError("retained Windows directory changed during file publish")
     finally:
         os.close(fd)
-    if not replace and target.exists():
-        raise FileExistsError("retained Windows destination exists")
-    os.replace(staging, target)
-    if not _same_directory_path(directory):
-        raise OSError("retained Windows directory changed during file publish")
 
 
 def retained_read_file(directory: _SecureDirectory, name: str, *, limit: int) -> bytes:
@@ -1044,7 +1116,9 @@ def retained_unlink_file(directory: _SecureDirectory, name: str) -> None:
             os.unlink(name, dir_fd=directory.fd)
             os.fsync(directory.fd)
         else:
-            os.unlink(directory.path / name)
+            import msvcrt
+
+            _windows_delete_handle(msvcrt.get_osfhandle(held.fd))
             if not _same_directory_path(directory):
                 raise OSError("retained Windows directory changed during unlink")
     finally:
@@ -1110,6 +1184,7 @@ def _open_secure_file_at(
             directory.path / name,
             directory=False,
             access=access,
+            share=0x7 if delete_access else 0x3,
             creation=creation,
         )
         try:

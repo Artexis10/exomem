@@ -1749,6 +1749,8 @@ def _recover_interrupted_reset(vault_root: Path) -> GraphReset | None:
     directory = candidates[0]
     reset, identities = _read_reset_manifest(directory)
     if reset.phase == "isolated":
+        if not _isolated_reset_matches(directory, kb, reset.members, identities):
+            raise GraphResetFailed()
         return reset
     moved: list[str] = []
     for name in reset.members:
@@ -1811,13 +1813,19 @@ def census_unavailable_graph_lineage(vault_root: Path) -> tuple[str, ...]:
 def _isolated_reset_matches(
     directory: Path, kb: Path, members: tuple[str, ...], identities: dict[str, tuple[int, ...]]
 ) -> bool:
-    from .mutation_lock import retain_regular_file
+    from .mutation_lock import retain_regular_file, retain_secure_directory, retained_regular_child_names
 
     try:
+        parent = retain_secure_directory(kb)
+        try:
+            if retained_regular_child_names(parent, members):
+                return False
+        finally:
+            parent.close()
         for name in members:
             held = retain_regular_file(directory / name)
             try:
-                if held.identity != identities[name] or (kb / name).exists():
+                if held.identity != identities[name]:
                     return False
             finally:
                 held.close()

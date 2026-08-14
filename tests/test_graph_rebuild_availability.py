@@ -464,6 +464,20 @@ def test_dry_run_census_never_recovers_an_interrupted_reset(
     assert graph_sync.census_unavailable_graph_lineage(tmp_path) == (".graph.sqlite",)
 
 
+def test_recovered_isolated_reset_requires_exact_quarantine_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset = graph_sync.GraphReset("a" * 24, (".graph.sqlite",), "isolated")
+    monkeypatch.setattr(graph_sync, "_read_reset_manifest", lambda _directory: (reset, {".graph.sqlite": (1, 2)}))
+    monkeypatch.setattr(graph_sync, "_isolated_reset_matches", lambda *_args: False)
+    kb = tmp_path / "Knowledge Base"
+    kb.mkdir()
+    (kb / f".graph-reset-{'a' * 24}").mkdir()
+
+    with pytest.raises(graph_sync.GraphResetFailed):
+        graph_sync._recover_interrupted_reset(tmp_path)
+
+
 def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -> None:
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))

@@ -37,10 +37,21 @@ def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> 
 
 
 def test_windows_retained_rename_uses_file_rename_info_filename_offset() -> None:
-    source = inspect.getsource(mutation_lock_module.rename_retained_regular_file)
+    source = inspect.getsource(mutation_lock_module._windows_rename_handle)
 
     assert "filename_offset = _RenameInfo.filename.offset" in source
     assert "size = filename_offset + len(name)" in source
+
+
+def test_windows_retained_child_and_cleanup_use_exact_native_handles() -> None:
+    create = inspect.getsource(mutation_lock_module._windows_create_child_directory_handle)
+    publish = inspect.getsource(mutation_lock_module.retained_write_file)
+    cleanup = inspect.getsource(mutation_lock_module.retained_unlink_file)
+
+    assert "NtCreateFile" in create
+    assert "parent.windows_handle" in create
+    assert "_windows_rename_handle(source_handle" in publish
+    assert "_windows_delete_handle(msvcrt.get_osfhandle(held.fd))" in cleanup
 
 
 def test_windows_path_inspection_access_has_dacl_read_right_without_mutation_rights() -> None:
