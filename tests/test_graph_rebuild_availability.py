@@ -1204,11 +1204,11 @@ def test_single_flight_retries_for_new_checkpoint_and_never_releases_stale_waite
     [
         (
             "current",
-            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+            graph_sync._RETRY_OR_RECONCILE,
         ),
         (
             "recovery_required",
-            "Retry the same mutation identity or run reconcile to recover the derived graph.",
+            graph_sync._RETRY_OR_RECONCILE,
         ),
         (
             "unavailable",
