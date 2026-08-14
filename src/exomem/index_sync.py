@@ -23,6 +23,7 @@ wrappers as the outermost belt.
 
 from __future__ import annotations
 
+import gc
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -34,6 +35,17 @@ log = logging.getLogger(__name__)
 
 _REPORT_PATH_LIMIT = 256
 _REPORT_PATH_BYTE_LIMIT = 1024
+
+_FULL_UPSERT_COMPONENTS = frozenset(
+    {
+        "memory_refs",
+        "resolver",
+        "semantic_purge",
+        "lexstore",
+        "epistemic_graph",
+        "embeddings",
+    }
+)
 
 
 def _withdraw_unbridgeable_corpus_consumers(vault_root: Path) -> None:
@@ -516,6 +528,112 @@ def record_failed_refresh(vault_root: Path, paths: list[Path]) -> int:
     return deferred_index.add_full(vault_root, _rel_md_paths(vault_root, paths))
 
 
+def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object) -> bool:
+    """Whether a full-upsert report completed or retained exact durable work."""
+    from . import graph_sync
+
+    if (
+        not isinstance(report, IndexSyncReport)
+        or report.operation != "upsert"
+        or report.reconcile_required
+    ):
+        return False
+    if (
+        len(report.components) != len(_FULL_UPSERT_COMPONENTS)
+        or {component.component for component in report.components} != _FULL_UPSERT_COMPONENTS
+    ):
+        return False
+    receipt_rels: set[str] | None = None
+    replaced_rels: set[str] = set()
+    root = Path(vault_root).resolve()
+    for path in replaced:
+        try:
+            rel = path.resolve().relative_to(root).as_posix()
+        except (OSError, ValueError):
+            continue
+        if rel.endswith(".md"):
+            replaced_rels.add(rel)
+    for component in report.components:
+        if component.outcome in {"completed", "not_required"}:
+            continue
+        if (
+            component.component == "embeddings"
+            and component.outcome == "accepted"
+            and component.code in {"embeddings_disabled", "no_eligible_paths"}
+        ):
+            continue
+        if component.component == "epistemic_graph" and component.outcome in {
+            "registered",
+            "deferred",
+        }:
+            checkpoint = graph_sync.read_checkpoint(vault_root)
+            if (
+                checkpoint is not None
+                and graph_sync.registered_checkpoint(vault_root) == checkpoint
+            ):
+                continue
+        if (
+            component.component == "embeddings"
+            and component.outcome == "deferred"
+            and component.code == "deferred_durable"
+            and replaced_rels
+        ):
+            if receipt_rels is None:
+                receipt_rels = {
+                    receipt.rel_path for receipt in deferred_index.snapshot(vault_root)
+                }
+            if replaced_rels <= receipt_rels:
+                continue
+        return False
+    return True
+
+
+def recover_full_receipt_graph_epoch(vault_root: Path, *, build: bool = True) -> bool:
+    """Recover a floor-ahead graph epoch before replaying full work."""
+    from . import epistemic_graph, graph_sync
+
+    root = Path(vault_root)
+    epoch = graph_sync.classify_epoch(root)
+    if epoch.kind not in {"legacy", "pre_floor", "coherent", "recoverable"}:
+        return False
+    from .writer_lease import active_manager, active_mutation_request_id
+
+    try:
+        if epoch.kind in {"pre_floor", "recoverable"}:
+            with active_manager().mutation_guard(
+                root,
+                request_id=active_mutation_request_id(),
+                operation="deferred_full_graph_recovery",
+                holder_kind="background",
+            ):
+                epoch = graph_sync.classify_epoch(root)
+                if epoch.kind in {"pre_floor", "recoverable"}:
+                    graph_sync.recover_checkpoint(root)
+                if graph_sync.classify_epoch(root).kind != "coherent":
+                    return False
+        elif epoch.kind == "legacy":
+            return True
+        if not build or not epistemic_graph.graph_enabled():
+            return True
+        if graph_sync.status(root)["state"] == "current":
+            return True
+        graph = epistemic_graph.EpistemicGraphIndex(root)
+        for attempt in range(2):
+            try:
+                gc.collect()
+                graph._rebuild_all_off_boundary()
+            except graph_sync.GraphSidecarReplaceUnavailable:
+                if attempt:
+                    raise
+                gc.collect()
+                continue
+            break
+        return graph_sync.status(root)["state"] == "current"
+    except Exception:  # noqa: BLE001 - durable receipt remains the retry authority
+        log.warning("deferred full-index graph recovery failed", exc_info=True)
+        return False
+
+
 def _publication_failed_report(
     operation: str,
     requested_paths: tuple[str, ...],
@@ -611,14 +729,17 @@ def drain_deferred_work(
                 requested.update(_rel_md_paths(vault_root, [item]))
             else:
                 requested.add(str(item).replace("\\", "/"))
-    full_receipts = deferred_index.snapshot_full(vault_root)
-    semantic_receipts = deferred_index.snapshot(vault_root)
     if requested is not None:
-        full_receipts = [receipt for receipt in full_receipts if receipt.rel_path in requested]
+        full_receipts = deferred_index.snapshot_full(
+            vault_root, limit=limit, paths=requested
+        )
         # `paths=` is the media worker's targeted full-refresh seam. Semantic
         # replay is owned by the periodic unscoped drain and must not add
         # unrelated work to a media completion callback.
         semantic_receipts = []
+    else:
+        full_receipts = deferred_index.snapshot_full(vault_root)
+        semantic_receipts = deferred_index.snapshot(vault_root)
     if limit is not None:
         budget = max(0, limit)
         if full_receipts and semantic_receipts and budget > 1:
@@ -628,44 +749,48 @@ def drain_deferred_work(
             full_budget, semantic_budget = budget, 0
         else:
             full_budget, semantic_budget = 0, budget
-        full_receipts = full_receipts[:full_budget]
-        semantic_receipts = semantic_receipts[:semantic_budget]
+        if requested is None:
+            full_receipts = full_receipts[:full_budget]
+            semantic_receipts = semantic_receipts[:semantic_budget]
 
     processed = 0
     if full_receipts:
         full_paths = [vault_root / receipt.rel_path for receipt in full_receipts]
         full_batch_completed = False
-        try:
-            dispatched = upsert_after_write(vault_root, full_paths)
-        except Exception:  # noqa: BLE001 - isolate failures below
-            log.warning("deferred full-index batch failed; isolating receipts", exc_info=True)
-        else:
-            full_batch_completed = dispatched is not False and not (
-                isinstance(dispatched, IndexSyncReport) and dispatched.reconcile_required
-            )
-        if full_batch_completed:
-            processed += deferred_index.clear_full_receipts(vault_root, full_receipts)
-        else:
-            log.warning("deferred full-index batch incomplete; isolating receipts")
-        for receipt in () if full_batch_completed else full_receipts:
+        if recover_full_receipt_graph_epoch(vault_root):
             try:
-                dispatched = upsert_after_write(
-                    vault_root, [vault_root / receipt.rel_path]
-                )
-            except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
-                log.warning(
-                    "deferred full-index dispatch failed; work remains queued",
-                    exc_info=True,
-                )
-                deferred_index.rotate_receipts(vault_root, [receipt], full=True)
-                continue
-            if dispatched is False or (
-                isinstance(dispatched, IndexSyncReport) and dispatched.reconcile_required
-            ):
-                log.warning("deferred full-index dispatch incomplete; work remains queued")
-                deferred_index.rotate_receipts(vault_root, [receipt], full=True)
-                continue
-            processed += deferred_index.clear_full_receipts(vault_root, [receipt])
+                dispatched = upsert_after_write(vault_root, full_paths)
+            except Exception:  # noqa: BLE001 - isolate failures below
+                log.warning("deferred full-index batch failed; isolating receipts", exc_info=True)
+            else:
+                full_batch_completed = full_upsert_succeeded(vault_root, full_paths, dispatched)
+        else:
+            log.warning("deferred full-index graph recovery incomplete; work remains queued")
+            full_paths = []
+        if full_paths:
+            if full_batch_completed:
+                processed += deferred_index.clear_full_receipts(vault_root, full_receipts)
+            else:
+                log.warning("deferred full-index batch incomplete; isolating receipts")
+            for receipt in () if full_batch_completed else full_receipts:
+                try:
+                    dispatched = upsert_after_write(
+                        vault_root, [vault_root / receipt.rel_path]
+                    )
+                except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
+                    log.warning(
+                        "deferred full-index dispatch failed; work remains queued",
+                        exc_info=True,
+                    )
+                    deferred_index.rotate_receipts(vault_root, [receipt], full=True)
+                    continue
+                if not full_upsert_succeeded(
+                    vault_root, [vault_root / receipt.rel_path], dispatched
+                ):
+                    log.warning("deferred full-index dispatch incomplete; work remains queued")
+                    deferred_index.rotate_receipts(vault_root, [receipt], full=True)
+                    continue
+                processed += deferred_index.clear_full_receipts(vault_root, [receipt])
 
     if limit is None and requested is None and full_receipts:
         # A full refresh performed under a deferring mode can create or revise

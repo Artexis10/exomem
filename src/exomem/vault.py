@@ -2834,7 +2834,7 @@ def post_commit_batch_fanout(
                 )
         if index_reports is not None:
             index_reports.append(report)
-        if not _fanout_report_is_verified(vault_root, replaced, report):
+        if not index_sync.full_upsert_succeeded(vault_root, replaced, report):
             index_sync.record_failed_refresh(vault_root, replaced)
             logging.getLogger(__name__).warning(
                 "index upsert incomplete after batch_atomic_write; "
@@ -2870,63 +2870,6 @@ def post_commit_batch_fanout(
                     "failed to construct bounded index degradation feedback"
                 )
         return False
-
-
-def _fanout_report_is_verified(vault_root: Path, replaced: list[Path], report: Any) -> bool:
-    """Whether every fanout component completed or retained exact durable work."""
-    from . import deferred_index, graph_sync, index_sync
-
-    if not isinstance(report, index_sync.IndexSyncReport) or report.reconcile_required:
-        return False
-    required_components = {
-        "memory_refs",
-        "resolver",
-        "semantic_purge",
-        "lexstore",
-        "epistemic_graph",
-        "embeddings",
-    }
-    if {component.component for component in report.components} != required_components:
-        return False
-    receipt_rels = {receipt.rel_path for receipt in deferred_index.snapshot(vault_root)}
-    replaced_rels: set[str] = set()
-    root = Path(vault_root).resolve()
-    for path in replaced:
-        try:
-            rel = path.resolve().relative_to(root).as_posix()
-        except (OSError, ValueError):
-            continue
-        if rel.endswith(".md"):
-            replaced_rels.add(rel)
-    for component in report.components:
-        if component.outcome in {"completed", "not_required"}:
-            continue
-        if (
-            component.component == "embeddings"
-            and component.outcome == "accepted"
-            and component.code in {"embeddings_disabled", "no_eligible_paths"}
-        ):
-            continue
-        if component.component == "epistemic_graph" and component.outcome in {
-            "registered",
-            "deferred",
-        }:
-            checkpoint = graph_sync.read_checkpoint(vault_root)
-            if (
-                checkpoint is not None
-                and graph_sync.registered_checkpoint(vault_root) == checkpoint
-            ):
-                continue
-        if (
-            component.component == "embeddings"
-            and component.outcome == "deferred"
-            and component.code == "deferred_durable"
-            and replaced_rels
-            and replaced_rels <= receipt_rels
-        ):
-            continue
-        return False
-    return bool(report.components)
 
 
 class ContentHashMismatchError(RuntimeError):

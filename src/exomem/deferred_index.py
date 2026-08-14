@@ -456,7 +456,10 @@ def snapshot(
 
 
 def snapshot_full(
-    vault_root: Path, *, limit: int | None = None
+    vault_root: Path,
+    *,
+    limit: int | None = None,
+    paths: set[str] | None = None,
 ) -> list[DeferredReceipt]:
     path = store_path(vault_root)
     if not path.exists():
@@ -467,15 +470,27 @@ def snapshot_full(
         revision = "revision" if "revision" in columns else "1 AS revision"
         sql = (
             f"SELECT rel_path, {revision} FROM full_upserts "
-            "ORDER BY updated_at, rel_path"
         )
-        params: tuple[Any, ...] = ()
+        params: list[Any] = []
+        if paths is not None:
+            wanted = sorted(
+                {
+                    rel
+                    for raw in paths
+                    if (rel := _safe_markdown_rel_path(raw)) is not None
+                }
+            )
+            if not wanted:
+                return []
+            sql += f"WHERE rel_path IN ({','.join('?' for _ in wanted)}) "
+            params.extend(wanted)
+        sql += "ORDER BY updated_at, rel_path"
         if limit is not None:
             sql += " LIMIT ?"
-            params = (max(0, limit),)
+            params.append(max(0, limit))
         receipts = [
             DeferredReceipt(str(row[0]), int(row[1]))
-            for row in conn.execute(sql, params).fetchall()
+            for row in conn.execute(sql, tuple(params)).fetchall()
         ]
     finally:
         conn.close()
