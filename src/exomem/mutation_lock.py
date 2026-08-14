@@ -222,12 +222,14 @@ def _windows_delete_handle(handle: int) -> None:
         raise OSError(_windows_last_error(ctypes), "retained Windows delete refused")
 
 
-def rename_retained_regular_file(source: RetainedRegularFile, destination: Path) -> None:
+def rename_retained_regular_file(
+    source: RetainedRegularFile, destination: Path, *, destination_directory: _SecureDirectory | None = None
+) -> None:
     """Rename the exact retained source to a new sibling in a retained directory."""
     target = Path(destination)
     if target.name != target.as_posix().split("/")[-1]:
         raise OSError("retained rename destination must be one child basename")
-    directory = _acquire_secure_directory(target.parent, create=False)
+    directory = destination_directory or _acquire_secure_directory(target.parent, create=False)
     try:
         if not _same_directory_path(source.directory) or not _same_directory_path(directory):
             raise OSError("retained rename directory changed")
@@ -277,7 +279,8 @@ def rename_retained_regular_file(source: RetainedRegularFile, destination: Path)
         _windows_close_handle(replacement)
         raise OSError("retained Windows rename source still exists")
     finally:
-        directory.close()
+        if destination_directory is None:
+            directory.close()
 
 
 class _SecureDirectory:
@@ -957,7 +960,7 @@ def _windows_create_child_directory_handle(parent: _SecureDirectory, name: str) 
     ]
     create.restype = ctypes.c_long
     code = create(
-        ctypes.byref(result), 0x00020080, ctypes.byref(attributes), ctypes.byref(status), None,
+        ctypes.byref(result), 0x00120080, ctypes.byref(attributes), ctypes.byref(status), None,
         0, 0x7, 2, 0x00200021, None, 0,
     )
     if code < 0:

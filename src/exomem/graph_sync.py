@@ -1641,8 +1641,8 @@ def _reset_directory(vault_root: Path, operation_id: str) -> Path:
     return kb_root(vault_root) / f"{_RESET_PREFIX}{operation_id}"
 
 
-def _write_reset_manifest(directory: Path, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> None:
-    from .mutation_lock import retain_secure_directory, retained_write_file
+def _write_reset_manifest(directory: Any, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> None:
+    from .mutation_lock import retain_secure_directory, retained_read_file, retained_unlink_file, retained_write_file
 
     payload = {
         "version": 1,
@@ -1652,38 +1652,57 @@ def _write_reset_manifest(directory: Path, reset: GraphReset, identities: dict[s
         "phase": reset.phase,
     }
     raw = _canonical_json(payload)
-    retained = retain_secure_directory(directory)
+    retained = directory if hasattr(directory, "fd") and hasattr(directory, "path") else retain_secure_directory(directory)
     try:
+        try:
+            residue = retained_read_file(retained, f".{_RESET_MANIFEST}.new", limit=8_192)
+        except FileNotFoundError:
+            pass
+        else:
+            if residue != raw:
+                raise GraphResetFailed()
+            retained_unlink_file(retained, f".{_RESET_MANIFEST}.new")
         retained_write_file(retained, _RESET_MANIFEST, raw)
     finally:
-        retained.close()
+        if retained is not directory:
+            retained.close()
 
 
-def _advance_reset_manifest(directory: Path, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> None:
-    from .mutation_lock import retain_secure_directory, retained_write_file
+def _advance_reset_manifest(directory: Any, reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> None:
+    from .mutation_lock import retain_secure_directory, retained_read_file, retained_unlink_file, retained_write_file
 
     payload = GraphReset(reset.operation_id, reset.members, reset.phase)
     raw = _canonical_json({
         "version": 1, "operation_id": payload.operation_id, "members": list(payload.members),
         "identities": {name: list(identities[name]) for name in payload.members}, "phase": payload.phase,
     })
-    retained = retain_secure_directory(directory)
+    retained = directory if hasattr(directory, "fd") and hasattr(directory, "path") else retain_secure_directory(directory)
     try:
+        try:
+            residue = retained_read_file(retained, f".{_RESET_MANIFEST}.new", limit=8_192)
+        except FileNotFoundError:
+            pass
+        else:
+            if residue != raw:
+                raise GraphResetFailed()
+            retained_unlink_file(retained, f".{_RESET_MANIFEST}.new")
         retained_write_file(retained, _RESET_MANIFEST, raw, replace=True)
     finally:
-        retained.close()
+        if retained is not directory:
+            retained.close()
 
 
-def _read_reset_manifest(directory: Path) -> tuple[GraphReset, dict[str, tuple[int, ...]]]:
+def _read_reset_manifest(directory: Any) -> tuple[GraphReset, dict[str, tuple[int, ...]]]:
     """Parse only the closed, content-free reset manifest shape."""
     try:
         from .mutation_lock import retain_secure_directory, retained_read_file
 
-        retained = retain_secure_directory(directory)
+        retained = directory if hasattr(directory, "fd") and hasattr(directory, "path") else retain_secure_directory(directory)
         try:
             raw = retained_read_file(retained, _RESET_MANIFEST, limit=8_192)
         finally:
-            retained.close()
+            if retained is not directory:
+                retained.close()
         value = json.loads(raw)
         operation_id = value["operation_id"]
         members = value["members"]
@@ -1694,7 +1713,7 @@ def _read_reset_manifest(directory: Path) -> tuple[GraphReset, dict[str, tuple[i
     if (
         not isinstance(operation_id, str)
         or not re.fullmatch(r"[0-9a-f]{24}", operation_id)
-        or directory.name != f"{_RESET_PREFIX}{operation_id}"
+        or Path(directory.path if hasattr(directory, "path") else directory).name != f"{_RESET_PREFIX}{operation_id}"
         or not isinstance(members, list)
         or not members
         or any(not isinstance(name, str) or name not in _RESET_MEMBERS for name in members)
@@ -1730,53 +1749,55 @@ def _recover_interrupted_reset(vault_root: Path) -> GraphReset | None:
     parent = retain_secure_directory(kb)
     try:
         entries = os.listdir(parent.fd) if parent.fd is not None else os.listdir(parent.path)
-        candidates = []
+        candidates: list[tuple[Path, Any]] = []
         for name in entries:
             if not name.startswith(_RESET_PREFIX):
                 continue
             candidate = kb / name
             held = retain_child_directory(parent, name)
-            try:
-                candidates.append(candidate)
-            finally:
-                held.close()
+            candidates.append((candidate, held))
     finally:
         parent.close()
     if not candidates:
         return None
     if len(candidates) != 1:
+        for _candidate, held in candidates:
+            held.close()
         raise GraphResetFailed()
-    directory = candidates[0]
-    reset, identities = _read_reset_manifest(directory)
-    if reset.phase == "isolated":
-        if not _isolated_reset_matches(directory, kb, reset.members, identities):
-            raise GraphResetFailed()
-        return reset
-    moved: list[str] = []
-    for name in reset.members:
-        candidate = directory / name
-        if candidate.exists():
-            retained = retain_regular_file(candidate)
-            try:
-                if retained.identity != identities[name]:
-                    raise GraphResetFailed()
-                rename_retained_regular_file(retained, kb / name)
-                moved.append(name)
-            finally:
-                retained.close()
-        elif (kb / name).exists():
-            retained = retain_regular_file(kb / name)
-            try:
-                if retained.identity != identities[name]:
-                    raise GraphResetFailed()
-            finally:
-                retained.close()
-        else:
-            raise GraphResetFailed()
-    _advance_reset_manifest(directory, GraphReset(reset.operation_id, reset.members, "prepared"), identities)
-    if not cleanup_graph_lineage_reset(vault_root, reset.operation_id):
-        raise GraphResetFailed("GRAPH_SYNC_RESET_ROLLBACK_FAILED")
-    return None
+    directory, retained_directory = candidates[0]
+    try:
+        reset, identities = _read_reset_manifest(retained_directory)
+        if reset.phase == "isolated":
+            if not _isolated_reset_matches(directory, kb, reset.members, identities):
+                raise GraphResetFailed()
+            return reset
+        moved: list[str] = []
+        for name in reset.members:
+            candidate = directory / name
+            if candidate.exists():
+                retained = retain_regular_file(candidate)
+                try:
+                    if retained.identity != identities[name]:
+                        raise GraphResetFailed()
+                    rename_retained_regular_file(retained, kb / name)
+                    moved.append(name)
+                finally:
+                    retained.close()
+            elif (kb / name).exists():
+                retained = retain_regular_file(kb / name)
+                try:
+                    if retained.identity != identities[name]:
+                        raise GraphResetFailed()
+                finally:
+                    retained.close()
+            else:
+                raise GraphResetFailed()
+        _advance_reset_manifest(retained_directory, GraphReset(reset.operation_id, reset.members, "prepared"), identities)
+        if not cleanup_graph_lineage_reset(vault_root, reset.operation_id):
+            raise GraphResetFailed("GRAPH_SYNC_RESET_ROLLBACK_FAILED")
+        return None
+    finally:
+        retained_directory.close()
 
 
 def census_unavailable_graph_lineage(vault_root: Path) -> tuple[str, ...]:
@@ -1818,7 +1839,7 @@ def _isolated_reset_matches(
     try:
         parent = retain_secure_directory(kb)
         try:
-            if retained_regular_child_names(parent, members):
+            if retained_regular_child_names(parent, _RESET_MEMBERS):
                 return False
         finally:
             parent.close()
@@ -1861,44 +1882,40 @@ def isolate_unavailable_graph_lineage(vault_root: Path) -> GraphReset | None:
             try:
                 created = create_retained_child_directory(parent, f"{_RESET_PREFIX}{operation_id}")
                 directory = created.path
+                reset = GraphReset(operation_id, members, "prepared")
+                _write_reset_manifest(created, reset, identities)
+                moved = []
+                try:
+                    _advance_reset_manifest(created, GraphReset(operation_id, members, "moving"), identities)
+                    for item in retained:
+                        moved.append(item)
+                        rename_retained_regular_file(item, directory / item.path.name, destination_directory=created)
+                        _advance_reset_manifest(created, GraphReset(operation_id, members, "moving"), identities)
+                    _advance_reset_manifest(created, GraphReset(operation_id, members, "isolated"), identities)
+                    if not _isolated_reset_matches(directory, kb, members, identities):
+                        raise GraphResetFailed()
+                    return GraphReset(operation_id, members, "isolated")
+                except Exception as error:
+                    rollback_failed = False
+                    for item in reversed(moved):
+                        try:
+                            target = directory / item.path.name
+                            if not target.exists():
+                                if (kb / item.path.name).exists():
+                                    continue
+                                raise FileNotFoundError(item.path.name)
+                            moved_item = retain_regular_file(target)
+                            try:
+                                rename_retained_regular_file(moved_item, kb / item.path.name, destination_directory=parent)
+                            finally:
+                                moved_item.close()
+                        except Exception:
+                            rollback_failed = True
+                    raise GraphResetFailed("GRAPH_SYNC_RESET_ROLLBACK_FAILED" if rollback_failed else "GRAPH_SYNC_RESET_REFUSED") from error
             finally:
                 parent.close()
                 if 'created' in locals():
                     created.close()
-            reset = GraphReset(operation_id, members, "prepared")
-            _write_reset_manifest(directory, reset, identities)
-            moved = []
-            try:
-                _advance_reset_manifest(directory, GraphReset(operation_id, members, "moving"), identities)
-                for item in retained:
-                    moved.append(item)
-                    rename_retained_regular_file(item, directory / item.path.name)
-                    _advance_reset_manifest(
-                        directory, GraphReset(operation_id, members, "moving"), identities
-                    )
-                _advance_reset_manifest(directory, GraphReset(operation_id, members, "isolated"), identities)
-                if not _isolated_reset_matches(directory, kb, members, identities):
-                    raise GraphResetFailed()
-                return GraphReset(operation_id, members, "isolated")
-            except Exception as error:
-                rollback_failed = False
-                for item in reversed(moved):
-                    try:
-                        target = directory / item.path.name
-                        if not target.exists():
-                            if (kb / item.path.name).exists():
-                                continue
-                            raise FileNotFoundError(item.path.name)
-                        moved_item = retain_regular_file(target)
-                        try:
-                            rename_retained_regular_file(moved_item, kb / item.path.name)
-                        finally:
-                            moved_item.close()
-                    except Exception:
-                        rollback_failed = True
-                if not rollback_failed and not cleanup_graph_lineage_reset(root, operation_id):
-                    rollback_failed = True
-                raise GraphResetFailed("GRAPH_SYNC_RESET_ROLLBACK_FAILED" if rollback_failed else "GRAPH_SYNC_RESET_REFUSED") from error
         finally:
             for item in retained:
                 item.close()
