@@ -594,13 +594,28 @@ class FileWatcher:
         freshness.clear_external_pending(self._vault_root, through=pending_epoch)
         if freshness.external_pending(self._vault_root) or not rebuild_graph:
             return
+        if epistemic_graph.publication_refusal_active(self._vault_root):
+            # The same publication was refused recently; re-paying a full
+            # rebuild every 300 s is exactly what the contract's R2 forbids.
+            # The persisted barrier keeps the graph fenced meanwhile.
+            return
         try:
             graph.rebuild_all()
             if not graph.available():
-                raise RuntimeError("rebuilt graph did not publish an available marker")
-        except Exception:  # noqa: BLE001 - retain a retry signal and fail closed
-            if not freshness.external_pending(self._vault_root):
-                freshness.mark_external_pending(self._vault_root)
+                raise epistemic_graph.GraphPublicationUnavailable(
+                    "rebuilt graph did not publish an available marker"
+                )
+        except Exception as error:  # noqa: BLE001 - retain a retry signal and fail closed
+            # A refused publication is Class B: the registry observed and
+            # recorded every event, and only this projection failed to publish.
+            # Re-marking here would allocate a fresh external-pending epoch on
+            # every cycle and defeat the compare-and-ack above (contract R1),
+            # which is why this loop kept the vault permanently pending.
+            if epistemic_graph.may_mark_external_pending(error):
+                if not freshness.external_pending(self._vault_root):
+                    freshness.mark_external_pending(self._vault_root)
+            else:
+                epistemic_graph.record_publication_recovery_state(self._vault_root)
             log.exception("file watcher: pending epoch graph recovery failed")
 
     def _recover_suspended_graph(self) -> None:
@@ -618,6 +633,12 @@ class FileWatcher:
         graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
         if not graph.reads_suspended():
             return
+        if epistemic_graph.publication_refusal_active(self._vault_root):
+            # Contract R2: a publication already proven doomed for this exact
+            # checkpoint must not be re-attempted at full rebuild cost on every
+            # 300 s cycle. The barrier this method repairs is itself the fence,
+            # so deferring costs nothing but the delay.
+            return
         try:
             find_module.evict_resolver_caches(self._vault_root)
             vault_module.evict_inbound_index(self._vault_root)
@@ -626,7 +647,9 @@ class FileWatcher:
                 return
             graph.rebuild_all()
             if not graph.available():
-                raise RuntimeError("recovered graph did not publish an available marker")
+                raise epistemic_graph.GraphPublicationUnavailable(
+                    "recovered graph did not publish an available marker"
+                )
         except Exception:  # noqa: BLE001 - persisted barrier remains a retry signal
             try:
                 graph.suspend_reads()
