@@ -33,6 +33,7 @@ _OPTIONAL = frozenset(
         "progress_evidence",
         "execution",
         "tags",
+        "motivation",
     }
 )
 
@@ -1215,6 +1216,26 @@ def _validate_optional(values: Mapping[str, Any]) -> None:
             _bounded_string(tag, "tag", 128)
     _validate_evidence(values.get("progress_evidence"))
     _validate_execution(values.get("execution"))
+    _validate_motivation(values.get("motivation"))
+
+
+def _validate_motivation(value: Any) -> None:
+    """Refuse anything but a bounded list of `exomem://memory/` refs.
+
+    Motivation is a reference from a plan to the knowledge that motivates it,
+    never the reverse: only `exomem://memory/` refs are accepted, so a
+    `exomem://plan/...` reference (or any other malformed value) is refused
+    the same way an invalid `progress_evidence` collection ref is refused.
+    Planning items stay outside recall and the graph regardless — this field
+    never becomes a relation-graph edge, it is validated shape only.
+    """
+    if value is None:
+        return
+    if not isinstance(value, list) or len(value) > 16:
+        _invalid("motivation must be a bounded list")
+    for ref in value:
+        if memory_refs.parse_memory_ref(ref) is None:
+            _invalid("motivation reference is invalid")
 
 
 def _validate_evidence(value: Any) -> None:
