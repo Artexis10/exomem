@@ -568,3 +568,59 @@ def test_internal_diagnostic_label_renders_in_its_own_report(
         "internal diagnostic — not publishable"
         in (result.run_dir / "report.md").read_text(encoding="utf-8")
     )
+
+
+def test_comparison_report_surfaces_ingest_latency_as_sibling_of_retrieval(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """``ingest.jsonl`` latency must reach the comparison report, with an
+    altitude caveat attached so a raw ms figure is never read as directly
+    comparable across contenders whose per-op unit of work differs."""
+
+    result = execute_run(_spec(corpus, tmp_path, FakeAdapter(), run_id="ingest-lat"))
+    ingest_lines = [
+        line
+        for line in (result.run_dir / "ingest.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert ingest_lines  # the fixture corpus must actually exercise ingest
+
+    text = build_comparison_report(
+        [result.run_dir], tmp_path / "cmp-ingest.md"
+    ).read_text()
+
+    assert "| ingest_median_ms |" in text
+    assert "| ingest_p95_ms |" in text
+    ops_rows = [line for line in text.splitlines() if line.startswith("| ingest_ops |")]
+    assert len(ops_rows) == 1
+    assert str(len(ingest_lines)) in ops_rows[0]
+    # The altitude caveat must be attached wherever the ingest number renders,
+    # not buried in a JSON field nobody opens.
+    assert "ingestion_altitude" in text or "raw_source" in text
+
+
+def test_comparison_report_degrades_gracefully_without_ingest_jsonl(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """A run dir predating ingest-latency capture must load exactly as
+    before: no KeyError, no required field, and no ingest row rendered."""
+
+    result = execute_run(_spec(corpus, tmp_path, FakeAdapter(), run_id="no-ingest"))
+    before_text = build_comparison_report(
+        [result.run_dir], tmp_path / "cmp-before.md"
+    ).read_text()
+    assert "| ingest_median_ms |" in before_text
+
+    (result.run_dir / "ingest.jsonl").unlink()
+
+    after_text = build_comparison_report(
+        [result.run_dir], tmp_path / "cmp-after.md"
+    ).read_text()
+
+    assert "| ingest_median_ms |" not in after_text
+    assert "| ingest_p95_ms |" not in after_text
+    assert "| ingest_ops |" not in after_text
+    # Everything else must render unchanged — the run degrades to "no ingest
+    # data", not to a broken report.
+    assert "## Retrieval floor" in after_text
+    assert "## Environment" in after_text
