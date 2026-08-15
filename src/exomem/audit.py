@@ -2630,10 +2630,6 @@ class _DerivationWalk:
     cycle_path: tuple[str, ...] | None  # start -> ... -> start, if `start` reaches itself
     truncated_reasons: frozenset[str]  # subset of {"depth", "edges"}; empty = complete
 
-    @property
-    def truncated(self) -> bool:
-        return bool(self.truncated_reasons)
-
 
 def _derivation_direct_sources(
     pages: list[find_module.ParsedPage],
@@ -2749,6 +2745,17 @@ def _nearest_shared_roots(
     order. If every candidate ends up mutually dominated (a cycle among the
     candidates themselves), keep one deterministic representative rather than
     silently emitting nothing for a genuine collapse.
+
+    Known gap, deliberately not addressed: if the candidates form TWO (or
+    more) disjoint mutually-dominating cyclic clusters — e.g. {P, Q} each
+    reachable from the other, and separately {R, S} each reachable from the
+    other, with no path between the two clusters — every candidate across
+    BOTH clusters is "dominated by someone", so the single-survivor fallback
+    picks one representative overall and silently drops the other cluster's
+    distinct convergence point, not just redundant nodes on the same tail.
+    This is exotic (it requires the ancestor graph itself to contain a cycle,
+    which is separately reported as its own `warn`-severity `cycle` finding)
+    and not worth the extra bookkeeping a per-cluster fallback would need.
     """
     keys = list(candidates)
     if len(keys) <= 1:

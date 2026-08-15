@@ -90,16 +90,33 @@ depth-capped one (mutation-testing review, correction round 1).
 
 **Deriving the edge-budget default.** The initial 2,000 default was picked
 without measurement and was wrong: mutation-testing review measured this walk
-(no cross-walk closure reuse, per the rejected alternative above) consuming
-roughly 10 edges per sourced page in a chain-shaped test graph, exhausting a
-2,000 budget at ~200 sourced pages — nowhere near the vault this ships into
-(~2,900 markdown files at review time). Re-derivation, then validated
-empirically rather than only extrapolated:
+(no cross-walk closure reuse, per the rejected alternative above) exhausting
+a 2,000 budget at ~200 sourced pages in a chain-shaped test graph — nowhere
+near the vault this ships into (~2,900 markdown files at review time).
+
+Edges-per-sourced-page is **a property of the `sources:` citation shape (how
+many tiers of derivation deep a chain runs), not of vault size** — a small
+vault with deep chains can exhaust the budget just as easily as a large one
+with shallow chains. Follow-up measurement across citation-tier depth made
+this explicit and non-linear: **4.0 edges/page at 3 tiers, 22.8 at 6 tiers,
+503 at 12 tiers** (the tier count where chains start approaching the
+`max_depth` cap itself). The original ~10 edges/page figure was one point on
+this curve, not a stable per-page constant — reading it as vault-size-derived
+would have produced a default confidently wrong for any vault whose
+`sources:` chains run deeper rather than wider.
+
+Given that, the default is sized for this codebase's actual shallow
+convention (compiled notes cite raw `Sources/` leaves directly, with at most
+one or two tiers of note-citing-note indirection — see D4/`missing_sources`),
+not for an assumed worst-case tier depth, with the attributed `truncated`
+finding and the env override as the honest fallback for a vault whose
+chains run deeper:
 - Assume a generously-sized target of **~5,000 markdown files**, up to half
   (2,500) carrying `sources:` — deliberately over-estimating density, since a
-  real vault's `sources:` fraction is typically much smaller.
-- At the reviewer's measured ~10 edges/sourced-page: 2,500 × 10 = 25,000.
-  Doubled for margin → **50,000**.
+  real vault's `sources:` fraction is typically much smaller — at this
+  codebase's actual shallow (2–3 tier) citation shape, ~4 edges/page:
+  2,500 × 4 = 10,000. Rounded up with several-fold margin against
+  measurement noise and a moderately deeper realistic shape → **50,000**.
 - Validated with a synthetic 5,000-file vault (2,500 sourced notes across two
   citation tiers — notes citing raw `Sources/` leaves directly, and notes
   citing two of those first-tier notes, matching this codebase's actual
@@ -112,8 +129,13 @@ empirically rather than only extrapolated:
   `truncated` with both `depth` and `edges` reasons — depth capping a chain
   that genuinely runs thousands of hops deep is the depth cap doing its
   documented job, not an edge-budget sizing defect.
-- The env override (`EXOMEM_DERIVATION_MAX_EDGES`) remains for a vault denser
-  than this baseline.
+- A vault that stays small but *deepens* its citation tiers rather than
+  widening its sourced-page count is the case this sizing does not cover by
+  construction — at 12 tiers, 500+ edges/page exhausts 50,000 at only ~100
+  such pages. The `truncated` finding names which cap fired so this reads as
+  "incomplete", never a false "clean"; `EXOMEM_DERIVATION_MAX_EDGES` is the
+  intended remedy for a vault whose shape genuinely runs deeper than this
+  default assumes, not a defect to fix by raising the default further.
 
 ### D3 — Self-references are graph edges, not filtered inputs
 

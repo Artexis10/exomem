@@ -134,17 +134,51 @@ def test_direct_duplicate_shared_source_also_collapses(tmp_path: Path) -> None:
     assert findings[0].meta["shared_ancestor"] == s + ".md"
 
 
-def test_origin_page_is_never_its_own_shared_ancestor(tmp_path: Path) -> None:
-    """C cites A and B; A and B each cite C back (forming two 2-cycles as a
-    byproduct -- unavoidable, since "C is reachable from A" and "A is one of
-    C's own direct sources" together mean a path back to C by construction).
-    A naive intersection lists C itself as C's own "shared ancestor";
-    `collapse_roots` must exclude the citing page.
+def test_unresolved_shared_ancestor_gets_a_reconstructed_vault_path(
+    tmp_path: Path,
+) -> None:
+    """The shared ancestor here is never written as a real page -- `sources:`
+    can legitimately point at material this vault has no parsed page for.
+    `shared_ancestor` must still be a vault-relative rel_path an agent could
+    open (or get an honest "not found" from), not the internal lowercase,
+    extension-stripped canon key every other lookup in this module uses.
     """
-    c_key = "Knowledge Base/Notes/Insights/self-ancestor-c"
-    a_key = "Knowledge Base/Notes/Insights/self-ancestor-a"
-    b_key = "Knowledge Base/Notes/Insights/self-ancestor-b"
-    edges = {c_key: [a_key, b_key], a_key: [c_key], b_key: [c_key]}
+    ghost = "Knowledge Base/Sources/Articles/ghost-page"
+    a = _write(tmp_path, "derived-a", sources=[ghost])
+    b = _write(tmp_path, "derived-b", sources=[ghost])
+    _write(tmp_path, "citing-both", sources=[a, b])
+
+    findings = _by_kind(_findings(tmp_path), "support_collapse")
+
+    assert len(findings) == 1
+    shared = findings[0].meta["shared_ancestor"]
+    assert shared == f"{ghost}.md"
+    assert shared != ghost.lower()  # not the internal canon key
+    assert shared.startswith("Knowledge Base/")
+
+
+def test_origin_page_is_never_its_own_shared_ancestor(tmp_path: Path) -> None:
+    """The origin cites two sources that each cite the origin back (forming
+    two 2-cycles as a byproduct -- unavoidable, since "the origin is
+    reachable from a source" and "that source is one of the origin's own
+    direct sources" together mean a path back to the origin by construction).
+    A naive intersection lists the origin itself as its own "shared
+    ancestor"; `collapse_roots` must exclude the citing page.
+
+    Names are chosen so the origin sorts FIRST among the three canon keys
+    (`aaa-origin` < `zzz-src-a` < `zzz-src-b`). This is load-bearing for the
+    test, not decoration: when all three candidates end up mutually
+    dominated (as they do here -- see `_nearest_shared_roots`), the
+    deterministic single-survivor fallback picks `min(keys)`. With the
+    origin-exclusion fix removed, that fallback would otherwise coincidentally
+    pick a source rather than the origin if the origin didn't sort first,
+    silently passing this test while the underlying bug (the origin reported
+    as its own shared ancestor) remained.
+    """
+    origin_key = "Knowledge Base/Notes/Insights/aaa-origin"
+    a_key = "Knowledge Base/Notes/Insights/zzz-src-a"
+    b_key = "Knowledge Base/Notes/Insights/zzz-src-b"
+    edges = {origin_key: [a_key, b_key], a_key: [origin_key], b_key: [origin_key]}
     for key, targets in edges.items():
         rel = f"{key}.md"
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -158,10 +192,10 @@ def test_origin_page_is_never_its_own_shared_ancestor(tmp_path: Path) -> None:
 
     findings = _by_kind(_findings(tmp_path), "support_collapse")
 
-    c_rel = c_key + ".md"
-    assert not any(f.meta["shared_ancestor"] == c_rel for f in findings)
+    origin_rel = origin_key + ".md"
+    assert not any(f.meta["shared_ancestor"] == origin_rel for f in findings)
     assert not any(
-        f.path == c_rel and c_rel in f.meta["via_sources"] for f in findings
+        f.path == origin_rel and origin_rel in f.meta["via_sources"] for f in findings
     )
 
 
@@ -203,6 +237,29 @@ def test_inactive_status_does_not_originate_a_collapse_finding(tmp_path: Path) -
     a = _write(tmp_path, "derived-a", sources=[s])
     b = _write(tmp_path, "derived-b", sources=[s])
     _write(tmp_path, "citing-both", sources=[a, b], status="archived")
+
+    assert _by_kind(_findings(tmp_path), "support_collapse") == []
+
+
+def test_architecture_slug_suffix_is_excluded_from_origination(tmp_path: Path) -> None:
+    """A convention-named hub/snapshot page is EXPECTED to fan its `sources:`
+    out from a shared root (`relation_debt`/`missing_sources` already carry
+    this exact exclusion) -- without it, this diamond would otherwise be
+    flagged exactly like `test_diamond_support_collapse_is_flagged`.
+    """
+    s = _write(tmp_path, "root-source", page_type="source")
+    a = _write(tmp_path, "derived-a", sources=[s])
+    b = _write(tmp_path, "derived-b", sources=[s])
+    _write(tmp_path, "retrieval-architecture", sources=[a, b])
+
+    assert _by_kind(_findings(tmp_path), "support_collapse") == []
+
+
+def test_hub_tag_is_excluded_from_origination(tmp_path: Path) -> None:
+    s = _write(tmp_path, "root-source", page_type="source")
+    a = _write(tmp_path, "derived-a", sources=[s])
+    b = _write(tmp_path, "derived-b", sources=[s])
+    _write(tmp_path, "citing-both", sources=[a, b], tags="[hub]")
 
     assert _by_kind(_findings(tmp_path), "support_collapse") == []
 
