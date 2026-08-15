@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.52.2](https://github.com/Artexis10/exomem/compare/v0.52.1...v0.52.2) (2026-08-15)
+
+
+### Bug Fixes
+
+* **contract:** stop the identity census walking trash and failing closed on deleted pages ([#547](https://github.com/Artexis10/exomem/issues/547)) ([9b0f7ec](https://github.com/Artexis10/exomem/commit/9b0f7ec76b7cc37d625c01b0df5a836b21a808b3))
+
 ## [0.52.1](https://github.com/Artexis10/exomem/compare/v0.52.0...v0.52.1) (2026-08-15)
 
 
