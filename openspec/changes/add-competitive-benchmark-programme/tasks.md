@@ -268,7 +268,35 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       all lock hashes recompute. Final independent FEEDBACK6 recheck: `CLEAR`.
       No competitor/provider/network/model/dataset benchmark, credential,
       metered call, commit, push, or §4.6 work occurred.
-- [ ] 4.6 25-case Exomem direct-vs-MemoryBench equivalence gate GREEN
+- [ ] 4.6a Publish the already-observed guest facts in `memorybench-export.v1`.
+      Blocked discovery (2026-08-15): five of the nine BLOCKING equivalence keys
+      had no source in the export — `session_normalization`,
+      `ingestion_payloads`, `readiness`, `top_k`, and
+      `answer_judge_prompt_model_config`. The names `search.transmitted_query`,
+      `search.options.limit`, and `search.normalized_hit_ids` appear in the
+      schema ONLY as labels inside the `missing_fields` enum; there is no
+      search `$def`, and `readiness`/`session_normalization`/`payload_sha`
+      appear nowhere. Under the differ's null-never-equals rule those five
+      mismatch by construction, so the blocking gate could never go green — not
+      because the paths disagree, but because one side was never asked.
+      This is NOT a §4.5 defect: its export was deliberately scoped to executed
+      ingest/indexing/search with a closed no-fabrication vocabulary.
+      The facts are already captured and validated: the Exomem guest records
+      `request`/`response` evidence for every call
+      (`providers/exomem/index.ts`), builds the search body from the exact
+      `{query, limit}`, refuses an over-limit response, and requires a selected
+      path per hit; `export.py` already reads and validates guest evidence.
+      So this is a PROJECTION extension — additive export fields sourced from
+      existing evidence, no TS provider change, no `registration.patch` churn,
+      no lock-hash recomputation. The no-fabrication rule holds: a field appears
+      only when its evidence proves it, otherwise it stays in `missing_fields`.
+      `answer_judge_prompt_model_config` is sourced from the run plan (an
+      operator declaration both sides share), never from the harness, which
+      excludes answer/evaluate/report by design.
+- [ ] 4.6b `memorybench-export.v1` → `equivalence-input.v1` projector, so the
+      differ has a right-hand side (only `lme/runner.py` writes
+      `equivalence.json` today)
+- [ ] 4.6c 25-case Exomem direct-vs-MemoryBench equivalence gate GREEN
       (mode=blocking) — prerequisite for every comparative run
 - [ ] 4.7 Ratify and implement the native Supermemory vendor-hit projection
       (distinct from 4.5's flat guest-hit wire), then run the Supermemory
