@@ -703,6 +703,47 @@ class MemoryBenchHit(StrictModel):
         return value
 
 
+class MemoryBenchSearchOptions(StrictModel):
+    limit: int = Field(ge=1)
+
+
+class MemoryBenchSearchObservation(StrictModel):
+    """What the guest actually transmitted and got back, not what we assume."""
+
+    transmitted_query: str = Field(min_length=1)
+    options: MemoryBenchSearchOptions
+    normalized_hit_ids: list[str]
+
+    @model_validator(mode="after")
+    def _hits_respect_the_transmitted_limit(self) -> "MemoryBenchSearchObservation":
+        if len(self.normalized_hit_ids) > self.options.limit:
+            raise ValueError("normalized hit ids exceed the transmitted search limit")
+        return self
+
+
+class MemoryBenchIngestObservation(StrictModel):
+    transmitted_payload_sha256: list[str]
+
+    @field_validator("transmitted_payload_sha256")
+    @classmethod
+    def _digests_are_sha256(cls, value: list[str]) -> list[str]:
+        if any(not re.fullmatch(_SHA256_PATTERN, item) for item in value):
+            raise ValueError("transmitted payload digests must be sha256 hex")
+        return value
+
+
+#: Each optional observation owns the missing-field labels it answers for, so a
+#: value can never be both published and declared absent.
+_OBSERVATION_LABELS: dict[str, tuple[str, ...]] = {
+    "search": (
+        "search.normalized_hit_ids",
+        "search.options.limit",
+        "search.transmitted_query",
+    ),
+    "ingest": ("ingest.transmitted_payloads",),
+}
+
+
 class MemoryBenchExportCase(StrictModel):
     case_ordinal: int = Field(ge=1)
     case_id_hmac_sha256: str = Field(pattern=_SHA256_PATTERN)
@@ -715,11 +756,29 @@ class MemoryBenchExportCase(StrictModel):
     hits: list[MemoryBenchHit]
     failure_codes: list[ExportFailureCode]
     missing_fields: list[MissingField]
+    search: MemoryBenchSearchObservation | None = None
+    ingest: MemoryBenchIngestObservation | None = None
 
     @field_validator("failure_codes", "missing_fields")
     @classmethod
     def _canonical_arrays(cls, value: list[str], info):
         return _require_sorted_unique(value, info.field_name)
+
+    @model_validator(mode="after")
+    def _observations_agree_with_missing_fields(self) -> "MemoryBenchExportCase":
+        declared = set(self.missing_fields)
+        for name, labels in _OBSERVATION_LABELS.items():
+            present = getattr(self, name) is not None
+            overlap = declared & set(labels)
+            if present and overlap:
+                raise ValueError(
+                    f"{name} is published but missing_fields still declares {sorted(overlap)}"
+                )
+            if not present and overlap != set(labels):
+                raise ValueError(
+                    f"{name} is absent, so missing_fields must declare {sorted(labels)}"
+                )
+        return self
 
     def is_complete(self) -> bool:
         return (
@@ -763,6 +822,9 @@ class MemoryBenchExport(StrictModel):
     latency: MemoryBenchLatency
     failure_codes: list[ExportFailureCode]
     cases: list[MemoryBenchExportCase] = Field(min_length=1)
+    # Run-level facts the guest observes once, not per case.
+    session_normalization: str | None = None
+    readiness: list[LaneReadiness] | None = None
 
     @field_validator("failure_codes")
     @classmethod
