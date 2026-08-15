@@ -31,6 +31,52 @@ COMMIT_P95_MS = 1_500.0
 SCALING_RATIO = 2.0
 SCALING_SLACK_MS = 200.0
 
+# --- Read-after-write budget (warm path). A governed write normally PATCHES
+# the corpus-context cache and the live freshness registry, so the very next
+# caller's read stays cheap. These ceilings bound THAT read, not just the
+# preflight+commit that preceded it -- the gap this gate used to leave open
+# (a change moving cost from inside commit onto the next caller's read read
+# as a pure improvement).
+#
+# MEASURED BASIS (contended Windows dev box, EXOMEM_LEXICAL_BACKEND=python so
+# the read runs the reference O(N) scan every time, not just cold):
+#   read_after_write_median_ms   2k ~6193ms   8k ~30601ms   (~4.9x @ 4x pages)
+# Linux CI has neither the per-file Windows short-name resolve() this scan
+# pays (`recall_policy._safe_regular_file`) nor this box's contention, so the
+# real gate floor is expected to sit well under these numbers -- headroom is
+# wide on purpose. Re-measure (don't hand-tune) if that basis changes.
+READ_AFTER_WRITE_MEDIAN_MS = 60_000.0
+READ_AFTER_WRITE_P95_MS = 75_000.0
+# Separate (not shared with SCALING_RATIO/SCALING_SLACK_MS): this read is
+# deliberately O(N) even when warm (see EXOMEM_LEXICAL_BACKEND above), so its
+# expected growth over a 4x corpus (the DEFAULT_SIZES jump) is ~4x, not flat
+# like validate/commit's cached steady state. Ratio/slack sit above the
+# measured ~4.9x with real headroom so ordinary linear scaling never trips
+# this; a super-linear regression still would.
+READ_AFTER_WRITE_SCALING_RATIO = 8.0
+READ_AFTER_WRITE_SCALING_SLACK_MS = 2_000.0
+
+# --- Cold/evicted read-after-write (the row the upcoming #510 fix must
+# move). `reset_corpus_context_cache()` + `freshness.clear()` mirror what the
+# withdraw at index_sync.py:51-67 does to a vault's liveness: the corpus
+# cache entry goes missing (the post-write patch at semantic_contract.py
+# ~:1745 is then a no-op -- nothing to patch) and the freshness registry
+# scope stays not-live (only the file watcher re-seeds it in production; see
+# FreshnessSnapshot's O(N) stat-walk fallback in find.py). The very next
+# caller's read pays a COLD corpus/registry rebuild instead of the warm
+# patch path.
+#
+# MEASURED BASIS (same box/run as above):
+#   cold_read_after_write_ms     2k ~11153ms   8k ~51596ms   (~4.6x @ 4x pages)
+# PROVISIONAL: calibrated generously from this lane's own measured 2k/8k
+# numbers so it is a regression net against materially WORSE behavior, not a
+# tight bound on today's known-bad cost -- re-measure after #510 lands and
+# tighten (Linux CI, not this contended Windows box, is the authoritative
+# floor).
+COLD_READ_AFTER_WRITE_MS = 120_000.0
+COLD_READ_AFTER_WRITE_SCALING_RATIO = 8.0
+COLD_READ_AFTER_WRITE_SCALING_SLACK_MS = 3_000.0
+
 
 def _percentile(values: list[float], fraction: float) -> float:
     ordered = sorted(values)
@@ -59,7 +105,7 @@ def _next_source(source: str, version: int) -> str:
     return source[:start] + str(version) + source[end:]
 
 
-def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, float]:
+def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, float, float]:
     path = vault_root / rel_path
     before = path.read_text(encoding="utf-8")
     after = _next_source(before, version)
@@ -77,7 +123,21 @@ def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, f
     started = time.perf_counter()
     semantic_writes.commit_existing(vault_root, preflight=preflight)
     commit_ms = (time.perf_counter() - started) * 1_000.0
-    return validate_ms, commit_ms
+
+    # Read-after-write budget: what the NEXT caller pays to see this write,
+    # not just what the writer itself paid. A fast-but-stale read must fail
+    # the gate, not pass it, so this asserts visibility as well as timing.
+    marker = f"Synthetic write latency version {version} "
+    started = time.perf_counter()
+    hits = find.find(vault_root, query=marker.strip(), scope="kb", mode="keyword", limit=5)
+    read_after_write_ms = (time.perf_counter() - started) * 1_000.0
+    if not any(marker in (hit.excerpt or "") for hit in hits):
+        excerpts = [hit.excerpt for hit in hits]
+        raise RuntimeError(
+            f"read-after-write visibility failed: version {version} marker not found "
+            f"in {len(hits)} hit(s) for {rel_path}: {excerpts!r}"
+        )
+    return validate_ms, commit_ms, read_after_write_ms
 
 
 def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]:
@@ -110,10 +170,22 @@ def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]
     _transition(vault_root, target_rel, 1)
     validates: list[float] = []
     commits: list[float] = []
+    reads: list[float] = []
     for version in range(2, samples + 2):
-        validate_ms, commit_ms = _transition(vault_root, target_rel, version)
+        validate_ms, commit_ms, read_ms = _transition(vault_root, target_rel, version)
         validates.append(validate_ms)
         commits.append(commit_ms)
+        reads.append(read_ms)
+
+    # Cold/evicted scenario: force the expensive path a governed write can
+    # relocate onto its NEXT caller (see the module-level constant comments),
+    # then measure exactly what that caller's read pays. One sample, kept out
+    # of the warm `reads`/`validates`/`commits` lists above so it cannot skew
+    # ceilings scoped to steady-state (cache-warm) operation.
+    semantic_contract.reset_corpus_context_cache()
+    freshness.clear()
+    _, _, cold_read_after_write_ms = _transition(vault_root, target_rel, samples + 2)
+
     return {
         "pages": size,
         "samples": samples,
@@ -122,6 +194,9 @@ def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]
         "validate_p95_ms": round(_percentile(validates, 0.95), 1),
         "commit_median_ms": round(statistics.median(commits), 1),
         "commit_p95_ms": round(_percentile(commits, 0.95), 1),
+        "read_after_write_median_ms": round(statistics.median(reads), 1),
+        "read_after_write_p95_ms": round(_percentile(reads, 0.95), 1),
+        "cold_read_after_write_ms": round(cold_read_after_write_ms, 1),
     }
 
 
@@ -134,6 +209,9 @@ def check(results: list[dict[str, float | int]]) -> None:
             ("validate_p95_ms", VALIDATE_P95_MS),
             ("commit_median_ms", COMMIT_MEDIAN_MS),
             ("commit_p95_ms", COMMIT_P95_MS),
+            ("read_after_write_median_ms", READ_AFTER_WRITE_MEDIAN_MS),
+            ("read_after_write_p95_ms", READ_AFTER_WRITE_P95_MS),
+            ("cold_read_after_write_ms", COLD_READ_AFTER_WRITE_MS),
         ):
             value = float(result[key])
             if value >= ceiling:
@@ -149,6 +227,29 @@ def check(results: list[dict[str, float | int]]) -> None:
                     f"{operation} scaling: {large[key]}ms >= {bound:.1f}ms "
                     f"({small['pages']} -> {large['pages']} pages)"
                 )
+        read_key = "read_after_write_median_ms"
+        read_bound = (
+            float(small[read_key]) * READ_AFTER_WRITE_SCALING_RATIO
+            + READ_AFTER_WRITE_SCALING_SLACK_MS
+        )
+        if float(large[read_key]) >= read_bound:
+            failures.append(
+                f"read_after_write scaling: {large[read_key]}ms >= {read_bound:.1f}ms "
+                f"({small['pages']} -> {large['pages']} pages)"
+            )
+        # The relocated-cost trap #510 must close: the cold row growing
+        # faster than headroom allows means the "next caller" bill is
+        # scaling with corpus size, not staying flat.
+        cold_key = "cold_read_after_write_ms"
+        cold_bound = (
+            float(small[cold_key]) * COLD_READ_AFTER_WRITE_SCALING_RATIO
+            + COLD_READ_AFTER_WRITE_SCALING_SLACK_MS
+        )
+        if float(large[cold_key]) >= cold_bound:
+            failures.append(
+                f"cold_read_after_write scaling: {large[cold_key]}ms >= {cold_bound:.1f}ms "
+                f"({small['pages']} -> {large['pages']} pages)"
+            )
     if failures:
         raise SystemExit("semantic write latency gate failed: " + "; ".join(failures))
 
@@ -198,6 +299,18 @@ def main(argv: list[str] | None = None) -> int:
         "EXOMEM_DISABLE_RANKING",
     ):
         os.environ[name] = "1"
+    # The read-after-write probe (`_transition`) must measure the corpus/
+    # freshness cost this gate exists for, not the lexical sidecar's OWN
+    # independent eventual-consistency window: a commit's incremental
+    # lexstore upsert defers to a background thread when it can't nest inside
+    # the write's own vault lock (VAULT_LOCK_NESTED; "heals on next sync"),
+    # so an immediate keyword read can race a multi-second async rebuild that
+    # has nothing to do with corpus-context/freshness eviction. The `python`
+    # kill switch (same lean/model-free spirit as the DISABLE_* vars above)
+    # routes keyword search through the synchronous, always-current
+    # reference scan instead, so a stale read here can only mean OUR target
+    # mechanism regressed.
+    os.environ["EXOMEM_LEXICAL_BACKEND"] = "python"
 
     results = measure_all(args.sizes, args.samples, args.root)
     print(json.dumps({"results": results}, sort_keys=True))
