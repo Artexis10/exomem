@@ -2574,8 +2574,21 @@ def _check_missing_sources(
 # protecting a vault with thousands of notes and dense wikilinks from an
 # unbounded chain walk. Either cap being hit produces a dedicated `truncated`
 # finding rather than silently under-reporting.
+#
+# The edge default is derived, not guessed: a mutation-testing pass measured
+# this walk (no cross-walk closure reuse — every distinct `sources:`-bearing
+# page gets its own independent bounded BFS) consuming ~10 edges per sourced
+# page in a chain-shaped graph, exhausting a 2000 budget at ~200 sourced
+# pages. For a ~5,000-file vault, assuming a generous (over-)estimate of up to
+# half the corpus carrying `sources:` (2,500 sourced pages) at that same ~10
+# edges/page rate: 2,500 * 10 = 25,000 edges needed; doubled for margin =
+# 50,000. See design.md D2 for the full derivation and the stress-test that
+# validated it.
 _DERIVATION_DEFAULT_MAX_DEPTH = 12
-_DERIVATION_DEFAULT_MAX_EDGES = 2000
+_DERIVATION_DEFAULT_MAX_EDGES = 50_000
+
+_DERIVATION_TRUNCATED_BY_DEPTH = "depth"
+_DERIVATION_TRUNCATED_BY_EDGES = "edges"
 
 
 def _derivation_traversal_limits() -> tuple[int, int]:
@@ -2615,18 +2628,30 @@ class _DerivationBudget:
 class _DerivationWalk:
     ancestors: frozenset[str]        # keys reachable from `start`, excluding `start`
     cycle_path: tuple[str, ...] | None  # start -> ... -> start, if `start` reaches itself
-    truncated: bool                  # depth or shared edge budget stopped exploration early
+    truncated_reasons: frozenset[str]  # subset of {"depth", "edges"}; empty = complete
+
+    @property
+    def truncated(self) -> bool:
+        return bool(self.truncated_reasons)
 
 
 def _derivation_direct_sources(
     pages: list[find_module.ParsedPage],
-) -> dict[str, list[str]]:
-    """canon(page) -> ordered, de-duplicated canon(source) keys from `sources:`.
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """(direct_sources, raw_by_key).
 
-    A page citing itself is kept (not filtered) so a trivial self-reference is
-    caught by cycle detection rather than silently dropped from the graph.
+    `direct_sources`: canon(page) -> ordered, de-duplicated canon(source) keys
+    from `sources:`. A page citing itself is kept (not filtered) so a trivial
+    self-reference is caught by cycle detection rather than silently dropped
+    from the graph.
+
+    `raw_by_key`: canon key -> the first raw `sources:` wikilink text observed
+    for it, so an UNRESOLVED target (no matching page) can still be rendered
+    as a plausible vault-relative path in a finding rather than an internal
+    lowercase canon key an agent cannot open.
     """
     direct: dict[str, list[str]] = {}
+    raw_by_key: dict[str, str] = {}
     for page in pages:
         key = _relevance_canon(page.rel_path)
         seen: set[str] = set()
@@ -2637,8 +2662,26 @@ def _derivation_direct_sources(
                 continue
             seen.add(target_key)
             targets.append(target_key)
+            raw_by_key.setdefault(target_key, link)
         direct[key] = targets
-    return direct
+    return direct, raw_by_key
+
+
+def _derivation_best_effort_path(raw: str) -> str:
+    """Reconstruct a plausible vault-relative rel_path for an unresolved
+    `sources:` target. Every other `AuditFinding.path` (and every path inside
+    `meta`) is a vault-relative rel_path an agent can open directly; falling
+    back to the internal lowercase canon key instead would silently break
+    that contract for exactly the pages a reviewer most needs to inspect.
+    """
+    cleaned = raw.strip().strip("/")
+    if not cleaned:
+        return raw
+    if not cleaned.startswith(kb_prefix()):
+        cleaned = kb_prefix() + cleaned
+    if not cleaned.lower().endswith(".md"):
+        cleaned = cleaned + ".md"
+    return cleaned
 
 
 def _bounded_ancestor_walk(
@@ -2659,16 +2702,16 @@ def _bounded_ancestor_walk(
     ancestors: set[str] = set()
     frontier: deque[tuple[str, int]] = deque([(start, 0)])
     cycle_path: tuple[str, ...] | None = None
-    truncated = False
+    truncated_reasons: set[str] = set()
     while frontier:
         node, depth = frontier.popleft()
         if depth >= max_depth:
             if direct_sources.get(node):
-                truncated = True
+                truncated_reasons.add(_DERIVATION_TRUNCATED_BY_DEPTH)
             continue
         for target in direct_sources.get(node, ()):
             if not budget.take():
-                truncated = True
+                truncated_reasons.add(_DERIVATION_TRUNCATED_BY_EDGES)
                 break
             if target == start:
                 if cycle_path is None:
@@ -2686,8 +2729,40 @@ def _bounded_ancestor_walk(
                 parent[target] = node
                 frontier.append((target, depth + 1))
     return _DerivationWalk(
-        ancestors=frozenset(ancestors), cycle_path=cycle_path, truncated=truncated
+        ancestors=frozenset(ancestors),
+        cycle_path=cycle_path,
+        truncated_reasons=frozenset(truncated_reasons),
     )
+
+
+def _nearest_shared_roots(
+    candidates: dict[str, set[str]],
+    walk,
+) -> dict[str, set[str]]:
+    """Collapse one converging ancestral tail to its nearest node(s) only.
+
+    A shared root `Y` is dropped when some OTHER candidate `X` can reach `Y`
+    (i.e. `Y` is further upstream than `X`, discovered on the same tail) —
+    keeping only the convergence point(s) closest to the citing page instead
+    of emitting one finding per node in a multi-hop shared tail. Pairwise and
+    order-independent, so it is correct regardless of candidate iteration
+    order. If every candidate ends up mutually dominated (a cycle among the
+    candidates themselves), keep one deterministic representative rather than
+    silently emitting nothing for a genuine collapse.
+    """
+    keys = list(candidates)
+    if len(keys) <= 1:
+        return dict(candidates)
+    dominated: set[str] = set()
+    for x in keys:
+        reachable_from_x = walk(x).ancestors
+        for y in keys:
+            if y != x and y in reachable_from_x:
+                dominated.add(y)
+    survivors = [k for k in keys if k not in dominated]
+    if not survivors:
+        survivors = [min(keys)]
+    return {root: candidates[root] for root in survivors}
 
 
 def _check_derivation_double_counting(
@@ -2702,12 +2777,12 @@ def _check_derivation_double_counting(
     support-collapse candidate (a review candidate, not a defect) — never
     `error`.
     """
-    direct_sources = _derivation_direct_sources(pages)
+    direct_sources, raw_by_key = _derivation_direct_sources(pages)
     pages_by_canon = {_relevance_canon(page.rel_path): page for page in pages}
     max_depth, max_edges = _derivation_traversal_limits()
     budget = _DerivationBudget(max_edges)
     walk_cache: dict[str, _DerivationWalk] = {}
-    truncated_any = False
+    truncated_reasons_seen: set[str] = set()
     findings: list[AuditFinding] = []
     cycles_reported: set[frozenset[str]] = set()
 
@@ -2720,15 +2795,17 @@ def _check_derivation_double_counting(
 
     def display_path(key: str) -> str:
         page = pages_by_canon.get(key)
-        return page.rel_path if page is not None else key
+        if page is not None:
+            return page.rel_path
+        raw = raw_by_key.get(key)
+        return _derivation_best_effort_path(raw) if raw else key
 
     # -- circular derivation: any node with outgoing `sources:` edges may loop.
     for key in sorted(direct_sources):
         if not direct_sources[key]:
             continue
         result = walk(key)
-        if result.truncated:
-            truncated_any = True
+        truncated_reasons_seen |= result.truncated_reasons
         if result.cycle_path is None:
             continue
         identity = frozenset(result.cycle_path)
@@ -2764,7 +2841,10 @@ def _check_derivation_double_counting(
 
     # -- support collapse: only from active, read-write, provenance-bearing
     # compiled pages citing two or more sources as (nominally) independent
-    # support — mirrors `_check_missing_sources`'s origination gate.
+    # support. Mirrors `_check_missing_sources`'s origination gate exactly,
+    # including its hub/snapshot/slug-suffix common-hub damping — a hub or
+    # snapshot page is EXPECTED to fan its `sources:` out from a shared root
+    # and would otherwise dominate this queue with non-actionable noise.
     for page in pages:
         if page.page_type not in _SOURCES_REQUIRED_TYPES:
             continue
@@ -2774,27 +2854,37 @@ def _check_derivation_double_counting(
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
+        stem = page.path.stem.lower()
+        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+            continue
+        if _STALE_SKIP_TAGS & set(page.tags):
+            continue
         key = _relevance_canon(page.rel_path)
         directs = direct_sources.get(key, [])
         if len(directs) < 2:
             continue
 
         closures: dict[str, frozenset[str]] = {}
-        page_truncated = False
+        page_reasons: set[str] = set()
         for source_key in directs:
             result = walk(source_key)
             closures[source_key] = frozenset({source_key}) | result.ancestors
-            if result.truncated:
-                page_truncated = True
-                truncated_any = True
+            page_reasons |= result.truncated_reasons
+        truncated_reasons_seen |= page_reasons
 
         collapse_roots: dict[str, set[str]] = {}
         for i, a in enumerate(directs):
             for b in directs[i + 1 :]:
                 for shared_root in closures[a] & closures[b]:
                     collapse_roots.setdefault(shared_root, set()).update({a, b})
+        # A page can never be its own shared ancestor — a back-citing source
+        # placing `key` in its own closure is a cycle, reported separately.
+        collapse_roots.pop(key, None)
         if not collapse_roots:
             continue
+        # One converging tail (C <- D <- E, both A and B reaching all three)
+        # is one situation, not one finding per node in the tail.
+        collapse_roots = _nearest_shared_roots(collapse_roots, walk)
 
         for root in sorted(collapse_roots):
             via = sorted(collapse_roots[root])
@@ -2818,27 +2908,33 @@ def _check_derivation_double_counting(
                         "shared_ancestor": display_path(root),
                         "via_sources": [display_path(v) for v in via],
                         "signal_version": _page_signal_version(page),
-                        "depth_capped": page_truncated,
+                        "truncated_reasons": sorted(page_reasons),
                     },
                 )
             )
 
-    if truncated_any:
+    if truncated_reasons_seen:
+        reasons_label = " and ".join(sorted(truncated_reasons_seen))
         findings.append(
             AuditFinding(
                 category="derivation_double_counting",
                 severity="info",
                 path=kb_prefix(),
                 detail=(
-                    f"derivation-chain traversal capped at depth {max_depth} and "
-                    f"{max_edges} total edges; some ancestor chains may extend "
-                    "further than reported here."
+                    f"derivation-chain traversal capped by {reasons_label} "
+                    f"(depth<={max_depth}, edges<={max_edges}); some ancestor "
+                    "chains may extend further than reported here."
                 ),
                 proposed_fix=(
                     "Re-run scoped to the densest chains, or raise "
                     "EXOMEM_DERIVATION_MAX_DEPTH / EXOMEM_DERIVATION_MAX_EDGES."
                 ),
-                meta={"kind": "truncated", "max_depth": max_depth, "max_edges": max_edges},
+                meta={
+                    "kind": "truncated",
+                    "max_depth": max_depth,
+                    "max_edges": max_edges,
+                    "reasons": sorted(truncated_reasons_seen),
+                },
             )
         )
 

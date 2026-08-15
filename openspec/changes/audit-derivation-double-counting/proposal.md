@@ -22,15 +22,18 @@ frontmatter already implies. No existing category does that traversal.
     (`research-note` / `insight` / `failure` / `pattern` — the types whose
     `sources:` carries substantive provenance) cites two or more sources whose
     ancestor chains converge on a shared node, so citing them as independent
-    support double-counts that ancestor.
+    support double-counts that ancestor. The finding names the nearest such
+    shared ancestor — one finding per converging situation, not one per node
+    in a multi-hop shared tail — and never names the citing page itself.
   - `cycle` (severity `warn`): a `sources:` chain that is reachable from
     itself, including a direct self-reference.
 - Bound the chain walk explicitly by depth (`EXOMEM_DERIVATION_MAX_DEPTH`,
   default 12) and by a shared total-edge budget across the whole audit pass
-  (`EXOMEM_DERIVATION_MAX_EDGES`, default 2000). Whenever either cap stops
-  exploration before it completes, emit a dedicated `truncated` finding
-  (`info`) naming the cap, so a capped run reads as "incomplete", never as a
-  false "nothing found".
+  (`EXOMEM_DERIVATION_MAX_EDGES`, default 50,000 — measured and validated
+  against a synthetic ~5,000-file vault; see design.md D2). Whenever either
+  cap stops exploration before it completes, emit a dedicated `truncated`
+  finding (`info`) naming which cap(s) were actually hit, so a capped run
+  reads as "incomplete", never as a false "nothing found".
 - Observe only: the category never mutates a note, never rewrites a relation,
   never downgrades or demotes anything, and never blocks a write. It is
   absent from `ALL_CATEGORIES` (the default audit sweep) — callers opt in via

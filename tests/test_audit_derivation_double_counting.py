@@ -134,6 +134,61 @@ def test_direct_duplicate_shared_source_also_collapses(tmp_path: Path) -> None:
     assert findings[0].meta["shared_ancestor"] == s + ".md"
 
 
+def test_origin_page_is_never_its_own_shared_ancestor(tmp_path: Path) -> None:
+    """C cites A and B; A and B each cite C back (forming two 2-cycles as a
+    byproduct -- unavoidable, since "C is reachable from A" and "A is one of
+    C's own direct sources" together mean a path back to C by construction).
+    A naive intersection lists C itself as C's own "shared ancestor";
+    `collapse_roots` must exclude the citing page.
+    """
+    c_key = "Knowledge Base/Notes/Insights/self-ancestor-c"
+    a_key = "Knowledge Base/Notes/Insights/self-ancestor-a"
+    b_key = "Knowledge Base/Notes/Insights/self-ancestor-b"
+    edges = {c_key: [a_key, b_key], a_key: [c_key], b_key: [c_key]}
+    for key, targets in edges.items():
+        rel = f"{key}.md"
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        sources_literal = "[" + ", ".join(f'"[[{t}]]"' for t in targets) + "]"
+        (tmp_path / rel).write_text(
+            f"---\ntype: insight\nstatus: active\ncreated: 2026-07-10\n"
+            f"updated: 2026-07-10\nsources: {sources_literal}\ntags: []\n---\n"
+            f"\n## Finding\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    findings = _by_kind(_findings(tmp_path), "support_collapse")
+
+    c_rel = c_key + ".md"
+    assert not any(f.meta["shared_ancestor"] == c_rel for f in findings)
+    assert not any(
+        f.path == c_rel and c_rel in f.meta["via_sources"] for f in findings
+    )
+
+
+def test_one_converging_tail_produces_one_finding_not_one_per_node(
+    tmp_path: Path,
+) -> None:
+    """E is cited by D, D is cited by C, and both A and B cite C directly
+    (so both trace up through the same C -> D -> E tail). Z cites A and B.
+    This is ONE collapse situation -- everything converges at C -- and must
+    produce exactly one finding naming the nearest shared ancestor, not one
+    finding per node (C, D, and E) in the shared tail.
+    """
+    e = _write(tmp_path, "tail-e", page_type="source")
+    d = _write(tmp_path, "tail-d", sources=[e])
+    c = _write(tmp_path, "tail-c", sources=[d])
+    a = _write(tmp_path, "tail-a", sources=[c])
+    b = _write(tmp_path, "tail-b", sources=[c])
+    z = _write(tmp_path, "tail-z", sources=[a, b])
+
+    findings = _by_kind(_findings(tmp_path), "support_collapse")
+
+    assert len(findings) == 1
+    assert findings[0].path == z + ".md"
+    assert findings[0].meta["shared_ancestor"] == c + ".md"
+    assert sorted(findings[0].meta["via_sources"]) == sorted([a + ".md", b + ".md"])
+
+
 def test_only_provenance_bearing_types_originate_a_collapse_finding(tmp_path: Path) -> None:
     s = _write(tmp_path, "root-source", page_type="source")
     a = _write(tmp_path, "derived-a", sources=[s])
@@ -200,6 +255,39 @@ def test_two_node_cycle_is_detected_and_deduplicated(tmp_path: Path) -> None:
     }
 
 
+def test_cycle_not_involving_the_walk_start_terminates_without_spurious_truncation(
+    tmp_path: Path,
+) -> None:
+    """X cites A but is not itself part of the A<->B cycle. Walking from X must
+    terminate cleanly (the `seen` guard stops re-enqueueing a node already
+    visited on this walk) rather than bouncing between A and B until the
+    depth/edge cap is hit and produces a spurious `truncated` finding.
+
+    2- and 3-node cycles that loop straight back to their own start terminate
+    via the `target == start` shortcut regardless of `seen` (see the tests
+    above) -- this fixture is the one shape that actually exercises the
+    `seen` guard's necessity: a cycle reachable FROM the walk's start, but
+    not containing the start itself.
+    """
+    a_key = "Knowledge Base/Notes/Insights/seen-guard-a"
+    b_key = "Knowledge Base/Notes/Insights/seen-guard-b"
+    for key, target in ((a_key, b_key), (b_key, a_key)):
+        rel = f"{key}.md"
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(
+            f"---\ntype: insight\nstatus: active\ncreated: 2026-07-10\n"
+            f"updated: 2026-07-10\nsources: [\"[[{target}]]\"]\ntags: []\n---\n"
+            f"\n## Finding\n\nBody.\n",
+            encoding="utf-8",
+        )
+    _write(tmp_path, "seen-guard-x", sources=[a_key])
+
+    findings = _findings(tmp_path)
+
+    assert len(_by_kind(findings, "cycle")) == 1
+    assert _by_kind(findings, "truncated") == []
+
+
 def test_cycle_detection_terminates_on_a_longer_self_referential_chain(tmp_path: Path) -> None:
     """A -> B -> C -> A must terminate (not loop forever) and be reported once."""
     keys = {
@@ -246,6 +334,32 @@ def test_truncation_is_visible_when_the_depth_cap_is_hit(
     assert len(truncated) == 1
     assert truncated[0].severity == "info"
     assert truncated[0].meta["max_depth"] == 2
+    assert truncated[0].meta["reasons"] == ["depth"]
+
+
+def test_edge_budget_cap_is_reported_and_is_the_sole_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolates the shared edge budget from the depth cap: this chain (4 hops)
+    is well under the default depth cap (12), so if the edge budget were
+    removed entirely (mutation: `_DerivationBudget.take` always returning
+    True) every walk would complete cleanly and no `truncated` finding would
+    ever be emitted -- there would be nothing left to bound it.
+    """
+    monkeypatch.setenv("EXOMEM_DERIVATION_MAX_EDGES", "5")
+
+    prior: str | None = None
+    for i in range(5):  # 4 edges per full walk of the deepest node; well under depth=12
+        name = f"edge-chain-{i}"
+        sources = [prior] if prior else None
+        prior = _write(tmp_path, name, sources=sources)
+
+    findings = _findings(tmp_path)
+    truncated = _by_kind(findings, "truncated")
+
+    assert len(truncated) == 1
+    assert truncated[0].meta["max_edges"] == 5
+    assert truncated[0].meta["reasons"] == ["edges"]
 
 
 def test_no_truncation_finding_when_the_graph_is_small(tmp_path: Path) -> None:
@@ -286,16 +400,24 @@ def test_audit_is_read_only(tmp_path: Path) -> None:
     b = _write(tmp_path, "derived-b", sources=[s])
     _write(tmp_path, "citing-both", sources=[a, b])
 
-    def _snapshot() -> dict[str, tuple[float, str]]:
+    def _snapshot() -> dict[str, tuple[float, bytes] | None]:
+        # `rglob("*")`, not `*.md`: a no-op check that only globbed Markdown
+        # would still pass a vacuous `return []` implementation that creates
+        # a new non-.md file. Directories snapshot as None (no content/mtime
+        # comparison meaningful for them, but their presence/absence still
+        # participates in the `keys()` equality check below).
         return {
-            str(p): (p.stat().st_mtime, p.read_text(encoding="utf-8"))
-            for p in sorted(tmp_path.rglob("*.md"))
+            str(p): (
+                None if p.is_dir() else (p.stat().st_mtime, p.read_bytes())
+            )
+            for p in sorted(tmp_path.rglob("*"))
         }
 
     before = _snapshot()
-    _findings(tmp_path)
+    findings = _findings(tmp_path)
     _findings(tmp_path)
     after = _snapshot()
 
-    assert before == after
+    assert findings, "expected at least one finding — a no-op check must not pass vacuously"
     assert before.keys() == after.keys()
+    assert before == after
