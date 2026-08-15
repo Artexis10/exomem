@@ -38,7 +38,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--openai-api-key-env", default="OPENAI_API_KEY")
     run.add_argument("--claude-binary", default="claude")
     run.add_argument("--top-k", type=int, default=10)
-    run.add_argument("--provider", choices=("exomem-source-only", "hybrid-rag-control", "no-memory"))
+    # The registry is the closed source of truth; a hand-copied list here would
+    # silently strand any newly registered row.
+    from .providers.registry import registered_provider_names
+
+    run.add_argument("--provider", choices=registered_provider_names())
     run.add_argument(
         "--budget-cap-usd", type=float, default=float(os.environ.get("PROTOCOL_BUDGET_CAP_USD", "0") or 0),
         help="cap written into the run's immutable budget ledger (env: PROTOCOL_BUDGET_CAP_USD)",

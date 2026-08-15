@@ -268,7 +268,89 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       all lock hashes recompute. Final independent FEEDBACK6 recheck: `CLEAR`.
       No competitor/provider/network/model/dataset benchmark, credential,
       metered call, commit, push, or §4.6 work occurred.
-- [ ] 4.6 25-case Exomem direct-vs-MemoryBench equivalence gate GREEN
+- [ ] 4.6a Publish the already-observed guest facts in `memorybench-export.v1`.
+      Blocked discovery (2026-08-15): five of the nine BLOCKING equivalence keys
+      had no source in the export — `session_normalization`,
+      `ingestion_payloads`, `readiness`, `top_k`, and
+      `answer_judge_prompt_model_config`. The names `search.transmitted_query`,
+      `search.options.limit`, and `search.normalized_hit_ids` appear in the
+      schema ONLY as labels inside the `missing_fields` enum; there is no
+      search `$def`, and `readiness`/`session_normalization`/`payload_sha`
+      appear nowhere. Under the differ's null-never-equals rule those five
+      mismatch by construction, so the blocking gate could never go green — not
+      because the paths disagree, but because one side was never asked.
+      This is NOT a §4.5 defect: its export was deliberately scoped to executed
+      ingest/indexing/search with a closed no-fabrication vocabulary.
+      The facts are already captured and validated: the Exomem guest records
+      `request`/`response` evidence for every call
+      (`providers/exomem/index.ts`), builds the search body from the exact
+      `{query, limit}`, refuses an over-limit response, and requires a selected
+      path per hit; `export.py` already reads and validates guest evidence.
+      So this is a PROJECTION extension — additive export fields sourced from
+      existing evidence, no TS provider change, no `registration.patch` churn,
+      no lock-hash recomputation. The no-fabrication rule holds: a field appears
+      only when its evidence proves it, otherwise it stays in `missing_fields`.
+      `answer_judge_prompt_model_config` is sourced from the run plan (an
+      operator declaration both sides share), never from the harness, which
+      excludes answer/evaluate/report by design.
+      - [x] 4.6a-1 SCHEMA: additive `MemoryBenchSearchObservation`
+            (`transmitted_query`, `options.limit`, `normalized_hit_ids`),
+            `MemoryBenchIngestObservation` (`transmitted_payload_sha256`), and
+            run-level `session_normalization` + `readiness`. The honesty
+            coupling is enforced, not documented: `_OBSERVATION_LABELS` binds
+            each optional block to the `missing_fields` labels it answers for,
+            and a model validator refuses BOTH a published value whose label is
+            still declared missing AND an absent value whose labels are not all
+            declared. Hit ids may not outnumber the transmitted limit — the
+            same contract the guest already enforces at `index.ts:205`.
+            Schema regenerated; drift and conformance gates green. Evidence:
+            958 passed / 32 skipped across membench + protocol + memorybench +
+            privacy, `ruff --select F` clean, OpenSpec strict valid.
+      - [x] 4.6a-2 POPULATE: `benchmarks/memorybench/guest_observations.py`
+            reads one guest evidence directory in TRANSMISSION order (the
+            sequence in the filename, never directory order — sequence 10 must
+            not sort before 2) and publishes only what those entries prove.
+            Wired into the single case-assembly site in `export.py`, which
+            starts from "everything missing" and subtracts only the labels the
+            evidence resolves. Scoped to the `exomem` guest; the Basic sidecar
+            records a different evidence shape and keeps its labels declared.
+            Absence is never a value: a request with no paired response records
+            `guest_evidence_incomplete`, and a response breaking the guest's own
+            limit contract (refused at `index.ts:205` before returning) records
+            `guest_evidence_invalid` rather than publishing it. An empty
+            directory is absence, not a fault. `normalized_scores` stays absent
+            — the guest search path hard-codes `score: 0.0`.
+            Evidence: 14 focused checks red-first, then 503 passed across
+            memorybench + protocol with the export's recompute-and-compare
+            invariant intact.
+- [x] 4.6b `memorybench-export.v1` → `equivalence-input.v1` projector.
+      `benchmarks/memorybench/equivalence_projection.py` mirrors the twelve
+      keys `lme/runner.py::_equivalence_case` emits, sourced from the public
+      export plus the private-gold mapping (the public artifact carries only
+      HMAC pseudonyms; the comparison needs the real question ids). Readiness
+      is narrowed to the same five fields the direct emitter compares, dropping
+      `evidence` because prose would never match. A key the export could not
+      source stays NULL rather than being invented — the differ treats null as
+      never equal to anything, so an unsourced key becomes a difference
+      demanding an explanation instead of a silent pass. A case with no private
+      gold mapping is refused, never guessed. CLI writes `equivalence.json`
+      into a run directory (`--export`, `--private-gold`, `--out`).
+      Evidence: 13 checks, red-first. The decisive two run the REAL emitter
+      rather than a hand-copy — one asserts both sides carry identical key sets
+      so the differ compares like with like, and a round trip through
+      `compare_runs` shows identical projections produce no blocking difference
+      while a widened `top_k` (10 vs 30) is caught as blocking.
+      EXPECTED at 4.6c: several BLOCKING keys will legitimately differ because
+      the two paths genuinely differ, not because either is wrong —
+      `session_normalization` (`lme.normalize.render_neutral_session/v1` vs
+      `memorybench.longmemeval_to_corpus/v1`), `namespace` (different
+      derivations), and `ingestion_payloads` (digest of a rendered neutral
+      session vs of a `capture_source` body). `retrieved_ids` will differ too
+      (the direct row emits positional `exomem-N` ids, the guest emits vault
+      paths) but that key is REPORTED, not blocking. These are the measured
+      findings 4.6c exists to surface and the exceptions register exists to
+      carry, with expiry — they are not to be papered over before the gate runs.
+- [ ] 4.6c 25-case Exomem direct-vs-MemoryBench equivalence gate GREEN
       (mode=blocking) — prerequisite for every comparative run
 - [ ] 4.7 Ratify and implement the native Supermemory vendor-hit projection
       (distinct from 4.5's flat guest-hit wire), then run the Supermemory

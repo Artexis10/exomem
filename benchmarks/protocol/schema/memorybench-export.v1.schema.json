@@ -129,6 +129,53 @@
       "title": "DatasetIdentity",
       "type": "object"
     },
+    "LaneReadiness": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "title": "Evidence",
+          "type": "string"
+        },
+        "fallback_detected": {
+          "default": false,
+          "title": "Fallback Detected",
+          "type": "boolean"
+        },
+        "lane": {
+          "title": "Lane",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "index-count",
+            "config-state",
+            "semantic-probe",
+            "memories-canary",
+            "doctor-check",
+            "readiness-unverifiable"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "requested": {
+          "title": "Requested",
+          "type": "boolean"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "lane",
+        "requested",
+        "verified",
+        "method",
+        "evidence"
+      ],
+      "title": "LaneReadiness",
+      "type": "object"
+    },
     "MemoryBenchExportCase": {
       "additionalProperties": false,
       "properties": {
@@ -211,6 +258,17 @@
           "title": "Hits",
           "type": "array"
         },
+        "ingest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryBenchIngestObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "missing_fields": {
           "items": {
             "enum": [
@@ -247,6 +305,17 @@
         },
         "question": {
           "$ref": "#/$defs/MemoryBenchQuestion"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryBenchSearchObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -316,6 +385,23 @@
         "score"
       ],
       "title": "MemoryBenchHit",
+      "type": "object"
+    },
+    "MemoryBenchIngestObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "transmitted_payload_sha256": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Transmitted Payload Sha256",
+          "type": "array"
+        }
+      },
+      "required": [
+        "transmitted_payload_sha256"
+      ],
+      "title": "MemoryBenchIngestObservation",
       "type": "object"
     },
     "MemoryBenchLatency": {
@@ -501,6 +587,49 @@
         "date"
       ],
       "title": "MemoryBenchQuestion",
+      "type": "object"
+    },
+    "MemoryBenchSearchObservation": {
+      "additionalProperties": false,
+      "description": "What the guest actually transmitted and got back, not what we assume.",
+      "properties": {
+        "normalized_hit_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Normalized Hit Ids",
+          "type": "array"
+        },
+        "options": {
+          "$ref": "#/$defs/MemoryBenchSearchOptions"
+        },
+        "transmitted_query": {
+          "minLength": 1,
+          "title": "Transmitted Query",
+          "type": "string"
+        }
+      },
+      "required": [
+        "transmitted_query",
+        "options",
+        "normalized_hit_ids"
+      ],
+      "title": "MemoryBenchSearchObservation",
+      "type": "object"
+    },
+    "MemoryBenchSearchOptions": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "limit"
+      ],
+      "title": "MemoryBenchSearchOptions",
       "type": "object"
     }
   },
@@ -833,6 +962,21 @@
       "title": "Provider Variant",
       "type": "string"
     },
+    "readiness": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/LaneReadiness"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Readiness"
+    },
     "run_id": {
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
       "title": "Run Id",
@@ -842,6 +986,18 @@
       "const": 1,
       "title": "Schema Version",
       "type": "integer"
+    },
+    "session_normalization": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Normalization"
     },
     "status": {
       "enum": [
