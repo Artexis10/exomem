@@ -19,6 +19,15 @@ Checks (all read-only; no writes ever):
   `find` AND low inbound-link degree — a measurement-only review candidate.
   Surfaces it for the reader to judge (keep / supersede / archive); never
   decays, down-ranks, or moves anything (`find` ordering is unchanged).
+- `derivation_double_counting` (optional): walks `sources:` (`derived_from`)
+  chains for two failures ordinary checks cannot see. Support collapse: a
+  compiled page cites two or more sources as independent support that
+  themselves trace back to a shared ancestor — a source laundered into
+  "multiple sources agree". Circular derivation: a `sources:` chain that
+  loops back on itself. Both are informational/warn only, never error; the
+  traversal is bounded by depth and total-edge caps, and a dedicated
+  `truncated` finding makes a hit cap visible rather than silently reading as
+  "nothing found".
 - `corpus_contradictions`: corpus-wide sweep for pairs of ACTIVE read-write
   COMPILED conclusions whose embeddings sit in the contradiction band
   `[floor, dup_threshold)` — close enough to plausibly restate/refine/contradict
@@ -46,6 +55,7 @@ import math
 import os
 import re
 import stat
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -85,6 +95,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
     "missing_sources",
+    "derivation_double_counting",
     "semantic_contract_drift",
     "semantic_malformed_unit",
     "semantic_category_governance",
@@ -393,6 +404,8 @@ def audit(
         findings.extend(_check_relation_debt(vault_root, pages))
     if "missing_sources" in selected:
         findings.extend(_check_missing_sources(vault_root, pages))
+    if "derivation_double_counting" in selected:
+        findings.extend(_check_derivation_double_counting(vault_root, pages))
     if "governance_receipts" in selected:
         findings.extend(_check_governance_receipts(vault_root))
     if "bridge_review" in selected:
@@ -2550,6 +2563,288 @@ def _check_missing_sources(
         )
 
     return sorted(findings, key=lambda finding: finding.path)
+
+
+# ---------------- check: derivation_double_counting ----------------
+
+# Bounds on the `sources:` (`derived_from`) chain walk. Both are env-overridable
+# so ops can tune without redeploying (same convention as `_stale_thresholds`).
+# The depth cap bounds how many hops are followed from any single node; the edge
+# cap bounds total work across the WHOLE audit pass (shared across every walk),
+# protecting a vault with thousands of notes and dense wikilinks from an
+# unbounded chain walk. Either cap being hit produces a dedicated `truncated`
+# finding rather than silently under-reporting.
+_DERIVATION_DEFAULT_MAX_DEPTH = 12
+_DERIVATION_DEFAULT_MAX_EDGES = 2000
+
+
+def _derivation_traversal_limits() -> tuple[int, int]:
+    """(max_depth, max_edges); bad/non-positive env values fall back to default."""
+
+    def _int_env(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            log.warning("invalid %s=%r; using %s", name, raw, default)
+            return default
+        return value if value > 0 else default
+
+    return (
+        _int_env("EXOMEM_DERIVATION_MAX_DEPTH", _DERIVATION_DEFAULT_MAX_DEPTH),
+        _int_env("EXOMEM_DERIVATION_MAX_EDGES", _DERIVATION_DEFAULT_MAX_EDGES),
+    )
+
+
+@dataclass
+class _DerivationBudget:
+    """Total-edge cap shared across every walk in one audit pass."""
+
+    remaining: int
+
+    def take(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+
+@dataclass(frozen=True)
+class _DerivationWalk:
+    ancestors: frozenset[str]        # keys reachable from `start`, excluding `start`
+    cycle_path: tuple[str, ...] | None  # start -> ... -> start, if `start` reaches itself
+    truncated: bool                  # depth or shared edge budget stopped exploration early
+
+
+def _derivation_direct_sources(
+    pages: list[find_module.ParsedPage],
+) -> dict[str, list[str]]:
+    """canon(page) -> ordered, de-duplicated canon(source) keys from `sources:`.
+
+    A page citing itself is kept (not filtered) so a trivial self-reference is
+    caught by cycle detection rather than silently dropped from the graph.
+    """
+    direct: dict[str, list[str]] = {}
+    for page in pages:
+        key = _relevance_canon(page.rel_path)
+        seen: set[str] = set()
+        targets: list[str] = []
+        for link in _extract_wikilinks_from_value(page.frontmatter.get("sources")):
+            target_key = _relevance_canon(link)
+            if not target_key or target_key in seen:
+                continue
+            seen.add(target_key)
+            targets.append(target_key)
+        direct[key] = targets
+    return direct
+
+
+def _bounded_ancestor_walk(
+    direct_sources: dict[str, list[str]],
+    start: str,
+    *,
+    max_depth: int,
+    budget: _DerivationBudget,
+) -> _DerivationWalk:
+    """BFS from `start` over `derived_from` edges, bounded by depth + a shared edge
+    budget. Always terminates: `seen` guards against revisiting a node regardless
+    of cycles, and the budget bounds total edges expanded across the whole audit
+    pass. Detects whether `start` is reachable from itself (a cycle) and
+    reconstructs one witness path.
+    """
+    parent: dict[str, str] = {}
+    seen = {start}
+    ancestors: set[str] = set()
+    frontier: deque[tuple[str, int]] = deque([(start, 0)])
+    cycle_path: tuple[str, ...] | None = None
+    truncated = False
+    while frontier:
+        node, depth = frontier.popleft()
+        if depth >= max_depth:
+            if direct_sources.get(node):
+                truncated = True
+            continue
+        for target in direct_sources.get(node, ()):
+            if not budget.take():
+                truncated = True
+                break
+            if target == start:
+                if cycle_path is None:
+                    path = [node]
+                    cur = node
+                    while cur != start:
+                        cur = parent[cur]
+                        path.append(cur)
+                    cycle_path = tuple(reversed(path)) + (start,)
+                ancestors.add(target)
+                continue
+            ancestors.add(target)
+            if target not in seen:
+                seen.add(target)
+                parent[target] = node
+                frontier.append((target, depth + 1))
+    return _DerivationWalk(
+        ancestors=frozenset(ancestors), cycle_path=cycle_path, truncated=truncated
+    )
+
+
+def _check_derivation_double_counting(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Walk `sources:` chains for support-collapse and circular derivation.
+
+    Read-only and observe-before-enforce: reports findings only, never rewrites
+    a relation, never demotes anything, never blocks a write. Severity is
+    `warn` for a genuine cycle (a structural inconsistency) and `info` for a
+    support-collapse candidate (a review candidate, not a defect) — never
+    `error`.
+    """
+    direct_sources = _derivation_direct_sources(pages)
+    pages_by_canon = {_relevance_canon(page.rel_path): page for page in pages}
+    max_depth, max_edges = _derivation_traversal_limits()
+    budget = _DerivationBudget(max_edges)
+    walk_cache: dict[str, _DerivationWalk] = {}
+    truncated_any = False
+    findings: list[AuditFinding] = []
+    cycles_reported: set[frozenset[str]] = set()
+
+    def walk(key: str) -> _DerivationWalk:
+        if key not in walk_cache:
+            walk_cache[key] = _bounded_ancestor_walk(
+                direct_sources, key, max_depth=max_depth, budget=budget
+            )
+        return walk_cache[key]
+
+    def display_path(key: str) -> str:
+        page = pages_by_canon.get(key)
+        return page.rel_path if page is not None else key
+
+    # -- circular derivation: any node with outgoing `sources:` edges may loop.
+    for key in sorted(direct_sources):
+        if not direct_sources[key]:
+            continue
+        result = walk(key)
+        if result.truncated:
+            truncated_any = True
+        if result.cycle_path is None:
+            continue
+        identity = frozenset(result.cycle_path)
+        if identity in cycles_reported:
+            continue
+        cycles_reported.add(identity)
+        origin_page = pages_by_canon.get(key)
+        cycle_display = [display_path(k) for k in result.cycle_path]
+        findings.append(
+            AuditFinding(
+                category="derivation_double_counting",
+                severity="warn",
+                path=display_path(key),
+                detail=(
+                    "Circular derivation: "
+                    + " -> ".join(cycle_display)
+                    + " — this `sources:` chain supports itself."
+                ),
+                proposed_fix=(
+                    "Review the `sources:` chain for a mistaken back-reference and "
+                    "remove or correct one entry to break the cycle. Nothing is "
+                    "auto-written."
+                ),
+                meta={
+                    "kind": "cycle",
+                    "cycle": cycle_display,
+                    "signal_version": (
+                        _page_signal_version(origin_page) if origin_page else None
+                    ),
+                },
+            )
+        )
+
+    # -- support collapse: only from active, read-write, provenance-bearing
+    # compiled pages citing two or more sources as (nominally) independent
+    # support — mirrors `_check_missing_sources`'s origination gate.
+    for page in pages:
+        if page.page_type not in _SOURCES_REQUIRED_TYPES:
+            continue
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if page.status in ("superseded", "archived", "draft", "dropped"):
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        key = _relevance_canon(page.rel_path)
+        directs = direct_sources.get(key, [])
+        if len(directs) < 2:
+            continue
+
+        closures: dict[str, frozenset[str]] = {}
+        page_truncated = False
+        for source_key in directs:
+            result = walk(source_key)
+            closures[source_key] = frozenset({source_key}) | result.ancestors
+            if result.truncated:
+                page_truncated = True
+                truncated_any = True
+
+        collapse_roots: dict[str, set[str]] = {}
+        for i, a in enumerate(directs):
+            for b in directs[i + 1 :]:
+                for shared_root in closures[a] & closures[b]:
+                    collapse_roots.setdefault(shared_root, set()).update({a, b})
+        if not collapse_roots:
+            continue
+
+        for root in sorted(collapse_roots):
+            via = sorted(collapse_roots[root])
+            findings.append(
+                AuditFinding(
+                    category="derivation_double_counting",
+                    severity="info",
+                    path=page.rel_path,
+                    detail=(
+                        f"{len(via)} of this page's cited sources trace back to a "
+                        f"shared ancestor ({display_path(root)}); citing them as "
+                        "independent support double-counts that ancestor."
+                    ),
+                    proposed_fix=(
+                        "Review whether these citations are genuinely independent "
+                        "evidence or restate the same underlying source; if not, "
+                        "cite the shared ancestor once. Nothing is auto-written."
+                    ),
+                    meta={
+                        "kind": "support_collapse",
+                        "shared_ancestor": display_path(root),
+                        "via_sources": [display_path(v) for v in via],
+                        "signal_version": _page_signal_version(page),
+                        "depth_capped": page_truncated,
+                    },
+                )
+            )
+
+    if truncated_any:
+        findings.append(
+            AuditFinding(
+                category="derivation_double_counting",
+                severity="info",
+                path=kb_prefix(),
+                detail=(
+                    f"derivation-chain traversal capped at depth {max_depth} and "
+                    f"{max_edges} total edges; some ancestor chains may extend "
+                    "further than reported here."
+                ),
+                proposed_fix=(
+                    "Re-run scoped to the densest chains, or raise "
+                    "EXOMEM_DERIVATION_MAX_DEPTH / EXOMEM_DERIVATION_MAX_EDGES."
+                ),
+                meta={"kind": "truncated", "max_depth": max_depth, "max_edges": max_edges},
+            )
+        )
+
+    return sorted(
+        findings, key=lambda finding: (finding.path, str((finding.meta or {}).get("kind") or ""))
+    )
 
 
 # ---------------- check: stale_review ----------------
