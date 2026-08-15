@@ -474,22 +474,28 @@ def _acquire_publication_hold(live: Path) -> str | None:
             return None
         _SIDECAR_PUBLICATION_HOLDS.add(key)
     deadline = time.monotonic() + PUBLICATION_READER_DRAIN_SECONDS
-    with _SIDECAR_READERS_CHANGED:
-        while _SIDECAR_READERS.get(key):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            _SIDECAR_READERS_CHANGED.wait(remaining)
-        # A reader whose owning thread is gone can never close itself, so it is
-        # the only connection safe to close from here: closing one a live
-        # caller still holds would surface `sqlite3.ProgrammingError` inside an
-        # unrelated read. Readers that outlast the drain are published around
-        # by `graph_sync.replace_sidecar`'s in-place path.
-        abandoned = [
-            conn
-            for conn, owner in _SIDECAR_READERS.get(key, {}).values()
-            if not owner.is_alive()
-        ]
+    try:
+        with _SIDECAR_READERS_CHANGED:
+            while _SIDECAR_READERS.get(key):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                _SIDECAR_READERS_CHANGED.wait(remaining)
+            # A reader whose owning thread is gone can never close itself, so
+            # it is the only connection safe to close from here: closing one a
+            # live caller still holds would surface `sqlite3.ProgrammingError`
+            # inside an unrelated read. Readers that outlast the drain are
+            # published around by `graph_sync.replace_sidecar`'s in-place path.
+            abandoned = [
+                conn
+                for conn, owner in _SIDECAR_READERS.get(key, {}).values()
+                if not owner.is_alive()
+            ]
+    except BaseException:
+        # Never leak a hold: an unreleased one would make every reader of this
+        # sidecar pay the full open-wait for the life of the process.
+        _release_publication_hold(key)
+        raise
     # Outside the registry lock: closing re-enters it to deregister.
     for conn in abandoned:
         try:
