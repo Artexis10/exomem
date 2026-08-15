@@ -306,12 +306,23 @@ them. Mission acceptance criteria (§14) close only from this ledger.
             Schema regenerated; drift and conformance gates green. Evidence:
             958 passed / 32 skipped across membench + protocol + memorybench +
             privacy, `ruff --select F` clean, OpenSpec strict valid.
-      - [ ] 4.6a-2 POPULATE: project the fields from the existing guest
-            evidence in `export.py` (the Exomem guest already logs
-            `request`/`response` per call, and `_basic_evidence_targets` is the
-            precedent for reading it). No-fabrication holds: absent evidence
-            keeps the `missing_fields` label. `normalized_scores` stays absent
+      - [x] 4.6a-2 POPULATE: `benchmarks/memorybench/guest_observations.py`
+            reads one guest evidence directory in TRANSMISSION order (the
+            sequence in the filename, never directory order — sequence 10 must
+            not sort before 2) and publishes only what those entries prove.
+            Wired into the single case-assembly site in `export.py`, which
+            starts from "everything missing" and subtracts only the labels the
+            evidence resolves. Scoped to the `exomem` guest; the Basic sidecar
+            records a different evidence shape and keeps its labels declared.
+            Absence is never a value: a request with no paired response records
+            `guest_evidence_incomplete`, and a response breaking the guest's own
+            limit contract (refused at `index.ts:205` before returning) records
+            `guest_evidence_invalid` rather than publishing it. An empty
+            directory is absence, not a fault. `normalized_scores` stays absent
             — the guest search path hard-codes `score: 0.0`.
+            Evidence: 14 focused checks red-first, then 503 passed across
+            memorybench + protocol with the export's recompute-and-compare
+            invariant intact.
 - [ ] 4.6b `memorybench-export.v1` → `equivalence-input.v1` projector, so the
       differ has a right-hand side (only `lme/runner.py` writes
       `equivalence.json` today)
