@@ -759,6 +759,59 @@ def test_watcher_recovery_allocates_no_new_epoch_for_a_refused_publication(
     )
 
 
+def test_watcher_drain_allocates_no_epoch_when_the_fan_out_publication_is_refused(
+    contract_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: the drain's own completeness check is a third door onto the registry.
+
+    `_dispatch_batch` withdraws the graph marker, compare-and-acks the drained
+    epoch, fans out, and then asserts the graph came back current. When the
+    fan-out's publication is refused (Class B) the barrier is still set, so that
+    assertion fails and the drain marks the vault externally pending again --
+    a fresh epoch on *every* drain cycle. That is the self-sustaining loop the
+    contract exists to end, and it falsifies the D7 precondition that
+    `external_pending` is set only by Class A and Class C.
+    """
+    from exomem.file_watcher import FileWatcher
+
+    root = contract_vault
+    _governed_write(root, INSIGHT_B, _page("Contract B", "B revised once."))
+    refuse_graph_publication(monkeypatch)
+    watcher = FileWatcher(root)
+
+    epoch_probe = tmp_path / "epoch-probe-root"
+    clock_before = freshness.mark_external_pending(epoch_probe)
+
+    for cycle, body in enumerate(("first external edit", "second external edit")):
+        edited = root / INSIGHT_A
+        edited.write_text(
+            _page("Contract A", f"A claims against [[contract-b]] -- {body}."),
+            encoding="utf-8",
+        )
+        # Exactly what `_record` does when watchdog observes an out-of-band edit.
+        pending_epoch = freshness.mark_external_pending(root)
+        watcher._dispatch_batch(
+            [edited],
+            [INSIGHT_A],
+            [],
+            cap=False,
+            pending_epoch=pending_epoch,
+        )
+        assert freshness.external_pending(root) is False, (
+            f"drain {cycle} re-armed the vault for a refused publication"
+        )
+        assert freshness.is_live(root, "vault") is True
+        # The graph is fenced by the barrier it owns, which is idempotent under
+        # retry -- that is what replaces the epoch.
+        assert epistemic_graph.EpistemicGraphIndex(root).reads_suspended() is True
+
+    clock_after = freshness.mark_external_pending(epoch_probe)
+    # Two legitimate Class A observations plus this probe: nothing else.
+    assert clock_after == clock_before + 3, (
+        "a refused fan-out publication must allocate no external-pending epoch"
+    )
+
+
 def test_refused_publication_is_memoized_instead_of_retried_at_full_cost(
     contract_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

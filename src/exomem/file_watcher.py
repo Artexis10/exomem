@@ -984,10 +984,26 @@ class FileWatcher:
             except Exception:  # noqa: BLE001 - availability is the required outcome
                 graph_current = False
             if not graph_current:
-                freshness.mark_external_pending(self._vault_root)
-                log.warning(
-                    "file watcher: graph fan-out incomplete; periodic recovery re-armed"
-                )
+                # The third door onto `external_pending`, and the one that made
+                # the loop self-sustaining: this drain withdrew the marker at
+                # the top, compare-and-acked the epoch, and now finds the graph
+                # still not current. If the fan-out's publication was *refused*
+                # that is Class B -- the registry recorded every event and only
+                # this projection failed to publish -- so re-assert the barrier
+                # the graph owns instead of allocating a fresh epoch on every
+                # drain cycle (contract R1). Any other incompleteness keeps the
+                # previous behaviour.
+                if epistemic_graph.publication_refusal_active(self._vault_root):
+                    epistemic_graph.record_publication_recovery_state(self._vault_root)
+                    log.warning(
+                        "file watcher: graph publication refused during fan-out; "
+                        "graph barrier re-asserted, vault freshness untouched"
+                    )
+                else:
+                    freshness.mark_external_pending(self._vault_root)
+                    log.warning(
+                        "file watcher: graph fan-out incomplete; periodic recovery re-armed"
+                    )
         return admitted_semantic
 
     def _run_reconcile(self) -> None:
