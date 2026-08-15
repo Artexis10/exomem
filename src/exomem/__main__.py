@@ -2210,7 +2210,13 @@ def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
     if cmd.name == "edit_memory":
         from .edit_operations import LEGACY_EDIT_FIELDS
 
+        primary_names = {p.name for p in cmd.params}
         for name in sorted(LEGACY_EDIT_FIELDS):
+            if name in primary_names:
+                # Already registered above as a real top-level param (e.g.
+                # `validate_only`, promoted out of the legacy-only set) —
+                # re-adding it here would collide on the same option string.
+                continue
             if name in _LEGACY_EDIT_BOOL_FIELDS:
                 sp.add_argument(
                     _flag(name),
