@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 ResponseDetail = Literal["compact", "full", "legacy"]
@@ -72,6 +72,13 @@ _ENVELOPE_KEYS = (
     "receipt_id",
 )
 
+#: Bounds on the free-text `warnings` compact carries beside `warnings_count`.
+#: Same shape the client-artifact rows already use (see `_artifact_receipt_projection`),
+#: because compact otherwise carries no unbounded strings at all and a bulk
+#: `delete_directory` emits one warning per path.
+_MAX_WARNINGS = 8
+_MAX_WARNING_CHARS = 300
+
 
 def _operation_id(result: Any) -> str | None:
     """Correlate a validate call with its later commit.
@@ -124,6 +131,45 @@ def _warning_count(result: Any) -> int:
             return len(source_warnings)
         return 1 if source_warnings else 0
     return 0
+
+
+def _warning_texts(result: Any, *, has_artifact_receipt: bool) -> list[str]:
+    """The warnings behind ``warnings_count``, bounded for the compact envelope.
+
+    A bare count is not actionable: the caller learns something was wrong but
+    not what, and the texts were only reachable by re-issuing the whole call
+    with ``detail="full"``.
+
+    Follows ``_warning_count``'s source order exactly so the list and the count
+    always describe the same warnings. Artifact receipts are skipped because
+    ``_artifact_receipt_projection`` already puts their per-file warnings in the
+    compact ``files`` rows; repeating them here would show each one twice.
+
+    Bounded deliberately. These are the only free-text strings compact carries,
+    and ``delete_directory``/``adopt`` emit one per path. ``warnings_count``
+    stays authoritative, so a caller seeing fewer entries than the count knows
+    the remainder was dropped and can ask for ``detail="full"``.
+    """
+    if not isinstance(result, Mapping) or has_artifact_receipt:
+        return []
+    warnings = result.get("warnings")
+    if isinstance(warnings, (list, tuple)):
+        candidates: Sequence[Any] = warnings
+    elif warnings:
+        candidates = [warnings]
+    else:
+        source = result.get("source")
+        source_warnings = source.get("warnings") if isinstance(source, Mapping) else None
+        if isinstance(source_warnings, (list, tuple)):
+            candidates = source_warnings
+        elif source_warnings:
+            candidates = [source_warnings]
+        else:
+            return []
+    return [
+        (warning if isinstance(warning, str) else str(warning))[:_MAX_WARNING_CHARS]
+        for warning in candidates[:_MAX_WARNINGS]
+    ]
 
 
 def _path_projection(result: Any) -> dict[str, Any]:
@@ -446,7 +492,8 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
-    compact.update(_artifact_receipt_projection(leaf))
+    artifact_receipt = _artifact_receipt_projection(leaf)
+    compact.update(artifact_receipt)
     graph_result = result if result.get("graph_sync") in {"completed", "failed"} else leaf
     if isinstance(graph_result, Mapping) and graph_result.get("graph_sync") in {"completed", "failed"}:
         compact["graph_sync"] = graph_result["graph_sync"]
@@ -487,6 +534,13 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         if isinstance(warning, str) and 0 < len(warning) <= 128:
             compact["graph_rebuild_warning"] = warning
     compact["warnings_count"] = result["warnings_count"]
+    # Projected from the leaf, never from the receipt. Receipt recovery replaces
+    # `leaf_result` with `{}` on purpose (the portable receipt must not retain
+    # leaf paths or content) while `warnings_count` survives in the receipt
+    # fields, so that path keeps reporting a count with no texts — by design.
+    warnings = _warning_texts(leaf, has_artifact_receipt=bool(artifact_receipt))
+    if warnings:
+        compact["warnings"] = warnings
     if detail == "full":
         compact["diagnostics"] = leaf
     return compact
