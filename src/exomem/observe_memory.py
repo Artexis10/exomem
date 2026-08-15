@@ -16,6 +16,7 @@ from . import (
     edit,
     semantic_index,
     semantic_language_registry,
+    semantic_units,
     semantic_writes,
     temporal,
     vault,
@@ -39,6 +40,21 @@ _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _UPDATED_RE = re.compile(r"^updated:.*$", re.MULTILINE)
 _TAG_RE = re.compile(r"^[^\s#]{1,64}$")
+_ANCHOR_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$")
+
+#: Metadata rows this module renders from its own arguments. Every *other*
+#: authored row is carried through a reconstruction verbatim.
+#:
+#: This set is the whole reason the update path is safe. `_render_unit` rebuilds
+#: a rich unit from arguments, so before governed metadata existed, any row not
+#: listed here was silently deleted by an unrelated edit. Preserving the
+#: remainder — not just the governed keys — keeps that true for the next
+#: governed key, and for a row an author wrote by hand that the parser simply
+#: does not interpret. Markdown is canonical; a mutation tool does not get to
+#: delete bytes it does not understand.
+_OWNED_METADATA_KEYS: frozenset[str] = frozenset(
+    {"category", "id", "tags", "context", "relations"}
+) | frozenset(semantic_units.GOVERNED_UNIT_METADATA_KEYS)
 
 
 @dataclass(slots=True)
@@ -62,6 +78,9 @@ def observe_memory(
     tags: list[str] | None = None,
     context: str | None = None,
     relations: list[dict[str, Any]] | None = None,
+    verdict: str | None = None,
+    check_by: str | None = None,
+    id: str | None = None,
     unit_ref: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
@@ -93,7 +112,18 @@ def observe_memory(
             "and expected_fingerprint.",
         )
     if op == "remove" and any(
-        value is not None for value in (category, content, kind, tags, context, relations)
+        value is not None
+        for value in (
+            category,
+            content,
+            kind,
+            tags,
+            context,
+            relations,
+            verdict,
+            check_by,
+            id,
+        )
     ):
         raise ObserveMemoryError(
             "INVALID_OBSERVE_INPUT",
@@ -173,12 +203,30 @@ def observe_memory(
                 "Select an explicit governed non-observation kind for rich form, "
                 "or author a canonical note-level relation.",
             )
+        base_unit = current_unit if proposal_mode == "update" else None
+        normalized_verdict = _resolve_verdict(verdict, base_unit)
+        normalized_check_by = _resolve_check_by(check_by, base_unit)
+        preserved_metadata = _preserved_metadata(base_unit)
+        if selected_kind == _COMPACT_KIND and (
+            normalized_verdict is not None
+            or normalized_check_by is not None
+            or preserved_metadata
+        ):
+            raise ObserveMemoryError(
+                "COMPACT_METADATA_REQUIRES_RICH_KIND",
+                "governed unit metadata requires an explicit governed "
+                "non-observation kind",
+                "Compact observations carry no metadata rows. Select an explicit "
+                "governed non-observation kind, or clear the metadata explicitly "
+                "before converting the unit to compact form.",
+            )
         existing_anchors = {
             unit.anchor
             for unit in current.document.units
             if unit.anchor and unit is not current_unit
         }
-        target_anchor = (
+        requested_anchor = _requested_anchor(id, existing_anchors)
+        target_anchor = requested_anchor or (
             current_unit.anchor
             if current_unit is not None and current_unit.anchor
             else _generated_anchor(
@@ -199,6 +247,9 @@ def observe_memory(
             context=normalized_context,
             relations=normalized_relations,
             anchor=target_anchor,
+            verdict=normalized_verdict,
+            check_by=normalized_check_by,
+            preserved=preserved_metadata,
         )
         if proposal_mode == "update":
             assert current_unit is not None
@@ -265,6 +316,9 @@ def observe_memory(
             context=normalized_context,
             relations=normalized_relations,
             anchor=target_anchor,
+            verdict=normalized_verdict,
+            check_by=normalized_check_by,
+            preserved=preserved_metadata,
         )
 
     if op == "validate":
@@ -428,6 +482,124 @@ def _canonical_relations(values: list[dict[str, Any]]) -> tuple[tuple[str, str],
     return tuple(relations)
 
 
+def _resolve_verdict(supplied: str | None, current: Any | None) -> str | None:
+    """Resolve `verdict` preserve-by-default; an explicit empty string clears it."""
+    return _resolve_governed_value(
+        supplied,
+        current,
+        key="verdict",
+        normalize=_canonical_verdict,
+    )
+
+
+def _resolve_check_by(supplied: str | None, current: Any | None) -> str | None:
+    """Resolve `check_by` preserve-by-default; an explicit empty string clears it."""
+    return _resolve_governed_value(
+        supplied,
+        current,
+        key="check_by",
+        normalize=_canonical_check_by,
+    )
+
+
+def _resolve_governed_value(
+    supplied: str | None,
+    current: Any | None,
+    *,
+    key: str,
+    normalize: Any,
+) -> str | None:
+    """Preserve, clear, or replace one governed metadata value.
+
+    Omission preserves, because the common edit is "fix the wording" and that
+    must never cost the author their judgment. An explicit empty string is the
+    one way to clear, so removing a verdict stays a deliberate act rather than
+    something an incomplete argument list does by accident.
+
+    An authored row the parser rejected has no normalized value to carry
+    forward, and dropping it would be exactly the silent deletion this design
+    exists to prevent. So an omitted argument over an invalid existing row is
+    refused rather than resolved either way.
+    """
+    if supplied is None:
+        if current is None:
+            return None
+        projected = getattr(current, key, None)
+        if projected is None and key in dict(getattr(current, "metadata", {})):
+            raise ObserveMemoryError(
+                "INVALID_EXISTING_UNIT_METADATA",
+                f"the current unit's authored {key} row is not valid, so an "
+                "update can neither carry it forward nor drop it silently",
+                f"Supply a valid {key} to replace the row, or an empty string "
+                "to clear it deliberately.",
+            )
+        return projected
+    if not str(supplied).strip():
+        return None
+    return normalize(str(supplied))
+
+
+def _canonical_verdict(value: str) -> str:
+    verdict = unicodedata.normalize("NFKC", value.strip()).casefold()
+    if verdict not in semantic_units.EPISTEMIC_OUTCOMES:
+        accepted = ", ".join(semantic_units.EPISTEMIC_OUTCOMES)
+        raise ObserveMemoryError(
+            "INVALID_SEMANTIC_VERDICT",
+            f"verdict must be exactly one of {accepted}",
+            "A verdict is categorical lifecycle state, not a confidence score, "
+            "so a number, percentage, or free-text hedge is never valid.",
+        )
+    return verdict
+
+
+def _canonical_check_by(value: str) -> str:
+    candidate = value.strip()
+    try:
+        parsed = dt.date.fromisoformat(candidate)
+    except ValueError as error:
+        raise ObserveMemoryError(
+            "INVALID_SEMANTIC_CHECK_BY",
+            "check_by must be one exact ISO calendar date spelled YYYY-MM-DD",
+        ) from error
+    if parsed.isoformat() != candidate:
+        raise ObserveMemoryError(
+            "INVALID_SEMANTIC_CHECK_BY",
+            "check_by must be one exact ISO calendar date spelled YYYY-MM-DD",
+        )
+    return candidate
+
+
+def _preserved_metadata(current: Any | None) -> tuple[tuple[str, str], ...]:
+    """Authored rows this command does not own, in their authored order."""
+    if current is None or getattr(current, "form", None) != "rich":
+        return ()
+    return tuple(
+        (key, value)
+        for key, value in dict(current.metadata).items()
+        if key not in _OWNED_METADATA_KEYS
+    )
+
+
+def _requested_anchor(value: str | None, existing: set[str | None]) -> str | None:
+    if value is None:
+        return None
+    anchor = str(value).strip()
+    if not anchor or _ANCHOR_RE.fullmatch(anchor) is None:
+        raise ObserveMemoryError(
+            "INVALID_SEMANTIC_ANCHOR",
+            f"invalid semantic-unit anchor: {value!r}",
+            "Use 1-64 ASCII letters, digits, or hyphens, beginning and ending "
+            "alphanumeric.",
+        )
+    if anchor in existing:
+        raise ObserveMemoryError(
+            "DUPLICATE_SEMANTIC_ANCHOR",
+            f"another semantic unit on this parent already uses anchor {anchor!r}",
+            "Choose an anchor that is unique within the parent page.",
+        )
+    return anchor
+
+
 def _generated_anchor(
     kind: str,
     category: str,
@@ -461,6 +633,9 @@ def _render_unit(
     context: str | None,
     relations: tuple[tuple[str, str], ...],
     anchor: str,
+    verdict: str | None = None,
+    check_by: str | None = None,
+    preserved: tuple[tuple[str, str], ...] = (),
 ) -> str:
     clean_content = content.strip()
     if not clean_content:
@@ -486,7 +661,17 @@ def _render_unit(
         metadata.append(
             "- relations: " + ", ".join(f"{rel}: {target}" for rel, target in relations)
         )
+    if verdict is not None:
+        metadata.append(f"- verdict: {verdict}")
+    if check_by is not None:
+        metadata.append(f"- check_by: {check_by}")
+    # Rows this command does not own, re-emitted in their authored order.
+    metadata.extend(_metadata_row(key, value) for key, value in preserved)
     return f"## {heading}\n" + "\n".join(metadata) + f"\n\n{clean_content}"
+
+
+def _metadata_row(key: str, value: str) -> str:
+    return f"- {key}: {value}" if value else f"- {key}:"
 
 
 def _replace_unit(body: str, start: int, end: int, rendered: str) -> str:
@@ -618,6 +803,9 @@ def _assert_round_trip(
     context: str | None,
     relations: tuple[tuple[str, str], ...],
     anchor: str | None,
+    verdict: str | None = None,
+    check_by: str | None = None,
+    preserved: tuple[tuple[str, str], ...] = (),
 ) -> None:
     relation_values = tuple((item.kind, item.target) for item in unit.relations)
     common_matches = bool(
@@ -630,6 +818,8 @@ def _assert_round_trip(
     if kind == _COMPACT_KIND:
         matches = common_matches and unit.tags == tags and unit.context == context
     else:
+        # Preserved rows are part of the expectation, so a reconstruction that
+        # drops one fails the write instead of round-tripping its own deletion.
         expected_metadata = {
             "category": category,
             "id": anchor,
@@ -644,8 +834,16 @@ def _assert_round_trip(
                 if relations
                 else {}
             ),
+            **({"verdict": verdict} if verdict is not None else {}),
+            **({"check_by": check_by} if check_by is not None else {}),
+            **dict(preserved),
         }
-        matches = common_matches and dict(unit.metadata) == expected_metadata
+        matches = (
+            common_matches
+            and dict(unit.metadata) == expected_metadata
+            and unit.verdict == verdict
+            and unit.check_by == check_by
+        )
     if not matches:
         raise ObserveMemoryError(
             "AMBIGUOUS_SEMANTIC_UNIT_CONTENT",

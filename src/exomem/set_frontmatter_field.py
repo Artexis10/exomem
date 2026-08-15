@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import project_keys, semantic_writes, temporal
+from . import project_keys, semantic_units, semantic_writes, temporal
 from .vault import (
     EXCLUDED_FIELD_CODE,
     PlannedWrite,
@@ -182,6 +182,10 @@ def set_frontmatter_field(
         or temporal.stamp(now)
     )
 
+    value = _governed_enum_value(
+        field, value, page_type=_read_yaml_field(fm_text, "type")
+    )
+
     old_value = _read_yaml_field(fm_text, field)
     fm_text = _remove_yaml_key(fm_text, field)
     new_line = _format_yaml_line(field, value)
@@ -316,6 +320,44 @@ def _plan_project_keys(
     except FileNotFoundError:
         return ()
     return (PlannedWrite(registry_path, current, guard=guard),)
+
+
+def _governed_enum_value(field: str, value: Any, *, page_type: Any) -> Any:
+    """Return the canonical value, or refuse a governed field written wrongly.
+
+    `outcome` is the page-level twin of a semantic unit's `verdict`: the same
+    five words, one altitude up. It only means something on an experiment, and
+    it is categorical — a score, percentage, or free-text hedge is exactly what
+    this vault refuses to store, so it is refused here rather than written and
+    surfaced later as debt. An accepted spelling is normalized on the way in, so
+    the file never carries two spellings of one state.
+    """
+    if field.strip().casefold() != "outcome":
+        return value
+
+    accepted = ", ".join(semantic_units.EPISTEMIC_OUTCOMES)
+    normalized_type = str(page_type or "").strip().casefold()
+    if normalized_type != "experiment":
+        raise SetFrontmatterError(
+            code="INVALID_OUTCOME",
+            reason=(
+                "`outcome:` is an experiment-only field; this page has type "
+                f"{normalized_type or 'none'}. Record how a non-experiment "
+                "conclusion turned out with a semantic unit's `verdict:` "
+                "metadata instead."
+            ),
+        )
+    normalized = str(value).strip().casefold() if isinstance(value, str) else None
+    if normalized not in semantic_units.EPISTEMIC_OUTCOMES:
+        raise SetFrontmatterError(
+            code="INVALID_OUTCOME",
+            reason=(
+                f"`outcome:` must be exactly one of {accepted}. It is "
+                "categorical lifecycle state, not a confidence score, so a "
+                "number or a free-text hedge is never valid."
+            ),
+        )
+    return normalized
 
 
 def _read_yaml_field(fm_text: str, field: str) -> Any:

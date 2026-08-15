@@ -72,6 +72,7 @@ losslessly; the server never guesses a language, pronunciation, or translation.
 | `started` | yes | ISO date the experiment actually began (may differ from `created` if planning preceded execution) |
 | `duration` | yes | freeform string: `"30 days"`, `"2 weeks"`, `"ongoing"` |
 | `concluded` | optional | ISO date the experiment ended; absent while ongoing |
+| `outcome` | optional | how it turned out: `confirmed`, `refuted`, `qualified`, `inconclusive`, `abandoned`. Categorical state, never a score — see below |
 | `n` | optional | sample size — default 1 if absent |
 | `hypothesis` | optional | one-line hypothesis (also restated in body); useful for find/audit |
 | `sources` | optional | wikilinks to any source material that informed the protocol |
@@ -120,9 +121,18 @@ For most page types:
 - **superseded** — replaced by a newer page; `superseded_by` must point to it
 - **archived** — moved to `<location>/_archive/`; not deleted, just stepped down from active rotation
 
-For experiments specifically: `active` covers both planning and running; once
-concluded but still relevant, leave `active`; archive only when the experiment is
-no longer being referenced.
+For experiments specifically: `active` covers both planning and running. When
+the experiment finishes, set `status: concluded` and record `outcome:` — that
+says the result stands, which is a different claim from `archived`. Archive only
+when the experiment is no longer being referenced at all; a concluded experiment
+usually stays very much in rotation, because a settled result is exactly what
+later work cites.
+
+A refuted experiment is **not** superseded. Supersession means a page's whole
+current view was replaced; refuted means the question was answered and the
+answer was no. A refuted result keeps `status: concluded`, stays fully
+retrievable, and carries the evidence that refuted it — negative results are the
+most expensive knowledge a vault holds and are never quietly retired.
 
 For production-logs specifically: status reflects production lifecycle (`planned`
 → `recorded` → `edited` → `published` → `reflected`), plus exit states
@@ -137,6 +147,10 @@ The following fields are deliberately **not** in the spec:
 
 - `confidence` — numeric scores misrepresent the underlying signal. Trust comes
   from sources and link counts, both visible in frontmatter and via backlinks.
+  The categorical `outcome:` field, and a semantic unit's `verdict:` metadata,
+  are lifecycle *state* rather than a stored credence: they say what happened,
+  not how sure anyone feels. A number, percentage, or hedge is never a valid
+  value for either, and no alias of `confidence` is accepted.
 - `decay_at` / `expires_at` — knowledge does not expire on a schedule.
   Supersession or archival is explicit.
 - `auto_*` anything — no field reflects an automated background process.
