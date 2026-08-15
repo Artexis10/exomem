@@ -207,6 +207,387 @@ def sidecar_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".graph.sqlite"
 
 
+# --------------------------------------------------------------------------
+# Publication failure classification (issue #508, "Joint freshness-liveness
+# contract", section 1).
+#
+# `freshness.*` describes what the event registry knows about the vault's
+# files.  It must never describe whether this projection managed to publish.
+# Only Class A (registry loss, owned by the watcher) and Class C (proven-stale
+# data, distinguished inside `_rebuild_all_locked`) may touch vault freshness.
+# Class B — a projection publication failure — records recovery state in the
+# graph's own store and owns its own bounded retry instead.
+# --------------------------------------------------------------------------
+
+_PUBLICATION_FAILURE_TYPES: tuple[type[BaseException], ...] = (
+    # Every member of this hierarchy is graph-projection-local: a refused
+    # `os.replace` (GraphSidecarReplaceUnavailable), rebuild-owner loss
+    # (GraphRebuildLockUnavailable), a stopped or capacity-exhausted registered
+    # builder, an incoherent epoch lineage, a refused lineage reset.  None of
+    # them is evidence that the event registry stopped naming the file set.
+    graph_sync.GraphRebuildRegistrationError,
+)
+
+# `OpError` codes raised by the shared vault mutation boundary.  A publication
+# that could not take the boundary is Class B for the same reason a refused
+# replacement is: the registry is intact, only this projection failed to
+# publish.  Any other `OpError` stays unclassified and keeps today's behaviour.
+_PUBLICATION_FAILURE_OP_CODES = frozenset(
+    {
+        "MUTATION_BUSY",
+        "MUTATION_LOCK_UNAVAILABLE",
+        "GRAPH_MUTATION_BUSY",
+    }
+)
+
+
+class GraphPublicationUnavailable(graph_sync.GraphRebuildRegistrationError):
+    """A rebuild proved nothing stale but still could not publish (Class B)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            "GRAPH_SYNC_PUBLICATION_UNAVAILABLE",
+            "Retry the mutation, or run reconcile to recover the derived graph.",
+        )
+        self.args = (f"{message}: {self.args[0]}",)
+
+
+class GraphProjectionMoved(RuntimeError):
+    """Class C: the vault bytes or recall projection moved under an in-flight proof.
+
+    Raised only for the two conditions the contract admits as proven-stale, so
+    a caller can tell them apart from a generic non-stabilization.  The proof
+    that produced it has already marked the registry externally pending; no
+    caller may mark again (contract R1).
+    """
+
+
+def is_publication_failure(error: BaseException) -> bool:
+    """Whether `error` is a Class B projection-publication failure.
+
+    True means: the event registry observed and recorded everything, and only
+    this projection failed to publish its derived copy.  Such a failure MUST
+    NOT call `freshness.invalidate` or `freshness.mark_external_pending`.
+
+    An unrecognised exception is deliberately *not* classified, so genuine
+    registry-loss signals keep the pre-contract behaviour rather than being
+    silently downgraded.
+    """
+    if isinstance(error, _PUBLICATION_FAILURE_TYPES):
+        return True
+    if isinstance(error, OpError):
+        return getattr(error, "code", None) in _PUBLICATION_FAILURE_OP_CODES
+    return False
+
+
+def may_mark_external_pending(error: BaseException) -> bool:
+    """Whether a graph dispatch failure may cool the vault-global registry.
+
+    False for Class B — the registry observed everything and only this
+    projection failed to publish — and false for Class C, because the proof
+    that detected it has already marked exactly once and R1 forbids a second
+    epoch: each extra epoch defeats the compare-and-ack the watcher's recovery
+    depends on.
+
+    True only for an exception this module cannot classify, so a genuine
+    registry-loss signal keeps its pre-contract behaviour instead of being
+    silently downgraded.
+    """
+    return not (isinstance(error, GraphProjectionMoved) or is_publication_failure(error))
+
+
+# --- Class B recovery state and its bounded, single-flight retry (R2) ------
+
+_PUBLICATION_MEMO_LOCK = threading.Lock()
+_PUBLICATION_REFUSALS: dict[str, tuple[str, float]] = {}
+PUBLICATION_RETRY_BACKOFF_SECONDS = 60.0
+
+
+def _publication_memo_key(vault_root: Path) -> str:
+    return os.path.normcase(str(Path(vault_root).resolve(strict=False)))
+
+
+def _publication_identity(vault_root: Path) -> str:
+    """Name the exact publication a refusal applies to.
+
+    A refusal memo must expire the moment the vault asks for a *different*
+    publication, so it is keyed by the required checkpoint (or, with no
+    checkpoint, the sidecar's own mtime lineage) rather than by time alone.
+    """
+    try:
+        checkpoint = graph_sync.read_checkpoint(vault_root)
+    except Exception:  # noqa: BLE001 - an unreadable checkpoint memoizes nothing
+        return ""
+    return "" if checkpoint is None else checkpoint.checkpoint_sha256
+
+
+def note_publication_refusal(vault_root: Path) -> None:
+    """Memoize one refused publication so the next cycle does not re-pay it.
+
+    Contract R2: a failure mode known to be non-self-healing within the process
+    — the resident-service reader on Windows — must not be re-attempted at full
+    rebuild cost on every cycle. This is `lexstore._REPAIRS_IN_FLIGHT`'s shape:
+    projection-local, bounded, and invisible to `freshness.*`.
+    """
+    identity = _publication_identity(vault_root)
+    deadline = time.monotonic() + PUBLICATION_RETRY_BACKOFF_SECONDS
+    with _PUBLICATION_MEMO_LOCK:
+        _PUBLICATION_REFUSALS[_publication_memo_key(vault_root)] = (identity, deadline)
+
+
+def clear_publication_refusal(vault_root: Path) -> None:
+    """Drop the memo after a publication succeeds (or a caller forces a retry)."""
+    with _PUBLICATION_MEMO_LOCK:
+        _PUBLICATION_REFUSALS.pop(_publication_memo_key(vault_root), None)
+
+
+def publication_refusal_active(vault_root: Path) -> bool:
+    """Whether the same publication was refused recently enough to skip a retry."""
+    key = _publication_memo_key(vault_root)
+    with _PUBLICATION_MEMO_LOCK:
+        memo = _PUBLICATION_REFUSALS.get(key)
+        if memo is None:
+            return False
+        identity, deadline = memo
+        if time.monotonic() >= deadline:
+            _PUBLICATION_REFUSALS.pop(key, None)
+            return False
+    if identity != _publication_identity(vault_root):
+        # A different publication is being asked for; it has not been proven
+        # doomed and must be attempted.
+        clear_publication_refusal(vault_root)
+        return False
+    return True
+
+
+def clear_publication_memos() -> None:
+    """Test seam: drop every per-process publication refusal memo."""
+    with _PUBLICATION_MEMO_LOCK:
+        _PUBLICATION_REFUSALS.clear()
+
+
+def record_publication_recovery_state(
+    vault_root: Path,
+    *,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None,
+) -> None:
+    """Persist the graph's own Class B recovery marker instead of cooling freshness.
+
+    The graph already owns a fence that is idempotent under retry (contract
+    R1): the persisted read barrier. Re-asserting it rewrites the same value,
+    so a doomed publication that repeats every cycle cannot defeat the
+    watcher's compare-and-ack the way a fresh `mark_external_pending` epoch
+    would. `file_watcher._recover_suspended_graph` is its clearer.
+    """
+    try:
+        if not graph_enabled() or not sidecar_path(vault_root).exists():
+            return
+        index = EpistemicGraphIndex(vault_root, mutation_coordinator=mutation_coordinator)
+        index.suspend_reads()
+    except Exception:  # noqa: BLE001 - the unacknowledged checkpoint still fails closed
+        log.warning("graph publication recovery state could not be persisted", exc_info=True)
+    finally:
+        note_publication_refusal(vault_root)
+
+
+# --- In-process live-sidecar reader registry (publication hold) ------------
+
+_SIDECAR_READERS_LOCK = threading.Lock()
+_SIDECAR_READERS_CHANGED = threading.Condition(_SIDECAR_READERS_LOCK)
+_SIDECAR_READERS: dict[str, dict[int, tuple[sqlite3.Connection, threading.Thread]]] = {}
+_SIDECAR_PUBLICATION_HOLDS: set[str] = set()
+
+PUBLICATION_READER_DRAIN_SECONDS = 1.0
+PUBLICATION_READER_OPEN_WAIT_SECONDS = 2.0
+
+
+def _reader_cycling_enabled() -> bool:
+    """Whether a publication must cycle this process's readers before replacing.
+
+    Linux keeps the plain `os.replace` fast path: the rename succeeds with
+    readers attached, so the hold would be pure overhead. Windows refuses it,
+    which is what makes the hold worth its cost there. Tests drive the Windows
+    branch on any platform through this seam.
+    """
+    return os.name == "nt"
+
+
+def _sidecar_registry_key(live: Path) -> str:
+    return os.path.normcase(str(Path(live).absolute()))
+
+
+class _TrackedSidecarConnection(sqlite3.Connection):
+    """A live-sidecar reader that leaves the publication registry when closed."""
+
+    def close(self) -> None:
+        key = self.__dict__.get("_exomem_registry_key")
+        try:
+            super().close()
+        finally:
+            if key is not None:
+                self.__dict__["_exomem_registry_key"] = None
+                _release_sidecar_reader(key, self)
+
+
+def _await_publication_hold(key: str) -> None:
+    """Block a new reader for the bounded replacement window, then proceed.
+
+    Failing open after the wait is deliberate: the hold exists to make the
+    replacement likely, never to make reads unavailable. A reader that outlasts
+    the window is handled by the in-place publication path instead.
+    """
+    deadline = time.monotonic() + PUBLICATION_READER_OPEN_WAIT_SECONDS
+    with _SIDECAR_READERS_CHANGED:
+        while key in _SIDECAR_PUBLICATION_HOLDS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            _SIDECAR_READERS_CHANGED.wait(remaining)
+
+
+def _register_sidecar_reader(key: str, conn: sqlite3.Connection) -> None:
+    with _SIDECAR_READERS_CHANGED:
+        _SIDECAR_READERS.setdefault(key, {})[id(conn)] = (conn, threading.current_thread())
+
+
+def _release_sidecar_reader(key: str, conn: sqlite3.Connection) -> None:
+    with _SIDECAR_READERS_CHANGED:
+        readers = _SIDECAR_READERS.get(key)
+        if readers is not None:
+            readers.pop(id(conn), None)
+            if not readers:
+                _SIDECAR_READERS.pop(key, None)
+        _SIDECAR_READERS_CHANGED.notify_all()
+
+
+def _acquire_publication_hold(live: Path) -> str | None:
+    """Block new live-sidecar readers, drain the open ones, and return the hold."""
+    key = _sidecar_registry_key(live)
+    with _SIDECAR_READERS_CHANGED:
+        if key in _SIDECAR_PUBLICATION_HOLDS:
+            return None
+        _SIDECAR_PUBLICATION_HOLDS.add(key)
+    deadline = time.monotonic() + PUBLICATION_READER_DRAIN_SECONDS
+    with _SIDECAR_READERS_CHANGED:
+        while _SIDECAR_READERS.get(key):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            _SIDECAR_READERS_CHANGED.wait(remaining)
+        # A reader whose owning thread is gone can never close itself, so it is
+        # the only connection safe to close from here: closing one a live
+        # caller still holds would surface `sqlite3.ProgrammingError` inside an
+        # unrelated read. Readers that outlast the drain are published around
+        # by `graph_sync.replace_sidecar`'s in-place path.
+        abandoned = [
+            conn
+            for conn, owner in _SIDECAR_READERS.get(key, {}).values()
+            if not owner.is_alive()
+        ]
+    # Outside the registry lock: closing re-enters it to deregister.
+    for conn in abandoned:
+        try:
+            conn.close()
+        except sqlite3.Error:  # pragma: no cover - defensive
+            _release_sidecar_reader(key, conn)
+    return key
+
+
+def _release_publication_hold(key: str | None) -> None:
+    if key is None:
+        return
+    with _SIDECAR_READERS_CHANGED:
+        _SIDECAR_PUBLICATION_HOLDS.discard(key)
+        _SIDECAR_READERS_CHANGED.notify_all()
+
+
+def reset_publication_holds() -> None:
+    """Test seam: forget every reader registration and publication hold."""
+    with _SIDECAR_READERS_CHANGED:
+        _SIDECAR_READERS.clear()
+        _SIDECAR_PUBLICATION_HOLDS.clear()
+        _SIDECAR_READERS_CHANGED.notify_all()
+
+
+# --- Preserved-temporary reaping (contract R3) -----------------------------
+
+PRESERVED_TEMPORARY_LIMIT = 1
+_TEMPORARY_COMPANION_SUFFIXES = ("-journal", "-wal", "-shm")
+
+
+def _temporary_base_name(name: str) -> str:
+    for suffix in _TEMPORARY_COMPANION_SUFFIXES:
+        if name.endswith(suffix):
+            return name.removesuffix(suffix)
+    return name
+
+
+def _reap_preserved_temporaries(
+    live: Path, *, keep: int = PRESERVED_TEMPORARY_LIMIT
+) -> list[Path]:
+    """Bound the `.graph-rebuild-*` artifacts a refused publication leaves behind.
+
+    A refused replacement deliberately preserves its complete private sidecar,
+    because that build is recoverable the moment the live file's reader lets
+    go. Exactly one of them is recoverable, though — the newest — so every
+    older one is dead weight, and on the reported vault it grew to 527 MB.
+
+    Anything still registered as an in-flight rebuild target is left alone. Of
+    the remainder the newest `keep` survive; the rest go with their SQLite
+    companions. A Windows reader may still refuse an unlink, in which case that
+    file is simply collected on a later pass rather than failing the rebuild.
+    """
+    directory = live.parent
+    try:
+        if not directory.is_dir():
+            return []
+        entries = list(directory.iterdir())
+    except OSError:
+        return []
+    active = graph_sync.live_temporary_paths()
+    groups: dict[str, list[Path]] = {}
+    for candidate in entries:
+        name = candidate.name
+        if not vault_module.is_graph_rebuild_runtime_file_name(name):
+            continue
+        base = _temporary_base_name(name)
+        base_path = directory / base
+        try:
+            registered = base_path.resolve(strict=False) in active
+        except OSError:  # pragma: no cover - defensive
+            registered = True
+        if registered or base_path.absolute() in active:
+            continue
+        groups.setdefault(base, []).append(candidate)
+    if len(groups) <= max(0, keep):
+        return []
+
+    def _recency(base: str) -> float:
+        newest = 0.0
+        for path in groups[base]:
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue
+        return newest
+
+    ordered = sorted(groups, key=_recency, reverse=True)
+    removed: list[Path] = []
+    for base in ordered[max(0, keep) :]:
+        for path in groups[base]:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # A reader still holds delete-sharing authority on Windows.
+                continue
+            removed.append(path)
+    if removed:
+        log.info(
+            "reaped %d orphaned graph rebuild artifact(s) from %s", len(removed), directory
+        )
+    return removed
+
+
 def _disk_vault_freshness(vault_root: Path) -> tuple[int, int, str]:
     """Direct-disk freshness of the ordinary-recall projection only.
 
@@ -505,6 +886,22 @@ class EpistemicGraphIndex:
         event-maintained (or cold-walk) projection. Incremental maintenance may
         open a structurally current but freshness-stale sidecar specifically to
         advance it to the already-published event checkpoint.
+
+        The `freshness.external_pending` guard here and at the tail of this
+        method is an **optimization, not a correctness fence** (issue #508,
+        joint freshness-liveness contract, section 2.1, deliverable D7). What
+        actually stops a stale sidecar being served as current is graph-owned
+        state proved against canonical disk: the publication ticket/epoch gate,
+        the persisted read barrier, the availability-marker re-proof against the
+        *current* recall projection identity (with a direct source-bytes and
+        resolver-topology proof outside the exact live-checkpoint lineage), and
+        the graph_sync checkpoint acknowledgement. Every one of those still
+        holds with vault freshness fully live. The guard survives only as a
+        cheap short-circuit, and only because `external_pending` is now set
+        exclusively by Class A (registry loss) and Class C (proven-stale)
+        signals — never by a publication failure. If a future change lets a
+        Class B failure mark again, this guard becomes a liveness bug wearing a
+        safety costume and must be removed rather than relied on.
         """
         if (
             not graph_enabled()
@@ -513,9 +910,13 @@ class EpistemicGraphIndex:
         ):
             return None
         conn: sqlite3.Connection | None = None
+        registry_key = _sidecar_registry_key(self.path)
+        _await_publication_hold(registry_key)
         try:
             uri = f"{self.path.resolve().as_uri()}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True)
+            conn = sqlite3.connect(uri, uri=True, factory=_TrackedSidecarConnection)
+            conn.__dict__["_exomem_registry_key"] = registry_key
+            _register_sidecar_reader(registry_key, conn)
             graph_sync.limit_graph_metadata_read(conn)
             conn.execute("BEGIN")
             # This marker validation MUST remain the first read in the transaction.
@@ -604,6 +1005,9 @@ class EpistemicGraphIndex:
                     conn,
                     resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
                 )
+        # The `external_pending` term is the same cheap short-circuit described
+        # in this method's docstring (contract D7), re-read after the proof so a
+        # Class A/C signal that landed mid-proof still fails closed.
         if not current or freshness.external_pending(self.vault_root):
             conn.close()
             return None
@@ -709,6 +1113,10 @@ class EpistemicGraphIndex:
         live = self.path
         attempts = 0
         epoch_error: graph_sync.GraphEpochIncoherent | None = None
+        # Artifacts of an earlier failed publication belong to this projection
+        # (contract R3). Collect them before adding another one, so repeated
+        # refusal cannot grow the directory without bound.
+        _reap_preserved_temporaries(live)
         while attempts < REBUILD_PUBLICATION_ATTEMPTS:
             attempts += 1
             prepared_recall = freshness.prepare_recall_publication(self.vault_root, "vault")
@@ -769,7 +1177,10 @@ class EpistemicGraphIndex:
                         self.vault_root, required, availability=self.available
                     ):
                         return {"indexed_files": 0, "nodes": 0, "edges": 0, "joined": 1}
-                    raise RuntimeError(
+                    # Losing the rebuild owner is Class B by name in the
+                    # contract: the registry is intact, this projection simply
+                    # could not publish. Type it so callers can classify.
+                    raise GraphPublicationUnavailable(
                         "another graph rebuild owner did not publish a current sidecar"
                     )
                 temporary_index = EpistemicGraphIndex(
@@ -816,19 +1227,27 @@ class EpistemicGraphIndex:
                     if not self._publication_ticket_matches(ticket):
                         continue
                     try:
-                        self._before_publish_replacement(temporary, live)
+                        publication_hold = self._before_publish_replacement(temporary, live)
                     except Exception:  # noqa: BLE001 - discard this ticket and retry boundedly
                         continue
-                    if not self._publication_ticket_matches(ticket):
-                        continue
                     try:
-                        graph_sync.replace_sidecar(temporary, live)
-                    except graph_sync.GraphSidecarReplaceUnavailable:
-                        # The complete private sidecar is recoverable after a
-                        # Windows reader releases the live file.
-                        preserve_temporary = True
-                        raise
-                    return report
+                        if not self._publication_ticket_matches(ticket):
+                            continue
+                        try:
+                            graph_sync.replace_sidecar(temporary, live)
+                        except graph_sync.GraphSidecarReplaceUnavailable:
+                            # Neither the atomic replacement nor the in-place
+                            # publication could land. The complete private
+                            # sidecar stays recoverable, and the refusal is
+                            # memoized so the next cycle does not re-pay a full
+                            # rebuild for the same doomed publication (R2).
+                            preserve_temporary = True
+                            note_publication_refusal(self.vault_root)
+                            raise
+                        clear_publication_refusal(self.vault_root)
+                        return report
+                    finally:
+                        _release_publication_hold(publication_hold)
             finally:
                 if owner_claimed:
                     graph_sync.release_rebuild_owner(
@@ -841,8 +1260,17 @@ class EpistemicGraphIndex:
                     graph_sync.unregister_temporary(registered_temporary)
                 if not preserve_temporary:
                     temporary.unlink(missing_ok=True)
+                # Owner release is the other moment the retained set can be
+                # bounded safely: no attempt of ours is registered any more.
+                _reap_preserved_temporaries(live)
         if epoch_error is not None:
             raise epoch_error
+        # Exhausting the publication attempts for any reason other than a proven
+        # stale projection is a Class B publication failure, not evidence that
+        # the event registry fell behind the disk (contract section 1). The
+        # exception type already carries that classification; only the memo is
+        # new, so the next cycle does not re-pay the same doomed rebuild.
+        note_publication_refusal(self.vault_root)
         raise graph_sync.GraphRebuildRegistrationError(
             "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
             "graph publication did not stabilize after "
@@ -1062,9 +1490,25 @@ class EpistemicGraphIndex:
         except (OSError, graph_sync.GraphEpochIncoherent):
             return False
 
-    def _before_publish_replacement(self, temporary: Path, live: Path) -> None:
-        """Original-index publication seam, intentionally after temp handles close."""
-        del temporary, live
+    def _before_publish_replacement(self, temporary: Path, live: Path) -> str | None:
+        """Clear this process's live-sidecar readers for the replacement window.
+
+        Original-index publication seam, intentionally after temp handles
+        close. On Windows `os.replace` is refused while any handle is open on
+        the destination, and a resident service holds one routinely — so the
+        publisher blocks new readers of the live sidecar, waits a bounded
+        interval for the open ones to close, and collects any left by a thread
+        that has since died. Readers that outlast the drain are not forced
+        shut: closing a connection its borrower still holds would surface
+        `sqlite3.ProgrammingError` inside an unrelated read. They are published
+        around instead, by `graph_sync.replace_sidecar`'s in-place path.
+
+        Returns the hold to release once the replacement has been attempted.
+        """
+        del temporary
+        if not _reader_cycling_enabled():
+            return None
+        return _acquire_publication_hold(live)
 
     def _wait_for_legacy_rebuild(self) -> bool:
         """Wait for a competing legacy builder without requiring an epoch."""
@@ -1078,7 +1522,14 @@ class EpistemicGraphIndex:
     def _rebuild_all_locked(self) -> dict[str, int]:
         pass_started = False
         stable = False
-        proof_invalidated = False
+        # Contract section 1 / deliverable D2. `projection_moved` may be set
+        # only for the two conditions that are positive evidence the *registry*
+        # is behind the disk: the supplied freshness identity failing to name
+        # the resolver bytes, and the recall projection moving across the pass.
+        # Every other non-stabilization — a marker that would not publish, a
+        # refused replacement, any OS or ownership error — is Class B and must
+        # leave vault freshness untouched.
+        projection_moved = False
         try:
             for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
                 before_disk = _disk_vault_freshness(self.vault_root)
@@ -1096,8 +1547,9 @@ class EpistemicGraphIndex:
                     # The supplied freshness identity did not actually name the
                     # resolver bytes (for example after a coarse-metadata edit).
                     # Clear both the resolver and page cache before retrying.
+                    # Class C, first admitted cause.
                     self._mark_unavailable()
-                    proof_invalidated = True
+                    projection_moved = True
                     find_module.unload_ram_caches()
                     continue
                 pass_started = True
@@ -1132,23 +1584,37 @@ class EpistemicGraphIndex:
                     # it.  Publishing without an event checkpoint makes public
                     # reads re-prove disk identity and makes the next live
                     # incremental refresh rebuild rather than bridge a gap.
-                    if (
-                        self._mark_available(before, checkpoint=checkpoint)
-                        and self._recall_membership() == resolver_membership
-                        and self._source_versions_current(resolver_versions)
-                    ):
-                        stable = True
-                        return report
+                    if self._mark_available(before, checkpoint=checkpoint):
+                        if self._recall_membership() == resolver_membership and (
+                            self._source_versions_current(resolver_versions)
+                        ):
+                            stable = True
+                            return report
+                        # The projection moved between writing the availability
+                        # marker and confirming it: Class C, second cause.
+                        projection_moved = True
+                    # A marker that would not publish is a publication failure,
+                    # not proof that the registry is behind the disk.
                     self._mark_unavailable()
-                proof_invalidated = True
-            raise RuntimeError("epistemic graph rebuild did not stabilize after 2 attempts")
+                else:
+                    # `_recall_projection_identity`, `_recall_membership` or the
+                    # resolver source versions changed across the pass: Class C,
+                    # second admitted cause.
+                    projection_moved = True
+            message = "epistemic graph rebuild did not stabilize after 2 attempts"
+            if projection_moved:
+                raise GraphProjectionMoved(message)
+            raise RuntimeError(message)
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
-            if not stable and proof_invalidated:
-                # The private pass proved the live exact-checkpoint fast path
-                # stale, but publication never replaced it. Withdraw admission
-                # out of band without modifying the old live sidecar bytes.
+            if not stable and projection_moved:
+                # Class C, and the only place in this module that may cool the
+                # vault registry: the private pass proved the live
+                # exact-checkpoint fast path stale, but publication never
+                # replaced it. Withdraw admission out of band without modifying
+                # the old live sidecar bytes. Marked exactly once per proof, so
+                # a repeating Class B refusal can never allocate an epoch here.
                 freshness.mark_external_pending(self.vault_root)
 
     def _rebuild_all_pass(
@@ -3257,6 +3723,29 @@ def _join_registered_standalone(
     return GraphDispatchResult("completed", "graph_rebuild_completed", result.checkpoint)
 
 
+def _handle_graph_dispatch_failure(
+    vault_root: Path,
+    error: BaseException,
+    *,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator | None = None,
+) -> None:
+    """Classify one graph dispatch failure before deciding what it may cool.
+
+    This is the decision the joint freshness-liveness contract moves off the
+    write path (deliverable D3). A publication failure — a refused
+    `os.replace`, rebuild-owner loss, a busy mutation boundary, an exhausted
+    publication attempt — says nothing about what the event registry knows, so
+    it records the graph's own recovery state and its retry memo instead of
+    cooling a vault-global signal that every later write then pays for. Class C
+    has already been marked exactly once by the proof that detected it. Only an
+    exception this module cannot classify keeps the pre-contract marking.
+    """
+    if may_mark_external_pending(error):
+        freshness.mark_external_pending(vault_root)
+        return
+    record_publication_recovery_state(vault_root, mutation_coordinator=mutation_coordinator)
+
+
 def schedule_background_rebuild(
     vault_root: Path,
     *,
@@ -3269,8 +3758,14 @@ def schedule_background_rebuild(
     converges without blocking the request. At most one rebuild per vault runs at
     a time (a second call while one is in flight is a no-op); the daemon thread
     swallows its own errors so a failed rebuild never surfaces on the request.
+
+    A publication already refused for this exact checkpoint is not re-attempted
+    until its bounded memo expires (contract R2): re-paying a full rebuild on
+    every stale query is precisely the loop that filled the reported vault.
     """
     if not graph_scheduling_enabled():
+        return False
+    if publication_refusal_active(vault_root):
         return False
     if mutation_coordinator is None:
         from .writer_lease import active_manager
@@ -3287,8 +3782,10 @@ def schedule_background_rebuild(
             EpistemicGraphIndex(
                 vault_root, mutation_coordinator=mutation_coordinator
             ).rebuild_all()
-        except Exception:  # noqa: BLE001 - request path remains non-blocking
-            freshness.mark_external_pending(vault_root)
+        except Exception as error:  # noqa: BLE001 - request path remains non-blocking
+            _handle_graph_dispatch_failure(
+                vault_root, error, mutation_coordinator=mutation_coordinator
+            )
             log.warning("background graph rebuild failed; graph remains unavailable", exc_info=True)
         finally:
             with _REBUILD_LOCK:
@@ -3385,8 +3882,10 @@ def upsert_after_write(
                 mutation_coordinator,
             )
         return GraphDispatchResult("completed", "incremental_completed", required)
-    except OpError:
-        freshness.mark_external_pending(vault_root)
+    except OpError as error:
+        _handle_graph_dispatch_failure(
+            vault_root, error, mutation_coordinator=mutation_coordinator
+        )
         if required is not None:
             assert mutation_coordinator is not None
             return _join_registered_standalone(
@@ -3395,8 +3894,10 @@ def upsert_after_write(
                 mutation_coordinator,
             )
         raise
-    except Exception:  # noqa: BLE001 - canonical bytes must still report graph failure exactly
-        freshness.mark_external_pending(vault_root)
+    except Exception as error:  # noqa: BLE001 - canonical bytes must still report graph failure
+        _handle_graph_dispatch_failure(
+            vault_root, error, mutation_coordinator=mutation_coordinator
+        )
         log.warning("graph post-commit dispatch failed", exc_info=True)
         if required is not None:
             assert mutation_coordinator is not None
@@ -3436,8 +3937,10 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> Graph
             return GraphDispatchResult("deferred", "graph_index_disabled", required)
         index.delete_paths(removed_rel_paths)
         return GraphDispatchResult("completed", "delete_completed", required)
-    except OpError:
-        freshness.mark_external_pending(vault_root)
+    except OpError as error:
+        _handle_graph_dispatch_failure(
+            vault_root, error, mutation_coordinator=mutation_coordinator
+        )
         if required is not None:
             assert mutation_coordinator is not None
             return _join_registered_standalone(
@@ -3446,8 +3949,10 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> Graph
                 mutation_coordinator,
             )
         raise
-    except Exception:  # noqa: BLE001 - canonical bytes must still report graph failure exactly
-        freshness.mark_external_pending(vault_root)
+    except Exception as error:  # noqa: BLE001 - canonical bytes must still report graph failure
+        _handle_graph_dispatch_failure(
+            vault_root, error, mutation_coordinator=mutation_coordinator
+        )
         log.warning("graph post-remove dispatch failed", exc_info=True)
         if required is not None:
             assert mutation_coordinator is not None

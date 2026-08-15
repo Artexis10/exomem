@@ -31,7 +31,9 @@ half's fixtures.
 
 from __future__ import annotations
 
+import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,7 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.cli_ops import OpError
 
 _PAGE_REL = "Knowledge Base/Notes/Insights/one.md"
 _OTHER_REL = "Knowledge Base/Notes/Insights/two.md"
@@ -401,6 +404,15 @@ INSIGHT_B = "Knowledge Base/Notes/Insights/contract-b.md"
 INSIGHT_C = "Knowledge Base/Notes/Insights/contract-c.md"
 
 
+def _contract_checkpoint(generation: int) -> graph_sync.GraphSyncCheckpoint:
+    return graph_sync.GraphSyncCheckpoint.create(
+        generation=generation,
+        mutation_id=f"{generation:024x}",
+        paths=((INSIGHT_A, "d" * 64),),
+        created_paths=(INSIGHT_A,),
+    )
+
+
 def _page(title: str, body: str) -> str:
     return f"""---
 type: insight
@@ -618,3 +630,200 @@ def test_refused_graph_publication_does_not_cool_vault_freshness(
     assert len(refused) > refused_after_first_cycle, (
         "the second cycle must still have retried the publication"
     )
+
+
+# ---------------------------------------------------------------------------
+# Deliverables owned by the #508 lane. The shared test above pins the joint
+# outcome; these pin each clause the contract assigns to graph publish hygiene.
+# ---------------------------------------------------------------------------
+
+
+def test_class_c_marking_is_narrowed_to_a_moved_projection(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2: only a proven-stale projection may mark, not any non-stabilization."""
+    root = contract_vault
+    index = epistemic_graph.EpistemicGraphIndex(root)
+
+    # A projection that provably moved under the in-flight proof: the supplied
+    # freshness identity does not name the resolver bytes.
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_resolver_source_versions",
+        lambda *_args, **_kwargs: None,
+    )
+    with pytest.raises(epistemic_graph.GraphProjectionMoved, match="did not stabilize"):
+        index._rebuild_all_locked()
+    assert freshness.external_pending(root) is True
+    moved_epoch = freshness.external_pending_epoch(root)
+    assert moved_epoch is not None
+    monkeypatch.undo()
+
+    freshness.clear_external_pending(root, through=moved_epoch)
+    assert freshness.external_pending(root) is False
+
+    # A marker that would not publish is a publication failure. It is *not*
+    # evidence that the registry fell behind the disk, so it may not mark.
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_mark_available",
+        lambda *_args, **_kwargs: False,
+    )
+    with pytest.raises(RuntimeError, match="did not stabilize") as raised:
+        epistemic_graph.EpistemicGraphIndex(root)._rebuild_all_locked()
+    assert not isinstance(raised.value, epistemic_graph.GraphProjectionMoved)
+    assert freshness.external_pending(root) is False
+
+
+def test_publication_failure_records_graph_recovery_state_not_vault_freshness(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: a Class B write-path failure fences the graph and leaves freshness alone."""
+    root = contract_vault
+    _governed_write(root, INSIGHT_B, _page("Contract B", "B revised once."))
+    refuse_graph_publication(monkeypatch)
+
+    index_sync.upsert_after_write(root, [root / INSIGHT_A], publish_corpus_change=False)
+
+    assert freshness.external_pending(root) is False
+    assert freshness.is_live(root, "vault") is True
+    index = epistemic_graph.EpistemicGraphIndex(root)
+    # The graph's own fence: idempotent under retry, and cleared by
+    # `file_watcher._recover_suspended_graph`.
+    assert index.reads_suspended() is True
+    assert index.available() is False
+    assert epistemic_graph.publication_refusal_active(root) is True
+
+
+def test_unclassifiable_dispatch_failure_still_marks_the_registry(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: only *classified* failures are downgraded; the rest keep marking."""
+    root = contract_vault
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "refresh_paths",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("unclassified")),
+    )
+
+    epistemic_graph.upsert_after_write(root, [root / INSIGHT_A])
+
+    assert freshness.external_pending(root) is True
+
+
+def test_classification_covers_the_contract_named_class_b_members() -> None:
+    """D3: the classifier, stated directly against contract section 1."""
+    assert epistemic_graph.is_publication_failure(graph_sync.GraphSidecarReplaceUnavailable())
+    assert epistemic_graph.is_publication_failure(
+        graph_sync.GraphRebuildLockUnavailable("secure graph rebuild lock unavailable")
+    )
+    assert epistemic_graph.is_publication_failure(
+        epistemic_graph.GraphPublicationUnavailable("owner lost")
+    )
+    assert epistemic_graph.is_publication_failure(OpError("MUTATION_BUSY", "busy"))
+    assert not epistemic_graph.is_publication_failure(OpError("VAULT_UNREADABLE", "gone"))
+    assert not epistemic_graph.is_publication_failure(ValueError("unclassified"))
+    # Class C already marked exactly once; a caller may not mark again (R1).
+    assert not epistemic_graph.may_mark_external_pending(
+        epistemic_graph.GraphProjectionMoved("moved")
+    )
+    assert epistemic_graph.may_mark_external_pending(ValueError("unclassified"))
+
+
+def test_watcher_recovery_allocates_no_new_epoch_for_a_refused_publication(
+    contract_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: the 300 s recovery loop must not re-contaminate the registry (R1/R2)."""
+    from exomem.file_watcher import FileWatcher
+
+    root = contract_vault
+    _governed_write(root, INSIGHT_B, _page("Contract B", "B revised once."))
+    refuse_graph_publication(monkeypatch)
+
+    watcher = FileWatcher(root)
+    pending_epoch = freshness.mark_external_pending(root)
+    epoch_probe = tmp_path / "epoch-probe-root"
+    clock_before = freshness.mark_external_pending(epoch_probe)
+
+    watcher._recover_external_pending(pending_epoch)
+    first_epoch = freshness.external_pending_epoch(root)
+
+    # A second cycle over the same doomed publication.
+    watcher._recover_external_pending(pending_epoch)
+    watcher._recover_suspended_graph()
+
+    assert freshness.external_pending_epoch(root) == first_epoch
+    clock_after = freshness.mark_external_pending(epoch_probe)
+    assert clock_after == clock_before + 1, (
+        "each recovery cycle must not allocate a fresh external-pending epoch"
+    )
+
+
+def test_refused_publication_is_memoized_instead_of_retried_at_full_cost(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D5: the lexstore `_REPAIRS_IN_FLIGHT` shape, applied to graph publication."""
+    root = contract_vault
+    _governed_write(root, INSIGHT_B, _page("Contract B", "B revised once."))
+    refuse_graph_publication(monkeypatch)
+    epistemic_graph.clear_publication_memos()
+
+    assert epistemic_graph.schedule_background_rebuild(root) is True
+    _drain_background_rebuilds()
+
+    assert epistemic_graph.publication_refusal_active(root) is True
+    assert epistemic_graph.schedule_background_rebuild(root) is False, (
+        "the same doomed publication must not be re-attempted at full rebuild cost"
+    )
+
+    # The memo is projection-local and bounded: clearing it restores the retry.
+    epistemic_graph.clear_publication_memos()
+    assert epistemic_graph.schedule_background_rebuild(root) is True
+    _drain_background_rebuilds()
+
+
+def test_repeated_refusal_keeps_at_most_one_preserved_temporary(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: `preserve_temporary` is bounded; the 527 MB orphan field cannot recur."""
+    root = contract_vault
+    _governed_write(root, INSIGHT_B, _page("Contract B", "B revised once."))
+    refused = refuse_graph_publication(monkeypatch)
+    index = epistemic_graph.EpistemicGraphIndex(root)
+
+    for cycle in range(4):
+        with pytest.raises(graph_sync.GraphRebuildRegistrationError):
+            index.rebuild_all()
+        retained = preserved_temporaries(root)
+        assert len(retained) <= 1, f"cycle {cycle} retained {len(retained)}: {retained}"
+
+    assert len(refused) >= 4
+    retained = preserved_temporaries(root)
+    assert len(retained) == 1
+    # The survivor is the newest complete build, still recoverable.
+    with closing(sqlite3.connect(retained[0])) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_reaper_never_collects_an_in_flight_registered_temporary(
+    contract_vault: Path,
+) -> None:
+    """D6: a build another owner still holds is not an orphan."""
+    root = contract_vault
+    live = epistemic_graph.sidecar_path(root)
+    in_flight = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(1))
+    orphan_older = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(2))
+    orphan_newer = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(3))
+    for path in (in_flight, orphan_older, orphan_newer):
+        path.write_bytes(b"sqlite artifact")
+        time.sleep(0.02)
+    graph_sync.register_temporary(in_flight)
+    try:
+        removed = epistemic_graph._reap_preserved_temporaries(live)
+    finally:
+        graph_sync.unregister_temporary(in_flight.resolve())
+
+    assert in_flight.exists()
+    assert orphan_newer.exists()
+    assert not orphan_older.exists()
+    assert removed == [orphan_older]
