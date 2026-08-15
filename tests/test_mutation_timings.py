@@ -580,8 +580,11 @@ def test_corpus_metrics_carry_caller_and_outcome(tmp_path: Path, monkeypatch) ->
     # Force the census-based reuse path: the event-token fast path returns
     # before any walk, so it cannot show the hit-vs-rebuild distinction.
     monkeypatch.setattr("exomem.freshness.triple", lambda *args, **kwargs: None)
-    semantic_contract.reset_corpus_context_cache()
     _seed(tmp_path)
+    # Reset AFTER the seeding write, not before: that write's own publish now
+    # populates the cache on miss, and the first build below has to be a
+    # genuine cold rebuild for the hit-vs-rebuild labels to mean anything.
+    semantic_contract.reset_corpus_context_cache()
     metrics_module.reset()
 
     semantic_contract.build_corpus_context(tmp_path)
