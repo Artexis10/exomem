@@ -223,10 +223,22 @@ def test_populate_on_miss_never_stamps_a_context_an_event_leapfrogged(
     monkeypatch.setattr(
         semantic_contract, "_build_corpus_context_uncached", build_with_racing_event
     )
+    confirms: list[Path] = []
+    real_confirm = semantic_contract._deferred_corpus_census
+
+    def counted_confirm(root: Path, sink, outcome: str):
+        confirms.append(root)
+        return real_confirm(root, sink, outcome)
+
+    monkeypatch.setattr(semantic_contract, "_deferred_corpus_census", counted_confirm)
 
     semantic_contract.publish_corpus_files_changed(vault, changed=(page,))
 
     assert builds, "the populate must have attempted a build to be a real discard"
+    # Attribution: the checkpoint decided this, not the census re-confirm that
+    # follows it. That is the point of L3 -- the generation-bearing checkpoint
+    # is the admission gate, and it is cheap enough to be consulted first.
+    assert confirms == []
     cache_key = semantic_contract._corpus_cache_key(vault)
     # Never stamp: the leapfrogged context must reach neither the cache nor
     # the event-token map (contract L2 "on any mismatch discard ... never
