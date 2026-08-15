@@ -48,6 +48,7 @@ from . import audit_fix as audit_fix_module
 from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
+from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
 from . import create_file as create_file_module
@@ -76,6 +77,7 @@ from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import plan_memory as plan_memory_module
+from . import plan_progress as plan_progress_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
@@ -599,8 +601,11 @@ def op_bootstrap(
                 "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page",
             },
             "post_write": {
-                "remember_suggestions": "non-binding related pages returned by remember(suggestions=true)",
-                "write_feedback": "structural feedback returned by remember(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions",
+                "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
+                "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
+                "structure_suggestion": "advisory signal on a compiled write that recurring durable material on that page now sits outside its declared scope; present in the default committed response with kind, strength (strong|moderate), reasons, off_scope_units, and cluster_terms",
+                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy",
+                "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
             },
             "note_type_recipes": {
@@ -4259,6 +4264,7 @@ def op_edit_memory(
     path: str,
     why: str,
     operation: edit_operations_module.EditOperation = None,  # type: ignore[assignment]
+    validate_only: bool = False,
     **legacy: Any,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
@@ -4289,6 +4295,9 @@ def op_edit_memory(
         why: One-line rationale recorded in the log.
         operation: Required nested edit selected by `kind`. The seven supported
             kinds expose only fields their underlying edit leaf enforces.
+        validate_only: Preview the edit without committing it. Accepted here or
+            as `operation.validate_only`; giving it in both places is fine when
+            they agree. Same meaning as on `remember` and `replace_memory`.
 
     The previous flat keyword arguments remain accepted by direct Python/runtime
     callers for one compatibility release, but are deprecated and intentionally
@@ -4297,6 +4306,8 @@ def op_edit_memory(
     arguments: dict[str, Any] = {"path": path, "why": why, **legacy}
     if operation is not None:
         arguments["operation"] = operation
+    if validate_only:
+        arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
     return op_edit(vault_root, **normalized)
 
@@ -4311,6 +4322,9 @@ def op_observe_memory(
     tags: list[str] | None = None,
     context: str | None = None,
     relations: list[dict] | None = None,
+    verdict: str | None = None,
+    check_by: str | None = None,
+    id: str | None = None,
     unit_ref: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
@@ -4325,15 +4339,35 @@ def op_observe_memory(
     non-observation `kind` for rich semantic-block form and typed relations.
     Use `validate` before a guarded commit when semantic review is required.
 
+    An update rebuilds the whole unit, and omission does NOT mean the same
+    thing for every field. `verdict`, `check_by`, and `id` are preserve-on-omit:
+    leave one out and its current value is kept. Any authored metadata row this
+    tool does not own is carried through as well. But `tags`, `context`, and
+    `relations` are replace-on-omit: leaving one out clears it, so resend the
+    values you want to keep.
+
     Args:
         path: Parent page path or canonical memory reference.
         operation: add, update, remove, or validate.
         category: Open semantic category for add/update/validate.
         content: Unit content for add/update/validate.
         kind: Optional governed rich kind; omitted means compact observation.
-        tags: Optional compact suffix tags or rich metadata tags.
-        context: Optional compact suffix context or rich metadata context.
-        relations: Rich typed relations as {kind, target} objects.
+        tags: Optional compact suffix tags or rich metadata tags. On update this
+            replaces the current tags, so omitting it clears them.
+        context: Optional compact suffix context or rich metadata context. On
+            update this replaces the current context, so omitting it clears it.
+        relations: Rich typed relations as {kind, target} objects. On update
+            this replaces the current relations, so omitting it clears them.
+        verdict: Rich-only governed judgment; one of abandoned, confirmed,
+            inconclusive, qualified, or refuted. Categorical lifecycle state,
+            never a confidence score. On update, omit to keep the current value
+            and pass an empty string to clear it.
+        check_by: Rich-only governed ISO calendar date (YYYY-MM-DD) naming the
+            day the unit should be revisited. On update, omit to keep the
+            current value and pass an empty string to clear it.
+        id: Optional explicit authored anchor for the unit; must be unique
+            within the parent. Omitted means keep the current anchor on update
+            and derive one on add.
         unit_ref: Current exact unit reference for update/remove or update validation.
         expected_fingerprint: Current exact unit fingerprint; required for update/remove.
         expected_hash: Current exact parent-page content hash; required for update/remove.
@@ -4382,6 +4416,9 @@ def op_observe_memory(
             tags=tags,
             context=context,
             relations=relations,
+            verdict=verdict,
+            check_by=check_by,
+            id=id,
             unit_ref=unit_ref,
             expected_fingerprint=expected_fingerprint,
             expected_hash=expected_hash,
@@ -4916,6 +4953,10 @@ def op_review_memory(
         active head, while `topic_anchor` is respectively the retrieval hit or the
         requested page.
     """
+    if mode == "plan-progress":
+        # `path` is a collection selector here, not a memory identifier, so it
+        # is passed through before the page-oriented resolution below.
+        return plan_progress_module.review(vault_root, collection=path, limit=limit)
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     if mode == "attention":
@@ -4982,7 +5023,7 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, relation-queue, or adoption"
+        "unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress"
     )
 
 
@@ -5040,6 +5081,21 @@ def op_review_item_context(
     return egress_module.filter_withheld_entries(vault_root, assembled)
 
 
+def _refuse_pairless_stance(ref: str, action: str) -> None:
+    """Guard the namespaced queues, which never carry a contradiction pair.
+
+    "rivals; keep both" is a statement about two competing notes. An Adoption
+    Studio proposal and a relation-queue candidate are single-sided, so the stance
+    is meaningless there and must not be silently recorded as a standing mute.
+    """
+    if str(action or "").strip().lower() != contradiction_stance_module.STANCE_ACTION:
+        return
+    raise ValueError(
+        "INVALID_REVIEW_ACTION: `competing` records that two notes are rivals worth "
+        f"keeping, so it does not apply to {ref}"
+    )
+
+
 def op_triage_memory(
     vault_root: Path,
     ref: str,
@@ -5065,6 +5121,7 @@ def op_triage_memory(
             the write and asks the caller to refresh.
     """
     if adoption_proposals_module.is_adoption_ref(ref):
+        _refuse_pairless_stance(ref, action)
         return adoption_proposals_module.triage(
             vault_root,
             ref=ref,
@@ -5074,6 +5131,7 @@ def op_triage_memory(
             expected_fingerprint=expected_fingerprint,
         )
     if relation_queue_module.is_relation_ref(ref):
+        _refuse_pairless_stance(ref, action)
         return relation_queue_module.triage(
             vault_root,
             ref=ref,
@@ -5082,14 +5140,49 @@ def op_triage_memory(
             why=why,
             expected_fingerprint=expected_fingerprint,
         )
-    item = attention_module.item_by_ref(
-        vault_root, ref, expected_fingerprint=expected_fingerprint
-    )
+    normalized = str(action or "").strip().lower()
+    try:
+        item = attention_module.item_by_ref(
+            vault_root, ref, expected_fingerprint=expected_fingerprint
+        )
+    except ValueError:
+        # A competing stance whose pair has drifted off every queue item is on no
+        # item's reasons, so the item-walking clear cannot reach it — while it still
+        # suppresses the write-time warning. Its own pair ref (returned by the stance
+        # write, and echoed on every annotated reason) addresses it directly.
+        if normalized == "reopen":
+            orphan = contradiction_stance_module.clear_orphan_stance(
+                vault_root, ref=ref
+            )
+            if orphan is not None:
+                return orphan
+        raise
     if expected_fingerprint and item.fingerprint != expected_fingerprint:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the review signal changed; refresh the worklist "
             f"and inspect {item.ref} again"
         )
+    if normalized == contradiction_stance_module.STANCE_ACTION:
+        # "rivals; keep both" is a statement about a PAIR, so it is recorded on the
+        # pair identity rather than on this item's composite signal — that is the
+        # only key the write-time draft check can reconstruct from two paths. The
+        # RESPONSE still reports the item's own identity, so a client that
+        # round-trips the returned fingerprint into `expected_fingerprint` is
+        # comparing like with like; the pair identities ride along under `pairs`.
+        recorded = contradiction_stance_module.record_stance(
+            vault_root, reasons=item.reasons, until=until, why=why
+        )
+        return {
+            "item_id": item.item_id,
+            "ref": item.ref or ref,
+            "fingerprint": item.fingerprint,
+            "state": "competing",
+            "decision": recorded[0]["decision"],
+            "pairs": recorded,
+            "path": item.path,
+            "target_ref": item.target_ref,
+            "categories": item.categories,
+        }
     result = review_state_module.ReviewStateStore(vault_root).apply(
         item.item_id or review_state_module.parse_review_ref(ref),
         item.fingerprint or "",
@@ -5097,6 +5190,10 @@ def op_triage_memory(
         until=until,
         why=why,
     )
+    if normalized == "reopen":
+        # Reopen is the complete inverse: an item-level record alone would leave a
+        # pair stance quietly suppressing the same item.
+        contradiction_stance_module.clear_stance(vault_root, reasons=item.reasons)
     result.update(
         {
             "path": item.path,
@@ -7017,7 +7114,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                     choices=param.choices,
                 )
                 for param in params
-                if param.name in {"path", "why", "operation"}
+                if param.name in {"path", "why", "operation", "validate_only"}
             )
         if response_detail is not None:
             response_detail_help = (

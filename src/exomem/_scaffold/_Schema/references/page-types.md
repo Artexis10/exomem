@@ -241,7 +241,12 @@ sub-domain that emerges (`Research`, `Ops`, etc.). Add a new sub-domain only
 when the first experiment in that domain is being written.
 **Naming:** `YYYY-MM-<slug>.md` — date-prefixed because experiments are time-bounded events, not evolving notes. Use the **start month**.
 **Mutability:** Editable while ongoing; once concluded, body is read-only except for supersession or follow-up notes that link back.
-**Required frontmatter:** `type: experiment`, `domain`, `status`, `created`, `updated`, `started`, `duration`, `tags`. Optional: `n` (sample size, default 1), `concluded`, `hypothesis`, `sources`, `supersedes`, `superseded_by`.
+**Required frontmatter:** `type: experiment`, `domain`, `status`, `created`, `updated`, `started`, `duration`, `tags`. Optional: `n` (sample size, default 1), `concluded`, `outcome`, `hypothesis`, `sources`, `supersedes`, `superseded_by`.
+
+**Status values for experiments:** `draft`, `active`, `concluded`, `archived`.
+`concluded` says the run finished and its result stands; pair it with
+`concluded:` (the date) and `outcome:` (one of `confirmed`, `refuted`,
+`qualified`, `inconclusive`, `abandoned`).
 
 **Content shape:**
 
@@ -295,6 +300,47 @@ What you learned. May be inconclusive — that's a valid result.
 
 - relates_to [[...]]
 ```
+
+### Closing the loop: predictions, check dates, and verdicts
+
+An experiment is worth much more when it recorded what you *expected* before it
+ran. Write that as a rich semantic unit with the governed `prediction` kind, and
+give it the two governed metadata rows that make it checkable:
+
+```markdown
+## Prediction
+- id: batching-cuts-switches
+- check_by: 2026-08-01
+- verdict: refuted
+
+Batching review into one daily slot will cut context switches by half.
+
+## Evidence
+- relations: contradicts: [[Knowledge Base/Notes/Experiments/Workflow/2026-05-batching]]
+
+Switch count fell 12%, well short of the predicted halving.
+```
+
+The verdict introduces no new relation kind. Attach the refuting material with
+the governed vocabulary you already have — `contradicts`, `evidenced_by`,
+`supports` — and let `verdict:` carry the judgment itself.
+
+- `check_by:` is one exact ISO calendar date (`YYYY-MM-DD`) naming the day the
+  claim should be revisited. It is a due date, not a deadline, and nothing
+  expires when it passes — it just becomes findable as overdue.
+- `verdict:` is exactly one of `confirmed`, `refuted`, `qualified`,
+  `inconclusive`, or `abandoned` — the same five words as an experiment's
+  `outcome:`, one altitude down. It is categorical state, never a number: this
+  vault stores no confidence score, so `verdict: 0.7` is rejected outright.
+
+Both rows are rich-form only; a compact `- [category] ...` observation carries no
+metadata. Both are also preserved across edits — correcting the wording of a
+prediction never costs you its verdict.
+
+**A refuted prediction stays active and stays ranked.** Refuted is not
+superseded: nothing replaced it, the question simply got an answer. Leave it in
+place with the evidence that refuted it. A vault that quietly retires its
+negative results loses the expensive half of what it learned.
 
 ### Experiments are not research notes
 

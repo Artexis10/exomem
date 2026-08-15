@@ -35,9 +35,9 @@ from typing import Any
 from .cli_ops import OpError
 from .mutation_lock import (
     VaultMutationCoordinator,
-    active_mutation_snapshot,
     canonical_mutation_identity,
     last_mutation_timing,
+    process_local_mutation_boundary,
 )
 from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
@@ -3054,6 +3054,9 @@ class LeaseManager:
         )
 
     def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+        # Without a boundary identity there is nothing to probe: the answer can
+        # only cover this process, so it is reported as `unknown`, never as a
+        # verified `free`.
         mutation_boundary = (
             VaultMutationCoordinator(
                 self.config.state_dir,
@@ -3062,7 +3065,7 @@ class LeaseManager:
                 poll_interval_seconds=self._mutation_poll_interval_seconds,
             ).snapshot()
             if vault_or_cell is not None
-            else active_mutation_snapshot()
+            else process_local_mutation_boundary()
         )
         renewer_alive = self._renewer is not None and self._renewer.is_alive()
         last_renew_age_seconds = (

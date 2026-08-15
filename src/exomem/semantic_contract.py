@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -11,7 +12,8 @@ import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -24,6 +26,7 @@ from . import (
     freshness,
     memory_refs,
     memory_schema,
+    metrics,
     relation_registry,
     semantic_authoring,
     semantic_language_registry,
@@ -1236,6 +1239,112 @@ def _corpus_cache_key(root: Path) -> tuple[str, str]:
     )
 
 
+# Who is asking for a corpus context. The corpus walk/build is the single
+# most expensive shared step on both the read and the write path, and an
+# aggregate duration cannot say whether a slow vault is slow for writers, for
+# readers, or only during warm-up. A contextvar (not a parameter) because the
+# attribution has to survive the several layers between an entrypoint and
+# `_corpus_census` without changing any of their signatures.
+_CALL_CONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "exomem_semantic_call_context", default="unknown"
+)
+
+
+def current_call_context() -> str:
+    """The caller label attached to corpus metrics; ``"unknown"`` by default."""
+    return _CALL_CONTEXT.get()
+
+
+@contextmanager
+def call_context(name: str) -> Iterator[None]:
+    """Label every corpus metric emitted inside this block with ``name``."""
+    token = _CALL_CONTEXT.set(str(name))
+    try:
+        yield
+    finally:
+        _CALL_CONTEXT.reset(token)
+
+
+# A queued walk whose disposition no branch has claimed yet. Never a label:
+# `_census_walk_log` resolves it on the way out, and how it resolves depends on
+# whether the block finished or blew up.
+_CENSUS_WALK_UNDECIDED = "__undecided__"
+
+
+def _observe_census_walk(elapsed_ms: float, outcome: str) -> None:
+    """One full `_corpus_census` stat-walk, labelled by what it decided.
+
+    Guarded because two of the three call sites emit from a `finally` that may
+    be unwinding a real corpus error; an instrument that raises there would
+    replace the error the caller needs to see.
+    """
+    try:
+        metrics.observe_duration_ms(
+            "exomem_corpus_census_walk_ms",
+            elapsed_ms,
+            {"caller": current_call_context(), "outcome": outcome},
+        )
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        log.debug("corpus census walk metric failed", exc_info=True)
+
+
+def _timed_corpus_census(root: Path, outcome: str) -> tuple | None:
+    """A census walk whose disposition is already known when it starts.
+
+    For walks taken with NO corpus cache lock held. Under a lock, use
+    `_census_walk_log` + `_deferred_corpus_census` instead.
+    """
+    started = time.perf_counter()
+    try:
+        return _corpus_census(root)
+    finally:
+        _observe_census_walk((time.perf_counter() - started) * 1000.0, outcome)
+
+
+@contextmanager
+def _census_walk_log() -> Iterator[list[list]]:
+    """Queue census-walk timings; emit them once the caller's locks are gone.
+
+    `metrics.observe_duration_ms` takes the metrics registry lock. Calling it
+    while `_CORPUS_CONTEXT_UPDATE_LOCK`/`_CORPUS_CONTEXT_CACHE_LOCK` is held
+    would let the instrument widen the very critical section it is measuring —
+    and this cache is contended by every reader and writer at once. Entries are
+    mutable `[elapsed_ms, outcome]` pairs so a walk whose disposition is only
+    settled several branches later can be corrected in place. Because this
+    context manager is entered OUTSIDE the locks, its exit runs after they have
+    all released, including on the `return`s taken from inside them.
+
+    An entry still `_CENSUS_WALK_UNDECIDED` at exit is resolved by HOW the block
+    ended: falling out cleanly means no cached state answered the walk, so a
+    rebuild is what it bought; unwinding on an exception means nobody ever got
+    to use it, and reporting that as a rebuild would invent work that never
+    happened. Explicitly-set outcomes are left alone — a confirmation census
+    that completed really was a census, whatever failed afterwards.
+    """
+    sink: list[list] = []
+    unresolved = "rebuild"
+    try:
+        yield sink
+    except BaseException:
+        unresolved = "aborted"
+        raise
+    finally:
+        for elapsed_ms, outcome in sink:
+            _observe_census_walk(
+                elapsed_ms,
+                unresolved if outcome == _CENSUS_WALK_UNDECIDED else outcome,
+            )
+
+
+def _deferred_corpus_census(root: Path, sink: list[list], outcome: str) -> tuple | None:
+    """A census walk taken under a lock; its metric is queued, not emitted."""
+    started = time.perf_counter()
+    try:
+        return _corpus_census(root)
+    finally:
+        sink.append([(time.perf_counter() - started) * 1000.0, outcome])
+
+
 def _corpus_census(root: Path) -> tuple | None:
     """Stat census of every filesystem input ``build_corpus_context`` reads.
 
@@ -1370,7 +1479,11 @@ def corpus_validity_token(root: Path, *, corpus_census: tuple | None = None) -> 
     a second stat-walk — at thousands of pages the walk dominates write
     latency, and the CI write-latency gate holds preflight to one walk total.
     """
-    corpus = corpus_census if corpus_census is not None else _corpus_census(root)
+    corpus = (
+        corpus_census
+        if corpus_census is not None
+        else _timed_corpus_census(root, "census")
+    )
     if corpus is None:
         return None
     review = _relation_review_census(root)
@@ -1677,6 +1790,10 @@ def on_corpus_files_changed(
     Callers that also publish freshness MUST use
     :func:`publish_corpus_files_changed` so both derived states advance under
     one boundary. This lower-level hook remains useful for tests and repair.
+
+    Deliberately does NOT populate a cold cache: it advances no freshness, so
+    there is no publication for a populated context to be captioned against —
+    that belongs to the publish seam.
     """
     with _CORPUS_CONTEXT_UPDATE_LOCK:
         _patch_corpus_files_changed_locked(
@@ -1685,6 +1802,43 @@ def on_corpus_files_changed(
             deleted=deleted,
             event_token=freshness.triple(Path(vault_root), "vault"),
         )
+
+
+_CORPUS_PATCH_MISS = "miss"
+_CORPUS_PATCH_EVICTED = "evicted"
+_CORPUS_PATCH_UNCHANGED = "unchanged"
+_CORPUS_PATCH_APPLIED = "patched"
+
+CORPUS_PUBLICATION_REGISTRY_ADVANCE = "registry_advance"
+CORPUS_PUBLICATION_PROJECTION_PATCH = "projection_patch"
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusPublicationFailure:
+    """Which half of the corpus publish seam failed, and with what.
+
+    One call publishes two derived states, and a caller deciding how to
+    recover needs to know which of them broke:
+
+    * ``"registry_advance"`` — ``freshness.on_files_changed`` itself failed,
+      so the event registry can no longer name the current file set and no
+      consumer's retained event suffix is bridgeable. Registry loss.
+    * ``"projection_patch"`` — the registry advanced and recorded every
+      event; only the corpus cache's own patch failed. The registry is
+      intact and exactly one projection lost its resumption point.
+
+    Before this split both surfaced as one exception from one call, so the
+    caller could only guess — and guessed registry loss, cooling a live
+    registry for a failure that was local to one RAM projection.
+    """
+
+    stage: str
+    error: BaseException
+
+    @property
+    def registry_intact(self) -> bool:
+        """Whether the event registry still names the current file set."""
+        return self.stage == CORPUS_PUBLICATION_PROJECTION_PATCH
 
 
 def publish_corpus_files_changed(
@@ -1698,6 +1852,31 @@ def publish_corpus_files_changed(
     Serializing these two derived-state publications prevents concurrent file
     events from stamping a context that contains only one event with a
     freshness token that already represents both.
+
+    Raises whatever either half raised. A caller whose recovery depends on
+    WHICH half failed calls
+    :func:`publish_corpus_files_changed_classified` instead.
+    """
+    failure = publish_corpus_files_changed_classified(
+        vault_root, changed=changed, deleted=deleted
+    )
+    if failure is not None:
+        raise failure.error
+
+
+def publish_corpus_files_changed_classified(
+    vault_root: Path,
+    *,
+    changed: Iterable[Path] = (),
+    deleted: Iterable[Path | str] = (),
+) -> CorpusPublicationFailure | None:
+    """:func:`publish_corpus_files_changed`, reporting WHICH half failed.
+
+    Returns ``None`` on success and a :class:`CorpusPublicationFailure`
+    otherwise, carrying the original exception unwrapped so a caller that
+    only wants to propagate can re-raise it unchanged. Interpreter-level
+    exits (anything that is not an ``Exception``) are never turned into a
+    result; they propagate as before.
     """
     root = Path(vault_root)
     changed_values = tuple(Path(value) for value in changed)
@@ -1709,17 +1888,26 @@ def publish_corpus_files_changed(
         value if value.is_absolute() else root / value for value in deleted_values
     )
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        freshness.on_files_changed(root, changed=changed_paths, deleted=deleted_paths)
         try:
-            _patch_corpus_files_changed_locked(
+            freshness.on_files_changed(root, changed=changed_paths, deleted=deleted_paths)
+            # Read the token here, not in the patch call below: it is a
+            # registry-side read, so a failure in it is registry-side too and
+            # must not be reported as the projection's fault.
+            event_token = freshness.triple(root, "vault")
+        except BaseException as error:
+            if not isinstance(error, Exception):
+                raise
+            return CorpusPublicationFailure(CORPUS_PUBLICATION_REGISTRY_ADVANCE, error)
+        try:
+            disposition = _patch_corpus_files_changed_locked(
                 root,
                 changed=changed_values,
                 deleted=deleted_values,
-                event_token=freshness.triple(root, "vault"),
+                event_token=event_token,
             )
-        except BaseException:
+        except BaseException as error:
             # Freshness already advanced, so the previous context can no
-            # longer prove continuity. Evict every caption before propagating
+            # longer prove continuity. Evict every caption before reporting
             # the safety/parse failure; a later good event must not leapfrog
             # this missed delta and stamp stale state as current.
             cache_key = _corpus_cache_key(root)
@@ -1727,7 +1915,14 @@ def publish_corpus_files_changed(
                 _CORPUS_CONTEXT_CACHE.pop(cache_key, None)
                 _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
                 _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
-            raise
+            if not isinstance(error, Exception):
+                raise
+            return CorpusPublicationFailure(CORPUS_PUBLICATION_PROJECTION_PATCH, error)
+    # Outside the update lock on purpose: the populate walks and parses the
+    # whole vault, and the publisher advances freshness under that same lock.
+    if disposition == _CORPUS_PATCH_MISS:
+        _populate_corpus_context_after_miss(root)
+    return None
 
 
 def _patch_corpus_files_changed_locked(
@@ -1736,21 +1931,29 @@ def _patch_corpus_files_changed_locked(
     changed: Iterable[Path],
     deleted: Iterable[Path | str],
     event_token: tuple[int, int, str] | None,
-) -> None:
-    """Patch one cache entry while ``_CORPUS_CONTEXT_UPDATE_LOCK`` is held."""
+) -> str:
+    """Patch one cache entry while ``_CORPUS_CONTEXT_UPDATE_LOCK`` is held.
+
+    Returns what it did, because only the caller can act on a ``"miss"``: a
+    cold cache has nothing to patch, and populating it means a full walk that
+    must NOT happen inside this lock (see
+    :func:`_populate_corpus_context_after_miss`). ``"evicted"`` is the
+    config-census drift pop and stays eviction-only — a drifted config makes
+    the stored context unusable, not merely absent.
+    """
     root = Path(vault_root)
     cache_key = _corpus_cache_key(root)
     with _CORPUS_CONTEXT_CACHE_LOCK:
         entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
     if entry is None:
-        return
+        return _CORPUS_PATCH_MISS
     if _config_census(root) != _stored_config_census(entry[0]):
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
                 _CORPUS_CONTEXT_CACHE.pop(cache_key, None)
                 _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
                 _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
-        return
+        return _CORPUS_PATCH_EVICTED
 
     def relative(value: Path | str) -> str | None:
         path = Path(value)
@@ -1786,7 +1989,7 @@ def _patch_corpus_files_changed_locked(
     )
     reconcile_paths = tuple(sorted(set(changed_paths) | set(deleted_paths)))
     if not reconcile_paths:
-        return
+        return _CORPUS_PATCH_UNCHANGED
     relation_definitions = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     context = _reconcile_markdown_delta(
@@ -1812,6 +2015,149 @@ def _patch_corpus_files_changed_locked(
                 _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
             else:
                 _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = event_token
+    return _CORPUS_PATCH_APPLIED
+
+
+def _trim_corpus_cache_locked(keep: tuple[str, str]) -> None:
+    """Evict other vaults down to the bound; call with the cache lock held."""
+    while len(_CORPUS_CONTEXT_CACHE) > _CORPUS_CONTEXT_CACHE_MAX_VAULTS:
+        for stale_key in list(_CORPUS_CONTEXT_CACHE):
+            if stale_key != keep:
+                del _CORPUS_CONTEXT_CACHE[stale_key]
+                _CORPUS_CONTEXT_EVENT_TOKENS.pop(stale_key, None)
+                _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(stale_key, None)
+                break
+        else:
+            break
+
+
+def _populate_corpus_context_after_miss(root: Path) -> None:
+    """Build the corpus context a publish found no warm entry to patch.
+
+    Before this, a publish onto a cold cache was a silent no-op, so the very
+    next reader paid a full stat census AND a full parse of the vault — on a
+    write path where that walk is the dominant cost. The publisher pays one
+    honest build here instead, synchronously, and the next reader is an
+    event-hit.
+
+    Why this cannot simply run inside the caller's lock (contract L1 vs L2):
+    the publish path holds ``_CORPUS_CONTEXT_UPDATE_LOCK`` across
+    ``freshness.on_files_changed`` precisely so no event can interleave
+    between an advance and a stamp. Walking and parsing the whole vault
+    inside that hold would serialize EVERY concurrent governed write behind
+    one cold build — at thousands of pages, seconds of it. So the walk runs
+    outside the lock and admission takes L2's shape instead:
+
+    * capture ``freshness.consumer_checkpoint`` BEFORE the walk and re-read it
+      under the update lock; stamp only if it is unchanged. The checkpoint,
+      not the bare triple, because it carries a strictly increasing
+      generation and the triple alone is ABA-vulnerable across a
+      revert-in-place (L3);
+    * require the cache slot to still hold the same thing observed at the
+      start — for a populate that is "still empty", the analogue of the
+      ``_CORPUS_CONTEXT_CACHE.get(cache_key) is entry`` idiom every other
+      stamp site uses;
+    * re-confirm the census under the same hold, because the checkpoint only
+      covers deltas the registry SAW. A file that moved during the build
+      without reaching the registry would otherwise leave a stored census
+      that lies about the context it captions, and a later revert-in-place
+      could serve that context as current;
+    * on any mismatch, discard. Never stamp; a later build repopulates
+      honestly.
+
+    Nothing here may fail the publish that called it: the canonical bytes are
+    already committed and the registry has already advanced. A populate that
+    cannot complete simply leaves the cache cold, which is exactly today's
+    behavior.
+
+    Deliberately NOT single-flighted and NOT memoized on failure: a state that
+    keeps the cache cold (persistent projection-publish failure, or external
+    churn that discards every admission) makes every publish pay a build that
+    cannot land. Bounding that is tracked as #539; the shape to copy is
+    ``lexstore._REPAIRS_IN_FLIGHT``.
+    """
+    if not corpus_context_cache_enabled():
+        return
+    try:
+        cache_key = _corpus_cache_key(root)
+    except Exception:  # noqa: BLE001 - an unkeyable root simply has no cache
+        return
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+            return
+    try:
+        _build_and_admit_corpus_context(root, cache_key)
+    except Exception:  # noqa: BLE001 - the publish itself already succeeded
+        log.warning("semantic corpus populate-on-miss failed", exc_info=True)
+
+
+def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> None:
+    """The L2 body of :func:`_populate_corpus_context_after_miss`."""
+    relation_definitions = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    # L2/L3: the admission decision is made against this, captured before the
+    # walk it has to vouch for.
+    before = freshness.consumer_checkpoint(root, "vault")
+    census = _timed_corpus_census(root, "populate")
+    if census is None:
+        return
+    # The registries were loaded BEFORE this walk, and the walk stats the two
+    # `_Schema` files at its END. A registry rewritten in between therefore
+    # produces a census that records the NEW file while the build below would
+    # use the OLD registry — and the census-reuse path admits on census
+    # equality alone (the registry identity is only re-checked on the
+    # event-hit path), so that entry would be served as current. Every other
+    # install site guards with this; so does this one. The window from here to
+    # the stamp is closed by the census re-confirm under the lock, which sees
+    # the same two files.
+    if not _registries_match_disk(root, relation_definitions, language):
+        log.info("semantic corpus populate discarded: registry moved during the walk")
+        return
+    started = time.perf_counter()
+    context = _build_corpus_context_uncached(
+        root,
+        candidate=None,
+        relation_definitions=relation_definitions,
+        language=language,
+    )
+    build_ms = (time.perf_counter() - started) * 1000.0
+    # Its own outcome, not "rebuild": this build is paid by the PUBLISHER, so
+    # a writer suddenly wearing a full corpus build has to be visible as that.
+    metrics.observe_duration_ms(
+        "exomem_corpus_build_ms",
+        build_ms,
+        {"caller": current_call_context(), "outcome": "populate"},
+    )
+    with _census_walk_log() as walk_log, _CORPUS_CONTEXT_UPDATE_LOCK:
+        after = freshness.consumer_checkpoint(root, "vault")
+        if after != before:
+            log.info("semantic corpus populate discarded: registry advanced mid-walk")
+            return
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+                return
+        if _deferred_corpus_census(root, walk_log, "census") != census:
+            log.info("semantic corpus populate discarded: corpus moved mid-build")
+            return
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+                return
+            _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+            _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                f"{language.schema_version}:{language.content_hash}"
+            )
+            # L4: no candidate is ever involved here, and a token of None
+            # pops rather than leaving a stale caption behind.
+            if after.triple is None:
+                _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
+            else:
+                _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = after.triple
+            _trim_corpus_cache_locked(cache_key)
+    log.info(
+        "semantic corpus context populated on miss pages=%d build_ms=%.1f",
+        len(context.pages),
+        build_ms,
+    )
 
 
 def build_corpus_context(
@@ -1828,6 +2174,37 @@ def build_corpus_context(
     return directly; Markdown-only changes reparse only the changed parents.
     Candidate-bearing builds always take the uncached path.
     ``EXOMEM_DISABLE_CORPUS_CACHE=1`` restores the always-rebuild behavior.
+    """
+    context, _census = build_corpus_context_with_census(
+        vault_root,
+        candidate=candidate,
+        registry=registry,
+        language_registry=language_registry,
+    )
+    return context
+
+
+def build_corpus_context_with_census(
+    vault_root: Path,
+    *,
+    candidate: SemanticPageState | None = None,
+    registry: relation_registry.RelationRegistry | None = None,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+) -> tuple[SemanticCorpusContext, tuple | None]:
+    """``build_corpus_context`` plus the exact census that validated it.
+
+    Identical corpus/cache mechanics to ``build_corpus_context`` (that
+    function is a thin wrapper over this one) — the only difference is a
+    second return so a caller about to compute ``corpus_validity_token`` can
+    reuse the census this call already walked instead of paying for another
+    one. The census is ``None`` whenever no single walk unambiguously matches
+    the returned context: candidate-bearing builds, a disabled cache, a
+    registry that does not match disk, a cold build whose post-publish
+    reconciliation never stabilized, or an in-flight-dedup waiter (it only
+    confirmed its own pre-wait walk matched the flight it is chasing, not
+    whatever the owning build's stabilization loop settles on or gives up on
+    afterward). A caller that gets ``None`` here has no cheaper option than
+    its own fresh walk — same as before this existed.
     """
     root = Path(vault_root)
     relation_definitions = registry or relation_registry.load_registry(root)
@@ -1861,68 +2238,83 @@ def build_corpus_context(
                     "semantic corpus context event-hit pages=%d",
                     len(event_entry[1].pages),
                 )
-                return event_entry[1]
-        started = time.perf_counter()
-        census = _corpus_census(root)
-        census_ms = (time.perf_counter() - started) * 1000.0
-        if census is not None and _registries_match_disk(root, relation_definitions, language):
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
-            if entry is not None and entry[0] == census:
-                with _CORPUS_CONTEXT_UPDATE_LOCK, _CORPUS_CONTEXT_CACHE_LOCK:
-                    current = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                    if current is not entry:
-                        entry = current
-                    elif entry[0] == census:
-                        current_token = freshness.triple(root, "vault")
-                        if current_token is not None:
-                            _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
-                        log.info(
-                            "semantic corpus context reused pages=%d census_ms=%.1f",
-                            len(entry[1].pages),
-                            census_ms,
-                        )
-                        return entry[1]
+                return event_entry[1], event_entry[0]
+        # This walk's meaning is only settled by the branch it lands in, and
+        # every one of those branches decides while a cache lock is held. So
+        # the disposition is recorded in place and emitted by `_census_walk_log`
+        # on the way out, once every lock below has released.
+        with _census_walk_log() as walk_log:
+            started = time.perf_counter()
+            census = _corpus_census(root)
+            census_ms = (time.perf_counter() - started) * 1000.0
+            # Claimed by whichever branch below consumes it; resolved on the
+            # way out if none does (see `_census_walk_log`).
+            walk = [census_ms, _CENSUS_WALK_UNDECIDED]
+            walk_log.append(walk)
+            if census is not None and _registries_match_disk(
+                root, relation_definitions, language
+            ):
+                with _CORPUS_CONTEXT_CACHE_LOCK:
+                    entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
                 if entry is not None and entry[0] == census:
-                    with _CORPUS_CONTEXT_CACHE_LOCK:
-                        if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
-                            return entry[1]
-            if entry is not None:
-                changed_paths = _markdown_census_delta(entry[0], census)
-                if changed_paths is not None:
-                    started = time.perf_counter()
-                    context = _reconcile_markdown_delta(
-                        root,
-                        entry[1],
-                        changed_paths,
-                        relation_definitions=relation_definitions,
-                        language=language,
-                    )
-                    with _CORPUS_CONTEXT_UPDATE_LOCK:
-                        confirmed = _corpus_census(root)
+                    with _CORPUS_CONTEXT_UPDATE_LOCK, _CORPUS_CONTEXT_CACHE_LOCK:
+                        current = _CORPUS_CONTEXT_CACHE.get(cache_key)
+                        if current is not entry:
+                            entry = current
+                        elif entry[0] == census:
+                            current_token = freshness.triple(root, "vault")
+                            if current_token is not None:
+                                _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                            log.info(
+                                "semantic corpus context reused pages=%d census_ms=%.1f",
+                                len(entry[1].pages),
+                                census_ms,
+                            )
+                            walk[1] = "hit"
+                            return entry[1], entry[0]
+                    if entry is not None and entry[0] == census:
                         with _CORPUS_CONTEXT_CACHE_LOCK:
-                            current = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                            if confirmed == census and current is entry:
-                                _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
-                                _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
-                                    f"{language.schema_version}:{language.content_hash}"
-                                )
-                                current_token = freshness.triple(root, "vault")
-                                if current_token is not None:
-                                    _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
-                                log.info(
-                                    "semantic corpus context reconciled pages=%d "
-                                    "changed=%d reconcile_ms=%.1f census_ms=%.1f",
-                                    len(context.pages),
-                                    len(changed_paths),
-                                    (time.perf_counter() - started) * 1000.0,
-                                    census_ms,
-                                )
-                                return context
-                            if current is not None and current is not entry:
-                                return current[1]
-        else:
-            census = None
+                            if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
+                                walk[1] = "hit"
+                                return entry[1], entry[0]
+                if entry is not None:
+                    changed_paths = _markdown_census_delta(entry[0], census)
+                    if changed_paths is not None:
+                        started = time.perf_counter()
+                        context = _reconcile_markdown_delta(
+                            root,
+                            entry[1],
+                            changed_paths,
+                            relation_definitions=relation_definitions,
+                            language=language,
+                        )
+                        with _CORPUS_CONTEXT_UPDATE_LOCK:
+                            confirmed = _deferred_corpus_census(root, walk_log, "census")
+                            with _CORPUS_CONTEXT_CACHE_LOCK:
+                                current = _CORPUS_CONTEXT_CACHE.get(cache_key)
+                                if confirmed == census and current is entry:
+                                    _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+                                    _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                                        f"{language.schema_version}:{language.content_hash}"
+                                    )
+                                    current_token = freshness.triple(root, "vault")
+                                    if current_token is not None:
+                                        _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                                    log.info(
+                                        "semantic corpus context reconciled pages=%d "
+                                        "changed=%d reconcile_ms=%.1f census_ms=%.1f",
+                                        len(context.pages),
+                                        len(changed_paths),
+                                        (time.perf_counter() - started) * 1000.0,
+                                        census_ms,
+                                    )
+                                    walk[1] = "patch"
+                                    return context, census
+                                if current is not None and current is not entry:
+                                    walk[1] = "hit"
+                                    return current[1], current[0]
+            else:
+                census = None
 
     flight: _CorpusContextFlight | None = None
     if census is not None and cache_key is not None:
@@ -1951,7 +2343,7 @@ def build_corpus_context(
             )
             flight.done.wait()
             if not same_inputs:
-                return build_corpus_context(
+                return build_corpus_context_with_census(
                     root,
                     candidate=candidate,
                     registry=registry,
@@ -1960,7 +2352,13 @@ def build_corpus_context(
             if flight.error is not None:
                 raise flight.error
             assert flight.result is not None
-            return flight.result
+            # Not `census`: that is this WAITER's own pre-wait walk, pinned
+            # only to confirm it is chasing the same flight (`same_inputs`
+            # above). The owner's stabilization loop can still reconcile
+            # `flight.result` to a different final census after that check,
+            # or give up entirely -- either way this waiter has no census
+            # that is honestly known to match the context it is returning.
+            return flight.result, None
 
     try:
         started = time.perf_counter()
@@ -1971,16 +2369,23 @@ def build_corpus_context(
             language=language,
         )
         build_ms = (time.perf_counter() - started) * 1000.0
+        metrics.observe_duration_ms(
+            "exomem_corpus_build_ms",
+            build_ms,
+            {"caller": current_call_context(), "outcome": "rebuild"},
+        )
         stored = False
         if census is not None and cache_key is not None:
-            with _CORPUS_CONTEXT_UPDATE_LOCK:
+            # Entered outside the update lock, so its queued samples are
+            # emitted only after that lock releases.
+            with _census_walk_log() as publish_log, _CORPUS_CONTEXT_UPDATE_LOCK:
                 stable_census = census
                 # A busy watcher/media worker can change Markdown while the cold
                 # build runs. Once publication begins, serialize with event
                 # freshness+cache updates, absorb exact deltas, then stamp the same
                 # state atomically so a newer event context cannot be overwritten.
                 for _ in range(3):
-                    confirmed = _corpus_census(root)
+                    confirmed = _deferred_corpus_census(root, publish_log, "census")
                     if confirmed == stable_census:
                         break
                     if confirmed is None:
@@ -2012,15 +2417,7 @@ def build_corpus_context(
                             _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
                         else:
                             _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
-                        while len(_CORPUS_CONTEXT_CACHE) > _CORPUS_CONTEXT_CACHE_MAX_VAULTS:
-                            for stale_key in list(_CORPUS_CONTEXT_CACHE):
-                                if stale_key != cache_key:
-                                    del _CORPUS_CONTEXT_CACHE[stale_key]
-                                    _CORPUS_CONTEXT_EVENT_TOKENS.pop(stale_key, None)
-                                    _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(stale_key, None)
-                                    break
-                            else:
-                                break
+                        _trim_corpus_cache_locked(cache_key)
                     stored = True
         log.info(
             "semantic corpus context built pages=%d build_ms=%.1f cached=%s",
@@ -2042,7 +2439,7 @@ def build_corpus_context(
             if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
                 del _CORPUS_CONTEXT_FLIGHTS[cache_key]
         flight.done.set()
-    return context
+    return context, (census if stored else None)
 
 
 def _build_corpus_context_uncached(
@@ -2116,14 +2513,45 @@ def _build_identity_census(
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
+            # Alias refusal comes first and applies to EVERY entry, exactly as
+            # before: an aliased subtree can hide or duplicate pages whatever
+            # its name looks like, so filtering by suffix ahead of this check
+            # would open a hole. `is_symlink()` answers from the listing.
             try:
-                info = child.stat(follow_symlinks=False)
+                if child.is_symlink():
+                    raise activation_manifest.ActivationManifestError(
+                        "IDENTITY_CENSUS_UNSAFE_ENTRY",
+                        "stable-identity census contains a filesystem alias",
+                    )
+                is_directory = child.is_dir(follow_symlinks=False)
             except OSError as error:
                 raise activation_manifest.ActivationManifestError(
                     "IDENTITY_CENSUS_ENTRY_UNREADABLE",
                     "could not inspect a stable-identity census entry",
                 ) from error
-            if child.is_symlink() or vault._is_reparse(info):
+            # Filter BEFORE the stat. The Knowledge Base root also holds
+            # SQLite's transient sidecars (`.embeddings.sqlite-shm`, `-wal`),
+            # created and dropped as embedding connections open and close.
+            # They are not census input, so statting them bought nothing and
+            # cost a race: the sidecar could vanish in the window between the
+            # listing and the stat, and the FileNotFoundError escalated into a
+            # hard census failure (#528).
+            if not is_directory and path.suffix.casefold() != ".md":
+                continue
+            try:
+                info = child.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                # Deleted between the listing and the stat. The census is a
+                # snapshot, not a lock — a page that no longer exists is simply
+                # not in it, and change detection belongs to the freshness
+                # machinery. Every other OSError still fails closed below.
+                continue
+            except OSError as error:
+                raise activation_manifest.ActivationManifestError(
+                    "IDENTITY_CENSUS_ENTRY_UNREADABLE",
+                    "could not inspect a stable-identity census entry",
+                ) from error
+            if vault._is_reparse(info):
                 raise activation_manifest.ActivationManifestError(
                     "IDENTITY_CENSUS_UNSAFE_ENTRY",
                     "stable-identity census contains a filesystem alias",

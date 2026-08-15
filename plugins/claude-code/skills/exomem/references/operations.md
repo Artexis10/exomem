@@ -143,6 +143,19 @@ entries of 300 characters each; `warnings_count` stays authoritative, so a
 shorter list means the remainder was trimmed. Upload receipts carry their
 warnings as per-file rows under `files`, and a terminal rebuilt from a portable
 receipt reports only the count, since that receipt retains no leaf content.
+
+A compiled-note write may additionally return `structure_suggestion`, an
+advisory signal that recurring durable material on the written page now sits
+outside its own declared scope. It carries `kind`, a `strength` of either
+`strong` or `moderate`, a deterministically ordered `reasons` list, the count of
+durable units in the group, and at most six `cluster_terms`. Every
+value is derived from the page named in the same response; it never reports a
+path, title, or count belonging to another page. It is advisory only: it is
+absent when nothing is detected, it never changes `status`, `mutated`,
+`warnings_count`, mutation identity, or replay, and detection failure omits the
+field rather than affecting the write. The runtime never creates, moves,
+renames, or deletes anything as a result.
+
 `response_detail="full"` adds the existing leaf result under
 `diagnostics`. `response_detail="legacy"` returns that old raw leaf result and
 is retained for at least one compatibility release. The response-detail choice

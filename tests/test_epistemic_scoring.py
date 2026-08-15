@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from epistemic.assertions import AssertionResult
 from epistemic.catastrophic import CATASTROPHIC_ASSERTIONS, catastrophic_failures
 from epistemic.scoring import FamilyResult, RunResult, assemble_family, assemble_run
+from pydantic import BaseModel
 
 BANNED_FIELD_TOKENS = ("score", "total", "overall", "aggregate", "points", "mean", "average")
 
@@ -47,6 +46,40 @@ def test_catastrophic_failure_marks_the_family_integrity_fail() -> None:
     scored = family("f05", "alpha", (result("prior_revision_retained", "fail"),))
     assert scored.status == "INTEGRITY_FAIL"
     assert scored.catastrophic_failures == ("prior_revision_retained",)
+
+
+def test_refuted_retrieval_failure_is_now_an_integrity_failure() -> None:
+    """The founder's `accept` decision, in the one place it has to show up.
+
+    f18's assertion joined the §3 set at the 2026-08-15 acknowledgment, so
+    silently losing or demoting a refuted result now suppresses every aggregate
+    for that provider — the same treatment as losing a prior revision, which is
+    the parity the amendment argued for. Before acknowledgment this same failure
+    merely cost a row.
+    """
+
+    assert "refuted_retrievable_at_full_standing" in CATASTROPHIC_ASSERTIONS
+
+    scored = family(
+        "f18", "alpha", (result("refuted_retrievable_at_full_standing", "fail"),)
+    )
+    assert scored.status == "INTEGRITY_FAIL"
+    assert scored.catastrophic_failures == ("refuted_retrievable_at_full_standing",)
+
+
+def test_refuted_retrieval_observability_outcomes_stay_out_of_integrity() -> None:
+    """The other direction, which the module's docstring insists on.
+
+    ``not_applicable``, ``unsupported`` and ``blocked`` are statements about what
+    could be observed, not about harm done. Promoting the new member must not
+    turn an honest declaration into an integrity failure — that would make
+    declaring a limitation more expensive than hiding one.
+    """
+
+    for outcome in ("pass", "not_applicable", "unsupported", "blocked"):
+        results = (result("refuted_retrievable_at_full_standing", outcome),)
+        assert catastrophic_failures(results) == ()
+        assert family("f18", "alpha", results).status != "INTEGRITY_FAIL"
 
 
 def test_integrity_failure_suppresses_every_aggregate_for_that_provider() -> None:

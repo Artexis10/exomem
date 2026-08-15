@@ -117,12 +117,25 @@ def test_budget_refusal_does_not_consume_budget_and_stale_lock_recovers(tmp_path
 
 
 def test_manifest_refuses_unknown_versions_duplicates_and_nonterminal_finalization(tmp_path: Path) -> None:
+    from protocol.contracts import RATIFICATION_REPOSITORY_REVISION
     from protocol.manifest import ManifestError, finalize_manifest, load_manifest, start_manifest
 
     identity = _identity(Path("benchmarks/lme/fixtures/leaky.json"), 2)
-    start_manifest(tmp_path, run_id="run", dataset=identity, started_at="2026-01-01T00:00:00Z")
+    start_manifest(
+        tmp_path,
+        run_id="run",
+        dataset=identity,
+        started_at="2026-01-01T00:00:00Z",
+        contract_revision=RATIFICATION_REPOSITORY_REVISION,
+    )
     with pytest.raises(ManifestError):
-        start_manifest(tmp_path, run_id="run", dataset=identity, started_at="2026-01-01T00:00:00Z")
+        start_manifest(
+            tmp_path,
+            run_id="run",
+            dataset=identity,
+            started_at="2026-01-01T00:00:00Z",
+            contract_revision=RATIFICATION_REPOSITORY_REVISION,
+        )
     with pytest.raises(ManifestError):
         finalize_manifest(tmp_path, status="started", finalized_at="2026-01-01T00:00:01Z")
     raw = json.loads((tmp_path / "manifest.json").read_text())

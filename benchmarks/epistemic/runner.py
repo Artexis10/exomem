@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .amendments import require_family_released
 from .assertions import AssertionContext, AssertionResult
 from .broker import (
     InvocationReceiptRef,
@@ -126,6 +127,12 @@ def evaluate_scenario(
     are supplied by the caller, and each expectation resolves through the
     frozen assertion registry.
     """
+
+    # The loader refuses a withheld family, so a Scenario for one should not
+    # exist — but this function accepts a caller-built Scenario, and "should not
+    # exist" is not a guarantee. Evaluating is the moment a family influences a
+    # score, so the receipt is checked here too rather than trusted upstream.
+    require_family_released(scenario.family_id)
 
     observations = {} if phase_observations is None else phase_observations
     _validate_inputs(scenario, snapshots, observations)

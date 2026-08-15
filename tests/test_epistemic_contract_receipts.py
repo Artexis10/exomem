@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PREREG = ROOT / "benchmarks/epistemic/PREREGISTRATION.md"
 RECEIPT = ROOT / "benchmarks/epistemic/contracts/ratification.v1.json"
@@ -54,14 +53,24 @@ def _amendment(sequence: int, parent: str, amended: bytes, revision: str) -> byt
         "affected_sections": ["§6 Strategy decision gates"],
         "rationale": "A later policy clarification with no retroactive identity effect.",
         "effective_policy": "Applies to publication decisions at and after this revision.",
+        "ratifier": "Hugo Ander Kivi",
+        "acknowledged_on": "2026-08-12",
     }
     return (json.dumps(payload, sort_keys=True) + "\n").encode()
 
 
-def test_approved_preregistration_bytes_remain_unchanged_and_receipt_is_exact() -> None:
+def _ratified_preregistration_bytes() -> bytes:
+    return subprocess.run(
+        ("git", "-C", str(ROOT), "show", f"{RATIFICATION_REVISION}:benchmarks/epistemic/PREREGISTRATION.md"),
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+def test_approved_preregistration_base_and_receipt_remain_exact() -> None:
     from protocol.contracts import RatificationReceipt
 
-    assert _sha(PREREG.read_bytes()) == APPROVED_SHA256
+    assert _sha(_ratified_preregistration_bytes()) == APPROVED_SHA256
     payload = json.loads(RECEIPT.read_text(encoding="utf-8"))
     assert payload == _ratification_payload()
     assert RatificationReceipt.model_validate(payload).contract_sha256 == APPROVED_SHA256
@@ -196,7 +205,10 @@ class _NamedBytes:
         self.data = data
 
 def test_later_amendment_does_not_retroactively_invalidate_historical_identity() -> None:
-    from protocol.contracts import derive_identity_from_receipt_bytes, validate_preregistration_identity
+    from protocol.contracts import (
+        derive_identity_from_receipt_bytes,
+        validate_preregistration_identity,
+    )
 
     original, amended = b"v0", b"v1"
     rat_payload = _ratification_payload()
@@ -218,7 +230,8 @@ def test_later_amendment_does_not_retroactively_invalidate_historical_identity()
         ): amendment[1],
         ("d" * 40, rat_payload["contract_path"]): amended,
     }
-    applicable = lambda revision, pin: revision <= pin
+    def applicable(revision: str, pin: str) -> bool:
+        return revision <= pin
     introductions = {
         "benchmarks/epistemic/contracts/ratification.v1.json": ("b" * 40,),
         "benchmarks/epistemic/contracts/amendment-0001.v1.json": ("d" * 40,),
@@ -297,7 +310,7 @@ def test_git_tree_pin_always_requires_exact_approved_ratification_receipt_digest
     monkeypatch.setattr(
         contracts,
         "_git_show",
-        lambda _root, _revision, path: PREREG.read_bytes()
+        lambda _root, _revision, path: _ratified_preregistration_bytes()
         if path == contracts.CONTRACT_PATH
         else mutated,
     )
@@ -447,8 +460,7 @@ def _real_git(repo: Path, *args: str) -> str:
     completed = subprocess.run(
         ("git", "-C", str(repo), *args),
         check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env=environment,
         text=True,
     )
@@ -462,7 +474,10 @@ def _real_commit(repo: Path, message: str) -> str:
 
 
 def _real_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pending_first: bool = False,
 ) -> dict[str, object]:
     import protocol.contracts as contracts
 
@@ -489,8 +504,26 @@ def _real_history(
     amended_revision = _real_commit(repo, "amend preregistration")
     amendment = _amendment(1, _sha(original), amended, amended_revision)
     amendment_path = receipt_dir / "amendment-0001.v1.json"
-    amendment_path.write_bytes(amendment)
-    amendment_introduction = _real_commit(repo, "add amendment receipt")
+    pending_introduction = None
+    if pending_first:
+        pending_payload = json.loads(amendment)
+        pending_payload.update(
+            repository_revision=None,
+            ratifier=None,
+            acknowledged_on=None,
+        )
+        amendment_path.write_bytes(
+            (json.dumps(pending_payload, sort_keys=True) + "\n").encode()
+        )
+        pending_introduction = _real_commit(repo, "add pending amendment receipt")
+        acknowledged_payload = json.loads(amendment)
+        acknowledged_payload["repository_revision"] = pending_introduction
+        amendment = (json.dumps(acknowledged_payload, sort_keys=True) + "\n").encode()
+        amendment_path.write_bytes(amendment)
+        amendment_introduction = _real_commit(repo, "acknowledge amendment receipt")
+    else:
+        amendment_path.write_bytes(amendment)
+        amendment_introduction = _real_commit(repo, "add amendment receipt")
 
     monkeypatch.setattr(
         contracts, "RATIFICATION_REPOSITORY_REVISION", ratified_revision
@@ -508,6 +541,7 @@ def _real_history(
         "amended_revision": amended_revision,
         "amendment": amendment,
         "amendment_path": amendment_path,
+        "pending_introduction": pending_introduction,
         "amendment_introduction": amendment_introduction,
     }
 
@@ -541,6 +575,22 @@ def test_receipt_git_history_derives_document_then_receipt_introductions(
         "string",
         "null",
     }
+
+
+def test_receipt_git_history_allows_one_pending_to_acknowledged_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    history = _real_history(tmp_path, monkeypatch, pending_first=True)
+
+    identity = history["contracts"].derive_preregistration_identity(
+        history["repo"], contract_revision=history["amendment_introduction"]
+    )
+
+    assert history["pending_introduction"] == identity.amendments[0].contract.repository_revision
+    assert (
+        identity.amendments[0].receipt.introduction_revision
+        == history["amendment_introduction"]
+    )
 
 
 @pytest.mark.parametrize("field", ["rationale", "effective_policy"])

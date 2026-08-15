@@ -48,23 +48,45 @@ _FULL_UPSERT_COMPONENTS = frozenset(
 )
 
 
-def _withdraw_unbridgeable_corpus_consumers(vault_root: Path) -> None:
-    """Fail closed when an exact filesystem delta could not be published.
+def _evict_corpus_projection_consumers(vault_root: Path) -> None:
+    """Withdraw the same-vault RAM projections after a publication failure.
 
-    Incremental resolver, inbound, graph, and semantic-corpus projections may
-    advance only from one retained event suffix.  Once publication fails, the
-    suffix is unknowable: make the registry cold and evict the same-vault RAM
-    consumers so their next read derives directly from human-owned files.
-    Persisted graph readers also become unavailable because their old marker no
-    longer matches the cold disk projection.
+    Incremental resolver, inbound, and semantic-corpus projections may advance
+    only from one retained event suffix.  Once publication fails their suffix
+    is unknowable, so drop them and let the next read derive directly from
+    human-owned files.
+
+    This is the WHOLE correct response when only a projection failed to
+    publish: the event registry observed and recorded every event, so vault
+    freshness still describes the vault accurately and must not be cooled.  A
+    persisted graph reader that stayed behind is fenced by state it owns — its
+    stored recall-projection identity no longer equals the current one, it
+    re-proves source bytes and resolver topology directly, and an
+    unacknowledged writer checkpoint already makes its sidecar non-current.
+    A cold registry was never that fence; it only made every later caller pay
+    a full stat census of the vault.
     """
-    from . import find, freshness, semantic_contract, vault
+    from . import find, semantic_contract, vault
 
-    freshness.invalidate(vault_root)
-    freshness.mark_external_pending(vault_root)
     semantic_contract.evict_corpus_context(vault_root)
     find.evict_resolver_caches(vault_root)
     vault.evict_inbound_index(vault_root)
+
+
+def _withdraw_unbridgeable_corpus_consumers(vault_root: Path) -> None:
+    """Fail closed when the event registry itself could not advance.
+
+    Registry loss: the registry can no longer name the current file set, so NO
+    consumer's retained suffix is bridgeable and a cold registry is this
+    failure's own defined signal — the watcher's periodic reconcile re-walks
+    and clears it.  Reserved for a genuine registry-advance failure; a
+    downstream projection's publish failure must never be read as this one.
+    """
+    from . import freshness
+
+    freshness.invalidate(vault_root)
+    freshness.mark_external_pending(vault_root)
+    _evict_corpus_projection_consumers(vault_root)
 
 
 def publish_corpus_delta(
@@ -78,7 +100,11 @@ def publish_corpus_delta(
 
     A caller may retry the *same complete batch* once for a transient failure.
     Persistent failure withdraws every checkpoint-consuming projection rather
-    than allowing a path-local callback to bless stale global state.
+    than allowing a path-local callback to bless stale global state — but only
+    as far as the failure justifies.  The publish seam reports which of its
+    two halves broke: a registry-advance failure is registry loss and takes
+    the full withdraw, while a corpus-patch failure leaves the registry intact
+    and withdraws the RAM projections only.
     """
     from . import semantic_contract
 
@@ -87,23 +113,34 @@ def publish_corpus_delta(
     if not changed_values and not deleted_values:
         return True
     bounded_attempts = max(1, min(int(attempts), 2))
+    failure: semantic_contract.CorpusPublicationFailure | None = None
     for attempt in range(1, bounded_attempts + 1):
         try:
-            semantic_contract.publish_corpus_files_changed(
+            failure = semantic_contract.publish_corpus_files_changed_classified(
                 vault_root,
                 changed=changed_values,
                 deleted=deleted_values,
             )
-        except Exception:  # noqa: BLE001 - canonical bytes already committed
-            log.warning(
-                "canonical corpus publication failed (attempt %d/%d)",
-                attempt,
-                bounded_attempts,
-                exc_info=True,
+        except Exception as error:  # noqa: BLE001 - canonical bytes already committed
+            # Escaped the classified seam, so it belongs to neither half.  An
+            # unattributable failure is treated as registry loss: the
+            # conservative reading, never the cheap one.
+            failure = semantic_contract.CorpusPublicationFailure(
+                semantic_contract.CORPUS_PUBLICATION_REGISTRY_ADVANCE, error
             )
-        else:
+        if failure is None:
             return True
-    _withdraw_unbridgeable_corpus_consumers(vault_root)
+        log.warning(
+            "canonical corpus publication failed (attempt %d/%d, stage=%s)",
+            attempt,
+            bounded_attempts,
+            failure.stage,
+            exc_info=failure.error,
+        )
+    if failure is not None and failure.registry_intact:
+        _evict_corpus_projection_consumers(vault_root)
+    else:
+        _withdraw_unbridgeable_corpus_consumers(vault_root)
     return False
 
 
@@ -445,7 +482,6 @@ def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
     rels = list(dict.fromkeys(rels))
     from . import (
         claims,
-        embedding_index,
         embeddings,
         epistemic_graph,
         index_paths,
@@ -468,7 +504,7 @@ def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
     if index_paths.sidecar_path(vault_root).exists():
         succeeded &= _purge(
             "embeddings",
-            lambda: embedding_index.EmbeddingIndex(vault_root).purge_paths_if_present(rels),
+            lambda: embeddings.get_embedding_index(vault_root).purge_paths_if_present(rels),
         )
     graph_rels = [
         rel for rel in rels if recall_policy.is_recall_candidate(vault_root, vault_root / rel)

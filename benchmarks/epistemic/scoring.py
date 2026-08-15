@@ -26,6 +26,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from .amendments import require_family_released
 from .assertions import AssertionResult
 from .catastrophic import PROVIDER_INTEGRITY_FAIL, PROVIDER_OK, catastrophic_failures
 from .snapshot import StrictModel
@@ -73,6 +74,11 @@ def assemble_family(
     assertion_results: Sequence[AssertionResult] = (),
 ) -> FamilyResult:
     """Score one family row: catastrophic first, then blocked, then comparable."""
+
+    # A family row IS the comparative claim. This takes a bare family id rather
+    # than a Scenario, so it is the one surface where a withheld family could
+    # reach a published table without passing the loader.
+    require_family_released(family_id)
 
     failures = catastrophic_failures(assertion_results)
     if failures:
