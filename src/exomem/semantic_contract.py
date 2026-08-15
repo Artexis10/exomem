@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -11,7 +12,8 @@ import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -24,6 +26,7 @@ from . import (
     freshness,
     memory_refs,
     memory_schema,
+    metrics,
     relation_registry,
     semantic_authoring,
     semantic_language_registry,
@@ -1236,6 +1239,50 @@ def _corpus_cache_key(root: Path) -> tuple[str, str]:
     )
 
 
+# Who is asking for a corpus context. The corpus walk/build is the single
+# most expensive shared step on both the read and the write path, and an
+# aggregate duration cannot say whether a slow vault is slow for writers, for
+# readers, or only during warm-up. A contextvar (not a parameter) because the
+# attribution has to survive the several layers between an entrypoint and
+# `_corpus_census` without changing any of their signatures.
+_CALL_CONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "exomem_semantic_call_context", default="unknown"
+)
+
+
+def current_call_context() -> str:
+    """The caller label attached to corpus metrics; ``"unknown"`` by default."""
+    return _CALL_CONTEXT.get()
+
+
+@contextmanager
+def call_context(name: str) -> Iterator[None]:
+    """Label every corpus metric emitted inside this block with ``name``."""
+    token = _CALL_CONTEXT.set(str(name))
+    try:
+        yield
+    finally:
+        _CALL_CONTEXT.reset(token)
+
+
+def _observe_census_walk(elapsed_ms: float, outcome: str) -> None:
+    """One full `_corpus_census` stat-walk, labelled by what it decided."""
+    metrics.observe_duration_ms(
+        "corpus.census_walk_ms",
+        elapsed_ms,
+        {"caller": current_call_context(), "outcome": outcome},
+    )
+
+
+def _timed_corpus_census(root: Path, outcome: str) -> tuple | None:
+    """A census walk whose disposition is already known when it starts."""
+    started = time.perf_counter()
+    try:
+        return _corpus_census(root)
+    finally:
+        _observe_census_walk((time.perf_counter() - started) * 1000.0, outcome)
+
+
 def _corpus_census(root: Path) -> tuple | None:
     """Stat census of every filesystem input ``build_corpus_context`` reads.
 
@@ -1370,7 +1417,11 @@ def corpus_validity_token(root: Path, *, corpus_census: tuple | None = None) -> 
     a second stat-walk — at thousands of pages the walk dominates write
     latency, and the CI write-latency gate holds preflight to one walk total.
     """
-    corpus = corpus_census if corpus_census is not None else _corpus_census(root)
+    corpus = (
+        corpus_census
+        if corpus_census is not None
+        else _timed_corpus_census(root, "census")
+    )
     if corpus is None:
         return None
     review = _relation_review_census(root)
@@ -1882,10 +1933,12 @@ def build_corpus_context(
                             len(entry[1].pages),
                             census_ms,
                         )
+                        _observe_census_walk(census_ms, "hit")
                         return entry[1]
                 if entry is not None and entry[0] == census:
                     with _CORPUS_CONTEXT_CACHE_LOCK:
                         if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
+                            _observe_census_walk(census_ms, "hit")
                             return entry[1]
             if entry is not None:
                 changed_paths = _markdown_census_delta(entry[0], census)
@@ -1899,7 +1952,7 @@ def build_corpus_context(
                         language=language,
                     )
                     with _CORPUS_CONTEXT_UPDATE_LOCK:
-                        confirmed = _corpus_census(root)
+                        confirmed = _timed_corpus_census(root, "census")
                         with _CORPUS_CONTEXT_CACHE_LOCK:
                             current = _CORPUS_CONTEXT_CACHE.get(cache_key)
                             if confirmed == census and current is entry:
@@ -1918,11 +1971,16 @@ def build_corpus_context(
                                     (time.perf_counter() - started) * 1000.0,
                                     census_ms,
                                 )
+                                _observe_census_walk(census_ms, "patch")
                                 return context
                             if current is not None and current is not entry:
+                                _observe_census_walk(census_ms, "hit")
                                 return current[1]
         else:
             census = None
+        # Nothing cached could answer this walk: whatever happens below, the
+        # walk paid for a rebuild (or for waiting on someone else's).
+        _observe_census_walk(census_ms, "rebuild")
 
     flight: _CorpusContextFlight | None = None
     if census is not None and cache_key is not None:
@@ -1971,6 +2029,11 @@ def build_corpus_context(
             language=language,
         )
         build_ms = (time.perf_counter() - started) * 1000.0
+        metrics.observe_duration_ms(
+            "corpus.build_ms",
+            build_ms,
+            {"caller": current_call_context(), "outcome": "rebuild"},
+        )
         stored = False
         if census is not None and cache_key is not None:
             with _CORPUS_CONTEXT_UPDATE_LOCK:
@@ -1980,7 +2043,7 @@ def build_corpus_context(
                 # freshness+cache updates, absorb exact deltas, then stamp the same
                 # state atomically so a newer event context cannot be overwritten.
                 for _ in range(3):
-                    confirmed = _corpus_census(root)
+                    confirmed = _timed_corpus_census(root, "census")
                     if confirmed == stable_census:
                         break
                     if confirmed is None:

@@ -14,12 +14,14 @@ from typing import Any, Literal
 from . import (
     access,
     edit,
+    semantic_contract,
     semantic_index,
     semantic_language_registry,
     semantic_writes,
     temporal,
     vault,
 )
+from .mutation_timings import MutationTimings, write_timings_enabled
 
 ObserveOperation = Literal["add", "update", "remove", "validate"]
 
@@ -221,19 +223,25 @@ def observe_memory(
         after_body,
         today=today or dt.date.today(),
     )
+    # One collector spans preflight+commit, so the response accounts for the
+    # whole governed write rather than two unrelated halves. `validate` never
+    # commits, so it stays entirely uninstrumented and byte-identical.
+    timings = MutationTimings() if op != "validate" else None
     try:
-        preflight = semantic_writes.preflight_existing(
-            vault_root,
-            path=editable.rel_path,
-            after_source=after_source,
-            operation="observe",
-            expected_before_hash=expected_hash or vault.content_hash(editable.original_text),
-            transition_token=transition_token,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
-            validate_only=operation == "validate",
-        )
+        with semantic_contract.call_context("write"):
+            preflight = semantic_writes.preflight_existing(
+                vault_root,
+                path=editable.rel_path,
+                after_source=after_source,
+                operation="observe",
+                expected_before_hash=expected_hash or vault.content_hash(editable.original_text),
+                transition_token=transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
+                validate_only=operation == "validate",
+                timings=timings,
+            )
     except semantic_writes.SemanticWriteError as error:
         raise ObserveMemoryError(error.code, error.reason) from error
 
@@ -299,11 +307,13 @@ def observe_memory(
             "LOG_PLAN_CONFLICT", "observe log update could not be planned safely"
         ) from error
     try:
-        committed = semantic_writes.commit_existing(
-            vault_root,
-            preflight=preflight,
-            auxiliary_writes=log_plan.writes,
-        )
+        with semantic_contract.call_context("write"):
+            committed = semantic_writes.commit_existing(
+                vault_root,
+                preflight=preflight,
+                auxiliary_writes=log_plan.writes,
+                timings=timings,
+            )
     except semantic_writes.SemanticWriteError as error:
         raise ObserveMemoryError(error.code, error.reason) from error
 
@@ -318,6 +328,9 @@ def observe_memory(
         unit=final_unit,
         removed_unit=removed_unit,
         semantic=committed.as_dict(),
+        timings=(
+            timings.as_dict() if timings is not None and write_timings_enabled() else None
+        ),
     )
 
 
@@ -665,6 +678,7 @@ def _result(
     unit: Any | None,
     removed_unit: Any | None,
     semantic: dict[str, Any],
+    timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "operation": operation,
@@ -674,6 +688,8 @@ def _result(
         "after_hash": after_hash,
         "semantic": semantic,
     }
+    if timings is not None:
+        value["timings"] = timings
     if unit is not None:
         value["unit_ref"] = unit.unit_ref
         value["unit"] = unit.to_dict()
