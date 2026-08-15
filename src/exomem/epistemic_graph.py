@@ -541,7 +541,9 @@ def _reap_preserved_temporaries(
     try:
         if not directory.is_dir():
             return []
-        entries = list(directory.iterdir())
+        # Prefix-filtered, like `graph_sync.sweep_abandoned_temporaries`: the KB
+        # directory of a large vault must not be enumerated in full for this.
+        entries = list(directory.glob(".graph-rebuild-*"))
     except OSError:
         return []
     active = graph_sync.live_temporary_paths()
