@@ -42,7 +42,14 @@ from .providers.lifecycle import (
 
 from .adapter import LmeExomemAdapter, lme_profile
 from .bounds import BoundRun, Hypothesis, run_bounds
-from .dataset import LmeDataset, QUESTION_TYPES, dump_dataset, load_dataset_bytes, stable_dataset_bytes
+from .dataset import (
+    DatasetValidationError,
+    LmeDataset,
+    QUESTION_TYPES,
+    dump_dataset,
+    load_dataset_bytes,
+    stable_dataset_bytes,
+)
 from .fetch import file_sha256, verify_sha256
 from .judge_io import _bound_ids, official_judge_commands
 from .reader import ABSTENTION, ApiReader, Reader, StubReader, _require_approval
@@ -283,17 +290,19 @@ def _canonical_selection(dataset: LmeDataset, dataset_path: Path, config: RunCon
         raise ValueError(f"canonical selection artifact is invalid: {exc}") from exc
     if artifact["source_identity"] != CANONICAL_LME_S_SOURCE:
         raise ValueError("canonical selection artifact source identity differs")
+    # Regenerate against the full source census, not the rows this loader
+    # accepted: the cohort is a property of the frozen source, and selecting
+    # from a subset would silently produce a different, smaller-universe cohort.
     regenerated = select_lme_s_25(
-        [{"question_id": question.question_id, "question_type": question.question_type} for question in dataset.questions],
+        [{"question_id": identity, "question_type": kind} for identity, kind in dataset.census],
         source=CANONICAL_LME_S_SOURCE,
     )
     if artifact["target_question_ids"] != regenerated["target_question_ids"]:
         raise ValueError("canonical selection artifact does not match regenerated membership and order")
-    questions = {question.question_id: question for question in dataset.questions}
     selected = artifact["target_question_ids"]
-    if any(question_id not in questions for question_id in selected):
-        raise ValueError("canonical selection artifact names a missing dataset question")
-    return LmeDataset(tuple(questions[question_id] for question_id in selected)), {
+    # `require` re-raises a deferred validation error, so a cohort row that
+    # could not be loaded fails loudly here rather than being quietly dropped.
+    return LmeDataset(tuple(dataset.require(question_id) for question_id in selected)), {
         "selection_artifact_path": "benchmarks/equivalence/subsets/lme-s-25.json",
         "selection_artifact_sha256": hashlib.sha256(raw).hexdigest(),
         "selection_algorithm_version": artifact["selection_algorithm_version"],
@@ -584,6 +593,13 @@ def execute_run(
     if config.canonical_selection:
         dataset, selection_pins = _canonical_selection(parent_dataset, dataset_path, config)
     else:
+        # Deferral is scoped to cohort runs. Every other path still covers the
+        # whole dataset, so an unloadable row must refuse here rather than
+        # quietly vanish from the denominator.
+        if parent_dataset.deferred_errors:
+            raise DatasetValidationError(
+                sorted(parent_dataset.deferred_errors.values())[0]
+            )
         dataset = _select_pilot(parent_dataset, config.pilot) if config.pilot is not None else parent_dataset
     dataset_identity = DatasetIdentity(
         id="longmemeval",
