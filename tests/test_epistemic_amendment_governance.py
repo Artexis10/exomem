@@ -11,13 +11,17 @@ BASE_BYTES = b"ratified preregistration\n"
 BASE_SHA256 = hashlib.sha256(BASE_BYTES).hexdigest()
 FOUNDER = "Hugo Ander Kivi"
 ROOT = Path(__file__).resolve().parents[1]
-PENDING_RECEIPT = (
+LOOP_CLOSURE_RECEIPT = (
     ROOT
     / "benchmarks/epistemic/contracts/amendment-2026-08-loop-closure.v1.json"
 )
-#: Families the sequence-1 amendment introduced, and therefore withholds while
-#: its receipt is pending.
-WITHHELD = ("f15", "f16", "f17", "f18", "f19")
+#: The squash commit on ``main`` carrying the amended pre-registration and its
+#: then-pending receipt.  The founder pinned this at acknowledgment, and it is a
+#: genuine ancestor of every later run pin — a pre-merge branch sha would not be.
+ACKNOWLEDGED_REVISION = "46b000e878a60dda9d4fa215c0212ade78e4eede"
+#: Families the sequence-1 amendment introduced.  Withheld until 2026-08-15;
+#: released by the founder acknowledgment recorded in the receipt.
+AMENDED_FAMILIES = ("f15", "f16", "f17", "f18", "f19")
 DATASET = {
     "id": "fixture",
     "variant": "mini",
@@ -78,6 +82,51 @@ def _scenario_yaml(family_id: str, assertion: str) -> str:
     import json
 
     return json.dumps(_scenario_payload(family_id, assertion))
+
+
+def _snapshot(ref: str):
+    """One neutral projected state snapshot, enough to bind an expectation.
+
+    Only needed since acknowledgment: while the amendment was pending,
+    ``evaluate_scenario`` refused an f15-f19 scenario before it ever looked at
+    the snapshots, so no state was required to prove the refusal.
+    """
+
+    from epistemic.snapshot import (
+        EpistemicStateSnapshot,
+        FieldDeclaration,
+        ProjectorMeta,
+        StateItem,
+    )
+
+    return EpistemicStateSnapshot(
+        provider="fixture",
+        phase=ref,
+        taken_at="2026-08-15T00:00:00Z",
+        items=(StateItem(id="claim", kind="claim", title="claim", text="text", current="yes"),),
+        declarations=tuple(
+            FieldDeclaration(
+                field=field,
+                status="declared",
+                evidence=f"benchmarks/epistemic/PREREGISTRATION.md:39 ({field})",
+            )
+            for field in (
+                "kind",
+                "current",
+                "external_edit",
+                "locator",
+                "export",
+                "review_state",
+            )
+        ),
+        projector=ProjectorMeta(
+            name="fixture-projector",
+            version="0.1.0",
+            author="benchmark-harness",
+            endpoints_used=("fixture:in-memory",),
+            loc=1,
+        ),
+    )
 
 
 def _receipt(
@@ -473,21 +522,39 @@ def test_frozen_amendment_text_is_acknowledgment_lifecycle_neutral() -> None:
     assert "awaiting founder acknowledgment" not in text.lower()
 
 
-def test_real_loop_closure_receipt_is_explicitly_pending_founder_acknowledgment() -> None:
+def test_real_loop_closure_receipt_records_the_founder_acknowledgment() -> None:
+    """The one decision the contract reserved for the founder, now recorded.
+
+    Acknowledgment adds exactly four fields and changes nothing else: the
+    amendment's substance was frozen when it was written, and
+    ``test_receipt_git_history_refuses_later_amendment_receipt_mutation`` is what
+    holds the rest of the receipt — ``effective_policy`` included — immutable
+    across the transition.
+    """
+
     from protocol.contracts import AmendmentReceipt
 
-    receipt = AmendmentReceipt.model_validate_json(PENDING_RECEIPT.read_bytes())
+    receipt = AmendmentReceipt.model_validate_json(LOOP_CLOSURE_RECEIPT.read_bytes())
     assert receipt.parent_contract_sha256 == (
         "21aa5a8815038b82358336798b10afd8d3ffbd9739c8da597955bd14d8d962e3"
     )
     assert receipt.contract_sha256 == hashlib.sha256(
         (ROOT / receipt.contract_path).read_bytes()
     ).hexdigest()
-    assert receipt.ratifier is None
-    assert receipt.acknowledged_on is None
-    assert receipt.catastrophic_set_decision is None
-    assert receipt.repository_revision is None
-    assert receipt.acknowledgment_status == "pending"
+    assert receipt.ratifier == FOUNDER
+    assert receipt.acknowledged_on == "2026-08-15"
+    assert receipt.catastrophic_set_decision == "accept"
+    assert receipt.repository_revision == ACKNOWLEDGED_REVISION
+    assert receipt.acknowledgment_status == "acknowledged"
+    # Unchanged from introduction, and deliberately so.  The sentence describes
+    # the policy the amendment carries, not the amendment's current status; the
+    # status lives in the four fields above.  Rewriting it here would put the
+    # receipt outside the single allowed pending-to-acknowledged transition and
+    # break the very identity chain this acknowledgment closes.
+    assert receipt.effective_policy == (
+        "Applies only after founder acknowledgment; until then f15-f19 cannot "
+        "support comparative runs or claims."
+    )
 
 
 def test_manifest_schema_constrains_each_lineage_receipt_identity_to_sha256() -> None:
@@ -502,29 +569,32 @@ def test_manifest_schema_constrains_each_lineage_receipt_identity_to_sha256() ->
     assert items["pattern"] == "^[0-9a-f]{64}$"
 
 
-def test_real_working_chain_folds_while_acknowledgment_is_pending() -> None:
-    """A pending amendment is a fact about the contract, not a repository outage.
+def test_real_working_chain_folds_after_acknowledgment() -> None:
+    """Acknowledgment changes the gate, not the digests.
 
-    The chain still folds from the ratified base to the working bytes: the
-    digests bind exactly as they will after acknowledgment.  What acknowledgment
-    gates is the *use* of the families the amendment introduced, which is
-    asserted separately below.
+    The chain folded from the ratified base to the working bytes while the
+    receipt was pending, and it folds to the identical digest now: acknowledgment
+    is a statement about *use*, and touches nothing the fold depends on.  That it
+    is unchanged here is the evidence that the founder's four fields did not
+    disturb the contract identity.
     """
 
     from protocol.contracts import AmendmentReceipt, validate_working_preregistration
 
-    receipt = AmendmentReceipt.model_validate_json(PENDING_RECEIPT.read_bytes())
-    assert receipt.acknowledgment_status == "pending"
+    receipt = AmendmentReceipt.model_validate_json(LOOP_CLOSURE_RECEIPT.read_bytes())
+    assert receipt.acknowledgment_status == "acknowledged"
     assert validate_working_preregistration(ROOT) == receipt.contract_sha256
 
 
-def test_pending_amendment_still_derives_a_complete_typed_identity() -> None:
-    """Identity derivation must reconstruct a pending amendment, not refuse it.
+def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
+    """Derivation now takes the amended-document revision from the founder.
 
-    Every digest and ancestry binding still holds.  The one field the founder
-    has not yet supplied — the amended-document revision — is taken from the
-    receipt's uniquely reconstructed introduction commit, which is where the
-    amendment actually landed.
+    While pending, the amended-document revision was *reconstructed* from the
+    receipt's unique introduction commit, because the founder could not pin one
+    yet — a pre-merge branch sha does not survive a squash merge.  Acknowledgment
+    supplies the real one, so the two now diverge: the contract revision is the
+    merged commit that carries the amended document, while the receipt's
+    introduction revision is the later commit that acknowledged it.
     """
 
     from protocol.contracts import derive_preregistration_identity
@@ -533,43 +603,79 @@ def test_pending_amendment_still_derives_a_complete_typed_identity() -> None:
 
     assert len(identity.amendments) == 1
     amendment = identity.amendments[0]
-    assert amendment.acknowledgment_status == "pending"
+    assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
-    assert amendment.contract.repository_revision == amendment.receipt.introduction_revision
+    assert amendment.contract.repository_revision == ACKNOWLEDGED_REVISION
+    assert amendment.contract.repository_revision != amendment.receipt.introduction_revision
     assert identity.effective.sha256 == amendment.contract.sha256
-    assert identity.withheld_family_ids == frozenset(
-        {"f15", "f16", "f17", "f18", "f19"}
-    )
+    assert identity.effective.repository_revision == ACKNOWLEDGED_REVISION
+    assert identity.pending_amendments == ()
+    assert identity.withheld_family_ids == frozenset()
 
 
-def test_pending_amendment_withholds_only_the_families_it_introduced() -> None:
+def test_acknowledged_amendment_withholds_nothing() -> None:
+    """The gate that refused f15-f19 now lets every one of them through.
+
+    This is the whole observable effect of the acknowledgment at the contract
+    layer: the same call, on the same families, that raised
+    ``AmendmentAcknowledgmentPendingError`` before 2026-08-15 now returns.
+    """
+
     from protocol.contracts import (
-        AmendmentAcknowledgmentPendingError,
         derive_preregistration_identity,
         require_amended_families_released,
     )
 
     identity = derive_preregistration_identity(ROOT)
 
-    # Ratified-base families are untouched by a pending amendment.
-    require_amended_families_released(identity, ("f01", "f07", "f14"))
     require_amended_families_released(identity, ())
+    require_amended_families_released(identity, ("f01", "f07", "f14"))
+    for family_id in AMENDED_FAMILIES:
+        require_amended_families_released(identity, (family_id,))
+    require_amended_families_released(identity, ("f01", *AMENDED_FAMILIES))
 
-    for family_id in ("f15", "f16", "f17", "f18", "f19"):
+
+def test_the_pending_refusal_is_still_armed_for_a_future_amendment() -> None:
+    """Release is a property of *this* receipt, not a retired mechanism.
+
+    Sequence 1 is acknowledged, so nothing real is withheld.  The refusal that
+    withheld it must still fire for the next unacknowledged amendment, which is
+    asserted here against a synthetic identity rather than the real one.
+    """
+
+    from protocol.contracts import (
+        AmendmentAcknowledgmentPendingError,
+        AmendmentIdentity,
+        derive_preregistration_identity,
+        require_amended_families_released,
+    )
+
+    identity = derive_preregistration_identity(ROOT)
+    still_pending = identity.model_copy(
+        update={
+            "amendments": (
+                identity.amendments[0].model_copy(
+                    update={"acknowledgment_status": "pending"}
+                ),
+            )
+        }
+    )
+    assert isinstance(still_pending.amendments[0], AmendmentIdentity)
+    assert still_pending.withheld_family_ids == frozenset(AMENDED_FAMILIES)
+
+    require_amended_families_released(still_pending, ("f01", "f07", "f14"))
+    for family_id in AMENDED_FAMILIES:
         with pytest.raises(
             AmendmentAcknowledgmentPendingError,
             match=rf"amendment sequence 1 .*pending.*{family_id}",
         ):
-            require_amended_families_released(identity, (family_id,))
-
-    with pytest.raises(AmendmentAcknowledgmentPendingError, match="f18"):
-        require_amended_families_released(identity, ("f01", "f18"))
+            require_amended_families_released(still_pending, (family_id,))
 
 
-def test_pending_amendment_does_not_block_an_unrelated_run_manifest(
+def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
     tmp_path,
 ) -> None:
-    """The narrowing that matters: unrelated work is not collateral damage."""
+    """The acknowledgment is legible in the artifact, not just in the gate."""
 
     from protocol.manifest import start_manifest
 
@@ -588,18 +694,22 @@ def test_pending_amendment_does_not_block_an_unrelated_run_manifest(
     )
 
     assert manifest.status == "started"
-    # The pending amendment is recorded, not hidden: a reader of this manifest
-    # can see the run executed against an unacknowledged contract state.
-    assert manifest.preregistration_identity.amendments[0].acknowledgment_status == "pending"
+    # A reader of this manifest can see the run executed against an acknowledged
+    # contract state — the same field that read "pending" before 2026-08-15.
+    assert (
+        manifest.preregistration_identity.amendments[0].acknowledgment_status
+        == "acknowledged"
+    )
+    assert manifest.preregistration_identity.withheld_family_ids == frozenset()
     assert manifest.preregistration_lineage is not None
 
 
-def test_pending_amendment_refuses_a_run_manifest_declaring_an_amended_family(
+def test_acknowledged_amendment_admits_a_run_manifest_declaring_an_amended_family(
     tmp_path,
 ) -> None:
-    """The fail-closed guarantee, aimed: no run may declare f15-f19 while pending."""
+    """The released guarantee: a run may now declare f15-f19 and be recorded."""
 
-    from protocol.manifest import ManifestError, start_manifest
+    from protocol.manifest import start_manifest
 
     dataset = {
         "id": "fixture",
@@ -610,33 +720,33 @@ def test_pending_amendment_refuses_a_run_manifest_declaring_an_amended_family(
         "case_count": 1,
     }
 
-    with pytest.raises(ManifestError, match="amendment pending.*f18"):
-        start_manifest(
-            tmp_path / "amended",
-            run_id="amended",
-            dataset=dataset,
-            started_at="2026-08-15T00:00:00Z",
-            family_ids=("f01", "f18"),
-        )
-    # Refused before any artifact exists: nothing was written to disk.
-    assert not (tmp_path / "amended" / "manifest.json").exists()
-
     started = start_manifest(
+        tmp_path / "amended",
+        run_id="amended",
+        dataset=dataset,
+        started_at="2026-08-15T00:00:00Z",
+        family_ids=("f01", *AMENDED_FAMILIES),
+    )
+    assert started.status == "started"
+    # The artifact this call used to refuse to create now exists on disk.
+    assert (tmp_path / "amended" / "manifest.json").exists()
+
+    ratified_only = start_manifest(
         tmp_path / "released",
         run_id="released",
         dataset=dataset,
         started_at="2026-08-15T00:00:00Z",
         family_ids=("f01", "f14"),
     )
-    assert started.status == "started"
+    assert ratified_only.status == "started"
 
 
-def test_pending_amendment_refuses_a_claim_read_back_from_a_recorded_manifest(
+def test_acknowledged_amendment_admits_a_claim_read_back_from_a_manifest(
     tmp_path,
 ) -> None:
-    """A manifest recorded while pending may not be replayed into an f15-f19 claim."""
+    """A recorded manifest may now be replayed into an f15-f19 claim."""
 
-    from protocol.manifest import ManifestError, finalize_manifest, load_manifest, start_manifest
+    from protocol.manifest import finalize_manifest, load_manifest, start_manifest
 
     run_dir = tmp_path / "recorded"
     start_manifest(
@@ -651,13 +761,14 @@ def test_pending_amendment_refuses_a_claim_read_back_from_a_recorded_manifest(
             "case_count": 1,
         },
         started_at="2026-08-15T00:00:00Z",
+        family_ids=("f01", *AMENDED_FAMILIES),
     )
     finalize_manifest(run_dir, status="VALID", finalized_at="2026-08-15T00:01:00Z")
 
     assert load_manifest(run_dir).run_id == "recorded"
     assert load_manifest(run_dir, family_ids=("f01",)).run_id == "recorded"
-    with pytest.raises(ManifestError, match="amendment pending.*f15"):
-        load_manifest(run_dir, family_ids=("f15",))
+    for family_id in AMENDED_FAMILIES:
+        assert load_manifest(run_dir, family_ids=(family_id,)).run_id == "recorded"
 
 
 # --------------------------------------------------------------------------
@@ -675,7 +786,7 @@ def test_amended_families_are_registered_against_the_amended_document() -> None:
         PREREGISTERED_FAMILY_IDS,
     )
 
-    for family_id in WITHHELD:
+    for family_id in AMENDED_FAMILIES:
         assert family_id in PREREGISTERED_FAMILY_IDS
         assert AMENDMENT_INTRODUCED_FAMILIES[family_id] == 1
     for assertion in (
@@ -704,30 +815,54 @@ def test_registry_mirror_of_introduced_families_matches_the_receipt_chain() -> N
     assert dict(AMENDMENT_INTRODUCED_FAMILIES) == derived
 
 
-def test_pending_amendment_refuses_to_load_a_scenario_for_an_amended_family() -> None:
-    """The non-bypassable gate: an f15-f19 scenario cannot be constructed at all.
+def test_acknowledged_amendment_lets_an_amended_family_scenario_load() -> None:
+    """The point of the acknowledgment: f15-f19 scenarios now exist.
 
-    Before f15-f19 were registered, the frozen §1 table refused these scenarios
-    incidentally — the family simply was not known. Registering them removes
-    that accident, so the receipt has to refuse them on purpose, at the same
-    load-time choke point.
+    This is the same loader call, on the same payloads, that raised
+    ``ScenarioLoadError: ... amendment sequence 1 ... pending`` for every one of
+    these families until 2026-08-15.  Nothing downstream can run, score or claim
+    a family it cannot first load, so this succeeding is what "released" means
+    in practice.
+
+    The payloads are built in-test by :func:`_scenario_payload` rather than read
+    from ``benchmarks/epistemic/fixtures/``: no f15-f19 scenario fixtures exist
+    yet, and authoring them is a separate change.  The loader exercised here is
+    the real one.
     """
 
-    from epistemic.schema import ScenarioLoadError, load_scenario_text
+    from epistemic.schema import load_scenario_text
 
-    for family_id in WITHHELD:
-        with pytest.raises(
-            ScenarioLoadError,
-            match=rf"amendment sequence 1 .*pending.*{family_id}",
-        ):
-            load_scenario_text(
-                _scenario_yaml(family_id, "refuted_retrievable_at_full_standing"),
-                source=f"{family_id}.yaml",
-            )
+    for family_id in AMENDED_FAMILIES:
+        scenario = load_scenario_text(
+            _scenario_yaml(family_id, "refuted_retrievable_at_full_standing"),
+            source=f"{family_id}.yaml",
+        )
+        assert scenario.family_id == family_id
 
 
-def test_ratified_base_families_still_load_while_the_amendment_is_pending() -> None:
-    """The narrowing must not become a blanket refusal of scenario loading."""
+def test_the_loader_gate_reports_nothing_withheld() -> None:
+    """The loader's own view of release, asserted directly at the gate.
+
+    ``epistemic.amendments`` answers "is amendment N acknowledged?" from the
+    working receipt bytes without Git, which is the cheap path the loader takes
+    per scenario.  It must now agree with the Git-derived identity that nothing
+    is withheld.
+    """
+
+    from epistemic.amendments import (
+        require_family_released,
+        reset_cache,
+        withheld_family_ids,
+    )
+
+    reset_cache()
+    assert withheld_family_ids(ROOT) == frozenset()
+    for family_id in AMENDED_FAMILIES:
+        require_family_released(family_id, repo_root=ROOT)
+
+
+def test_ratified_base_families_still_load() -> None:
+    """The release must not disturb the families that were never withheld."""
 
     from epistemic.schema import load_scenario_text
 
@@ -738,11 +873,11 @@ def test_ratified_base_families_still_load_while_the_amendment_is_pending() -> N
 
 
 def test_declared_scenario_families_reach_the_manifest_gate(tmp_path) -> None:
-    """Defence in depth: a Scenario built without the loader is still refused.
+    """The manifest still names every declared family — it now admits them all.
 
-    The loader is the choke point, but a run manifest is the protocol's
-    mandatory pre-provider artifact, so the families a run declares must also
-    be named to it. This is the wiring that made the gate stop being latent.
+    The gate is unchanged and still consulted; what changed is its answer. The
+    families a run declares are still enumerated to the manifest, so a future
+    unacknowledged amendment is refused here exactly as sequence 1 once was.
     """
 
     from epistemic.manifest import (
@@ -751,77 +886,64 @@ def test_declared_scenario_families_reach_the_manifest_gate(tmp_path) -> None:
         start_epistemic_manifest,
     )
     from epistemic.schema import Scenario
-    from protocol.manifest import ManifestError, finalize_manifest
+    from protocol.manifest import finalize_manifest
 
-    # Built straight from JSON, deliberately bypassing load_scenario_text: the
-    # loader would refuse f18 outright, and the point here is that the manifest
-    # gate holds even for a Scenario that never went through it.
     amended = Scenario.model_validate_json(
         _scenario_yaml("f18", "refuted_retrievable_at_full_standing")
     )
-    released = Scenario.model_validate_json(_scenario_yaml("f01", "evidence_path_exists"))
+    ratified = Scenario.model_validate_json(_scenario_yaml("f01", "evidence_path_exists"))
 
-    assert declared_family_ids((released, amended)) == ("f01", "f18")
+    assert declared_family_ids((ratified, amended)) == ("f01", "f18")
 
-    with pytest.raises(ManifestError, match="amendment pending.*f18"):
-        start_epistemic_manifest(
-            tmp_path / "amended",
-            run_id="amended",
-            dataset=DATASET,
-            started_at="2026-08-15T00:00:00Z",
-            scenarios=(released, amended),
-        )
-    assert not (tmp_path / "amended" / "manifest.json").exists()
-
-    run_dir = tmp_path / "released"
+    run_dir = tmp_path / "amended"
     started = start_epistemic_manifest(
         run_dir,
-        run_id="released",
+        run_id="amended",
         dataset=DATASET,
         started_at="2026-08-15T00:00:00Z",
-        scenarios=(released,),
+        scenarios=(ratified, amended),
     )
     assert started.status == "started"
+    assert (run_dir / "manifest.json").exists()
     finalize_manifest(run_dir, status="VALID", finalized_at="2026-08-15T00:01:00Z")
 
-    assert load_epistemic_manifest(run_dir, scenarios=(released,)).run_id == "released"
-    with pytest.raises(ManifestError, match="amendment pending.*f18"):
-        load_epistemic_manifest(run_dir, scenarios=(released, amended))
+    assert load_epistemic_manifest(run_dir, scenarios=(ratified,)).run_id == "amended"
+    assert (
+        load_epistemic_manifest(run_dir, scenarios=(ratified, amended)).run_id
+        == "amended"
+    )
 
 
-def test_no_execution_path_reaches_an_amended_family_while_pending() -> None:
-    """The audit the narrowing turns on: enumerate every way in, and close it.
+def test_every_execution_path_now_reaches_an_amended_family() -> None:
+    """The release, audited across the same surfaces the withholding closed.
 
-    Registering f15-f19 removed the frozen registry's incidental refusal. If any
-    surface that runs, scores, or records a family still accepted one of them,
-    the protection would have evaporated between the registry and the gate
-    rather than transferred. These are those surfaces.
+    Task 3.6 enumerated every way to run, score or record a family and wired the
+    receipt gate into each. Those are the surfaces that must open together: a
+    release that reached the loader but not the scorer would leave f15-f19
+    loadable and unscoreable, which is not what the founder acknowledged.
     """
 
     from epistemic.runner import evaluate_scenario
-    from epistemic.schema import Scenario, ScenarioLoadError, load_scenario_text
+    from epistemic.schema import Scenario, load_scenario_text
     from epistemic.scoring import assemble_family
-    from protocol.contracts import AmendmentAcknowledgmentPendingError
-
-    payload = _scenario_payload("f18", "refuted_retrievable_at_full_standing")
 
     # 1. Loading a scenario — the choke point nothing downstream can skip.
-    with pytest.raises(ScenarioLoadError, match="pending"):
-        load_scenario_text(_scenario_yaml("f18", "evidence_path_exists"), source="f18.yaml")
+    loaded = load_scenario_text(
+        _scenario_yaml("f18", "evidence_path_exists"), source="f18.yaml"
+    )
+    assert loaded.family_id == "f18"
 
-    # 2. Evaluating a Scenario built without the loader.
+    # 2. Evaluating a Scenario, which the pending gate refused outright.
     hand_built = Scenario.model_validate_json(_scenario_yaml("f18", "evidence_path_exists"))
-    with pytest.raises(AmendmentAcknowledgmentPendingError, match="f18"):
-        evaluate_scenario(hand_built, snapshots={})
+    evaluated = evaluate_scenario(hand_built, snapshots={"s1": _snapshot("s1")})
+    assert [bound.assertion for bound in evaluated.assertions] == ["evidence_path_exists"]
+    assert [bound.phase_id for bound in evaluated.assertions] == ["p1"]
 
     # 3. Scoring a family row, which takes a bare id and IS the comparative claim.
-    with pytest.raises(AmendmentAcknowledgmentPendingError, match="f18"):
-        assemble_family(family_id="f18", provider="fixture")
+    assert assemble_family(family_id="f18", provider="fixture").family_id == "f18"
 
     # Ratified-base families keep working at every one of those surfaces.
     assert load_scenario_text(
         _scenario_yaml("f01", "evidence_path_exists"), source="f01.yaml"
     ).family_id == "f01"
     assert assemble_family(family_id="f01", provider="fixture").family_id == "f01"
-    assert Scenario.model_validate_json(_scenario_yaml("f01", "evidence_path_exists"))
-    assert payload["family_id"] == "f18"
