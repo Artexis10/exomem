@@ -2073,8 +2073,8 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
     Deliberately NOT single-flighted and NOT memoized on failure: a state that
     keeps the cache cold (persistent projection-publish failure, or external
     churn that discards every admission) makes every publish pay a build that
-    cannot land. Bounding that is tracked as a follow-up issue; the shape to
-    copy is ``lexstore._REPAIRS_IN_FLIGHT``.
+    cannot land. Bounding that is tracked as #539; the shape to copy is
+    ``lexstore._REPAIRS_IN_FLIGHT``.
     """
     if not corpus_context_cache_enabled():
         return
