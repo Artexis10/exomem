@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.52.1](https://github.com/Artexis10/exomem/compare/v0.52.0...v0.52.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **benchmarks:** match update-probe markers inside rendered provider text ([#533](https://github.com/Artexis10/exomem/issues/533)) ([0bc46d6](https://github.com/Artexis10/exomem/commit/0bc46d6a8fe9b122732c12fabed4015b845304d9))
+* **benchmarks:** read the pinned LongMemEval release as the data it actually is ([#532](https://github.com/Artexis10/exomem/issues/532)) ([423b091](https://github.com/Artexis10/exomem/commit/423b0911fbf9a29cc7e44b1773146f5bb3384125))
+
 ## [0.52.0](https://github.com/Artexis10/exomem/compare/v0.51.0...v0.52.0) (2026-08-15)
 
 
