@@ -3482,7 +3482,7 @@ def commit_creation(
             commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, _fresh_state = _evaluate_structural(
+            contract_result, _fresh_state, _fresh_census = _evaluate_structural(
                 root,
                 destination=preflight.destination,
                 source=preflight.source,

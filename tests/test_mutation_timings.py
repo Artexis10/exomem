@@ -520,6 +520,61 @@ def test_preflight_creation_structural_shares_the_same_one_walk_seam(
     assert preflight.census_token is not None
 
 
+def _direct_creation_write(
+    root: Path,
+    *,
+    bump: bool,
+    path: str = "Knowledge Base/Notes/plain-creation-commit.md",
+) -> semantic_writes.CreationCommit:
+    """One structural creation preflight+commit pair, optionally with a stale
+    commit generation bumped in between -- mirrors `_direct_write`'s `bump`
+    shape for the creation seam (`preflight_creation` / `commit_creation`).
+    """
+    source = (
+        "---\n"
+        "status: active\n"
+        "---\n\n"
+        "# Plain commit creation\n\n"
+        "Ordinary prose, no compiled type.\n"
+    )
+    token = semantic_writes.DraftToken(
+        "test_writer", "tier2_create", path, TODAY.isoformat()
+    ).encode()
+    preflight = semantic_writes.preflight_creation(
+        root,
+        path=path,
+        source=source,
+        operation="tier2_create",
+        writer="test_writer",
+        draft_id=None,
+        draft_token=token,
+    )
+    assert preflight.applicability == "not_semantic"
+    if bump:
+        writer_lease._bump_commit_generation(
+            writer_lease.active_manager().config.state_dir, root
+        )
+    return semantic_writes.commit_creation(root, preflight=preflight, operation="tier2_create")
+
+
+def test_creation_commit_survives_a_stale_validity_stamp_at_boundary_entry(
+    tmp_path: Path,
+) -> None:
+    """`commit_creation`'s structural/non-semantic revalidation branch (taken
+    whenever `validity_stamp_current` is False at boundary entry) calls
+    `_evaluate_structural` too, and must unpack its 3-tuple return the same
+    way every other caller does. A commit-generation bump landing between
+    preflight and commit -- exactly the boundary-entry staleness
+    `_direct_write(bump=True)` already covers for
+    `preflight_existing`/`commit_existing` -- forces this exact branch.
+    """
+    committed = _direct_creation_write(tmp_path, bump=True)
+
+    assert committed.mutated is True
+    assert committed.applicability == "not_semantic"
+    assert committed.written_paths
+
+
 def test_corpus_metrics_carry_caller_and_outcome(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
     # Force the census-based reuse path: the event-token fast path returns

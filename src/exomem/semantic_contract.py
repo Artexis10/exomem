@@ -1966,9 +1966,12 @@ def build_corpus_context_with_census(
     reuse the census this call already walked instead of paying for another
     one. The census is ``None`` whenever no single walk unambiguously matches
     the returned context: candidate-bearing builds, a disabled cache, a
-    registry that does not match disk, or a cold build whose post-publish
-    reconciliation never stabilized. A caller that gets ``None`` here has no
-    cheaper option than its own fresh walk — same as before this existed.
+    registry that does not match disk, a cold build whose post-publish
+    reconciliation never stabilized, or an in-flight-dedup waiter (it only
+    confirmed its own pre-wait walk matched the flight it is chasing, not
+    whatever the owning build's stabilization loop settles on or gives up on
+    afterward). A caller that gets ``None`` here has no cheaper option than
+    its own fresh walk — same as before this existed.
     """
     root = Path(vault_root)
     relation_definitions = registry or relation_registry.load_registry(root)
@@ -2116,7 +2119,13 @@ def build_corpus_context_with_census(
             if flight.error is not None:
                 raise flight.error
             assert flight.result is not None
-            return flight.result, census
+            # Not `census`: that is this WAITER's own pre-wait walk, pinned
+            # only to confirm it is chasing the same flight (`same_inputs`
+            # above). The owner's stabilization loop can still reconcile
+            # `flight.result` to a different final census after that check,
+            # or give up entirely -- either way this waiter has no census
+            # that is honestly known to match the context it is returning.
+            return flight.result, None
 
     try:
         started = time.perf_counter()
