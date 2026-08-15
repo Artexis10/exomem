@@ -4311,6 +4311,9 @@ def op_observe_memory(
     tags: list[str] | None = None,
     context: str | None = None,
     relations: list[dict] | None = None,
+    verdict: str | None = None,
+    check_by: str | None = None,
+    id: str | None = None,
     unit_ref: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
@@ -4325,15 +4328,35 @@ def op_observe_memory(
     non-observation `kind` for rich semantic-block form and typed relations.
     Use `validate` before a guarded commit when semantic review is required.
 
+    An update rebuilds the whole unit, and omission does NOT mean the same
+    thing for every field. `verdict`, `check_by`, and `id` are preserve-on-omit:
+    leave one out and its current value is kept. Any authored metadata row this
+    tool does not own is carried through as well. But `tags`, `context`, and
+    `relations` are replace-on-omit: leaving one out clears it, so resend the
+    values you want to keep.
+
     Args:
         path: Parent page path or canonical memory reference.
         operation: add, update, remove, or validate.
         category: Open semantic category for add/update/validate.
         content: Unit content for add/update/validate.
         kind: Optional governed rich kind; omitted means compact observation.
-        tags: Optional compact suffix tags or rich metadata tags.
-        context: Optional compact suffix context or rich metadata context.
-        relations: Rich typed relations as {kind, target} objects.
+        tags: Optional compact suffix tags or rich metadata tags. On update this
+            replaces the current tags, so omitting it clears them.
+        context: Optional compact suffix context or rich metadata context. On
+            update this replaces the current context, so omitting it clears it.
+        relations: Rich typed relations as {kind, target} objects. On update
+            this replaces the current relations, so omitting it clears them.
+        verdict: Rich-only governed judgment; one of abandoned, confirmed,
+            inconclusive, qualified, or refuted. Categorical lifecycle state,
+            never a confidence score. On update, omit to keep the current value
+            and pass an empty string to clear it.
+        check_by: Rich-only governed ISO calendar date (YYYY-MM-DD) naming the
+            day the unit should be revisited. On update, omit to keep the
+            current value and pass an empty string to clear it.
+        id: Optional explicit authored anchor for the unit; must be unique
+            within the parent. Omitted means keep the current anchor on update
+            and derive one on add.
         unit_ref: Current exact unit reference for update/remove or update validation.
         expected_fingerprint: Current exact unit fingerprint; required for update/remove.
         expected_hash: Current exact parent-page content hash; required for update/remove.
@@ -4382,6 +4405,9 @@ def op_observe_memory(
             tags=tags,
             context=context,
             relations=relations,
+            verdict=verdict,
+            check_by=check_by,
+            id=id,
             unit_ref=unit_ref,
             expected_fingerprint=expected_fingerprint,
             expected_hash=expected_hash,

@@ -147,6 +147,39 @@ def excluded_frontmatter_reason(field: str) -> str | None:
     return None
 
 
+def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str | None:
+    """A refusal reason if `field` breaks a governed enum contract, else None.
+
+    This lives beside `excluded_frontmatter_reason` deliberately. `confidence`
+    is refused by that function at every governed write boundary, and
+    `outcome` is its categorical twin — the same doctrine, one step further in.
+    Splitting the two checks across different modules is exactly how one of
+    them ends up enforced on only one boundary while the other is enforced on
+    both, so both policies are stated once, here, and every boundary calls both.
+    """
+    if field.strip().casefold() != "outcome":
+        return None
+    # Deferred: `semantic_units` reaches `semantic_language_registry`, which
+    # imports this module. The vocabulary still has exactly one definition.
+    from .semantic_units import EPISTEMIC_OUTCOMES
+
+    normalized_type = str(page_type or "").strip().casefold()
+    if normalized_type != "experiment":
+        return (
+            "`outcome:` is an experiment-only field; this page has type "
+            f"{normalized_type or 'none'}. Record how a non-experiment "
+            "conclusion turned out with a semantic unit's `verdict:` metadata "
+            "instead."
+        )
+    if not isinstance(value, str) or value.strip().casefold() not in EPISTEMIC_OUTCOMES:
+        return (
+            f"`outcome:` must be exactly one of {', '.join(EPISTEMIC_OUTCOMES)}. "
+            "It is categorical lifecycle state, not a confidence score, so a "
+            "number or a free-text hedge is never valid."
+        )
+    return None
+
+
 # When scanning the full vault for inbound wikilinks, skip these.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name

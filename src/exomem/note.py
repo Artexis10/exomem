@@ -184,8 +184,19 @@ PATTERN_TYPE_VALUES = (
 # Lifecycle status enums per type. research-note/insight/failure/pattern share
 # the basic {active, draft} pair; experiment + production-log have richer
 # lifecycles per page-types.md.
+#
+# `concluded` says the experiment finished and its result stands. That is a
+# different claim from `archived`, which steps a page out of active rotation —
+# a concluded experiment usually stays very much in rotation, because a settled
+# result is exactly what later work cites.
 STATUS_BASIC = ("active", "draft")
-STATUS_EXPERIMENT = ("active", "draft", "archived")
+STATUS_EXPERIMENT = ("active", "draft", "archived", "concluded")
+
+# How a finished experiment turned out. Deliberately the same closed vocabulary
+# as a semantic unit's `verdict` (see `semantic_units.EPISTEMIC_OUTCOMES`), so a
+# reader never translates between a unit's judgment and its parent's. Never a
+# number: this vault stores no confidence score.
+EXPERIMENT_OUTCOME_VALUES = semantic_units.EPISTEMIC_OUTCOMES
 STATUS_PRODUCTION = (
     "planned", "recorded", "edited", "published", "reflected", "dropped", "archived",
 )

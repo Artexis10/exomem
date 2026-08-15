@@ -40,6 +40,7 @@ from .vault import (
     VaultPathError,
     batch_atomic_write,
     first_excluded_field,
+    governed_frontmatter_reason,
     in_append_only_tree,
     in_curated_tree,
     kb_root,
@@ -104,6 +105,11 @@ def create_file(
         if excluded is not None:
             _field, reason = excluded
             raise CreateFileError(code=EXCLUDED_FIELD_CODE, reason=reason)
+        page_type = frontmatter.get("type")
+        for key in frontmatter:
+            governed = governed_frontmatter_reason(str(key), frontmatter[key], page_type)
+            if governed is not None:
+                raise CreateFileError(code="INVALID_OUTCOME", reason=governed)
 
     try:
         abs_path, rel_path = resolve_under_vault(

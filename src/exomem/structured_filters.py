@@ -61,9 +61,14 @@ _KNOWN_STRING_FIELDS = frozenset(
         "unit.kind",
         "unit.context",
         "unit.form",
+        "unit.verdict",
     }
 )
-_KNOWN_SCALAR_FIELDS = _KNOWN_STRING_FIELDS | {"page.updated"}
+# Fields compared as real dates rather than strings. Every site that used to
+# name `page.updated` alone consults this set, so a second typed date field is
+# one entry instead of five scattered special cases.
+_KNOWN_DATE_FIELDS = frozenset({"page.updated", "unit.check_by"})
+_KNOWN_SCALAR_FIELDS = _KNOWN_STRING_FIELDS | _KNOWN_DATE_FIELDS
 _PAGE_FIELDS = frozenset(
     {
         "page.status",
@@ -83,6 +88,8 @@ _UNIT_FIELDS = frozenset(
         "unit.tags",
         "unit.context",
         "unit.form",
+        "unit.verdict",
+        "unit.check_by",
     }
 )
 
@@ -666,8 +673,17 @@ def page_view(page: Any) -> dict[str, Any]:
 
 
 def unit_view(unit: Any) -> dict[str, Any]:
-    """Adapt one normalized ``SemanticUnit`` for predicate evaluation."""
-    return {
+    """Adapt one normalized ``SemanticUnit`` for predicate evaluation.
+
+    The governed metadata keys are *omitted* when absent rather than present as
+    null, because for them absence is the meaningful state — "no verdict yet",
+    "no check date" — and `$exists` has to be able to say so. `check_by` is
+    settled into a real `date` here for the same reason `page_view` settles
+    `updated`: `_evaluate_operator` compares typed scalars, so a leftover
+    string would silently never equal a date operand and would drop the unit
+    from every date filter with no warning.
+    """
+    view: dict[str, Any] = {
         "category": unit.category,
         "category_key": unit.category_key,
         "kind": unit.kind,
@@ -675,6 +691,18 @@ def unit_view(unit: Any) -> dict[str, Any]:
         "context": unit.context,
         "form": unit.form,
     }
+    verdict = getattr(unit, "verdict", None)
+    if verdict is not None:
+        view["verdict"] = verdict
+    check_by = getattr(unit, "check_by", None)
+    if check_by is not None:
+        parsed = _parse_temporal(str(check_by))
+        # The parser already rejects a non-calendar `check_by`, so an
+        # unparseable value can only reach here from a caller that built a unit
+        # by hand. Pass it through untouched so it fails date filters instead of
+        # acquiring an invented day.
+        view["check_by"] = parsed.value if parsed is not None else check_by
+    return view
 
 
 def _parse_expression(
@@ -830,11 +858,11 @@ def _parse_predicate(
                 "$eq, $ne, $in, or $contains",
                 "Use exact or substring comparison for string fields.",
             )
-        if field.name == "page.updated" and operator == "$contains":
+        if field.name in _KNOWN_DATE_FIELDS and operator == "$contains":
             raise _error(
                 "INVALID_FILTER_OPERATOR",
                 operator_path,
-                "$contains cannot compare the typed date field page.updated",
+                f"$contains cannot compare the typed date field {field.name}",
                 "$eq, $ne, $in, or an ordered date comparison",
                 "Use an ISO date or timezone-qualified date-time comparison.",
             )
@@ -1019,12 +1047,12 @@ def _parse_scalar(
     if not isinstance(value, str):
         raise _invalid_value(path, "filter operands must be JSON scalars", "string, number, boolean, or null")
     _check_string(value, path=path)
-    if field.name == "page.updated" or ordered:
+    if field.name in _KNOWN_DATE_FIELDS or ordered:
         parsed_temporal = _parse_temporal(value)
         if parsed_temporal is None:
             if ordered:
                 raise _invalid_value(path, "ordered string operands must be ISO dates or timezone-qualified RFC 3339 date-times", "ISO date or timezone-qualified RFC 3339 date-time")
-            raise _invalid_value(path, "page.updated requires an ISO date or timezone-qualified RFC 3339 date-time", "ISO date or timezone-qualified RFC 3339 date-time")
+            raise _invalid_value(path, f"{field.name} requires an ISO date or timezone-qualified RFC 3339 date-time", "ISO date or timezone-qualified RFC 3339 date-time")
         return parsed_temporal
     return TypedScalar("string", _canonicalize_string(field.name, value, path=path))
 
@@ -1040,14 +1068,14 @@ def _validate_closed_field_operand(
         return
     values = operand if isinstance(operand, tuple) else (operand,)
     scalars = tuple(value for value in values if isinstance(value, TypedScalar))
-    if field.name == "page.updated":
+    if field.name in _KNOWN_DATE_FIELDS:
         allowed = {"date", "datetime"}
         if operator in {"$eq", "$ne"}:
             allowed.add("null")
         if any(value.kind not in allowed for value in scalars):
             raise _invalid_value(
                 path,
-                "page.updated accepts only typed ISO dates or timezone-qualified date-times",
+                f"{field.name} accepts only typed ISO dates or timezone-qualified date-times",
                 "date/date-time operand (or null for $eq/$ne)",
             )
         return
@@ -1090,7 +1118,13 @@ def _parse_temporal(value: str) -> TypedScalar | None:
 
 
 def _canonicalize_string(field: str, value: str, *, path: str = "$") -> str:
-    if field in {"page.status", "page.type", "page.file_type", "unit.form"}:
+    if field in {
+        "page.status",
+        "page.type",
+        "page.file_type",
+        "unit.form",
+        "unit.verdict",
+    }:
         return value.strip().casefold()
     if field in {"page.tags", "page.speakers", "unit.tags"}:
         return value.casefold()
