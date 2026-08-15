@@ -26,6 +26,12 @@ or decision. Those links are opaque reference/query descriptors: Records do not
 resolve Planning, duplicate a plan's history, or infer progress, completion,
 medical conclusions, or personal judgments.
 
+The comparison itself lives in `review_memory(mode="plan-progress")`, which
+reaches Records only as an ordinary governed reader — released manifest,
+authorized saved view, default-deny envelope — and takes counts rather than
+rows. A view read as plan evidence is exactly the same neutral view it is when
+read directly.
+
 For software work, Exomem owns durable intent and multi-horizon planning.
 OpenSpec and the repository own accepted software change contracts and execution
 truth; git, specifications, tests, and code remain authoritative. Outcomes and

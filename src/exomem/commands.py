@@ -76,6 +76,7 @@ from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import plan_memory as plan_memory_module
+from . import plan_progress as plan_progress_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
@@ -4942,6 +4943,10 @@ def op_review_memory(
         active head, while `topic_anchor` is respectively the retrieval hit or the
         requested page.
     """
+    if mode == "plan-progress":
+        # `path` is a collection selector here, not a memory identifier, so it
+        # is passed through before the page-oriented resolution below.
+        return plan_progress_module.review(vault_root, collection=path, limit=limit)
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     if mode == "attention":
@@ -5008,7 +5013,7 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, relation-queue, or adoption"
+        "unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress"
     )
 
 
