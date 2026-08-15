@@ -264,8 +264,14 @@ def _memorybench_payloads() -> dict[str, dict]:
                 "hits": [{"content": "first", "score": 0.9}],
                 "failure_codes": [],
                 "missing_fields": missing,
+                # This fixture declares every observation missing, so both
+                # optional blocks stay null and their labels stay in `missing`.
+                "search": None,
+                "ingest": None,
             }
         ],
+        "session_normalization": None,
+        "readiness": None,
     }
     private_gold = {
         "protocol_version": "1.0.0",

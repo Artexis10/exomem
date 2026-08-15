@@ -293,6 +293,25 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       `answer_judge_prompt_model_config` is sourced from the run plan (an
       operator declaration both sides share), never from the harness, which
       excludes answer/evaluate/report by design.
+      - [x] 4.6a-1 SCHEMA: additive `MemoryBenchSearchObservation`
+            (`transmitted_query`, `options.limit`, `normalized_hit_ids`),
+            `MemoryBenchIngestObservation` (`transmitted_payload_sha256`), and
+            run-level `session_normalization` + `readiness`. The honesty
+            coupling is enforced, not documented: `_OBSERVATION_LABELS` binds
+            each optional block to the `missing_fields` labels it answers for,
+            and a model validator refuses BOTH a published value whose label is
+            still declared missing AND an absent value whose labels are not all
+            declared. Hit ids may not outnumber the transmitted limit — the
+            same contract the guest already enforces at `index.ts:205`.
+            Schema regenerated; drift and conformance gates green. Evidence:
+            958 passed / 32 skipped across membench + protocol + memorybench +
+            privacy, `ruff --select F` clean, OpenSpec strict valid.
+      - [ ] 4.6a-2 POPULATE: project the fields from the existing guest
+            evidence in `export.py` (the Exomem guest already logs
+            `request`/`response` per call, and `_basic_evidence_targets` is the
+            precedent for reading it). No-fabrication holds: absent evidence
+            keeps the `missing_fields` label. `normalized_scores` stays absent
+            — the guest search path hard-codes `score: 0.0`.
 - [ ] 4.6b `memorybench-export.v1` → `equivalence-input.v1` projector, so the
       differ has a right-hand side (only `lme/runner.py` writes
       `equivalence.json` today)
