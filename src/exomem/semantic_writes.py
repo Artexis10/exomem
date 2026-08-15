@@ -1376,16 +1376,29 @@ def reviewed_transition_refusal_reason(
     return None
 
 
+def _format_hours(value: dt.timedelta) -> str:
+    hours = value.total_seconds() / 3600
+    return f"{hours:g}h"
+
+
+def _format_minutes(value: dt.timedelta) -> str:
+    minutes = value.total_seconds() / 60
+    unit = "minute" if minutes == 1 else "minutes"
+    return f"{minutes:g} {unit}"
+
+
+# Derived from the bound constants (not hard-coded) so retuning either one
+# can't leave the refusal message quoting a stale figure.
 _REVIEWED_TOKEN_REFUSAL_MESSAGES: dict[Literal["expired", "skewed"], str] = {
     "expired": (
-        "reviewed transition token is more than 24h old — its reviewed "
-        "state is stale; re-run validate_only to mint a fresh token before "
-        "committing"
+        f"reviewed transition token is more than {_format_hours(_MAX_REVIEWED_STAMP_AGE)} "
+        "old — its reviewed state is stale; re-run validate_only to mint a "
+        "fresh token before committing"
     ),
     "skewed": (
-        "reviewed transition token's reviewed instant is more than 5 "
-        "minutes in the future (clock skew); re-run validate_only to mint "
-        "a fresh token before committing"
+        "reviewed transition token's reviewed instant is more than "
+        f"{_format_minutes(_MAX_REVIEWED_STAMP_SKEW)} in the future (clock "
+        "skew); re-run validate_only to mint a fresh token before committing"
     ),
 }
 

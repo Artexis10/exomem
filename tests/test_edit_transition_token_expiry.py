@@ -24,10 +24,20 @@ import pytest
 from exomem import create_file as create_file_module
 from exomem import edit as edit_module
 from exomem import multi_edit as multi_edit_module
+from exomem import semantic_writes
 from exomem import set_frontmatter_field as set_frontmatter_module
+from exomem import temporal
 
 _PAGE = "Knowledge Base/Notes/Insights/lifecycle-token-expiry.md"
 _ID = "00000000-0000-4000-8000-0000000000f1"
+
+# Derived from the same bound constants the production message is built
+# from (`semantic_writes._format_hours`/`_format_minutes` applied to
+# `_MAX_REVIEWED_STAMP_AGE`/`_MAX_REVIEWED_STAMP_SKEW`) rather than hard-coded
+# "24"/"5" literals, so retuning either bound can't silently desync the
+# message assertions below from the constant that actually governs behavior.
+_EXPECTED_AGE_BOUND = semantic_writes._format_hours(semantic_writes._MAX_REVIEWED_STAMP_AGE)
+_EXPECTED_SKEW_BOUND = semantic_writes._format_minutes(semantic_writes._MAX_REVIEWED_STAMP_SKEW)
 
 
 def _source(body: str) -> str:
@@ -85,7 +95,7 @@ def test_expired_reviewed_token_fails_with_its_own_code(tmp_path: Path) -> None:
 
     assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
     assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
-    assert "24" in exc.value.reason
+    assert _EXPECTED_AGE_BOUND in exc.value.reason
     assert "validate_only" in exc.value.reason
 
 
@@ -108,7 +118,7 @@ def test_skewed_reviewed_token_fails_with_its_own_code(tmp_path: Path) -> None:
     assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
     assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
     assert "skew" in exc.value.reason.lower()
-    assert "5" in exc.value.reason
+    assert _EXPECTED_SKEW_BOUND in exc.value.reason
 
 
 def test_fresh_reviewed_token_still_commits(tmp_path: Path) -> None:
@@ -210,7 +220,7 @@ def test_multi_edit_expired_reviewed_token_fails_with_its_own_code(
 
     assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
     assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
-    assert "24" in exc.value.reason
+    assert _EXPECTED_AGE_BOUND in exc.value.reason
     assert "validate_only" in exc.value.reason
 
 
@@ -234,7 +244,7 @@ def test_multi_edit_skewed_reviewed_token_fails_with_its_own_code(
     assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
     assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
     assert "skew" in exc.value.reason.lower()
-    assert "5" in exc.value.reason
+    assert _EXPECTED_SKEW_BOUND in exc.value.reason
 
 
 def test_multi_edit_fresh_reviewed_token_still_commits(tmp_path: Path) -> None:
@@ -334,7 +344,7 @@ def test_set_frontmatter_field_expired_reviewed_token_fails_with_its_own_code(
 
     assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
     assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
-    assert "24" in exc.value.reason
+    assert _EXPECTED_AGE_BOUND in exc.value.reason
     assert "validate_only" in exc.value.reason
 
 
@@ -359,7 +369,7 @@ def test_set_frontmatter_field_skewed_reviewed_token_fails_with_its_own_code(
     assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
     assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
     assert "skew" in exc.value.reason.lower()
-    assert "5" in exc.value.reason
+    assert _EXPECTED_SKEW_BOUND in exc.value.reason
 
 
 def test_set_frontmatter_field_fresh_reviewed_token_still_commits(
@@ -478,7 +488,7 @@ def test_create_file_overwrite_expired_reviewed_token_fails_with_its_own_code(
 
     assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
     assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
-    assert "24" in exc.value.reason
+    assert _EXPECTED_AGE_BOUND in exc.value.reason
     assert "validate_only" in exc.value.reason
 
 
@@ -503,7 +513,7 @@ def test_create_file_overwrite_skewed_reviewed_token_fails_with_its_own_code(
     assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
     assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
     assert "skew" in exc.value.reason.lower()
-    assert "5" in exc.value.reason
+    assert _EXPECTED_SKEW_BOUND in exc.value.reason
 
 
 def test_create_file_overwrite_fresh_reviewed_token_still_commits(
@@ -555,3 +565,105 @@ def test_create_file_overwrite_no_token_legacy_path_still_commits_with_a_fresh_s
     text = page.read_text(encoding="utf-8")
     assert 'updated: "2026-07-14T12:00:00Z"' in text
     assert "B\n\n## Relations" in text
+
+
+def test_create_file_overwrite_raw_content_expired_token_raises_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """Reviewer finding 1: raw `content=` overwrite (no `frontmatter=` dict)
+    never embeds `stamp_iso` into the page bytes, so on unfixed `main` an
+    expired token was silently accepted there — the commit still succeeded,
+    just with a wrong log-entry date, since the `after_hash` never diverged.
+    That's a real, previously-succeeding path with zero prior coverage.
+    After the fix it now correctly raises `LIFECYCLE_TRANSITION_TOKEN_EXPIRED`
+    too, because the refusal happens at stamp resolution — before create_file
+    ever looks at whether a `frontmatter=` dict was supplied — and nothing is
+    written.
+    """
+    raw_overwrite = _cf_initial_source("B")
+    page = _write(tmp_path, _CF_PAGE, _cf_initial_source("A"))
+
+    reviewed_at = dt.datetime(2026, 7, 14, 12, 0, 0, tzinfo=dt.UTC)
+    preview = create_file_module.create_file(
+        tmp_path,
+        path=_CF_PAGE,
+        content=raw_overwrite,
+        overwrite=True,
+        validate_only=True,
+        today=reviewed_at,
+    )
+    token = preview.transition_token
+    assert isinstance(token, str)
+
+    before_bytes = page.read_bytes()
+    committed_at = reviewed_at + dt.timedelta(hours=24, minutes=1)
+    with pytest.raises(create_file_module.CreateFileError) as exc:
+        create_file_module.create_file(
+            tmp_path,
+            path=_CF_PAGE,
+            content=raw_overwrite,
+            overwrite=True,
+            draft_token=token,
+            today=committed_at,
+        )
+
+    assert exc.value.code == "LIFECYCLE_TRANSITION_TOKEN_EXPIRED"
+    assert exc.value.code != "LIFECYCLE_TRANSITION_MISMATCH"
+    assert _EXPECTED_AGE_BOUND in exc.value.reason
+    assert page.read_bytes() == before_bytes
+
+
+# ---------------------------------------------------------------------------
+# semantic_writes.reviewed_transition_stamp — direct shape pin.
+#
+# Reviewer finding 4: no writer in this file calls it directly anymore (they
+# all go through resolve_reviewed_date_iso), but it's still public API in
+# semantic_writes.py whose backward-compatible shape the spec locked this
+# task to preserving for other callers. Pin its own behavior directly rather
+# than only exercising it indirectly through a writer round-trip.
+# ---------------------------------------------------------------------------
+
+
+def test_reviewed_transition_stamp_direct_shape() -> None:
+    reviewed_at = dt.datetime(2026, 7, 14, 12, 0, 0, tzinfo=dt.UTC)
+    reviewed_stamp = temporal.stamp(reviewed_at)
+    token = semantic_writes._existing_transition_token(
+        operation="edit",
+        path="Knowledge Base/Notes/Insights/shape-pin.md",
+        before_hash="a" * 64,
+        after_hash="b" * 64,
+        stamp=reviewed_stamp,
+    )
+
+    # No token: None.
+    assert semantic_writes.reviewed_transition_stamp(None, reviewed_at) is None
+
+    # Malformed token: None (decode failure, not a raise).
+    assert (
+        semantic_writes.reviewed_transition_stamp("not-a-real-token", reviewed_at)
+        is None
+    )
+
+    # In-window: returns the exact reviewed stamp string.
+    assert (
+        semantic_writes.reviewed_transition_stamp(
+            token, reviewed_at + dt.timedelta(minutes=5)
+        )
+        == reviewed_stamp
+    )
+
+    # Aged past the bound: None.
+    assert (
+        semantic_writes.reviewed_transition_stamp(
+            token,
+            reviewed_at + semantic_writes._MAX_REVIEWED_STAMP_AGE + dt.timedelta(minutes=1),
+        )
+        is None
+    )
+
+    # A bare `dt.date` reference is accepted (treated as end-of-day UTC), not
+    # just `dt.datetime`.
+    assert (
+        semantic_writes.reviewed_transition_stamp(token, reviewed_at.date())
+        == reviewed_stamp
+    )
