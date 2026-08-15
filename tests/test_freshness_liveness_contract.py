@@ -59,17 +59,29 @@ def vault(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _spy_corpus_census(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """Record every real full-vault stat census the code under test still pays."""
-    calls: list[Path] = []
-    real_census = semantic_contract._corpus_census
+def _spy_corpus_work(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
+    """Record the full-vault census walks AND the from-scratch corpus builds.
 
-    def spy(root: Path):
-        calls.append(root)
+    Both seams, not just the census: a regression that rebuilds the corpus
+    without walking it first, or walks without rebuilding, would slip past a
+    spy on either one alone. An event-hit pays neither.
+    """
+    censuses: list[str] = []
+    builds: list[str] = []
+    real_census = semantic_contract._corpus_census
+    real_build = semantic_contract._build_corpus_context_uncached
+
+    def census_spy(root: Path):
+        censuses.append(str(root))
         return real_census(root)
 
-    monkeypatch.setattr(semantic_contract, "_corpus_census", spy)
-    return calls
+    def build_spy(root: Path, **kwargs):
+        builds.append(str(root))
+        return real_build(root, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_corpus_census", census_spy)
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", build_spy)
+    return censuses, builds
 
 
 def _poison_corpus_patch(monkeypatch: pytest.MonkeyPatch):
@@ -130,9 +142,9 @@ def test_refused_corpus_patch_does_not_cool_vault_freshness(
         vault, "vault"
     )
 
-    census_calls = _spy_corpus_census(monkeypatch)
+    censuses, builds = _spy_corpus_work(monkeypatch)
     context = semantic_contract.build_corpus_context(vault)
-    assert census_calls == []
+    assert (censuses, builds) == ([], [])
     assert context.pages[_OTHER_REL].title == "Two changed"
     assert context.pages[_PAGE_REL].title == "One changed"
 
@@ -189,9 +201,9 @@ def test_publish_populates_a_cold_corpus_cache_for_the_next_reader(
         vault, "vault"
     )
 
-    census_calls = _spy_corpus_census(monkeypatch)
+    censuses, builds = _spy_corpus_work(monkeypatch)
     context = semantic_contract.build_corpus_context(vault)
-    assert census_calls == []
+    assert (censuses, builds) == ([], [])
     assert context is entry[1]
 
 

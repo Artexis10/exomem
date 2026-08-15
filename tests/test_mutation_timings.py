@@ -732,6 +732,16 @@ def test_publish_after_an_eviction_leaves_the_next_preflight_warm(
     assert index_sync.publish_corpus_delta(tmp_path, changed=(path,)) is True
 
     calls = _spy_corpus_census(monkeypatch)
+    # Both seams: a rebuild that skipped the walk, or a walk that fed no
+    # rebuild, would each slip past a spy on the other one alone.
+    builds: list[Path] = []
+    real_build = semantic_contract._build_corpus_context_uncached
+
+    def counted_build(root: Path, **kwargs):
+        builds.append(root)
+        return real_build(root, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", counted_build)
     after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
     preflight = semantic_writes.preflight_existing(
         tmp_path,
@@ -741,4 +751,5 @@ def test_publish_after_an_eviction_leaves_the_next_preflight_warm(
     )
 
     assert calls == [], f"expected an event-hit with no census walk, got {len(calls)}"
+    assert builds == [], f"expected an event-hit with no corpus rebuild, got {len(builds)}"
     assert preflight.census_token is not None
