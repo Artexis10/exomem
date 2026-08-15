@@ -436,6 +436,139 @@ def test_an_uninterpreted_authored_metadata_row_survives_an_update(
     assert updated["unit"]["metadata"]["reviewer"] == "someone"
 
 
+def _rich_page_with_rows(tmp_path: Path, rows: str) -> tuple[Path, object]:
+    """Write a rich unit carrying `rows`, and return it with its parsed unit."""
+    page = _write_page(
+        tmp_path,
+        "# Loop primitives\n\n"
+        "## Prediction\n"
+        "- category: reliability\n"
+        "- id: retry-budget\n"
+        f"{rows}"
+        "\n"
+        "Retry budgets will stop the incident class.\n",
+    )
+    document = semantic_units.parse_semantic_units(
+        page.read_text(encoding="utf-8"),
+        path=PAGE,
+        parent_ref=f"exomem://memory/{PAGE_ID}",
+    )
+    unit = next(item for item in document.units if item.anchor == "retry-budget")
+    return page, unit
+
+
+def test_unowned_rows_survive_an_edit_that_changes_only_tags(tmp_path: Path) -> None:
+    """Preservation is a property of the reconstruction, not of which field moved."""
+    page, unit = _rich_page_with_rows(tmp_path, "- reviewer: someone\n")
+
+    updated = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="update",
+        category="reliability",
+        content="Retry budgets will stop the incident class.",
+        kind="prediction",
+        tags=["reliability", "ops"],
+        unit_ref=unit.unit_ref,
+        expected_fingerprint=unit.fingerprint,
+        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+    )
+
+    source = page.read_text(encoding="utf-8")
+    assert "- tags: reliability, ops" in source
+    assert "- reviewer: someone" in source
+    assert updated["unit"]["metadata"]["reviewer"] == "someone"
+    assert updated["unit"]["tags"] == ["reliability", "ops"]
+
+
+def test_two_unowned_rows_both_survive_in_authored_order(tmp_path: Path) -> None:
+    page, unit = _rich_page_with_rows(
+        tmp_path, "- reviewer: someone\n- ticket: OPS-4821\n"
+    )
+
+    updated = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="update",
+        category="reliability",
+        content="Retry budgets did not stop the incident class.",
+        kind="prediction",
+        unit_ref=unit.unit_ref,
+        expected_fingerprint=unit.fingerprint,
+        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+    )
+
+    source = page.read_text(encoding="utf-8")
+    assert "- reviewer: someone" in source
+    assert "- ticket: OPS-4821" in source
+    assert source.index("- reviewer: someone") < source.index("- ticket: OPS-4821")
+    assert updated["unit"]["metadata"]["reviewer"] == "someone"
+    assert updated["unit"]["metadata"]["ticket"] == "OPS-4821"
+
+
+@pytest.mark.parametrize(
+    "key", ["verdicts", "verdict_note", "check_by_owner", "precheck_by", "id_source"]
+)
+def test_a_row_that_merely_resembles_a_governed_key_is_preserved_not_swallowed(
+    tmp_path: Path, key: str
+) -> None:
+    """Ownership is exact-key, so a lookalike stays an ordinary preserved row."""
+    page, unit = _rich_page_with_rows(tmp_path, f"- {key}: kept verbatim\n")
+
+    updated = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="update",
+        category="reliability",
+        content="Retry budgets did not stop the incident class.",
+        kind="prediction",
+        unit_ref=unit.unit_ref,
+        expected_fingerprint=unit.fingerprint,
+        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+    )
+
+    source = page.read_text(encoding="utf-8")
+    assert f"- {key}: kept verbatim" in source
+    assert updated["unit"]["metadata"][key] == "kept verbatim"
+    # A lookalike is never mistaken for the governed key it resembles.
+    assert updated["unit"]["verdict"] is None
+    assert updated["unit"]["check_by"] is None
+    assert updated["unit"]["anchor"] == "retry-budget"
+
+
+@pytest.mark.parametrize(
+    "authored,normalized",
+    [("Verdict", "verdict"), ("check by", "check_by"), ("Check-By", "check_by")],
+)
+def test_a_governed_key_is_recognized_through_label_normalization(
+    tmp_path: Path, authored: str, normalized: str
+) -> None:
+    """The inverse guard: a real governed key spelled loosely is still governed."""
+    value = "refuted" if normalized == "verdict" else "2026-11-01"
+    page, unit = _rich_page_with_rows(tmp_path, f"- {authored}: {value}\n")
+
+    assert getattr(unit, normalized) == value
+
+    updated = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="update",
+        category="reliability",
+        content="Retry budgets did not stop the incident class.",
+        kind="prediction",
+        unit_ref=unit.unit_ref,
+        expected_fingerprint=unit.fingerprint,
+        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+    )
+
+    # Re-emitted under its canonical spelling, and never duplicated as an
+    # unowned row alongside the governed one.
+    source = page.read_text(encoding="utf-8")
+    assert f"- {normalized}: {value}" in source
+    assert source.count(value) == 1
+    assert updated["unit"][normalized] == value
+
+
 def test_an_invalid_existing_governed_row_is_never_dropped_silently(
     tmp_path: Path,
 ) -> None:
