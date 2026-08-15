@@ -1,5 +1,5 @@
 {
-  "acknowledged_on": null,
+  "acknowledged_on": "2026-08-15",
   "affected_sections": [
     "Status",
     "§1 Scenario families",
@@ -10,14 +10,14 @@
   ],
   "amended_on": "2026-08-15",
   "artifact_type": "preregistration-amendment-receipt.v1",
-  "catastrophic_set_decision": null,
+  "catastrophic_set_decision": "accept",
   "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
   "contract_sha256": "92ee986b10fa5676ad68ed48d9e0389d15d4cfa702c0ff68873d5789e40b785c",
   "effective_policy": "Applies only after founder acknowledgment; until then f15-f19 cannot support comparative runs or claims.",
   "parent_contract_sha256": "21aa5a8815038b82358336798b10afd8d3ffbd9739c8da597955bd14d8d962e3",
-  "ratifier": null,
+  "ratifier": "Hugo Ander Kivi",
   "rationale": "Add deterministic loop-closure families f15-f19 and correct the stale status header through the governed post-ratification amendment path.",
-  "repository_revision": null,
+  "repository_revision": "46b000e878a60dda9d4fa215c0212ade78e4eede",
   "schema_version": 1,
   "sequence": 1
 }
