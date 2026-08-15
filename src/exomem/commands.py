@@ -48,6 +48,7 @@ from . import audit_fix as audit_fix_module
 from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
+from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
 from . import create_file as create_file_module
@@ -5066,6 +5067,21 @@ def op_review_item_context(
     return egress_module.filter_withheld_entries(vault_root, assembled)
 
 
+def _refuse_pairless_stance(ref: str, action: str) -> None:
+    """Guard the namespaced queues, which never carry a contradiction pair.
+
+    "rivals; keep both" is a statement about two competing notes. An Adoption
+    Studio proposal and a relation-queue candidate are single-sided, so the stance
+    is meaningless there and must not be silently recorded as a standing mute.
+    """
+    if str(action or "").strip().lower() != contradiction_stance_module.STANCE_ACTION:
+        return
+    raise ValueError(
+        "INVALID_REVIEW_ACTION: `competing` records that two notes are rivals worth "
+        f"keeping, so it does not apply to {ref}"
+    )
+
+
 def op_triage_memory(
     vault_root: Path,
     ref: str,
@@ -5091,6 +5107,7 @@ def op_triage_memory(
             the write and asks the caller to refresh.
     """
     if adoption_proposals_module.is_adoption_ref(ref):
+        _refuse_pairless_stance(ref, action)
         return adoption_proposals_module.triage(
             vault_root,
             ref=ref,
@@ -5100,6 +5117,7 @@ def op_triage_memory(
             expected_fingerprint=expected_fingerprint,
         )
     if relation_queue_module.is_relation_ref(ref):
+        _refuse_pairless_stance(ref, action)
         return relation_queue_module.triage(
             vault_root,
             ref=ref,
@@ -5108,14 +5126,49 @@ def op_triage_memory(
             why=why,
             expected_fingerprint=expected_fingerprint,
         )
-    item = attention_module.item_by_ref(
-        vault_root, ref, expected_fingerprint=expected_fingerprint
-    )
+    normalized = str(action or "").strip().lower()
+    try:
+        item = attention_module.item_by_ref(
+            vault_root, ref, expected_fingerprint=expected_fingerprint
+        )
+    except ValueError:
+        # A competing stance whose pair has drifted off every queue item is on no
+        # item's reasons, so the item-walking clear cannot reach it — while it still
+        # suppresses the write-time warning. Its own pair ref (returned by the stance
+        # write, and echoed on every annotated reason) addresses it directly.
+        if normalized == "reopen":
+            orphan = contradiction_stance_module.clear_orphan_stance(
+                vault_root, ref=ref
+            )
+            if orphan is not None:
+                return orphan
+        raise
     if expected_fingerprint and item.fingerprint != expected_fingerprint:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the review signal changed; refresh the worklist "
             f"and inspect {item.ref} again"
         )
+    if normalized == contradiction_stance_module.STANCE_ACTION:
+        # "rivals; keep both" is a statement about a PAIR, so it is recorded on the
+        # pair identity rather than on this item's composite signal — that is the
+        # only key the write-time draft check can reconstruct from two paths. The
+        # RESPONSE still reports the item's own identity, so a client that
+        # round-trips the returned fingerprint into `expected_fingerprint` is
+        # comparing like with like; the pair identities ride along under `pairs`.
+        recorded = contradiction_stance_module.record_stance(
+            vault_root, reasons=item.reasons, until=until, why=why
+        )
+        return {
+            "item_id": item.item_id,
+            "ref": item.ref or ref,
+            "fingerprint": item.fingerprint,
+            "state": "competing",
+            "decision": recorded[0]["decision"],
+            "pairs": recorded,
+            "path": item.path,
+            "target_ref": item.target_ref,
+            "categories": item.categories,
+        }
     result = review_state_module.ReviewStateStore(vault_root).apply(
         item.item_id or review_state_module.parse_review_ref(ref),
         item.fingerprint or "",
@@ -5123,6 +5176,10 @@ def op_triage_memory(
         until=until,
         why=why,
     )
+    if normalized == "reopen":
+        # Reopen is the complete inverse: an item-level record alone would leave a
+        # pair stance quietly suppressing the same item.
+        contradiction_stance_module.clear_stance(vault_root, reasons=item.reasons)
     result.update(
         {
             "path": item.path,
