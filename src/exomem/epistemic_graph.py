@@ -245,6 +245,12 @@ _PUBLICATION_FAILURE_OP_CODES = frozenset(
 class GraphPublicationUnavailable(graph_sync.GraphRebuildRegistrationError):
     """A rebuild proved nothing stale but still could not publish (Class B)."""
 
+    # The targeted type gate runs with `--follow-imports skip`, so the base class
+    # resolves to `Any` and `BaseException.args` is invisible.  Without this
+    # declaration the rewrite below reads `self.args` to compute the value it
+    # assigns to `self.args`, and mypy reports a circular `has-type` error.
+    args: tuple[Any, ...]
+
     def __init__(self, message: str) -> None:
         super().__init__(
             "GRAPH_SYNC_PUBLICATION_UNAVAILABLE",
