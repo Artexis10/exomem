@@ -502,7 +502,7 @@ def test_event_delta_rejects_reparse_markdown_like_full_identity_census(
         "vault",
         ((str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")),
     )
-    semantic_contract.build_corpus_context(vault)
+    rejected = semantic_contract.build_corpus_context(vault)
     page = vault / _PAGE_REL
     real_lstat = Path.lstat
     fake_info = SimpleNamespace(st_mode=real_lstat(page).st_mode)
@@ -525,22 +525,28 @@ def test_event_delta_rejects_reparse_markdown_like_full_identity_census(
     assert cache_key not in semantic_contract._CORPUS_CONTEXT_CACHE
 
     # A later valid event cannot skip over the rejected delta and re-caption
-    # the old context with a newer freshness token.
+    # the context that missed it. Refilling the cache the rejected delta
+    # emptied IS allowed -- that is populate-on-miss -- but only from scratch
+    # through the full safety oracle, never by patching the old context.
     other = vault / "Knowledge Base/Notes/Insights/two.md"
     other.write_text(_page(title="Later valid event"), encoding="utf-8")
+    oracle_calls: list[str] = []
+    real_uncached = semantic_contract._build_corpus_context_uncached
+
+    def counted_oracle(*args, **kwargs):
+        oracle_calls.append("build")
+        return real_uncached(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", counted_oracle)
     semantic_contract.publish_corpus_files_changed(vault, changed=(other,))
-    assert cache_key not in semantic_contract._CORPUS_CONTEXT_CACHE
 
-    def cold_oracle_required(*args, **kwargs):
-        raise AssertionError("next request must use the full safety oracle")
-
-    monkeypatch.setattr(
-        semantic_contract,
-        "_build_corpus_context_uncached",
-        cold_oracle_required,
+    assert oracle_calls, "refilling the cache must use the full safety oracle"
+    repopulated = semantic_contract._CORPUS_CONTEXT_CACHE[cache_key][1]
+    assert repopulated is not rejected
+    assert (
+        repopulated.pages["Knowledge Base/Notes/Insights/two.md"].title == "Later valid event"
     )
-    with pytest.raises(AssertionError, match="full safety oracle"):
-        semantic_contract.build_corpus_context(vault)
+    assert semantic_contract.build_corpus_context(vault) is repopulated
 
 
 def test_event_delete_rejects_missing_leaf_below_reparse_ancestor(

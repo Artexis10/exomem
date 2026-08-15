@@ -580,8 +580,11 @@ def test_corpus_metrics_carry_caller_and_outcome(tmp_path: Path, monkeypatch) ->
     # Force the census-based reuse path: the event-token fast path returns
     # before any walk, so it cannot show the hit-vs-rebuild distinction.
     monkeypatch.setattr("exomem.freshness.triple", lambda *args, **kwargs: None)
-    semantic_contract.reset_corpus_context_cache()
     _seed(tmp_path)
+    # Reset AFTER the seeding write, not before: that write's own publish now
+    # populates the cache on miss, and the first build below has to be a
+    # genuine cold rebuild for the hit-vs-rebuild labels to mean anything.
+    semantic_contract.reset_corpus_context_cache()
     metrics_module.reset()
 
     semantic_contract.build_corpus_context(tmp_path)
@@ -627,3 +630,126 @@ def test_a_walk_nobody_consumed_is_not_reported_as_a_rebuild(
     assert ("exomem_corpus_census_walk_ms", "aborted") in observed
     assert ("exomem_corpus_census_walk_ms", "rebuild") not in observed
     assert ("exomem_corpus_build_ms", "rebuild") not in observed
+
+
+_DRAFT_ID = "00000000-0000-4000-8000-0000000005b2"
+_EXISTING_ID = "00000000-0000-4000-8000-0000000005b3"
+_DRAFT_PAGE = "Knowledge Base/Notes/Insights/candidate.md"
+_EXISTING_PAGE = "Knowledge Base/Notes/Insights/existing.md"
+_COMPILED_BODY = (
+    "Body.\n\n"
+    "## Observations\n\n"
+    "- [operating constraint] Keep retries bounded #reliability\n\n"
+    "## Relations\n"
+)
+
+
+def _compiled_source(page_id: str, *, title: str = "Candidate") -> str:
+    return (
+        "---\n"
+        f"title: {title}\n"
+        "type: insight\n"
+        "status: active\n"
+        f"exomem_id: {page_id}\n"
+        "---\n\n"
+        f"{_COMPILED_BODY}"
+    )
+
+
+def test_creation_draft_prepare_costs_one_census_walk(tmp_path: Path, monkeypatch) -> None:
+    """`prepare_commit_creation_draft` must not re-walk the vault for its stamp.
+
+    It holds `preliminary.before_corpus` from its own `_attempt` build, yet
+    asked `corpus_validity_token` for a census through the global process
+    cache. Against unpatched code an eviction landing between that build and
+    the capture -- the exact window a concurrent write opens -- makes
+    `cached_corpus_census` come back empty, so the token walks the whole
+    corpus a SECOND time. Threading the build's own census makes the eviction
+    irrelevant: still exactly one walk.
+    """
+    from exomem import relation_review
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _force_walk_confirmed_cache_path(monkeypatch)
+    semantic_contract.reset_corpus_context_cache()
+    existing = tmp_path / _EXISTING_PAGE
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(
+        _compiled_source(_EXISTING_ID, title="Existing"), encoding="utf-8", newline=""
+    )
+    source = _compiled_source(_DRAFT_ID)
+    validation = relation_review.validate_creation_draft(
+        tmp_path,
+        path=_DRAFT_PAGE,
+        source=source,
+        draft_id=_DRAFT_ID,
+        operation="create",
+    )
+    semantic_contract.build_corpus_context(tmp_path)  # warm the process cache
+
+    _evict_between_build_and_capture(monkeypatch, tmp_path)
+    calls = _spy_corpus_census(monkeypatch)
+
+    prepared = relation_review.prepare_commit_creation_draft(
+        tmp_path,
+        path=_DRAFT_PAGE,
+        source=source,
+        draft_id=_DRAFT_ID,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    assert len(calls) == 1, f"expected exactly one census walk, got {len(calls)}"
+    assert prepared.reuse is not None
+
+
+def test_publish_after_an_eviction_leaves_the_next_preflight_warm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A write's own publish must rewarm a cold corpus cache for the next one.
+
+    This is the benefit the write-latency gate's `cold_preflight` row cannot
+    show: that row evicts BETWEEN the warm write and its probe, so the probe's
+    own preflight faces a cold cache by construction. The cost a cold cache
+    really imposes is on the write AFTER a write -- and a publish that finds
+    nothing to patch is exactly where it can be paid once instead of by every
+    later caller.
+
+    Against unpatched code the publish is a silent no-op on a cold cache, so
+    the preflight below pays a full stat census of the vault.
+    """
+    from exomem import freshness, index_sync
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    path = _seed(tmp_path)
+    freshness.rebaseline(tmp_path)
+    # A restart, an eviction, or a Class B projection withdrawal -- any of the
+    # ways the process cache legitimately ends up empty with the registry live.
+    semantic_contract.reset_corpus_context_cache()
+
+    assert index_sync.publish_corpus_delta(tmp_path, changed=(path,)) is True
+
+    calls = _spy_corpus_census(monkeypatch)
+    # Both seams: a rebuild that skipped the walk, or a walk that fed no
+    # rebuild, would each slip past a spy on the other one alone.
+    builds: list[Path] = []
+    real_build = semantic_contract._build_corpus_context_uncached
+
+    def counted_build(root: Path, **kwargs):
+        builds.append(root)
+        return real_build(root, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", counted_build)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=PAGE,
+        after_source=after_source,
+        operation="edit",
+    )
+
+    assert calls == [], f"expected an event-hit with no census walk, got {len(calls)}"
+    assert builds == [], f"expected an event-hit with no corpus rebuild, got {len(builds)}"
+    assert preflight.census_token is not None

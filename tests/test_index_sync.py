@@ -512,9 +512,15 @@ def test_publication_failure_withdraws_stale_graph_and_resolver(
 
     a.write_text("# A\n\nLinks to [[New B]].\n", encoding="utf-8")
     b.write_text("---\ntitle: New B\n---\n# B\n", encoding="utf-8")
+    # The WHOLE publish seam fails, so neither half can be blamed. An
+    # unattributable failure is deliberately read as registry loss (the
+    # conservative classification), which is what keeps the full withdraw --
+    # and these assertions -- in force here. A failure attributable to the
+    # corpus patch alone is a different, narrower response; see
+    # tests/test_freshness_liveness_contract.py.
     monkeypatch.setattr(
         semantic_contract,
-        "publish_corpus_files_changed",
+        "publish_corpus_files_changed_classified",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("publish failed")),
     )
 
@@ -544,9 +550,11 @@ def test_delete_publication_failure_cannot_leave_graph_current_at_old_checkpoint
     graph = epistemic_graph.EpistemicGraphIndex(tmp_path)
     graph.rebuild_all()
     b.unlink()
+    # Unattributable (the whole seam fails), so registry loss; see the sibling
+    # upsert test above.
     monkeypatch.setattr(
         semantic_contract,
-        "publish_corpus_files_changed",
+        "publish_corpus_files_changed_classified",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("publish failed")),
     )
 
