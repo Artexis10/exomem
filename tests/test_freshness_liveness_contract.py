@@ -759,8 +759,12 @@ def test_watcher_recovery_allocates_no_new_epoch_for_a_refused_publication(
     )
 
 
+@pytest.mark.parametrize("graph_scheduling", [True, False], ids=["scheduled", "disabled"])
 def test_watcher_drain_allocates_no_epoch_when_the_fan_out_publication_is_refused(
-    contract_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    contract_vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    graph_scheduling: bool,
 ) -> None:
     """D4: the drain's own completeness check is a third door onto the registry.
 
@@ -771,12 +775,20 @@ def test_watcher_drain_allocates_no_epoch_when_the_fan_out_publication_is_refuse
     a fresh epoch on *every* drain cycle. That is the self-sustaining loop the
     contract exists to end, and it falsifies the D7 precondition that
     `external_pending` is set only by Class A and Class C.
+
+    The `disabled` case is the same site reached the other way: with
+    `EXOMEM_DISABLE_GRAPH_SCHEDULING=1` — the mitigation deployed today — no
+    publication is even attempted, so the graph is *configured* not to be
+    current. That is not a failure to classify either, and it must not cool the
+    registry for as long as the mitigation is on.
     """
     from exomem.file_watcher import FileWatcher
 
     root = contract_vault
     _governed_write(root, INSIGHT_B, _page("Contract B", "B revised once."))
     refuse_graph_publication(monkeypatch)
+    if not graph_scheduling:
+        monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
     watcher = FileWatcher(root)
 
     epoch_probe = tmp_path / "epoch-probe-root"

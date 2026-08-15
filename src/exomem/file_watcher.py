@@ -999,6 +999,18 @@ class FileWatcher:
                         "file watcher: graph publication refused during fan-out; "
                         "graph barrier re-asserted, vault freshness untouched"
                     )
+                elif not epistemic_graph.graph_scheduling_enabled():
+                    # The graph is deliberately not being maintained, so "not
+                    # current" is the configured outcome rather than a failure
+                    # to classify. The barrier withdrawn at the top of this
+                    # drain still fences every reader; marking on top of it
+                    # would cool the registry on every cycle for as long as the
+                    # mitigation is deployed, which is exactly the cost this
+                    # contract exists to remove.
+                    log.info(
+                        "file watcher: graph scheduling disabled; graph stays fenced "
+                        "by its barrier and vault freshness is untouched"
+                    )
                 else:
                     freshness.mark_external_pending(self._vault_root)
                     log.warning(
