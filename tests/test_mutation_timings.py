@@ -347,6 +347,179 @@ def test_a_broken_metrics_registry_cannot_mask_the_boundary_error(
     assert isinstance(timings.as_dict()["boundary"]["waited_ms"], float)
 
 
+def _spy_corpus_census(monkeypatch) -> list[Path]:
+    """Monkeypatch `_corpus_census` to record every real call it still makes."""
+    calls: list[Path] = []
+    real_census = semantic_contract._corpus_census
+
+    def spy(root: Path):
+        calls.append(root)
+        return real_census(root)
+
+    monkeypatch.setattr(semantic_contract, "_corpus_census", spy)
+    return calls
+
+
+def _force_walk_confirmed_cache_path(monkeypatch) -> None:
+    """Disable the event-token fast path so a cache hit still walks once.
+
+    The event-hit branch in `build_corpus_context` returns before any stat
+    walk at all, which would make a "warm cache costs one walk" assertion
+    vacuous (it would cost zero). Forcing `freshness.triple` to miss routes
+    every call through the census-confirmed reuse path instead, which walks
+    exactly once whether it reuses, patches, or rebuilds.
+    """
+    monkeypatch.setattr("exomem.freshness.triple", lambda *args, **kwargs: None)
+
+
+def test_preflight_existing_warm_cache_costs_one_census_walk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Warm reuse must stay at exactly one walk after threading the census."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _force_walk_confirmed_cache_path(monkeypatch)
+    semantic_contract.reset_corpus_context_cache()
+    path = _seed(tmp_path)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+    semantic_contract.build_corpus_context(tmp_path)  # warm the process cache
+
+    calls = _spy_corpus_census(monkeypatch)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=PAGE,
+        after_source=after_source,
+        operation="edit",
+    )
+
+    assert len(calls) == 1, f"expected exactly one census walk, got {len(calls)}"
+    assert preflight.census_token is not None
+
+
+def _evict_between_build_and_capture(monkeypatch, root: Path) -> None:
+    """Simulate a concurrent eviction landing between corpus build and capture.
+
+    `semantic_contract.evaluate` is the last thing `_preflight_existing` (and
+    `_evaluate_structural`) run between `build_corpus_context_with_census` and
+    `_capture_validity_stamp` — evicting from inside it lands exactly in the
+    window where the old `cached_corpus_census(root)` global-cache read would
+    come back empty and force a second walk.
+    """
+    real_evaluate = semantic_contract.evaluate
+
+    def evicting_evaluate(*args, **kwargs):
+        semantic_contract.evict_corpus_context(root)
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "evaluate", evicting_evaluate)
+
+
+def test_preflight_existing_evicted_cache_costs_one_census_walk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The fix under test: a preflight must never pay a second walk for its
+    own validity token, even when the global corpus-context cache entry it
+    just built is evicted before the token is captured.
+
+    Against unpatched `main` this is red: `cached_corpus_census(root)` comes
+    back `None` after the eviction, so `corpus_validity_token`'s own fallback
+    walks the corpus a second time — TWO walks for one preflight. Threading
+    the census straight from the corpus context the preflight already built
+    means the eviction never matters: still exactly ONE walk.
+
+    The cache is warmed before the spy/eviction hook attach so the one walk
+    being counted is the preflight's own confirm-and-reuse walk, not the
+    unrelated multi-walk stabilization a genuinely cold, from-scratch build
+    already pays before this fix's seam is ever reached.
+    """
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _force_walk_confirmed_cache_path(monkeypatch)
+    semantic_contract.reset_corpus_context_cache()
+    path = _seed(tmp_path)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+    semantic_contract.build_corpus_context(tmp_path)  # warm the process cache
+
+    _evict_between_build_and_capture(monkeypatch, tmp_path)
+    calls = _spy_corpus_census(monkeypatch)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=PAGE,
+        after_source=after_source,
+        operation="edit",
+    )
+
+    assert len(calls) == 1, f"expected exactly one census walk, got {len(calls)}"
+    assert preflight.census_token is not None
+
+
+def test_preflight_existing_census_token_matches_the_old_uncached_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Threading the census must not change what the validity token contains.
+
+    Reconstructs the corpus-census half of the stamp exactly the way the old,
+    un-threaded `_capture_validity_stamp` produced it — `cached_corpus_census`
+    missing, falling back to `corpus_validity_token`'s own walk — on the same
+    unchanged corpus, right after the real preflight ran. Both walks see
+    identical on-disk state, so the two tokens must be byte-for-byte equal.
+    """
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _force_walk_confirmed_cache_path(monkeypatch)
+    semantic_contract.reset_corpus_context_cache()
+    path = _seed(tmp_path)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+    semantic_contract.build_corpus_context(tmp_path)  # warm the process cache
+    _evict_between_build_and_capture(monkeypatch, tmp_path)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=PAGE,
+        after_source=after_source,
+        operation="edit",
+    )
+
+    assert preflight.census_token is not None
+    sc_token, _generation = preflight.census_token
+    # The eviction is still in effect (nothing repopulated the cache since),
+    # so this reproduces the old fallback path on the identical corpus state.
+    old_style_sc_token = semantic_contract.corpus_validity_token(
+        tmp_path, corpus_census=semantic_contract.cached_corpus_census(tmp_path)
+    )
+    assert old_style_sc_token == sc_token
+
+
+def test_preflight_creation_structural_shares_the_same_one_walk_seam(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`preflight_creation`'s structural/not_semantic path shares
+    `_capture_validity_stamp` with `preflight_existing` through
+    `_evaluate_structural`, and must show the same one-walk behaviour under
+    the same evicted-cache condition.
+    """
+    from exomem import create_file
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _force_walk_confirmed_cache_path(monkeypatch)
+    semantic_contract.reset_corpus_context_cache()
+    semantic_contract.build_corpus_context(tmp_path)  # warm the process cache
+
+    _evict_between_build_and_capture(monkeypatch, tmp_path)
+    calls = _spy_corpus_census(monkeypatch)
+
+    preflight = create_file.create_file(
+        tmp_path,
+        path="Knowledge Base/Notes/plain-creation.md",
+        content="# Plain creation\n\nOrdinary prose, no compiled type.\n",
+        frontmatter={"status": "active"},
+        today=TODAY,
+        validate_only=True,
+    )
+
+    assert preflight.applicability == "not_semantic"
+    assert len(calls) == 1, f"expected exactly one census walk, got {len(calls)}"
+    assert preflight.census_token is not None
+
+
 def test_corpus_metrics_carry_caller_and_outcome(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
     # Force the census-based reuse path: the event-token fast path returns
