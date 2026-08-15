@@ -2839,7 +2839,9 @@ def test_live_sidecar_readers_are_registered_and_drained_for_a_publication_hold(
 
     # A reader whose owning thread is gone can never close itself; the hold is
     # the only place it is safe to collect one.
-    leaked: list[object] = []
+    import sqlite3
+
+    leaked: list = []
 
     def leak_a_reader() -> None:
         leaked.append(index._open_read_snapshot())
@@ -2854,6 +2856,10 @@ def test_live_sidecar_readers_are_registered_and_drained_for_a_publication_hold(
     try:
         assert held == key
         assert not epistemic_graph._SIDECAR_READERS.get(key)
+        # Really closed, not merely deregistered: a handle that stays open is
+        # still blocking the replacement the hold exists to enable.
+        with pytest.raises(sqlite3.ProgrammingError):
+            leaked[0].execute("SELECT 1")
         # Single flight: a second publisher does not get the same hold.
         assert epistemic_graph._acquire_publication_hold(index.path) is None
     finally:

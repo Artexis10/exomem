@@ -424,7 +424,14 @@ def _sidecar_registry_key(live: Path) -> str:
 
 
 class _TrackedSidecarConnection(sqlite3.Connection):
-    """A live-sidecar reader that leaves the publication registry when closed."""
+    """A live-sidecar reader that leaves the publication registry when closed.
+
+    Opened with `check_same_thread=False` so a publication hold can actually
+    close a reader whose owning thread has died. SQLite itself is serialized,
+    and every caller in this module still uses its snapshot on the thread that
+    opened it; the guard is dropped only to make the abandoned-reader collection
+    real rather than raising `ProgrammingError` and leaving the handle open.
+    """
 
     def close(self) -> None:
         key = self.__dict__.get("_exomem_registry_key")
@@ -960,7 +967,9 @@ class EpistemicGraphIndex:
         _await_publication_hold(registry_key)
         try:
             uri = f"{self.path.resolve().as_uri()}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True, factory=_TrackedSidecarConnection)
+            conn = sqlite3.connect(
+                uri, uri=True, factory=_TrackedSidecarConnection, check_same_thread=False
+            )
             conn.__dict__["_exomem_registry_key"] = registry_key
             _register_sidecar_reader(registry_key, conn)
             graph_sync.limit_graph_metadata_read(conn)
