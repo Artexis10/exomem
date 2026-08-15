@@ -4261,6 +4261,7 @@ def op_edit_memory(
     path: str,
     why: str,
     operation: edit_operations_module.EditOperation = None,  # type: ignore[assignment]
+    validate_only: bool = False,
     **legacy: Any,
 ) -> dict:
     """Edit an existing memory page with an auditable reason.
@@ -4291,6 +4292,9 @@ def op_edit_memory(
         why: One-line rationale recorded in the log.
         operation: Required nested edit selected by `kind`. The seven supported
             kinds expose only fields their underlying edit leaf enforces.
+        validate_only: Preview the edit without committing it. Accepted here or
+            as `operation.validate_only`; giving it in both places is fine when
+            they agree. Same meaning as on `remember` and `replace_memory`.
 
     The previous flat keyword arguments remain accepted by direct Python/runtime
     callers for one compatibility release, but are deprecated and intentionally
@@ -4299,6 +4303,8 @@ def op_edit_memory(
     arguments: dict[str, Any] = {"path": path, "why": why, **legacy}
     if operation is not None:
         arguments["operation"] = operation
+    if validate_only:
+        arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
     return op_edit(vault_root, **normalized)
 
@@ -7105,7 +7111,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                     choices=param.choices,
                 )
                 for param in params
-                if param.name in {"path", "why", "operation"}
+                if param.name in {"path", "why", "operation", "validate_only"}
             )
         if response_detail is not None:
             response_detail_help = (

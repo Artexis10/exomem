@@ -1935,6 +1935,11 @@
             }
           ]
         },
+        "validate_only": {
+          "default": false,
+          "description": "Preview the edit without committing it. Accepted here or as `operation.validate_only`; giving it in both places is fine when they agree. Same meaning as on `remember` and `replace_memory`.",
+          "type": "boolean"
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
