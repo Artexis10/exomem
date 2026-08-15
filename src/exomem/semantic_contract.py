@@ -1890,6 +1890,10 @@ def publish_corpus_files_changed_classified(
     with _CORPUS_CONTEXT_UPDATE_LOCK:
         try:
             freshness.on_files_changed(root, changed=changed_paths, deleted=deleted_paths)
+            # Read the token here, not in the patch call below: it is a
+            # registry-side read, so a failure in it is registry-side too and
+            # must not be reported as the projection's fault.
+            event_token = freshness.triple(root, "vault")
         except BaseException as error:
             if not isinstance(error, Exception):
                 raise
@@ -1899,7 +1903,7 @@ def publish_corpus_files_changed_classified(
                 root,
                 changed=changed_values,
                 deleted=deleted_values,
-                event_token=freshness.triple(root, "vault"),
+                event_token=event_token,
             )
         except BaseException as error:
             # Freshness already advanced, so the previous context can no
@@ -2065,6 +2069,12 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
     already committed and the registry has already advanced. A populate that
     cannot complete simply leaves the cache cold, which is exactly today's
     behavior.
+
+    Deliberately NOT single-flighted and NOT memoized on failure: a state that
+    keeps the cache cold (persistent projection-publish failure, or external
+    churn that discards every admission) makes every publish pay a build that
+    cannot land. Bounding that is tracked as a follow-up issue; the shape to
+    copy is ``lexstore._REPAIRS_IN_FLIGHT``.
     """
     if not corpus_context_cache_enabled():
         return
@@ -2083,16 +2093,25 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
 
 def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> None:
     """The L2 body of :func:`_populate_corpus_context_after_miss`."""
-    # Loaded from disk, so no `_registries_match_disk` check is needed: both
-    # registry files are census entries, and the confirm below re-reads the
-    # whole census under the lock.
     relation_definitions = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     # L2/L3: the admission decision is made against this, captured before the
     # walk it has to vouch for.
     before = freshness.consumer_checkpoint(root, "vault")
-    census = _timed_corpus_census(root, "rebuild")
+    census = _timed_corpus_census(root, "populate")
     if census is None:
+        return
+    # The registries were loaded BEFORE this walk, and the walk stats the two
+    # `_Schema` files at its END. A registry rewritten in between therefore
+    # produces a census that records the NEW file while the build below would
+    # use the OLD registry — and the census-reuse path admits on census
+    # equality alone (the registry identity is only re-checked on the
+    # event-hit path), so that entry would be served as current. Every other
+    # install site guards with this; so does this one. The window from here to
+    # the stamp is closed by the census re-confirm under the lock, which sees
+    # the same two files.
+    if not _registries_match_disk(root, relation_definitions, language):
+        log.info("semantic corpus populate discarded: registry moved during the walk")
         return
     started = time.perf_counter()
     context = _build_corpus_context_uncached(
