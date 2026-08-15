@@ -2251,14 +2251,45 @@ def _build_identity_census(
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
+            # Alias refusal comes first and applies to EVERY entry, exactly as
+            # before: an aliased subtree can hide or duplicate pages whatever
+            # its name looks like, so filtering by suffix ahead of this check
+            # would open a hole. `is_symlink()` answers from the listing.
             try:
-                info = child.stat(follow_symlinks=False)
+                if child.is_symlink():
+                    raise activation_manifest.ActivationManifestError(
+                        "IDENTITY_CENSUS_UNSAFE_ENTRY",
+                        "stable-identity census contains a filesystem alias",
+                    )
+                is_directory = child.is_dir(follow_symlinks=False)
             except OSError as error:
                 raise activation_manifest.ActivationManifestError(
                     "IDENTITY_CENSUS_ENTRY_UNREADABLE",
                     "could not inspect a stable-identity census entry",
                 ) from error
-            if child.is_symlink() or vault._is_reparse(info):
+            # Filter BEFORE the stat. The Knowledge Base root also holds
+            # SQLite's transient sidecars (`.embeddings.sqlite-shm`, `-wal`),
+            # created and dropped as embedding connections open and close.
+            # They are not census input, so statting them bought nothing and
+            # cost a race: the sidecar could vanish in the window between the
+            # listing and the stat, and the FileNotFoundError escalated into a
+            # hard census failure (#528).
+            if not is_directory and path.suffix.casefold() != ".md":
+                continue
+            try:
+                info = child.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                # Deleted between the listing and the stat. The census is a
+                # snapshot, not a lock — a page that no longer exists is simply
+                # not in it, and change detection belongs to the freshness
+                # machinery. Every other OSError still fails closed below.
+                continue
+            except OSError as error:
+                raise activation_manifest.ActivationManifestError(
+                    "IDENTITY_CENSUS_ENTRY_UNREADABLE",
+                    "could not inspect a stable-identity census entry",
+                ) from error
+            if vault._is_reparse(info):
                 raise activation_manifest.ActivationManifestError(
                     "IDENTITY_CENSUS_UNSAFE_ENTRY",
                     "stable-identity census contains a filesystem alias",
