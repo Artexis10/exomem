@@ -279,18 +279,41 @@ def _resolve_edit_operation(
 
     if has_operation:
         operation_input = raw.pop("operation")
-        if modifiers and isinstance(operation_input, Mapping):
+        if modifiers:
+            # On the real MCP path, FastMCP's own pydantic validation has
+            # already turned the incoming `operation` JSON into a validated
+            # `_EditOperationModel` instance (e.g. `ReplaceStringOperation`)
+            # by the time it reaches here — it is not a `Mapping`. Read the
+            # fields the caller actually *sent* via `model_fields_set` rather
+            # than `getattr`/`model_dump`, which would report every field's
+            # (possibly defaulted) value and make an unset nested field look
+            # like an explicit disagreement with the top-level modifier.
+            if isinstance(operation_input, BaseModel):
+                nested_explicit = {
+                    name: getattr(operation_input, name)
+                    for name in operation_input.model_fields_set
+                }
+            elif isinstance(operation_input, Mapping):
+                nested_explicit = operation_input
+            else:
+                nested_explicit = {}
             conflicting = sorted(
                 name
                 for name, value in modifiers.items()
-                if operation_input.get(name, value) != value
+                if nested_explicit.get(name, value) != value
             )
             if conflicting:
                 raise ValueError(
                     "INVALID_EDIT: conflicting values for " + ", ".join(conflicting)
                     + "; give it once, at the top level or inside `operation`"
                 )
-            operation_input = {**operation_input, **modifiers}
+            if isinstance(operation_input, BaseModel):
+                operation_input = operation_input.model_copy(update=modifiers)
+            elif isinstance(operation_input, Mapping):
+                operation_input = {**operation_input, **modifiers}
+            # Any other shape is left untouched; `_validate_operation` below
+            # raises the precise INVALID_EDIT for a malformed `operation`
+            # regardless of whether the modifier could be folded in.
     else:
         legacy = {name: raw.pop(name) for name in legacy_names}
         legacy.update(modifiers)

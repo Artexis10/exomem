@@ -8,6 +8,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from exomem.edit_operations import (
+    EDIT_OPERATION_ADAPTER,
     EditOperation,
     normalize_edit_arguments,
     normalize_edit_surface_arguments,
@@ -321,6 +322,62 @@ def test_shared_modifier_validate_only_top_level_and_nested() -> None:
             }
         )
     assert legacy_normalized["validate_only"] is True
+
+
+def test_shared_modifier_matrix_survives_a_pre_validated_operation_instance() -> None:
+    """On the real MCP call path, FastMCP's own pydantic validation turns the
+    incoming `operation` JSON into an already-validated `_EditOperationModel`
+    instance (e.g. `ReplaceStringOperation`) before `normalize_edit_surface_arguments`
+    / `normalize_edit_arguments` ever sees it -- not a plain dict. Exercise the
+    modifier merge/conflict logic with that exact shape via the repo's own
+    canonical adapter, `EDIT_OPERATION_ADAPTER`, covering the same matrix as
+    the dict-shaped test above.
+    """
+    common = {"path": "Knowledge Base/Notes/Insights/example.md", "why": "update"}
+
+    def validated_operation(**overrides: object) -> EditOperation:
+        payload = {
+            "kind": "replace_string",
+            "old_string": "Before",
+            "new_string": "After",
+            **overrides,
+        }
+        return EDIT_OPERATION_ADAPTER.validate_python(payload)
+
+    # Nested-only: no top-level modifier given, unaffected either way.
+    nested_only = normalize_edit_arguments(
+        {**common, "operation": validated_operation()}
+    )
+    assert nested_only["validate_only"] is False
+
+    # Top-level-only: the pre-validated instance never mentioned validate_only
+    # (not in its `model_fields_set`), so the top-level modifier must win
+    # with no false conflict against the field's default value.
+    top_level_only = normalize_edit_arguments(
+        {**common, "operation": validated_operation(), "validate_only": True}
+    )
+    assert top_level_only["validate_only"] is True
+
+    # Both given and agreeing: explicit nested True + top-level True, fine.
+    both_agree = normalize_edit_arguments(
+        {
+            **common,
+            "operation": validated_operation(validate_only=True),
+            "validate_only": True,
+        }
+    )
+    assert both_agree["validate_only"] is True
+
+    # Both given and disagreeing: explicit nested False + top-level True
+    # must error clearly, naming the field -- same as the dict-shaped path.
+    with pytest.raises(ValueError, match="INVALID_EDIT.*validate_only"):
+        normalize_edit_arguments(
+            {
+                **common,
+                "operation": validated_operation(validate_only=False),
+                "validate_only": True,
+            }
+        )
 
 
 def test_surface_normalization_keeps_primary_shape_for_adapter_validation() -> None:
