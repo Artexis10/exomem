@@ -673,10 +673,22 @@ def test_feedback6_preflight_and_execution_model_refuse_before_factory(
     from lme.runner import RunConfig, execute_run
     from protocol.custody import CustodyUnsupported, HeldDirectory
 
+    from lme.runner import _SUPPORTED_EXECUTION_MODELS
+
     registered = [registry.provider_spec(name) for name in registry.registered_provider_names()]
-    assert {spec.descriptor.execution_model for spec in registered} == {
-        "in-process-no-post-return-background"
+    # Both admitted models are in real use, and nothing else is admitted.
+    assert {spec.descriptor.execution_model for spec in registered} == _SUPPORTED_EXECUTION_MODELS
+    assert _SUPPORTED_EXECUTION_MODELS == {
+        "in-process-no-post-return-background",
+        "owned-subprocess-terminated-at-cleanup",
     }
+    # The extra process-absence surface is owed by exactly the out-of-process
+    # rows: an in-process row must not claim it, and a subprocess row must.
+    for spec in registered:
+        owes_process_group = (
+            spec.descriptor.execution_model == "owned-subprocess-terminated-at-cleanup"
+        )
+        assert ("process-group" in spec.runtime_binding.required_surface_ids) is owes_process_group
     factory_calls = 0
 
     def factory():

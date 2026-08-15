@@ -182,10 +182,11 @@ bind the latter only after setup, and refuse drift. Each constructed provider
 instance SHALL receive an immutable run/session/namespace/work/evidence
 context and SHALL have exactly one cleanup-owning outer lifecycle.
 
-The static descriptor SHALL declare an in-process,
-no-post-return-background execution model. Unknown or background-capable
-declarations, unsafe direct run IDs, and unsupported descriptor custody SHALL
-refuse before factory invocation. On supported POSIX/Linux filesystems the
+The static descriptor SHALL declare either an in-process,
+no-post-return-background execution model or an
+owned-subprocess-terminated-at-cleanup execution model. Unknown or
+background-capable declarations, unsafe direct run IDs, and unsupported
+descriptor custody SHALL refuse before factory invocation. On supported POSIX/Linux filesystems the
 runner SHALL functionally prove required descriptor-relative operations and
 `/proc/<runner-pid>/fd/<fd>` reopening on the actual output filesystem, and
 SHALL hold separate session, work, and evidence directory capabilities before
@@ -203,6 +204,31 @@ requirement SHALL NOT claim resistance to arbitrary unrelated same-UID actors
 that guess or replace that private name; that threat requires process isolation
 or an amendment. Original, provider-exposed, and public names SHALL still
 survive replacement or fail closed.
+
+A row declaring the owned-subprocess-terminated-at-cleanup execution model MAY
+own exactly one sidecar process, started in its own process group and reached
+over loopback with a per-session bearer token. Every provider method SHALL be a
+blocking round trip, and `cleanup()` SHALL terminate and reap the entire owned
+process group before returning. The runner-owned runtime binding for such a row
+SHALL additionally observe a `process-group` surface, and absence SHALL require
+both zero live owned processes and an unbound listener. Raw process IDs, ports,
+and bearer tokens SHALL NOT be serialized into cleanup evidence. The quarantine
+caveat above is scoped to the in-process model and SHALL NOT be read as
+extending to this one.
+
+#### Scenario: Sidecar row proves process absence
+- **WHEN** a provider declaring owned-subprocess-terminated-at-cleanup returns
+  from `cleanup()` while an owned sidecar process survives or its loopback
+  listener still accepts
+- **THEN** the runner SHALL derive absence as unproved from the `process-group`
+  surface and SHALL terminalize the run INVALID rather than retire the work
+  inode
+
+#### Scenario: Sidecar row cannot borrow the in-process caveat
+- **WHEN** a subprocess-backed row declares the in-process,
+  no-post-return-background execution model
+- **THEN** registration SHALL refuse before factory invocation rather than
+  admit an unevidenced execution-model claim
 
 Cleanup observations SHALL be self-identifying raw facts only, written under
 the session evidence root and independently reopened, digest-checked, and

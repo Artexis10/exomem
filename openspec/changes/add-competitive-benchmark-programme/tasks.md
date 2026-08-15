@@ -85,9 +85,30 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       machinery + 12-key perturbed twin + null case; contamination
       semantics: provider-path unverifiable invalidates, legacy-path
       records honest unverifiable and is refused for comparative use.
-- [ ] 2.3-residual `basic_memory_direct.py` via sidecar +
-      `supermemory_direct.py` (deferred by scope note until the sidecar and
-      pinned local binary exist; null_direct + exomem-source-only landed)
+- [x] 2.3a-residual `basic_memory_direct.py` via the §4.4 sidecar. Unblocked
+      once 4.4 landed the sidecar. Because decision 1 requires the competitor's
+      provider class to run under its own uv environment, this row cannot be
+      in-process, and decision 14's single
+      `in-process-no-post-return-background` model could not carry it;
+      declaring it anyway would have been exactly the unevidenced status field
+      this programme refuses. Design decision 15 + the benchmark-protocol
+      requirement therefore add `owned-subprocess-terminated-at-cleanup` as a
+      second admitted model, owing an additive `process-group` cleanup surface
+      (canonical group ref, live count, listener bound — never raw PIDs, ports,
+      or tokens) whose absence is probed rather than asserted. Landed: the
+      provider (registry row, closed-envelope transport, exact-top_k
+      pass-through, owned process-group teardown), the additive schema, and 12
+      hermetic contract tests that need no Basic Memory checkout. Test-validity
+      evidence: three production mutations (teardown never signals; top_k
+      widened by 7; `_absence` process-group branch removed) each reproduced
+      red, and the third exposed a genuinely weak test — `provider-state` was
+      carrying process liveness, so the surviving-sidecar case passed for the
+      wrong reason. `backend_active` now describes only what the provider
+      holds, so a row that zeroes its own bookkeeping cannot hide a leaked
+      process. NOT run against the real pinned Basic Memory environment; that
+      belongs with the §7 runs.
+- [ ] 2.3b-residual `supermemory_direct.py` (still deferred by scope note:
+      needs the 7.3 pinned local binary, which is not installed)
 - [x] 2.5-residual the REAL committed `lme-s-25.json` generates from the
       pinned dataset at fetch time (W9); the selection algorithm + fixture
       subsets are landed and tested (artifact
