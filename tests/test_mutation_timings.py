@@ -703,3 +703,42 @@ def test_creation_draft_prepare_costs_one_census_walk(tmp_path: Path, monkeypatc
 
     assert len(calls) == 1, f"expected exactly one census walk, got {len(calls)}"
     assert prepared.reuse is not None
+
+
+def test_publish_after_an_eviction_leaves_the_next_preflight_warm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A write's own publish must rewarm a cold corpus cache for the next one.
+
+    This is the benefit the write-latency gate's `cold_preflight` row cannot
+    show: that row evicts BETWEEN the warm write and its probe, so the probe's
+    own preflight faces a cold cache by construction. The cost a cold cache
+    really imposes is on the write AFTER a write -- and a publish that finds
+    nothing to patch is exactly where it can be paid once instead of by every
+    later caller.
+
+    Against unpatched code the publish is a silent no-op on a cold cache, so
+    the preflight below pays a full stat census of the vault.
+    """
+    from exomem import freshness, index_sync
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    path = _seed(tmp_path)
+    freshness.rebaseline(tmp_path)
+    # A restart, an eviction, or a Class B projection withdrawal -- any of the
+    # ways the process cache legitimately ends up empty with the registry live.
+    semantic_contract.reset_corpus_context_cache()
+
+    assert index_sync.publish_corpus_delta(tmp_path, changed=(path,)) is True
+
+    calls = _spy_corpus_census(monkeypatch)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=PAGE,
+        after_source=after_source,
+        operation="edit",
+    )
+
+    assert calls == [], f"expected an event-hit with no census walk, got {len(calls)}"
+    assert preflight.census_token is not None
