@@ -21,9 +21,11 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from exomem import mutation_lock as mutation_lock_module
 from exomem import runtime_readiness as readiness_module
 from exomem import writer_lease
 from exomem.cli_ops import OpError
@@ -293,6 +295,10 @@ def test_refused_acquire_is_counted_and_attributed_in_the_busy_payload(
     assert details["busy_refusals_recent"] >= 1
     assert details["acquire_attempts"] >= 2
     assert details["contention_scope"] == "process_local"
+    # `pid` stays in the error payload — unlike /health/ready, this is
+    # attribution handed to an authenticated caller. It is None here because a
+    # refusal observes a holder whose process this one cannot identify.
+    assert "pid" in details["last_holder"]
     assert details["last_holder"]["request_id"] == "req-holder"
     assert details["last_holder"]["operation"] == "edit_memory"
     assert details["last_holder"]["holder_kind"] == "command"
@@ -302,6 +308,54 @@ def test_refused_acquire_is_counted_and_attributed_in_the_busy_payload(
     stats = contender.snapshot()["contention"]
     assert stats["busy_refusals"] >= 1
     assert stats["busy_refusals_recent"] >= 1
+
+
+def test_recent_refusal_window_survives_a_wall_clock_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An NTP step must not add or drop refusals from the recency window.
+
+    The window is elapsed-time arithmetic, so it runs on the monotonic clock;
+    wall clock is only ever a displayed timestamp. Getting this wrong would
+    corrupt the counter during exactly the contention incident it diagnoses.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    contender = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    # Take the OS boundary on a separate descriptor so the bounded acquire is
+    # refused without a second thread.
+    handle = contender._open_lock_file(contender.lock_path)
+    assert mutation_lock_module._try_os_lock(handle)
+    try:
+        with pytest.raises(OpError) as raised:
+            with contender.hold(timeout_seconds=0.0):
+                pytest.fail("contender entered a held mutation boundary")
+        assert raised.value.code == "MUTATION_BUSY"
+    finally:
+        mutation_lock_module._release_os_lock(handle)
+        handle.close()
+
+    assert contender.snapshot()["contention"]["busy_refusals_recent"] == 1
+
+    real = mutation_lock_module.time
+    stepped = SimpleNamespace(
+        time=lambda: real.time() + 3600.0,  # wall clock jumps an hour forward
+        monotonic=real.monotonic,
+        sleep=real.sleep,
+    )
+    monkeypatch.setattr(mutation_lock_module, "time", stepped)
+    assert contender.snapshot()["contention"]["busy_refusals_recent"] == 1
+
+    aged = SimpleNamespace(
+        time=real.time,
+        monotonic=lambda: real.monotonic() + 61.0,  # genuinely past the window
+        sleep=real.sleep,
+    )
+    monkeypatch.setattr(mutation_lock_module, "time", aged)
+    stats = contender.snapshot()["contention"]
+    assert stats["busy_refusals_recent"] == 0
+    assert stats["busy_refusals"] == 1
 
 
 def test_readiness_publishes_only_bounded_contention_fields() -> None:
@@ -340,8 +394,11 @@ def test_readiness_publishes_only_bounded_contention_fields() -> None:
             "busy_refusals_recent": 2,
             "recent_window_seconds": 60.0,
             "scope": "process_local",
+            # No `pid`: /health/ready is unauthenticated and documented
+            # content-free/identity-free, so host process metadata stays out of
+            # it. It survives in the MUTATION_BUSY payload instead, which is
+            # attribution for an authenticated caller.
             "last_holder": {
-                "pid": 4242,
                 "request_id": "req-busy",
                 "operation": "edit_memory",
                 "holder_kind": "command",
@@ -350,4 +407,5 @@ def test_readiness_publishes_only_bounded_contention_fields() -> None:
             },
         },
     }
+    assert "4242" not in repr(snapshot)
     assert "must-not-leak" not in repr(snapshot)

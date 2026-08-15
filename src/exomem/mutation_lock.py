@@ -1452,7 +1452,12 @@ class _LocalLockState:
     # block carries `scope: "process_local"`.
     acquire_attempts: int = 0
     busy_refusals: int = 0
-    busy_refusal_times: deque[float] = field(
+    # MONOTONIC refusal timestamps, deliberately not wall-clock: the recency
+    # window is elapsed-time arithmetic, and an NTP step (or a DST/manual clock
+    # change) would otherwise silently drop or invent recent refusals during
+    # exactly the contention incident this window exists to diagnose.  Wall
+    # clock is kept only for the displayed `observed_at`.
+    busy_refusal_monotonic: deque[float] = field(
         default_factory=lambda: deque(maxlen=_CONTENTION_RECENT_SAMPLES)
     )
     last_holder: dict[str, object] | None = None
@@ -1481,9 +1486,10 @@ def _note_busy_refusal(
     increments the counters; `last_holder` keeps the previous observation
     because it is the *last known* holder, not the currently-observed one.
     """
-    now = time.time()
     state.busy_refusals += 1
-    state.busy_refusal_times.append(now)
+    # Window arithmetic on the monotonic clock; display timestamp on the wall
+    # clock.  They are not interchangeable and must not be mixed.
+    state.busy_refusal_monotonic.append(time.monotonic())
     if snapshot is not None and snapshot.get("state") == "held":
         state.last_holder = {
             # A refusal can observe another process's holder, whose pid this
@@ -1492,7 +1498,7 @@ def _note_busy_refusal(
             "request_id": _safe_label(snapshot.get("request_id"), fallback="untracked"),
             "operation": _safe_label(snapshot.get("operation"), fallback="unknown"),
             "holder_kind": _safe_label(snapshot.get("holder_kind"), fallback="unknown"),
-            "observed_at": now,
+            "observed_at": time.time(),
             "source": "refusal",
         }
 
@@ -1517,8 +1523,8 @@ def _note_release(
 
 def _contention_view(state: _LocalLockState) -> dict[str, object]:
     """Project the process-local contention counters into a content-free block."""
-    horizon = time.time() - _CONTENTION_RECENT_WINDOW_SECONDS
-    recent = sum(1 for at in tuple(state.busy_refusal_times) if at >= horizon)
+    horizon = time.monotonic() - _CONTENTION_RECENT_WINDOW_SECONDS
+    recent = sum(1 for at in tuple(state.busy_refusal_monotonic) if at >= horizon)
     last_holder = state.last_holder
     return {
         "acquire_attempts": state.acquire_attempts,

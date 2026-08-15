@@ -36,14 +36,19 @@ def _non_negative_int(value: object) -> int:
 
 
 def _public_last_holder(value: object) -> dict[str, Any] | None:
-    """Project the last-known holder into content-free, allowlisted fields."""
+    """Project the last-known holder into content-free, allowlisted fields.
+
+    `pid` is deliberately NOT projected here.  `/health/ready` is an
+    unauthenticated surface documented as content-free and identity-free, and a
+    process id is host process metadata.  It stays in the MUTATION_BUSY error
+    payload, where it is attribution handed to an authenticated caller who just
+    lost the boundary.
+    """
     if not isinstance(value, Mapping):
         return None
-    pid = value.get("pid")
     observed_at = value.get("observed_at")
     source = value.get("source")
     return {
-        "pid": pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
         "request_id": _safe_readiness_label(
             value.get("request_id"), fallback="untracked"
         ),
