@@ -39,10 +39,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, indexes, semantic_writes, temporal
+from . import corpus_aware, indexes, semantic_contract, semantic_writes, temporal
 from . import find as find_module
 from .cli_ops import OpError
 from .kbdir import kb_prefix
+from .mutation_timings import MutationTimings, write_timings_enabled
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
@@ -64,11 +65,14 @@ class EditResult:
     path: str  # vault-relative, with .md
     warnings: list[str]
     semantic: dict | None = None
+    timings: dict | None = None  # only under EXOMEM_WRITE_TIMINGS
 
     def as_dict(self) -> dict:
         value = {"path": self.path, "warnings": self.warnings}
         if self.semantic is not None:
             value["semantic"] = self.semantic
+        if self.timings is not None:
+            value["timings"] = self.timings
         return value
 
 
@@ -361,6 +365,7 @@ def edit(
         path=rel_path,
         warnings=committed.warnings,
         semantic=committed.semantic,
+        timings=committed.timings,
     )
 
 
@@ -699,6 +704,7 @@ def apply_section_edit(
 class CommitEditResult:
     warnings: list[str]
     semantic: dict
+    timings: dict | None = None  # only under EXOMEM_WRITE_TIMINGS
 
 
 def commit_edit(
@@ -778,24 +784,32 @@ def commit_edit(
         warnings.append(log_plan.rotation_note)
 
     semantic_operation = "edit" if op in {"edit", "multi_edit"} else op
+    # One collector spans preflight+commit so the envelope accounts for the
+    # whole governed write, not two unrelated halves. It is always built (the
+    # `write.*` service histograms are unconditional); only the response key
+    # is gated.
+    timings = MutationTimings()
     try:
-        preflight = semantic_writes.preflight_existing(
-            vault_root,
-            path=rel_path,
-            after_source=new_text,
-            operation=semantic_operation,  # type: ignore[arg-type]
-            expected_before_hash=expected_before_hash,
-            transition_token=semantic_transition_token,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
-            stamp=date_iso,
-        )
-        committed = semantic_writes.commit_existing(
-            vault_root,
-            preflight=preflight,
-            auxiliary_writes=tuple(writes),
-        )
+        with semantic_contract.call_context("write"):
+            preflight = semantic_writes.preflight_existing(
+                vault_root,
+                path=rel_path,
+                after_source=new_text,
+                operation=semantic_operation,  # type: ignore[arg-type]
+                expected_before_hash=expected_before_hash,
+                transition_token=semantic_transition_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
+                stamp=date_iso,
+                timings=timings,
+            )
+            committed = semantic_writes.commit_existing(
+                vault_root,
+                preflight=preflight,
+                auxiliary_writes=tuple(writes),
+                timings=timings,
+            )
     except semantic_writes.SemanticWriteError as error:
         raise EditError(error.code, [], error.reason) from error
     except OpError:
@@ -829,7 +843,11 @@ def commit_edit(
             log.debug(
                 "corpus-aware contradiction check failed (non-fatal): %s", error
             )
-    return CommitEditResult(warnings, committed.as_dict())
+    return CommitEditResult(
+        warnings,
+        committed.as_dict(),
+        timings.as_dict() if write_timings_enabled() else None,
+    )
 
 
 # ---------------- validate-only preview ----------------
