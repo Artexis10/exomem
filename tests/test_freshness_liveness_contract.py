@@ -824,6 +824,61 @@ def test_watcher_drain_allocates_no_epoch_when_the_fan_out_publication_is_refuse
     )
 
 
+def test_watcher_drain_still_marks_unclassified_graph_incompleteness(
+    contract_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3/D4: the fail-closed default the two carve-outs are carved out of.
+
+    The drain site has exactly two reasons not to mark -- a refused publication
+    (Class B, memoized by the projection) and scheduling deliberately off -- and
+    both are pinned above. This pins the branch they are exceptions to: a graph
+    that is simply not current, with no refusal recorded and scheduling on, is
+    an incompleteness this module cannot classify, so it must keep cooling the
+    registry exactly as it did before the contract landed.
+
+    Without this test a future widening of either carve-out could swallow a
+    genuine Class A signal with the whole suite still green.
+    """
+    from exomem.file_watcher import FileWatcher
+
+    root = contract_vault
+    _governed_write(root, INSIGHT_B, _page("Contract B", "B revised once."))
+    epistemic_graph.clear_publication_memos()
+
+    # A graph dispatch that fails without ever attempting -- let alone being
+    # refused -- a publication: nothing writes a refusal memo, so neither
+    # carve-out can apply.
+    def deferred_without_publishing(*_args: object, **_kwargs: object):
+        return epistemic_graph.GraphDispatchResult("failed", "graph_dispatch_failed")
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", deferred_without_publishing)
+
+    watcher = FileWatcher(root)
+    epoch_probe = tmp_path / "epoch-probe-root"
+    clock_before = freshness.mark_external_pending(epoch_probe)
+
+    edited = root / INSIGHT_A
+    edited.write_text(
+        _page("Contract A", "A claims against [[contract-b]] -- unclassified."),
+        encoding="utf-8",
+    )
+    pending_epoch = freshness.mark_external_pending(root)
+    watcher._dispatch_batch(
+        [edited], [INSIGHT_A], [], cap=False, pending_epoch=pending_epoch
+    )
+
+    # Neither carve-out was available, so the default had to fire.
+    assert epistemic_graph.publication_refusal_active(root) is False
+    assert epistemic_graph.graph_scheduling_enabled() is True
+    assert epistemic_graph.EpistemicGraphIndex(root).available() is False
+    assert freshness.external_pending(root) is True, (
+        "an unclassified graph incompleteness must still fail closed"
+    )
+    clock_after = freshness.mark_external_pending(epoch_probe)
+    # One watchdog observation, one mark from the drain site, one probe.
+    assert clock_after == clock_before + 3
+
+
 def test_refused_publication_is_memoized_instead_of_retried_at_full_cost(
     contract_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
