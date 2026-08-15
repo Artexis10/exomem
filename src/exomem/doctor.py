@@ -24,6 +24,7 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -72,6 +73,58 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: reconcile` (or the `maintain` alias). Remediation strings named the internal
 #: ops, so every one of them fell through to the server argument parser.
 _REBUILD_VECTORS_CMD = "exomem maintain --reconcile"
+
+#: Absolute deferred-queue FAIL threshold (total semantic_upserts + full_upserts
+#: items), independent of vault size. The existing WARN tier is a 10% fraction
+#: of indexed pages — fine for scaling with a vault, but it never fires an
+#: absolute ceiling: a large vault can carry thousands of queued items and stay
+#: under 10%, and by then every operation on that vault is durably slow. The
+#: incident this guards: 3,724 items (2,116 semantic + 1,608 full) queued on a
+#: 2,872-page vault took per-operation latency from ~300ms to ~60s. 300 sits
+#: comfortably below that (12x headroom) and comfortably above a healthy
+#: transient of "a few dozen" items (7-12x headroom), so neither end flips the
+#: other's verdict.
+_DEFERRED_BACKLOG_FAIL_TOTAL = 300
+
+#: Orphaned rebuild-temporary files left by an interrupted background rebuild
+#: (either the `.graph-rebuild-*.sqlite[-journal|-wal|-shm]` or the
+#: `.lexical.sqlite.rebuild-*.tmp[-wal|-shm|-journal]` family — see
+#: `_check_rebuild_temp_orphans`). WARN above a small count (a single
+#: interrupted rebuild can leave a handful of sibling files for one attempt);
+#: FAIL once either count or size indicates an unbounded leak rather than one
+#: incomplete attempt. Incidents this guards: 18 graph-rebuild orphans totaling
+#: 527 MB; separately, 74 lexical-rebuild orphans totaling 5.84 GiB across 30
+#: abandoned rebuilds with nothing reaping them.
+_REBUILD_TEMP_ORPHAN_FAIL_COUNT = 5
+_REBUILD_TEMP_ORPHAN_FAIL_BYTES = 50 * 1024 * 1024
+
+#: Age (by mtime) above which a matching rebuild-temp file is treated as an
+#: orphan candidate rather than a legitimate in-flight rebuild. A single
+#: `rebuild_atomic()` pass (corpus scan + delta replay + WAL fold, or the
+#: graph-rebuild equivalent) writes to its temp file throughout the build, so
+#: an active one has a continuously fresh mtime; only a killed process leaves
+#: one whose mtime stops advancing. 60 minutes is comfortably above any
+#: plausible single-build write gap (the incident's abandoned files sat
+#: unmodified for days-to-weeks — 30 rebuilds spanning July 25-Aug 15 — not
+#: minutes) while still catching a truly abandoned temp promptly. Below this
+#: age, size is NOT evidence of a leak: the incident's own abandoned files
+#: averaged ~79 MB, well above the 50 MB fail-by-bytes threshold, but a
+#: same-sized in-flight rebuild is routine and must not fail.
+_REBUILD_TEMP_STALE_AGE_SECONDS = 60 * 60
+
+#: lexstore.rebuild_atomic() (lexstore.py:2469) names its detached build sibling
+#: `<lexical sidecar name>.rebuild-<uuid4().hex>.tmp`, optionally with a
+#: `-wal`/`-shm`/`-journal` companion suffix, and reaps it in its own `finally`
+#: on any graceful return — so a surviving one means the process was killed
+#: mid-build. No PUBLIC matcher for this name exists to import: lexstore.py
+#: itself has none, and governance/tool.py carries an identical PRIVATE regex
+#: (`_LEXICAL_REBUILD_TEMP_RE`) for its own unrelated fail-closed
+#: non-Markdown-membership purpose — private, and governance/tool.py is out of
+#: this task's scope to touch. This is a hand-derived duplicate of that same
+#: pattern, sourced from lexstore's construction call rather than guessed.
+_LEXICAL_REBUILD_TEMP_RE = re.compile(
+    r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$"
+)
 
 
 @dataclass
@@ -600,10 +653,19 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
 
 
 def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
-    """Warn when durable index work is a material share of indexed pages."""
+    """FAIL/WARN when durable index work threatens or already degrades every op.
+
+    Two independent tiers: an absolute FAIL ceiling
+    (`_DEFERRED_BACKLOG_FAIL_TOTAL`) that fires regardless of vault size, and
+    the pre-existing relative WARN tier (10% of indexed pages) below it.
+    Reconcile only re-embeds paths it itself changes — it never drains this
+    queue — so remediation always names the one command that does:
+    `exomem index --vault <root> --scope vault`.
+    """
     details: dict[str, object] = {
         "indexed_pages": 0,
         "warn_fraction": 0.10,
+        "fail_total": _DEFERRED_BACKLOG_FAIL_TOTAL,
         "semantic_upserts": 0,
         "full_upserts": 0,
     }
@@ -627,6 +689,23 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
     for queue in ("semantic_upserts", "full_upserts"):
         details[queue] = int(status.get(queue, {}).get("count", 0))
     indexed_pages = int(details["indexed_pages"])
+    semantic = int(details["semantic_upserts"])
+    full = int(details["full_upserts"])
+    total = semantic + full
+    command = f'exomem index --vault "{vault_root}" --scope vault'
+
+    if total >= _DEFERRED_BACKLOG_FAIL_TOTAL:
+        return _check(
+            "deferred_index_backlog",
+            "fail",
+            f"Deferred index backlog is {total} item(s) (semantic_upserts={semantic}, "
+            f"full_upserts={full}) — at this depth every vault operation degrades. "
+            "Reconcile only re-embeds paths it itself changes; it does not drain "
+            "this backlog.",
+            f"Run `{command}` to drain the backlog now.",
+            details=details,
+        )
+
     warn_above = indexed_pages * float(details["warn_fraction"])
     offenders = [
         f"{queue}={details[queue]}"
@@ -634,19 +713,341 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
         if int(details[queue]) > warn_above
     ]
     if offenders:
-        command = f'exomem index --vault "{vault_root}" --scope vault'
         return _check(
             "deferred_index_backlog",
             "warn",
             f"Deferred index backlog exceeds 10% of {indexed_pages} indexed page(s): "
             + ", ".join(offenders),
-            f"Reconciliation drains it automatically; run `{command}` to drain now.",
+            f"Run `{command}` to drain it — reconcile does not drain this queue on "
+            "its own.",
             details=details,
         )
     return _check(
         "deferred_index_backlog",
         "pass",
         f"Deferred index backlog is below 10% of {indexed_pages} indexed page(s).",
+        details=details,
+    )
+
+
+def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
+    """graph_sync epoch health: whether the derived graph is servable.
+
+    Reads graph_sync.status() (current/recovery_required/unavailable) plus
+    checkpoint_state() (whose "malformed" outcome status() alone cannot
+    distinguish). current -> pass; a malformed checkpoint always fails, even if
+    status() otherwise reports current; recovery_required fails using the same
+    canned remediation graph_sync itself hands to callers via
+    committed_graph_failure() when a real checkpoint is available, falling back
+    to an honest message when it is not; unavailable fails with an honest
+    message. Never claims to fix this itself — recovery is reconcile's job.
+
+    committed_graph_failure()'s own default remediation ("Run reconcile to
+    recover the derived graph.") names an internal op, not a runnable command
+    (see `_REBUILD_VECTORS_CMD`'s own comment for that history) — so this
+    always ensures the printed remediation includes the actual runnable
+    command, augmenting the canned text rather than discarding it when it is
+    more specific than the default.
+    """
+    if vault_root is None:
+        return _check(
+            "graph_sync.state",
+            "pass",
+            "No vault configured; graph_sync state was not inspected.",
+        )
+    from . import graph_sync
+
+    status = graph_sync.status(vault_root)
+    state = status.get("state")
+    generation = status.get("generation")
+    checkpoint_status, checkpoint = graph_sync.checkpoint_state(vault_root)
+    details: dict[str, object] = {
+        "state": state,
+        "generation": generation,
+        "checkpoint_state": checkpoint_status,
+    }
+
+    if checkpoint_status == "malformed":
+        return _check(
+            "graph_sync.state",
+            "fail",
+            f"graph_sync checkpoint is malformed (generation {generation}); the "
+            "derived graph cannot be trusted until it is recovered.",
+            f"Run `{_REBUILD_VECTORS_CMD}` to recover the derived graph.",
+            details=details,
+        )
+    if state == "current":
+        return _check(
+            "graph_sync.state",
+            "pass",
+            f"graph_sync is current at generation {generation}.",
+            details=details,
+        )
+    if state == "recovery_required":
+        if checkpoint is not None:
+            remediation = graph_sync.committed_graph_failure(checkpoint)[
+                "graph_sync_remediation"
+            ]
+            if _REBUILD_VECTORS_CMD not in remediation:
+                # The canned text (its own default: "Run reconcile to recover
+                # the derived graph.") names an internal op, not a runnable
+                # shell command. Augment rather than replace so a more
+                # specific canned message (e.g. a threaded
+                # GraphRebuildRegistrationError remediation) is preserved.
+                remediation = f"{remediation} Run `{_REBUILD_VECTORS_CMD}`."
+        else:
+            remediation = f"Run `{_REBUILD_VECTORS_CMD}` to recover the derived graph."
+        return _check(
+            "graph_sync.state",
+            "fail",
+            f"graph_sync requires recovery at generation {generation}; the derived "
+            "graph is not current.",
+            remediation,
+            details=details,
+        )
+    # state == "unavailable" (or any value outside the documented set).
+    return _check(
+        "graph_sync.state",
+        "fail",
+        f"graph_sync is unavailable at generation {generation}; graph-backed reads "
+        "cannot be trusted.",
+        f"Run `{_REBUILD_VECTORS_CMD}` to recover the derived graph.",
+        details=details,
+    )
+
+
+def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
+    """Leaked rebuild-temporary files from interrupted background rebuilds.
+
+    Two independent families, both normally self-cleaned on a graceful exit and
+    both leakable only by a hard process kill mid-rebuild:
+
+    - `.graph-rebuild-*.sqlite[-journal|-wal|-shm]` — graph_sync's rebuild path.
+      Matched via `vault.is_graph_rebuild_runtime_file_name`, a strict regex
+      that deliberately excludes `.graph-rebuild-user-copy.sqlite`, a real
+      (tested) user file.
+    - `.lexical.sqlite.rebuild-<32-hex>.tmp[-wal|-shm|-journal]` —
+      lexstore.rebuild_atomic()'s detached build sibling (lexstore.py:2469),
+      matched via `_LEXICAL_REBUILD_TEMP_RE` (see its module-level comment for
+      why this is hand-derived rather than imported).
+
+    A matching name alone is NOT evidence of an orphan: a legitimate in-flight
+    rebuild has a matching name too, and can legitimately be large (the
+    incident's own abandoned files averaged ~79 MB). Only a file whose mtime is
+    older than `_REBUILD_TEMP_STALE_AGE_SECONDS` is treated as a stale orphan
+    candidate; WARN/FAIL thresholds evaluate STALE counts/bytes exclusively, so
+    a fresh in-flight temporary of any size or count never trips them — its
+    remediation ("stop the service...") would itself create a real orphan if
+    followed against a rebuild that is still running.
+
+    `details` reports, per family (`details["graph_rebuild"]`,
+    `details["lexical_rebuild"]`) and combined: total `count`/`total_bytes`
+    (every matching name, regardless of age) and `stale_count`/`stale_bytes`
+    (age-gated, the population thresholds actually act on), plus
+    `stale_age_seconds`. Reclaiming a stale file requires the service stopped
+    and no rebuild in flight, so remediation names `exomem maintain` run
+    out-of-process (it reads the vault from EXOMEM_VAULT_PATH, not `--vault`).
+    """
+    empty_family = {"count": 0, "total_bytes": 0, "stale_count": 0, "stale_bytes": 0}
+    details: dict[str, object] = {
+        "count": 0,
+        "total_bytes": 0,
+        "stale_count": 0,
+        "stale_bytes": 0,
+        "stale_age_seconds": _REBUILD_TEMP_STALE_AGE_SECONDS,
+        "graph_rebuild": dict(empty_family),
+        "lexical_rebuild": dict(empty_family),
+    }
+    if vault_root is None:
+        return _check(
+            "rebuild_temp.orphans",
+            "pass",
+            "No vault configured; rebuild temporaries were not inspected.",
+            details=details,
+        )
+    from . import vault as vault_module
+
+    kb = Path(vault_root) / kb_dirname()
+    graph_orphans: list[Path] = []
+    lexical_orphans: list[Path] = []
+    if kb.is_dir():
+        for entry in kb.iterdir():
+            try:
+                if not entry.is_file():
+                    continue
+            except OSError:
+                continue
+            name = entry.name
+            if vault_module.is_graph_rebuild_runtime_file_name(name):
+                graph_orphans.append(entry)
+            elif _LEXICAL_REBUILD_TEMP_RE.fullmatch(name) is not None:
+                lexical_orphans.append(entry)
+
+    now = time.time()
+
+    def _family_stats(paths: list[Path]) -> dict[str, int]:
+        total = 0
+        stale_count = 0
+        stale_total = 0
+        for entry in paths:
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            total += st.st_size
+            if now - st.st_mtime > _REBUILD_TEMP_STALE_AGE_SECONDS:
+                stale_count += 1
+                stale_total += st.st_size
+        return {
+            "count": len(paths),
+            "total_bytes": total,
+            "stale_count": stale_count,
+            "stale_bytes": stale_total,
+        }
+
+    graph_stats = _family_stats(graph_orphans)
+    lexical_stats = _family_stats(lexical_orphans)
+    details["graph_rebuild"] = graph_stats
+    details["lexical_rebuild"] = lexical_stats
+    count = graph_stats["count"] + lexical_stats["count"]
+    total_bytes = graph_stats["total_bytes"] + lexical_stats["total_bytes"]
+    stale_count = graph_stats["stale_count"] + lexical_stats["stale_count"]
+    stale_bytes = graph_stats["stale_bytes"] + lexical_stats["stale_bytes"]
+    details["count"] = count
+    details["total_bytes"] = total_bytes
+    details["stale_count"] = stale_count
+    details["stale_bytes"] = stale_bytes
+    mb = total_bytes / (1024 * 1024)
+    stale_mb = stale_bytes / (1024 * 1024)
+    age_minutes = _REBUILD_TEMP_STALE_AGE_SECONDS // 60
+
+    if count == 0:
+        return _check(
+            "rebuild_temp.orphans",
+            "pass",
+            "No orphaned rebuild temporaries found.",
+            details=details,
+        )
+    if stale_count == 0:
+        return _check(
+            "rebuild_temp.orphans",
+            "pass",
+            f"{count} rebuild temporary file(s) totaling {mb:.1f} MB present, none "
+            f"older than {age_minutes} minutes — likely an in-flight rebuild, not "
+            "an orphan.",
+            details=details,
+        )
+    remediation = (
+        "Stop the exomem service, then run `exomem maintain` out-of-process "
+        "(it reads the vault from EXOMEM_VAULT_PATH, not --vault) to reclaim "
+        "orphaned rebuild temporaries — reclaim is only safe once no rebuild is "
+        "in flight."
+    )
+    summary = (
+        f"graph={graph_stats['stale_count']}/{graph_stats['count']}, "
+        f"lexical={lexical_stats['stale_count']}/{lexical_stats['count']} "
+        "(stale/total)"
+    )
+    if (
+        stale_count > _REBUILD_TEMP_ORPHAN_FAIL_COUNT
+        or stale_bytes > _REBUILD_TEMP_ORPHAN_FAIL_BYTES
+    ):
+        return _check(
+            "rebuild_temp.orphans",
+            "fail",
+            f"{stale_count} rebuild temporary file(s) older than {age_minutes} "
+            f"minutes, totaling {stale_mb:.1f} MB, are leaking disk space from "
+            f"interrupted rebuilds ({summary}).",
+            remediation,
+            details=details,
+        )
+    if stale_count > 1:
+        return _check(
+            "rebuild_temp.orphans",
+            "warn",
+            f"{stale_count} rebuild temporary file(s) older than {age_minutes} "
+            f"minutes, totaling {stale_mb:.1f} MB ({summary}).",
+            remediation,
+            details=details,
+        )
+    return _check(
+        "rebuild_temp.orphans",
+        "pass",
+        f"{stale_count} rebuild temporary file older than {age_minutes} minutes, "
+        f"totaling {stale_mb:.1f} MB (below the warn threshold).",
+        details=details,
+    )
+
+
+def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
+    """Env kill-switches that change or disable write-path background work.
+
+    Doctor is out-of-process and read-only: it can only see environment
+    configuration, never the running service's in-memory state. It
+    deliberately does NOT invent an accessor for the in-process corpus-context
+    cache dict (semantic_contract.py) — that structure is process-private and
+    meaningless from here. What it can honestly report: whether the cache is
+    switched on at all (EXOMEM_DISABLE_CORPUS_CACHE), whether the service runs
+    any periodic drain (EXOMEM_DISABLE_EVENT_INDEXES — when set, file_watcher
+    starts no reconcile thread at all), and whether new graph work is being
+    scheduled (EXOMEM_DISABLE_GRAPH_SCHEDULING). A disabled periodic drain
+    combined with an already non-empty deferred queue is the sharpest signal:
+    that backlog will not shrink on its own.
+    """
+    from . import epistemic_graph, freshness, semantic_contract
+
+    corpus_cache = semantic_contract.corpus_context_cache_enabled()
+    event_indexes = freshness.event_indexes_enabled()
+    graph_scheduling = epistemic_graph.graph_scheduling_enabled()
+    details: dict[str, object] = {
+        "corpus_context_cache_enabled": corpus_cache,
+        "event_indexes_enabled": event_indexes,
+        "graph_scheduling_enabled": graph_scheduling,
+    }
+
+    if not event_indexes and vault_root is not None:
+        from . import index_sync
+
+        status = index_sync.deferred_work_status(vault_root)
+        semantic = int(status.get("semantic_upserts", {}).get("count", 0))
+        full = int(status.get("full_upserts", {}).get("count", 0))
+        total = semantic + full
+        details["semantic_upserts"] = semantic
+        details["full_upserts"] = full
+        if total > 0:
+            command = f'exomem index --vault "{vault_root}" --scope vault'
+            level: Status = "fail" if total >= _DEFERRED_BACKLOG_FAIL_TOTAL else "warn"
+            return _check(
+                "write_path.env_flags",
+                level,
+                "EXOMEM_DISABLE_EVENT_INDEXES is set: the service runs no periodic "
+                f"drain, and {total} item(s) are already queued (semantic_upserts="
+                f"{semantic}, full_upserts={full}). This backlog will not shrink on "
+                "its own.",
+                f"Unset EXOMEM_DISABLE_EVENT_INDEXES, or run `{command}` manually.",
+                details=details,
+            )
+
+    notes = []
+    if not corpus_cache:
+        notes.append("EXOMEM_DISABLE_CORPUS_CACHE is set (corpus-context cache off).")
+    if not event_indexes:
+        notes.append("EXOMEM_DISABLE_EVENT_INDEXES is set (no periodic drain).")
+    if not graph_scheduling:
+        notes.append("EXOMEM_DISABLE_GRAPH_SCHEDULING is set (no new graph work).")
+    if notes:
+        return _check(
+            "write_path.env_flags",
+            "warn",
+            " ".join(notes),
+            "These are deliberate kill switches; unset the variable(s) to restore "
+            "default write-path behavior.",
+            details=details,
+        )
+    return _check(
+        "write_path.env_flags",
+        "pass",
+        "No write-path kill switches are set.",
         details=details,
     )
 
@@ -2083,6 +2484,9 @@ def doctor(
         _check_resource_posture(profile),
         _check_lexical(vault_root),
         _check_deferred_index_backlog(vault_root),
+        _check_graph_sync_state(vault_root),
+        _check_rebuild_temp_orphans(vault_root),
+        _check_write_path_env_flags(vault_root),
     ]
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:
