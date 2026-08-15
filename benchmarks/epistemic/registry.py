@@ -1,9 +1,15 @@
 """The frozen assertion registry.
 
-The 18 names below are pre-registered in ``PREREGISTRATION.md`` §2 and were
-committed before any competitor was run by this programme. The registry is a
+The 24 names below are pre-registered in ``PREREGISTRATION.md`` §2 — eighteen
+committed before any competitor was run by this programme, and six added by the
+2026-08 loop-closure amendment through the governed §7 path. The registry is a
 closed set on purpose: a scenario that names anything else fails to load, which
 is what stops the suite from growing an assertion to fit a result it wanted.
+
+Registration is not release. The families the amendment introduced stay
+withheld from comparative runs until its receipt is acknowledged; that gate
+lives in :mod:`epistemic.amendments` and fires at the same load-time choke
+point this registry does.
 
 ``PREREGISTERED_ASSERTIONS`` mirrors §2 in code so the mapping can be checked
 without file I/O at import time; ``tests/test_epistemic_registry.py`` parses the
@@ -46,6 +52,13 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     "export_reconstructs_state",
     "dependent_conclusions_surfaced_for_review",
     "no_cross_case_residue",
+    # Added by the 2026-08 loop-closure amendment (§7).
+    "due_prediction_surfaced",
+    "verdict_state_retrievable",
+    "divergence_surfaced_without_mutation",
+    "support_collapse_inspectable",
+    "refuted_retrievable_at_full_standing",
+    "loop_journey_state_coherent",
 )
 
 
@@ -67,10 +80,37 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f12", "external_canonical_edit"),
     ("f13", "engine_off_portability"),
     ("f14", "cross_agent_continuation"),
+    # Added by the 2026-08 loop-closure amendment (§7).
+    ("f15", "prediction_window"),
+    ("f16", "plan_record_linkage"),
+    ("f17", "derivation_collapse"),
+    ("f18", "negative_result_retention"),
+    ("f19", "loop_composite"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
     family_id for family_id, _name in PREREGISTERED_FAMILIES
+)
+
+#: ``family_id -> amendment sequence that introduced it``, mirroring §7.
+#:
+#: Being *pre-registered* and being *released* are two different facts, and this
+#: mapping is what keeps them apart. Before the amendment, f15-f19 were refused
+#: by the scenario loader for the incidental reason that §1 did not know them;
+#: registering them above removes that accident, so the receipt has to withhold
+#: them on purpose until the founder acknowledges it — see
+#: :mod:`epistemic.amendments`. The mapping is hand-mirrored from the document
+#: for the same reason ``PREREGISTERED_ASSERTIONS`` is (no file or Git I/O at
+#: import time) and is drift-tested against the derived receipt chain in
+#: ``tests/test_epistemic_amendment_governance.py``.
+AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
+    {
+        "f15": 1,
+        "f16": 1,
+        "f17": 1,
+        "f18": 1,
+        "f19": 1,
+    }
 )
 
 #: Assertions whose semantics compare two *named items*. A scenario expectation
@@ -95,6 +135,11 @@ REQUIRES_SNAPSHOT_PAIR: frozenset[str] = frozenset(
         "external_edit_authoritative_within",
         "export_reconstructs_state",
         "dependent_conclusions_surfaced_for_review",
+        # f16 proves the plan was not auto-mutated, and f19 proves the journey
+        # survived a restart. Both are statements about a transition, so a
+        # trajectory that took one snapshot cannot support either.
+        "divergence_surfaced_without_mutation",
+        "loop_journey_state_coherent",
     }
 )
 

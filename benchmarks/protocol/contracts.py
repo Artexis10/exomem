@@ -438,6 +438,18 @@ def _working_amendment_receipts(root: Path) -> tuple[AmendmentReceipt, ...]:
     return tuple(AmendmentReceipt.model_validate_json(data) for _name, data in ordered)
 
 
+def working_amendment_receipts(repo_root: Path | str) -> tuple[AmendmentReceipt, ...]:
+    """The working-tree amendment receipts, ordered by declared sequence.
+
+    File I/O only — no Git. A consumer that needs to know whether an amendment
+    is acknowledged (rather than to reconstruct its full pinned identity) can
+    answer that from the receipts alone, which keeps the acknowledgment check
+    available in a checkout where Git history is unavailable.
+    """
+
+    return _working_amendment_receipts(Path(repo_root).resolve())
+
+
 def validate_working_preregistration(
     repo_root: Path | str,
 ) -> str:
@@ -1057,4 +1069,5 @@ __all__ = [
     "validate_preregistration_bytes",
     "validate_preregistration_identity",
     "validate_working_preregistration",
+    "working_amendment_receipts",
 ]

@@ -15,6 +15,69 @@ PENDING_RECEIPT = (
     ROOT
     / "benchmarks/epistemic/contracts/amendment-2026-08-loop-closure.v1.json"
 )
+#: Families the sequence-1 amendment introduced, and therefore withholds while
+#: its receipt is pending.
+WITHHELD = ("f15", "f16", "f17", "f18", "f19")
+DATASET = {
+    "id": "fixture",
+    "variant": "mini",
+    "source": "local",
+    "revision": "1",
+    "sha256": "a" * 64,
+    "case_count": 1,
+}
+
+
+def _scenario_payload(family_id: str, assertion: str) -> dict[str, Any]:
+    """A structurally complete scenario for one family, as the loader wants it."""
+
+    return {
+        "scenario_id": f"probe-{family_id}",
+        "family_id": family_id,
+        "kind": "corpus",
+        "public_coverage": "none",
+        "phases": [
+            {
+                "phase_id": "p1",
+                "ops": [
+                    {"op": "ingest_source", "ref": "src-1"},
+                    {"op": "snapshot", "ref": "s1"},
+                ],
+                "expect": [{"assert": assertion}],
+            }
+        ],
+        "fairness": {
+            "why_neutral": "The property is independent of any product's storage shape.",
+            "public_coverage_subtraction": "No public suite covers this family.",
+            "mechanisms": [
+                {
+                    "provider_role": "subject",
+                    "mechanism": "documented query over neutral projected state",
+                    "verdict": "satisfiable",
+                    "evidence": "benchmarks/epistemic/PREREGISTRATION.md:1",
+                }
+            ],
+            "privileged_endpoint_matrix": [
+                {
+                    "driver_surface_id": "state.read",
+                    "provider": "fixture",
+                    "variant": "native",
+                    "disposition": "equivalent",
+                    "audit_scope": "read-only projected state",
+                    "evidence": "benchmarks/epistemic/PREREGISTRATION.md:1",
+                    "reason": "The fixture projects only documented neutral state.",
+                    "competitor_surface": "documented read endpoint",
+                }
+            ],
+            "acceptance_predicate": "PREREGISTRATION.md section 4.",
+        },
+    }
+
+
+def _scenario_yaml(family_id: str, assertion: str) -> str:
+    import json
+
+    return json.dumps(_scenario_payload(family_id, assertion))
 
 
 def _receipt(
@@ -595,3 +658,170 @@ def test_pending_amendment_refuses_a_claim_read_back_from_a_recorded_manifest(
     assert load_manifest(run_dir, family_ids=("f01",)).run_id == "recorded"
     with pytest.raises(ManifestError, match="amendment pending.*f15"):
         load_manifest(run_dir, family_ids=("f15",))
+
+
+# --------------------------------------------------------------------------
+# The pairing: registering f15-f19 removes the registry's incidental refusal,
+# so the receipt-governed gate must take over in the same change.
+# --------------------------------------------------------------------------
+
+
+def test_amended_families_are_registered_against_the_amended_document() -> None:
+    """The frozen registry mirrors §1 and §2 of the document, amendment included."""
+
+    from epistemic.registry import (
+        AMENDMENT_INTRODUCED_FAMILIES,
+        ASSERTION_REGISTRY,
+        PREREGISTERED_FAMILY_IDS,
+    )
+
+    for family_id in WITHHELD:
+        assert family_id in PREREGISTERED_FAMILY_IDS
+        assert AMENDMENT_INTRODUCED_FAMILIES[family_id] == 1
+    for assertion in (
+        "due_prediction_surfaced",
+        "verdict_state_retrievable",
+        "divergence_surfaced_without_mutation",
+        "support_collapse_inspectable",
+        "refuted_retrievable_at_full_standing",
+        "loop_journey_state_coherent",
+    ):
+        assert assertion in ASSERTION_REGISTRY
+
+
+def test_registry_mirror_of_introduced_families_matches_the_receipt_chain() -> None:
+    """The hand-mirrored constant cannot drift from what the receipts prove."""
+
+    from epistemic.registry import AMENDMENT_INTRODUCED_FAMILIES
+    from protocol.contracts import derive_preregistration_identity
+
+    identity = derive_preregistration_identity(ROOT)
+    derived = {
+        family_id: amendment.sequence
+        for amendment in identity.amendments
+        for family_id in amendment.introduced_family_ids
+    }
+    assert dict(AMENDMENT_INTRODUCED_FAMILIES) == derived
+
+
+def test_pending_amendment_refuses_to_load_a_scenario_for_an_amended_family() -> None:
+    """The non-bypassable gate: an f15-f19 scenario cannot be constructed at all.
+
+    Before f15-f19 were registered, the frozen §1 table refused these scenarios
+    incidentally — the family simply was not known. Registering them removes
+    that accident, so the receipt has to refuse them on purpose, at the same
+    load-time choke point.
+    """
+
+    from epistemic.schema import ScenarioLoadError, load_scenario_text
+
+    for family_id in WITHHELD:
+        with pytest.raises(
+            ScenarioLoadError,
+            match=rf"amendment sequence 1 .*pending.*{family_id}",
+        ):
+            load_scenario_text(
+                _scenario_yaml(family_id, "refuted_retrievable_at_full_standing"),
+                source=f"{family_id}.yaml",
+            )
+
+
+def test_ratified_base_families_still_load_while_the_amendment_is_pending() -> None:
+    """The narrowing must not become a blanket refusal of scenario loading."""
+
+    from epistemic.schema import load_scenario_text
+
+    scenario = load_scenario_text(
+        _scenario_yaml("f01", "evidence_path_exists"), source="f01.yaml"
+    )
+    assert scenario.family_id == "f01"
+
+
+def test_declared_scenario_families_reach_the_manifest_gate(tmp_path) -> None:
+    """Defence in depth: a Scenario built without the loader is still refused.
+
+    The loader is the choke point, but a run manifest is the protocol's
+    mandatory pre-provider artifact, so the families a run declares must also
+    be named to it. This is the wiring that made the gate stop being latent.
+    """
+
+    from epistemic.manifest import (
+        declared_family_ids,
+        load_epistemic_manifest,
+        start_epistemic_manifest,
+    )
+    from epistemic.schema import Scenario
+    from protocol.manifest import ManifestError, finalize_manifest
+
+    # Built straight from JSON, deliberately bypassing load_scenario_text: the
+    # loader would refuse f18 outright, and the point here is that the manifest
+    # gate holds even for a Scenario that never went through it.
+    amended = Scenario.model_validate_json(
+        _scenario_yaml("f18", "refuted_retrievable_at_full_standing")
+    )
+    released = Scenario.model_validate_json(_scenario_yaml("f01", "evidence_path_exists"))
+
+    assert declared_family_ids((released, amended)) == ("f01", "f18")
+
+    with pytest.raises(ManifestError, match="amendment pending.*f18"):
+        start_epistemic_manifest(
+            tmp_path / "amended",
+            run_id="amended",
+            dataset=DATASET,
+            started_at="2026-08-15T00:00:00Z",
+            scenarios=(released, amended),
+        )
+    assert not (tmp_path / "amended" / "manifest.json").exists()
+
+    run_dir = tmp_path / "released"
+    started = start_epistemic_manifest(
+        run_dir,
+        run_id="released",
+        dataset=DATASET,
+        started_at="2026-08-15T00:00:00Z",
+        scenarios=(released,),
+    )
+    assert started.status == "started"
+    finalize_manifest(run_dir, status="VALID", finalized_at="2026-08-15T00:01:00Z")
+
+    assert load_epistemic_manifest(run_dir, scenarios=(released,)).run_id == "released"
+    with pytest.raises(ManifestError, match="amendment pending.*f18"):
+        load_epistemic_manifest(run_dir, scenarios=(released, amended))
+
+
+def test_no_execution_path_reaches_an_amended_family_while_pending() -> None:
+    """The audit the narrowing turns on: enumerate every way in, and close it.
+
+    Registering f15-f19 removed the frozen registry's incidental refusal. If any
+    surface that runs, scores, or records a family still accepted one of them,
+    the protection would have evaporated between the registry and the gate
+    rather than transferred. These are those surfaces.
+    """
+
+    from epistemic.runner import evaluate_scenario
+    from epistemic.schema import Scenario, ScenarioLoadError, load_scenario_text
+    from epistemic.scoring import assemble_family
+    from protocol.contracts import AmendmentAcknowledgmentPendingError
+
+    payload = _scenario_payload("f18", "refuted_retrievable_at_full_standing")
+
+    # 1. Loading a scenario — the choke point nothing downstream can skip.
+    with pytest.raises(ScenarioLoadError, match="pending"):
+        load_scenario_text(_scenario_yaml("f18", "evidence_path_exists"), source="f18.yaml")
+
+    # 2. Evaluating a Scenario built without the loader.
+    hand_built = Scenario.model_validate_json(_scenario_yaml("f18", "evidence_path_exists"))
+    with pytest.raises(AmendmentAcknowledgmentPendingError, match="f18"):
+        evaluate_scenario(hand_built, snapshots={})
+
+    # 3. Scoring a family row, which takes a bare id and IS the comparative claim.
+    with pytest.raises(AmendmentAcknowledgmentPendingError, match="f18"):
+        assemble_family(family_id="f18", provider="fixture")
+
+    # Ratified-base families keep working at every one of those surfaces.
+    assert load_scenario_text(
+        _scenario_yaml("f01", "evidence_path_exists"), source="f01.yaml"
+    ).family_id == "f01"
+    assert assemble_family(family_id="f01", provider="fixture").family_id == "f01"
+    assert Scenario.model_validate_json(_scenario_yaml("f01", "evidence_path_exists"))
+    assert payload["family_id"] == "f18"

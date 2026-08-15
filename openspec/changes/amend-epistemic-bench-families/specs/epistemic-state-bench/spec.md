@@ -41,6 +41,24 @@ Any change to families, assertions, predicates, or gates after ratification SHAL
 - **WHEN** the f15–f19 amendment receipt is receipted but not yet acknowledged
 - **THEN** f15–f19 MUST NOT back a comparative run, score, or published claim, AND f01–f14 runs, the contract identity, the amendment chain and every consumer that names no amended family proceed unchanged
 
+### Requirement: Registration is not release
+
+The frozen registry SHALL mirror §1 and §2 of the amended pre-registration, f15–f19 and their assertions included, so a drift between code and document is a named failure. Being registered SHALL NOT make a family runnable: a family introduced by an amendment whose receipt is unacknowledged SHALL be refused at every surface that runs, scores, or records it — scenario loading, scenario evaluation, family-row assembly, run-manifest construction, and manifest loading for a claim. The refusal SHALL carry the typed pending-acknowledgment error naming the amendment sequence and the family.
+
+Scenario loading is the primary choke point: because no `Scenario` for a withheld family can be constructed through the loader, no downstream consumer can receive one. The remaining surfaces cover objects built without the loader.
+
+The released/withheld decision SHALL be answerable from the working receipt bytes alone, without Git history, so an ordinary fixture load does not depend on a checkout's history being present. Unreadable receipts SHALL fail closed, withholding every family an amendment introduced.
+
+#### Scenario: An amended family is registered but not runnable
+
+- **WHEN** f15–f19 are present in the §1 registry and the sequence-1 receipt is still pending
+- **THEN** loading, evaluating, or scoring a scenario for any of those families refuses with the typed pending-acknowledgment error, while f01–f14 proceed unchanged
+
+#### Scenario: The code mirror cannot drift from the receipt chain
+
+- **WHEN** the registry's amendment-introduced family mapping is compared against the families derived from the receipt chain
+- **THEN** they MUST be equal, so the cheap receipt-bytes check cannot silently disagree with the Git-derived identity
+
 ### Requirement: Ratified-identity drift check
 
 The suite SHALL verify that the working pre-registration file is byte-identical to the ratified base sha, or equals the base evolved through the receipted amendment chain (each receipt's amended sha matching the file state after its amendment, the final receipt matching the current file).

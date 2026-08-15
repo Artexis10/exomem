@@ -83,6 +83,57 @@ HYPOTHESIS_COLLECTION_TERMS: frozenset[str] = frozenset(
     {"hypothesis", "hypotheses", "proposal", "proposals"}
 )
 
+#: Vocabularies for the 2026-08 loop-closure families (f15-f19).
+#:
+#: Same discipline as the review-state vocabularies above, and for the same
+#: reason: these are *closed* sets matched against a single field or attribute
+#: value, never bare substring containment over prose. A projector that surfaces
+#: a product's own wording maps it onto one of these tokens; anything else is
+#: not observed rather than quietly accepted.
+
+#: Attribute keys under which a projector records a prediction unit.
+PREDICTION_RAW_KEYS: frozenset[str] = frozenset(
+    {"prediction", "prediction_id", "predicts", "forecast"}
+)
+#: Attribute keys carrying the prediction's window or deadline.
+DUE_RAW_KEYS: frozenset[str] = frozenset(
+    {"due", "due_at", "deadline", "prediction_window", "resolve_by", "window_ends"}
+)
+#: Values that state the window has elapsed.
+DUE_STATES: frozenset[str] = frozenset(
+    {"due", "overdue", "past_due", "elapsed", "expired", "ready_for_review"}
+)
+#: Attribute keys under which a verdict is recorded.
+VERDICT_RAW_KEYS: frozenset[str] = frozenset(
+    {"verdict", "outcome", "resolution", "adjudication"}
+)
+#: Values that state a verdict was reached, either way.
+VERDICT_STATES: frozenset[str] = frozenset(
+    {"confirmed", "supported", "refuted", "falsified", "disconfirmed", "inconclusive"}
+)
+#: The subset of verdicts that are negative results. f18 is about these.
+REFUTED_STATES: frozenset[str] = frozenset(
+    {"refuted", "falsified", "disconfirmed", "disproven"}
+)
+#: Attribute keys naming a plan artifact, and values that mark a divergence.
+PLAN_RAW_KEYS: frozenset[str] = frozenset({"plan", "plan_id", "intent"})
+DIVERGENCE_STATES: frozenset[str] = frozenset(
+    {"divergence", "diverged", "drift", "off_plan", "deviation", "mismatch"}
+)
+#: Attribute keys carrying a journey stage and the session it happened in.
+STAGE_RAW_KEYS: frozenset[str] = frozenset({"stage", "journey_stage", "step"})
+SESSION_RAW_KEYS: frozenset[str] = frozenset({"session", "session_id", "run"})
+#: The loop stages f19 requires evidence of, in order.
+JOURNEY_STAGES: tuple[str, ...] = (
+    "goal",
+    "hypothesis",
+    "prediction",
+    "intervention",
+    "records",
+    "review",
+    "revision",
+)
+
 #: Cap on how many offenders one evidence string lists (as the gates do).
 _MAX_LISTED = 8
 
@@ -121,7 +172,7 @@ class AssertionContext:
     #: Allowed reconstruction loss for the export comparison, 0.0 - 1.0.
     tolerance: float = 0.0
 
-    def replace(self, **changes: object) -> "AssertionContext":
+    def replace(self, **changes: object) -> AssertionContext:
         return replace(self, **changes)  # type: ignore[arg-type]
 
 
@@ -144,7 +195,7 @@ def _listed(values: Iterable[str]) -> str:
 def _content_hash(item: StateItem) -> str:
     """Identity of an item's material content; not a text-matching rule."""
 
-    payload = f"{item.title}\x00{item.text}".encode("utf-8")
+    payload = f"{item.title}\x00{item.text}".encode()
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -391,6 +442,110 @@ def _evidence_targets(snapshot: EpistemicStateSnapshot, item: StateItem) -> tupl
         if target not in seen:
             seen.append(target)
     return tuple(seen)
+
+
+def _raw_value(item: StateItem, keys: frozenset[str]) -> tuple[str, str] | None:
+    """The first ``(key, value)`` whose key is in ``keys``; ids stay sorted-stable."""
+
+    for key, value in sorted(item.raw.items()):
+        if key.strip().lower() in keys:
+            return key, value
+    return None
+
+
+def _raw_states(item: StateItem, keys: frozenset[str], vocabulary: frozenset[str]) -> str | None:
+    """The vocabulary token a documented attribute states, or ``None``.
+
+    Two closed sets, never a free-text scan: the attribute must be one the
+    projector documented, and its value must state one of the tokens under the
+    harness's single fixed matching rule.
+    """
+
+    found = _raw_value(item, keys)
+    if found is None:
+        return None
+    _key, value = found
+    for token in sorted(vocabulary):
+        if states_value(token, value) or states_value(token.replace("_", "-"), value):
+            return token
+    return None
+
+
+def _prediction_items(snapshot: EpistemicStateSnapshot) -> tuple[StateItem, ...]:
+    """Items a projector recorded as prediction units."""
+
+    return tuple(
+        item
+        for item in snapshot.items
+        if _raw_value(item, PREDICTION_RAW_KEYS) is not None
+        or _raw_value(item, DUE_RAW_KEYS) is not None
+    )
+
+
+def _hypothesis_items(snapshot: EpistemicStateSnapshot) -> tuple[StateItem, ...]:
+    """Hypotheses and prediction units — whatever a verdict may adjudicate."""
+
+    predictions = {item.id for item in _prediction_items(snapshot)}
+    return tuple(
+        item
+        for item in snapshot.items
+        if item.kind == "hypothesis" or item.id in predictions
+    )
+
+
+def _verdict_of(snapshot: EpistemicStateSnapshot, item: StateItem) -> tuple[str, str] | None:
+    """``(verdict, how)`` for ``item``: on the item, or on a linked outcome.
+
+    The two alternates PREREGISTRATION §4 requires. The linked form must
+    dereference — an outcome artifact that names no adjudicated subject, or
+    names one that is not in the snapshot, is not a retrievable verdict.
+    """
+
+    direct = _raw_states(item, VERDICT_RAW_KEYS, VERDICT_STATES)
+    if direct is not None:
+        return direct, f"verdict attribute on {item.id}"
+    for candidate in snapshot.items:
+        if candidate.id == item.id:
+            continue
+        linked = _raw_states(candidate, VERDICT_RAW_KEYS, VERDICT_STATES)
+        if linked is None:
+            continue
+        resolves = item.id in _evidence_targets(snapshot, candidate) or any(
+            relation.subject == candidate.id
+            and relation.object == item.id
+            and relation.predicate in {"answers", "supports", "contradicts", "relates_to"}
+            for relation in snapshot.relations
+        )
+        if resolves:
+            return linked, f"linked outcome {candidate.id} adjudicating {item.id}"
+    return None
+
+
+def _support_roots(snapshot: EpistemicStateSnapshot, item: StateItem) -> frozenset[str]:
+    """Raw-source ids reachable from ``item`` by evidence hops, bounded.
+
+    Bounded by the snapshot's own item count so a cyclic provenance graph is a
+    terminating traversal rather than a hang.
+    """
+
+    seen: set[str] = set()
+    roots: set[str] = set()
+    frontier = [item.id]
+    limit = len(snapshot.items) + 1
+    while frontier and len(seen) <= limit:
+        current = frontier.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        node = snapshot.item(current)
+        if node is None:
+            continue
+        targets = _evidence_targets(snapshot, node)
+        if node.kind == "raw_source" and node.id != item.id:
+            roots.add(node.id)
+            continue
+        frontier.extend(targets)
+    return frozenset(roots)
 
 
 def _outgoing_edges(
@@ -1562,3 +1717,428 @@ def no_cross_case_residue(ctx: AssertionContext) -> AssertionResult:
             ctx.subject,
         )
     return _result(name, "pass", "cross-case canary probe returned no foreign hits", ctx.subject)
+
+
+# --------------------------------------------------------------------------
+# 19-24: loop closure (PREREGISTRATION §7, 2026-08 amendment; families f15-f19)
+#
+# These six are pre-registered ahead of the primitives they measure, which is
+# the contracts-first point of the amendment: the bar is committed to before
+# the product can clear it. Each follows the same discipline as the original
+# eighteen — capability gate first, §4 alternates tried in order, the winning
+# representation named in the evidence, and absence typed rather than zeroed.
+# --------------------------------------------------------------------------
+
+
+def due_prediction_surfaced(ctx: AssertionContext) -> AssertionResult:
+    """An overdue prediction is surfaced through the documented interface.
+
+    Accepts a deadline/status query over prediction units, or a due/review
+    queue derived from dated prediction artifacts.
+    """
+
+    name = "due_prediction_surfaced"
+    gated = _gate(ctx, name, "prediction", "review_state")
+    if gated is not None:
+        return gated
+    unobservable = _declared_but_unobservable(ctx, name)
+    if unobservable is not None:
+        return unobservable
+
+    snapshot = ctx.snapshot
+    predictions = _prediction_items(snapshot)
+    if ctx.subject:
+        predictions = tuple(item for item in predictions if item.id == ctx.subject)
+    if not predictions:
+        return _result(
+            name,
+            "unsupported",
+            "no prediction unit observed; a projector that records none cannot "
+            "be asked whether an overdue one surfaces",
+            ctx.subject,
+        )
+
+    served = set(ctx.served_items) if ctx.served_items is not None else None
+    missed: list[str] = []
+    for item in predictions:
+        overdue = _raw_states(item, DUE_RAW_KEYS, DUE_STATES)
+        queued = _is_open(item.review_state)
+        if not overdue and not queued:
+            missed.append(item.id)
+            continue
+        if served is not None and item.id not in served:
+            missed.append(item.id)
+            continue
+        how = (
+            f"deadline/status attribute states {overdue!r}"
+            if overdue
+            else f"due/review queue entry ({item.review_state})"
+        )
+        return _result(name, "pass", f"{item.id}: {how}", ctx.subject)
+    return _result(
+        name,
+        "fail",
+        f"no overdue prediction is surfaced: {_listed(missed)} state no elapsed "
+        "window and sit in no queue",
+        ctx.subject,
+    )
+
+
+def verdict_state_retrievable(ctx: AssertionContext) -> AssertionResult:
+    """A resolved hypothesis or prediction can be asked what it resolved to.
+
+    Accepts verdict metadata on the item, or a linked outcome artifact that
+    carries the verdict and resolves back to what it adjudicates.
+    """
+
+    name = "verdict_state_retrievable"
+    gated = _gate(ctx, name, "verdict", "kind", "cites")
+    if gated is not None:
+        return gated
+    unobservable = _declared_but_unobservable(ctx, name)
+    if unobservable is not None:
+        return unobservable
+
+    snapshot = ctx.snapshot
+    subjects = _hypothesis_items(snapshot)
+    if ctx.subject:
+        subjects = tuple(item for item in subjects if item.id == ctx.subject)
+    if not subjects:
+        return _result(
+            name,
+            "unsupported",
+            "no hypothesis or prediction observed to carry a verdict",
+            ctx.subject,
+        )
+
+    missing: list[str] = []
+    for item in subjects:
+        verdict = _verdict_of(snapshot, item)
+        if verdict is None:
+            missing.append(item.id)
+            continue
+        value, how = verdict
+        return _result(name, "pass", f"{item.id} verdict {value!r} via {how}", ctx.subject)
+    return _result(
+        name,
+        "fail",
+        f"no verdict is retrievable for {_listed(missing)}: no verdict attribute "
+        "and no linked outcome that resolves back",
+        ctx.subject,
+    )
+
+
+def divergence_surfaced_without_mutation(ctx: AssertionContext) -> AssertionResult:
+    """Records that drift from a bound plan are surfaced, and nothing rewrites the plan.
+
+    Both halves are load-bearing. Surfacing without the no-mutation check would
+    pass a system that silently edited the plan to match reality, which is the
+    failure the family exists to catch.
+    """
+
+    name = "divergence_surfaced_without_mutation"
+    gated = _gate(ctx, name, "plan_linkage", "review_state")
+    if gated is not None:
+        return gated
+    paired = _require_pair(ctx, name)
+    if paired is not None:
+        return paired
+    unobservable = _declared_but_unobservable(ctx, name)
+    if unobservable is not None:
+        return unobservable
+
+    snapshot = ctx.snapshot
+    prior = ctx.prior
+    assert prior is not None  # _require_pair
+    plans = tuple(
+        item for item in snapshot.items if _raw_value(item, PLAN_RAW_KEYS) is not None
+    )
+    if ctx.subject:
+        plans = tuple(item for item in plans if item.id == ctx.subject)
+    if not plans:
+        return _result(
+            name,
+            "unsupported",
+            "no plan artifact observed; a divergence from nothing is not measurable",
+            ctx.subject,
+        )
+
+    mutated: list[str] = []
+    unsurfaced: list[str] = []
+    for plan in plans:
+        before = prior.item(plan.id)
+        if before is not None and _content_hash(before) != _content_hash(plan):
+            mutated.append(plan.id)
+            continue
+        flagged = [
+            item.id
+            for item in snapshot.items
+            if _normalize_state(item.review_state) in DIVERGENCE_STATES
+            or _raw_states(item, PLAN_RAW_KEYS, DIVERGENCE_STATES) is not None
+        ]
+        if flagged:
+            return _result(
+                name,
+                "pass",
+                f"divergence surfaced for review ({_listed(flagged)}) while plan "
+                f"{plan.id} is byte-identical across the transition",
+                ctx.subject,
+            )
+        related = [
+            relation.object
+            for relation in snapshot.relations
+            if relation.subject == plan.id
+            and relation.predicate in {"contradicts", "relates_to"}
+        ]
+        if related:
+            return _result(
+                name,
+                "pass",
+                f"documented comparison surfaces {plan.id} against {_listed(related)} "
+                "while the plan is unchanged across the transition",
+                ctx.subject,
+            )
+        unsurfaced.append(plan.id)
+    if mutated:
+        return _result(
+            name,
+            "fail",
+            f"plan auto-mutated to match the records: {_listed(mutated)} changed "
+            "across the transition rather than being surfaced for review",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "fail",
+        f"records diverge but nothing surfaces it for {_listed(unsurfaced)}: "
+        "no review entry and no documented comparison",
+        ctx.subject,
+    )
+
+
+def support_collapse_inspectable(ctx: AssertionContext) -> AssertionResult:
+    """Two derived notes resting on one source do not read as independent support.
+
+    Accepts a provenance graph exposing the shared root, or documented source
+    references that let both support paths be resolved to the same source.
+    """
+
+    name = "support_collapse_inspectable"
+    gated = _gate(ctx, name, "cites", "kind")
+    if gated is not None:
+        return gated
+    unobservable = _declared_but_unobservable(ctx, name)
+    if unobservable is not None:
+        return unobservable
+
+    snapshot = ctx.snapshot
+    consumers = tuple(
+        item
+        for item in snapshot.items
+        if len(_evidence_targets(snapshot, item)) > 1 and item.kind in BELIEF_KINDS
+    )
+    if ctx.subject:
+        consumers = tuple(item for item in consumers if item.id == ctx.subject)
+    if not consumers:
+        return _result(
+            name,
+            "unsupported",
+            "no item rests on two or more supports; support collapse is not "
+            "observable here",
+            ctx.subject,
+        )
+
+    opaque: list[str] = []
+    for consumer in consumers:
+        supports = _evidence_targets(snapshot, consumer)
+        roots_by_support = {
+            support: _support_roots(snapshot, snapshot.item(support))
+            for support in supports
+            if snapshot.item(support) is not None
+        }
+        if len(roots_by_support) < 2 or any(not roots for roots in roots_by_support.values()):
+            opaque.append(consumer.id)
+            continue
+        shared = frozenset.intersection(*roots_by_support.values())
+        if shared:
+            return _result(
+                name,
+                "pass",
+                f"{consumer.id}: both support paths resolve to shared source "
+                f"{_listed(sorted(shared))}, so the collapse is inspectable",
+                ctx.subject,
+            )
+        return _result(
+            name,
+            "pass",
+            f"{consumer.id}: support paths resolve to distinct sources "
+            f"({_listed(sorted({r for rs in roots_by_support.values() for r in rs}))}); "
+            "independence is inspectable rather than assumed",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "fail",
+        f"support structure is not inspectable for {_listed(opaque)}: at least one "
+        "support path does not resolve to a source the snapshot exposes",
+        ctx.subject,
+    )
+
+
+def refuted_retrievable_at_full_standing(ctx: AssertionContext) -> AssertionResult:
+    """A refuted hypothesis stays retrievable, and is not demoted for being refuted.
+
+    Distinguishable from active-unresolved (it carries a verdict) AND from
+    superseded (it was not retired or replaced). Losing a negative result is the
+    harm; quietly filing it as superseded is the same harm with better manners.
+    """
+
+    name = "refuted_retrievable_at_full_standing"
+    gated = _gate(ctx, name, "verdict", "current", "kind")
+    if gated is not None:
+        return gated
+    unobservable = _declared_but_unobservable(ctx, name)
+    if unobservable is not None:
+        return unobservable
+
+    snapshot = ctx.snapshot
+    candidates = _hypothesis_items(snapshot)
+    if ctx.subject:
+        candidates = tuple(item for item in candidates if item.id == ctx.subject)
+    refuted = tuple(
+        item
+        for item in candidates
+        if (_raw_states(item, VERDICT_RAW_KEYS, REFUTED_STATES) is not None)
+        or (
+            (verdict := _verdict_of(snapshot, item)) is not None and verdict[0] in REFUTED_STATES
+        )
+    )
+    if not refuted:
+        return _result(
+            name,
+            "unsupported",
+            "no refuted hypothesis observed; the retention invariant has no subject",
+            ctx.subject,
+        )
+
+    superseded = _superseded_ids(snapshot)
+    served = set(ctx.served_items) if ctx.served_items is not None else None
+    demoted: list[str] = []
+    for item in refuted:
+        reasons: list[str] = []
+        if item.current == "no":
+            reasons.append("currency withdrawn")
+        if item.retired_reason:
+            reasons.append(f"retired as {item.retired_reason!r}")
+        if item.id in superseded or item.revision_of:
+            reasons.append("filed as superseded")
+        if served is not None and item.id not in served:
+            reasons.append("not served by the documented retrieval surface")
+        if reasons:
+            demoted.append(f"{item.id} ({'; '.join(reasons)})")
+            continue
+        return _result(
+            name,
+            "pass",
+            f"{item.id} is retrievable at full standing: verdict distinguishes it "
+            "from active-unresolved, and it is neither retired nor superseded",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "fail",
+        f"refuted result demoted rather than retained: {_listed(demoted)}",
+        ctx.subject,
+    )
+
+
+def loop_journey_state_coherent(ctx: AssertionContext) -> AssertionResult:
+    """A full goal-to-revision journey survives a restart with its links intact.
+
+    Scores the system rather than retrieval: the deterministic snapshots must
+    show at least three sessions, the review outcome, and the resulting
+    revision, and every stage observed before the restart must still be there
+    afterwards, unchanged.
+    """
+
+    name = "loop_journey_state_coherent"
+    gated = _gate(ctx, name, "kind", "cites", "verdict")
+    if gated is not None:
+        return gated
+    paired = _require_pair(ctx, name)
+    if paired is not None:
+        return paired
+
+    snapshot = ctx.snapshot
+    prior = ctx.prior
+    assert prior is not None  # _require_pair
+    staged = {
+        item.id: stage
+        for item in snapshot.items
+        if (stage := _raw_states(item, STAGE_RAW_KEYS, frozenset(JOURNEY_STAGES))) is not None
+    }
+    if not staged:
+        return _result(
+            name,
+            "unsupported",
+            "no journey stage observed; the composite family needs staged artifacts",
+            ctx.subject,
+        )
+
+    sessions = {
+        found[1]
+        for item in snapshot.items
+        if (found := _raw_value(item, SESSION_RAW_KEYS)) is not None
+    }
+    observed = set(staged.values())
+    missing = [stage for stage in JOURNEY_STAGES if stage not in observed]
+
+    lost: list[str] = []
+    for item_id in sorted(staged):
+        before = prior.item(item_id)
+        current = snapshot.item(item_id)
+        if before is not None and current is not None and _content_hash(before) != _content_hash(current):
+            lost.append(f"{item_id} (rewritten across the restart)")
+    for before in prior.items:
+        stage = _raw_states(before, STAGE_RAW_KEYS, frozenset(JOURNEY_STAGES))
+        if stage is not None and snapshot.item(before.id) is None:
+            lost.append(f"{before.id} (stage {stage!r} lost across the restart)")
+    if lost:
+        return _result(
+            name, "fail", f"journey did not survive the restart: {_listed(sorted(lost))}", ctx.subject
+        )
+    if missing:
+        return _result(
+            name,
+            "fail",
+            f"journey is incomplete: no artifact records stage(s) {_listed(missing)}",
+            ctx.subject,
+        )
+    if len(sessions) < 3:
+        return _result(
+            name,
+            "fail",
+            f"journey spans {len(sessions)} session(s); the family requires at least three",
+            ctx.subject,
+        )
+    unlinked = [
+        item_id
+        for item_id in sorted(staged)
+        if not _evidence_targets(snapshot, snapshot.item(item_id))  # type: ignore[arg-type]
+        and not _outgoing_edges(snapshot, item_id)
+        and staged[item_id] != JOURNEY_STAGES[0]
+    ]
+    if unlinked:
+        return _result(
+            name,
+            "fail",
+            f"journey stages are not linked: {_listed(unlinked)} reference nothing upstream",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "pass",
+        f"all {len(JOURNEY_STAGES)} stages recorded across {len(sessions)} sessions, "
+        "linked, and unchanged across the restart",
+        ctx.subject,
+    )
