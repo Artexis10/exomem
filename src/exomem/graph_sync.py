@@ -2493,15 +2493,78 @@ def temporary_sidecar_path(live: Path, checkpoint: GraphSyncCheckpoint) -> Path:
     )
 
 
+PUBLISH_IN_PLACE_ATTEMPTS = 3
+PUBLISH_IN_PLACE_BUSY_TIMEOUT_SECONDS = 5.0
+
+
 def replace_sidecar(temporary: Path, live: Path) -> None:
-    """Use the platform's atomic replacement primitive after all handles close."""
+    """Publish the proven temporary as the live sidecar.
+
+    The fast path is the platform's atomic replacement primitive, which Linux
+    always grants and which Windows grants once no handle is open on the
+    destination. Windows refuses it while any reader keeps the live SQLite file
+    open, and a resident service makes that a routine condition rather than a
+    rare one, so a refusal must not be the end of the road: fall back to
+    publishing the same proven bytes *into* the existing file with SQLite's
+    backup API, which needs only a write transaction on the destination and
+    therefore leaves the directory entry (and every open handle) untouched.
+
+    Only when both fail is the publication genuinely unavailable. Leaving the
+    complete old sidecar in place is fail-closed; the checkpoint remains
+    unacknowledged and the graph's own recovery path retries later.
+    """
     try:
         os.replace(temporary, live)
     except PermissionError as error:
-        # Windows refuses replacement while a reader keeps the SQLite file
-        # open. Leaving the complete old sidecar in place is fail-closed; the
-        # checkpoint remains unacknowledged and reconcile can retry later.
+        if _publish_sidecar_in_place(temporary, live):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                # A retained temp is inert once the live file already carries
+                # the published bytes; the reaper collects it on a later pass.
+                pass
+            return
         raise GraphSidecarReplaceUnavailable("live graph sidecar has an open reader") from error
+
+
+def _publish_sidecar_in_place(temporary: Path, live: Path) -> bool:
+    """Copy a proven temp sidecar over the live file without moving the entry.
+
+    `sqlite3.Connection.backup` copies the whole source database inside one
+    destination transaction, so a concurrent reader either sees the complete
+    old content or the complete new content — never a half-written file. A
+    reader holding a *read* transaction blocks the write briefly, which the
+    busy timeout absorbs; a reader that never yields exhausts the bounded
+    attempts and leaves the live sidecar exactly as it was.
+    """
+    if not live.exists():
+        return False
+    for attempt in range(PUBLISH_IN_PLACE_ATTEMPTS):
+        try:
+            source = sqlite3.connect(temporary)
+            try:
+                destination = sqlite3.connect(
+                    live, timeout=PUBLISH_IN_PLACE_BUSY_TIMEOUT_SECONDS
+                )
+                try:
+                    source.backup(destination)
+                    destination.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                finally:
+                    destination.close()
+            finally:
+                source.close()
+        except sqlite3.Error:
+            logger.debug(
+                "graph sidecar in-place publication attempt %d/%d did not complete",
+                attempt + 1,
+                PUBLISH_IN_PLACE_ATTEMPTS,
+                exc_info=True,
+            )
+            continue
+        except OSError:
+            return False
+        return True
+    return False
 
 
 def _rebuild_runtime_root(state_root: Path | None) -> Path:
