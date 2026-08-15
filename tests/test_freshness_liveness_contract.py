@@ -72,19 +72,23 @@ def _spy_corpus_census(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     return calls
 
 
-def _poison_corpus_patch(monkeypatch: pytest.MonkeyPatch) -> None:
+def _poison_corpus_patch(monkeypatch: pytest.MonkeyPatch):
     """Fail only the projection half of the corpus publish seam (Class B).
 
     `freshness.on_files_changed` still runs and still records the delta -- the
     registry observed every event. Only the cache's own patch raises, which is
     exactly the contract's Class B: "a corpus-cache patch that raises for a
-    cause local to the cache".
+    cause local to the cache". Returns the real patch so a caller can put it
+    back explicitly; `monkeypatch.undo()` would also revert the corpus-cache
+    env var this module's fixture sets, which is not what any caller means.
     """
+    real_patch = semantic_contract._patch_corpus_files_changed_locked
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("poisoned corpus delta")
 
     monkeypatch.setattr(semantic_contract, "_patch_corpus_files_changed_locked", boom)
+    return real_patch
 
 
 def test_refused_corpus_patch_does_not_cool_vault_freshness(
@@ -103,7 +107,7 @@ def test_refused_corpus_patch_does_not_cool_vault_freshness(
 
     page = vault / _PAGE_REL
     page.write_text(_page(title="One changed"), encoding="utf-8")
-    _poison_corpus_patch(monkeypatch)
+    real_patch = _poison_corpus_patch(monkeypatch)
 
     assert index_sync.publish_corpus_delta(vault, changed=(page,)) is False
 
@@ -116,7 +120,7 @@ def test_refused_corpus_patch_does_not_cool_vault_freshness(
     # 2. The corpus projection can warm itself again with no operator action:
     #    the next publish repopulates on miss, and the read after it is an
     #    event-hit paying zero full censuses.
-    monkeypatch.undo()
+    monkeypatch.setattr(semantic_contract, "_patch_corpus_files_changed_locked", real_patch)
     other = vault / _OTHER_REL
     other.write_text(_page(title="Two changed"), encoding="utf-8")
     assert index_sync.publish_corpus_delta(vault, changed=(other,)) is True
