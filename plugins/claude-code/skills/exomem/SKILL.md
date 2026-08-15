@@ -360,6 +360,12 @@ Successful product mutations return a compact decisive terminal by default:
 `request_id`, `receipt_id`, and `warnings_count` (plus a caller-supplied
 `idempotency_key` when the surface supports one). A null receipt means that the
 surface supplied no replay identity; it does not weaken the committed status.
+When the write warned, `warnings` carries the texts — at most 8 entries of at
+most 300 characters. `warnings_count` remains authoritative, so fewer entries
+than the count means the rest were trimmed; ask for `response_detail="full"` to
+see them all. An upload receipt reports its warnings as per-file rows under
+`files` instead, and a mutation recovered from a portable receipt reports the
+count alone because it retains no leaf content.
 Use `response_detail="full"` when existing leaf diagnostics are needed under
 `diagnostics`. Use `response_detail="legacy"` only for temporary compatibility
 with the former raw result. Response detail is presentation-only: changing it

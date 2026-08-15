@@ -202,7 +202,13 @@ Agent behavior:
 
 Successful product mutations now return a compact decisive terminal by default:
 `ok`, `status="committed"`, `mutated`, `path` or `paths`, `request_id`,
-`receipt_id`, and `warnings_count`. Use `response_detail="full"` when an agent
+`receipt_id`, and `warnings_count`. When the write actually warned, the texts
+come back as `warnings` — at most 8 entries of at most 300 characters each.
+`warnings_count` stays authoritative, so fewer entries than the count means the
+rest were trimmed. Two cases return a count with no `warnings`: an upload
+receipt, whose warnings are already per-file rows under `files`, and a mutation
+recovered from a portable receipt, which deliberately retains no leaf content.
+Use `response_detail="full"` when an agent
 needs the previous leaf diagnostics nested under `diagnostics`.
 `response_detail="legacy"` returns the old raw result for temporary
 compatibility. Detail is presentation-only and does not change replay identity.

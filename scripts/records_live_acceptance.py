@@ -50,6 +50,9 @@ _COMPACT_MUTATION_OPTIONAL = frozenset(
         "graph_sync_code",
         "graph_sync_checkpoint",
         "graph_sync_remediation",
+        # Present only when the leaf actually warned; absent on receipt recovery,
+        # which reports a count with no retained texts.
+        "warnings",
     }
 )
 _COMPACT_V1_RECEIPT = frozenset(
