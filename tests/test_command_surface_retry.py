@@ -620,7 +620,9 @@ def test_real_edit_semantic_preflight_failure_releases_mutation_boundary(
 
     assert result["path"] == path
     assert "After" in (vault / path).read_text(encoding="utf-8")
-    assert manager.status()["mutation_boundary"] == {"state": "free"}
+    # Probe the vault's real boundary: the pathless status only covers this
+    # process, so it now answers `unknown` rather than a blind `free`.
+    assert manager.status(vault)["mutation_boundary"]["state"] == "free"
 
 
 def test_real_edit_replays_after_terminal_acknowledgement_loss(
@@ -677,7 +679,9 @@ def test_real_edit_replays_after_terminal_acknowledgement_loss(
 
     assert replay["path"] == path
     assert (vault / path).read_text(encoding="utf-8").count("After") == 1
-    assert manager.status()["mutation_boundary"] == {"state": "free"}
+    # Probe the vault's real boundary: the pathless status only covers this
+    # process, so it now answers `unknown` rather than a blind `free`.
+    assert manager.status(vault)["mutation_boundary"]["state"] == "free"
 
 
 def test_mcp_retry_scope_hashes_bearer_and_falls_back_to_session(monkeypatch) -> None:
@@ -810,7 +814,9 @@ def test_all_public_audit_routes_bypass_a_held_mutation_boundary(
         ("review_memory", {"mode": "audit", "detail": "full"}),
         ("maintain_memory", {"mode": "audit", "detail": "full"}),
     ]
-    assert manager.status()["mutation_boundary"] == {"state": "free"}
+    # Probe the vault's real boundary: the pathless status only covers this
+    # process, so it now answers `unknown` rather than a blind `free`.
+    assert manager.status(vault)["mutation_boundary"]["state"] == "free"
 
 
 def test_bound_mcp_tool_passes_retry_scope(monkeypatch) -> None:

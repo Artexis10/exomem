@@ -954,7 +954,10 @@ def test_commit_creation_draft_reuses_prevalidated_attempt_on_matching_census_to
     source, validation = _reviewed_validation(tmp_path)
     counts = {"corpus": 0, "validation": 0}
     seams = (
-        (relation_review.semantic_contract, "build_corpus_context", "corpus"),
+        # `_attempt` builds through the census-returning entry point, so its
+        # own validity token never re-walks the vault; that is the seam to
+        # count corpus builds at.
+        (relation_review.semantic_contract, "build_corpus_context_with_census", "corpus"),
         (relation_review, "_validation", "validation"),
     )
     for owner, name, key in seams:
@@ -989,13 +992,15 @@ def test_commit_creation_draft_falls_through_to_full_attempt_on_census_mismatch(
 ) -> None:
     source, validation = _reviewed_validation(tmp_path)
     counts = {"corpus": 0}
-    original_build = relation_review.semantic_contract.build_corpus_context
+    original_build = relation_review.semantic_contract.build_corpus_context_with_census
 
     def counted_build(*args, **kwargs):
         counts["corpus"] += 1
         return original_build(*args, **kwargs)
 
-    monkeypatch.setattr(relation_review.semantic_contract, "build_corpus_context", counted_build)
+    monkeypatch.setattr(
+        relation_review.semantic_contract, "build_corpus_context_with_census", counted_build
+    )
 
     real_prepare = relation_review.prepare_commit_creation_draft
 
@@ -1132,7 +1137,10 @@ def test_attempt_loaders_and_corpus_walk_are_each_called_once(
         (relation_review.relation_registry, "load_registry", "relations"),
         (relation_review.semantic_language_registry, "load_registry", "language"),
         (relation_review.memory_schema, "load_saved_contracts", "contracts"),
-        (relation_review.semantic_contract, "build_corpus_context", "corpus"),
+        # `_attempt` builds through the census-returning entry point, so its
+        # own validity token never re-walks the vault; that is the seam to
+        # count corpus builds at.
+        (relation_review.semantic_contract, "build_corpus_context_with_census", "corpus"),
     )
     for owner, name, key in seams:
         original = getattr(owner, name)

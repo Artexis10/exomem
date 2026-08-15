@@ -12,6 +12,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from exomem import epistemic_graph
 
 A = "Knowledge Base/Notes/Insights/a.md"
@@ -215,3 +217,73 @@ def test_participant_validation_is_bounded_by_unique_endpoints(tmp_path: Path, m
     assert idx.relation_participants(["supports"]).paths == frozenset(rels)
     assert set(calls) == set(rels)
     assert len(calls) == len(rels)
+
+
+# ---------------------------------------------------------------- relation_edges
+
+
+def test_relation_edges_returns_both_endpoints_in_one_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The single-query form callers need to enumerate PAIRS.
+
+    `relation_participants` keeps only one counterpart per page in `provenance`, so
+    enumerating every pair through it required an anchored lookup per page — and an
+    anchored lookup re-runs the same unnarrowed query, making that O(pages x edges).
+    """
+    vault = tmp_path / "vault"
+    idx = _built(vault)
+    opens = {"n": 0}
+    original = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+
+    def _counting(self, *args, **kwargs):
+        opens["n"] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", _counting
+    )
+    result = idx.relation_edges(["supports"])
+    assert result.status == "available"
+    assert result.edges == ((A, B),)  # directed as stored, source order
+    assert opens["n"] == 1
+
+
+def test_relation_edges_symmetric_relation_is_one_row(tmp_path: Path) -> None:
+    # `contradicts` is symmetric; the authored bullet is still a single edge, so
+    # callers normalize rather than receiving both orientations.
+    idx = _built(tmp_path / "vault")
+    assert idx.relation_edges(["contradicts"]).edges == ((A, C),)
+
+
+def test_relation_edges_drops_unresolved_placeholder_targets(tmp_path: Path) -> None:
+    # `A` links_to a page that does not exist; the INNER JOIN drops it.
+    idx = _built(tmp_path / "vault")
+    targets = {dst for _src, dst in idx.relation_edges(["links_to"]).edges}
+    assert not any("does-not-exist" in target for target in targets)
+
+
+def test_relation_edges_empty_keys_are_authoritative(tmp_path: Path) -> None:
+    idx = _built(tmp_path / "vault")
+    result = idx.relation_edges([])
+    assert result.status == "available"
+    assert result.edges == ()
+
+
+def test_relation_edges_reports_disabled_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    idx = _built(tmp_path / "vault")
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    result = idx.relation_edges(["supports"])
+    assert result.status == "temporarily_unavailable"
+    assert result.edges == ()
+
+
+def test_relation_edges_reports_a_missing_sidecar_as_warming(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    idx = epistemic_graph.EpistemicGraphIndex(vault)  # never built
+    result = idx.relation_edges(["supports"])
+    assert result.status == "warming"
+    assert result.edges == ()

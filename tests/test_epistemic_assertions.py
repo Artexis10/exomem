@@ -382,6 +382,159 @@ def no_cross_case_residue_fail() -> AssertionContext:
     )
 
 
+# --------------------------------------------------------------------------
+# Loop-closure families f15-f19 (PREREGISTRATION §7, 2026-08 amendment).
+# --------------------------------------------------------------------------
+
+
+def due_prediction_surfaced_pass() -> AssertionContext:
+    prediction = item(
+        "pred-latency",
+        kind="hypothesis",
+        raw={"prediction": "pred-latency", "due": "overdue"},
+    )
+    return AssertionContext(
+        snapshot=snapshot((prediction,)), served_items=("pred-latency",)
+    )
+
+
+def due_prediction_surfaced_fail() -> AssertionContext:
+    """The window elapsed, but nothing says so and nothing queues it."""
+
+    prediction = item(
+        "pred-latency",
+        kind="hypothesis",
+        raw={"prediction": "pred-latency", "due": "2026-01-01"},
+    )
+    return AssertionContext(snapshot=snapshot((prediction,)))
+
+
+def verdict_state_retrievable_pass() -> AssertionContext:
+    hypothesis = item("hyp-cache", kind="hypothesis", raw={"verdict": "refuted"})
+    return AssertionContext(snapshot=snapshot((hypothesis,)))
+
+
+def verdict_state_retrievable_fail() -> AssertionContext:
+    hypothesis = item("hyp-cache", kind="hypothesis", raw={"note": "still open"})
+    return AssertionContext(snapshot=snapshot((hypothesis,)))
+
+
+def _plan_pair(*, mutated: bool) -> AssertionContext:
+    before = item("plan-q3", kind="container", raw={"plan": "plan-q3"})
+    after = item(
+        "plan-q3",
+        kind="container",
+        text="rewritten to match what actually happened" if mutated else "body of plan-q3",
+        raw={"plan": "plan-q3"},
+    )
+    divergence = item("review-drift", kind="container", review_state="divergence")
+    return AssertionContext(
+        snapshot=snapshot((after, divergence)),
+        prior=snapshot((before,), phase="p0"),
+        subject="plan-q3",
+    )
+
+
+def divergence_surfaced_without_mutation_pass() -> AssertionContext:
+    return _plan_pair(mutated=False)
+
+
+def divergence_surfaced_without_mutation_fail() -> AssertionContext:
+    """Surfaced, but the plan was silently rewritten to agree with the records."""
+
+    return _plan_pair(mutated=True)
+
+
+def _collapse_snapshot(*, shared_root_visible: bool) -> AssertionContext:
+    source = item("src-survey", kind="raw_source")
+    left = item("note-a", kind="derived_inference", cites=("src-survey",))
+    right = item(
+        "note-b",
+        kind="derived_inference",
+        cites=("src-survey",) if shared_root_visible else (),
+    )
+    consumer = item("claim-strong", kind="claim", cites=("note-a", "note-b"))
+    return AssertionContext(
+        snapshot=snapshot((source, left, right, consumer)), subject="claim-strong"
+    )
+
+
+def support_collapse_inspectable_pass() -> AssertionContext:
+    return _collapse_snapshot(shared_root_visible=True)
+
+
+def support_collapse_inspectable_fail() -> AssertionContext:
+    """One support path dead-ends, so double-counting cannot be seen."""
+
+    return _collapse_snapshot(shared_root_visible=False)
+
+
+def refuted_retrievable_at_full_standing_pass() -> AssertionContext:
+    refuted = item(
+        "hyp-prefetch",
+        kind="hypothesis",
+        current="yes",
+        raw={"verdict": "refuted"},
+    )
+    return AssertionContext(
+        snapshot=snapshot((refuted,)), served_items=("hyp-prefetch",)
+    )
+
+
+def refuted_retrievable_at_full_standing_fail() -> AssertionContext:
+    """Retained on disk, but demoted for the crime of being a negative result."""
+
+    refuted = item(
+        "hyp-prefetch",
+        kind="hypothesis",
+        current="no",
+        retired_reason="refuted",
+        raw={"verdict": "refuted"},
+    )
+    return AssertionContext(
+        snapshot=snapshot((refuted,)), served_items=("hyp-prefetch",)
+    )
+
+
+_JOURNEY = (
+    ("goal-1", "goal", "s1", ()),
+    ("hyp-1", "hypothesis", "s1", ("goal-1",)),
+    ("pred-1", "prediction", "s1", ("hyp-1",)),
+    ("act-1", "intervention", "s2", ("pred-1",)),
+    ("rec-1", "records", "s2", ("act-1",)),
+    ("rev-1", "review", "s3", ("rec-1",)),
+    ("hyp-2", "revision", "s3", ("hyp-1",)),
+)
+
+
+def _journey_items(stages: tuple[tuple[str, str, str, tuple[str, ...]], ...]):
+    return tuple(
+        item(
+            item_id,
+            kind="claim",
+            cites=cites,
+            raw={"stage": stage, "session": session},
+        )
+        for item_id, stage, session, cites in stages
+    )
+
+
+def loop_journey_state_coherent_pass() -> AssertionContext:
+    items = _journey_items(_JOURNEY)
+    return AssertionContext(
+        snapshot=snapshot(items), prior=snapshot(items, phase="p0")
+    )
+
+
+def loop_journey_state_coherent_fail() -> AssertionContext:
+    """The restart ate the revision the whole loop existed to produce."""
+
+    items = _journey_items(_JOURNEY)
+    return AssertionContext(
+        snapshot=snapshot(items[:-1]), prior=snapshot(items, phase="p0")
+    )
+
+
 Factory = Callable[[], AssertionContext]
 
 DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
@@ -430,6 +583,27 @@ DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
         dependent_conclusions_surfaced_for_review_fail,
     ),
     "no_cross_case_residue": (no_cross_case_residue_pass, no_cross_case_residue_fail),
+    "due_prediction_surfaced": (due_prediction_surfaced_pass, due_prediction_surfaced_fail),
+    "verdict_state_retrievable": (
+        verdict_state_retrievable_pass,
+        verdict_state_retrievable_fail,
+    ),
+    "divergence_surfaced_without_mutation": (
+        divergence_surfaced_without_mutation_pass,
+        divergence_surfaced_without_mutation_fail,
+    ),
+    "support_collapse_inspectable": (
+        support_collapse_inspectable_pass,
+        support_collapse_inspectable_fail,
+    ),
+    "refuted_retrievable_at_full_standing": (
+        refuted_retrievable_at_full_standing_pass,
+        refuted_retrievable_at_full_standing_fail,
+    ),
+    "loop_journey_state_coherent": (
+        loop_journey_state_coherent_pass,
+        loop_journey_state_coherent_fail,
+    ),
 }
 
 

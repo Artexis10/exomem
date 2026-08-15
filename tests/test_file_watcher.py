@@ -369,7 +369,7 @@ def test_periodic_reconcile_recovers_a_failed_external_publication(
     graph.rebuild_all()
     page = next(find_module._walk_md(vault / "Knowledge Base"))
     rel = _vault_rel(vault, page)
-    original_publish = semantic_contract.publish_corpus_files_changed
+    original_publish = semantic_contract.publish_corpus_files_changed_classified
 
     page.write_text(
         page.read_text(encoding="utf-8") + "\nRecovered external edit.\n",
@@ -382,7 +382,7 @@ def test_periodic_reconcile_recovers_a_failed_external_publication(
 
     monkeypatch.setattr(
         semantic_contract,
-        "publish_corpus_files_changed",
+        "publish_corpus_files_changed_classified",
         fail_publication,
     )
     watcher._flush()
@@ -393,7 +393,7 @@ def test_periodic_reconcile_recovers_a_failed_external_publication(
 
     monkeypatch.setattr(
         semantic_contract,
-        "publish_corpus_files_changed",
+        "publish_corpus_files_changed_classified",
         original_publish,
     )
     watcher._reconcile_once(seed=False)
@@ -888,7 +888,8 @@ def test_self_write_publishes_semantic_corpus_delta(vault, monkeypatch: pytest.M
     calls: list[tuple[list[Path], list[str]]] = []
     monkeypatch.setattr(file_watcher.freshness, "event_indexes_enabled", lambda: True)
     monkeypatch.setattr(
-        "exomem.semantic_contract.publish_corpus_files_changed",
+        "exomem.semantic_contract.publish_corpus_files_changed_classified",
+        # `list.append` returns None, i.e. "published, no failure".
         lambda root, *, changed=(), deleted=(): calls.append(
             (list(changed), [str(path) for path in deleted])
         ),
@@ -908,7 +909,8 @@ def test_external_batch_publishes_semantic_corpus_delta(
     _stub_embeddings(monkeypatch)
     calls: list[tuple[list[Path], list[str]]] = []
     monkeypatch.setattr(
-        "exomem.semantic_contract.publish_corpus_files_changed",
+        "exomem.semantic_contract.publish_corpus_files_changed_classified",
+        # `list.append` returns None, i.e. "published, no failure".
         lambda root, *, changed=(), deleted=(): calls.append(
             (list(changed), [str(path) for path in deleted])
         ),
@@ -939,17 +941,19 @@ def test_external_batch_retries_the_complete_vault_delta_before_fanout(
     source.write_text("---\ntitle: New target\n---\n# New target\n", encoding="utf-8")
     kb_note.write_text("# After\n", encoding="utf-8")
 
-    real_publish = semantic_contract.publish_corpus_files_changed
+    real_publish = semantic_contract.publish_corpus_files_changed_classified
     calls: list[tuple[list[Path], list[str]]] = []
 
     def flaky_publish(root, *, changed=(), deleted=()):
         calls.append((list(changed), [str(path) for path in deleted]))
         if len(calls) == 1:
             raise RuntimeError("transient publication failure")
-        real_publish(root, changed=changed, deleted=deleted)
+        return real_publish(root, changed=changed, deleted=deleted)
 
     upserts: list[tuple[list[Path], dict]] = []
-    monkeypatch.setattr(semantic_contract, "publish_corpus_files_changed", flaky_publish)
+    monkeypatch.setattr(
+        semantic_contract, "publish_corpus_files_changed_classified", flaky_publish
+    )
     monkeypatch.setattr(
         file_watcher.index_sync,
         "upsert_after_write",
@@ -983,7 +987,7 @@ def test_persistent_non_kb_publication_failure_withdraws_stale_resolver(
     source.write_text("---\ntitle: New target\n---\n# New target\n", encoding="utf-8")
     monkeypatch.setattr(
         semantic_contract,
-        "publish_corpus_files_changed",
+        "publish_corpus_files_changed_classified",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("persistent failure")),
     )
     watcher = file_watcher.FileWatcher(vault)

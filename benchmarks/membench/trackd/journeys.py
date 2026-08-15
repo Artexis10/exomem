@@ -679,11 +679,19 @@ class PlantedItem:
 
 @dataclass(frozen=True)
 class QueueObservation:
-    """What one ``review_memory`` mode actually surfaced."""
+    """What one ``review_memory`` mode actually surfaced.
+
+    ``unsupported_lanes`` names sub-lanes of a SUPPORTED queue that this profile
+    still cannot exercise. A queue is not always all-or-nothing: the contradiction
+    queue has a deterministic authored-edge lane and an embeddings-gated proximity
+    lane, and collapsing that to one boolean would either deny the product credit
+    it earned or claim a measurement that never ran.
+    """
 
     mode: str
     paths: tuple[str, ...]
     supported: bool = True
+    unsupported_lanes: tuple[str, ...] = ()
 
 
 def score_review_queue(
@@ -694,11 +702,14 @@ def score_review_queue(
 ) -> dict:
     """Deterministic planted-id recall/precision + false-surface rate.
 
-    An unsupported queue (e.g. the contradiction sweep under the lexical
-    profile, which is embeddings-gated) reports every metric as ``None`` —
-    unsupported is NEVER converted to a zero. ``precision`` and
-    ``false_surface_rate`` are ``None`` when nothing surfaced (no claim can
-    be made about an empty list's composition).
+    An unsupported queue reports every metric as ``None`` — unsupported is NEVER
+    converted to a zero. ``precision`` and ``false_surface_rate`` are ``None``
+    when nothing surfaced (no claim can be made about an empty list's
+    composition).
+
+    ``unsupported_lanes`` rides along on a supported queue's score so a reader
+    cannot mistake a partial measurement for a whole one: the metrics below
+    describe only the lanes this profile actually exercised.
     """
 
     expected = sorted({p.path for p in planted if p.kind in expected_kinds})
@@ -706,6 +717,7 @@ def score_review_queue(
     base = {
         "mode": observation.mode,
         "supported": observation.supported,
+        "unsupported_lanes": list(observation.unsupported_lanes),
         "expected": expected,
         "surfaced": list(observation.paths),
     }
@@ -845,6 +857,28 @@ def _queue_paths(payload: dict | None) -> tuple[str, ...]:
     )
 
 
+def _queue_related_paths(payload: dict | None) -> tuple[str, ...]:
+    """Every counterpart path named by a surfaced item's reasons.
+
+    A pair-shaped finding surfaces as ONE row anchored on the lower path, so the
+    anchor alone cannot show the pair was captured whole — the counterpart lives
+    in the reason's ``related_paths``.
+    """
+    data = _data(payload)
+    items = data.get("items", []) if isinstance(data, dict) else []
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for reason in item.get("reasons", []) or []:
+            if not isinstance(reason, dict):
+                continue
+            for path in reason.get("related_paths", []) or []:
+                if path and str(path) not in out:
+                    out.append(str(path))
+    return tuple(out)
+
+
 def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -> J3Result:
     """J3: weekly review over planted stale/contradiction/unprocessed/open-loop
     items, scored by planted-id recall+precision, false-surface rate, and
@@ -860,10 +894,20 @@ def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -
       knob ``EXOMEM_STALE_AGE_DAYS=0`` (recorded in the journey env), so the
       stale queue measures the DORMANCY conjunct: an unlinked conclusion is
       flagged, well-linked decoys (>= 2 inbound wikilinks) are not.
-    - The corpus-contradiction sweep is embeddings-gated and no-ops under
-      ``EXOMEM_DISABLE_EMBEDDINGS`` (the deterministic lexical profile), so
-      the planted contradiction pair is recorded and the queue is scored
-      UNSUPPORTED — never zero.
+    - The contradiction queue has TWO lanes and this profile exercises exactly
+      one of them. The ASSERTED lane reads authored ``contradicts`` graph edges
+      and is deterministic — it needs no embeddings, so the planted authored
+      pair surfaces under ``EXOMEM_DISABLE_EMBEDDINGS`` and IS scored. The
+      PROXIMITY lane (the embedding-band sweep that finds UNSTATED tension) is
+      still embeddings-gated, no-ops in this profile, and is declared an
+      unsupported lane — never zero, and never folded into the asserted lane's
+      recall. The journey plants no proximity item, because none could be
+      measured here; claiming otherwise is the one thing this benchmark must
+      not do.
+    - A contradiction pair surfaces as ONE row anchored on the lower of its two
+      paths (the product's documented one-row-per-pair contract), so the pair is
+      planted as a single expected item at that anchor and the counterpart is
+      verified through the surfaced row's related paths.
     - Compiled pages after the first need a qualifying typed relation
       (``## Relations`` bullets; ``sources=`` frontmatter maps to the excluded
       ``derivation`` family and does NOT qualify). The first note commits under
@@ -978,8 +1022,12 @@ def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -
         f"sources={s3}",
     )
     n3_ref = n3.removesuffix(".md")
-    planted.append(PlantedItem("p-contradiction-a", "contradiction", n2))
-    planted.append(PlantedItem("p-contradiction-b", "contradiction", n3))
+    # ONE planted item at the pair anchor: a contradiction pair surfaces as a
+    # single row anchored on the lower of its two paths, so planting both
+    # endpoints would make a correct one-row answer score 0.5 recall.
+    contradiction_anchor = min(n2, n3)
+    contradiction_other = max(n2, n3)
+    planted.append(PlantedItem("p-contradiction", "contradiction", contradiction_anchor))
 
     # N4 - the planted DORMANT conclusion: no inbound links (its outbound
     # links give N2/N3 inbound degree instead).
@@ -1015,6 +1063,7 @@ def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -
 
     # ---- the weekly review itself: four queues -------------------------
     observations: dict[str, QueueObservation] = {}
+    contradiction_related: tuple[str, ...] = ()
     for mode in ("stale", "contradiction", "unprocessed-sources", "attention"):
         run, payload = runner.run("review_memory", "--mode", mode, "--json")
         checks.append(
@@ -1024,12 +1073,16 @@ def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -
                 f"exit={run.returncode}",
             )
         )
+        if mode == "contradiction":
+            contradiction_related = _queue_related_paths(payload)
         observations[mode] = QueueObservation(
             mode=mode,
             paths=_queue_paths(payload),
-            # The contradiction sweep is embeddings-gated: honestly
-            # unsupported under the lexical profile, never scored zero.
-            supported=(mode != "contradiction"),
+            # The asserted (authored-edge) lane is deterministic and DOES run
+            # here; the proximity lane is embeddings-gated and does not. Naming
+            # the unmeasured lane keeps `supported=True` from overclaiming.
+            supported=True,
+            unsupported_lanes=(("proximity",) if mode == "contradiction" else ()),
         )
 
     stale_score = score_review_queue(
@@ -1042,11 +1095,13 @@ def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -
         planted, observations["unprocessed-sources"], expected_kinds=("unprocessed",)
     )
     # Attention = the open-loop union view of everything surfaceable in this
-    # profile (contradictions cannot surface here; see docstring).
+    # profile. The authored contradiction DOES surface here now, so it belongs in
+    # the expected set: omitting it would score a correct union as a false
+    # surface and penalise the product for being right.
     attention_score = score_review_queue(
         planted,
         observations["attention"],
-        expected_kinds=("stale", "unprocessed", "open_loop"),
+        expected_kinds=("stale", "unprocessed", "open_loop", "contradiction"),
     )
     queue_scores = [stale_score, contradiction_score, unprocessed_score, attention_score]
 
@@ -1067,11 +1122,28 @@ def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -
     )
     checks.append(
         JourneyCheck(
-            "contradiction queue honestly unsupported in the lexical profile",
-            contradiction_score["supported"] is False
-            and contradiction_score["recall"] is None
-            and not observations["contradiction"].paths,
-            "embeddings-gated sweep; planted pair recorded, metrics None (never zero)",
+            "contradiction queue surfaces exactly the planted authored pair",
+            contradiction_score["recall"] == 1.0
+            and contradiction_score["false_surface_rate"] == 0.0,
+            f"recall={contradiction_score['recall']} "
+            f"false={contradiction_score['false_surfaces']}",
+        )
+    )
+    checks.append(
+        JourneyCheck(
+            "contradiction row names both endpoints of the planted pair",
+            contradiction_other in contradiction_related,
+            f"related={len(contradiction_related)} path(s); counterpart present="
+            f"{contradiction_other in contradiction_related}",
+        )
+    )
+    checks.append(
+        JourneyCheck(
+            "contradiction proximity lane declared unsupported, not scored zero",
+            contradiction_score["unsupported_lanes"] == ["proximity"]
+            and not [p for p in planted if p.kind == "proximity"],
+            "embeddings-gated lane; no proximity item planted, so nothing is "
+            "claimed for a lane this profile never ran",
         )
     )
     checks.append(
@@ -1102,8 +1174,13 @@ def run_j3_weekly_review(workdir: Path, *, instant: dt.datetime | None = None) -
         f"{len(unprocessed_score['matched'])} of {len(unprocessed_score['expected'])} "
         f"planted items (false-surface rate "
         f"{_fmt_rate(unprocessed_score['false_surface_rate'])}); "
-        "the contradiction sweep is unsupported in this deterministic profile "
-        "and is reported unsupported rather than zero; the combined attention "
+        "the contradiction queue surfaced "
+        f"{len(contradiction_score['matched'])} of "
+        f"{len(contradiction_score['expected'])} planted authored conflicts "
+        f"(false-surface rate {_fmt_rate(contradiction_score['false_surface_rate'])}) "
+        "from its deterministic authored-edge lane, while its proximity lane - "
+        "which finds unstated tension - is embeddings-gated, did not run in this "
+        "profile, and is reported unsupported rather than zero; the combined attention "
         f"view covered {len(attention_score['matched'])} of "
         f"{len(attention_score['expected'])} open loops; triage burden was "
         f"{burden} scripted operations with 0 manual interventions."

@@ -128,12 +128,30 @@ Use this loop whenever a durable conclusion should enter Exomem:
    that genuinely clarify provenance or context, and write accepted note-level
    edges under `## Relations` as `- relation_type [[Target]]`. Carry accepted
    links into the *first* write; do not defer them to a follow-up `edit_memory`.
-6. Write, then inspect the returned `warnings`, optional `suggestions`, and
-   `write_feedback` — which reports `sources.cited`, `links.body_wikilinks`, and
-   `relations.relation_debt`. If all three are zero and that is not honest, fix it
-   before reporting.
+6. Write, then inspect the result. The default committed response carries
+   `warnings` (when the write warned) and an optional `structure_suggestion`.
+   The fuller structural checklist — `write_feedback` with `sources.cited`,
+   `links.body_wikilinks`, and `relations.relation_debt`, plus corpus-aware
+   `suggestions` — lives under `diagnostics` and needs `response_detail="full"`.
+   Ask for it when provenance or connectivity is in doubt; if all three counts
+   are zero and that is not honest, fix it before reporting.
 7. If a near-duplicate warning fires, prefer `edit_memory` or `replace_memory` over a parallel page. If suggestions are useful, add them with a follow-up `edit_memory`.
-8. Report one line: `Saved -> <path>`.
+8. If the write returned a `structure_suggestion`, handle it as below.
+9. Report one line: `Saved -> <path>`.
+
+**When a write says the page has outgrown its scope.** A compiled write may return
+`structure_suggestion` — the runtime's observation that recurring durable material
+on that page now sits outside what the page says it is about. It is advice, not an
+instruction, and nothing has been moved.
+
+Normally surface a `strong` one, in the user's own words: name the threads that have
+grown up, say it looks like its own project or note now, and offer to organise it.
+Never recite the reason codes or say "scope divergence" — that is internal
+vocabulary. Prefer routing into an existing suitable destination over inventing a
+new one, so search before proposing. Ask before restructuring anything unless the
+user has already delegated curation. Do not raise the same recommendation twice in
+one conversation. On a `moderate` one, use judgement: if mentioning it would be
+bureaucracy rather than help, stay quiet.
 
 **Comprehensive coverage, minimal expression.** Capturing at the landing is about
 *timing*, not *volume* — it never means keep less. Minimality is a property of
@@ -366,6 +384,13 @@ than the count means the rest were trimmed; ask for `response_detail="full"` to
 see them all. An upload receipt reports its warnings as per-file rows under
 `files` instead, and a mutation recovered from a portable receipt reports the
 count alone because it retains no leaf content.
+A compiled-note write may also carry `structure_suggestion`: an advisory
+`kind`, a `strength` of `strong` or `moderate`, deterministic `reasons`, the
+number of durable units in the group, and up to six recurring `cluster_terms`.
+It is present only when the written page shows recurring durable material
+outside its own declared scope, it reports nothing about any other page, and it
+never affects `status`, `mutated`, or replay. Nothing is reorganised by the
+runtime; acting on it is the agent's decision with the user.
 Use `response_detail="full"` when existing leaf diagnostics are needed under
 `diagnostics`. Use `response_detail="legacy"` only for temporary compatibility
 with the former raw result. Response detail is presentation-only: changing it

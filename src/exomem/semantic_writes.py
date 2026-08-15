@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
+import contextvars
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,6 +24,7 @@ from . import (
     activation_manifest,
     freshness,
     memory_schema,
+    metrics,
     relation_registry,
     relation_review,
     semantic_authoring,
@@ -32,6 +38,9 @@ from . import (
     find as find_module,
 )
 from .kbdir import kb_prefix
+from .mutation_timings import MutationTimings, mutation_timing_span
+
+log = logging.getLogger(__name__)
 
 # v2 froze the authored *instant* alongside the authored day. v1 tokens are
 # rejected: a token minted before the bump carries no knowledge-time stamp,
@@ -877,9 +886,12 @@ class CreationCommit:
     written_paths: tuple[str, ...]
     contract_result: semantic_contract.SemanticContractResult | None
     creation_commit: relation_review.CreationDraftCommit | None
+    # Advisory only. Absent unless the written page shows recurring durable
+    # material outside its own declared scope; never affects the commit.
+    structure_suggestion: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "applicability": self.applicability,
             "mutated": self.mutated,
             "written_paths": list(self.written_paths),
@@ -890,6 +902,9 @@ class CreationCommit:
                 self.creation_commit.as_dict() if self.creation_commit is not None else None
             ),
         }
+        if self.structure_suggestion is not None:
+            value["structure_suggestion"] = self.structure_suggestion
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -953,6 +968,9 @@ class ExistingCommit:
     index_report: Any | None
     lifecycle_state: str | None
     transition_token: str
+    # Advisory only. Absent unless the written page shows recurring durable
+    # material outside its own declared scope; never affects the commit.
+    structure_suggestion: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -967,6 +985,8 @@ class ExistingCommit:
         }
         if self.index_report is not None:
             value["index"] = self.index_report.as_dict()
+        if self.structure_suggestion is not None:
+            value["structure_suggestion"] = self.structure_suggestion
         return value
 
 
@@ -1298,17 +1318,19 @@ def transition_token_stamp(token: str | None) -> str | None:
     return stamp if type(stamp) is str and stamp else None
 
 
-def reviewed_transition_stamp(
+def _reviewed_transition_delta(
     transition_token: str | None,
     now: dt.date | dt.datetime,
-) -> str | None:
-    """Reuse the bounded instant already reviewed by an existing transition.
+) -> tuple[str, dt.timedelta] | None:
+    """The reviewed stamp a token carries and its age relative to `now`.
 
-    Existing-page writers render their proposed bytes before semantic preflight,
-    so this is the shared seam that keeps every leaf's server-owned `updated:`
-    value identical between validation and commit.
+    `None` when the token carries no reviewable instant at all (no token,
+    a token minted before the `stamp` field existed, or a bare-day stamp
+    with no precise instant) — this is shared math for
+    `reviewed_transition_stamp` and `reviewed_transition_refusal_reason`;
+    neither the age/skew accept-or-refuse decision nor the reason label for
+    a refusal lives here.
     """
-
     stamp = transition_token_stamp(transition_token)
     if stamp is None:
         return None
@@ -1320,10 +1342,115 @@ def reviewed_transition_stamp(
         reference = reference.astimezone(dt.UTC)
     else:
         reference = dt.datetime.combine(now, dt.time.max, tzinfo=dt.UTC)
-    delta = reference - moment.instant
+    return stamp, reference - moment.instant
+
+
+def reviewed_transition_stamp(
+    transition_token: str | None,
+    now: dt.date | dt.datetime,
+) -> str | None:
+    """Reuse the bounded instant already reviewed by an existing transition.
+
+    Existing-page writers render their proposed bytes before semantic preflight,
+    so this is the shared seam that keeps every leaf's server-owned `updated:`
+    value identical between validation and commit.
+    """
+
+    found = _reviewed_transition_delta(transition_token, now)
+    if found is None:
+        return None
+    stamp, delta = found
     if delta > _MAX_REVIEWED_STAMP_AGE or -delta > _MAX_REVIEWED_STAMP_SKEW:
         return None
     return stamp
+
+
+def reviewed_transition_refusal_reason(
+    transition_token: str | None,
+    now: dt.date | dt.datetime,
+) -> Literal["expired", "skewed"] | None:
+    """Why a SUPPLIED token's reviewed stamp was refused, for a distinct error.
+
+    Callers reach for this only once `reviewed_transition_stamp` has already
+    returned `None` for a token that was actually supplied — it draws on the
+    exact same delta and never loosens or duplicates that accept/reject
+    decision, only labels it. Returns `None` when the token carries no
+    reviewable instant at all (no token, pre-`stamp`, or bare-day) — that
+    refusal is unrelated to age/skew, and callers should keep their
+    pre-existing fallback behaviour for it, unchanged.
+    """
+    found = _reviewed_transition_delta(transition_token, now)
+    if found is None:
+        return None
+    _, delta = found
+    if delta > _MAX_REVIEWED_STAMP_AGE:
+        return "expired"
+    if -delta > _MAX_REVIEWED_STAMP_SKEW:
+        return "skewed"
+    return None
+
+
+def _format_hours(value: dt.timedelta) -> str:
+    hours = value.total_seconds() / 3600
+    return f"{hours:g}h"
+
+
+def _format_minutes(value: dt.timedelta) -> str:
+    minutes = value.total_seconds() / 60
+    unit = "minute" if minutes == 1 else "minutes"
+    return f"{minutes:g} {unit}"
+
+
+# Derived from the bound constants (not hard-coded) so retuning either one
+# can't leave the refusal message quoting a stale figure.
+_REVIEWED_TOKEN_REFUSAL_MESSAGES: dict[Literal["expired", "skewed"], str] = {
+    "expired": (
+        f"reviewed transition token is more than {_format_hours(_MAX_REVIEWED_STAMP_AGE)} "
+        "old — its reviewed state is stale; re-run validate_only to mint a "
+        "fresh token before committing"
+    ),
+    "skewed": (
+        "reviewed transition token's reviewed instant is more than "
+        f"{_format_minutes(_MAX_REVIEWED_STAMP_SKEW)} in the future (clock "
+        "skew); re-run validate_only to mint a fresh token before committing"
+    ),
+}
+
+
+def resolve_reviewed_date_iso(
+    transition_token: str | None,
+    now: dt.date | dt.datetime,
+) -> str:
+    """The `updated:` stamp to write, honouring a reviewed token when given.
+
+    Shared by every existing-page writer (`edit`, `multi_edit`,
+    `set_frontmatter_field`, and `create_file`'s overwrite-by-token path) so
+    the accept/refuse/message decision lives in exactly one place.
+
+    - No token supplied: mint a fresh stamp — the legacy path, unchanged,
+      correct behaviour, not a fallback.
+    - Token supplied and still within the reviewed-stamp window: reuse its
+      exact reviewed instant, so committed bytes match what was validated.
+    - Token supplied but refused for age (>24h) or clock skew (>5min): raise
+      `SemanticWriteError("LIFECYCLE_TRANSITION_TOKEN_EXPIRED", ...)` naming
+      the actual cause, instead of silently minting a fresh stamp — which
+      changes `after_hash` and fails downstream with the unrelated-looking
+      `LIFECYCLE_TRANSITION_MISMATCH`.
+    - Token supplied but carries no reviewable instant at all (no `stamp`
+      field — pre-dates that field): unrelated to age/skew; keep minting a
+      fresh stamp, as before.
+    """
+    if transition_token is None:
+        return temporal.stamp(now)
+    reviewed = reviewed_transition_stamp(transition_token, now)
+    if reviewed is not None:
+        return reviewed
+    refusal = reviewed_transition_refusal_reason(transition_token, now)
+    if refusal is None:
+        return temporal.stamp(now)
+    raise SemanticWriteError(
+        "LIFECYCLE_TRANSITION_TOKEN_EXPIRED", _REVIEWED_TOKEN_REFUSAL_MESSAGES[refusal]
+    )
 
 
 def _existing_transition_id(token: str) -> str:
@@ -1349,6 +1476,123 @@ def _existing_applicability(
     return "structural"
 
 
+# Which attempt an `exomem_write_*` sample belongs to. A stale validity stamp
+# re-runs the WHOLE preflight through the public `preflight_existing` (kept
+# public deliberately: tests monkeypatch that name as a race seam), so without
+# a discriminator a revalidating write contributes two indistinguishable
+# preflight samples and the series reports a doubled cost that no single
+# attempt ever paid. `preview` is the validate-only path: real work, but not
+# commit-path work, and it must not inflate the write series either.
+_WRITE_PHASE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "exomem_write_phase", default="initial"
+)
+
+
+@contextmanager
+def _write_phase(name: str | None):
+    """Label the `exomem_write_*` samples inside this block; `None` inherits."""
+    if name is None:
+        yield
+        return
+    token = _WRITE_PHASE.set(name)
+    try:
+        yield
+    finally:
+        _WRITE_PHASE.reset(token)
+
+
+def _observe_write_ms(name: str, value_ms: float, labels: dict[str, str]) -> None:
+    """Emit one write-path duration sample; never let it mask the real error.
+
+    Both callers emit from a `finally` that may be unwinding a lease, boundary,
+    or contract failure. A raise from the instrument there would REPLACE the
+    error the caller actually needs to see — an observability defect turning
+    itself into a misdiagnosis. Same rule and same shape as
+    `mutation_lock._observe_boundary_ms`.
+    """
+    try:
+        metrics.observe_duration_ms(name, value_ms, labels)
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
+@contextmanager
+def _write_metric(name: str, operation: str):
+    """Emit one `exomem_write_*` duration histogram for the wrapped phase.
+
+    Unconditional by design — the metrics module does its own gating, and a
+    phase you can only see when a debug flag was set in advance is exactly the
+    instrument that is missing during the incident you needed it for.
+    """
+    started = time.perf_counter()
+    outcome = "ok"
+    try:
+        yield
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        _observe_write_ms(
+            name,
+            (time.perf_counter() - started) * 1000.0,
+            {"operation": operation, "outcome": outcome, "phase": _WRITE_PHASE.get()},
+        )
+
+
+@contextmanager
+def _timed_acquire(timings: MutationTimings | None, name: str, inner: Any):
+    """Enter `inner`, timing only the *acquisition* — not the body.
+
+    A lock's wait and the work done under it are different diagnoses; folding
+    them into one number is how a contended boundary looks identical to a slow
+    commit. The span closes on the first statement inside `inner`.
+    """
+    stack = contextlib.ExitStack()
+    with stack:
+        stack.enter_context(mutation_timing_span(timings, name))
+        with inner:
+            stack.close()
+            yield
+
+
+@contextmanager
+def _timed_boundary(timings: MutationTimings | None, guard: Any, *, operation: str):
+    """Enter the vault mutation boundary, timing only the wait to acquire it.
+
+    The wait is recorded on the way out, not on the way in. If `guard` never
+    admits us — lease contention or a boundary timeout, the starvation this
+    metric exists to explain — an emit placed inside the boundary would never
+    run, and the entire wait would resurface as a slow `..._commit_ms` with
+    nothing to say it was spent queueing.
+    """
+    started = time.perf_counter()
+    span_stack = contextlib.ExitStack()
+    acquired = False
+
+    def _record(outcome: str) -> None:
+        # Span close and boundary bookkeeping first: they are the collector's
+        # own state and must land even if the emit below is swallowed.
+        waited_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        span_stack.close()
+        if timings is not None:
+            timings.boundary["waited_ms"] = waited_ms
+        _observe_write_ms(
+            "exomem_write_boundary_acquire_ms",
+            waited_ms,
+            {"operation": operation, "outcome": outcome, "phase": _WRITE_PHASE.get()},
+        )
+
+    try:
+        span_stack.enter_context(mutation_timing_span(timings, "commit.boundary_acquire"))
+        with guard:
+            acquired = True
+            _record("ok")
+            yield
+    finally:
+        if not acquired:
+            _record("error")
+
+
 def preflight_existing(
     vault_root: Path,
     *,
@@ -1362,8 +1606,49 @@ def preflight_existing(
     relation_review_reason: str | None = None,
     stamp: str | None = None,
     validate_only: bool = False,
+    timings: MutationTimings | None = None,
 ) -> ExistingPreflight:
-    """Evaluate an existing-page transition without mutating any shared state."""
+    """Evaluate an existing-page transition without mutating any shared state.
+
+    `timings` is a pure instrument: pass a `MutationTimings` to collect
+    per-stage spans, or omit it and nothing about the behaviour or the
+    returned payload changes.
+    """
+    with (
+        _write_phase("preview" if validate_only else None),
+        _write_metric("exomem_write_preflight_ms", str(operation)),
+    ):
+        return _preflight_existing(
+            vault_root,
+            path=path,
+            after_source=after_source,
+            operation=operation,
+            expected_before_hash=expected_before_hash,
+            transition_token=transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
+            stamp=stamp,
+            validate_only=validate_only,
+            timings=timings,
+        )
+
+
+def _preflight_existing(
+    vault_root: Path,
+    *,
+    path: str,
+    after_source: str,
+    operation: Literal["edit", "observe", "tier2_overwrite", "tier2_append"],
+    expected_before_hash: str | None = None,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+    stamp: str | None = None,
+    validate_only: bool = False,
+    timings: MutationTimings | None = None,
+) -> ExistingPreflight:
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
     if operation not in _EXISTING_OPERATIONS:
         raise SemanticWriteError(
@@ -1386,7 +1671,8 @@ def preflight_existing(
     # re-spell stays self-consistent, and a canonical input is a no-op.
     path = vault.canonical_vault_rel(root, path)
     entry_generation = _entry_commit_generation(root)
-    before_source, primary_guard = vault.read_guarded_text(root, root / path)
+    with mutation_timing_span(timings, "preflight.read_guarded"):
+        before_source, primary_guard = vault.read_guarded_text(root, root / path)
     raw_before_hash = vault.content_hash(before_source)
     # The parser/corpus and public content-hash contract normalize platform
     # newlines. Keep the raw-byte PathGuard, but evaluate the same logical text
@@ -1399,38 +1685,45 @@ def preflight_existing(
     }:
         raise SemanticWriteError("STALE_SEMANTIC_WRITE", "page changed before semantic preflight")
 
-    registry = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
-    loaded_contracts = memory_schema.load_saved_contracts(root)
+    with mutation_timing_span(timings, "preflight.registries"):
+        registry = relation_registry.load_registry(root)
+        language = semantic_language_registry.load_registry(root)
+        loaded_contracts = memory_schema.load_saved_contracts(root)
     resolver_freshness_before = freshness.triple(root, "vault")
-    before_corpus = semantic_contract.build_corpus_context(
-        root, registry=registry, language_registry=language
-    )
+    with (
+        _write_metric("exomem_write_corpus_context_ms", str(operation)),
+        mutation_timing_span(timings, "preflight.corpus_context"),
+    ):
+        before_corpus, before_corpus_census = semantic_contract.build_corpus_context_with_census(
+            root, registry=registry, language_registry=language
+        )
     resolver_freshness_after = freshness.triple(root, "vault")
     resolver_freshness = (
         resolver_freshness_before if resolver_freshness_before == resolver_freshness_after else None
     )
-    before = semantic_contract.build_page_state(
-        root,
-        path,
-        before_source,
-        relation_registry=registry,
-        language_registry=language,
-    )
-    if before_corpus.pages.get(path) != before:
-        # The guarded read can observe a canonical or external replacement in
-        # the short window before its freshness event is published. Repair the
-        # exact evaluated page from those authoritative bytes so a lagging
-        # process cache never turns a valid write into a corpus-state refusal.
-        before_corpus = before_corpus.with_candidate(before)
-    after = semantic_contract.build_page_state(
-        root,
-        path,
-        after_source,
-        relation_registry=registry,
-        language_registry=language,
-    )
-    after_corpus = before_corpus.with_candidate(after)
+    with mutation_timing_span(timings, "preflight.page_states"):
+        before = semantic_contract.build_page_state(
+            root,
+            path,
+            before_source,
+            relation_registry=registry,
+            language_registry=language,
+        )
+        if before_corpus.pages.get(path) != before:
+            # The guarded read can observe a canonical or external replacement
+            # in the short window before its freshness event is published.
+            # Repair the exact evaluated page from those authoritative bytes so
+            # a lagging process cache never turns a valid write into a
+            # corpus-state refusal.
+            before_corpus = before_corpus.with_candidate(before)
+        after = semantic_contract.build_page_state(
+            root,
+            path,
+            after_source,
+            relation_registry=registry,
+            language_registry=language,
+        )
+        after_corpus = before_corpus.with_candidate(after)
     before_contracts = memory_schema.resolve_contracts(
         loaded_contracts,
         projects=before.projects,
@@ -1447,8 +1740,9 @@ def preflight_existing(
     before_review: semantic_contract.RelationReviewState | None = None
     after_review: semantic_contract.RelationReviewState | None = None
     if applicability == "full":
-        before_review = relation_review.load_relation_review(root, before, corpus=before_corpus)
-        after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
+        with mutation_timing_span(timings, "preflight.relation_review"):
+            before_review = relation_review.load_relation_review(root, before, corpus=before_corpus)
+            after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
 
     token = transition_token or _existing_transition_token(
         operation=operation,
@@ -1529,22 +1823,26 @@ def preflight_existing(
         manifest=boundary.manifest,
         census=before_corpus.activation_census,
     )
-    result = semantic_contract.evaluate(
-        before=before,
-        after=after,
-        operation=operation,
-        mode="precommit",
-        before_contracts=before_contracts,
-        after_contracts=after_contracts,
-        before_corpus=before_corpus,
-        after_corpus=after_corpus,
-        before_review=before_review,
-        after_review=after_review,
-        grandfathered=grandfathered and before.eligible_compiled,
-        include_relation_disposition=applicability == "full",
-        language_registry=language,
-    )
-    census_token = _capture_validity_stamp(root, entry_generation)
+    with mutation_timing_span(timings, "preflight.contract_eval"):
+        result = semantic_contract.evaluate(
+            before=before,
+            after=after,
+            operation=operation,
+            mode="precommit",
+            before_contracts=before_contracts,
+            after_contracts=after_contracts,
+            before_corpus=before_corpus,
+            after_corpus=after_corpus,
+            before_review=before_review,
+            after_review=after_review,
+            grandfathered=grandfathered and before.eligible_compiled,
+            include_relation_disposition=applicability == "full",
+            language_registry=language,
+        )
+    with mutation_timing_span(timings, "preflight.validity_token"):
+        census_token = _capture_validity_stamp(
+            root, entry_generation, corpus_census=before_corpus_census
+        )
     return ExistingPreflight(
         applicability,
         operation,
@@ -1774,6 +2072,12 @@ def _revalidate_existing_preflight(
     exactly as the existing cross-invocation replay path already does — this
     is the same warm revalidation, just triggered by a census mismatch instead
     of a second caller-supplied invocation.
+
+    Deliberately calls the PUBLIC ``preflight_existing`` — tests monkeypatch
+    that name to inject the race this path exists to survive, so routing around
+    it would silently disarm them. The nested preflight's own metrics are kept
+    apart from the first attempt's by the ``revalidate`` write phase rather
+    than by changing the call.
     """
     relation_disposition: str | None = None
     relation_review_hash: str | None = None
@@ -1782,17 +2086,34 @@ def _revalidate_existing_preflight(
         relation_disposition = "reviewed_none"
         relation_review_hash = preflight.transition_hash
         relation_review_reason = preflight.requested_decision.reason
-    return preflight_existing(
-        vault_root,
-        path=preflight.path,
-        after_source=preflight.after_source,
-        operation=preflight.operation,
-        expected_before_hash=preflight.before.source_hash,
-        transition_token=preflight.transition_token,
-        relation_disposition=relation_disposition,
-        relation_review_hash=relation_review_hash,
-        relation_review_reason=relation_review_reason,
-    )
+    with _write_phase("revalidate"):
+        return preflight_existing(
+            vault_root,
+            path=preflight.path,
+            after_source=preflight.after_source,
+            operation=preflight.operation,
+            expected_before_hash=preflight.before.source_hash,
+            transition_token=preflight.transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
+        )
+
+
+def _structure_suggestion(state: Any) -> dict[str, Any] | None:
+    """Measure structural divergence for a committed page. Advisory; never raises.
+
+    Runs only after the guarded write has returned, over the page state the
+    preflight already built, so it adds no I/O and holds no lock. A fault here
+    costs the caller a suggestion, never the write.
+    """
+    try:
+        from . import structure_promotion
+
+        return structure_promotion.suggest_for_state(state)
+    except Exception:  # noqa: BLE001 — structural advice never breaks a commit
+        log.debug("structural promotion analysis failed (non-fatal)", exc_info=True)
+        return None
 
 
 def commit_existing(
@@ -1800,8 +2121,34 @@ def commit_existing(
     *,
     preflight: ExistingPreflight,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    timings: MutationTimings | None = None,
 ) -> ExistingCommit:
-    """Commit one preflighted existing-page transition, primary Markdown last."""
+    """Commit one preflighted existing-page transition, primary Markdown last.
+
+    `timings` is a pure instrument: pass a `MutationTimings` to collect
+    per-stage spans, or omit it and nothing about the behaviour or the
+    returned payload changes.
+    """
+    with _write_metric("exomem_write_commit_ms", str(preflight.operation)):
+        committed = _commit_existing(
+            vault_root,
+            preflight=preflight,
+            auxiliary_writes=auxiliary_writes,
+            timings=timings,
+        )
+    suggestion = _structure_suggestion(preflight.after)
+    if suggestion is None:
+        return committed
+    return replace(committed, structure_suggestion=suggestion)
+
+
+def _commit_existing(
+    vault_root: Path,
+    *,
+    preflight: ExistingPreflight,
+    auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    timings: MutationTimings | None = None,
+) -> ExistingCommit:
     root = Path(vault_root)
     if preflight.contract_result.should_block:
         raise SemanticWriteError(
@@ -1811,14 +2158,20 @@ def commit_existing(
         )
 
     auxiliaries = tuple(auxiliary_writes)
-    _prewarm_embeddings()
-    from .writer_lease import active_manager, active_mutation_request_id
+    with mutation_timing_span(timings, "commit.embedding_prewarm"):
+        _prewarm_embeddings()
+    from .writer_lease import active_manager, active_mutation_request_id, log_active_mutation_phase
 
-    with active_manager().mutation_guard(
-        root,
-        request_id=active_mutation_request_id(),
-        operation=f"semantic_existing_{preflight.operation}_commit",
-        holder_kind="command",
+    operation_label = str(preflight.operation)
+    with _timed_boundary(
+        timings,
+        active_manager().mutation_guard(
+            root,
+            request_id=active_mutation_request_id(),
+            operation=f"semantic_existing_{preflight.operation}_commit",
+            holder_kind="command",
+        ),
+        operation=operation_label,
     ):
         # A current validity stamp (commit-generation unchanged + sidecar
         # census unchanged — no corpus walk) means no governed writer
@@ -1828,51 +2181,70 @@ def commit_existing(
         # existing cross-invocation replay path already does.
         from .writer_lease import read_commit_generation
 
-        if not semantic_contract.validity_stamp_current(
-            root,
-            preflight.census_token,
-            commit_generation=read_commit_generation(root),
-        ):
-            preflight = _revalidate_existing_preflight(root, preflight)
+        with mutation_timing_span(timings, "commit.stamp_check"):
+            stamp_current = semantic_contract.validity_stamp_current(
+                root,
+                preflight.census_token,
+                commit_generation=read_commit_generation(root),
+            )
+        if not stamp_current:
+            log_active_mutation_phase("semantic_revalidate_start")
+            with (
+                _write_metric("exomem_write_revalidate_ms", operation_label),
+                mutation_timing_span(timings, "commit.revalidate"),
+            ):
+                preflight = _revalidate_existing_preflight(root, preflight)
             if preflight.contract_result.should_block:
                 raise SemanticWriteError(
                     "SEMANTIC_CONTRACT_BLOCKED",
                     _blocking_reason(preflight.contract_result),
                     preflight.contract_result.blocking_findings,
                 )
+        elif timings is not None:
+            timings.skipped("commit.revalidate")
 
         result = preflight.contract_result
         if preflight.manifest_install_required:
-            winner = activation_manifest.ensure_manifest(root, census=preflight.activation_census)
-            result, _ = _reevaluate_existing(preflight, manifest=winner)
-            if result.should_block:
-                raise SemanticWriteError(
-                    "SEMANTIC_CONTRACT_BLOCKED",
-                    _blocking_reason(
-                        result,
-                        "semantic contract blocked against the activation boundary winner",
-                    ),
-                    result.blocking_findings,
+            with mutation_timing_span(timings, "commit.manifest"):
+                winner = activation_manifest.ensure_manifest(
+                    root, census=preflight.activation_census
                 )
+                result, _ = _reevaluate_existing(preflight, manifest=winner)
+                if result.should_block:
+                    raise SemanticWriteError(
+                        "SEMANTIC_CONTRACT_BLOCKED",
+                        _blocking_reason(
+                            result,
+                            "semantic contract blocked against the activation boundary winner",
+                        ),
+                        result.blocking_findings,
+                    )
 
         if preflight.resolver_freshness is not None:
-            try:
-                find_module.prime_resolver_from_entries(
-                    root,
-                    preflight.before_corpus.resolver_entries,
-                    expected_freshness=preflight.resolver_freshness,
-                )
-            except Exception:  # noqa: BLE001 — rebuildable graph cache never blocks commit
-                pass
+            with mutation_timing_span(timings, "commit.resolver_prime"):
+                try:
+                    find_module.prime_resolver_from_entries(
+                        root,
+                        preflight.before_corpus.resolver_entries,
+                        expected_freshness=preflight.resolver_freshness,
+                    )
+                except Exception:  # noqa: BLE001 — rebuildable graph cache never blocks commit
+                    pass
 
         try:
-            with vault.vault_creation_lock(root, "semantic-creation"):
-                return _commit_existing_locked(
-                    root,
-                    preflight=preflight,
-                    auxiliaries=auxiliaries,
-                    result=result,
-                )
+            with _timed_acquire(
+                timings,
+                "commit.creation_lock",
+                vault.vault_creation_lock(root, "semantic-creation"),
+            ):
+                log_active_mutation_phase("semantic_locked_commit_start")
+                with mutation_timing_span(timings, "commit.locked_commit"):
+                    return _commit_existing_locked(
+                        root,
+                        preflight=preflight,
+                        auxiliaries=auxiliaries,
+                        result=result,
+                    )
         except vault.PathGuardError as error:
             # A caller-captured auxiliary guard (log/index) lost a race the
             # wide boundary used to prevent. The batch aborted atomically —
@@ -2869,11 +3241,19 @@ def _evaluate_structural(
 ) -> tuple[
     semantic_contract.SemanticContractResult,
     semantic_contract.SemanticPageState,
+    tuple | None,
 ]:
+    """Returns ``(result, state, corpus_census)``.
+
+    ``corpus_census`` is the exact census that validated the ``before`` corpus
+    context this evaluation just built, for a preflight caller to thread
+    straight into ``_capture_validity_stamp`` without paying for a second
+    walk; see ``semantic_contract.build_corpus_context_with_census``.
+    """
     registry = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     contracts = memory_schema.load_saved_contracts(root)
-    before = semantic_contract.build_corpus_context(
+    before, before_census = semantic_contract.build_corpus_context_with_census(
         root, registry=registry, language_registry=language
     )
     candidate = semantic_contract.build_page_state(
@@ -2903,6 +3283,7 @@ def _evaluate_structural(
             language_registry=language,
         ),
         candidate,
+        before_census,
     )
 
 
@@ -2940,7 +3321,9 @@ def preflight_creation(
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
     entry_generation = _entry_commit_generation(root)
-    result, state = _evaluate_structural(root, destination=path, source=source, operation=operation)
+    result, state, corpus_census = _evaluate_structural(
+        root, destination=path, source=source, operation=operation
+    )
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
@@ -2955,7 +3338,9 @@ def preflight_creation(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        census_token = _capture_validity_stamp(root, entry_generation)
+        census_token = _capture_validity_stamp(
+            root, entry_generation, corpus_census=corpus_census
+        )
         return CreationPreflight(
             "full",
             path,
@@ -2973,7 +3358,7 @@ def preflight_creation(
         if state.page_type is not None or semantic_contract.compiled_intent(state)
         else "not_semantic"
     )
-    census_token = _capture_validity_stamp(root, entry_generation)
+    census_token = _capture_validity_stamp(root, entry_generation, corpus_census=corpus_census)
     return CreationPreflight(
         applicability, path, source, draft_id, draft_token, False, result, None, state, census_token
     )
@@ -2988,19 +3373,35 @@ def _entry_commit_generation(root: Path):  # noqa: ANN201 - int | None
     return read_commit_generation(root)
 
 
-def _capture_validity_stamp(root: Path, entry_generation) -> tuple | None:  # noqa: ANN001
+def _capture_validity_stamp(
+    root: Path,
+    entry_generation,  # noqa: ANN001
+    *,
+    corpus_census: tuple | None = None,
+) -> tuple | None:
     """Assemble the preflight validity stamp WITHOUT a second corpus walk.
 
-    The corpus census is reused from the cache entry the validation's own
-    ``build_corpus_context`` call just walked/validated; only the cheap
-    review-artifact census is computed here. The stamp pairs that with the
-    entry commit-generation; the in-boundary admission check is then
+    Pass ``corpus_census`` when the caller's own ``build_corpus_context_with_census``
+    call already walked/validated one — this is the direct plumbing from the
+    corpus context the preflight just built, and it never depends on the
+    global process cache still holding that entry (a cold build that could not
+    cache, a candidate build, or a concurrent eviction between the build and
+    this capture would otherwise all fall through to a second walk). Omitting
+    it falls back to ``cached_corpus_census`` for a caller that has no corpus
+    context in hand. Either way, only the cheap review-artifact census is
+    computed here. The stamp pairs the result with the entry commit-generation;
+    the in-boundary admission check is then
     ``semantic_contract.validity_stamp_current`` — O(sidecars), no walk.
     """
     if entry_generation is None:
         return None
     sc_token = semantic_contract.corpus_validity_token(
-        root, corpus_census=semantic_contract.cached_corpus_census(root)
+        root,
+        corpus_census=(
+            corpus_census
+            if corpus_census is not None
+            else semantic_contract.cached_corpus_census(root)
+        ),
     )
     if sc_token is None:
         return None
@@ -3031,6 +3432,36 @@ def _prewarm_embeddings() -> None:
 
 
 def commit_creation(
+    vault_root: Path,
+    *,
+    preflight: CreationPreflight,
+    auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+    operation: str,
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
+) -> CreationCommit:
+    """Commit a page creation, then attach advisory structural feedback."""
+    committed = _commit_creation(
+        vault_root,
+        preflight=preflight,
+        auxiliary_writes=auxiliary_writes,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
+        operation=operation,
+        predecessor_path=predecessor_path,
+        predecessor_content_hash=predecessor_content_hash,
+    )
+    suggestion = _structure_suggestion(preflight.semantic_state)
+    if suggestion is None:
+        return committed
+    return replace(committed, structure_suggestion=suggestion)
+
+
+def _commit_creation(
     vault_root: Path,
     *,
     preflight: CreationPreflight,
@@ -3115,7 +3546,7 @@ def commit_creation(
             commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, _fresh_state = _evaluate_structural(
+            contract_result, _fresh_state, _fresh_census = _evaluate_structural(
                 root,
                 destination=preflight.destination,
                 source=preflight.source,

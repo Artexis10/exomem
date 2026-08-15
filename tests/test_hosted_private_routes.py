@@ -414,13 +414,21 @@ def test_invalid_hosted_edit_fails_before_invoker(tmp_path: Path) -> None:
         credential="invalid-edit-service-credential-0001",
         invoker=capture,
     )
+    # The old payload here (a valid operation + an agreeing top-level
+    # validate_only) became legal in #310; this payload preserves the
+    # test's intent with a both-disagreeing shape that still conflicts.
     response = client.post(
         "/private/exomem/v1/command/edit_memory",
         headers=_headers(config),
         json={
             "path": "Knowledge Base/Notes/Insights/example.md",
             "why": "invalid",
-            "operation": {"kind": "fill_row", "row_key": "x", "take": "y"},
+            "operation": {
+                "kind": "fill_row",
+                "row_key": "x",
+                "take": "y",
+                "validate_only": False,
+            },
             "validate_only": True,
         },
     )
