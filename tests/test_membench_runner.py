@@ -536,6 +536,16 @@ def test_cross_contender_report_withholds_structurally_incomparable_columns(
 
     assert "withheld: transport asymmetry (4b.40)" in text
     assert "| median_ms |" not in text
+    # Ingest (write) latency is a sibling of retrieval latency and is bound
+    # by the same "Structurally Incomparable Columns Are Withheld" spec
+    # requirement: unqualified for latency, ingest included. All four
+    # fixtures here produce ingest.jsonl data (every adapter populates
+    # OpResult.latency_ms on ingest), so the withheld marker — not numbers —
+    # must be what actually renders.
+    assert "ingest: withheld: transport asymmetry (4b.40)" in text
+    assert "| ingest_median_ms |" not in text
+    assert "| ingest_p95_ms |" not in text
+    assert "| ingest_ops |" not in text
     abstention_rows = [
         line for line in text.splitlines() if line.startswith("| abstention |")
     ]
@@ -557,6 +567,12 @@ def test_cross_contender_report_withholds_structurally_incomparable_columns(
     ).read_text()
     assert "| median_ms |" in bounded_text
     assert "withheld: transport asymmetry (4b.40)" not in bounded_text
+    # Single-contender surface: ingest latency renders real numbers plus its
+    # own altitude caveat, not the withheld marker — the withholding is
+    # cross-contender only.
+    assert "| ingest_median_ms |" in bounded_text
+    assert "ingest: withheld: transport asymmetry (4b.40)" not in bounded_text
+    assert "ingestion_altitude" in bounded_text or "per-op unit of work" in bounded_text
 
 
 def test_internal_diagnostic_label_renders_in_its_own_report(

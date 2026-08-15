@@ -461,7 +461,9 @@ def _retrieval_stats(rows: Sequence[dict]) -> dict[str, float | int] | None:
     }
 
 
-def _ingest_latency_section(runs: Sequence[_RunView]) -> list[str]:
+def _ingest_latency_section(
+    runs: Sequence[_RunView], *, cross_contender: bool = False
+) -> list[str]:
     """Ingest (write) latency rows — a sibling of the retrieval latency rows.
 
     Every adapter populates ``OpResult.latency_ms`` on ingest and the runner
@@ -476,16 +478,30 @@ def _ingest_latency_section(runs: Sequence[_RunView]) -> list[str]:
     column, rendered ``n/a`` (the retrieval-latency idiom), rather than
     silently dropping that run out of the row.
 
-    Altitude caveat: each contender's per-op unit of work differs (one
-    exomem tool call is not one basic-memory write), so a raw ms figure is
-    comparable within a contender but not directly across contenders. The
-    run's own ``ingestion_altitude`` — already threaded into the manifest by
-    the runner — is attached alongside the numbers as that caveat, rather
-    than left in a JSON field nobody reading the report would open.
+    Cross-contender withholding: "Structurally Incomparable Columns Are
+    Withheld" (memory-proof-harness spec) is unqualified for latency — no
+    latency figures, ingest included, appear on a surface covering more than
+    one contender; adapter transport asymmetry dominates the measurement
+    regardless of what the ingestion-altitude caveat below says. Gated
+    exactly the way the retrieval latency block above it is gated: the
+    withheld-with-reason marker replaces the table rather than the table
+    rendering zeros, blanks, or unqualified numbers.
+
+    Altitude caveat (single-contender surfaces only): each contender's
+    per-op unit of work differs (one exomem tool call is not one
+    basic-memory write), so a raw ms figure is comparable within a
+    contender but not directly across contenders. The run's own
+    ``ingestion_altitude`` — already threaded into the manifest by the
+    runner — is attached alongside the numbers as that caveat, rather than
+    left in a JSON field nobody reading the report would open. This caveat
+    is about per-op granularity, a narrower concern than — and never a
+    substitute for — the transport-asymmetry withholding above.
     """
 
     if not any(run.ingest_latencies for run in runs):
         return []
+    if cross_contender:
+        return ["", f"ingest: {WITHHELD_LATENCY}"]
     labels = [run.label for run in runs]
     lines = [
         "",
@@ -1102,10 +1118,10 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
                     cells.append(str(len(run.latencies)))
             lines.append(f"| {metric_name} | " + " | ".join(cells) + " |")
 
-    # Ingest (write) latency renders regardless of cross_contender: unlike
-    # retrieval latency's transport-asymmetry withholding (4b.40), its own
-    # altitude caveat above is what keeps a cross-contender read honest.
-    lines.extend(_ingest_latency_section(runs))
+    # Ingest (write) latency is gated on cross_contender exactly like the
+    # retrieval block above: "Structurally Incomparable Columns Are Withheld"
+    # is unqualified for latency, ingest included — see _ingest_latency_section.
+    lines.extend(_ingest_latency_section(runs, cross_contender=cross_contender))
 
     lines.extend(_environment_section(runs))
     lines.extend(_retrieval_floor_section(runs))

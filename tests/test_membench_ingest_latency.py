@@ -89,3 +89,43 @@ def test_invalid_run_renders_invalid_not_a_number() -> None:
     assert rows
     for row in rows:
         assert "INVALID" in row
+
+
+def test_cross_contender_withholds_ingest_numbers_with_reason() -> None:
+    """"Structurally Incomparable Columns Are Withheld" (memory-proof-harness
+    spec) is unqualified for latency: on a surface covering more than one
+    contender, no latency figures appear — ingest included — and the
+    withholding reason names the transport asymmetry. Gated exactly the way
+    the retrieval latency block is gated (WITHHELD_LATENCY)."""
+
+    runs = [
+        _run("alpha", ingest_latencies=[10.0, 20.0, 30.0]),
+        _run("beta", ingest_latencies=[1.0, 2.0]),
+    ]
+    lines = _ingest_latency_section(runs, cross_contender=True)
+    text = "\n".join(lines)
+
+    # (a) no numeric ingest figures appear
+    assert not any(line.startswith("| ingest_") for line in lines)
+    # (b) the withheld-with-reason marker does, naming the transport asymmetry
+    assert "withheld: transport asymmetry (4b.40)" in text
+
+
+def test_cross_contender_still_degrades_gracefully_without_any_data() -> None:
+    """Nothing to withhold when no run ever had ingest data — the marker
+    would be noise, not a finding, so the section stays empty either way."""
+
+    runs = [_run("alpha"), _run("beta")]
+    assert _ingest_latency_section(runs, cross_contender=True) == []
+
+
+def test_single_contender_surface_keeps_numbers_and_caveat() -> None:
+    """(c) the single-contender path still renders real numbers plus the
+    altitude caveat — withholding is a cross-contender-only concern."""
+
+    runs = [_run("alpha", ingest_latencies=[10.0, 20.0, 30.0])]
+    text = "\n".join(_ingest_latency_section(runs, cross_contender=False))
+    assert "| ingest_median_ms |" in text
+    assert "20.000" in text
+    assert "raw_source" in text  # the altitude caveat
+    assert "withheld: transport asymmetry (4b.40)" not in text
