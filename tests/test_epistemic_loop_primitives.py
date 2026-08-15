@@ -592,6 +592,88 @@ def test_a_governed_key_is_recognized_through_label_normalization(
     assert updated["unit"][normalized] == value
 
 
+def test_converting_a_unit_carrying_unowned_rows_to_compact_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Untested, this clause is one mutation away from restoring the silent drop.
+
+    Compact form has no metadata rows, so converting a unit that carries one
+    can only mean deleting it. The refusal is the guard; without a test, making
+    `preserved_metadata` falsy here brings the old data loss straight back.
+    """
+    page, unit = _rich_page_with_rows(tmp_path, "- reviewer: someone\n")
+
+    with pytest.raises(ValueError) as caught:
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="update",
+            category="reliability",
+            content="Retry budgets did not stop the incident class.",
+            kind="observation",
+            unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint,
+            expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        )
+
+    message = str(caught.value)
+    assert "COMPACT_METADATA_REQUIRES_RICH_KIND" in message
+    # Every exit the remediation names must be one the caller can actually take.
+    assert "editing the page" in message
+    assert "no argument clears a row this tool does not own" in message
+    assert "- reviewer: someone" in page.read_text(encoding="utf-8")
+
+
+def test_converting_a_unit_carrying_only_governed_rows_to_compact_is_refused(
+    tmp_path: Path,
+) -> None:
+    page, unit = _rich_page_with_rows(tmp_path, "- verdict: refuted\n")
+
+    with pytest.raises(ValueError) as caught:
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="update",
+            category="reliability",
+            content="Retry budgets did not stop the incident class.",
+            kind="observation",
+            unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint,
+            expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        )
+
+    assert "COMPACT_METADATA_REQUIRES_RICH_KIND" in str(caught.value)
+    assert "- verdict: refuted" in page.read_text(encoding="utf-8")
+
+
+def test_clearing_the_governed_rows_then_converting_to_compact_succeeds(
+    tmp_path: Path,
+) -> None:
+    """The remediation's own path, walked end to end so it cannot be fiction."""
+    page, unit = _rich_page_with_rows(
+        tmp_path, "- verdict: refuted\n- check_by: 2026-11-01\n"
+    )
+
+    converted = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="update",
+        category="reliability",
+        content="Retry budgets did not stop the incident class.",
+        kind="observation",
+        verdict="",
+        check_by="",
+        unit_ref=unit.unit_ref,
+        expected_fingerprint=unit.fingerprint,
+        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+    )
+
+    assert converted["unit"]["form"] == "compact"
+    source = page.read_text(encoding="utf-8")
+    assert "- verdict:" not in source
+    assert "- check_by:" not in source
+
+
 def test_an_invalid_existing_governed_row_is_never_dropped_silently(
     tmp_path: Path,
 ) -> None:
@@ -821,7 +903,45 @@ def test_governed_arguments_are_registered_on_every_generated_surface() -> None:
     )
     properties = schemas["observe_memory"]["inputSchema"]["properties"]
     assert {"verdict", "check_by", "id"} <= set(properties)
-    assert "preserve-by-default" in schemas["observe_memory"]["description"]
+
+
+def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> None:
+    """The help is digested into the surface, so a false claim ships as contract.
+
+    An earlier draft said an update "never discards an authored metadata row it
+    was not given". `tags`, `context`, and `relations` are authored metadata
+    rows and are discarded on omission, so a reader of the shipped help
+    concluded the exact opposite of the truth. Scope the claim, or do not make
+    it.
+    """
+    schemas = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "tests"
+            / "fixtures"
+            / "mcp_tool_schemas.json"
+        ).read_text(encoding="utf-8")
+    )
+    description = schemas["observe_memory"]["description"]
+    properties = schemas["observe_memory"]["inputSchema"]["properties"]
+
+    assert "preserve-on-omit" in description
+    assert "replace-on-omit" in description
+    assert "never discards an authored metadata row" not in description
+    for replaced in ("tags", "context", "relations"):
+        assert "omitting it clear" in properties[replaced]["description"], replaced
+    for preserved in ("verdict", "check_by"):
+        assert "omit to keep the current value" in properties[preserved]["description"]
+
+
+def test_the_command_registry_help_matches_the_shipped_description() -> None:
+    command = next(
+        item for item in commands.PRODUCT_COMMANDS if item.name == "observe_memory"
+    )
+    help_by_name = {param.name: (param.help or "") for param in command.params}
+
+    for replaced in ("tags", "context", "relations"):
+        assert "omitting it clear" in help_by_name[replaced], replaced
 
 
 # --------------------------------------------------------------------------
@@ -1209,6 +1329,90 @@ def test_outcome_belongs_only_to_experiments(vault: Path) -> None:
 
     assert caught.value.code == "INVALID_OUTCOME"
     assert "experiment" in caught.value.reason
+
+
+@pytest.mark.parametrize("bad", ["0.7", "mostly-right", "", "0.95"])
+def test_the_creation_route_refuses_an_invalid_outcome_too(
+    vault: Path, bad: str
+) -> None:
+    """The doctrine has to hold at every frontmatter-write boundary, not one.
+
+    `confidence` was refused here and `outcome` was not, so `outcome: 0.7`
+    reached disk through the route its twin was blocked on. Both boundaries now
+    consult one policy.
+    """
+    with pytest.raises(ValueError) as caught:
+        commands.op_manage_memory_file(
+            vault,
+            operation="create",
+            path="Knowledge Base/Notes/Experiments/Workflow/2026-07-bypass.md",
+            content="# Bypass\n\n## Observations\n\n- [finding] Something #x\n",
+            frontmatter={
+                "type": "experiment",
+                "status": "concluded",
+                "domain": "workflow",
+                "outcome": bad,
+            },
+            validate_only=True,
+        )
+
+    assert "INVALID_OUTCOME" in str(caught.value)
+    assert not (
+        vault / "Knowledge Base/Notes/Experiments/Workflow/2026-07-bypass.md"
+    ).exists()
+
+
+def test_the_creation_route_refuses_outcome_on_a_non_experiment(vault: Path) -> None:
+    with pytest.raises(ValueError) as caught:
+        commands.op_manage_memory_file(
+            vault,
+            operation="create",
+            path="Knowledge Base/Notes/Insights/misplaced-outcome.md",
+            content="# Misplaced\n\n## Observations\n\n- [finding] Something #x\n",
+            frontmatter={
+                "type": "insight",
+                "status": "active",
+                "outcome": "confirmed",
+            },
+            validate_only=True,
+        )
+
+    assert "INVALID_OUTCOME" in str(caught.value)
+
+
+def test_the_creation_route_accepts_a_valid_experiment_outcome(vault: Path) -> None:
+    validation = commands.op_manage_memory_file(
+        vault,
+        operation="create",
+        path="Knowledge Base/Notes/Experiments/Workflow/2026-07-accepted.md",
+        content="# Accepted\n\n## Observations\n\n- [finding] Something #x\n",
+        frontmatter={
+            "type": "experiment",
+            "status": "concluded",
+            "domain": "workflow",
+            "outcome": "refuted",
+        },
+        validate_only=True,
+    )
+
+    assert validation["mutated"] is False
+
+
+def test_both_frontmatter_boundaries_share_one_governed_policy() -> None:
+    """One policy object, so the two boundaries cannot drift apart again."""
+    assert (
+        vault_module.governed_frontmatter_reason("outcome", "0.7", "experiment")
+        is not None
+    )
+    assert (
+        vault_module.governed_frontmatter_reason("outcome", "refuted", "experiment")
+        is None
+    )
+    assert (
+        vault_module.governed_frontmatter_reason("outcome", "refuted", "insight")
+        is not None
+    )
+    assert vault_module.governed_frontmatter_reason("tags", ["x"], "insight") is None
 
 
 def test_confidence_remains_a_refused_frontmatter_field(vault: Path) -> None:

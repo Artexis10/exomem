@@ -202,6 +202,14 @@ class SemanticUnit:
             "unit_ref": self.unit_ref,
             "fingerprint": self.fingerprint,
             "occurrence": self.occurrence,
+            # Emitted as null when absent, unlike `structured_filters.unit_view`
+            # and the hit serializers, which omit them. The difference is
+            # deliberate and follows what each shape is for: this is the
+            # complete-unit projection, where every field is always present and
+            # a reader indexes it positionally, so a disappearing key would be
+            # a shape change. The other two are presence-sensitive — `$exists`
+            # has to be able to distinguish "no verdict yet" from any value, and
+            # a hit omits what it has nothing to say about.
             "verdict": self.verdict,
             "check_by": self.check_by,
         }

@@ -43,7 +43,12 @@ _TAG_RE = re.compile(r"^[^\s#]{1,64}$")
 _ANCHOR_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$")
 
 #: Metadata rows this module renders from its own arguments. Every *other*
-#: authored row is carried through a reconstruction verbatim.
+#: authored row is carried through a reconstruction with its value intact.
+#:
+#: "With its value intact" rather than "verbatim": the row is re-emitted under
+#: the parser's normalized key spelling, so `- source-note: x` comes back as
+#: `- source_note: x`. That normalization already happened at parse time and is
+#: what every consumer downstream sees; the authored value itself is untouched.
 #:
 #: This set is the whole reason the update path is safe. `_render_unit` rebuilds
 #: a rich unit from arguments, so before governed metadata existed, any row not
@@ -212,13 +217,21 @@ def observe_memory(
             or normalized_check_by is not None
             or preserved_metadata
         ):
+            # Every exit named here has to actually exist. `verdict=""` and
+            # `check_by=""` really do clear those rows, but no argument clears
+            # an unowned row, so converting a unit that carries one means
+            # editing the page to remove it first. Naming a remediation the
+            # caller cannot perform is how a refusal becomes a dead end.
             raise ObserveMemoryError(
                 "COMPACT_METADATA_REQUIRES_RICH_KIND",
                 "governed unit metadata requires an explicit governed "
                 "non-observation kind",
-                "Compact observations carry no metadata rows. Select an explicit "
-                "governed non-observation kind, or clear the metadata explicitly "
-                "before converting the unit to compact form.",
+                "Compact observations carry no metadata rows. Select an "
+                "explicit governed non-observation kind to keep the rich form; "
+                "or, to convert this unit to compact form, clear `verdict` and "
+                "`check_by` by passing an empty string and remove any remaining "
+                "metadata rows by editing the page, since no argument clears a "
+                "row this tool does not own.",
             )
         existing_anchors = {
             unit.anchor

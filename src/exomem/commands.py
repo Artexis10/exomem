@@ -4328,9 +4328,12 @@ def op_observe_memory(
     non-observation `kind` for rich semantic-block form and typed relations.
     Use `validate` before a guarded commit when semantic review is required.
 
-    An update never discards an authored metadata row it was not given: the
-    governed metadata fields are preserve-by-default, and any other authored row
-    is carried through the rewrite verbatim.
+    An update rebuilds the whole unit, and omission does NOT mean the same
+    thing for every field. `verdict`, `check_by`, and `id` are preserve-on-omit:
+    leave one out and its current value is kept. Any authored metadata row this
+    tool does not own is carried through as well. But `tags`, `context`, and
+    `relations` are replace-on-omit: leaving one out clears it, so resend the
+    values you want to keep.
 
     Args:
         path: Parent page path or canonical memory reference.
@@ -4338,9 +4341,12 @@ def op_observe_memory(
         category: Open semantic category for add/update/validate.
         content: Unit content for add/update/validate.
         kind: Optional governed rich kind; omitted means compact observation.
-        tags: Optional compact suffix tags or rich metadata tags.
-        context: Optional compact suffix context or rich metadata context.
-        relations: Rich typed relations as {kind, target} objects.
+        tags: Optional compact suffix tags or rich metadata tags. On update this
+            replaces the current tags, so omitting it clears them.
+        context: Optional compact suffix context or rich metadata context. On
+            update this replaces the current context, so omitting it clears it.
+        relations: Rich typed relations as {kind, target} objects. On update
+            this replaces the current relations, so omitting it clears them.
         verdict: Rich-only governed judgment; one of abandoned, confirmed,
             inconclusive, qualified, or refuted. Categorical lifecycle state,
             never a confidence score. On update, omit to keep the current value

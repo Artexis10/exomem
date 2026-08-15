@@ -26,6 +26,10 @@ An experiment page MAY carry an `outcome:` frontmatter field whose value is exac
 - **WHEN** a caller patches an experiment page's frontmatter with `outcome` set to `mostly-right`
 - **THEN** the write is refused with an error naming the accepted values
 
+#### Scenario: Every frontmatter-write boundary enforces the enum
+- **WHEN** a caller creates a page with frontmatter carrying `outcome` set to a numeric value
+- **THEN** the write is refused, exactly as the field-patch route refuses it
+
 #### Scenario: Outcome belongs only to experiments
 - **WHEN** a caller patches an insight page's frontmatter with `outcome` set to `confirmed`
 - **THEN** the write is refused because the field is experiment-only
