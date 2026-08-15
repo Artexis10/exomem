@@ -2120,10 +2120,14 @@ def test_supervisor_backs_off_after_transient_child_exit(
 
     class _TransientChild:
         pid = 2_147_483_645
+        returncode = None
 
-        @staticmethod
-        def poll():
-            return returncode
+        def poll(self):
+            # Mirrors real subprocess.Popen.poll(), which sets the `returncode`
+            # ATTRIBUTE as a side effect — the consumer reads `child.returncode`
+            # separately from the poll() return value.
+            self.returncode = returncode
+            return self.returncode
 
     worker._child = _TransientChild()
     monkeypatch.setattr(
@@ -2136,6 +2140,9 @@ def test_supervisor_backs_off_after_transient_child_exit(
     thread.start()
     try:
         time.sleep(0.1)
+        assert thread.is_alive(), (
+            "supervisor thread died — the transient-exit backoff branch was never reached"
+        )
         assert worker._child is None
     finally:
         worker._stop_event.set()
