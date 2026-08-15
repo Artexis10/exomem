@@ -433,23 +433,22 @@ def _apply_review_state(
             # contradiction pair itself still governs. The item-level record is
             # checked first because it is the more specific decision about this
             # exact signal composite.
-            pairs = contradiction_stance_module.pairs_from_reasons(item.reasons)
-            if pairs:
-                stances = [
-                    contradiction_stance_module.pair_decision(
-                        vault_root,
-                        *pair,
-                        store=store,
-                        payload=state_payload,
-                        refs=refs,
-                    )
-                    for pair in pairs
-                ]
-                # EVERY conflict on the anchor must be dispositioned before the item
-                # is: one un-stanced rival — a newly drifted pair, say — is still
-                # open review work, so the item honestly reopens.
-                if all(stance is not None for stance in stances):
-                    effective, decision = "competing", stances[0]
+            # Annotating here also makes a partially-stanced item legible: a reader
+            # sees which reason is already dispositioned, and the `pair_ref` that
+            # addresses it, instead of an ordinary-looking open item.
+            stances = contradiction_stance_module.annotate_reasons(
+                vault_root,
+                item.reasons,
+                store=store,
+                payload=state_payload,
+                refs=refs,
+            )
+            # EVERY conflict on the anchor must be dispositioned before the item is:
+            # one un-stanced rival — a newly drifted pair, say — is still open
+            # review work, so the item honestly reopens.
+            if stances and all(stance is not None for stance in stances.values()):
+                effective = "competing"
+                decision = stances[min(stances)]
         item.item_id = review_id
         item.ref = review_state_module.review_ref(review_id)
         item.target_ref = target_ref

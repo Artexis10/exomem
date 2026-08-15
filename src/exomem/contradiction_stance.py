@@ -182,6 +182,92 @@ def is_competing(
     )
 
 
+def annotate_reasons(
+    vault_root: Path,
+    reasons: list[dict] | None,
+    *,
+    store: review_state_module.ReviewStateStore,
+    payload: dict[str, Any] | None = None,
+    refs: dict[str, str] | None = None,
+) -> dict[tuple[str, str], review_state_module.ReviewDecision | None]:
+    """Tag each contradiction reason with its pair's stance, and return the map.
+
+    Without this a drifted item serializes as an ordinary open item with two
+    reasons and no hint that one of them is already dispositioned and silently
+    muting a write-time warning. Each reason gains `pair_ref` — the handle that
+    addresses that pair's stance directly — and, when a stance is recorded,
+    `stance`.
+
+    MUST be called after the item's `signal_fingerprint` is computed:
+    `review_state.fingerprint` reads only `category`, `meta.signal_version`,
+    `detail`, and `related_paths`, so these keys cannot feed back into review
+    identity, but computing the fingerprint first keeps that independent of
+    ordering rather than of a field list.
+    """
+    resolved: dict[
+        tuple[str, str],
+        tuple[tuple[str, str] | None, review_state_module.ReviewDecision | None],
+    ] = {}
+    for reason in reasons or []:
+        if str(reason.get("category") or "") != "corpus_contradictions":
+            continue
+        paths = sorted(set(reason.get("related_paths") or []))
+        if len(paths) != 2:
+            continue
+        pair = pair_key(paths[0], paths[1])
+        if pair[0] == pair[1]:
+            continue
+        if pair not in resolved:
+            identity = pair_identity(vault_root, *pair, refs=refs)
+            decision = None
+            if identity is not None:
+                found = store.decision(identity[0], identity[1], payload=payload)
+                if found is not None and found.action == STANCE_ACTION:
+                    decision = found
+            resolved[pair] = (identity, decision)
+        identity, decision = resolved[pair]
+        if identity is not None:
+            reason["pair_ref"] = review_state_module.review_ref(identity[0])
+        if decision is not None:
+            reason["stance"] = STANCE_ACTION
+    return {pair: decision for pair, (_identity, decision) in resolved.items()}
+
+
+def clear_orphan_stance(
+    vault_root: Path, *, ref: str
+) -> dict[str, Any] | None:
+    """Clear a competing stance addressed directly by its own pair ref, or None.
+
+    A stance whose pair has drifted off every queue item is otherwise unreachable:
+    `clear_stance` walks the pairs an ITEM currently carries, and an orphan is on
+    none of them, while the record keeps suppressing the write-time warning. The
+    pair ref returned by the original stance write addresses it directly.
+
+    Returns None when `ref` is not a review reference or carries no stance record,
+    so the caller can fall through to its ordinary not-found error.
+    """
+    try:
+        review_id = review_state_module.parse_review_ref(ref)
+    except ValueError:
+        return None
+    store = review_state_module.ReviewStateStore(Path(vault_root))
+    payload = store.load()
+    prefix = f"{review_id}:"
+    stanced = [
+        record
+        for key, record in payload["records"].items()
+        if key.startswith(prefix)
+        and isinstance(record, dict)
+        and str(record.get("action") or "") == STANCE_ACTION
+    ]
+    if not stanced:
+        return None
+    fingerprint_value = str(stanced[0].get("fingerprint") or "")
+    result = store.apply(review_id, fingerprint_value, action="reopen")
+    result["cleared"] = STANCE_ACTION
+    return result
+
+
 def pairs_from_reasons(reasons: list[dict] | None) -> list[tuple[str, str]]:
     """EVERY distinct contradiction pair a review item carries, in pair order.
 

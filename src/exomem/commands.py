@@ -5126,15 +5126,28 @@ def op_triage_memory(
             why=why,
             expected_fingerprint=expected_fingerprint,
         )
-    item = attention_module.item_by_ref(
-        vault_root, ref, expected_fingerprint=expected_fingerprint
-    )
+    normalized = str(action or "").strip().lower()
+    try:
+        item = attention_module.item_by_ref(
+            vault_root, ref, expected_fingerprint=expected_fingerprint
+        )
+    except ValueError:
+        # A competing stance whose pair has drifted off every queue item is on no
+        # item's reasons, so the item-walking clear cannot reach it — while it still
+        # suppresses the write-time warning. Its own pair ref (returned by the stance
+        # write, and echoed on every annotated reason) addresses it directly.
+        if normalized == "reopen":
+            orphan = contradiction_stance_module.clear_orphan_stance(
+                vault_root, ref=ref
+            )
+            if orphan is not None:
+                return orphan
+        raise
     if expected_fingerprint and item.fingerprint != expected_fingerprint:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the review signal changed; refresh the worklist "
             f"and inspect {item.ref} again"
         )
-    normalized = str(action or "").strip().lower()
     if normalized == contradiction_stance_module.STANCE_ACTION:
         # "rivals; keep both" is a statement about a PAIR, so it is recorded on the
         # pair identity rather than on this item's composite signal — that is the

@@ -191,6 +191,41 @@ The exemption applies only to the write-time warnings. The asserted queue entry 
 deliberately not exempt: surfacing it is the entire point of this change, and the
 reader dismisses or marks it competing through triage like any other item.
 
+### An orphaned stance stays addressable by its own pair ref
+
+A stance survives its pair leaving every queue — the proximity pair drifts out of
+band, or the authored edge is deleted. The record is then on no item's `reasons`,
+so the item-walking `clear_stance` cannot see it, while `DeclaredPairFilter` still
+consults it and suppresses the write-time warning. `dismiss` orphans identically,
+but a dismissal has no write-time side effect, so this one is the one that bites.
+
+Rather than leave it un-clearable, `triage_memory(ref=<pair_ref>, action="reopen")`
+now clears a stance addressed directly by its own pair ref — the ref the stance
+write returns under `pairs[].ref`, and which every annotated contradiction reason
+carries. That needs no new tool parameter, which matters because the tool schema is
+frozen. An unknown ref still raises `REVIEW_ITEM_NOT_FOUND`; only a ref that
+actually carries a stance record is treated this way.
+
+Two bounded residuals remain, deliberately. Discovery still depends on holding the
+pair ref: there is no "list every orphaned stance" surface, because the record
+stores refs and hashes rather than paths and adding paths would change the persisted
+record shape. And the orphan self-heals on the next edit to either endpoint, since
+the write-time check reads both pages' current content — an edit changes the pair
+signal version, the record stops matching, and the warning returns. The exposure is
+therefore at most one suppressed warning on one write, on a pair the reader
+themselves declared, and only while neither note changes.
+
+### A stanced pair is annotated on the item, not hidden
+
+An item that is only partially stanced — the drift case, where one of two pairs
+carries a stance — would otherwise serialize as an ordinary open item with two
+reasons and no hint that one of them is dispositioned and muting a warning. Each
+contradiction reason therefore carries `pair_ref`, and a stanced one also carries
+`stance`. The annotation is applied AFTER the item fingerprint is computed:
+`review_state.fingerprint` reads only `category`, `meta.signal_version`, `detail`,
+and `related_paths`, so these keys cannot feed back into review identity, but
+ordering the write after the hash keeps that true independently of that field list.
+
 ### Deep packs label, they do not suppress
 
 `context_pack._tension_pairs` gains asserted pairs (from authored `contradicts` edges
@@ -237,7 +272,13 @@ proximity pass ran — so an embeddings-off pack now reports
   `DeclaredPairFilter` builds one `DeclaredEdges` snapshot (two indexed queries) and
   one review-state read LAZILY on the first candidate and reuses both, so the cost is
   flat in the number of candidates and is paid only on a write that would have warned
-  at all.
+  at all. The residual is real and worth stating plainly: that snapshot is
+  proportional to the vault's TOTAL `contradicts` + `answers` edge count, not to the
+  handful of candidates being checked, so a vault with an order of magnitude more
+  such edges pays proportionally more on every warned write (measured 7.3 ms at 5
+  edges, 69.6 ms at 250, with six candidates). Narrowing it would mean an
+  anchor-narrowed query, which the graph layer does not currently support without
+  the O(P x E) fan-out this change removed.
 - [A warming graph silently yields no asserted entries] -> Documented in the spec as
   an explicit absence contract rather than a fabricated result; the proximity lane is
   unaffected, and the next audit after the rebuild surfaces them.

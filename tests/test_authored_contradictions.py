@@ -37,6 +37,7 @@ from exomem import corpus_aware as corpus_aware_module
 from exomem import embeddings as embeddings_module
 from exomem import epistemic_graph as epistemic_graph_module
 from exomem import find as find_module
+from exomem import recall_policy
 from exomem import review_state as review_state_module
 from exomem.audit import AuditFinding
 from exomem.find import Hit
@@ -220,6 +221,93 @@ def test_asserted_pairs_dedupes_a_symmetric_edge(vault: Path) -> None:
     a = _seed(vault, "Notes/Insights/ap-a.md", relations=[f"contradicts {_link(b)}"])
     _build_graph(vault)
     assert stance_module.asserted_pairs(vault) == [tuple(sorted((a, b)))]
+
+
+def test_asserted_pairs_excludes_a_recall_withheld_endpoint(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A weakened recall filter here is a disclosure bug, so pin it end to end.
+
+    The filter matters precisely when a page was INDEXED while ordinary and its
+    recall status changed afterwards: the sidecar still holds the node, and the
+    query-time check is the only thing standing between a stale node and a caller.
+    Withholding at seed time instead would never index the node at all, the INNER
+    JOIN would drop the edge, and the assertion would hold with the filter removed.
+    """
+    b = _seed(vault, "Notes/Insights/rw-b.md")
+    a = _seed(vault, "Notes/Insights/rw-a.md", relations=[f"contradicts {_link(b)}"])
+    _build_graph(vault)
+    assert stance_module.asserted_pairs(vault) == [tuple(sorted((a, b)))]
+
+    original = recall_policy.is_recall_candidate
+
+    def _withhold(vault_root, path):
+        if str(path).replace("\\", "/").endswith(b):
+            return False
+        return original(vault_root, path)
+
+    monkeypatch.setattr(recall_policy, "is_recall_candidate", _withhold)
+    assert stance_module.asserted_pairs(vault) == []
+    assert epistemic_graph_module.EpistemicGraphIndex(vault).relation_edges(
+        ["contradicts"]
+    ).edges == ()
+    assert not [f for f in _cc(vault) if _pair_key(f) == tuple(sorted((a, b)))]
+
+
+def test_relation_participants_excludes_a_recall_withheld_endpoint(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same disclosure guarantee on the older lookup, which had no such test."""
+    b = _seed(vault, "Notes/Insights/rp-b.md")
+    a = _seed(vault, "Notes/Insights/rp-a.md", relations=[f"contradicts {_link(b)}"])
+    _build_graph(vault)
+    index = epistemic_graph_module.EpistemicGraphIndex(vault)
+    assert index.relation_participants(["contradicts"]).paths == frozenset({a, b})
+
+    original = recall_policy.is_recall_candidate
+
+    def _withhold(vault_root, path):
+        if str(path).replace("\\", "/").endswith(b):
+            return False
+        return original(vault_root, path)
+
+    monkeypatch.setattr(recall_policy, "is_recall_candidate", _withhold)
+    assert index.relation_participants(["contradicts"]).paths == frozenset()
+
+
+def test_asserted_pairs_uses_exactly_one_read_snapshot(vault: Path) -> None:
+    """Pin the O(P x E) fan-out fix at the CALLER, not only inside the index.
+
+    A snapshot assertion on `relation_edges` alone leaves the regression
+    reintroducible one call site up: restoring a per-page anchored loop inside
+    `asserted_pairs` keeps `relation_edges` pristine and passes.
+    """
+    expected = []
+    for index in range(6):
+        other = _seed(vault, f"Notes/Insights/snap-b{index}.md")
+        own = _seed(
+            vault,
+            f"Notes/Insights/snap-a{index}.md",
+            relations=[f"contradicts {_link(other)}"],
+        )
+        expected.append(tuple(sorted((own, other))))
+    _build_graph(vault)
+
+    opens = {"n": 0}
+    original = epistemic_graph_module.EpistemicGraphIndex._open_read_snapshot
+
+    def _counting(self, *args, **kwargs):
+        opens["n"] += 1
+        return original(self, *args, **kwargs)
+
+    epistemic_graph_module.EpistemicGraphIndex._open_read_snapshot = _counting
+    try:
+        pairs = stance_module.asserted_pairs(vault)
+    finally:
+        epistemic_graph_module.EpistemicGraphIndex._open_read_snapshot = original
+
+    assert sorted(pairs) == sorted(expected)
+    assert opens["n"] == 1, "one indexed query for the whole corpus, not one per page"
 
 
 def test_asserted_pairs_is_empty_without_a_built_graph(vault: Path) -> None:
@@ -684,6 +772,73 @@ def test_a_drifted_second_pair_never_strands_the_first_stance(vault: Path) -> No
     assert a in _open_paths(vault)
 
 
+def test_a_stanced_reason_is_visible_on_a_partially_stanced_item(
+    two_conflicts,
+) -> None:
+    """A drifted item must not look like an ordinary open item.
+
+    One reason is already dispositioned and silently muting a write-time warning;
+    the payload has to say so, and hand back the ref that addresses it.
+    """
+    vault, a, b, _c, _ref = two_conflicts
+    identity = stance_module.pair_identity(vault, a, b)
+    assert identity is not None
+    review_state_module.ReviewStateStore(vault).apply(
+        identity[0], identity[1], action="competing", why="only this one"
+    )
+    report = attention_module.attention(
+        vault, categories=["corpus_contradictions"], limit=0, today=_TODAY
+    )
+    item = next(i for i in report.items if i.path == a)
+    stanced = [r for r in item.reasons if r.get("stance") == "competing"]
+    assert len(stanced) == 1
+    assert sorted(stanced[0]["related_paths"]) == sorted([a, b])
+    assert stanced[0]["pair_ref"] == review_state_module.review_ref(identity[0])
+    # Every contradiction reason carries the handle, stanced or not.
+    assert all("pair_ref" in r for r in item.reasons)
+
+
+def test_an_orphaned_stance_is_clearable_by_its_pair_ref(vault: Path) -> None:
+    """A stance whose pair left every queue item is still reachable.
+
+    It is on no item's reasons, so the item-walking clear cannot see it, while it
+    keeps suppressing the write-time warning. The pair ref returned by the stance
+    write addresses it directly.
+    """
+    b = _seed(vault, "Notes/Insights/orph-b.md")
+    a = _seed(vault, "Notes/Insights/orph-a.md", relations=[f"contradicts {_link(b)}"])
+    _build_graph(vault)
+    report = attention_module.attention(
+        vault, categories=["corpus_contradictions"], limit=0, today=_TODAY
+    )
+    item_ref = next(i for i in report.items if i.path == min(a, b)).ref
+    stance = commands_module.op_triage_memory(
+        vault, ref=item_ref, action="competing", why="rivals"
+    )
+    pair_ref = stance["pairs"][0]["ref"]
+
+    # Drop the authored edge: the pair now surfaces on no queue item at all.
+    target = vault / a
+    target.write_text(
+        target.read_text(encoding="utf-8").split("## Relations")[0], encoding="utf-8"
+    )
+    _build_graph(vault)
+    assert _open_paths(vault) == []
+
+    cleared = commands_module.op_triage_memory(vault, ref=pair_ref, action="reopen")
+    assert cleared["state"] == "open"
+    assert cleared["cleared"] == "competing"
+    assert review_state_module.ReviewStateStore(vault).load()["records"] == {}
+
+
+def test_an_unknown_ref_still_reports_not_found(vault: Path) -> None:
+    """The orphan route must not swallow a genuinely bad reference."""
+    with pytest.raises(ValueError, match="REVIEW_ITEM_NOT_FOUND"):
+        commands_module.op_triage_memory(
+            vault, ref="exomem://review/" + "a" * 24, action="reopen"
+        )
+
+
 def test_reopen_clears_a_stance_recorded_against_older_content(vault: Path) -> None:
     """Clearing keys on the review id, not the fingerprint, so a drifted record goes."""
     b = _seed(vault, "Notes/Insights/oc-b.md")
@@ -798,29 +953,35 @@ def test_a_competing_stance_exempts_the_pair(write_time: Path) -> None:
     assert _dups(write_time, a, b, 0.99) == []
 
 
-def test_declared_rivals_do_not_consume_a_top_n_slot(write_time: Path) -> None:
+def _slot_fixture(vault: Path, prefix: str, rivals: int = 3) -> tuple[str, list[str], str]:
+    """A draft page, `rivals` pages declared as its rivals, and one genuine match."""
+    question = _seed(vault, f"Notes/Insights/{prefix}-question.md")
+    self_page = _seed(
+        vault, f"Notes/Insights/{prefix}-self.md", relations=[f"answers {_link(question)}"]
+    )
+    declared = [
+        _seed(
+            vault,
+            f"Notes/Insights/{prefix}-rival-{index}.md",
+            relations=[f"answers {_link(question)}"],
+        )
+        for index in range(rivals)
+    ]
+    genuine = _seed(vault, f"Notes/Insights/{prefix}-genuine.md")
+    _build_graph(vault)
+    return self_page, declared, genuine
+
+
+def test_declared_rivals_do_not_consume_a_dup_slot(write_time: Path) -> None:
     """Exempt rivals must be filtered INSIDE the accumulation loop.
 
-    With `top_n=3`, three declared rivals ranked above a genuine near-duplicate would
-    otherwise fill every slot and the real duplicate warning would never fire.
+    Three declared rivals ranked above a genuine near-duplicate would otherwise fill
+    every slot and the real duplicate warning would never fire. `top_n` is pinned to
+    the rival count rather than leaning on the default, so the test cannot start
+    passing because post-loop filtering happens to fit under a larger default.
     """
-    q = _seed(write_time, "Notes/Insights/ts-question.md")
-    self_page = _seed(
-        write_time, "Notes/Insights/ts-self.md", relations=[f"answers {_link(q)}"]
-    )
-    rivals = [
-        _seed(
-            write_time,
-            f"Notes/Insights/ts-rival-{index}.md",
-            relations=[f"answers {_link(q)}"],
-        )
-        for index in range(3)
-    ]
-    genuine = _seed(write_time, "Notes/Insights/ts-genuine.md")
-    _build_graph(write_time)
-
-    # Rivals score higher than the genuine near-duplicate, so they sort first.
-    precomputed = {rival: 0.99 for rival in rivals}
+    self_page, rivals, genuine = _slot_fixture(write_time, "ts")
+    precomputed = {rival: 0.99 for rival in rivals}  # rivals sort above the real match
     precomputed[genuine] = 0.97
     candidates = corpus_aware_module.detect_duplicates(
         write_time,
@@ -829,6 +990,23 @@ def test_declared_rivals_do_not_consume_a_top_n_slot(write_time: Path) -> None:
         self_path=self_page,
         precomputed=precomputed,
         threshold=0.9,
+        top_n=len(rivals),
+    )
+    assert [c.path for c in candidates] == [genuine]
+
+
+def test_declared_rivals_do_not_consume_an_overlap_slot(write_time: Path) -> None:
+    """The contradiction lane has the same slot-consumption hazard and the same fix."""
+    self_page, rivals, genuine = _slot_fixture(write_time, "tc")
+    precomputed = {rival: 0.9 for rival in rivals}  # in band, above the real match
+    precomputed[genuine] = 0.7
+    candidates = corpus_aware_module.detect_contradictions(
+        write_time,
+        title="Draft",
+        body=_BODY,
+        self_path=self_page,
+        precomputed=precomputed,
+        top_n=len(rivals),
     )
     assert [c.path for c in candidates] == [genuine]
 

@@ -49,6 +49,12 @@ only when EVERY one of its pairs is stanced, because one un-stanced rival is sti
 open review work. `reopen` on such an item SHALL clear both the item-level record and
 the stance on every pair it carries.
 
+Each contradiction reason SHALL carry a reference addressing its own pair's stance,
+and a reason whose pair carries a stance SHALL be marked as such, so a partially
+stanced item cannot present as an ordinary open item while one of its conflicts is
+already dispositioned and suppressing a write-time warning. These annotations MUST
+NOT alter the item's review identity or signal fingerprint.
+
 #### Scenario: A competing item leaves the open view
 
 - **WHEN** a contradiction pair carries a `competing` stance
@@ -66,6 +72,8 @@ the stance on every pair it carries.
 
 - **WHEN** an item carries two contradiction pairs and only one of them is stanced
 - **THEN** the item remains in the default open view
+- **AND** the stanced reason is marked as stanced while the other is not
+- **AND** every contradiction reason carries a reference to its own pair's stance
 
 #### Scenario: Reopen restores the item to the open view
 

@@ -101,6 +101,10 @@ the item carries. Clearing SHALL release a stance recorded against an earlier co
 version as well as one matching the current fingerprint, so a stance can never become
 un-clearable while still suppressing a warning.
 
+A stance whose pair no longer surfaces on any review item SHALL remain clearable
+through a reference that addresses the pair directly, so a recorded stance can never
+reach a state where it suppresses a write-time warning with no way to release it.
+
 The stance SHALL be refused only for a review item that carries no counterpart at
 all, because "rivals; keep both" is meaningless for a single-note signal. Recording a
 stance MUST NOT mutate any note, MUST NOT supersede, merge, or rank either rival
@@ -144,6 +148,13 @@ against the other, and MUST NOT change `find` ordering.
 
 - **WHEN** `reopen` is applied to a pair that carries a `competing` stance
 - **THEN** the pair stance is cleared and the pair returns to the open view
+
+#### Scenario: An orphaned stance is still clearable
+
+- **WHEN** a stanced pair stops surfacing on any review item and `reopen` is applied
+  to the reference addressing that pair
+- **THEN** the stance is cleared and no longer suppresses the write-time warning
+- **AND** a reference carrying no stance record still reports the item as not found
 
 ### Requirement: Structural-Pair Exemption For Write-Time Proximity Warnings
 

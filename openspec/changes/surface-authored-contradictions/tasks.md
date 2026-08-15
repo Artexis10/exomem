@@ -58,3 +58,14 @@
 - [x] 8.7 Filter declared rivals inside each detect loop so an exempt pair cannot consume a `top_n` slot.
 - [x] 8.8 Pin the proximity `signal_version` formula, the inverted-band asserted path, and the warming-graph proximity path.
 - [x] 8.9 Correct the design.md cost claim and re-validate the change in strict mode.
+
+## 9. Mutation-survivor closure
+
+- [x] 9.1 Pin the recall filter on `relation_edges` AND `relation_participants` with a withheld endpoint that was indexed while ordinary, so the disclosure mutation is reachable.
+- [x] 9.2 Assert the read-snapshot count at the `asserted_pairs` level so the fan-out cannot be reintroduced one call site above `relation_edges`.
+- [x] 9.3 Mirror the slot-consumption test for the contradiction lane.
+- [x] 9.4 Pin `top_n` explicitly in both slot tests instead of leaning on the default.
+- [x] 9.5 Make an orphaned stance clearable by its own pair ref, and document the bounded residual.
+- [x] 9.6 Annotate each contradiction reason with its pair ref and stance, after the fingerprint is computed.
+- [x] 9.7 State `declared_pairs`' residual cost in design.md.
+
