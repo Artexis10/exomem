@@ -3,6 +3,14 @@
     "AmendmentIdentity": {
       "additionalProperties": false,
       "properties": {
+        "acknowledgment_status": {
+          "enum": [
+            "pending",
+            "acknowledged"
+          ],
+          "title": "Acknowledgment Status",
+          "type": "string"
+        },
         "affected_sections": {
           "items": {
             "type": "string"
@@ -16,6 +24,13 @@
         "effective_policy": {
           "title": "Effective Policy",
           "type": "string"
+        },
+        "introduced_family_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Introduced Family Ids",
+          "type": "array"
         },
         "parent_contract_sha256": {
           "pattern": "^[0-9a-f]{64}$",
@@ -42,7 +57,9 @@
         "contract",
         "affected_sections",
         "rationale",
-        "effective_policy"
+        "effective_policy",
+        "acknowledgment_status",
+        "introduced_family_ids"
       ],
       "title": "AmendmentIdentity",
       "type": "object"
@@ -252,6 +269,38 @@
       "title": "PreregistrationIdentity",
       "type": "object"
     },
+    "PreregistrationLineage": {
+      "additionalProperties": false,
+      "description": "Additive manifest projection of the ordered amendment receipt chain.",
+      "properties": {
+        "amendment_receipt_sha256s": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Amendment Receipt Sha256S",
+          "type": "array"
+        },
+        "base_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Base Sha256",
+          "type": "string"
+        },
+        "effective_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Effective Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_sha256",
+        "amendment_receipt_sha256s",
+        "effective_sha256"
+      ],
+      "title": "PreregistrationLineage",
+      "type": "object"
+    },
     "ReceiptIdentity": {
       "additionalProperties": false,
       "properties": {
@@ -376,6 +425,17 @@
     },
     "preregistration_identity": {
       "$ref": "#/$defs/PreregistrationIdentity"
+    },
+    "preregistration_lineage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PreregistrationLineage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "protocol_version": {
       "const": "1.0.0",
