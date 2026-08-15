@@ -53,6 +53,10 @@ _COMPACT_MUTATION_OPTIONAL = frozenset(
         # Present only when the leaf actually warned; absent on receipt recovery,
         # which reports a count with no retained texts.
         "warnings",
+        # Advisory structural feedback on a compiled-note write. Absent unless the
+        # written page shows recurring durable material outside its declared scope,
+        # and never carried by a Records mutation.
+        "structure_suggestion",
     }
 )
 _COMPACT_V1_RECEIPT = frozenset(

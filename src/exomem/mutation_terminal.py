@@ -314,6 +314,67 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     return {"files": projected, "summary": {"stored": stored, "failed": failed}}
 
 
+#: Bounds on the advisory structural suggestion compact may carry. Same posture as
+#: `warnings`: advisory, projected from the leaf, and never something a client
+#: branches on for the outcome of the mutation (see `_ENVELOPE_KEYS`).
+_STRUCTURE_STRENGTHS = frozenset({"strong", "moderate"})
+_MAX_STRUCTURE_REASONS = 8
+_MAX_STRUCTURE_TERMS = 6
+_MAX_STRUCTURE_TOKEN_CHARS = 64
+
+
+def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one advisory structural suggestion out of a compiled-write leaf.
+
+    Compiled creations carry it under `creation`, compiled edits under `semantic`.
+    The shape is re-validated here rather than trusted, so a malformed or oversized
+    advisory is dropped instead of widening the wire contract.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic"):
+        container = leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("structure_suggestion")
+        if not isinstance(value, Mapping):
+            continue
+        kind = value.get("kind")
+        strength = value.get("strength")
+        reasons = value.get("reasons")
+        terms = value.get("cluster_terms")
+        units = value.get("off_scope_units")
+        if not isinstance(kind, str) or not kind or len(kind) > _MAX_STRUCTURE_TOKEN_CHARS:
+            continue
+        if strength not in _STRUCTURE_STRENGTHS:
+            continue
+        if type(units) is not int or units < 0:
+            continue
+        if not _bounded_tokens(reasons, _MAX_STRUCTURE_REASONS):
+            continue
+        if not _bounded_tokens(terms, _MAX_STRUCTURE_TERMS):
+            continue
+        return {
+            "kind": kind,
+            "strength": strength,
+            "reasons": list(reasons),
+            "off_scope_units": units,
+            "cluster_terms": list(terms),
+        }
+    return None
+
+
+def _bounded_tokens(value: Any, limit: int) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and 0 < len(value) <= limit
+        and all(
+            isinstance(item, str) and 0 < len(item) <= _MAX_STRUCTURE_TOKEN_CHARS
+            for item in value
+        )
+    )
+
+
 def receipt_leaf_projection(leaf_result: Any) -> dict[str, Any]:
     """Portable graph receipts never retain collection paths or content metadata."""
     # Collection receipts are public API results, not portable graph protocol
@@ -533,6 +594,9 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         warning = leaf.get("graph_rebuild_warning")
         if isinstance(warning, str) and 0 < len(warning) <= 128:
             compact["graph_rebuild_warning"] = warning
+    structure_suggestion = _structure_suggestion_projection(leaf)
+    if structure_suggestion is not None:
+        compact["structure_suggestion"] = structure_suggestion
     compact["warnings_count"] = result["warnings_count"]
     # Projected from the leaf, never from the receipt. Receipt recovery replaces
     # `leaf_result` with `{}` on purpose (the portable receipt must not retain

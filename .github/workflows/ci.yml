@@ -282,6 +282,7 @@ jobs:
           src/exomem/memory_context.py
           src/exomem/memory_schema.py
           src/exomem/relation_registry.py
+          src/exomem/structure_promotion.py
           src/exomem/traversal_profiles.py
           src/exomem/epistemic_graph.py
           scripts/e2e_product_loop.py
@@ -291,6 +292,7 @@ jobs:
           tests/test_observe_memory.py
           tests/test_memory_schema.py
           tests/test_relation_registry.py
+          tests/test_structure_promotion.py
           tests/test_traversal_profiles.py
           --select E,F,I,B,UP,BLE
       - name: Targeted contract type check
@@ -301,6 +303,7 @@ jobs:
           src/exomem/memory_context.py
           src/exomem/memory_schema.py
           src/exomem/relation_registry.py
+          src/exomem/structure_promotion.py
           src/exomem/traversal_profiles.py
           src/exomem/epistemic_graph.py
 

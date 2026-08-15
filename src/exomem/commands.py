@@ -601,8 +601,11 @@ def op_bootstrap(
                 "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page",
             },
             "post_write": {
-                "remember_suggestions": "non-binding related pages returned by remember(suggestions=true)",
-                "write_feedback": "structural feedback returned by remember(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions",
+                "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
+                "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
+                "structure_suggestion": "advisory signal on a compiled write that recurring durable material on that page now sits outside its declared scope; present in the default committed response with kind, strength (strong|moderate), reasons, off_scope_units, and cluster_terms",
+                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy",
+                "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
             },
             "note_type_recipes": {
