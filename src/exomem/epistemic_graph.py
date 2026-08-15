@@ -16,6 +16,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import weakref
 from collections.abc import Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -395,7 +396,12 @@ def record_publication_recovery_state(
 
 _SIDECAR_READERS_LOCK = threading.Lock()
 _SIDECAR_READERS_CHANGED = threading.Condition(_SIDECAR_READERS_LOCK)
-_SIDECAR_READERS: dict[str, dict[int, tuple[sqlite3.Connection, threading.Thread]]] = {}
+# Weak references only: a registry that pinned its connections would keep the
+# very file handles alive that make a Windows replacement impossible, and a
+# reader leaked on an exception path would never be collected.
+_SIDECAR_READERS: dict[
+    str, dict[int, tuple["weakref.ref[sqlite3.Connection]", int]]
+] = {}
 _SIDECAR_PUBLICATION_HOLDS: set[str] = set()
 
 PUBLICATION_READER_DRAIN_SECONDS = 1.0
@@ -453,7 +459,10 @@ def _await_publication_hold(key: str) -> None:
 
 def _register_sidecar_reader(key: str, conn: sqlite3.Connection) -> None:
     with _SIDECAR_READERS_CHANGED:
-        _SIDECAR_READERS.setdefault(key, {})[id(conn)] = (conn, threading.current_thread())
+        _SIDECAR_READERS.setdefault(key, {})[id(conn)] = (
+            weakref.ref(conn),
+            threading.get_ident(),
+        )
 
 
 def _release_sidecar_reader(key: str, conn: sqlite3.Connection) -> None:
@@ -466,6 +475,28 @@ def _release_sidecar_reader(key: str, conn: sqlite3.Connection) -> None:
         _SIDECAR_READERS_CHANGED.notify_all()
 
 
+def _live_sidecar_readers(key: str) -> list[tuple[sqlite3.Connection, int]]:
+    """Prune collected readers and return the ones still holding the file.
+
+    Caller must hold `_SIDECAR_READERS_CHANGED`. A connection dropped without
+    `close()` is finalized by CPython without running the Python-level override,
+    so its registry entry is pruned here rather than lingering forever.
+    """
+    readers = _SIDECAR_READERS.get(key)
+    if not readers:
+        return []
+    live: list[tuple[sqlite3.Connection, int]] = []
+    for token, (reference, owner_ident) in list(readers.items()):
+        conn = reference()
+        if conn is None:
+            readers.pop(token, None)
+            continue
+        live.append((conn, owner_ident))
+    if not readers:
+        _SIDECAR_READERS.pop(key, None)
+    return live
+
+
 def _acquire_publication_hold(live: Path) -> str | None:
     """Block new live-sidecar readers, drain the open ones, and return the hold."""
     key = _sidecar_registry_key(live)
@@ -476,7 +507,7 @@ def _acquire_publication_hold(live: Path) -> str | None:
     deadline = time.monotonic() + PUBLICATION_READER_DRAIN_SECONDS
     try:
         with _SIDECAR_READERS_CHANGED:
-            while _SIDECAR_READERS.get(key):
+            while _live_sidecar_readers(key):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -486,10 +517,11 @@ def _acquire_publication_hold(live: Path) -> str | None:
             # live caller still holds would surface `sqlite3.ProgrammingError`
             # inside an unrelated read. Readers that outlast the drain are
             # published around by `graph_sync.replace_sidecar`'s in-place path.
+            running = {thread.ident for thread in threading.enumerate()}
             abandoned = [
                 conn
-                for conn, owner in _SIDECAR_READERS.get(key, {}).values()
-                if not owner.is_alive()
+                for conn, owner_ident in _live_sidecar_readers(key)
+                if owner_ident not in running
             ]
     except BaseException:
         # Never leak a hold: an unreleased one would make every reader of this
