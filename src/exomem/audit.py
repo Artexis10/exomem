@@ -61,6 +61,7 @@ from . import (
     temporal,
 )
 from . import find as find_module
+from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     _mask_code_spans,
@@ -1947,9 +1948,57 @@ def _check_frontmatter_compliance(
     findings: list[AuditFinding] = []
     for page in pages:
         fm = page.frontmatter
+        excluded = vault_module.first_excluded_field(fm)
+        if excluded is not None:
+            field, _reason = excluded
+            findings.append(AuditFinding(
+                category="frontmatter_compliance",
+                severity="warn",
+                path=page.rel_path,
+                detail=f"{field!r} is a schema-excluded frontmatter field.",
+                proposed_fix=f"Remove the {field!r} frontmatter field.",
+            ))
         page_type = fm.get("type")
         if not isinstance(page_type, str):
             continue
+        if page_type == "collection":
+            nested_excluded = vault_module.excluded_field_in_collection_frontmatter(fm)
+            if nested_excluded is not None:
+                field, _reason = nested_excluded
+                item_schema = fm.get("item_schema")
+                schema_fields = (
+                    item_schema.get("fields") if isinstance(item_schema, dict) else None
+                )
+                in_schema = isinstance(schema_fields, dict) and field in schema_fields
+                if in_schema:
+                    detail = (
+                        f"Collection item_schema.fields declares schema-excluded "
+                        f"field {field!r}."
+                    )
+                    proposed_fix = (
+                        f"Delete {field!r} from every item first, then revise the "
+                        "collection manifest to remove the field declaration."
+                    )
+                else:
+                    # The note field lives in the immutable storage descriptor, so
+                    # revise refuses with IMMUTABLE_COLLECTION_REPRESENTATION. The
+                    # only route out is a new collection plus migration.
+                    detail = (
+                        f"Collection Markdown-log note field declares schema-excluded "
+                        f"field {field!r}."
+                    )
+                    proposed_fix = (
+                        f"Delete {field!r} from every item, then migrate to a new "
+                        "collection whose note field uses a permitted name — the "
+                        "storage descriptor is immutable, so revise cannot remove it."
+                    )
+                findings.append(AuditFinding(
+                    category="frontmatter_compliance",
+                    severity="warn",
+                    path=page.rel_path,
+                    detail=detail,
+                    proposed_fix=proposed_fix,
+                ))
         required = _REQUIRED_FIELDS_BY_TYPE.get(page_type)
         if required:
             missing = [k for k in required if not fm.get(k)]
