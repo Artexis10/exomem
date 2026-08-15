@@ -28,7 +28,15 @@ def load_module():
     return module
 
 
-def result(pages: int, *, commit: float, validate: float = 30.0) -> dict[str, float | int]:
+def result(
+    pages: int,
+    *,
+    commit: float,
+    validate: float = 30.0,
+    read_after_write: float = 500.0,
+    cold_read_after_write: float = 800.0,
+    cold_preflight: float = 900.0,
+) -> dict[str, float | int]:
     return {
         "pages": pages,
         "samples": 5,
@@ -37,6 +45,10 @@ def result(pages: int, *, commit: float, validate: float = 30.0) -> dict[str, fl
         "validate_p95_ms": validate * 1.4,
         "commit_median_ms": commit,
         "commit_p95_ms": commit * 1.15,
+        "read_after_write_median_ms": read_after_write,
+        "read_after_write_p95_ms": read_after_write * 1.4,
+        "cold_read_after_write_ms": cold_read_after_write,
+        "cold_preflight_ms": cold_preflight,
     }
 
 
@@ -53,6 +65,27 @@ def test_absolute_ceiling_breach_fails() -> None:
     module = load_module()
     with pytest.raises(SystemExit, match="commit_median_ms"):
         module.check([result(8_000, commit=module.COMMIT_MEDIAN_MS + 1)])
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "read_after_write_median_ms",
+        "read_after_write_p95_ms",
+        "cold_read_after_write_ms",
+        "cold_preflight_ms",
+    ],
+)
+def test_missing_new_key_fails_loudly(key: str) -> None:
+    """check() hard-indexes every gate key -- a result dict missing one must
+    fail loudly, not silently pass via a `.get()` skip (the exact
+    invisibility class this lane closes: a relocated cost that never lands
+    on any row would otherwise pass the build unnoticed)."""
+    module = load_module()
+    incomplete = result(2_000, commit=51.5)
+    del incomplete[key]
+    with pytest.raises(KeyError, match=key):
+        module.check([incomplete])
 
 
 def test_superlinear_scaling_fails() -> None:

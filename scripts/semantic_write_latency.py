@@ -44,7 +44,9 @@ SCALING_SLACK_MS = 200.0
 # Linux CI has neither the per-file Windows short-name resolve() this scan
 # pays (`recall_policy._safe_regular_file`) nor this box's contention, so the
 # real gate floor is expected to sit well under these numbers -- headroom is
-# wide on purpose. Re-measure (don't hand-tune) if that basis changes.
+# wide on purpose. Re-measure (don't hand-tune) if that basis changes; retune
+# alongside the cold rows below once #510 lands and the relocated cost has a
+# real shape to calibrate against.
 READ_AFTER_WRITE_MEDIAN_MS = 60_000.0
 READ_AFTER_WRITE_P95_MS = 75_000.0
 # Separate (not shared with SCALING_RATIO/SCALING_SLACK_MS): this read is
@@ -56,26 +58,44 @@ READ_AFTER_WRITE_P95_MS = 75_000.0
 READ_AFTER_WRITE_SCALING_RATIO = 8.0
 READ_AFTER_WRITE_SCALING_SLACK_MS = 2_000.0
 
-# --- Cold/evicted read-after-write (the row the upcoming #510 fix must
-# move). `reset_corpus_context_cache()` + `freshness.clear()` mirror what the
-# withdraw at index_sync.py:51-67 does to a vault's liveness: the corpus
-# cache entry goes missing (the post-write patch at semantic_contract.py
-# ~:1745 is then a no-op -- nothing to patch) and the freshness registry
-# scope stays not-live (only the file watcher re-seeds it in production; see
-# FreshnessSnapshot's O(N) stat-walk fallback in find.py). The very next
-# caller's read pays a COLD corpus/registry rebuild instead of the warm
-# patch path.
+# --- Cold/evicted scenario (the row the upcoming #510 fix must move a cost
+# onto). `reset_corpus_context_cache()` drops the semantic-contract
+# corpus-context cache; `freshness.clear()` drops freshness liveness (only
+# the file watcher re-seeds it in production -- see FreshnessSnapshot's O(N)
+# stat-walk fallback in find.py). Eviction runs BETWEEN an ordinary warm
+# write and the two probes that follow it, not before the write: preflight
+# calls build_corpus_context() itself, so evicting before the write just lets
+# that SAME write's own preflight quietly repopulate the cache before
+# anything is timed -- the relocated cost would never land on any gated row.
+# One eviction, two rows:
+#   cold_read_after_write_ms -- the very next read's honest reader-side cold
+#     cost (freshness-liveness fallback etc.), visibility-asserted the same
+#     as the warm row.
+#   cold_preflight_ms -- the very next transition's validate_ms. Preflight is
+#     where a cold corpus-context rebuild lands BY CONSTRUCTION
+#     (build_corpus_context has no cache entry to patch), so this is the
+#     honest incident-class net: the ~70s relocated walk from the incident
+#     would breach THIS row, not the read.
 #
-# MEASURED BASIS (same box/run as above):
-#   cold_read_after_write_ms     2k ~11153ms   8k ~51596ms   (~4.6x @ 4x pages)
-# PROVISIONAL: calibrated generously from this lane's own measured 2k/8k
-# numbers so it is a regression net against materially WORSE behavior, not a
-# tight bound on today's known-bad cost -- re-measure after #510 lands and
-# tighten (Linux CI, not this contended Windows box, is the authoritative
-# floor).
-COLD_READ_AFTER_WRITE_MS = 120_000.0
+# MEASURED BASIS (contended Windows dev box, same run as the warm figures,
+# post-reorder so eviction genuinely lands after the write and before both
+# probes -- see the restructured `measure()` cold block):
+#   cold_read_after_write_ms   2k ~9861ms   8k ~36734ms   (~3.7x @ 4x pages)
+#   cold_preflight_ms          2k ~6462ms   8k ~23749ms   (~3.7x @ 4x pages)
+# PROVISIONAL for both: calibrated generously from this lane's own measured
+# 2k/8k numbers so they are a regression net against materially WORSE
+# behavior, not a tight bound on today's known-bad cost -- re-measure after
+# #510 lands and tighten (Linux CI, not this contended Windows box, is the
+# authoritative floor). Both rows are n=1 per size: a `--root` run refuses a
+# pre-existing directory so it gets exactly one attempt with no re-measure,
+# so a contended box can make either row noisy in isolation -- expected, and
+# Linux CI adjudicates a reproducible failure.
+COLD_READ_AFTER_WRITE_MS = 100_000.0
 COLD_READ_AFTER_WRITE_SCALING_RATIO = 8.0
 COLD_READ_AFTER_WRITE_SCALING_SLACK_MS = 3_000.0
+COLD_PREFLIGHT_MS = 80_000.0
+COLD_PREFLIGHT_SCALING_RATIO = 8.0
+COLD_PREFLIGHT_SCALING_SLACK_MS = 5_000.0
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -105,6 +125,26 @@ def _next_source(source: str, version: int) -> str:
     return source[:start] + str(version) + source[end:]
 
 
+def _read_after_write(vault_root: Path, rel_path: str, version: int) -> float:
+    """Timed, visibility-asserted keyword read for a version already committed.
+
+    What the NEXT caller pays to see a write, not just what the writer itself
+    paid. A fast-but-stale read must fail the gate, not pass it, so this
+    asserts the new content is actually visible before returning its cost.
+    """
+    marker = f"Synthetic write latency version {version} "
+    started = time.perf_counter()
+    hits = find.find(vault_root, query=marker.strip(), scope="kb", mode="keyword", limit=5)
+    read_ms = (time.perf_counter() - started) * 1_000.0
+    if not any(marker in (hit.excerpt or "") for hit in hits):
+        excerpts = [hit.excerpt for hit in hits]
+        raise RuntimeError(
+            f"read-after-write visibility failed: version {version} marker not found "
+            f"in {len(hits)} hit(s) for {rel_path}: {excerpts!r}"
+        )
+    return read_ms
+
+
 def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, float, float]:
     path = vault_root / rel_path
     before = path.read_text(encoding="utf-8")
@@ -123,20 +163,7 @@ def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, f
     started = time.perf_counter()
     semantic_writes.commit_existing(vault_root, preflight=preflight)
     commit_ms = (time.perf_counter() - started) * 1_000.0
-
-    # Read-after-write budget: what the NEXT caller pays to see this write,
-    # not just what the writer itself paid. A fast-but-stale read must fail
-    # the gate, not pass it, so this asserts visibility as well as timing.
-    marker = f"Synthetic write latency version {version} "
-    started = time.perf_counter()
-    hits = find.find(vault_root, query=marker.strip(), scope="kb", mode="keyword", limit=5)
-    read_after_write_ms = (time.perf_counter() - started) * 1_000.0
-    if not any(marker in (hit.excerpt or "") for hit in hits):
-        excerpts = [hit.excerpt for hit in hits]
-        raise RuntimeError(
-            f"read-after-write visibility failed: version {version} marker not found "
-            f"in {len(hits)} hit(s) for {rel_path}: {excerpts!r}"
-        )
+    read_after_write_ms = _read_after_write(vault_root, rel_path, version)
     return validate_ms, commit_ms, read_after_write_ms
 
 
@@ -177,14 +204,22 @@ def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]
         commits.append(commit_ms)
         reads.append(read_ms)
 
-    # Cold/evicted scenario: force the expensive path a governed write can
-    # relocate onto its NEXT caller (see the module-level constant comments),
-    # then measure exactly what that caller's read pays. One sample, kept out
-    # of the warm `reads`/`validates`/`commits` lists above so it cannot skew
-    # ceilings scoped to steady-state (cache-warm) operation.
+    # Cold/evicted scenario (see the module-level constant comments for the
+    # full mechanism). Eviction must land BETWEEN a write and the probes that
+    # follow it, not before the write: preflight_existing() itself calls
+    # build_corpus_context(), so evicting first just lets that SAME write's
+    # own preflight quietly repopulate the cache before anything is timed --
+    # the relocated cost would never land on any gated row. One eviction, two
+    # samples, neither folded into the warm `reads`/`validates`/`commits`
+    # lists above so they cannot skew ceilings scoped to steady-state
+    # (cache-warm) operation:
+    cold_write_version = samples + 2
+    cold_probe_version = samples + 3
+    _transition(vault_root, target_rel, cold_write_version)  # ordinary warm write
     semantic_contract.reset_corpus_context_cache()
     freshness.clear()
-    _, _, cold_read_after_write_ms = _transition(vault_root, target_rel, samples + 2)
+    cold_read_after_write_ms = _read_after_write(vault_root, target_rel, cold_write_version)
+    cold_preflight_ms, _, _ = _transition(vault_root, target_rel, cold_probe_version)
 
     return {
         "pages": size,
@@ -197,6 +232,7 @@ def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]
         "read_after_write_median_ms": round(statistics.median(reads), 1),
         "read_after_write_p95_ms": round(_percentile(reads, 0.95), 1),
         "cold_read_after_write_ms": round(cold_read_after_write_ms, 1),
+        "cold_preflight_ms": round(cold_preflight_ms, 1),
     }
 
 
@@ -212,6 +248,7 @@ def check(results: list[dict[str, float | int]]) -> None:
             ("read_after_write_median_ms", READ_AFTER_WRITE_MEDIAN_MS),
             ("read_after_write_p95_ms", READ_AFTER_WRITE_P95_MS),
             ("cold_read_after_write_ms", COLD_READ_AFTER_WRITE_MS),
+            ("cold_preflight_ms", COLD_PREFLIGHT_MS),
         ):
             value = float(result[key])
             if value >= ceiling:
@@ -249,6 +286,19 @@ def check(results: list[dict[str, float | int]]) -> None:
             failures.append(
                 f"cold_read_after_write scaling: {large[cold_key]}ms >= {cold_bound:.1f}ms "
                 f"({small['pages']} -> {large['pages']} pages)"
+            )
+        # The true incident-class net: a cold preflight IS where the
+        # relocated corpus rebuild lands, so this is the row that would
+        # actually catch the ~70s walk moving back in.
+        cold_preflight_key = "cold_preflight_ms"
+        cold_preflight_bound = (
+            float(small[cold_preflight_key]) * COLD_PREFLIGHT_SCALING_RATIO
+            + COLD_PREFLIGHT_SCALING_SLACK_MS
+        )
+        if float(large[cold_preflight_key]) >= cold_preflight_bound:
+            failures.append(
+                f"cold_preflight scaling: {large[cold_preflight_key]}ms >= "
+                f"{cold_preflight_bound:.1f}ms ({small['pages']} -> {large['pages']} pages)"
             )
     if failures:
         raise SystemExit("semantic write latency gate failed: " + "; ".join(failures))
@@ -309,7 +359,8 @@ def main(argv: list[str] | None = None) -> int:
     # kill switch (same lean/model-free spirit as the DISABLE_* vars above)
     # routes keyword search through the synchronous, always-current
     # reference scan instead, so a stale read here can only mean OUR target
-    # mechanism regressed.
+    # mechanism regressed. The excluded async-lexstore read-after-write
+    # window this pin steps around is tracked separately as #526.
     os.environ["EXOMEM_LEXICAL_BACKEND"] = "python"
 
     results = measure_all(args.sizes, args.samples, args.root)
