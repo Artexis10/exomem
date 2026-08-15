@@ -2495,6 +2495,7 @@ def temporary_sidecar_path(live: Path, checkpoint: GraphSyncCheckpoint) -> Path:
 
 PUBLISH_IN_PLACE_ATTEMPTS = 3
 PUBLISH_IN_PLACE_BUSY_TIMEOUT_SECONDS = 5.0
+PUBLISH_IN_PLACE_RETRY_SECONDS = 0.25
 
 
 def replace_sidecar(temporary: Path, live: Path) -> None:
@@ -2506,8 +2507,14 @@ def replace_sidecar(temporary: Path, live: Path) -> None:
     open, and a resident service makes that a routine condition rather than a
     rare one, so a refusal must not be the end of the road: fall back to
     publishing the same proven bytes *into* the existing file with SQLite's
-    backup API, which needs only a write transaction on the destination and
-    therefore leaves the directory entry (and every open handle) untouched.
+    backup API, which leaves the directory entry untouched and so does not care
+    how many handles are open on it.
+
+    That fallback covers open *handles*, not open read *transactions*. This
+    sidecar runs in rollback-journal mode, where a reader inside `BEGIN` holds a
+    SHARED lock that blocks the backup's EXCLUSIVE one — so a reader that holds
+    a transaction across the whole window still defeats both paths. Bounded
+    retries absorb the ordinary case where the reader commits and lets go.
 
     Only when both fail is the publication genuinely unavailable. Leaving the
     complete old sidecar in place is fail-closed; the checkpoint remains
@@ -2532,14 +2539,21 @@ def _publish_sidecar_in_place(temporary: Path, live: Path) -> bool:
 
     `sqlite3.Connection.backup` copies the whole source database inside one
     destination transaction, so a concurrent reader either sees the complete
-    old content or the complete new content — never a half-written file. A
-    reader holding a *read* transaction blocks the write briefly, which the
-    busy timeout absorbs; a reader that never yields exhausts the bounded
-    attempts and leaves the live sidecar exactly as it was.
+    old content or the complete new content — never a half-written file.
+
+    The sidecar is a rollback-journal database (nothing sets `journal_mode`), so
+    a reader inside `BEGIN` holds a SHARED lock and the backup's EXCLUSIVE lock
+    waits on it. The busy timeout absorbs that once the connection is open; a
+    failure raised at *open* time returns immediately, so the attempts are also
+    spaced, or all three would burn in microseconds and prove nothing. A reader
+    that never yields exhausts them and leaves the live sidecar exactly as it
+    was.
     """
     if not live.exists():
         return False
     for attempt in range(PUBLISH_IN_PLACE_ATTEMPTS):
+        if attempt:
+            time.sleep(PUBLISH_IN_PLACE_RETRY_SECONDS)
         try:
             source = sqlite3.connect(temporary)
             try:
@@ -2548,7 +2562,6 @@ def _publish_sidecar_in_place(temporary: Path, live: Path) -> bool:
                 )
                 try:
                     source.backup(destination)
-                    destination.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 finally:
                     destination.close()
             finally:

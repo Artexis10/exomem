@@ -984,16 +984,26 @@ class EpistemicGraphIndex:
         advance it to the already-published event checkpoint.
 
         The `freshness.external_pending` guard here and at the tail of this
-        method is an **optimization, not a correctness fence** (issue #508,
-        joint freshness-liveness contract, section 2.1, deliverable D7). What
-        actually stops a stale sidecar being served as current is graph-owned
-        state proved against canonical disk: the publication ticket/epoch gate,
-        the persisted read barrier, the availability-marker re-proof against the
-        *current* recall projection identity (with a direct source-bytes and
-        resolver-topology proof outside the exact live-checkpoint lineage), and
-        the graph_sync checkpoint acknowledgement. Every one of those still
-        holds with vault freshness fully live. The guard survives only as a
-        cheap short-circuit, and only because `external_pending` is now set
+        method is an **optimization for public readers, not a correctness
+        fence** (issue #508, joint freshness-liveness contract, section 2.1,
+        deliverable D7). What actually stops a stale sidecar being served as
+        current is graph-owned state proved against canonical disk: the
+        publication ticket/epoch gate, the persisted read barrier, the
+        availability-marker re-proof against the *current* recall projection
+        identity (with a direct source-bytes and resolver-topology proof
+        outside the exact live-checkpoint lineage), and the graph_sync
+        checkpoint acknowledgement. Every one of those still holds with vault
+        freshness fully live.
+
+        Note where those four live, though: all of them are inside the
+        `require_current_projection` branch below. The three maintenance
+        readers that pass `require_current_projection=False` — the graph_sync
+        predecessor probe, the incremental refresh, and its topology re-read —
+        deliberately skip them, so for those callers this guard is the *only*
+        `freshness`-side check in this method that an unobserved external event
+        has landed. That is a second reason it stays, beyond cheapness.
+
+        It stays admissible only because `external_pending` is now set
         exclusively by Class A (registry loss) and Class C (proven-stale)
         signals — never by a publication failure. If a future change lets a
         Class B failure mark again, this guard becomes a liveness bug wearing a
@@ -1604,8 +1614,14 @@ class EpistemicGraphIndex:
         interval for the open ones to close, and collects any left by a thread
         that has since died. Readers that outlast the drain are not forced
         shut: closing a connection its borrower still holds would surface
-        `sqlite3.ProgrammingError` inside an unrelated read. They are published
-        around instead, by `graph_sync.replace_sidecar`'s in-place path.
+        `sqlite3.ProgrammingError` inside an unrelated read.
+
+        This drain is the only thing that clears an open read *transaction*.
+        `replace_sidecar`'s in-place path publishes around an open *handle*, but
+        the sidecar is a rollback-journal database, so a reader inside
+        `BEGIN` — which is exactly what `_open_read_snapshot` returns — holds a
+        SHARED lock that blocks the backup's EXCLUSIVE one. Draining first and
+        publishing in place second are complementary, not redundant.
 
         Returns the hold to release once the replacement has been attempted.
         """
