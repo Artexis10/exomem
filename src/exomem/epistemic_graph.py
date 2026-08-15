@@ -573,30 +573,23 @@ def _temporary_base_name(name: str) -> str:
     return name
 
 
-def _reap_preserved_temporaries(
-    live: Path, *, keep: int = PRESERVED_TEMPORARY_LIMIT
-) -> list[Path]:
-    """Bound the `.graph-rebuild-*` artifacts a refused publication leaves behind.
+def _unregistered_temporary_groups(live: Path) -> dict[str, list[Path]]:
+    """Group `.graph-rebuild-*` artifacts this process has not registered.
 
-    A refused replacement deliberately preserves its complete private sidecar,
-    because that build is recoverable the moment the live file's reader lets
-    go. Exactly one of them is recoverable, though — the newest — so every
-    older one is dead weight, and on the reported vault it grew to 527 MB.
-
-    Anything still registered as an in-flight rebuild target is left alone. Of
-    the remainder the newest `keep` survive; the rest go with their SQLite
-    companions. A Windows reader may still refuse an unlink, in which case that
-    file is simply collected on a later pass rather than failing the rebuild.
+    Process-local registration (`graph_sync.live_temporary_paths`) protects our
+    own in-flight builds. It says nothing about another process's, which is why
+    every caller must hold the cross-process rebuild-owner claim before acting
+    on what this returns.
     """
     directory = live.parent
     try:
         if not directory.is_dir():
-            return []
+            return {}
         # Prefix-filtered, like `graph_sync.sweep_abandoned_temporaries`: the KB
         # directory of a large vault must not be enumerated in full for this.
         entries = list(directory.glob(".graph-rebuild-*"))
     except OSError:
-        return []
+        return {}
     active = graph_sync.live_temporary_paths()
     groups: dict[str, list[Path]] = {}
     for candidate in entries:
@@ -612,6 +605,56 @@ def _reap_preserved_temporaries(
         if registered or base_path.absolute() in active:
             continue
         groups.setdefault(base, []).append(candidate)
+    return groups
+
+
+def _reap_preserved_temporaries(
+    live: Path,
+    vault_root: Path,
+    *,
+    state_root: Path | None = None,
+    keep: int = PRESERVED_TEMPORARY_LIMIT,
+) -> list[Path]:
+    """Bound the `.graph-rebuild-*` artifacts a refused publication leaves behind.
+
+    A refused replacement deliberately preserves its complete private sidecar,
+    because that build is recoverable the moment the live file's reader lets
+    go. Exactly one of them is recoverable, though — the newest — so every
+    older one is dead weight, and on the reported vault it grew to 527 MB.
+
+    Ownership is cross-process, exactly as `graph_sync.sweep_abandoned_temporaries`
+    treats it: this holds the rebuild-owner claim for the whole decision, because
+    process-local registration cannot see an *out-of-process* repair's in-flight
+    build. Reaping one would be worse than the orphans — on Linux the unlink
+    succeeds, that builder's `os.replace` then raises `FileNotFoundError`, and an
+    unclassified error is exactly what still cools the registry. Failing to claim
+    means someone else is building; leave everything alone and reap next time.
+
+    Under the claim, the newest `keep` groups survive and the rest go with their
+    SQLite companions. A Windows reader may still refuse an unlink, in which case
+    that file is collected on a later pass rather than failing the rebuild.
+    """
+    # Cheap pre-check without the claim: nothing to bound, nothing to lock.
+    if len(_unregistered_temporary_groups(live)) <= max(0, keep):
+        return []
+    probe = live.with_name(f".graph-rebuild-reap-{secrets.token_hex(12)}.sqlite")
+    try:
+        claimed = graph_sync.claim_rebuild_owner(vault_root, probe, state_root=state_root)
+    except graph_sync.GraphRebuildRegistrationError:
+        return []
+    if not claimed:
+        return []
+    try:
+        return _reap_unowned_temporaries(live, keep=keep)
+    finally:
+        graph_sync.release_rebuild_owner(vault_root, probe, state_root=state_root)
+
+
+def _reap_unowned_temporaries(live: Path, *, keep: int) -> list[Path]:
+    """Do the reaping. Caller MUST already hold the rebuild-owner claim."""
+    directory = live.parent
+    # Re-scan under the claim: the pre-check ran without it.
+    groups = _unregistered_temporary_groups(live)
     if len(groups) <= max(0, keep):
         return []
 
@@ -1170,8 +1213,11 @@ class EpistemicGraphIndex:
         epoch_error: graph_sync.GraphEpochIncoherent | None = None
         # Artifacts of an earlier failed publication belong to this projection
         # (contract R3). Collect them before adding another one, so repeated
-        # refusal cannot grow the directory without bound.
-        _reap_preserved_temporaries(live)
+        # refusal cannot grow the directory without bound. The reaper takes the
+        # cross-process rebuild-owner claim itself, so this runs before ours.
+        _reap_preserved_temporaries(
+            live, self.vault_root, state_root=self._mutation_coordinator.state_root
+        )
         while attempts < REBUILD_PUBLICATION_ATTEMPTS:
             attempts += 1
             prepared_recall = freshness.prepare_recall_publication(self.vault_root, "vault")
@@ -1316,8 +1362,11 @@ class EpistemicGraphIndex:
                 if not preserve_temporary:
                     temporary.unlink(missing_ok=True)
                 # Owner release is the other moment the retained set can be
-                # bounded safely: no attempt of ours is registered any more.
-                _reap_preserved_temporaries(live)
+                # bounded safely: no attempt of ours is registered any more, and
+                # the reaper can take the claim it needs.
+                _reap_preserved_temporaries(
+                    live, self.vault_root, state_root=self._mutation_coordinator.state_root
+                )
         if epoch_error is not None:
             raise epoch_error
         # Exhausting the publication attempts for any reason other than a proven

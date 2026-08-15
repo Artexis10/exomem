@@ -861,7 +861,7 @@ def test_repeated_refusal_keeps_at_most_one_preserved_temporary(
 def test_reaper_never_collects_an_in_flight_registered_temporary(
     contract_vault: Path,
 ) -> None:
-    """D6: a build another owner still holds is not an orphan."""
+    """D6: a build this process still holds is not an orphan."""
     root = contract_vault
     live = epistemic_graph.sidecar_path(root)
     in_flight = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(1))
@@ -872,7 +872,7 @@ def test_reaper_never_collects_an_in_flight_registered_temporary(
         time.sleep(0.02)
     graph_sync.register_temporary(in_flight)
     try:
-        removed = epistemic_graph._reap_preserved_temporaries(live)
+        removed = epistemic_graph._reap_preserved_temporaries(live, root)
     finally:
         graph_sync.unregister_temporary(in_flight.resolve())
 
@@ -880,3 +880,65 @@ def test_reaper_never_collects_an_in_flight_registered_temporary(
     assert orphan_newer.exists()
     assert not orphan_older.exists()
     assert removed == [orphan_older]
+
+
+def test_reaper_leaves_everything_alone_while_another_owner_is_building(
+    contract_vault: Path,
+) -> None:
+    """D6: process-local registration cannot see an out-of-process build.
+
+    A foreign repair's temporary is fresh and complete but unregistered here.
+    Reaping it would be worse than the orphans it collects -- on Linux the
+    unlink succeeds, that builder's `os.replace` then raises FileNotFoundError,
+    and an unclassified error is exactly what still cools the registry. The
+    cross-process rebuild-owner claim is the only thing that can tell the two
+    apart, so failing to take it must mean reaping nothing.
+    """
+    root = contract_vault
+    live = epistemic_graph.sidecar_path(root)
+    # Deliberately the OLDEST, so recency cannot accidentally save it: only the
+    # ownership claim can.
+    foreign_in_flight = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(1))
+    orphan_older = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(2))
+    orphan_newer = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(3))
+    for path in (foreign_in_flight, orphan_older, orphan_newer):
+        path.write_bytes(b"sqlite artifact")
+        time.sleep(0.02)
+
+    # Stand in for the other process: hold the same cross-process claim it would.
+    owner_probe = live.with_name(".graph-rebuild-foreign-owner.sqlite")
+    assert graph_sync.claim_rebuild_owner(root, owner_probe) is True
+    try:
+        removed = epistemic_graph._reap_preserved_temporaries(live, root)
+    finally:
+        graph_sync.release_rebuild_owner(root, owner_probe)
+
+    assert removed == []
+    assert foreign_in_flight.exists(), "a foreign in-flight build must survive"
+    assert orphan_older.exists()
+    assert orphan_newer.exists()
+
+    # Once that owner releases, nothing is in flight anywhere and the same call
+    # bounds the retained set to the newest complete build.
+    removed = epistemic_graph._reap_preserved_temporaries(live, root)
+    assert set(removed) == {foreign_in_flight, orphan_older}
+    assert orphan_newer.exists()
+
+
+def test_publication_hold_is_platform_gated(contract_vault: Path) -> None:
+    """Linux keeps the plain `os.replace` fast path: no hold, no drain."""
+    root = contract_vault
+    index = epistemic_graph.EpistemicGraphIndex(root)
+    epistemic_graph.reset_publication_holds()
+
+    hold = index._before_publish_replacement(index.path, index.path)
+    try:
+        if epistemic_graph._reader_cycling_enabled():
+            assert hold == epistemic_graph._sidecar_registry_key(index.path)
+            assert epistemic_graph._SIDECAR_PUBLICATION_HOLDS == {hold}
+        else:
+            assert hold is None
+            assert epistemic_graph._SIDECAR_PUBLICATION_HOLDS == set()
+    finally:
+        epistemic_graph._release_publication_hold(hold)
+    assert epistemic_graph._SIDECAR_PUBLICATION_HOLDS == set()
