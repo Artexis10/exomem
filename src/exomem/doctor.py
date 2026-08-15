@@ -98,6 +98,20 @@ _DEFERRED_BACKLOG_FAIL_TOTAL = 300
 _REBUILD_TEMP_ORPHAN_FAIL_COUNT = 5
 _REBUILD_TEMP_ORPHAN_FAIL_BYTES = 50 * 1024 * 1024
 
+#: Age (by mtime) above which a matching rebuild-temp file is treated as an
+#: orphan candidate rather than a legitimate in-flight rebuild. A single
+#: `rebuild_atomic()` pass (corpus scan + delta replay + WAL fold, or the
+#: graph-rebuild equivalent) writes to its temp file throughout the build, so
+#: an active one has a continuously fresh mtime; only a killed process leaves
+#: one whose mtime stops advancing. 60 minutes is comfortably above any
+#: plausible single-build write gap (the incident's abandoned files sat
+#: unmodified for days-to-weeks — 30 rebuilds spanning July 25-Aug 15 — not
+#: minutes) while still catching a truly abandoned temp promptly. Below this
+#: age, size is NOT evidence of a leak: the incident's own abandoned files
+#: averaged ~79 MB, well above the 50 MB fail-by-bytes threshold, but a
+#: same-sized in-flight rebuild is routine and must not fail.
+_REBUILD_TEMP_STALE_AGE_SECONDS = 60 * 60
+
 #: lexstore.rebuild_atomic() (lexstore.py:2469) names its detached build sibling
 #: `<lexical sidecar name>.rebuild-<uuid4().hex>.tmp`, optionally with a
 #: `-wal`/`-shm`/`-journal` companion suffix, and reaps it in its own `finally`
@@ -727,6 +741,13 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     committed_graph_failure() when a real checkpoint is available, falling back
     to an honest message when it is not; unavailable fails with an honest
     message. Never claims to fix this itself — recovery is reconcile's job.
+
+    committed_graph_failure()'s own default remediation ("Run reconcile to
+    recover the derived graph.") names an internal op, not a runnable command
+    (see `_REBUILD_VECTORS_CMD`'s own comment for that history) — so this
+    always ensures the printed remediation includes the actual runnable
+    command, augmenting the canned text rather than discarding it when it is
+    more specific than the default.
     """
     if vault_root is None:
         return _check(
@@ -767,6 +788,13 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
             remediation = graph_sync.committed_graph_failure(checkpoint)[
                 "graph_sync_remediation"
             ]
+            if _REBUILD_VECTORS_CMD not in remediation:
+                # The canned text (its own default: "Run reconcile to recover
+                # the derived graph.") names an internal op, not a runnable
+                # shell command. Augment rather than replace so a more
+                # specific canned message (e.g. a threaded
+                # GraphRebuildRegistrationError remediation) is preserved.
+                remediation = f"{remediation} Run `{_REBUILD_VECTORS_CMD}`."
         else:
             remediation = f"Run `{_REBUILD_VECTORS_CMD}` to recover the derived graph."
         return _check(
@@ -803,17 +831,32 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
       matched via `_LEXICAL_REBUILD_TEMP_RE` (see its module-level comment for
       why this is hand-derived rather than imported).
 
-    Reports count + total bytes per family (`details["graph_rebuild"]`,
-    `details["lexical_rebuild"]`) plus a combined `count`/`total_bytes`.
-    Reclaiming either family requires the service stopped and no rebuild in
-    flight, so remediation names `exomem maintain` run out-of-process
-    (it reads the vault from EXOMEM_VAULT_PATH, not `--vault`).
+    A matching name alone is NOT evidence of an orphan: a legitimate in-flight
+    rebuild has a matching name too, and can legitimately be large (the
+    incident's own abandoned files averaged ~79 MB). Only a file whose mtime is
+    older than `_REBUILD_TEMP_STALE_AGE_SECONDS` is treated as a stale orphan
+    candidate; WARN/FAIL thresholds evaluate STALE counts/bytes exclusively, so
+    a fresh in-flight temporary of any size or count never trips them — its
+    remediation ("stop the service...") would itself create a real orphan if
+    followed against a rebuild that is still running.
+
+    `details` reports, per family (`details["graph_rebuild"]`,
+    `details["lexical_rebuild"]`) and combined: total `count`/`total_bytes`
+    (every matching name, regardless of age) and `stale_count`/`stale_bytes`
+    (age-gated, the population thresholds actually act on), plus
+    `stale_age_seconds`. Reclaiming a stale file requires the service stopped
+    and no rebuild in flight, so remediation names `exomem maintain` run
+    out-of-process (it reads the vault from EXOMEM_VAULT_PATH, not `--vault`).
     """
+    empty_family = {"count": 0, "total_bytes": 0, "stale_count": 0, "stale_bytes": 0}
     details: dict[str, object] = {
         "count": 0,
         "total_bytes": 0,
-        "graph_rebuild": {"count": 0, "total_bytes": 0},
-        "lexical_rebuild": {"count": 0, "total_bytes": 0},
+        "stale_count": 0,
+        "stale_bytes": 0,
+        "stale_age_seconds": _REBUILD_TEMP_STALE_AGE_SECONDS,
+        "graph_rebuild": dict(empty_family),
+        "lexical_rebuild": dict(empty_family),
     }
     if vault_root is None:
         return _check(
@@ -840,14 +883,27 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             elif _LEXICAL_REBUILD_TEMP_RE.fullmatch(name) is not None:
                 lexical_orphans.append(entry)
 
+    now = time.time()
+
     def _family_stats(paths: list[Path]) -> dict[str, int]:
         total = 0
+        stale_count = 0
+        stale_total = 0
         for entry in paths:
             try:
-                total += entry.stat().st_size
+                st = entry.stat()
             except OSError:
                 continue
-        return {"count": len(paths), "total_bytes": total}
+            total += st.st_size
+            if now - st.st_mtime > _REBUILD_TEMP_STALE_AGE_SECONDS:
+                stale_count += 1
+                stale_total += st.st_size
+        return {
+            "count": len(paths),
+            "total_bytes": total,
+            "stale_count": stale_count,
+            "stale_bytes": stale_total,
+        }
 
     graph_stats = _family_stats(graph_orphans)
     lexical_stats = _family_stats(lexical_orphans)
@@ -855,9 +911,15 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     details["lexical_rebuild"] = lexical_stats
     count = graph_stats["count"] + lexical_stats["count"]
     total_bytes = graph_stats["total_bytes"] + lexical_stats["total_bytes"]
+    stale_count = graph_stats["stale_count"] + lexical_stats["stale_count"]
+    stale_bytes = graph_stats["stale_bytes"] + lexical_stats["stale_bytes"]
     details["count"] = count
     details["total_bytes"] = total_bytes
+    details["stale_count"] = stale_count
+    details["stale_bytes"] = stale_bytes
     mb = total_bytes / (1024 * 1024)
+    stale_mb = stale_bytes / (1024 * 1024)
+    age_minutes = _REBUILD_TEMP_STALE_AGE_SECONDS // 60
 
     if count == 0:
         return _check(
@@ -866,39 +928,53 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             "No orphaned rebuild temporaries found.",
             details=details,
         )
+    if stale_count == 0:
+        return _check(
+            "rebuild_temp.orphans",
+            "pass",
+            f"{count} rebuild temporary file(s) totaling {mb:.1f} MB present, none "
+            f"older than {age_minutes} minutes — likely an in-flight rebuild, not "
+            "an orphan.",
+            details=details,
+        )
     remediation = (
         "Stop the exomem service, then run `exomem maintain` out-of-process "
         "(it reads the vault from EXOMEM_VAULT_PATH, not --vault) to reclaim "
         "orphaned rebuild temporaries — reclaim is only safe once no rebuild is "
         "in flight."
     )
-    summary = f"graph={graph_stats['count']}, lexical={lexical_stats['count']}"
+    summary = (
+        f"graph={graph_stats['stale_count']}/{graph_stats['count']}, "
+        f"lexical={lexical_stats['stale_count']}/{lexical_stats['count']} "
+        "(stale/total)"
+    )
     if (
-        count > _REBUILD_TEMP_ORPHAN_FAIL_COUNT
-        or total_bytes > _REBUILD_TEMP_ORPHAN_FAIL_BYTES
+        stale_count > _REBUILD_TEMP_ORPHAN_FAIL_COUNT
+        or stale_bytes > _REBUILD_TEMP_ORPHAN_FAIL_BYTES
     ):
         return _check(
             "rebuild_temp.orphans",
             "fail",
-            f"{count} orphaned rebuild temporary file(s) totaling {mb:.1f} MB are "
-            f"leaking disk space from interrupted rebuilds ({summary}).",
+            f"{stale_count} rebuild temporary file(s) older than {age_minutes} "
+            f"minutes, totaling {stale_mb:.1f} MB, are leaking disk space from "
+            f"interrupted rebuilds ({summary}).",
             remediation,
             details=details,
         )
-    if count > 1:
+    if stale_count > 1:
         return _check(
             "rebuild_temp.orphans",
             "warn",
-            f"{count} orphaned rebuild temporary file(s) totaling {mb:.1f} MB "
-            f"({summary}).",
+            f"{stale_count} rebuild temporary file(s) older than {age_minutes} "
+            f"minutes, totaling {stale_mb:.1f} MB ({summary}).",
             remediation,
             details=details,
         )
     return _check(
         "rebuild_temp.orphans",
         "pass",
-        f"{count} orphaned rebuild temporary file(s) totaling {mb:.1f} MB "
-        "(below the warn threshold).",
+        f"{stale_count} rebuild temporary file older than {age_minutes} minutes, "
+        f"totaling {stale_mb:.1f} MB (below the warn threshold).",
         details=details,
     )
 

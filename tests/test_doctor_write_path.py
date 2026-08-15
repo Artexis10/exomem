@@ -15,7 +15,9 @@ touched here (out of scope) — it is re-verified by the acceptance run instead.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -116,9 +118,13 @@ def test_graph_sync_current_passes(vault: Path) -> None:
     assert check.details["generation"] == 0
 
 
-def test_graph_sync_recovery_required_fails_with_canned_remediation(
+def test_graph_sync_recovery_required_fails_with_augmented_canned_remediation(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Correction round (MINOR): committed_graph_failure()'s own default text
+    ("Run reconcile to recover the derived graph.") names an internal op, not
+    a runnable command. The printed remediation must always include the
+    actual runnable command too, without discarding the canned text."""
     checkpoint = graph_sync.GraphSyncCheckpoint.create(
         generation=4,
         mutation_id="0123456789abcdef01234567",
@@ -136,9 +142,43 @@ def test_graph_sync_recovery_required_fails_with_canned_remediation(
     check = doctor_module._check_graph_sync_state(vault)
 
     assert check.status == "fail"
-    expected = graph_sync.committed_graph_failure(checkpoint)["graph_sync_remediation"]
-    assert check.remediation == expected
+    canned = graph_sync.committed_graph_failure(checkpoint)["graph_sync_remediation"]
+    assert check.remediation is not None
+    assert canned in check.remediation
+    assert "exomem maintain --reconcile" in check.remediation
     assert check.details["generation"] == 4
+
+
+def test_graph_sync_recovery_required_keeps_an_already_specific_remediation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the canned remediation already names the runnable command (e.g. a
+    threaded GraphRebuildRegistrationError.remediation), it is used as-is
+    rather than duplicated."""
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=7,
+        mutation_id="0123456789abcdef01234567",
+        paths=(),
+        created_paths=(),
+        scope="full",
+    )
+    specific = "Run `exomem maintain --reconcile` after clearing the stuck lease."
+    monkeypatch.setattr(
+        graph_sync, "status", lambda _root: {"state": "recovery_required", "generation": 7}
+    )
+    monkeypatch.setattr(
+        graph_sync, "checkpoint_state", lambda _root: ("valid", checkpoint)
+    )
+    monkeypatch.setattr(
+        graph_sync,
+        "committed_graph_failure",
+        lambda _checkpoint: {"graph_sync_remediation": specific},
+    )
+
+    check = doctor_module._check_graph_sync_state(vault)
+
+    assert check.status == "fail"
+    assert check.remediation == specific
 
 
 def test_graph_sync_unavailable_fails_with_honest_message(
@@ -181,8 +221,16 @@ def test_graph_sync_no_vault_configured_passes() -> None:
 # production (transient, always cleaned; final count 0). The actual unbounded
 # leak is the OTHER rebuild-temp family lexstore.rebuild_atomic() creates
 # (lexstore.py:2469): `.lexical.sqlite.rebuild-<32-hex>.tmp[-wal|-shm|-journal]`.
-# Live state: 74 files / 5.84 GiB across 30 abandoned rebuilds — nothing reaps
-# them. This check covers both families and reports each separately.
+# Live state: 74 files / 5.84 GiB across 30 abandoned rebuilds spanning
+# July 25-Aug 15 — nothing reaps them. This check covers both families and
+# reports each separately.
+#
+# Correction round (MAJOR): a matching name alone is not evidence of an
+# orphan — a legitimate in-flight rebuild matches the same name pattern and
+# can legitimately be large (the incident's own abandoned files averaged
+# ~79 MB). Every test below is explicit about mtime: `_age_file` back-dates a
+# file past `_REBUILD_TEMP_STALE_AGE_SECONDS` to simulate an abandoned
+# rebuild; a file left un-aged simulates one still in flight.
 
 
 def _rebuild_name(seed: int, suffix: str = "") -> str:
@@ -193,64 +241,122 @@ def _lexical_rebuild_name(digest: str, suffix: str = "") -> str:
     return f".lexical.sqlite.rebuild-{digest}.tmp{suffix}"
 
 
+def _age_file(path: Path, *, minutes_ago: float) -> None:
+    """Back-date a file's mtime (and atime) by `minutes_ago` minutes."""
+    ts = time.time() - minutes_ago * 60
+    os.utime(path, (ts, ts))
+
+
+# A comfortable margin past doctor_module._REBUILD_TEMP_STALE_AGE_SECONDS
+# (60 minutes), used throughout to mark a file as an abandoned orphan.
+_STALE_MINUTES = 120
+
+
 def test_orphan_count_excludes_user_copy_and_sums_bytes(vault: Path) -> None:
     kb = vault / kb_dirname()
-    (kb / _rebuild_name(1)).write_bytes(b"x" * 1000)
-    (kb / _rebuild_name(2, "-wal")).write_bytes(b"y" * 2000)
+    a = kb / _rebuild_name(1)
+    b = kb / _rebuild_name(2, "-wal")
+    a.write_bytes(b"x" * 1000)
+    b.write_bytes(b"y" * 2000)
     (kb / ".graph-rebuild-user-copy.sqlite").write_bytes(b"z" * 5000)
+    _age_file(a, minutes_ago=_STALE_MINUTES)
+    _age_file(b, minutes_ago=_STALE_MINUTES)
 
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
     assert check.details["count"] == 2
     assert check.details["total_bytes"] == 3000
-    assert check.details["graph_rebuild"] == {"count": 2, "total_bytes": 3000}
-    assert check.details["lexical_rebuild"] == {"count": 0, "total_bytes": 0}
+    assert check.details["stale_count"] == 2
+    assert check.details["stale_bytes"] == 3000
+    assert check.details["graph_rebuild"] == {
+        "count": 2,
+        "total_bytes": 3000,
+        "stale_count": 2,
+        "stale_bytes": 3000,
+    }
+    assert check.details["lexical_rebuild"]["count"] == 0
 
 
-def test_single_small_orphan_passes(vault: Path) -> None:
+def test_single_stale_small_orphan_passes(vault: Path) -> None:
     kb = vault / kb_dirname()
-    (kb / _rebuild_name(3)).write_bytes(b"x" * 10)
+    path = kb / _rebuild_name(3)
+    path.write_bytes(b"x" * 10)
+    _age_file(path, minutes_ago=_STALE_MINUTES)
 
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
     assert check.status == "pass"
     assert check.details["count"] == 1
+    assert check.details["stale_count"] == 1
 
 
-def test_a_couple_of_orphans_warns(vault: Path) -> None:
+def test_a_couple_of_stale_orphans_warn(vault: Path) -> None:
     kb = vault / kb_dirname()
-    (kb / _rebuild_name(4)).write_bytes(b"x" * 10)
-    (kb / _rebuild_name(5, "-journal")).write_bytes(b"y" * 10)
+    a = kb / _rebuild_name(4)
+    b = kb / _rebuild_name(5, "-journal")
+    a.write_bytes(b"x" * 10)
+    b.write_bytes(b"y" * 10)
+    _age_file(a, minutes_ago=_STALE_MINUTES)
+    _age_file(b, minutes_ago=_STALE_MINUTES)
 
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
     assert check.status == "warn"
+    assert check.details["stale_count"] == 2
 
 
-def test_many_orphans_fail_by_count(vault: Path) -> None:
-    """The incident: 18 orphans (well below the byte threshold each) must FAIL."""
+def test_many_stale_orphans_fail_by_count(vault: Path) -> None:
+    """The incident: 18 stale orphans (well below the byte threshold each) fail."""
     kb = vault / kb_dirname()
     for i in range(18):
-        (kb / _rebuild_name(100 + i)).write_bytes(b"\0" * 16)
+        path = kb / _rebuild_name(100 + i)
+        path.write_bytes(b"\0" * 16)
+        _age_file(path, minutes_ago=_STALE_MINUTES)
 
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
     assert check.status == "fail"
     assert check.details["count"] == 18
+    assert check.details["stale_count"] == 18
 
 
-def test_one_large_orphan_fails_by_bytes(vault: Path) -> None:
+def test_one_large_stale_orphan_fails_by_bytes(vault: Path) -> None:
     kb = vault / kb_dirname()
     path = kb / _rebuild_name(200)
     size = 60 * 1024 * 1024  # 60 MB, above the 50 MB fail threshold
     with path.open("wb") as fh:
         fh.seek(size - 1)
         fh.write(b"\0")
+    _age_file(path, minutes_ago=_STALE_MINUTES)
 
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
     assert check.status == "fail"
     assert check.details["total_bytes"] == size
+    assert check.details["stale_bytes"] == size
+
+
+def test_large_fresh_rebuild_temp_passes(vault: Path) -> None:
+    """MAJOR fix, red-first: a large temp with a FRESH mtime is routine for an
+    in-flight rebuild (the incident's abandoned files averaged ~79 MB), not an
+    orphan. Size alone must never fail a temp that is still being written.
+    (Pre-fix this failed identically to test_one_large_stale_orphan_fails_by_bytes
+    above, since size was the only signal — see .task/RESULT.md for the
+    verbatim red run.)"""
+    kb = vault / kb_dirname()
+    path = kb / _rebuild_name(201)
+    size = 60 * 1024 * 1024  # 60 MB — above the 50 MB fail-by-bytes threshold
+    with path.open("wb") as fh:
+        fh.seek(size - 1)
+        fh.write(b"\0")
+    # Freshly written: mtime is "now" (no aging applied).
+
+    check = doctor_module._check_rebuild_temp_orphans(vault)
+
+    assert check.status == "pass"
+    assert check.details["total_bytes"] == size
+    assert check.details["stale_bytes"] == 0
+    assert check.details["stale_count"] == 0
 
 
 def test_no_orphans_passes(vault: Path) -> None:
@@ -258,8 +364,9 @@ def test_no_orphans_passes(vault: Path) -> None:
 
     assert check.status == "pass"
     assert check.details["count"] == 0
-    assert check.details["graph_rebuild"] == {"count": 0, "total_bytes": 0}
-    assert check.details["lexical_rebuild"] == {"count": 0, "total_bytes": 0}
+    assert check.details["stale_count"] == 0
+    assert check.details["graph_rebuild"]["count"] == 0
+    assert check.details["lexical_rebuild"]["count"] == 0
 
 
 def test_orphans_no_vault_configured_passes() -> None:
@@ -276,48 +383,119 @@ def test_single_fresh_lexical_rebuild_temp_passes(vault: Path) -> None:
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
     assert check.status == "pass"
-    assert check.details["lexical_rebuild"] == {"count": 1, "total_bytes": 10}
-    assert check.details["graph_rebuild"] == {"count": 0, "total_bytes": 0}
+    assert check.details["lexical_rebuild"]["count"] == 1
+    assert check.details["lexical_rebuild"]["total_bytes"] == 10
+    assert check.details["lexical_rebuild"]["stale_count"] == 0
+    assert check.details["graph_rebuild"]["count"] == 0
 
 
-def test_lexical_rebuild_orphans_counted_separately_and_summed(vault: Path) -> None:
+def test_fresh_lexical_rebuild_temps_of_any_count_or_size_do_not_warn_or_fail(
+    vault: Path,
+) -> None:
+    """A fresh in-flight temporary must pass regardless of count or size —
+    neither alone is evidence of an orphan without staleness."""
     kb = vault / kb_dirname()
-    (kb / _lexical_rebuild_name("b" * 32)).write_bytes(b"x" * 1000)
-    (kb / _lexical_rebuild_name("c" * 32, "-wal")).write_bytes(b"y" * 2000)
+    for i, size in enumerate((1_000, 2_000, 70 * 1024 * 1024)):
+        path = kb / _lexical_rebuild_name(f"{i:032x}")
+        with path.open("wb") as fh:
+            if size > 1_000_000:
+                fh.seek(size - 1)
+                fh.write(b"\0")
+            else:
+                fh.write(b"x" * size)
+        # No aging: every file keeps a fresh "just written" mtime.
 
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
-    assert check.details["lexical_rebuild"] == {"count": 2, "total_bytes": 3000}
-    assert check.details["graph_rebuild"] == {"count": 0, "total_bytes": 0}
+    assert check.status == "pass"
+    assert check.details["lexical_rebuild"]["count"] == 3
+    assert check.details["stale_count"] == 0
+
+
+def test_stale_lexical_rebuild_orphans_counted_separately_and_summed(
+    vault: Path,
+) -> None:
+    kb = vault / kb_dirname()
+    a = kb / _lexical_rebuild_name("b" * 32)
+    b = kb / _lexical_rebuild_name("c" * 32, "-wal")
+    a.write_bytes(b"x" * 1000)
+    b.write_bytes(b"y" * 2000)
+    _age_file(a, minutes_ago=_STALE_MINUTES)
+    _age_file(b, minutes_ago=_STALE_MINUTES)
+
+    check = doctor_module._check_rebuild_temp_orphans(vault)
+
+    assert check.details["lexical_rebuild"]["count"] == 2
+    assert check.details["lexical_rebuild"]["total_bytes"] == 3000
+    assert check.details["lexical_rebuild"]["stale_count"] == 2
+    assert check.details["graph_rebuild"]["count"] == 0
     assert check.details["count"] == 2
-    assert check.details["total_bytes"] == 3000
+    assert check.details["stale_count"] == 2
     assert check.status == "warn"
 
 
+def test_mixed_fresh_and_stale_files_count_only_the_stale(vault: Path) -> None:
+    """Extend tests per the correction: a mix of fresh and stale temporaries in
+    the same family must count only the stale ones toward WARN/FAIL."""
+    kb = vault / kb_dirname()
+    stale_a = kb / _lexical_rebuild_name("1" * 32)
+    stale_b = kb / _lexical_rebuild_name("2" * 32, "-wal")
+    fresh = kb / _lexical_rebuild_name("3" * 32, "-shm")
+    stale_a.write_bytes(b"x" * 100)
+    stale_b.write_bytes(b"y" * 200)
+    fresh.write_bytes(b"z" * 300)
+    _age_file(stale_a, minutes_ago=_STALE_MINUTES)
+    _age_file(stale_b, minutes_ago=_STALE_MINUTES)
+    # `fresh` is left un-aged.
+
+    check = doctor_module._check_rebuild_temp_orphans(vault)
+
+    assert check.details["lexical_rebuild"]["count"] == 3
+    assert check.details["lexical_rebuild"]["total_bytes"] == 600
+    assert check.details["lexical_rebuild"]["stale_count"] == 2
+    assert check.details["lexical_rebuild"]["stale_bytes"] == 300
+    assert check.details["count"] == 3
+    assert check.details["stale_count"] == 2
+    assert check.details["stale_bytes"] == 300
+    assert check.status == "warn"  # 2 stale -> warn, the fresh one is invisible to it
+
+
 def test_lexical_rebuild_many_stale_files_fail(vault: Path) -> None:
-    """The live-diagnosis state: 74 abandoned lexical-rebuild temporaries."""
+    """The live-diagnosis state: 74 abandoned lexical-rebuild temporaries
+    (production incident spanned July 25-Aug 15 — days to weeks old, comfortably
+    past the 60-minute staleness threshold; 2 hours is used here for speed)."""
     kb = vault / kb_dirname()
     for i in range(74):
-        (kb / _lexical_rebuild_name(f"{i:032x}")).write_bytes(b"\0" * 16)
+        path = kb / _lexical_rebuild_name(f"{i:032x}")
+        path.write_bytes(b"\0" * 16)
+        _age_file(path, minutes_ago=_STALE_MINUTES)
 
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
     assert check.status == "fail"
     assert check.details["lexical_rebuild"]["count"] == 74
-    assert check.details["graph_rebuild"] == {"count": 0, "total_bytes": 0}
+    assert check.details["lexical_rebuild"]["stale_count"] == 74
+    assert check.details["graph_rebuild"]["count"] == 0
 
 
 def test_mixed_graph_and_lexical_orphans_report_both_families(vault: Path) -> None:
     kb = vault / kb_dirname()
-    (kb / _rebuild_name(6)).write_bytes(b"x" * 500)
-    (kb / _lexical_rebuild_name("d" * 32)).write_bytes(b"y" * 700)
+    a = kb / _rebuild_name(6)
+    b = kb / _lexical_rebuild_name("d" * 32)
+    a.write_bytes(b"x" * 500)
+    b.write_bytes(b"y" * 700)
+    _age_file(a, minutes_ago=_STALE_MINUTES)
+    _age_file(b, minutes_ago=_STALE_MINUTES)
 
     check = doctor_module._check_rebuild_temp_orphans(vault)
 
-    assert check.details["graph_rebuild"] == {"count": 1, "total_bytes": 500}
-    assert check.details["lexical_rebuild"] == {"count": 1, "total_bytes": 700}
+    assert check.details["graph_rebuild"]["count"] == 1
+    assert check.details["graph_rebuild"]["total_bytes"] == 500
+    assert check.details["lexical_rebuild"]["count"] == 1
+    assert check.details["lexical_rebuild"]["total_bytes"] == 700
     assert check.details["count"] == 2
     assert check.details["total_bytes"] == 1200
+    assert check.details["stale_count"] == 2
 
 
 # --- 4. Write-path env kill-switch facts -------------------------------------
