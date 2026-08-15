@@ -69,3 +69,13 @@
 - [x] 9.6 Annotate each contradiction reason with its pair ref and stance, after the fingerprint is computed.
 - [x] 9.7 State `declared_pairs`' residual cost in design.md.
 
+## 10. Competitive benchmark journey
+
+- [x] 10.1 Re-plant the J3 contradiction pair as ONE expected item at the pair anchor, matching the one-row-per-pair contract.
+- [x] 10.2 Score the asserted (authored-edge) lane, which is deterministic without embeddings, instead of scoring the whole queue unsupported.
+- [x] 10.3 Declare the still-gated proximity lane as an explicit unsupported sub-lane so `supported=True` cannot overclaim a measurement that never ran.
+- [x] 10.4 Assert the surfaced row names both endpoints, so the pair is verified captured whole rather than merely present.
+- [x] 10.5 Add the authored contradiction to the attention union's expected set so a correct union is not scored as a false surface.
+- [x] 10.6 Update the J3 docstring and judge-facing summary text, both of which asserted now-false "unsupported" prose.
+- [x] 10.7 Mirror in `tests/test_membench_trackd.py` and run shard 4/4.
+

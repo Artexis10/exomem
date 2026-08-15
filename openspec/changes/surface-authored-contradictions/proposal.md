@@ -57,7 +57,17 @@ None.
 The `corpus_contradictions` audit check, the review-state disposition vocabulary,
 the attention review-state application, the write-time corpus-aware duplicate and
 overlap checks, deep-pack tension assembly, the triage command leaf, and their
-focused tests change. A new pure-logic module holds the pair-stance identity and
+focused tests change.
+
+The competitive benchmark's J3 weekly-review journey
+(`benchmarks/membench/trackd/journeys.py`) changes too, and deliberately: it
+scored the contradiction queue as wholly UNSUPPORTED because the sweep was
+entirely embeddings-gated. That is no longer true — the asserted lane is
+deterministic — so the journey now scores the authored-edge lane and declares the
+still-gated proximity lane as an explicitly unsupported sub-lane rather than
+collapsing both into one boolean. The planted pair also becomes a single expected
+item at the pair anchor, matching the one-row-per-pair contract. This is a change
+to what a scored journey measures, not a test fix. A new pure-logic module holds the pair-stance identity and
 graph-lookup helpers. No MCP tool docstring, tool parameter set, or relation
 registry entry changes, so `tests/fixtures/mcp_tool_schemas.json`,
 `src/exomem/tool_surface_contract.json`, and `tests/golden/` stay untouched. No new
