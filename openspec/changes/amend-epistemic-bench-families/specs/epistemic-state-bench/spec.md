@@ -36,6 +36,11 @@ Any change to families, assertions, predicates, or gates after ratification SHAL
 - **WHEN** an amendment proposes adding an assertion to the catastrophic set (f18's `refuted_retrievable_at_full_standing` is proposed)
 - **THEN** the acknowledgment records the founder's accept-or-strike decision explicitly
 
+#### Scenario: Pending acknowledgment withholds only the amended families
+
+- **WHEN** the f15–f19 amendment receipt is receipted but not yet acknowledged
+- **THEN** f15–f19 MUST NOT back a comparative run, score, or published claim, AND f01–f14 runs, the contract identity, the amendment chain and every consumer that names no amended family proceed unchanged
+
 ### Requirement: Ratified-identity drift check
 
 The suite SHALL verify that the working pre-registration file is byte-identical to the ratified base sha, or equals the base evolved through the receipted amendment chain (each receipt's amended sha matching the file state after its amendment, the final receipt matching the current file).

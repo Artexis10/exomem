@@ -3,6 +3,14 @@
     "AmendmentIdentity": {
       "additionalProperties": false,
       "properties": {
+        "acknowledgment_status": {
+          "enum": [
+            "pending",
+            "acknowledged"
+          ],
+          "title": "Acknowledgment Status",
+          "type": "string"
+        },
         "affected_sections": {
           "items": {
             "type": "string"
@@ -16,6 +24,13 @@
         "effective_policy": {
           "title": "Effective Policy",
           "type": "string"
+        },
+        "introduced_family_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Introduced Family Ids",
+          "type": "array"
         },
         "parent_contract_sha256": {
           "pattern": "^[0-9a-f]{64}$",
@@ -42,7 +57,9 @@
         "contract",
         "affected_sections",
         "rationale",
-        "effective_policy"
+        "effective_policy",
+        "acknowledgment_status",
+        "introduced_family_ids"
       ],
       "title": "AmendmentIdentity",
       "type": "object"

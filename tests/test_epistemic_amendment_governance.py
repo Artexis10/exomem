@@ -272,6 +272,8 @@ def test_manifest_lineage_is_optional_but_must_match_typed_identity() -> None:
         affected_sections=("§7",),
         rationale="reason",
         effective_policy="after acknowledgment",
+        acknowledgment_status="acknowledged",
+        introduced_family_ids=(),
     )
     base_identity = PreregistrationIdentity(
         contract_revision=receipt_revision,
@@ -437,14 +439,159 @@ def test_manifest_schema_constrains_each_lineage_receipt_identity_to_sha256() ->
     assert items["pattern"] == "^[0-9a-f]{64}$"
 
 
-def test_real_working_chain_refuses_with_typed_pending_state() -> None:
-    from protocol.contracts import (
-        AmendmentAcknowledgmentPendingError,
-        validate_working_preregistration,
+def test_real_working_chain_folds_while_acknowledgment_is_pending() -> None:
+    """A pending amendment is a fact about the contract, not a repository outage.
+
+    The chain still folds from the ratified base to the working bytes: the
+    digests bind exactly as they will after acknowledgment.  What acknowledgment
+    gates is the *use* of the families the amendment introduced, which is
+    asserted separately below.
+    """
+
+    from protocol.contracts import AmendmentReceipt, validate_working_preregistration
+
+    receipt = AmendmentReceipt.model_validate_json(PENDING_RECEIPT.read_bytes())
+    assert receipt.acknowledgment_status == "pending"
+    assert validate_working_preregistration(ROOT) == receipt.contract_sha256
+
+
+def test_pending_amendment_still_derives_a_complete_typed_identity() -> None:
+    """Identity derivation must reconstruct a pending amendment, not refuse it.
+
+    Every digest and ancestry binding still holds.  The one field the founder
+    has not yet supplied — the amended-document revision — is taken from the
+    receipt's uniquely reconstructed introduction commit, which is where the
+    amendment actually landed.
+    """
+
+    from protocol.contracts import derive_preregistration_identity
+
+    identity = derive_preregistration_identity(ROOT)
+
+    assert len(identity.amendments) == 1
+    amendment = identity.amendments[0]
+    assert amendment.acknowledgment_status == "pending"
+    assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
+    assert amendment.contract.repository_revision == amendment.receipt.introduction_revision
+    assert identity.effective.sha256 == amendment.contract.sha256
+    assert identity.withheld_family_ids == frozenset(
+        {"f15", "f16", "f17", "f18", "f19"}
     )
 
-    with pytest.raises(
+
+def test_pending_amendment_withholds_only_the_families_it_introduced() -> None:
+    from protocol.contracts import (
         AmendmentAcknowledgmentPendingError,
-        match="amendment sequence 1 founder acknowledgment is pending",
-    ):
-        validate_working_preregistration(ROOT)
+        derive_preregistration_identity,
+        require_amended_families_released,
+    )
+
+    identity = derive_preregistration_identity(ROOT)
+
+    # Ratified-base families are untouched by a pending amendment.
+    require_amended_families_released(identity, ("f01", "f07", "f14"))
+    require_amended_families_released(identity, ())
+
+    for family_id in ("f15", "f16", "f17", "f18", "f19"):
+        with pytest.raises(
+            AmendmentAcknowledgmentPendingError,
+            match=rf"amendment sequence 1 .*pending.*{family_id}",
+        ):
+            require_amended_families_released(identity, (family_id,))
+
+    with pytest.raises(AmendmentAcknowledgmentPendingError, match="f18"):
+        require_amended_families_released(identity, ("f01", "f18"))
+
+
+def test_pending_amendment_does_not_block_an_unrelated_run_manifest(
+    tmp_path,
+) -> None:
+    """The narrowing that matters: unrelated work is not collateral damage."""
+
+    from protocol.manifest import start_manifest
+
+    manifest = start_manifest(
+        tmp_path / "unrelated",
+        run_id="unrelated",
+        dataset={
+            "id": "fixture",
+            "variant": "mini",
+            "source": "local",
+            "revision": "1",
+            "sha256": "a" * 64,
+            "case_count": 1,
+        },
+        started_at="2026-08-15T00:00:00Z",
+    )
+
+    assert manifest.status == "started"
+    # The pending amendment is recorded, not hidden: a reader of this manifest
+    # can see the run executed against an unacknowledged contract state.
+    assert manifest.preregistration_identity.amendments[0].acknowledgment_status == "pending"
+    assert manifest.preregistration_lineage is not None
+
+
+def test_pending_amendment_refuses_a_run_manifest_declaring_an_amended_family(
+    tmp_path,
+) -> None:
+    """The fail-closed guarantee, aimed: no run may declare f15-f19 while pending."""
+
+    from protocol.manifest import ManifestError, start_manifest
+
+    dataset = {
+        "id": "fixture",
+        "variant": "mini",
+        "source": "local",
+        "revision": "1",
+        "sha256": "a" * 64,
+        "case_count": 1,
+    }
+
+    with pytest.raises(ManifestError, match="amendment pending.*f18"):
+        start_manifest(
+            tmp_path / "amended",
+            run_id="amended",
+            dataset=dataset,
+            started_at="2026-08-15T00:00:00Z",
+            family_ids=("f01", "f18"),
+        )
+    # Refused before any artifact exists: nothing was written to disk.
+    assert not (tmp_path / "amended" / "manifest.json").exists()
+
+    started = start_manifest(
+        tmp_path / "released",
+        run_id="released",
+        dataset=dataset,
+        started_at="2026-08-15T00:00:00Z",
+        family_ids=("f01", "f14"),
+    )
+    assert started.status == "started"
+
+
+def test_pending_amendment_refuses_a_claim_read_back_from_a_recorded_manifest(
+    tmp_path,
+) -> None:
+    """A manifest recorded while pending may not be replayed into an f15-f19 claim."""
+
+    from protocol.manifest import ManifestError, finalize_manifest, load_manifest, start_manifest
+
+    run_dir = tmp_path / "recorded"
+    start_manifest(
+        run_dir,
+        run_id="recorded",
+        dataset={
+            "id": "fixture",
+            "variant": "mini",
+            "source": "local",
+            "revision": "1",
+            "sha256": "a" * 64,
+            "case_count": 1,
+        },
+        started_at="2026-08-15T00:00:00Z",
+    )
+    finalize_manifest(run_dir, status="VALID", finalized_at="2026-08-15T00:01:00Z")
+
+    assert load_manifest(run_dir).run_id == "recorded"
+    assert load_manifest(run_dir, family_ids=("f01",)).run_id == "recorded"
+    with pytest.raises(ManifestError, match="amendment pending.*f15"):
+        load_manifest(run_dir, family_ids=("f15",))

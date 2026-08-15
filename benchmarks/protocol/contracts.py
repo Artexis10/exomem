@@ -36,6 +36,11 @@ _REVISION = r"^[0-9a-f]{40}$"
 _AMENDMENT_NAME = re.compile(
     r"^amendment-(?:(?P<sequence>[0-9]{4})|(?P<slug>[0-9]{4}-[0-9]{2}-[a-z0-9][a-z0-9-]*))\.v1\.json$"
 )
+#: A §1 scenario-family table row.  Used only to work out which families an
+#: amendment introduced, by differencing its document against its parent's.
+_FAMILY_ROW = re.compile(r"^\|\s*(f[0-9]{2})\s*\|", re.MULTILINE)
+_SECTION_ONE = "## 1. Scenario families"
+_SECTION_TWO = "## 2."
 
 
 class ContractIdentityError(ValueError):
@@ -137,6 +142,17 @@ class AmendmentReceipt(_StrictModel):
         return "pending" if self.ratifier is None else "acknowledged"
 
     def require_acknowledged(self) -> None:
+        """Assert this receipt is acknowledged, for a caller that needs all of it.
+
+        Deliberately **not** called by chain folding or identity derivation.
+        Gating those on acknowledgment turned one pending receipt into a
+        repository-wide refusal, which is broader than anything the receipt
+        claims.  Acknowledgment gates the use of the families the amendment
+        introduced — :func:`require_amended_families_released` — and this
+        remains the whole-receipt primitive for a caller whose own contract is
+        "no part of this amendment applies until it is acknowledged".
+        """
+
         if self.acknowledgment_status == "pending":
             raise AmendmentAcknowledgmentPendingError(
                 f"amendment sequence {self.sequence} founder acknowledgment is pending"
@@ -163,6 +179,13 @@ class AmendmentIdentity(_StrictModel):
     affected_sections: tuple[str, ...]
     rationale: str
     effective_policy: str
+    #: Recorded rather than refused.  A pending amendment is a legible fact about
+    #: the contract a run executed against, so every manifest carries it.
+    acknowledgment_status: Literal["pending", "acknowledged"]
+    #: §1 family ids this amendment added to its parent document, in file order.
+    #: While the amendment is pending these are exactly the families withheld
+    #: from comparative runs, scores and claims.
+    introduced_family_ids: tuple[str, ...]
 
 
 class PreregistrationIdentity(_StrictModel):
@@ -194,9 +217,88 @@ class PreregistrationIdentity(_StrictModel):
             raise ValueError("effective contract identity does not match the ordered chain")
         return self
 
+    @property
+    def pending_amendments(self) -> tuple[AmendmentIdentity, ...]:
+        """Amendments in this identity that the founder has not yet acknowledged."""
+
+        return tuple(
+            amendment
+            for amendment in self.amendments
+            if amendment.acknowledgment_status == "pending"
+        )
+
+    @property
+    def withheld_family_ids(self) -> frozenset[str]:
+        """Families a pending amendment introduced and therefore still withholds."""
+
+        return frozenset(
+            family_id
+            for amendment in self.pending_amendments
+            for family_id in amendment.introduced_family_ids
+        )
+
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _section_one_family_ids(document: bytes, *, label: str) -> tuple[str, ...]:
+    """The §1 scenario-family ids declared by one pre-registration document.
+
+    A document with no §1 section declares no families, which is a fact and not
+    an error — the derivation is differential, so an amendment that *introduces*
+    the table has every one of its rows counted as introduced.  A §1 section
+    that exists but yields nothing parsable is a different matter: that is a
+    malformed contract, and it refuses rather than silently releasing families.
+    """
+
+    try:
+        text = document.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractIdentityError(f"{label}: contract document is not UTF-8") from exc
+    start = text.find(_SECTION_ONE)
+    if start == -1:
+        return ()
+    end = text.find(_SECTION_TWO, start)
+    section = text[start:] if end == -1 else text[start:end]
+    rows = tuple(match.group(1) for match in _FAMILY_ROW.finditer(section))
+    if not rows:
+        raise ContractIdentityError(f"{label}: §1 scenario-family table has no parsable rows")
+    if len(set(rows)) != len(rows):
+        raise ContractIdentityError(f"{label}: §1 scenario-family table repeats a family id")
+    return rows
+
+
+def require_amended_families_released(
+    identity: PreregistrationIdentity,
+    family_ids: Iterable[str],
+) -> None:
+    """Refuse the *use* of a family whose amendment is still unacknowledged.
+
+    This is the whole of what a pending amendment blocks.  Identity validation,
+    chain folding, lineage recording and every consumer that does not name an
+    amended family all proceed normally — a pending amendment is a fact about
+    the contract, not a repository outage.  What it withholds is exact and
+    narrow: the families the amendment introduced may not back a comparative
+    run, a score, or a published claim until the founder acknowledges the
+    receipt, which is precisely the receipt's own ``effective_policy``.
+    """
+
+    requested = tuple(dict.fromkeys(family_ids))
+    if not requested:
+        return
+    for amendment in identity.pending_amendments:
+        withheld = tuple(
+            family_id
+            for family_id in requested
+            if family_id in set(amendment.introduced_family_ids)
+        )
+        if withheld:
+            raise AmendmentAcknowledgmentPendingError(
+                f"amendment sequence {amendment.sequence} founder acknowledgment is "
+                f"pending; {', '.join(withheld)} may not back a comparative run, "
+                "score or claim"
+            )
 
 
 def _strict_json(data: bytes, *, label: str) -> dict[str, object]:
@@ -223,7 +325,16 @@ def fold_amendment_chain(
     base_sha256: str,
     current_sha256: str,
 ) -> str:
-    """Fold acknowledged receipt identities from a frozen base to working bytes."""
+    """Fold receipt identities from a frozen base to working bytes.
+
+    Digest identity only.  Acknowledgment is deliberately *not* checked here: a
+    receipted amendment binds its parent and its own document by sha256 the
+    moment it is written, and that binding is what a drift check is for.  Gating
+    the fold on acknowledgment made an unacknowledged amendment indistinguishable
+    from a silently edited pre-registration and turned one pending receipt into a
+    repository-wide refusal.  Acknowledgment gates the *use* of the amended
+    families instead — see :func:`require_amended_families_released`.
+    """
 
     chain = tuple(receipts)
     if not chain:
@@ -236,7 +347,6 @@ def fold_amendment_chain(
 
     expected_sha256 = base_sha256
     for expected_sequence, receipt in enumerate(chain, 1):
-        receipt.require_acknowledged()
         if receipt.sequence != expected_sequence:
             raise AmendmentChainOrderError(
                 "amendment chain out of order: "
@@ -264,7 +374,7 @@ def validate_preregistration_bytes(
     *,
     base_sha256: str = RATIFICATION_CONTRACT_SHA256,
 ) -> str:
-    """Require working bytes to equal the frozen base or an acknowledged chain."""
+    """Require working bytes to equal the frozen base or a receipted chain."""
 
     actual_sha256 = _sha256(data)
     try:
@@ -273,12 +383,10 @@ def validate_preregistration_bytes(
             base_sha256=base_sha256,
             current_sha256=actual_sha256,
         )
-    except AmendmentAcknowledgmentPendingError:
-        raise
     except (AmendmentChainMissingError, AmendmentChainOrderError, AmendmentChainMismatchError) as exc:
         raise PreregistrationDriftError(
             "working pre-registration drift: "
-            f"expected base identity {base_sha256} or an acknowledged amendment chain; "
+            f"expected base identity {base_sha256} or a receipted amendment chain; "
             f"actual identity {actual_sha256}; {exc}"
         ) from exc
 
@@ -449,8 +557,9 @@ def derive_identity_from_receipt_bytes(
 
     expected_digest = original.sha256
     previous_receipt_introduction = ratification_introduction
+    previous_document = original_bytes
     amendments: list[AmendmentIdentity] = []
-    applicable_rows: list[tuple[str, bytes, AmendmentReceipt, str]] = []
+    applicable_rows: list[tuple[str, bytes, AmendmentReceipt, str, str]] = []
     for name, data in receipt_rows[1:]:
         match = _AMENDMENT_NAME.fullmatch(name)
         if match is None:
@@ -463,11 +572,6 @@ def derive_identity_from_receipt_bytes(
         filename_sequence = match.group("sequence")
         if filename_sequence is not None and receipt.sequence != int(filename_sequence):
             raise ContractIdentityError("amendment filename and sequence differ")
-        receipt.require_acknowledged()
-        if not is_revision_applicable(receipt.repository_revision, contract_revision):
-            raise ContractIdentityError(
-                "amendment named amended-contract revision is not an ancestor of the pin"
-            )
         receipt_path = f"{CONTRACTS_DIR}/{name}"
         try:
             introductions = tuple(
@@ -487,9 +591,20 @@ def derive_identity_from_receipt_bytes(
             raise ContractIdentityError(
                 "amendment receipt history must have exactly one unique introduction commit"
             )
-        applicable_rows.append((name, data, receipt, introductions[0]))
+        # A pending receipt has not pinned its amended-document revision: the
+        # founder records that at acknowledgment, and cannot record it earlier
+        # because a pre-merge branch sha does not survive a squash merge.  Until
+        # then the receipt's uniquely reconstructed introduction commit *is* the
+        # amended-document revision — the amendment and its receipt land in one
+        # commit, which is exactly what the single-introduction rule proves.
+        amended_revision = receipt.repository_revision or introductions[0]
+        if not is_revision_applicable(amended_revision, contract_revision):
+            raise ContractIdentityError(
+                "amendment named amended-contract revision is not an ancestor of the pin"
+            )
+        applicable_rows.append((name, data, receipt, introductions[0], amended_revision))
 
-    for expected_sequence, (name, data, receipt, introduction) in enumerate(
+    for expected_sequence, (name, data, receipt, introduction, amended_revision) in enumerate(
         applicable_rows, 1
     ):
         if receipt.sequence != expected_sequence:
@@ -503,9 +618,9 @@ def derive_identity_from_receipt_bytes(
                 "an amendment cannot precede the ratification receipt introduction"
             )
         if (
-            receipt.repository_revision == previous_receipt_introduction
+            amended_revision == previous_receipt_introduction
             or not is_revision_applicable(
-                previous_receipt_introduction, receipt.repository_revision
+                previous_receipt_introduction, amended_revision
             )
         ):
             raise ContractIdentityError(
@@ -513,8 +628,14 @@ def derive_identity_from_receipt_bytes(
                 "amended-contract revision; ordered ancestry is broken"
             )
         receipt_path = f"{CONTRACTS_DIR}/{name}"
-        if introduction == receipt.repository_revision or not is_revision_applicable(
-            receipt.repository_revision, introduction
+        # Only a receipt that *names* its amended-document revision can be
+        # checked for strict descent: acknowledgment necessarily lands in a
+        # later commit than the amendment.  A pending receipt's amended revision
+        # is its own introduction, so descent is trivially satisfied and the
+        # bytes-at-introduction check below is what binds it.
+        if receipt.repository_revision is not None and (
+            introduction == amended_revision
+            or not is_revision_applicable(amended_revision, introduction)
         ):
             raise ContractIdentityError(
                 "amendment receipt introduction is not a strict descendant of its "
@@ -539,15 +660,23 @@ def derive_identity_from_receipt_bytes(
                 "amendment receipt introduction bytes differ from bytes at the run pin"
             )
         try:
-            document = read_git_artifact(receipt.repository_revision, receipt.contract_path)
+            document = read_git_artifact(amended_revision, receipt.contract_path)
         except Exception as exc:  # noqa: BLE001
             raise ContractIdentityError("amended contract bytes are missing from the repository") from exc
         if _sha256(document) != receipt.contract_sha256:
             raise ContractIdentityError("amendment contract digest differs from Git bytes")
+        parent_family_ids = set(
+            _section_one_family_ids(previous_document, label=f"{name} parent document")
+        )
+        introduced_family_ids = tuple(
+            family_id
+            for family_id in _section_one_family_ids(document, label=name)
+            if family_id not in parent_family_ids
+        )
         contract = ContractArtifactIdentity(
             path=receipt.contract_path,
             sha256=receipt.contract_sha256,
-            repository_revision=receipt.repository_revision,
+            repository_revision=amended_revision,
         )
         amendments.append(AmendmentIdentity(
             sequence=receipt.sequence,
@@ -561,9 +690,12 @@ def derive_identity_from_receipt_bytes(
             affected_sections=receipt.affected_sections,
             rationale=receipt.rationale,
             effective_policy=receipt.effective_policy,
+            acknowledgment_status=receipt.acknowledgment_status,
+            introduced_family_ids=introduced_family_ids,
         ))
         expected_digest = contract.sha256
         previous_receipt_introduction = introduction
+        previous_document = document
 
     effective = amendments[-1].contract if amendments else original
     if previous_receipt_introduction is not None and (
@@ -921,6 +1053,7 @@ __all__ = [
     "default_contract_revision",
     "fold_amendment_chain",
     "order_amendment_receipt_rows",
+    "require_amended_families_released",
     "validate_preregistration_bytes",
     "validate_preregistration_identity",
     "validate_working_preregistration",
