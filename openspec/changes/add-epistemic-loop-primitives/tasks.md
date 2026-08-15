@@ -60,6 +60,8 @@
 - [x] 8.1 Regenerate the pinned MCP tool schemas and the tool-surface discovery fingerprint, then review the diff and confirm it contains only the intended `observe_memory` additions.
 - [x] 8.2 Regenerate the generated capability documentation.
 - [x] 8.3 Record the moved MCP discovery digest as the ChatGPT Personal Plugin pending attestation, keep the rollout state awaiting refresh, and report the moved fingerprint as release-blocking.
+- [x] 8.4 Re-render the derived hosted compatibility descriptor and both platform locks for the v1 and v2 candidates, verify the descriptor diff is confined to `observe_memory`'s three added arguments, and confirm every package archive stays byte-identical.
+- [x] 8.5 Update the three moved entries in the v1 release-identity fixture and record the reasoning for moving a frozen candidate's derived identity in `design.md`.
 
 ## 9. Targeted Verification
 
