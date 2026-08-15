@@ -28,6 +28,7 @@ from protocol.models import (
     RunManifest,
 )
 from equivalence.selection import CANONICAL_LME_S_SOURCE, load_frozen_lme_selection, select_lme_s_25
+from memorybench.guest_observations import project_guest_evidence
 
 try:
     from .setup import verify_checkout
@@ -965,8 +966,12 @@ def _build_export(
     result_set_rejected = bool(result_failures) or result_set_mismatch
 
     cases: list[dict[str, Any]] = []
+    # Run-level facts the guest observes once, not per case.
+    run_readiness: list[dict[str, Any]] | None = None
+    run_session_normalization: str | None = None
     cleanup_targets = _cleanup_target_union(plan, checkpoint_by_id, failures)
     for ordinal, dataset_case in enumerate(dataset_raw, start=1):
+        container_tag: str | None = None
         question_id = dataset_case["question_id"]
         case_digest = privacy_hmac_sha256(plan.privacy_hmac_key_hex, "case-id", question_id)
         case_failures: set[str] = set()
@@ -1119,6 +1124,26 @@ def _build_export(
             result_ref = None
             private_ref = None
             hits = []
+
+        # The Exomem guest already logs a request/response pair per call, so
+        # publishing those facts reads its own evidence rather than adding
+        # instrumentation. Absence keeps its missing_fields label; the export
+        # model refuses any disagreement between the two.
+        search_observation: dict[str, Any] | None = None
+        ingest_observation: dict[str, Any] | None = None
+        if plan.provider == "exomem" and isinstance(container_tag, str) and container_tag:
+            observed = project_guest_evidence(
+                Path(plan.guest_evidence_root) / "exomem" / _sha256_text(container_tag)[:24]
+            )
+            case_failures.update(observed.problems)
+            search_observation = observed.search
+            ingest_observation = observed.ingest
+            missing -= observed.resolved_labels()
+            if observed.readiness is not None and run_readiness is None:
+                run_readiness = observed.readiness
+            if observed.session_normalization is not None:
+                run_session_normalization = observed.session_normalization
+
         failures.update(case_failures)
         cases.append({
             "case_ordinal": ordinal,
@@ -1136,6 +1161,8 @@ def _build_export(
             "hits": hits,
             "failure_codes": sorted(case_failures),
             "missing_fields": sorted(missing),
+            "search": search_observation,
+            "ingest": ingest_observation,
         })
 
     try:
@@ -1175,6 +1202,8 @@ def _build_export(
         "latency": {"publishable": False, "reason": "host_unvalidated"},
         "failure_codes": sorted(failures),
         "cases": cases,
+        "session_normalization": run_session_normalization,
+        "readiness": run_readiness,
     }
     if _secure_read(Path(plan.dataset_path), private=False) != original_dataset_bytes:
         raise ValueError("dataset bytes changed during the run")
