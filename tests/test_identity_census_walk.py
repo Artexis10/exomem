@@ -198,3 +198,99 @@ def test_a_non_markdown_alias_still_refuses_the_census(tmp_path: Path, monkeypat
         semantic_contract.build_stable_identity_census(tmp_path)
 
     assert raised.value.code == "IDENTITY_CENSUS_UNSAFE_ENTRY"
+
+
+# ---------------------------------------------------------------------------
+# Issue #545. `_build_identity_census` walked `Knowledge Base/_trash/` like
+# any canonical directory: `_IDENTITY_CENSUS_RESERVED_KB_DIRS` reserved only
+# `.graph-commit-receipts`, so a malformed page trashed by `delete_file`
+# escalated `vault.parse_frontmatter(strict=True)`'s failure into a
+# census-fatal `ActivationManifestError` — blocking every governed write on
+# the vault, not just recall of the deleted page. Trash is exempt,
+# non-canonical content per the semantic-authoring contract (mirrors
+# `_SEMANTIC_UNIT_EXEMPT_PARTS`'s "_trash"/"trash" pair): a deleted page's
+# frontmatter must never be able to block a live write. Fixed by pruning
+# `_trash`/`trash` at the KB root — deliberately NOT a general
+# tolerate-unparseable-pages path, which would also mask a real defect in a
+# canonical directory.
+# ---------------------------------------------------------------------------
+
+TRASH_BAD_REL = f"{KB}/_trash/2026-08-15/bad.md"
+CANONICAL_BAD_REL = f"{KB}/Notes/Insights/bad.md"
+TRASH_GOOD_REL = f"{KB}/_trash/2026-08-15/good.md"
+# The exact defect class from the incident: an unquoted scalar value that
+# itself contains a "key: value"-shaped substring collides with YAML's block
+# mapping indicator and raises `ScannerError`, which `parse_frontmatter`
+# reports as `INVALID_FRONTMATTER` — verbatim the code the live incident
+# raised (`could not safely inspect stable identity at Knowledge
+# Base/_trash/2026-08-15/145201-...md`).
+_MALFORMED_FRONTMATTER = (
+    "---\n"
+    "title: bad\n"
+    "type: insight\n"
+    "status: active\n"
+    "label: PR 512 - readytags: [a, b]\n"
+    "---\n\n"
+    "Prose.\n"
+)
+
+
+def _write(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_a_malformed_trash_page_no_longer_blocks_the_identity_census(tmp_path: Path) -> None:
+    """The reported incident. A page trashed by `delete_file` with frontmatter
+    that fails strict YAML must not be able to block every governed write."""
+    _seed(tmp_path)
+    _write(tmp_path, TRASH_BAD_REL, _MALFORMED_FRONTMATTER)
+
+    census = semantic_contract.build_stable_identity_census(tmp_path)
+
+    paths = {entry.path for entry in census.entries}
+    assert PAGE_REL in paths
+    assert TRASH_BAD_REL not in paths
+
+
+def test_a_malformed_canonical_page_still_fails_closed(tmp_path: Path) -> None:
+    """Companion guard: the fix is a KB-root prune of trash, not a general
+    tolerate-unparseable-pages path. A malformed page in a CANONICAL
+    directory must still refuse to vouch for the tree."""
+    _seed(tmp_path)
+    _write(tmp_path, CANONICAL_BAD_REL, _MALFORMED_FRONTMATTER)
+
+    with pytest.raises(activation_manifest.ActivationManifestError) as raised:
+        semantic_contract.build_stable_identity_census(tmp_path)
+
+    assert raised.value.code == "INVALID_FRONTMATTER"
+
+
+def test_a_well_formed_trash_page_is_absent_from_the_census_either_way(tmp_path: Path) -> None:
+    """Companion guard: pruning the whole `_trash` directory means even a
+    well-formed trashed page never enters the identity census — proving the
+    fix is a full directory prune, not selective error-tolerance that would
+    still surface valid trash entries either way (malformed or well-formed)."""
+    _seed(tmp_path)
+    _write(tmp_path, TRASH_GOOD_REL, _page("Good but trashed"))
+
+    census = semantic_contract.build_stable_identity_census(tmp_path)
+
+    paths = {entry.path for entry in census.entries}
+    assert PAGE_REL in paths
+    assert TRASH_GOOD_REL not in paths
+
+
+def test_reserved_kb_dirs_prune_trash_at_the_kb_root_only(tmp_path: Path) -> None:
+    """Unit-level pin on `_IDENTITY_CENSUS_RESERVED_KB_DIRS`: both spellings
+    from the semantic-authoring contract's exempt-content list are reserved,
+    matching `.graph-commit-receipts`'s KB-root-only, case-sensitive scope."""
+    kb = tmp_path / KB
+    assert semantic_contract._prune_identity_census_directory(kb, kb, "_trash")
+    assert semantic_contract._prune_identity_census_directory(kb, kb, "trash")
+    assert not semantic_contract._prune_identity_census_directory(kb, kb, "_Trash")
+    assert not semantic_contract._prune_identity_census_directory(kb, kb, "TRASH")
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb / "Notes", "_trash"
+    )
