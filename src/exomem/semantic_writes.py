@@ -1304,17 +1304,19 @@ def transition_token_stamp(token: str | None) -> str | None:
     return stamp if type(stamp) is str and stamp else None
 
 
-def reviewed_transition_stamp(
+def _reviewed_transition_delta(
     transition_token: str | None,
     now: dt.date | dt.datetime,
-) -> str | None:
-    """Reuse the bounded instant already reviewed by an existing transition.
+) -> tuple[str, dt.timedelta] | None:
+    """The reviewed stamp a token carries and its age relative to `now`.
 
-    Existing-page writers render their proposed bytes before semantic preflight,
-    so this is the shared seam that keeps every leaf's server-owned `updated:`
-    value identical between validation and commit.
+    `None` when the token carries no reviewable instant at all (no token,
+    a token minted before the `stamp` field existed, or a bare-day stamp
+    with no precise instant) — this is shared math for
+    `reviewed_transition_stamp` and `reviewed_transition_refusal_reason`;
+    neither the age/skew accept-or-refuse decision nor the reason label for
+    a refusal lives here.
     """
-
     stamp = transition_token_stamp(transition_token)
     if stamp is None:
         return None
@@ -1326,10 +1328,115 @@ def reviewed_transition_stamp(
         reference = reference.astimezone(dt.UTC)
     else:
         reference = dt.datetime.combine(now, dt.time.max, tzinfo=dt.UTC)
-    delta = reference - moment.instant
+    return stamp, reference - moment.instant
+
+
+def reviewed_transition_stamp(
+    transition_token: str | None,
+    now: dt.date | dt.datetime,
+) -> str | None:
+    """Reuse the bounded instant already reviewed by an existing transition.
+
+    Existing-page writers render their proposed bytes before semantic preflight,
+    so this is the shared seam that keeps every leaf's server-owned `updated:`
+    value identical between validation and commit.
+    """
+
+    found = _reviewed_transition_delta(transition_token, now)
+    if found is None:
+        return None
+    stamp, delta = found
     if delta > _MAX_REVIEWED_STAMP_AGE or -delta > _MAX_REVIEWED_STAMP_SKEW:
         return None
     return stamp
+
+
+def reviewed_transition_refusal_reason(
+    transition_token: str | None,
+    now: dt.date | dt.datetime,
+) -> Literal["expired", "skewed"] | None:
+    """Why a SUPPLIED token's reviewed stamp was refused, for a distinct error.
+
+    Callers reach for this only once `reviewed_transition_stamp` has already
+    returned `None` for a token that was actually supplied — it draws on the
+    exact same delta and never loosens or duplicates that accept/reject
+    decision, only labels it. Returns `None` when the token carries no
+    reviewable instant at all (no token, pre-`stamp`, or bare-day) — that
+    refusal is unrelated to age/skew, and callers should keep their
+    pre-existing fallback behaviour for it, unchanged.
+    """
+    found = _reviewed_transition_delta(transition_token, now)
+    if found is None:
+        return None
+    _, delta = found
+    if delta > _MAX_REVIEWED_STAMP_AGE:
+        return "expired"
+    if -delta > _MAX_REVIEWED_STAMP_SKEW:
+        return "skewed"
+    return None
+
+
+def _format_hours(value: dt.timedelta) -> str:
+    hours = value.total_seconds() / 3600
+    return f"{hours:g}h"
+
+
+def _format_minutes(value: dt.timedelta) -> str:
+    minutes = value.total_seconds() / 60
+    unit = "minute" if minutes == 1 else "minutes"
+    return f"{minutes:g} {unit}"
+
+
+# Derived from the bound constants (not hard-coded) so retuning either one
+# can't leave the refusal message quoting a stale figure.
+_REVIEWED_TOKEN_REFUSAL_MESSAGES: dict[Literal["expired", "skewed"], str] = {
+    "expired": (
+        f"reviewed transition token is more than {_format_hours(_MAX_REVIEWED_STAMP_AGE)} "
+        "old — its reviewed state is stale; re-run validate_only to mint a "
+        "fresh token before committing"
+    ),
+    "skewed": (
+        "reviewed transition token's reviewed instant is more than "
+        f"{_format_minutes(_MAX_REVIEWED_STAMP_SKEW)} in the future (clock "
+        "skew); re-run validate_only to mint a fresh token before committing"
+    ),
+}
+
+
+def resolve_reviewed_date_iso(
+    transition_token: str | None,
+    now: dt.date | dt.datetime,
+) -> str:
+    """The `updated:` stamp to write, honouring a reviewed token when given.
+
+    Shared by every existing-page writer (`edit`, `multi_edit`,
+    `set_frontmatter_field`, and `create_file`'s overwrite-by-token path) so
+    the accept/refuse/message decision lives in exactly one place.
+
+    - No token supplied: mint a fresh stamp — the legacy path, unchanged,
+      correct behaviour, not a fallback.
+    - Token supplied and still within the reviewed-stamp window: reuse its
+      exact reviewed instant, so committed bytes match what was validated.
+    - Token supplied but refused for age (>24h) or clock skew (>5min): raise
+      `SemanticWriteError("LIFECYCLE_TRANSITION_TOKEN_EXPIRED", ...)` naming
+      the actual cause, instead of silently minting a fresh stamp — which
+      changes `after_hash` and fails downstream with the unrelated-looking
+      `LIFECYCLE_TRANSITION_MISMATCH`.
+    - Token supplied but carries no reviewable instant at all (no `stamp`
+      field — pre-dates that field): unrelated to age/skew; keep minting a
+      fresh stamp, as before.
+    """
+    if transition_token is None:
+        return temporal.stamp(now)
+    reviewed = reviewed_transition_stamp(transition_token, now)
+    if reviewed is not None:
+        return reviewed
+    refusal = reviewed_transition_refusal_reason(transition_token, now)
+    if refusal is None:
+        return temporal.stamp(now)
+    raise SemanticWriteError(
+        "LIFECYCLE_TRANSITION_TOKEN_EXPIRED", _REVIEWED_TOKEN_REFUSAL_MESSAGES[refusal]
+    )
 
 
 def _existing_transition_id(token: str) -> str:

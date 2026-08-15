@@ -110,6 +110,24 @@ class EditError(Exception):
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
 
 
+def _resolve_date_iso(
+    semantic_transition_token: str | None, now: dt.date | dt.datetime
+) -> str:
+    """The `updated:` stamp to write, honouring a reviewed token when given.
+
+    Thin `EditError`-flavored wrapper around the shared
+    `semantic_writes.resolve_reviewed_date_iso` — every existing-page writer
+    (`edit`, `multi_edit`, `set_frontmatter_field`, `create_file`'s
+    overwrite-by-token path) shares that decision and only differs in which
+    domain error it converts a refusal into. See its docstring for the full
+    no-token/reviewed/expired/skewed/unreviewable breakdown.
+    """
+    try:
+        return semantic_writes.resolve_reviewed_date_iso(semantic_transition_token, now)
+    except semantic_writes.SemanticWriteError as error:
+        raise EditError(error.code, [], error.reason) from error
+
+
 def edit(
     vault_root: Path,
     *,
@@ -209,10 +227,7 @@ def edit(
         )
 
     now = today or temporal.now()
-    date_iso = (
-        semantic_writes.reviewed_transition_stamp(semantic_transition_token, now)
-        or temporal.stamp(now)
-    )
+    date_iso = _resolve_date_iso(semantic_transition_token, now)
 
     editable = load_editable(
         vault_root,
