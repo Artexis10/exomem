@@ -1265,13 +1265,27 @@ def call_context(name: str) -> Iterator[None]:
         _CALL_CONTEXT.reset(token)
 
 
+# A queued walk whose disposition no branch has claimed yet. Never a label:
+# `_census_walk_log` resolves it on the way out, and how it resolves depends on
+# whether the block finished or blew up.
+_CENSUS_WALK_UNDECIDED = "__undecided__"
+
+
 def _observe_census_walk(elapsed_ms: float, outcome: str) -> None:
-    """One full `_corpus_census` stat-walk, labelled by what it decided."""
-    metrics.observe_duration_ms(
-        "exomem_corpus_census_walk_ms",
-        elapsed_ms,
-        {"caller": current_call_context(), "outcome": outcome},
-    )
+    """One full `_corpus_census` stat-walk, labelled by what it decided.
+
+    Guarded because two of the three call sites emit from a `finally` that may
+    be unwinding a real corpus error; an instrument that raises there would
+    replace the error the caller needs to see.
+    """
+    try:
+        metrics.observe_duration_ms(
+            "exomem_corpus_census_walk_ms",
+            elapsed_ms,
+            {"caller": current_call_context(), "outcome": outcome},
+        )
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        log.debug("corpus census walk metric failed", exc_info=True)
 
 
 def _timed_corpus_census(root: Path, outcome: str) -> tuple | None:
@@ -1299,13 +1313,27 @@ def _census_walk_log() -> Iterator[list[list]]:
     settled several branches later can be corrected in place. Because this
     context manager is entered OUTSIDE the locks, its exit runs after they have
     all released, including on the `return`s taken from inside them.
+
+    An entry still `_CENSUS_WALK_UNDECIDED` at exit is resolved by HOW the block
+    ended: falling out cleanly means no cached state answered the walk, so a
+    rebuild is what it bought; unwinding on an exception means nobody ever got
+    to use it, and reporting that as a rebuild would invent work that never
+    happened. Explicitly-set outcomes are left alone — a confirmation census
+    that completed really was a census, whatever failed afterwards.
     """
     sink: list[list] = []
+    unresolved = "rebuild"
     try:
         yield sink
+    except BaseException:
+        unresolved = "aborted"
+        raise
     finally:
         for elapsed_ms, outcome in sink:
-            _observe_census_walk(elapsed_ms, outcome)
+            _observe_census_walk(
+                elapsed_ms,
+                unresolved if outcome == _CENSUS_WALK_UNDECIDED else outcome,
+            )
 
 
 def _deferred_corpus_census(root: Path, sink: list[list], outcome: str) -> tuple | None:
@@ -1955,8 +1983,9 @@ def build_corpus_context(
             started = time.perf_counter()
             census = _corpus_census(root)
             census_ms = (time.perf_counter() - started) * 1000.0
-            # Nothing cached answered it unless a branch below says otherwise.
-            walk = [census_ms, "rebuild"]
+            # Claimed by whichever branch below consumes it; resolved on the
+            # way out if none does (see `_census_walk_log`).
+            walk = [census_ms, _CENSUS_WALK_UNDECIDED]
             walk_log.append(walk)
             if census is not None and _registries_match_disk(
                 root, relation_definitions, language

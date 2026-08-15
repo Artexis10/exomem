@@ -1380,6 +1380,21 @@ def _write_phase(name: str | None):
         _WRITE_PHASE.reset(token)
 
 
+def _observe_write_ms(name: str, value_ms: float, labels: dict[str, str]) -> None:
+    """Emit one write-path duration sample; never let it mask the real error.
+
+    Both callers emit from a `finally` that may be unwinding a lease, boundary,
+    or contract failure. A raise from the instrument there would REPLACE the
+    error the caller actually needs to see — an observability defect turning
+    itself into a misdiagnosis. Same rule and same shape as
+    `mutation_lock._observe_boundary_ms`.
+    """
+    try:
+        metrics.observe_duration_ms(name, value_ms, labels)
+    except Exception:  # noqa: BLE001 - observability must never break a mutation
+        pass
+
+
 @contextmanager
 def _write_metric(name: str, operation: str):
     """Emit one `exomem_write_*` duration histogram for the wrapped phase.
@@ -1396,7 +1411,7 @@ def _write_metric(name: str, operation: str):
         outcome = "error"
         raise
     finally:
-        metrics.observe_duration_ms(
+        _observe_write_ms(
             name,
             (time.perf_counter() - started) * 1000.0,
             {"operation": operation, "outcome": outcome, "phase": _WRITE_PHASE.get()},
@@ -1434,11 +1449,13 @@ def _timed_boundary(timings: MutationTimings | None, guard: Any, *, operation: s
     acquired = False
 
     def _record(outcome: str) -> None:
+        # Span close and boundary bookkeeping first: they are the collector's
+        # own state and must land even if the emit below is swallowed.
         waited_ms = round((time.perf_counter() - started) * 1000.0, 3)
         span_stack.close()
         if timings is not None:
             timings.boundary["waited_ms"] = waited_ms
-        metrics.observe_duration_ms(
+        _observe_write_ms(
             "exomem_write_boundary_acquire_ms",
             waited_ms,
             {"operation": operation, "outcome": outcome, "phase": _WRITE_PHASE.get()},

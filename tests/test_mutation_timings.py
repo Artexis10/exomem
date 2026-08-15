@@ -320,6 +320,33 @@ def test_boundary_acquire_is_measured_even_when_acquisition_fails(
     assert path.read_text(encoding="utf-8") != after_source
 
 
+def test_a_broken_metrics_registry_cannot_mask_the_boundary_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The emit on the failure path runs inside a `finally` that is already
+    unwinding a lease error. If the instrument raised there it would REPLACE
+    that error, and an observability defect would present as a boundary bug."""
+    path = _seed(tmp_path)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+    timings = mutation_timings_module.MutationTimings()
+    preflight = semantic_writes.preflight_existing(
+        tmp_path, path=PAGE, after_source=after_source, operation="edit", timings=timings
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: _RefusingManager())
+    monkeypatch.setattr(
+        semantic_writes.metrics,
+        "observe_duration_ms",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("metrics registry is down")),
+    )
+
+    # The lease error, not the metrics error.
+    with pytest.raises(RuntimeError, match="boundary unavailable"):
+        semantic_writes.commit_existing(tmp_path, preflight=preflight, timings=timings)
+
+    # Collector bookkeeping still landed: it runs before the guarded emit.
+    assert isinstance(timings.as_dict()["boundary"]["waited_ms"], float)
+
+
 def test_corpus_metrics_carry_caller_and_outcome(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
     # Force the census-based reuse path: the event-token fast path returns
@@ -341,3 +368,34 @@ def test_corpus_metrics_carry_caller_and_outcome(tmp_path: Path, monkeypatch) ->
     assert ("exomem_corpus_build_ms", "unknown", "rebuild") in observed
     assert ("exomem_corpus_census_walk_ms", "write", "hit") in observed
     assert ("exomem_corpus_build_ms", "write", "rebuild") not in observed
+
+
+def test_a_walk_nobody_consumed_is_not_reported_as_a_rebuild(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An exception between the census walk and its disposition must not mint
+    a `rebuild` sample. Nothing was rebuilt — the call died holding a walk it
+    never got to use, and the series has to say so."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    monkeypatch.setattr("exomem.freshness.triple", lambda *args, **kwargs: None)
+    semantic_contract.reset_corpus_context_cache()
+    _seed(tmp_path)
+
+    boom = RuntimeError("corpus inputs vanished mid-build")
+    monkeypatch.setattr(
+        semantic_contract,
+        "_registries_match_disk",
+        lambda *args, **kwargs: (_ for _ in ()).throw(boom),
+    )
+    metrics_module.reset()
+
+    with pytest.raises(RuntimeError, match="corpus inputs vanished mid-build"):
+        semantic_contract.build_corpus_context(tmp_path)
+
+    observed = {
+        (item["name"], item["labels"].get("outcome"))
+        for item in metrics_module.snapshot()["histograms"]
+    }
+    assert ("exomem_corpus_census_walk_ms", "aborted") in observed
+    assert ("exomem_corpus_census_walk_ms", "rebuild") not in observed
+    assert ("exomem_corpus_build_ms", "rebuild") not in observed
