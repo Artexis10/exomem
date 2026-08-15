@@ -1804,6 +1804,11 @@ def on_corpus_files_changed(
         )
 
 
+_CORPUS_PATCH_MISS = "miss"
+_CORPUS_PATCH_EVICTED = "evicted"
+_CORPUS_PATCH_UNCHANGED = "unchanged"
+_CORPUS_PATCH_APPLIED = "patched"
+
 CORPUS_PUBLICATION_REGISTRY_ADVANCE = "registry_advance"
 CORPUS_PUBLICATION_PROJECTION_PATCH = "projection_patch"
 
@@ -1914,12 +1919,6 @@ def publish_corpus_files_changed_classified(
     if disposition == _CORPUS_PATCH_MISS:
         _populate_corpus_context_after_miss(root)
     return None
-
-
-_CORPUS_PATCH_MISS = "miss"
-_CORPUS_PATCH_EVICTED = "evicted"
-_CORPUS_PATCH_UNCHANGED = "unchanged"
-_CORPUS_PATCH_APPLIED = "patched"
 
 
 def _patch_corpus_files_changed_locked(
@@ -2077,12 +2076,12 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
         if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
             return
     try:
-        _populate_corpus_context_locked_admission(root, cache_key)
+        _build_and_admit_corpus_context(root, cache_key)
     except Exception:  # noqa: BLE001 - the publish itself already succeeded
         log.warning("semantic corpus populate-on-miss failed", exc_info=True)
 
 
-def _populate_corpus_context_locked_admission(root: Path, cache_key: tuple[str, str]) -> None:
+def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> None:
     """The L2 body of :func:`_populate_corpus_context_after_miss`."""
     # Loaded from disk, so no `_registries_match_disk` check is needed: both
     # registry files are census entries, and the confirm below re-reads the
@@ -2103,6 +2102,13 @@ def _populate_corpus_context_locked_admission(root: Path, cache_key: tuple[str, 
         language=language,
     )
     build_ms = (time.perf_counter() - started) * 1000.0
+    # Its own outcome, not "rebuild": this build is paid by the PUBLISHER, so
+    # a writer suddenly wearing a full corpus build has to be visible as that.
+    metrics.observe_duration_ms(
+        "exomem_corpus_build_ms",
+        build_ms,
+        {"caller": current_call_context(), "outcome": "populate"},
+    )
     with _census_walk_log() as walk_log, _CORPUS_CONTEXT_UPDATE_LOCK:
         after = freshness.consumer_checkpoint(root, "vault")
         if after != before:
