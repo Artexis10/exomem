@@ -1376,6 +1376,56 @@ def reviewed_transition_refusal_reason(
     return None
 
 
+_REVIEWED_TOKEN_REFUSAL_MESSAGES: dict[Literal["expired", "skewed"], str] = {
+    "expired": (
+        "reviewed transition token is more than 24h old — its reviewed "
+        "state is stale; re-run validate_only to mint a fresh token before "
+        "committing"
+    ),
+    "skewed": (
+        "reviewed transition token's reviewed instant is more than 5 "
+        "minutes in the future (clock skew); re-run validate_only to mint "
+        "a fresh token before committing"
+    ),
+}
+
+
+def resolve_reviewed_date_iso(
+    transition_token: str | None,
+    now: dt.date | dt.datetime,
+) -> str:
+    """The `updated:` stamp to write, honouring a reviewed token when given.
+
+    Shared by every existing-page writer (`edit`, `multi_edit`,
+    `set_frontmatter_field`, and `create_file`'s overwrite-by-token path) so
+    the accept/refuse/message decision lives in exactly one place.
+
+    - No token supplied: mint a fresh stamp — the legacy path, unchanged,
+      correct behaviour, not a fallback.
+    - Token supplied and still within the reviewed-stamp window: reuse its
+      exact reviewed instant, so committed bytes match what was validated.
+    - Token supplied but refused for age (>24h) or clock skew (>5min): raise
+      `SemanticWriteError("LIFECYCLE_TRANSITION_TOKEN_EXPIRED", ...)` naming
+      the actual cause, instead of silently minting a fresh stamp — which
+      changes `after_hash` and fails downstream with the unrelated-looking
+      `LIFECYCLE_TRANSITION_MISMATCH`.
+    - Token supplied but carries no reviewable instant at all (no `stamp`
+      field — pre-dates that field): unrelated to age/skew; keep minting a
+      fresh stamp, as before.
+    """
+    if transition_token is None:
+        return temporal.stamp(now)
+    reviewed = reviewed_transition_stamp(transition_token, now)
+    if reviewed is not None:
+        return reviewed
+    refusal = reviewed_transition_refusal_reason(transition_token, now)
+    if refusal is None:
+        return temporal.stamp(now)
+    raise SemanticWriteError(
+        "LIFECYCLE_TRANSITION_TOKEN_EXPIRED", _REVIEWED_TOKEN_REFUSAL_MESSAGES[refusal]
+    )
+
+
 def _existing_transition_id(token: str) -> str:
     return str(_decode_existing_transition_token(token)["transition_id"])
 

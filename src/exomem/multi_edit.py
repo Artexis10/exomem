@@ -27,6 +27,7 @@ from pydantic import BeforeValidator
 from . import guards, semantic_writes, temporal
 from .edit import (
     EditError,
+    _resolve_date_iso,
     _set_or_append,
     apply_surgical_replace,
     commit_edit,
@@ -155,10 +156,7 @@ def multi_edit(
     edits = normalized_edits
 
     now = today or temporal.now()
-    date_iso = (
-        semantic_writes.reviewed_transition_stamp(semantic_transition_token, now)
-        or temporal.stamp(now)
-    )
+    date_iso = _resolve_date_iso(semantic_transition_token, now)
 
     editable = load_editable(
         vault_root, path, expected_hash=expected_hash, allow_frontmatterless=True

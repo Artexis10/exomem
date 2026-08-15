@@ -115,45 +115,17 @@ def _resolve_date_iso(
 ) -> str:
     """The `updated:` stamp to write, honouring a reviewed token when given.
 
-    No token supplied: mint a fresh stamp — that's the legacy path and is
-    unchanged, correct behaviour, not a fallback.
-
-    Token supplied and still within the reviewed-stamp window: reuse its
-    exact reviewed instant, so the committed bytes match what was validated.
-
-    Token supplied but refused for age (>24h) or clock skew (>5min): this
-    used to silently mint a fresh stamp too, which changes `after_hash` and
-    fails downstream with the unrelated-looking `LIFECYCLE_TRANSITION_MISMATCH`.
-    Raise a distinct, honest error instead. A token that carries no reviewable
-    instant at all (no `stamp` field — pre-dates that field) is a different,
-    unrelated refusal; keep minting a fresh stamp for it as before.
+    Thin `EditError`-flavored wrapper around the shared
+    `semantic_writes.resolve_reviewed_date_iso` — every existing-page writer
+    (`edit`, `multi_edit`, `set_frontmatter_field`, `create_file`'s
+    overwrite-by-token path) shares that decision and only differs in which
+    domain error it converts a refusal into. See its docstring for the full
+    no-token/reviewed/expired/skewed/unreviewable breakdown.
     """
-    if semantic_transition_token is None:
-        return temporal.stamp(now)
-    reviewed = semantic_writes.reviewed_transition_stamp(semantic_transition_token, now)
-    if reviewed is not None:
-        return reviewed
-    refusal = semantic_writes.reviewed_transition_refusal_reason(
-        semantic_transition_token, now
-    )
-    if refusal is None:
-        return temporal.stamp(now)
-    if refusal == "expired":
-        message = (
-            "reviewed transition token is more than 24h old — its reviewed "
-            "state is stale; re-run validate_only to mint a fresh token "
-            "before committing"
-        )
-    else:
-        message = (
-            "reviewed transition token's reviewed instant is more than 5 "
-            "minutes in the future (clock skew); re-run validate_only to "
-            "mint a fresh token before committing"
-        )
-    refusal_error = semantic_writes.SemanticWriteError(
-        "LIFECYCLE_TRANSITION_TOKEN_EXPIRED", message
-    )
-    raise EditError(refusal_error.code, [], refusal_error.reason) from refusal_error
+    try:
+        return semantic_writes.resolve_reviewed_date_iso(semantic_transition_token, now)
+    except semantic_writes.SemanticWriteError as error:
+        raise EditError(error.code, [], error.reason) from error
 
 
 def edit(

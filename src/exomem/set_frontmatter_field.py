@@ -178,10 +178,12 @@ def set_frontmatter_field(
     body = m.group(2)
 
     now = today or temporal.now()
-    date_iso = (
-        semantic_writes.reviewed_transition_stamp(semantic_transition_token, now)
-        or temporal.stamp(now)
-    )
+    try:
+        date_iso = semantic_writes.resolve_reviewed_date_iso(
+            semantic_transition_token, now
+        )
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
 
     value = _governed_enum_value(
         field, value, page_type=_read_yaml_field(fm_text, "type")
