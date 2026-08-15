@@ -22,7 +22,7 @@ from exomem import vault as vault_module
 from exomem import writer_lease as writer_lease_module
 from exomem.cli_ops import OpError, error_dict, http_status_for
 from exomem.lease_coordinator import SQLiteLeaseStore
-from exomem.mutation_lock import VaultMutationCoordinator
+from exomem.mutation_lock import VaultMutationCoordinator, active_mutation_snapshot
 from exomem.mutation_terminal import committed_terminal
 from exomem.vault import PlannedWrite, batch_atomic_write
 from exomem.writer_lease import (
@@ -33,6 +33,16 @@ from exomem.writer_lease import (
     invoke_command,
     reset_managers_for_tests,
 )
+
+
+def _boundary(snapshot: dict) -> dict:
+    """Drop the additive contention block so the boundary shape stays exact.
+
+    Contention attribution is covered by `tests/test_readiness_honesty.py`;
+    stripping only that key keeps these assertions exact-shape, so a future key
+    leaking into the free payload still fails here.
+    """
+    return {key: value for key, value in snapshot.items() if key != "contention"}
 
 
 class _UnknownLengthMapping(Mapping[str, str]):
@@ -1945,7 +1955,7 @@ def test_mutation_during_semantic_warm_returns_without_holding_boundary(
     assert payload["retry_after_ms"] == 750
     assert payload["request_id"] == "warm-request"
     assert calls == []
-    assert writer_lease_module.active_mutation_snapshot()["state"] == "free"
+    assert active_mutation_snapshot()["state"] == "free"
 
 
 def test_postcommit_error_cannot_escape_as_precommit_retryable(tmp_path: Path) -> None:
@@ -2979,7 +2989,7 @@ def test_coordination_status_includes_content_free_mutation_boundary(tmp_path: P
     vault = tmp_path / "private-vault"
     vault.mkdir()
 
-    assert manager.status(vault)["mutation_boundary"] == {"state": "free"}
+    assert _boundary(manager.status(vault)["mutation_boundary"]) == {"state": "free"}
     with manager.mutation_guard(
         vault,
         request_id="req-health",
@@ -3007,7 +3017,7 @@ def test_coordination_status_measures_only_the_requested_vault(tmp_path: Path) -
         operation="remember",
         holder_kind="command",
     ):
-        assert manager.status(vault_b)["mutation_boundary"] == {"state": "free"}
+        assert _boundary(manager.status(vault_b)["mutation_boundary"]) == {"state": "free"}
         boundary = manager.status(vault_a)["mutation_boundary"]
         assert boundary["state"] == "held"
         assert boundary["request_id"] == "req-vault-a"

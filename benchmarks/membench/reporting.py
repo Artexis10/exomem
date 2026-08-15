@@ -36,7 +36,7 @@ import json
 import math
 import statistics
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from membench.environment import compare_environments
@@ -239,6 +239,11 @@ class _RunView:
     provider: str = "?"
     #: The layer the run measured at; see INGESTION_ALTITUDES.
     ingestion_altitude: str = "raw_source"
+    #: Per-op ``latency_ms`` values drained from ``ingest.jsonl`` (write
+    #: latency), mirroring ``latencies`` (retrieval). Empty for runs recorded
+    #: before ingest latency was captured, or with no ingest ops — graceful
+    #: degrade, see ``_load_run`` and ``_ingest_latency_section``.
+    ingest_latencies: list[float] = field(default_factory=list)
     #: The writer of answer-level dimensions such as abstention.
     answer_mode: str = ANSWER_MODE_HARNESS
     #: Non-reference providers remain useful fixtures but are not publishable.
@@ -265,6 +270,17 @@ def _load_run(run_dir: Path) -> _RunView:
                 row = json.loads(raw)
                 if isinstance(row.get("latency_ms"), int | float):
                     latencies.append(float(row["latency_ms"]))
+    # Write (ingest) latency, mirrored from the retrieval loop above. A run
+    # dir with no ingest.jsonl (older runs, partial runs) simply leaves this
+    # empty — no required field, no KeyError; see _ingest_latency_section.
+    ingest_latencies: list[float] = []
+    ingest_path = run_dir / "ingest.jsonl"
+    if ingest_path.is_file():
+        for raw in ingest_path.read_text(encoding="utf-8").splitlines():
+            if raw.strip():
+                row = json.loads(raw)
+                if isinstance(row.get("latency_ms"), int | float):
+                    ingest_latencies.append(float(row["latency_ms"]))
     judge: dict | None = None
     judge_path = run_dir / JUDGE_SCORES_NAME
     if judge_path.is_file():
@@ -313,6 +329,7 @@ def _load_run(run_dir: Path) -> _RunView:
         dimensions=dimensions,
         per_query=per_query,
         latencies=latencies,
+        ingest_latencies=ingest_latencies,
         judge=judge,
         failure_lines=failure_lines,
         # Runs recorded before the three-state contract carry no field; they
@@ -442,6 +459,79 @@ def _retrieval_stats(rows: Sequence[dict]) -> dict[str, float | int] | None:
         "mean_recall_at_10": mean_of("recall_at_10"),
         "mean_mrr": mean_of("mrr"),
     }
+
+
+def _ingest_latency_section(
+    runs: Sequence[_RunView], *, cross_contender: bool = False
+) -> list[str]:
+    """Ingest (write) latency rows — a sibling of the retrieval latency rows.
+
+    Every adapter populates ``OpResult.latency_ms`` on ingest and the runner
+    already drains it to ``ingest.jsonl``; this renders it the same way
+    retrieval latency is rendered (median/p95/op count), so a write-latency
+    regression is visible here instead of reaching production unmeasured.
+
+    Graceful degrade: if NO run in the comparison has any ingest latency data
+    (older runs, partial runs), no rows are returned at all — the report
+    renders exactly as it did before ingest latency was captured. A run that
+    lacks data while at least one sibling run has it still gets its own
+    column, rendered ``n/a`` (the retrieval-latency idiom), rather than
+    silently dropping that run out of the row.
+
+    Cross-contender withholding: "Structurally Incomparable Columns Are
+    Withheld" (memory-proof-harness spec) is unqualified for latency — no
+    latency figures, ingest included, appear on a surface covering more than
+    one contender; adapter transport asymmetry dominates the measurement
+    regardless of what the ingestion-altitude caveat below says. Gated
+    exactly the way the retrieval latency block above it is gated: the
+    withheld-with-reason marker replaces the table rather than the table
+    rendering zeros, blanks, or unqualified numbers.
+
+    Altitude caveat (single-contender surfaces only): each contender's
+    per-op unit of work differs (one exomem tool call is not one
+    basic-memory write), so a raw ms figure is comparable within a
+    contender but not directly across contenders. The run's own
+    ``ingestion_altitude`` — already threaded into the manifest by the
+    runner — is attached alongside the numbers as that caveat, rather than
+    left in a JSON field nobody reading the report would open. This caveat
+    is about per-op granularity, a narrower concern than — and never a
+    substitute for — the transport-asymmetry withholding above.
+    """
+
+    if not any(run.ingest_latencies for run in runs):
+        return []
+    if cross_contender:
+        return ["", f"ingest: {WITHHELD_LATENCY}"]
+    labels = [run.label for run in runs]
+    lines = [
+        "",
+        "`ingest_*` rows: write latency, a sibling of the retrieval latency",
+        "rows above. Each contender's per-op unit of work differs (one",
+        "exomem tool call is not one basic-memory write), so these ms figures",
+        "are comparable within a contender across runs, never directly across",
+        "contenders, without accounting for that difference. `ingestion_altitude`",
+        "per run, the harness's own signal for it: "
+        + " · ".join(f"{run.label}={run.ingestion_altitude}" for run in runs)
+        + ".",
+        "",
+        "| metric | " + " | ".join(labels) + " |",
+        "| --- |" + " --- |" * len(runs),
+    ]
+    for metric_name in ("ingest_median_ms", "ingest_p95_ms", "ingest_ops"):
+        cells = []
+        for run in runs:
+            if run.invalid:
+                cells.append("INVALID")
+            elif not run.ingest_latencies:
+                cells.append("n/a")
+            elif metric_name == "ingest_median_ms":
+                cells.append(_fmt(statistics.median(run.ingest_latencies)))
+            elif metric_name == "ingest_p95_ms":
+                cells.append(_fmt(_p95(run.ingest_latencies)))
+            else:
+                cells.append(str(len(run.ingest_latencies)))
+        lines.append(f"| {metric_name} | " + " | ".join(cells) + " |")
+    return lines
 
 
 def _sample_cell(samples: list[dict]) -> str:
@@ -1027,6 +1117,11 @@ def build_comparison_report(run_dirs: Sequence[Path], out_path: Path) -> Path:
                 else:
                     cells.append(str(len(run.latencies)))
             lines.append(f"| {metric_name} | " + " | ".join(cells) + " |")
+
+    # Ingest (write) latency is gated on cross_contender exactly like the
+    # retrieval block above: "Structurally Incomparable Columns Are Withheld"
+    # is unqualified for latency, ingest included — see _ingest_latency_section.
+    lines.extend(_ingest_latency_section(runs, cross_contender=cross_contender))
 
     lines.extend(_environment_section(runs))
     lines.extend(_retrieval_floor_section(runs))
