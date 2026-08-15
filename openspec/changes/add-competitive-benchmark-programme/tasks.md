@@ -323,9 +323,33 @@ them. Mission acceptance criteria (§14) close only from this ledger.
             Evidence: 14 focused checks red-first, then 503 passed across
             memorybench + protocol with the export's recompute-and-compare
             invariant intact.
-- [ ] 4.6b `memorybench-export.v1` → `equivalence-input.v1` projector, so the
-      differ has a right-hand side (only `lme/runner.py` writes
-      `equivalence.json` today)
+- [x] 4.6b `memorybench-export.v1` → `equivalence-input.v1` projector.
+      `benchmarks/memorybench/equivalence_projection.py` mirrors the twelve
+      keys `lme/runner.py::_equivalence_case` emits, sourced from the public
+      export plus the private-gold mapping (the public artifact carries only
+      HMAC pseudonyms; the comparison needs the real question ids). Readiness
+      is narrowed to the same five fields the direct emitter compares, dropping
+      `evidence` because prose would never match. A key the export could not
+      source stays NULL rather than being invented — the differ treats null as
+      never equal to anything, so an unsourced key becomes a difference
+      demanding an explanation instead of a silent pass. A case with no private
+      gold mapping is refused, never guessed. CLI writes `equivalence.json`
+      into a run directory (`--export`, `--private-gold`, `--out`).
+      Evidence: 13 checks, red-first. The decisive two run the REAL emitter
+      rather than a hand-copy — one asserts both sides carry identical key sets
+      so the differ compares like with like, and a round trip through
+      `compare_runs` shows identical projections produce no blocking difference
+      while a widened `top_k` (10 vs 30) is caught as blocking.
+      EXPECTED at 4.6c: several BLOCKING keys will legitimately differ because
+      the two paths genuinely differ, not because either is wrong —
+      `session_normalization` (`lme.normalize.render_neutral_session/v1` vs
+      `memorybench.longmemeval_to_corpus/v1`), `namespace` (different
+      derivations), and `ingestion_payloads` (digest of a rendered neutral
+      session vs of a `capture_source` body). `retrieved_ids` will differ too
+      (the direct row emits positional `exomem-N` ids, the guest emits vault
+      paths) but that key is REPORTED, not blocking. These are the measured
+      findings 4.6c exists to surface and the exceptions register exists to
+      carry, with expiry — they are not to be papered over before the gate runs.
 - [ ] 4.6c 25-case Exomem direct-vs-MemoryBench equivalence gate GREEN
       (mode=blocking) — prerequisite for every comparative run
 - [ ] 4.7 Ratify and implement the native Supermemory vendor-hit projection
