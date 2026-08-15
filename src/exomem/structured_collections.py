@@ -187,6 +187,17 @@ def manifest_authoring_contract() -> dict[str, Any]:
                         "type": "object",
                         "minProperties": 1,
                         "maxProperties": _MAX_SCHEMA_FIELDS,
+                        "propertyNames": {
+                            "not": {"enum": sorted(vault.EXCLUDED_FRONTMATTER_FIELDS)},
+                            "description": (
+                                "Schema-excluded field names are refused on every "
+                                "governed write. Matching ignores case and "
+                                "surrounding whitespace, so 'Confidence' and "
+                                "' expires_at ' are refused too, and the same names "
+                                "are refused as a Markdown-log "
+                                "storage.item_heading.note.field."
+                            ),
+                        },
                         "additionalProperties": {"$ref": "#/$defs/field"},
                     },
                 },

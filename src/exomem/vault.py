@@ -88,6 +88,51 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
 # Governed write paths refuse them so the documented "no confidence floats / no
 # retention decay" stance is actually enforced, not just described.
 EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset({"confidence", "decay_at", "expires_at"})
+EXCLUDED_FIELD_CODE = "EXCLUDED_FIELD"
+
+# The broader `auto_*` exclusion documented in
+# `_scaffold/_Schema/references/frontmatter.md` is deliberately deferred: it is
+# a prefix rule with a different compatibility surface from this exact-name set.
+
+
+def first_excluded_field(names: Iterable[object]) -> tuple[str, str] | None:
+    """Return the first excluded string name and its reason, without raising."""
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        reason = excluded_frontmatter_reason(name)
+        if reason is not None:
+            return name, reason
+    return None
+
+
+def excluded_field_in_collection_frontmatter(
+    frontmatter: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    """First excluded name a collection manifest's frontmatter declares, else None.
+
+    A collection declares item field names on two surfaces, and both must be
+    fenced. `item_schema.fields` is the obvious one. The Markdown-log note field
+    under `storage.item_heading.note.field` is the other: `_validate_values`
+    admits that name as a legal item key *outside* the schema, so an excluded
+    name declared there is fully operable. It is also the more dangerous of the
+    two, because it lives in the immutable storage descriptor — revising it away
+    refuses with IMMUTABLE_COLLECTION_REPRESENTATION, so a manifest that slips
+    past this check can never be repaired.
+    """
+    item_schema = frontmatter.get("item_schema")
+    fields = item_schema.get("fields") if isinstance(item_schema, Mapping) else None
+    if isinstance(fields, Mapping):
+        excluded = first_excluded_field(fields)
+        if excluded is not None:
+            return excluded
+    storage = frontmatter.get("storage")
+    if not isinstance(storage, Mapping) or storage.get("strategy") != "markdown-log":
+        return None
+    heading = storage.get("item_heading")
+    note = heading.get("note") if isinstance(heading, Mapping) else None
+    field = note.get("field") if isinstance(note, Mapping) else None
+    return first_excluded_field((field,)) if isinstance(field, str) else None
 
 
 def excluded_frontmatter_reason(field: str) -> str | None:

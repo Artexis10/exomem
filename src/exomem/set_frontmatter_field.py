@@ -18,6 +18,7 @@ from typing import Any
 
 from . import project_keys, semantic_writes, temporal
 from .vault import (
+    EXCLUDED_FIELD_CODE,
     PlannedWrite,
     VaultPathError,
     _format_yaml_line,
@@ -124,7 +125,7 @@ def set_frontmatter_field(
         )
     excluded_reason = excluded_frontmatter_reason(field)
     if excluded_reason is not None:
-        raise SetFrontmatterError(code="EXCLUDED_FIELD", reason=excluded_reason)
+        raise SetFrontmatterError(code=EXCLUDED_FIELD_CODE, reason=excluded_reason)
 
     try:
         abs_path, rel_path = resolve_under_vault(
