@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import activation as activation_module
 from . import audit as audit_module
+from . import contradiction_stance as contradiction_stance_module
 from . import fusion
 from . import review_state as review_state_module
 from .audit import AuditFinding
@@ -388,7 +389,7 @@ def _apply_review_state(
     refs = review_state_module.refs_for_paths(vault_root, all_paths)
     store = review_state_module.ReviewStateStore(vault_root)
     state_payload = store.load()
-    state_summary = {"open": 0, "snoozed": 0, "dismissed": 0}
+    state_summary = {state: 0 for state in review_state_module.VALID_STATES}
 
     for item in report.items:
         target_ref = refs[item.path]
@@ -426,6 +427,28 @@ def _apply_review_state(
             today=today,
             payload=state_payload,
         )
+        if effective == "open":
+            # No item-level decision APPLIES (none recorded, or a snooze that has
+            # since lapsed), so a competing-alternatives stance recorded on the
+            # contradiction pair itself still governs. The item-level record is
+            # checked first because it is the more specific decision about this
+            # exact signal composite.
+            # Annotating here also makes a partially-stanced item legible: a reader
+            # sees which reason is already dispositioned, and the `pair_ref` that
+            # addresses it, instead of an ordinary-looking open item.
+            stances = contradiction_stance_module.annotate_reasons(
+                vault_root,
+                item.reasons,
+                store=store,
+                payload=state_payload,
+                refs=refs,
+            )
+            # EVERY conflict on the anchor must be dispositioned before the item is:
+            # one un-stanced rival — a newly drifted pair, say — is still open
+            # review work, so the item honestly reopens.
+            if stances and all(stance is not None for stance in stances.values()):
+                effective = "competing"
+                decision = stances[min(stances)]
         item.item_id = review_id
         item.ref = review_state_module.review_ref(review_id)
         item.target_ref = target_ref

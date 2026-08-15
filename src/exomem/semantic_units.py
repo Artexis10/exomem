@@ -7,6 +7,7 @@ registry mutation, indexing, or model work.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import re
@@ -42,6 +43,27 @@ _RICH_METADATA_RE = re.compile(
 )
 _TASK_LABELS = frozenset({"", " ", "x", "X", "-"})
 _IDENTITY_SCHEMA = "exomem.semantic-unit.identity.v1"
+
+#: The one closed vocabulary for how a claim about the world turned out.
+#:
+#: A unit's ``verdict`` and an experiment page's ``outcome`` draw from this same
+#: set, so a reader never translates between the two altitudes. It is
+#: deliberately categorical: Exomem stores no numeric confidence, credence, or
+#: probability, and a verdict is lifecycle state rather than a score. Refuted is
+#: not superseded — a refuted claim keeps active standing and full rank, because
+#: a negative result is knowledge, not replaced knowledge.
+EPISTEMIC_OUTCOMES: tuple[str, ...] = (
+    "abandoned",
+    "confirmed",
+    "inconclusive",
+    "qualified",
+    "refuted",
+)
+
+#: Governed rich unit-metadata keys this module parses, validates, and projects.
+GOVERNED_UNIT_METADATA_KEYS: tuple[str, ...] = ("verdict", "check_by")
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +150,10 @@ class SemanticUnit:
     unit_ref: str | None = None
     fingerprint: str | None = None
     occurrence: int | None = None
+    # Governed metadata, normalized off `metadata` the same way `tags` and
+    # `context` already are, so no downstream consumer re-parses a raw row.
+    verdict: str | None = None
+    check_by: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tags", tuple(self.tags))
@@ -176,6 +202,16 @@ class SemanticUnit:
             "unit_ref": self.unit_ref,
             "fingerprint": self.fingerprint,
             "occurrence": self.occurrence,
+            # Emitted as null when absent, unlike `structured_filters.unit_view`
+            # and the hit serializers, which omit them. The difference is
+            # deliberate and follows what each shape is for: this is the
+            # complete-unit projection, where every field is always present and
+            # a reader indexes it positionally, so a disappearing key would be
+            # a shape change. The other two are presence-sensitive — `$exists`
+            # has to be able to distinguish "no verdict yet" from any value, and
+            # a hit omits what it has nothing to say about.
+            "verdict": self.verdict,
+            "check_by": self.check_by,
         }
 
     def to_legacy_block_dict(self) -> dict[str, Any] | None:
@@ -530,9 +566,26 @@ def parse_semantic_units(
             path=source_path,
             line_by_number=line_by_number,
         )
+        rich_verdict, verdict_error = _rich_verdict(
+            block,
+            path=source_path,
+            line_by_number=line_by_number,
+        )
+        rich_check_by, check_by_error = _rich_check_by(
+            block,
+            path=source_path,
+            line_by_number=line_by_number,
+        )
         if validate:
             errors.extend(
-                error for error in (tags_error, context_error) if error is not None
+                error
+                for error in (
+                    tags_error,
+                    context_error,
+                    verdict_error,
+                    check_by_error,
+                )
+                if error is not None
             )
         units.append(
             SemanticUnit(
@@ -558,6 +611,8 @@ def parse_semantic_units(
                 title=block.title,
                 level=block.level,
                 body=block.body,
+                verdict=rich_verdict,
+                check_by=rich_check_by,
             )
         )
 
@@ -1134,6 +1189,76 @@ def _rich_context(
             remediation="Use non-empty single-line Unicode context.",
         )
     return context, None
+
+
+def _rich_verdict(
+    block: semantic_blocks.SemanticBlock,
+    *,
+    path: str,
+    line_by_number: dict[int, _SourceLine],
+) -> tuple[str | None, SemanticUnitDiagnostic | None]:
+    """Validate the governed categorical `verdict` row, never a number."""
+    raw = block.metadata.get("verdict")
+    if raw is None:
+        return None, None
+    verdict = unicodedata.normalize("NFKC", raw.strip()).casefold()
+    if verdict not in EPISTEMIC_OUTCOMES:
+        return None, _invalid_rich_metadata(
+            block,
+            key="verdict",
+            path=path,
+            line_by_number=line_by_number,
+            message="invalid rich semantic-unit verdict",
+            remediation=(
+                "Use exactly one of "
+                f"{', '.join(EPISTEMIC_OUTCOMES)}. A verdict is categorical "
+                "lifecycle state; numeric confidence is not a stored field in "
+                "this vault, so a score, probability, or percentage is never a "
+                "valid verdict."
+            ),
+        )
+    return verdict, None
+
+
+def _rich_check_by(
+    block: semantic_blocks.SemanticBlock,
+    *,
+    path: str,
+    line_by_number: dict[int, _SourceLine],
+) -> tuple[str | None, SemanticUnitDiagnostic | None]:
+    """Validate the governed `check_by` row as a strict ISO calendar date."""
+    raw = block.metadata.get("check_by")
+    if raw is None:
+        return None, None
+    value = raw.strip()
+    if _ISO_DATE_RE.fullmatch(value) is None:
+        return None, _invalid_check_by(block, path, line_by_number)
+    try:
+        parsed = dt.date.fromisoformat(value)
+    except ValueError:
+        return None, _invalid_check_by(block, path, line_by_number)
+    if parsed.isoformat() != value:
+        return None, _invalid_check_by(block, path, line_by_number)
+    return value, None
+
+
+def _invalid_check_by(
+    block: semantic_blocks.SemanticBlock,
+    path: str,
+    line_by_number: dict[int, _SourceLine],
+) -> SemanticUnitDiagnostic:
+    return _invalid_rich_metadata(
+        block,
+        key="check_by",
+        path=path,
+        line_by_number=line_by_number,
+        message="invalid rich semantic-unit check_by date",
+        remediation=(
+            "Use one exact ISO calendar date spelled YYYY-MM-DD. A check-by "
+            "date names the day a claim should be revisited, so timestamps and "
+            "abbreviated dates are not accepted."
+        ),
+    )
 
 
 def _invalid_rich_metadata(

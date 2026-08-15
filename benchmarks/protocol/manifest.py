@@ -4,17 +4,28 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from .contracts import (
+    AmendmentAcknowledgmentPendingError,
     ContractIdentityError,
     derive_preregistration_identity,
+    require_amended_families_released,
     validate_preregistration_identity,
+    validate_working_preregistration,
 )
-from .models import BudgetSummary, DatasetIdentity, LaneReadiness, LeakageSummary, RunManifest
+from .models import (
+    BudgetSummary,
+    DatasetIdentity,
+    LaneReadiness,
+    LeakageSummary,
+    PreregistrationLineage,
+    RunManifest,
+)
 from .validity import is_terminal
 
 
@@ -33,14 +44,39 @@ def start_manifest(
     contamination: str | None = None, budget: BudgetSummary | None = None,
     provider_variant: str | None = None, control_config_sha256: str | None = None,
     contract_revision: str | None = None, repo_root: Path | str | None = None,
+    family_ids: Iterable[str] | None = None,
 ) -> RunManifest:
+    """Start a run manifest.
+
+    ``family_ids`` declares the pre-registered scenario families this run will
+    execute.  A run that declares a family introduced by an amendment whose
+    receipt is still unacknowledged is refused here, before any artifact exists
+    — that, and not a blanket identity refusal, is what a pending amendment
+    withholds.  A run that declares nothing, or declares only released families,
+    proceeds normally against the recorded (possibly pending) lineage.
+    """
+
     repository = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[2]
     try:
+        working_sha256 = None
+        if contract_revision is None:
+            working_sha256 = validate_working_preregistration(repository)
         preregistration_identity = derive_preregistration_identity(
             repository, contract_revision=contract_revision
         )
+        if (
+            working_sha256 is not None
+            and working_sha256 != preregistration_identity.effective.sha256
+        ):
+            raise ContractIdentityError(
+                "working pre-registration digest differs from the derived identity"
+            )
     except ContractIdentityError as exc:
         raise ManifestError(f"pre-registration identity refused: {exc}") from exc
+    try:
+        require_amended_families_released(preregistration_identity, family_ids or ())
+    except AmendmentAcknowledgmentPendingError as exc:
+        raise ManifestError(f"pre-registration amendment pending: {exc}") from exc
     path = _path(run_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -53,6 +89,11 @@ def start_manifest(
         leakage=leakage or LeakageSummary(scanned_cases=0, invalidated_cases=0),
         contamination=contamination, budget=budget,
         preregistration_identity=preregistration_identity,
+        preregistration_lineage=(
+            PreregistrationLineage.from_identity(preregistration_identity)
+            if preregistration_identity.amendments
+            else None
+        ),
         provider_variant=provider_variant, control_config_sha256=control_config_sha256,
     )
     path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -125,7 +166,17 @@ def bind_started_manifest_provider(
     return updated
 
 
-def load_manifest(run_dir: Path | str) -> RunManifest:
+def load_manifest(
+    run_dir: Path | str, *, family_ids: Iterable[str] | None = None
+) -> RunManifest:
+    """Load a terminal manifest for reporting.
+
+    ``family_ids`` declares the families a caller is about to read a comparative
+    claim for.  A manifest recorded while an amendment was pending stays
+    readable — the run happened and its identity is intact — but it may not be
+    replayed into a claim about a family that amendment still withholds.
+    """
+
     path = _path(run_dir)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -148,6 +199,12 @@ def load_manifest(run_dir: Path | str) -> RunManifest:
         )
     except ContractIdentityError as exc:
         raise ManifestError(f"pre-registration identity refused: {exc}") from exc
+    try:
+        require_amended_families_released(
+            manifest.preregistration_identity, family_ids or ()
+        )
+    except AmendmentAcknowledgmentPendingError as exc:
+        raise ManifestError(f"pre-registration amendment pending: {exc}") from exc
     if not is_terminal(manifest.status):
         raise ManifestError("non-terminal manifest cannot be used for reports")
     if manifest.status in {"VALID", "READINESS_UNVERIFIABLE"} and _has_direct_lifecycle_artifacts(
@@ -185,7 +242,10 @@ def _validate_lifecycle_artifacts(
     if not expected_instances:
         raise ManifestError("lifecycle expected instances are unavailable")
     try:
-        from lme.providers.lifecycle import LifecycleCompletenessError, validate_lifecycle_completeness
+        from lme.providers.lifecycle import (
+            LifecycleCompletenessError,
+            validate_lifecycle_completeness,
+        )
 
         validate_lifecycle_completeness(
             expected_instances=tuple(expected_instances),

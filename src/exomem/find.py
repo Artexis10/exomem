@@ -1455,6 +1455,8 @@ def _semantic_unit_hit(
         excerpt=_unit_excerpt(unit.content),
         tags=list(unit.tags),
         context=unit.context,
+        verdict=getattr(unit, "verdict", None),
+        check_by=getattr(unit, "check_by", None),
         relations=[relation.to_dict() for relation in unit.relations],
         source_anchor=unit.anchor,
         source_span=_unit_span(unit),

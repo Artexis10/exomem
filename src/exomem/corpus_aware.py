@@ -291,6 +291,25 @@ def _best_cosine_per_file(
         return {}
 
 
+def _declared_pair_filter(vault_root: Path, self_path: str | None):
+    """A candidate-level "already declared a rival pair with `self_path`?" predicate.
+
+    Declared means a recorded competing-alternatives stance, an authored
+    `contradicts` edge between the two pages, or both answering one question. In
+    every case the proximity warning would only repeat what the author typed, and
+    the stance is fingerprint-bound, so editing either rival brings the warning
+    back. A draft with no page identity of its own (`self_path is None`) has no
+    pair to declare, so it warns exactly as before.
+
+    Applied INSIDE each detect loop rather than to the finished list: filtering
+    afterwards would let an exempt rival consume a `top_n` slot, so three declared
+    rivals ranked above a genuine near-duplicate would suppress the real warning.
+    """
+    from . import contradiction_stance
+
+    return contradiction_stance.DeclaredPairFilter(vault_root, self_path)
+
+
 def detect_duplicates(
     vault_root: Path,
     *,
@@ -328,6 +347,7 @@ def detect_duplicates(
     from . import recall_policy
 
     self_canon = _canon(self_path) if self_path else None
+    declared = _declared_pair_filter(vault_root, self_path)
     out: list[DupCandidate] = []
     for fp, score in sorted(best_per_file.items(), key=lambda t: -t[1]):
         if score < threshold:
@@ -341,6 +361,8 @@ def detect_duplicates(
             continue
         if types_filter and page.page_type not in types_filter:
             continue
+        if declared(fp):
+            continue  # already declared rivals — and it must not eat a `top_n` slot
         out.append(DupCandidate(path=fp, title=page.title, cosine=round(float(score), 4)))
         if len(out) >= top_n:
             break
@@ -395,6 +417,7 @@ def detect_contradictions(
     from . import find as find_module
 
     self_canon = _canon(self_path) if self_path else None
+    declared = _declared_pair_filter(vault_root, self_path)
     out: list[DupCandidate] = []
     for fp, score in sorted(best_per_file.items(), key=lambda t: -t[1]):
         if score >= ceiling:
@@ -416,6 +439,8 @@ def detect_contradictions(
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
+        if declared(fp):
+            continue  # already declared rivals — and it must not eat a `top_n` slot
         out.append(DupCandidate(path=fp, title=page.title, cosine=round(float(score), 4)))
         if len(out) >= top_n:
             break

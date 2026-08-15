@@ -18,11 +18,13 @@ from typing import Any
 
 from . import project_keys, semantic_writes, temporal
 from .vault import (
+    EXCLUDED_FIELD_CODE,
     PlannedWrite,
     VaultPathError,
     _format_yaml_line,
     content_hash,
     excluded_frontmatter_reason,
+    governed_frontmatter_reason,
     in_append_only_tree,
     in_curated_tree,
     kb_root,
@@ -124,7 +126,7 @@ def set_frontmatter_field(
         )
     excluded_reason = excluded_frontmatter_reason(field)
     if excluded_reason is not None:
-        raise SetFrontmatterError(code="EXCLUDED_FIELD", reason=excluded_reason)
+        raise SetFrontmatterError(code=EXCLUDED_FIELD_CODE, reason=excluded_reason)
 
     try:
         abs_path, rel_path = resolve_under_vault(
@@ -179,6 +181,10 @@ def set_frontmatter_field(
     date_iso = (
         semantic_writes.reviewed_transition_stamp(semantic_transition_token, now)
         or temporal.stamp(now)
+    )
+
+    value = _governed_enum_value(
+        field, value, page_type=_read_yaml_field(fm_text, "type")
     )
 
     old_value = _read_yaml_field(fm_text, field)
@@ -315,6 +321,23 @@ def _plan_project_keys(
     except FileNotFoundError:
         return ()
     return (PlannedWrite(registry_path, current, guard=guard),)
+
+
+def _governed_enum_value(field: str, value: Any, *, page_type: Any) -> Any:
+    """Return the canonical value, or refuse a governed field written wrongly.
+
+    The policy itself lives in `vault.governed_frontmatter_reason`, beside the
+    excluded-field policy, so this boundary and `create_file` enforce one rule
+    rather than two that can drift. This wrapper adds only the thing a
+    field-setter needs and a creation path does not: normalizing an accepted
+    spelling on the way in, so a file never carries two spellings of one state.
+    """
+    reason = governed_frontmatter_reason(field, value, page_type)
+    if reason is not None:
+        raise SetFrontmatterError(code="INVALID_OUTCOME", reason=reason)
+    if field.strip().casefold() == "outcome":
+        return str(value).strip().casefold()
+    return value
 
 
 def _read_yaml_field(fm_text: str, field: str) -> Any:

@@ -63,6 +63,25 @@ applies. Rich `tags` and `context` are first-class retrieval fields, not merely
 generic metadata. Category, kind, tags, context, and authored relations remain
 independent axes.
 
+Rich units also carry two governed epistemic-loop metadata keys. `check_by` is
+one exact ISO calendar date (`YYYY-MM-DD`) naming the day a claim should be
+revisited; it is filterable as the typed date field `unit.check_by`, so "what is
+due" is an ordered query rather than a scan. `verdict` records how the claim
+turned out — exactly one of `confirmed`, `refuted`, `qualified`, `inconclusive`,
+or `abandoned` — and is filterable as `unit.verdict`. Both appear on unit hits
+when present and are omitted when absent, so an unjudged unit is distinguishable
+from a judged one.
+
+`verdict` is state, not supersession, and not a score. A refuted unit keeps its
+page's active standing and its ordinary rank: nothing replaced it, the question
+simply got an answer, and the negative result stays retrievable with the
+evidence that refuted it. Exomem stores no numeric confidence, so a probability
+or percentage is never a valid `verdict`; the parser rejects one outright. The
+`prediction` governed kind names a unit that is a claim about the future, and
+pairs naturally with both keys. None of this adds a relation kind: attach the
+refuting or confirming material with the governed vocabulary you already have
+and let `verdict:` carry the judgment itself.
+
 Use `observe_memory(operation="add"|"update"|"remove"|"validate")` for one
 unit. Update and remove operations must carry both the current parent
 `content_hash` and the unit fingerprint. Compact observations cannot author

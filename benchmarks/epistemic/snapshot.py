@@ -89,6 +89,16 @@ DECLARABLE_FIELDS: tuple[str, ...] = (
     "locator",
     "external_edit",
     "export",
+    # Added by the 2026-08 loop-closure amendment (§7) for families f15-f19.
+    # Each names a capability the amended families are *about*, so a product
+    # that has no such concept declares it ``absent_by_design`` once and is
+    # scored ``not_applicable`` rather than failing an invariant it never
+    # claimed. Without them the new assertions would have had to gate on an
+    # unrelated field, which is the exact bug ``_gate``'s primary/sibling
+    # asymmetry exists to prevent.
+    "prediction",
+    "verdict",
+    "plan_linkage",
 )
 
 _DECLARATION_STATUS_RE = re.compile(

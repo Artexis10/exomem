@@ -88,6 +88,51 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
 # Governed write paths refuse them so the documented "no confidence floats / no
 # retention decay" stance is actually enforced, not just described.
 EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset({"confidence", "decay_at", "expires_at"})
+EXCLUDED_FIELD_CODE = "EXCLUDED_FIELD"
+
+# The broader `auto_*` exclusion documented in
+# `_scaffold/_Schema/references/frontmatter.md` is deliberately deferred: it is
+# a prefix rule with a different compatibility surface from this exact-name set.
+
+
+def first_excluded_field(names: Iterable[object]) -> tuple[str, str] | None:
+    """Return the first excluded string name and its reason, without raising."""
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        reason = excluded_frontmatter_reason(name)
+        if reason is not None:
+            return name, reason
+    return None
+
+
+def excluded_field_in_collection_frontmatter(
+    frontmatter: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    """First excluded name a collection manifest's frontmatter declares, else None.
+
+    A collection declares item field names on two surfaces, and both must be
+    fenced. `item_schema.fields` is the obvious one. The Markdown-log note field
+    under `storage.item_heading.note.field` is the other: `_validate_values`
+    admits that name as a legal item key *outside* the schema, so an excluded
+    name declared there is fully operable. It is also the more dangerous of the
+    two, because it lives in the immutable storage descriptor — revising it away
+    refuses with IMMUTABLE_COLLECTION_REPRESENTATION, so a manifest that slips
+    past this check can never be repaired.
+    """
+    item_schema = frontmatter.get("item_schema")
+    fields = item_schema.get("fields") if isinstance(item_schema, Mapping) else None
+    if isinstance(fields, Mapping):
+        excluded = first_excluded_field(fields)
+        if excluded is not None:
+            return excluded
+    storage = frontmatter.get("storage")
+    if not isinstance(storage, Mapping) or storage.get("strategy") != "markdown-log":
+        return None
+    heading = storage.get("item_heading")
+    note = heading.get("note") if isinstance(heading, Mapping) else None
+    field = note.get("field") if isinstance(note, Mapping) else None
+    return first_excluded_field((field,)) if isinstance(field, str) else None
 
 
 def excluded_frontmatter_reason(field: str) -> str | None:
@@ -98,6 +143,39 @@ def excluded_frontmatter_reason(field: str) -> str | None:
             "record numeric confidence scores or time-based decay/expiry — trust "
             "is conveyed by citations and link count, and old material is never "
             "auto-decayed (see SKILL.md). Omit this field."
+        )
+    return None
+
+
+def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str | None:
+    """A refusal reason if `field` breaks a governed enum contract, else None.
+
+    This lives beside `excluded_frontmatter_reason` deliberately. `confidence`
+    is refused by that function at every governed write boundary, and
+    `outcome` is its categorical twin — the same doctrine, one step further in.
+    Splitting the two checks across different modules is exactly how one of
+    them ends up enforced on only one boundary while the other is enforced on
+    both, so both policies are stated once, here, and every boundary calls both.
+    """
+    if field.strip().casefold() != "outcome":
+        return None
+    # Deferred: `semantic_units` reaches `semantic_language_registry`, which
+    # imports this module. The vocabulary still has exactly one definition.
+    from .semantic_units import EPISTEMIC_OUTCOMES
+
+    normalized_type = str(page_type or "").strip().casefold()
+    if normalized_type != "experiment":
+        return (
+            "`outcome:` is an experiment-only field; this page has type "
+            f"{normalized_type or 'none'}. Record how a non-experiment "
+            "conclusion turned out with a semantic unit's `verdict:` metadata "
+            "instead."
+        )
+    if not isinstance(value, str) or value.strip().casefold() not in EPISTEMIC_OUTCOMES:
+        return (
+            f"`outcome:` must be exactly one of {', '.join(EPISTEMIC_OUTCOMES)}. "
+            "It is categorical lifecycle state, not a confidence score, so a "
+            "number or a free-text hedge is never valid."
         )
     return None
 
