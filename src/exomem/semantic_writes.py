@@ -9,13 +9,14 @@ import contextvars
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -38,6 +39,8 @@ from . import (
 )
 from .kbdir import kb_prefix
 from .mutation_timings import MutationTimings, mutation_timing_span
+
+log = logging.getLogger(__name__)
 
 # v2 froze the authored *instant* alongside the authored day. v1 tokens are
 # rejected: a token minted before the bump carries no knowledge-time stamp,
@@ -883,9 +886,12 @@ class CreationCommit:
     written_paths: tuple[str, ...]
     contract_result: semantic_contract.SemanticContractResult | None
     creation_commit: relation_review.CreationDraftCommit | None
+    # Advisory only. Absent unless the written page shows recurring durable
+    # material outside its own declared scope; never affects the commit.
+    structure_suggestion: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "applicability": self.applicability,
             "mutated": self.mutated,
             "written_paths": list(self.written_paths),
@@ -896,6 +902,9 @@ class CreationCommit:
                 self.creation_commit.as_dict() if self.creation_commit is not None else None
             ),
         }
+        if self.structure_suggestion is not None:
+            value["structure_suggestion"] = self.structure_suggestion
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -959,6 +968,9 @@ class ExistingCommit:
     index_report: Any | None
     lifecycle_state: str | None
     transition_token: str
+    # Advisory only. Absent unless the written page shows recurring durable
+    # material outside its own declared scope; never affects the commit.
+    structure_suggestion: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -973,6 +985,8 @@ class ExistingCommit:
         }
         if self.index_report is not None:
             value["index"] = self.index_report.as_dict()
+        if self.structure_suggestion is not None:
+            value["structure_suggestion"] = self.structure_suggestion
         return value
 
 
@@ -2086,6 +2100,22 @@ def _revalidate_existing_preflight(
         )
 
 
+def _structure_suggestion(state: Any) -> dict[str, Any] | None:
+    """Measure structural divergence for a committed page. Advisory; never raises.
+
+    Runs only after the guarded write has returned, over the page state the
+    preflight already built, so it adds no I/O and holds no lock. A fault here
+    costs the caller a suggestion, never the write.
+    """
+    try:
+        from . import structure_promotion
+
+        return structure_promotion.suggest_for_state(state)
+    except Exception:  # noqa: BLE001 — structural advice never breaks a commit
+        log.debug("structural promotion analysis failed (non-fatal)", exc_info=True)
+        return None
+
+
 def commit_existing(
     vault_root: Path,
     *,
@@ -2100,12 +2130,16 @@ def commit_existing(
     returned payload changes.
     """
     with _write_metric("exomem_write_commit_ms", str(preflight.operation)):
-        return _commit_existing(
+        committed = _commit_existing(
             vault_root,
             preflight=preflight,
             auxiliary_writes=auxiliary_writes,
             timings=timings,
         )
+    suggestion = _structure_suggestion(preflight.after)
+    if suggestion is None:
+        return committed
+    return replace(committed, structure_suggestion=suggestion)
 
 
 def _commit_existing(
@@ -3398,6 +3432,36 @@ def _prewarm_embeddings() -> None:
 
 
 def commit_creation(
+    vault_root: Path,
+    *,
+    preflight: CreationPreflight,
+    auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+    operation: str,
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
+) -> CreationCommit:
+    """Commit a page creation, then attach advisory structural feedback."""
+    committed = _commit_creation(
+        vault_root,
+        preflight=preflight,
+        auxiliary_writes=auxiliary_writes,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
+        operation=operation,
+        predecessor_path=predecessor_path,
+        predecessor_content_hash=predecessor_content_hash,
+    )
+    suggestion = _structure_suggestion(preflight.semantic_state)
+    if suggestion is None:
+        return committed
+    return replace(committed, structure_suggestion=suggestion)
+
+
+def _commit_creation(
     vault_root: Path,
     *,
     preflight: CreationPreflight,
