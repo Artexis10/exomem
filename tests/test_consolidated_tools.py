@@ -111,6 +111,7 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
         "why",
         "operation",
         "response_detail",
+        "validate_only",
     }
     assert set(schema["required"]) == {"path", "why", "operation"}
     operation = schema["properties"]["operation"]
