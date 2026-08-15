@@ -63,6 +63,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
 def _binding(
     role: str = "progress", matched: int | None = None, reason: str | None = None
 ) -> dict[str, Any]:
+    """Mirror exactly the observed shape `_observe` produces — no aggregate."""
     if reason is not None:
         return {
             "role": role,
@@ -84,7 +85,6 @@ def _binding(
             "matched": matched,
             "returned": matched,
             "truncated": False,
-            "aggregate": None,
         },
     }
 
@@ -376,6 +376,34 @@ def _add_plan(root: Path, item: Mapping[str, Any], plan_id: str | None = None) -
     )["plan_id"]
 
 
+#: Identity order is Gamma < Beta < Alpha. Titles sort the other way, and the
+#: Planning page arrives sorted by title, so identity order, arrival order and
+#: insertion order are three different orders. Any test that asserts identity
+#: order over this trio is non-vacuous.
+_PINNED_IDS = {
+    "Gamma": "11111111-1111-4111-8111-111111111111",
+    "Beta": "22222222-2222-4222-8222-222222222222",
+    "Alpha": "33333333-3333-4333-8333-333333333333",
+}
+
+
+def _seed_pinned_trio(root: Path) -> dict[str, str]:
+    """Seed three items where identity, title and insertion order all disagree.
+
+    identity order  : Gamma(1111), Beta(2222), Alpha(3333)
+    arrival order   : Alpha, Beta, Gamma   (the query sorts by title)
+    insertion order : Beta, Gamma, Alpha   (a third order again)
+    observations along identity order: 0, 6, 3 — non-monotonic, so neither an
+    ascending nor a descending divergence sort reproduces it.
+    """
+    worked = {"collection": RECORDS_REF, "role": "progress", "view": "worked"}
+    shipped = {"collection": RECORDS_REF, "role": "progress", "view": "shipped"}
+    _add_plan(root, _committed("Beta", [worked, dict(worked)]), _PINNED_IDS["Beta"])
+    _add_plan(root, _committed("Gamma", [shipped]), _PINNED_IDS["Gamma"])
+    _add_plan(root, _committed("Alpha", [worked]), _PINNED_IDS["Alpha"])
+    return _PINNED_IDS
+
+
 def _digest(root: Path) -> dict[str, str]:
     return {
         path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -617,20 +645,30 @@ def test_execution_budget_truncates_explicitly(tmp_path: Path) -> None:
     assert result["unavailable"]["budget_exhausted"] == 1
 
 
-def test_item_limit_reports_truncation_without_dropping_the_count(tmp_path: Path) -> None:
+def test_item_limit_truncates_by_identity_not_by_arrival(tmp_path: Path) -> None:
+    """Ordering must happen BEFORE the cap, or the cap becomes a covert ranking.
+
+    If the cap were applied to the arrival page and the survivors ordered
+    afterwards, the retained set would be chosen by the Planning query's title
+    sort. The retained set here distinguishes the two.
+    """
     from exomem import plan_progress
 
-    _build_vault(tmp_path)
-    evidence = [{"collection": RECORDS_REF, "role": "progress", "view": "worked"}]
-    for title in ("First", "Second", "Third"):
-        _add_plan(tmp_path, _committed(title, evidence))
+    _build_vault(tmp_path, worked=3)
+    ids = _seed_pinned_trio(tmp_path)
 
     result = plan_progress.review(tmp_path, limit=2)
 
     assert result["items_matched"] == 3
     assert result["items_reviewed"] == 2
     assert result["truncated"] is True
-    assert len(result["items"]) == 2
+    # Identity order keeps Gamma and Beta. Truncating the arrival page first
+    # would have kept Alpha and Beta instead.
+    assert [item["plan_id"] for item in result["items"]] == [
+        ids["Gamma"],
+        ids["Beta"],
+    ]
+    assert [item["intent"]["title"] for item in result["items"]] == ["Gamma", "Beta"]
 
 
 def test_review_selector_restricts_to_one_planning_collection(tmp_path: Path) -> None:
@@ -829,29 +867,25 @@ def test_returned_sequence_is_identity_ordered_not_divergence_ordered(
     from exomem import plan_progress
 
     _build_vault(tmp_path, worked=3)
-    worked = {"collection": RECORDS_REF, "role": "progress", "view": "worked"}
-    shipped = {"collection": RECORDS_REF, "role": "progress", "view": "shipped"}
-    # Identity order is pinned, and the observation counts along it are 3, 0, 6:
-    # neither ascending nor descending, so any divergence-based ordering moves
-    # at least one item.
-    first = _add_plan(
-        tmp_path, _committed("First", [worked]), "11111111-1111-4111-8111-111111111111"
-    )
-    second = _add_plan(
-        tmp_path, _committed("Second", [shipped]), "22222222-2222-4222-8222-222222222222"
-    )
-    third = _add_plan(
-        tmp_path,
-        _committed("Third", [worked, dict(worked)]),
-        "33333333-3333-4333-8333-333333333333",
-    )
+    ids = _seed_pinned_trio(tmp_path)
 
     result = plan_progress.review(tmp_path)
 
-    assert [item["plan_id"] for item in result["items"]] == [first, second, third]
+    # Titles descend while identity ascends: a no-op ordering would return the
+    # rows in arrival (title) order and fail here.
+    assert [item["intent"]["title"] for item in result["items"]] == [
+        "Gamma",
+        "Beta",
+        "Alpha",
+    ]
+    assert [item["plan_id"] for item in result["items"]] == [
+        ids["Gamma"],
+        ids["Beta"],
+        ids["Alpha"],
+    ]
     assert [
         item["divergence"]["progress_observations"] for item in result["items"]
-    ] == [3, 0, 6]
+    ] == [0, 6, 3]
 
 
 def test_review_leaves_the_vault_byte_identical(tmp_path: Path) -> None:
@@ -1159,29 +1193,44 @@ def test_plan_progress_round_trips_over_rest(
 
 
 def test_attention_mode_is_unaffected_by_plan_progress(tmp_path: Path) -> None:
-    """Divergence never enters the ranked Inbox."""
+    """Divergence never enters the ranked Inbox.
+
+    The queue is seeded with a real `unprocessed_source` finding first: against
+    an empty queue every exclusion assertion below would pass over nothing and
+    would keep passing even if attention DID anchor on Planning items.
+    """
     from exomem import commands
 
     _build_vault(tmp_path)
     _add_plan(
         tmp_path,
         _committed(
-            "Ship the thing",
+            "Diverging outcome",
             [{"collection": RECORDS_REF, "role": "completion", "view": "shipped"}],
         ),
+    )
+    source = tmp_path / "Knowledge Base" / "Sources" / "Observed Elsewhere.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "---\ntype: source\ntitle: Observed elsewhere\ncaptured: 2025-01-01\n---\n\n"
+        "Raw captured material that nothing has compiled yet.\n",
+        encoding="utf-8",
     )
 
     attention = commands.op_review_memory(tmp_path, mode="attention")
 
+    # Non-vacuity guard: the queue really does surface something.
+    assert attention["total"] >= 1
+    assert attention["summary"] == {"unprocessed_source": 1}
+    # ...and what it surfaces is exactly the source, never the diverging plan.
+    assert [item["path"] for item in attention["items"]] == [
+        "Knowledge Base/Sources/Observed Elsewhere.md"
+    ]
     serialized = str(attention)
     assert "exomem://plan/" not in serialized
     assert "plan-progress" not in serialized
     assert "divergence" not in serialized
-    assert not [
-        item
-        for item in attention.get("items", [])
-        if "Planning" in str(item.get("path", ""))
-    ]
+    assert "Diverging outcome" not in serialized
 
 
 def test_invalid_review_mode_names_plan_progress(tmp_path: Path) -> None:
