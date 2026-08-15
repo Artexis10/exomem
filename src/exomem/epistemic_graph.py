@@ -436,6 +436,11 @@ def _await_publication_hold(key: str) -> None:
     replacement likely, never to make reads unavailable. A reader that outlasts
     the window is handled by the in-place publication path instead.
     """
+    if not _SIDECAR_PUBLICATION_HOLDS:
+        # The overwhelmingly common case, and this is the hot graph read path:
+        # no publication is holding anything, so do not even take the lock.
+        # Linux never takes a hold at all (`_reader_cycling_enabled`).
+        return
     deadline = time.monotonic() + PUBLICATION_READER_OPEN_WAIT_SECONDS
     with _SIDECAR_READERS_CHANGED:
         while key in _SIDECAR_PUBLICATION_HOLDS:
