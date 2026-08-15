@@ -2979,7 +2979,7 @@ def test_coordination_status_includes_content_free_mutation_boundary(tmp_path: P
     vault = tmp_path / "private-vault"
     vault.mkdir()
 
-    assert manager.status(vault)["mutation_boundary"] == {"state": "free"}
+    assert manager.status(vault)["mutation_boundary"]["state"] == "free"
     with manager.mutation_guard(
         vault,
         request_id="req-health",
@@ -3007,7 +3007,7 @@ def test_coordination_status_measures_only_the_requested_vault(tmp_path: Path) -
         operation="remember",
         holder_kind="command",
     ):
-        assert manager.status(vault_b)["mutation_boundary"] == {"state": "free"}
+        assert manager.status(vault_b)["mutation_boundary"]["state"] == "free"
         boundary = manager.status(vault_a)["mutation_boundary"]
         assert boundary["state"] == "held"
         assert boundary["request_id"] == "req-vault-a"

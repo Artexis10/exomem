@@ -21,18 +21,112 @@ def _instance_id() -> str | None:
     return None
 
 
-def _public_mutation_boundary(value: object) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or value.get("state") != "held":
-        return {"state": "free"}
+_SAFE_READINESS_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
+def _safe_readiness_label(value: object, *, fallback: str) -> str:
+    candidate = str(value or "").strip()
+    return candidate if _SAFE_READINESS_LABEL.fullmatch(candidate) else fallback
+
+
+def _non_negative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _public_last_holder(value: object) -> dict[str, Any] | None:
+    """Project the last-known holder into content-free, allowlisted fields."""
+    if not isinstance(value, Mapping):
+        return None
+    pid = value.get("pid")
+    observed_at = value.get("observed_at")
+    source = value.get("source")
     return {
-        "state": "held",
-        "request_id": str(value.get("request_id") or "untracked"),
-        "operation": str(value.get("operation") or "unknown"),
-        "holder_kind": str(value.get("holder_kind") or "unknown"),
-        "age_seconds": float(value.get("age_seconds") or 0.0),
-        "overdue": bool(value.get("overdue")),
-        "verified": bool(value.get("verified")),
+        "pid": pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+        "request_id": _safe_readiness_label(
+            value.get("request_id"), fallback="untracked"
+        ),
+        "operation": _safe_readiness_label(value.get("operation"), fallback="unknown"),
+        "holder_kind": _safe_readiness_label(
+            value.get("holder_kind"), fallback="unknown"
+        ),
+        "observed_at": float(observed_at)
+        if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool)
+        else 0.0,
+        "source": source if source in {"refusal", "release"} else "unknown",
     }
+
+
+def _public_contention(value: object) -> dict[str, Any] | None:
+    """Project the boundary's contention counters, dropping anything unmodelled.
+
+    The flag alone cannot show a bounded waiter starving against a stream of
+    short holds — every one-shot probe lands in a gap.  These counters can, so
+    they ride along with every boundary state.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    window = value.get("recent_window_seconds")
+    return {
+        "acquire_attempts": _non_negative_int(value.get("acquire_attempts")),
+        "busy_refusals": _non_negative_int(value.get("busy_refusals")),
+        "busy_refusals_recent": _non_negative_int(value.get("busy_refusals_recent")),
+        "recent_window_seconds": float(window)
+        if isinstance(window, (int, float)) and not isinstance(window, bool)
+        else 0.0,
+        # Stated, not implied: the counters describe this process only, so a
+        # zero refusal count is not evidence that the boundary is uncontended.
+        "scope": "process_local",
+        "last_holder": _public_last_holder(value.get("last_holder")),
+    }
+
+
+def _public_mutation_boundary(value: object) -> dict[str, Any]:
+    """Project the coordination boundary into three honest public states.
+
+    - `free`: a probe ran and verified the boundary is not held.
+    - `held`: a probe found a holder; the bounded, content-free holder block
+      rides along (`verified` distinguishes a confirmed holder from one read
+      without the metadata mutex).
+    - `unknown`: this process could not determine the boundary's state, with a
+      `reason` naming why (`process_local_only` when no vault identity was
+      configured so only this process's own holds were visible,
+      `status_error` when the coordination probe itself failed,
+      `unavailable` when no boundary block was reported at all).
+
+    A missing or unrecognised block is `unknown`, never `free`.  "We did not
+    measure" and "we measured free" are different claims, and publishing the
+    first as the second is what let `/health/ready` report a free boundary
+    while live writes were being refused MUTATION_BUSY by a real concurrent
+    holder in another process.
+    """
+    if not isinstance(value, Mapping):
+        return {"state": "unknown", "reason": "unavailable"}
+    state = value.get("state")
+    if state == "held":
+        public: dict[str, Any] = {
+            "state": "held",
+            "request_id": str(value.get("request_id") or "untracked"),
+            "operation": str(value.get("operation") or "unknown"),
+            "holder_kind": str(value.get("holder_kind") or "unknown"),
+            "age_seconds": float(value.get("age_seconds") or 0.0),
+            "overdue": bool(value.get("overdue")),
+            "verified": bool(value.get("verified")),
+        }
+    elif state == "free":
+        public = {"state": "free"}
+    else:
+        public = {
+            "state": "unknown",
+            "reason": _safe_readiness_label(
+                value.get("reason"), fallback="unspecified"
+            ),
+        }
+    contention = _public_contention(value.get("contention"))
+    if contention is not None:
+        public["contention"] = contention
+    return public
 
 
 def _public_graph_sync(value: object) -> dict[str, Any] | None:
@@ -189,7 +283,16 @@ def runtime_readiness(*, mcp_tool_surface_sha256: str | None) -> dict[str, Any]:
 
     try:
         configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
-        configured_vault = Path(configured_raw) if configured_raw else None
+        # Only an absolute path names a boundary this process can probe. A
+        # relative one resolves against whatever the service's cwd happens to
+        # be, so it would measure some other boundary and publish that as this
+        # vault's state; that is a blind "free", which is the failure being
+        # fixed here. Fall through to the process-local `unknown` instead.
+        configured_vault = (
+            Path(configured_raw)
+            if configured_raw and Path(configured_raw).is_absolute()
+            else None
+        )
         coordination = coordination_status(configured_vault)
     except Exception:  # noqa: BLE001 - readiness must return structured 503 state
         coordination = {
@@ -197,6 +300,9 @@ def runtime_readiness(*, mcp_tool_surface_sha256: str | None) -> dict[str, Any]:
             "role": "unknown",
             "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
             "coordinator_healthy": False,
+            # The probe failed; the boundary was not measured. Saying "free"
+            # here is what made MUTATION_LOCK_UNAVAILABLE read as healthy.
+            "mutation_boundary": {"state": "unknown", "reason": "status_error"},
         }
     return build_runtime_readiness(
         coordination=coordination,

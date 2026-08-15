@@ -39,7 +39,9 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
             "enabled": False,
             "role": "standalone",
             "coordinator_healthy": True,
-            "mutation_boundary": {"state": "free"},
+            # No boundary was measured, so readiness must not claim one is
+            # free — see tests/test_readiness_honesty.py.
+            "mutation_boundary": {"state": "unknown", "reason": "unavailable"},
         },
         "session_store": {"state": "ok", "stale_served_count": 0},
         "observability": {
@@ -103,7 +105,7 @@ def test_healthy_coordinated_follower_is_takeover_eligible() -> None:
         "enabled": True,
         "role": "follower",
         "coordinator_healthy": True,
-        "mutation_boundary": {"state": "free"},
+        "mutation_boundary": {"state": "unknown", "reason": "unavailable"},
     }
     rendered = repr(snapshot).lower()
     assert "must-not-leak" not in rendered

@@ -20,7 +20,8 @@ import stat
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -42,6 +43,13 @@ _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _DEFAULT_LONG_HOLDER_SECONDS = 30.0
 _STATUS_TIMEOUT_SECONDS = 0.25
 _HOLDER_SCHEMA = 1
+# Contention attribution window.  A boundary flag can never explain a stream of
+# short holds starving a bounded waiter: every one-shot probe lands in a gap and
+# reads "free" while acquires are really being refused.  Counters and a
+# last-known holder can, so they are kept per boundary and surfaced alongside
+# the flag.
+_CONTENTION_RECENT_WINDOW_SECONDS = 60.0
+_CONTENTION_RECENT_SAMPLES = 128
 _WINDOWS_DACL_STABILIZATION_SECONDS = 0.25
 _WINDOWS_DACL_STABILIZATION_POLL_SECONDS = 0.01
 
@@ -1434,10 +1442,95 @@ class _LocalLockState:
     acquired_at: float | None = None
     long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS
     long_warning_emitted: bool = False
+    # Contention attribution.  These are *measurement only* — nothing in the
+    # acquire path reads them, so no fairness or timeout behaviour depends on
+    # them.  They are deliberately maintained without taking any new lock:
+    # `int` increments and `deque.append` are cheap, and losing a count under
+    # extreme thread contention degrades a diagnostic rather than a decision.
+    # They are also strictly PROCESS-LOCAL: a second exomem process holding the
+    # same OS boundary contributes nothing here, which is why the published
+    # block carries `scope: "process_local"`.
+    acquire_attempts: int = 0
+    busy_refusals: int = 0
+    busy_refusal_times: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_CONTENTION_RECENT_SAMPLES)
+    )
+    last_holder: dict[str, object] | None = None
 
 
 _LOCAL_STATES: dict[Path, _LocalLockState] = {}
 _LOCAL_STATES_GUARD = threading.Lock()
+
+
+def _note_acquire_attempt(state: _LocalLockState) -> None:
+    """Count one `hold()` entry, including re-entrant ones (they never contend).
+
+    No lock: this is a diagnostic counter, and taking one would add an
+    acquisition to the hot path the counter exists to measure.
+    """
+    state.acquire_attempts += 1
+
+
+def _note_busy_refusal(
+    state: _LocalLockState, snapshot: Mapping[str, object] | None
+) -> None:
+    """Record one MUTATION_BUSY refusal and whatever holder it could observe.
+
+    A refusal that observes no holder (the starvation case: the boundary was
+    free at the instant of the probe, yet the bounded acquire still lost) still
+    increments the counters; `last_holder` keeps the previous observation
+    because it is the *last known* holder, not the currently-observed one.
+    """
+    now = time.time()
+    state.busy_refusals += 1
+    state.busy_refusal_times.append(now)
+    if snapshot is not None and snapshot.get("state") == "held":
+        state.last_holder = {
+            # A refusal can observe another process's holder, whose pid this
+            # process never learns; the sidecar record is content-free labels.
+            "pid": None,
+            "request_id": _safe_label(snapshot.get("request_id"), fallback="untracked"),
+            "operation": _safe_label(snapshot.get("operation"), fallback="unknown"),
+            "holder_kind": _safe_label(snapshot.get("holder_kind"), fallback="unknown"),
+            "observed_at": now,
+            "source": "refusal",
+        }
+
+
+def _note_release(
+    state: _LocalLockState,
+    *,
+    request_id: str | None,
+    operation: str | None,
+    holder_kind: str | None,
+) -> None:
+    """Record the hold this process just released as the last-known holder."""
+    state.last_holder = {
+        "pid": os.getpid(),
+        "request_id": _safe_label(request_id, fallback="untracked"),
+        "operation": _safe_label(operation, fallback="unknown"),
+        "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+        "observed_at": time.time(),
+        "source": "release",
+    }
+
+
+def _contention_view(state: _LocalLockState) -> dict[str, object]:
+    """Project the process-local contention counters into a content-free block."""
+    horizon = time.time() - _CONTENTION_RECENT_WINDOW_SECONDS
+    recent = sum(1 for at in tuple(state.busy_refusal_times) if at >= horizon)
+    last_holder = state.last_holder
+    return {
+        "acquire_attempts": state.acquire_attempts,
+        "busy_refusals": state.busy_refusals,
+        "busy_refusals_recent": recent,
+        "recent_window_seconds": _CONTENTION_RECENT_WINDOW_SECONDS,
+        # Cross-process caveat: these counts describe this process only.  A
+        # concurrent writer in another process is invisible here, so a zero
+        # refusal count is not evidence that the boundary is uncontended.
+        "scope": "process_local",
+        "last_holder": dict(last_holder) if last_holder is not None else None,
+    }
 
 
 def _state_for(lock_path: Path) -> _LocalLockState:
@@ -1519,11 +1612,10 @@ class VaultMutationCoordinator:
         _LAST_MUTATION_TIMING.set(None)
         deadline = wait_start + timeout
         state = _state_for(self.lock_path)
+        _note_acquire_attempt(state)
         remaining = max(0.0, deadline - time.monotonic())
         if not state.guard.acquire(timeout=remaining):
-            raise _mutation_busy(
-                self.snapshot(), wait_ms=(time.monotonic() - wait_start) * 1000
-            )
+            raise self._refused(wait_start)
         try:
             thread_id = threading.get_ident()
             if state.owner_thread == thread_id:
@@ -1578,6 +1670,11 @@ class VaultMutationCoordinator:
                 )
                 with state.metadata_guard:
                     already_warned = state.long_warning_emitted
+                    # Read the labels under the guard this path already holds;
+                    # the attribution itself is published after release.
+                    released_request_id = state.request_id
+                    released_operation = state.operation
+                    released_holder_kind = state.holder_kind
                     state.request_id = None
                     state.operation = None
                     state.holder_kind = None
@@ -1594,6 +1691,15 @@ class VaultMutationCoordinator:
                 finally:
                     handle.close()
                     metadata_handle.close()
+                # Contention attribution AFTER release, for the same reason the
+                # telemetry below is: measurement must never extend the
+                # critical section other writers are polling on.
+                _note_release(
+                    state,
+                    request_id=released_request_id,
+                    operation=released_operation,
+                    holder_kind=released_holder_kind,
+                )
                 # Telemetry AFTER release, so log appends never extend the
                 # critical section other writers are polling on. Guaranteed on
                 # release, regardless of whether anyone ever probed this hold
@@ -1628,8 +1734,27 @@ class VaultMutationCoordinator:
             state.guard.release()
 
     def snapshot(self) -> dict[str, object]:
-        """Measure this vault's OS boundary without exposing identity or content."""
+        """Measure this vault's OS boundary without exposing identity or content.
+
+        The returned block always carries an additive, content-free
+        `contention` sub-block.  The `state` flag is one instantaneous probe;
+        the counters are the only part of this payload that can show a bounded
+        waiter losing to a stream of short holds.
+        """
         state = _state_for(self.lock_path)
+        probed = self._probe(state)
+        probed["contention"] = _contention_view(state)
+        return probed
+
+    def _refused(self, wait_start: float) -> OpError:
+        """Record one refusal, then build MUTATION_BUSY from that same probe."""
+        state = _state_for(self.lock_path)
+        probed = self._probe(state)
+        _note_busy_refusal(state, probed)
+        probed["contention"] = _contention_view(state)
+        return _mutation_busy(probed, wait_ms=(time.monotonic() - wait_start) * 1000)
+
+    def _probe(self, state: _LocalLockState) -> dict[str, object]:
         local = _snapshot_state(state, emit_warning=True)
         if local["state"] == "held":
             return local
@@ -1729,9 +1854,7 @@ class VaultMutationCoordinator:
             except OSError as exc:
                 raise self._lock_unavailable(exc) from None
             if not metadata_locked:
-                raise _mutation_busy(
-                    self.snapshot(), wait_ms=(time.monotonic() - wait_start) * 1000
-                )
+                raise self._refused(wait_start)
             acquired = False
             try:
                 try:
@@ -1767,9 +1890,7 @@ class VaultMutationCoordinator:
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise _mutation_busy(
-                    self.snapshot(), wait_ms=(time.monotonic() - wait_start) * 1000
-                )
+                raise self._refused(wait_start)
             time.sleep(min(self.poll_interval_seconds, remaining))
 
     def _publish_holder_metadata(self, holder: dict[str, object]) -> None:
@@ -2035,6 +2156,21 @@ def active_mutation_snapshot() -> dict[str, object]:
     )
 
 
+def process_local_mutation_boundary() -> dict[str, object]:
+    """Report the process-local view honestly: a local hold, or `unknown`.
+
+    `active_mutation_snapshot()` walks this process's own lock states only, so
+    its "free" means "nobody *here* holds a boundary" — it cannot see another
+    process's hold, and reporting that absence as a verified `free` is exactly
+    how readiness came to contradict live MUTATION_BUSY refusals.  A local hold
+    is real and stays `held`; anything else is `unknown`.
+    """
+    local = active_mutation_snapshot()
+    if local.get("state") == "held":
+        return local
+    return {"state": "unknown", "reason": "process_local_only"}
+
+
 def dynamic_retry_after_ms(snapshot: dict[str, object] | None) -> int:
     """Scale the retry hint with observed contention instead of a fixed 750ms.
 
@@ -2060,8 +2196,21 @@ def _mutation_busy(
     }
     if wait_ms is not None:
         details["wait_ms"] = round(wait_ms, 2)
+    contention = snapshot.get("contention") if snapshot else None
     if snapshot and snapshot.get("state") == "held":
-        details["holder"] = snapshot
+        # The holder block keeps exactly the keys it always had; the
+        # attribution fields are added alongside it, not inside it.
+        details["holder"] = {
+            key: value for key, value in snapshot.items() if key != "contention"
+        }
+    if isinstance(contention, Mapping):
+        details["acquire_attempts"] = contention.get("acquire_attempts")
+        details["busy_refusals"] = contention.get("busy_refusals")
+        details["busy_refusals_recent"] = contention.get("busy_refusals_recent")
+        details["contention_scope"] = contention.get("scope")
+        last_holder = contention.get("last_holder")
+        if last_holder is not None:
+            details["last_holder"] = last_holder
     _bump_boundary_metric("exomem_mutation_busy_total", {"code": "MUTATION_BUSY"})
     return OpError(
         "MUTATION_BUSY",
