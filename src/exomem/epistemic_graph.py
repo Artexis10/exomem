@@ -399,9 +399,7 @@ _SIDECAR_READERS_CHANGED = threading.Condition(_SIDECAR_READERS_LOCK)
 # Weak references only: a registry that pinned its connections would keep the
 # very file handles alive that make a Windows replacement impossible, and a
 # reader leaked on an exception path would never be collected.
-_SIDECAR_READERS: dict[
-    str, dict[int, tuple["weakref.ref[sqlite3.Connection]", int]]
-] = {}
+_SIDECAR_READERS: dict[str, dict[int, tuple[weakref.ref[sqlite3.Connection], int]]] = {}
 _SIDECAR_PUBLICATION_HOLDS: set[str] = set()
 
 PUBLICATION_READER_DRAIN_SECONDS = 1.0
