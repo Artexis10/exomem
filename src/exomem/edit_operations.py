@@ -8,6 +8,7 @@ the existing edit leaf see one stable payload regardless of compatibility shape.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -143,7 +144,17 @@ LEGACY_EDIT_FIELDS = frozenset(
     }
 )
 
-_TOP_LEVEL_EDIT_FIELDS = frozenset({"path", "why", "operation", "response_detail"})
+_TOP_LEVEL_EDIT_FIELDS = frozenset(
+    {"path", "why", "operation", "response_detail", "validate_only"}
+)
+
+#: `validate_only` is a modifier every operation kind carries, not a mode
+#: selector. `remember`, `note` and `replace_memory` all expose it at the top
+#: level, so an agent generalising from edit's own siblings sends it there —
+#: and used to get a hard `cannot combine nested operation with legacy flat
+#: fields` for a request that was never ambiguous. It is accepted in both
+#: positions and folded into the operation.
+_SHARED_EDIT_MODIFIERS = frozenset({"validate_only"})
 
 
 def _inline_schema_references(value: Any, definitions: dict[str, Any]) -> Any:
@@ -251,6 +262,13 @@ def _resolve_edit_operation(
             "INVALID_EDIT: unknown top-level field(s): " + ", ".join(sorted(unknown))
         )
 
+    # Taken out before the mode analysis below: a shared modifier selects no mode,
+    # so it must not make a call look "legacy", and it must not collide with a
+    # nested `operation` that is otherwise complete.
+    modifiers = {
+        name: raw.pop(name) for name in sorted(set(raw) & _SHARED_EDIT_MODIFIERS)
+    }
+
     has_operation = "operation" in raw
     legacy_names = sorted(set(raw) & LEGACY_EDIT_FIELDS)
     if has_operation and legacy_names:
@@ -261,8 +279,21 @@ def _resolve_edit_operation(
 
     if has_operation:
         operation_input = raw.pop("operation")
+        if modifiers and isinstance(operation_input, Mapping):
+            conflicting = sorted(
+                name
+                for name, value in modifiers.items()
+                if operation_input.get(name, value) != value
+            )
+            if conflicting:
+                raise ValueError(
+                    "INVALID_EDIT: conflicting values for " + ", ".join(conflicting)
+                    + "; give it once, at the top level or inside `operation`"
+                )
+            operation_input = {**operation_input, **modifiers}
     else:
         legacy = {name: raw.pop(name) for name in legacy_names}
+        legacy.update(modifiers)
         operation_input = _legacy_operation(legacy)
 
     operation = _validate_operation(operation_input)
