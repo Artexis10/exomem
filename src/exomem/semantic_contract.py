@@ -2750,6 +2750,27 @@ def _qualifying_body_wikilink_targets(
     return tuple(targets)
 
 
+def review_identity_is_current(
+    review: RelationReviewState,
+    page: SemanticPageState,
+    corpus: SemanticCorpusContext,
+) -> bool:
+    """Whether the review still describes THIS page, ignoring its content.
+
+    Split out from `is_relation_review_current` so a caller can distinguish the
+    two reasons a review stops being current. Contested stable identity — a
+    second path claiming the same `exomem_id`, e.g. a sync-conflict copy — means
+    the review may not describe this page at all, and is the bypass the census
+    exists to prevent. That is categorically different from the page's own
+    content having changed, and must never be treated as recoverable.
+    """
+    return (
+        page.identity_kind == "exomem_id"
+        and review.page_identity == page.identity
+        and corpus.identity_census.paths_by_identity.get(page.identity) == (page.path,)
+    )
+
+
 def is_relation_review_current(
     review: RelationReviewState,
     page: SemanticPageState,
@@ -2757,9 +2778,7 @@ def is_relation_review_current(
 ) -> bool:
     """Return whether stable identity and exact review fingerprint are current."""
     return (
-        page.identity_kind == "exomem_id"
-        and review.page_identity == page.identity
-        and corpus.identity_census.paths_by_identity.get(page.identity) == (page.path,)
+        review_identity_is_current(review, page, corpus)
         and page.review_fingerprint is not None
         and review.content_fingerprint == page.review_fingerprint
     )
@@ -2840,6 +2859,37 @@ def _relation_disposition(
             qualifying_signal="connectivity",
         )
     if review_is_current and review is not None and review.kind == "reviewed_none":
+        return RelationDisposition(
+            "reviewed_none",
+            True,
+            True,
+            rejected_facts=tuple(rejected),
+            review_reason=review.reason,
+            review_reference=review.reference,
+        )
+    if (
+        review is not None
+        and review.kind == "reviewed_none"
+        and not review_is_current
+        and review_identity_is_current(review, page, corpus)
+        and not other_governed
+    ):
+        # Renewable ONLY because the identity check above still holds: the review
+        # provably describes this page, and the sole thing that drifted is its
+        # content fingerprint. A review that went non-current through contested
+        # stable identity is a different matter entirely and stays stale.
+        #
+        # The review's content fingerprint moved, but its SUBJECT did not: with
+        # no other governed page in the corpus there is nothing a qualifying
+        # typed relation could point at, so "reviewed none" is not merely the
+        # easier answer, it is the only available one. Without this, every edit
+        # to the page re-fires RELATION_DISPOSITION_STALE — the fingerprint
+        # changes on any content change — and each append costs three tool calls
+        # (blocked, validate_only, commit-with-tokens) to re-assert a fact that
+        # cannot have changed. Worse, the remediation steers toward
+        # `reviewed_none`, which succeeds and leaves the cause in place, so the
+        # loop never terminates. A fresh Knowledge Base hits this by
+        # construction: its first note has no peer to relate to.
         return RelationDisposition(
             "reviewed_none",
             True,
@@ -3209,17 +3259,29 @@ def _disposition_finding(
         path=page.path,
         span=None,
         detail=_disposition_detail(page, disposition),
+        # The two branches are NOT equivalent, and presenting them as equals
+        # trained agents to always take the second one: `reviewed_none` reliably
+        # succeeds and reliably leaves the cause in place, so the next edit
+        # blocks again at three tool calls apiece, forever. Lead with the fix
+        # that actually resolves it and say plainly what the fallback costs.
+        # Kept terse deliberately. Findings share a bounded response budget, and
+        # a wordier draft of this string pushed omitted contract results from 1
+        # to 17 in the 120 KB directory-review validation. The size guard in
+        # test_disposition_remediation_is_route_neutral is the ceiling to
+        # respect when editing it.
         remediation=(
             (
-                "Add a qualifying typed relation, or validate_only=true; re-issue "
-                "the same edit with transition_token=<returned>, "
+                "Fix: add a qualifying typed relation. Retriggers: "
+                "validate_only=true; re-issue the same edit with "
+                "transition_token=<returned>, "
                 "relation_disposition=\"reviewed_none\", "
                 "relation_review_hash=<returned>, "
                 "relation_review_reason."
             )
             if existing
             else (
-                "Add a qualifying typed relation, or call validate_only=true, then "
+                "Fix: add a qualifying typed relation. Retriggers: "
+                "call validate_only=true, then "
                 "re-issue the same creation unchanged with draft_id=<returned draft_id>, "
                 "draft_hash=<returned draft_hash>, draft_token=<returned "
                 "draft_token>, relation_disposition=\"reviewed_none\", "

@@ -138,7 +138,12 @@ arbitrary page.
 Product mutations default to a compact committed terminal containing `ok`,
 `status`, `mutated`, `path` or `paths`, `request_id`, `receipt_id`, and
 `warnings_count`; a supported caller-supplied idempotency key is echoed as
-`idempotency_key`. `response_detail="full"` adds the existing leaf result under
+`idempotency_key`. A write that warned also returns `warnings`, bounded to 8
+entries of 300 characters each; `warnings_count` stays authoritative, so a
+shorter list means the remainder was trimmed. Upload receipts carry their
+warnings as per-file rows under `files`, and a terminal rebuilt from a portable
+receipt reports only the count, since that receipt retains no leaf content.
+`response_detail="full"` adds the existing leaf result under
 `diagnostics`. `response_detail="legacy"` returns that old raw leaf result and
 is retained for at least one compatibility release. The response-detail choice
 is removed before mutation identity is calculated, so it cannot create a second

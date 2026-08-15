@@ -40,7 +40,78 @@ def test_compact_projection_leads_with_decisive_commit_fields() -> None:
         "receipt_id": "receipt-1",
         "idempotency_key": "public-key",
         "warnings_count": 1,
+        "warnings": ["review a link"],
     }
+
+
+def test_compact_warnings_are_bounded_in_count_and_length() -> None:
+    """`warnings_count` stays authoritative when the texts are trimmed.
+
+    A bulk `delete_directory` or `adopt` emits one warning per path, so this is
+    the only unbounded free text compact could carry. The count tells a caller
+    that entries were dropped; `detail="full"` returns the rest.
+    """
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {"warnings": [f"warning {index} " + "x" * 400 for index in range(12)]},
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["warnings_count"] == 12
+    assert len(compact["warnings"]) == 8
+    assert all(len(warning) <= 300 for warning in compact["warnings"])
+    assert compact["warnings"][0].startswith("warning 0 ")
+
+
+def test_compact_omits_warnings_when_the_leaf_did_not_warn() -> None:
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {"path": "Knowledge Base/Notes/quiet.md"},
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["warnings_count"] == 0
+    assert "warnings" not in compact
+
+
+def test_compact_does_not_repeat_artifact_receipt_warnings_at_the_top_level() -> None:
+    """Artifact warnings are already per-file rows; listing them twice is noise."""
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {
+            "files": [
+                {
+                    "file_id": "f1",
+                    "outcome": "stored",
+                    "stored_path": "Knowledge Base/_attachments/a.pdf",
+                    "size": 10,
+                    "hash": "a" * 64,
+                    "hash_algorithm": "sha256",
+                    "content_type": "application/pdf",
+                    "media_id": None,
+                    "warnings": ["text layer missing"],
+                }
+            ],
+            "summary": {"stored": 1, "failed": 0},
+        },
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
+    )
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["warnings_count"] == 1
+    assert compact["files"][0]["warnings"] == ["text layer missing"]
+    assert "warnings" not in compact
 
 
 def test_compact_terminal_retains_completed_graph_sync_fields() -> None:

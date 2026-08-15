@@ -96,7 +96,15 @@ def test_existing_remediation_names_only_existing_edit_fields():
         assert token not in text
     assert "transition_token=<returned>" in text
     assert "relation_review_hash=<returned>" in text
-    assert len(text.encode("utf-8")) <= 220
+    # Raised from 220 by exactly the bytes that let the remediation say which
+    # branch is the fix and which one comes back ("Fix: ... Retriggers: ...").
+    # Presented as equals, an agent always picked the branch that reliably
+    # succeeds and reliably leaves the cause in place (#483). This is a
+    # don't-grow-unbounded guard, not a measured wire limit — where length
+    # genuinely bites is the 120 KB directory-review budget, covered by
+    # test_directory_review_validation_does_not_truncate_actionable_pages,
+    # which this string clears.
+    assert len(text.encode("utf-8")) <= 224
 
 
 def test_creation_remediation_keeps_the_creation_draft_fields():
