@@ -35,10 +35,12 @@ from . import (
 )
 from . import vault as vault_module
 from .vault import (
+    EXCLUDED_FIELD_CODE,
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
-    excluded_frontmatter_reason,
+    first_excluded_field,
+    governed_frontmatter_reason,
     in_append_only_tree,
     in_curated_tree,
     kb_root,
@@ -99,10 +101,15 @@ def create_file(
     | semantic_writes.ExistingPreflight
 ):
     if frontmatter:
+        excluded = first_excluded_field(frontmatter)
+        if excluded is not None:
+            _field, reason = excluded
+            raise CreateFileError(code=EXCLUDED_FIELD_CODE, reason=reason)
+        page_type = frontmatter.get("type")
         for key in frontmatter:
-            reason = excluded_frontmatter_reason(str(key))
-            if reason is not None:
-                raise CreateFileError(code="EXCLUDED_FIELD", reason=reason)
+            governed = governed_frontmatter_reason(str(key), frontmatter[key], page_type)
+            if governed is not None:
+                raise CreateFileError(code="INVALID_OUTCOME", reason=governed)
 
     try:
         abs_path, rel_path = resolve_under_vault(
@@ -227,6 +234,17 @@ def create_file(
         full_text = f"---\n{fm_block}\n---\n{body}"
     else:
         full_text = content
+
+    if is_markdown:
+        parsed_frontmatter, _, _ = vault_module.parse_frontmatter(full_text)
+        excluded = first_excluded_field(parsed_frontmatter)
+        if excluded is None and parsed_frontmatter.get("type") == "collection":
+            excluded = vault_module.excluded_field_in_collection_frontmatter(
+                parsed_frontmatter
+            )
+        if excluded is not None:
+            _field, reason = excluded
+            raise CreateFileError(code=EXCLUDED_FIELD_CODE, reason=reason)
 
     if existing_file and overwrite and is_markdown and existing_text is not None:
         _guard_tier2_stable_identity(existing_text, full_text)

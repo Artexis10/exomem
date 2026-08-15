@@ -286,7 +286,11 @@ def test_j3_weekly_review_live_green(tmp_path: Path) -> None:
     names = {c.name for c in result.checks}
     assert "stale queue surfaces exactly the planted dormant conclusion" in names
     assert "unprocessed queue surfaces exactly the planted raw sources" in names
-    assert "contradiction queue honestly unsupported in the lexical profile" in names
+    assert "contradiction queue surfaces exactly the planted authored pair" in names
+    assert "contradiction row names both endpoints of the planted pair" in names
+    assert (
+        "contradiction proximity lane declared unsupported, not scored zero" in names
+    )
     assert "attention queue covers every surfaceable open loop" in names
     assert "triage burden equals the scripted op count" in names
 
@@ -307,5 +311,11 @@ def test_j3_weekly_review_live_green(tmp_path: Path) -> None:
     contradiction = next(
         q for q in report["queue_scores"] if q["mode"] == "contradiction"
     )
-    assert contradiction["supported"] is False  # embeddings-gated sweep
-    assert contradiction["recall"] is None  # unsupported is never zero
+    # The asserted (authored-edge) lane is deterministic and runs without
+    # embeddings, so it is measured; the proximity lane is still gated and must
+    # stay declared-unsupported rather than folded into that recall.
+    assert contradiction["supported"] is True
+    assert contradiction["recall"] == 1.0
+    assert contradiction["unsupported_lanes"] == ["proximity"]
+    # One row per pair, anchored on the lower path — not one row per endpoint.
+    assert len(contradiction["expected"]) == 1

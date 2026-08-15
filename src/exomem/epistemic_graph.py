@@ -172,6 +172,20 @@ class RelationFilterResult:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class RelationEdgeResult:
+    """Outcome of a typed-edge endpoint lookup.
+
+    `edges` are `(source_page, destination_page)` as stored, in source order — a
+    symmetric relation is still one row, so callers normalize. `status` carries the
+    same never-false-empty contract as `RelationFilterResult`.
+    """
+
+    status: str
+    edges: tuple[tuple[str, str], ...] = ()
+    reason: str | None = None
+
+
 def graph_enabled() -> bool:
     return os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX", "").strip().lower() not in {
         "1",
@@ -2567,6 +2581,81 @@ class EpistemicGraphIndex:
         return RelationFilterResult(
             status="available", paths=frozenset(paths), provenance=provenance
         )
+
+    def relation_edges(self, keys: Iterable[str]) -> RelationEdgeResult:
+        """Every typed edge whose canonical `relation_type` or `parent_relation` is
+        in `keys`, resolved to its two page endpoints, in ONE query.
+
+        `relation_participants` cannot answer "which page is joined to which": its
+        `provenance` keeps only the best counterpart per page, so a caller needing
+        every pair had to re-issue an anchored lookup per participating page — and
+        an anchored lookup runs the SAME unnarrowed `relation_type IN (...)` query
+        (narrowing happens in Python afterwards), so that fan-out costs
+        O(pages x edges) and one read snapshot per page. This is the single-query
+        form for callers that want the whole edge set.
+
+        Endpoint resolution is identical: block-level endpoints resolve to their
+        owning page through the INNER JOIN (which also drops unresolved
+        placeholders), self-edges drop out, and both endpoints must pass the recall
+        policy. Status mirrors the exact-recall reliability contract — "available"
+        is authoritative (an empty `edges` is a real "no such edges"), "warming"
+        means the sidecar is missing or stale, "temporarily_unavailable" means the
+        graph index is disabled. It never scans the corpus and never false-empties.
+        """
+        key_set = {str(k) for k in keys if k}
+        if not key_set:
+            return RelationEdgeResult(status="available")
+        if not graph_enabled():
+            return RelationEdgeResult(
+                status="temporarily_unavailable", reason="graph_index_disabled"
+            )
+        if not self.path.exists():
+            return RelationEdgeResult(status="warming")
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return RelationEdgeResult(status="warming")
+        select = (
+            "SELECT s.path, d.path, e.rowid "
+            "FROM graph_edges e "
+            "JOIN graph_nodes s ON s.node_key = e.src_key "
+            "JOIN graph_nodes d ON d.node_key = e.dst_key "
+        )
+        placeholders = ",".join("?" for _ in key_set)
+        params = list(key_set)
+        try:
+            # Two indexed lookups UNIONed, exactly as `relation_participants` does —
+            # an OR across relation_type/parent_relation would defeat both indexes.
+            rows = conn.execute(
+                f"{select} WHERE e.relation_type IN ({placeholders}) "
+                f"UNION {select} WHERE e.parent_relation IN ({placeholders}) "
+                "ORDER BY 3",
+                params + params,
+            ).fetchall()
+        except sqlite3.Error:
+            return RelationEdgeResult(status="warming")
+        finally:
+            conn.close()
+
+        allowed_paths: dict[str, bool] = {}
+
+        def _path_allowed(rel_path: str) -> bool:
+            allowed = allowed_paths.get(rel_path)
+            if allowed is None:
+                allowed = _recall_path_allowed(self.vault_root, rel_path)
+                allowed_paths[rel_path] = allowed
+            return allowed
+
+        edges: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for src_path, dst_path, _rowid in rows:
+            edge = (str(src_path), str(dst_path))
+            if edge[0] == edge[1] or edge in seen:
+                continue
+            if not _path_allowed(edge[0]) or not _path_allowed(edge[1]):
+                continue
+            seen.add(edge)
+            edges.append(edge)
+        return RelationEdgeResult(status="available", edges=tuple(edges))
 
 
 def graph_context(

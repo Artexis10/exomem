@@ -22,8 +22,10 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
+from protocol.contracts import AmendmentAcknowledgmentPendingError
 from pydantic import Field, ValidationError, model_validator
 
+from .amendments import require_family_released
 from .assertions import AssertionContext, AssertionResult
 from .catastrophic import CATASTROPHIC_ASSERTIONS
 from .registry import (
@@ -171,6 +173,17 @@ def _validate_names(scenario: Scenario, source: str) -> None:
             f"{source}: family_id {scenario.family_id!r} is not in the pre-registered "
             "§1 family table"
         )
+
+    # Pre-registered is not released. A family introduced by an amendment whose
+    # receipt is still pending may not be run, scored, or claimed — and this is
+    # the choke point that makes that unbypassable, because nothing downstream
+    # can obtain a Scenario for such a family at all. Before f15-f19 were
+    # registered the check above refused them incidentally; the receipt refuses
+    # them on purpose now.
+    try:
+        require_family_released(scenario.family_id)
+    except AmendmentAcknowledgmentPendingError as error:
+        raise ScenarioLoadError(f"{source}: {error}") from error
 
     unknown = [
         expectation.assertion

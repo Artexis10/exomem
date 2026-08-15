@@ -597,6 +597,7 @@ def test_edit_memory_rest_and_openapi_use_discriminated_primary_shape(
         "why",
         "operation",
         "response_detail",
+        "validate_only",
     }
     assert set(schema["required"]) == {"path", "why", "operation"}
     assert schema["additionalProperties"] is False

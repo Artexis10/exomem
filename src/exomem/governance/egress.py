@@ -469,6 +469,8 @@ _UNIT_FIELDS: frozenset[str] = frozenset(
         "excerpt",
         "tags",
         "context",
+        "verdict",
+        "check_by",
         "relations",
         "source_anchor",
         "source_span",

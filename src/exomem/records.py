@@ -146,6 +146,7 @@ def append_record(
     """Append one structured item, or return a content-identical replay."""
     root = Path(vault_root)
     _validate_why(why)
+    _refuse_excluded_authored_names(item)
     supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("append")
@@ -349,6 +350,7 @@ def update_record(
         raise collections.CollectionError(
             "INVALID_RECORD_CHANGES", "changes must be a non-empty object"
         )
+    _refuse_excluded_authored_names(changes)
     with writer_lease.active_manager().mutation_guard(root, operation="record_update"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         if refresh_presentation and manifest.record_presentation is None:
@@ -923,6 +925,7 @@ def _validate_revision_manifest(
     if not isinstance(manifest_text, str) or not manifest_text:
         raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest text is required")
     proposed = collections.parse_manifest_bytes(root, root / current.path, manifest_text.encode("utf-8"))
+    _refuse_excluded_manifest_fields(proposed)
     if proposed.view_diagnostics:
         diagnostic = proposed.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
@@ -1089,6 +1092,7 @@ def _preflight_collection_create(
             "CREATE_ONLY_CONFLICT", "collection manifest already exists"
         )
     manifest = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
+    _refuse_excluded_manifest_fields(manifest)
     if manifest.view_diagnostics:
         diagnostic = manifest.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
@@ -2015,6 +2019,33 @@ def _log_note_field(manifest: collections.CollectionManifest) -> str | None:
     note = heading.get("note") if isinstance(heading, Mapping) else None
     field = note.get("field") if isinstance(note, Mapping) else None
     return field if isinstance(field, str) else None
+
+
+def _refuse_excluded_authored_names(names: object) -> None:
+    if not isinstance(names, Mapping):
+        return
+    excluded = vault.first_excluded_field(names)
+    if excluded is None:
+        return
+    field, reason = excluded
+    raise collections.CollectionError(
+        vault.EXCLUDED_FIELD_CODE, reason, details={"field": field}
+    )
+
+
+def _refuse_excluded_manifest_fields(
+    manifest: collections.CollectionManifest,
+) -> None:
+    excluded = vault.first_excluded_field(manifest.schema.fields)
+    note_field = _log_note_field(manifest)
+    if excluded is None and note_field is not None:
+        excluded = vault.first_excluded_field((note_field,))
+    if excluded is None:
+        return
+    field, reason = excluded
+    raise collections.CollectionError(
+        vault.EXCLUDED_FIELD_CODE, reason, details={"field": field}
+    )
 
 
 def _validate_representable(value: Any) -> None:

@@ -13,15 +13,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .contracts import PreregistrationIdentity
 from .version import (
-    BUDGET_LEDGER_SCHEMA_VERSION, CASE_GOLD_SCHEMA_VERSION, CASE_TRACE_SCHEMA_VERSION,
-    CASE_TRACE_V2_SCHEMA_VERSION, PROVIDER_CLEANUP_OBSERVATION_SCHEMA_VERSION,
-    EQUIVALENCE_DIFF_SCHEMA_VERSION, EQUIVALENCE_EXCEPTION_SCHEMA_VERSION,
-    GAP_REPORT_SCHEMA_VERSION, PROBE_RESULT_SCHEMA_VERSION, PROTOCOL_EVENT_SCHEMA_VERSION,
-    PROTOCOL_VERSION, READINESS_REPORT_SCHEMA_VERSION, RUN_MANIFEST_SCHEMA_VERSION,
-    MEMORYBENCH_RUN_PLAN_SCHEMA_VERSION, MEMORYBENCH_EXPORT_SCHEMA_VERSION,
-    MEMORYBENCH_PRIVATE_GOLD_SCHEMA_VERSION, GUEST_CLEANUP_PLAN_SCHEMA_VERSION,
+    BUDGET_LEDGER_SCHEMA_VERSION,
+    CASE_GOLD_SCHEMA_VERSION,
+    CASE_TRACE_SCHEMA_VERSION,
+    CASE_TRACE_V2_SCHEMA_VERSION,
+    EQUIVALENCE_DIFF_SCHEMA_VERSION,
+    EQUIVALENCE_EXCEPTION_SCHEMA_VERSION,
+    GAP_REPORT_SCHEMA_VERSION,
+    GUEST_CLEANUP_PLAN_SCHEMA_VERSION,
     GUEST_CLEANUP_SCHEMA_VERSION,
     LME_SELECTION_SCHEMA_VERSION,
+    MEMORYBENCH_EXPORT_SCHEMA_VERSION,
+    MEMORYBENCH_PRIVATE_GOLD_SCHEMA_VERSION,
+    MEMORYBENCH_RUN_PLAN_SCHEMA_VERSION,
+    PROBE_RESULT_SCHEMA_VERSION,
+    PROTOCOL_EVENT_SCHEMA_VERSION,
+    PROTOCOL_VERSION,
+    PROVIDER_CLEANUP_OBSERVATION_SCHEMA_VERSION,
+    READINESS_REPORT_SCHEMA_VERSION,
+    RUN_MANIFEST_SCHEMA_VERSION,
 )
 
 
@@ -61,7 +71,7 @@ class LmeSelectionSource(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def _source_totals(self) -> "LmeSelectionSource":
+    def _source_totals(self) -> LmeSelectionSource:
         if sum(self.type_census.values()) != self.row_count:
             raise ValueError("type census must total row count")
         return self
@@ -79,7 +89,7 @@ class LmeSelection(StrictModel):
     target_question_ids: list[str]
 
     @model_validator(mode="after")
-    def _closed_canonical_profile(self) -> "LmeSelection":
+    def _closed_canonical_profile(self) -> LmeSelection:
         question_types = [
             "single-session-user", "single-session-assistant", "single-session-preference",
             "multi-session", "temporal-reasoning", "knowledge-update",
@@ -181,6 +191,34 @@ class BudgetSummary(StrictModel):
 
 
 ManifestStatus = Literal["started", "VALID", "INVALID", "READINESS_UNVERIFIABLE", "ABORTED_BUDGET", "BLOCKED"]
+Sha256Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class PreregistrationLineage(StrictModel):
+    """Additive manifest projection of the ordered amendment receipt chain."""
+
+    base_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    amendment_receipt_sha256s: tuple[Sha256Digest, ...] = Field(min_length=1)
+    effective_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("amendment_receipt_sha256s")
+    @classmethod
+    def _receipt_identities_are_sha256s(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(re.fullmatch(r"[0-9a-f]{64}", item) is None for item in value):
+            raise ValueError("amendment receipt identities must be sha256 digests")
+        return value
+
+    @classmethod
+    def from_identity(cls, identity: PreregistrationIdentity) -> PreregistrationLineage:
+        if not identity.amendments:
+            raise ValueError("base-only identity has no amendment lineage")
+        return cls(
+            base_sha256=identity.original.sha256,
+            amendment_receipt_sha256s=tuple(
+                amendment.receipt.receipt_sha256 for amendment in identity.amendments
+            ),
+            effective_sha256=identity.effective.sha256,
+        )
 
 
 class RunManifest(StrictModel):
@@ -203,6 +241,25 @@ class RunManifest(StrictModel):
     provider_variant: str | None = None
     control_config_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     preregistration_identity: PreregistrationIdentity
+    preregistration_lineage: PreregistrationLineage | None = None
+
+    @model_validator(mode="after")
+    def _lineage_matches_identity(self) -> RunManifest:
+        if self.preregistration_lineage is None:
+            if self.preregistration_identity.amendments:
+                raise ValueError("amended preregistration requires manifest lineage")
+            return self
+        expected = PreregistrationLineage.from_identity(self.preregistration_identity)
+        if self.preregistration_lineage.base_sha256 != expected.base_sha256:
+            raise ValueError("preregistration lineage base does not match typed identity")
+        if (
+            self.preregistration_lineage.amendment_receipt_sha256s
+            != expected.amendment_receipt_sha256s
+        ):
+            raise ValueError("preregistration lineage receipt order does not match typed identity")
+        if self.preregistration_lineage.effective_sha256 != expected.effective_sha256:
+            raise ValueError("preregistration lineage effective sha does not match typed identity")
+        return self
 
 
 class IngestRecord(StrictModel):
@@ -409,7 +466,7 @@ class ProviderCleanupObservation(StrictModel):
         return _require_sorted_unique(value, "required_surface_ids")
 
     @model_validator(mode="after")
-    def _observation_kinds_unique(self) -> "ProviderCleanupObservation":
+    def _observation_kinds_unique(self) -> ProviderCleanupObservation:
         keys = [
             (item.kind, getattr(item, "path", getattr(item, "expected_namespace", "")))
             for item in self.observations
@@ -540,8 +597,8 @@ def _require_sorted_unique(values: list[str], field: str) -> list[str]:
 
 
 def _require_sorted_unique_references(
-    values: list["ArtifactReference"], field: str
-) -> list["ArtifactReference"]:
+    values: list[ArtifactReference], field: str
+) -> list[ArtifactReference]:
     keys = [(value.root, value.path, value.path_hmac_sha256, value.sha256) for value in values]
     if keys != sorted(set(keys)):
         raise ValueError(f"{field} must be sorted and unique")
@@ -579,7 +636,7 @@ class MemoryBenchSelection(StrictModel):
     target_question_ids: list[str] | None
 
     @model_validator(mode="after")
-    def _closed_union(self) -> "MemoryBenchSelection":
+    def _closed_union(self) -> MemoryBenchSelection:
         if self.mode == "full":
             if self.target_question_ids is not None:
                 raise ValueError("full selection requires null target question IDs")
@@ -622,7 +679,7 @@ class MemoryBenchRunPlan(StrictModel):
         return _absolute_normalized(value, info.field_name)
 
     @model_validator(mode="after")
-    def _roots_are_distinct_and_contained(self) -> "MemoryBenchRunPlan":
+    def _roots_are_distinct_and_contained(self) -> MemoryBenchRunPlan:
         output = Path(self.output_root)
         work = Path(self.guest_work_root)
         evidence = Path(self.guest_evidence_root)
@@ -659,7 +716,7 @@ class ArtifactReference(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def _root_path_union(self) -> "ArtifactReference":
+    def _root_path_union(self) -> ArtifactReference:
         if self.root == "output":
             if self.path is None or self.path_hmac_sha256 is not None:
                 raise ValueError("output references require path and null path HMAC")
@@ -679,7 +736,7 @@ class MemoryBenchPhase(StrictModel):
     failure_code: ExportFailureCode | None
 
     @model_validator(mode="after")
-    def _failure_code_matches_status(self) -> "MemoryBenchPhase":
+    def _failure_code_matches_status(self) -> MemoryBenchPhase:
         if (self.status == "failed") != (self.failure_code is not None):
             raise ValueError("phase failure code contradicts phase status")
         return self
@@ -846,7 +903,7 @@ class MemoryBenchExport(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def _status_recomputes(self) -> "MemoryBenchExport":
+    def _status_recomputes(self) -> MemoryBenchExport:
         ordinals = [case.case_ordinal for case in self.cases]
         if ordinals != sorted(set(ordinals)):
             raise ValueError("cases must have unique ascending ordinals")
@@ -885,7 +942,7 @@ class MemoryBenchPrivateGold(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def _null_matrix(self) -> "MemoryBenchPrivateGold":
+    def _null_matrix(self) -> MemoryBenchPrivateGold:
         missing = "gold.answer_session_ids" in self.missing_fields
         if (self.answer_session_ids is None) != missing:
             raise ValueError("answer-session null/missing matrix is contradictory")
@@ -932,7 +989,7 @@ class GuestCleanupPlan(StrictModel):
         return _absolute_normalized(value, info.field_name)
 
     @model_validator(mode="after")
-    def _targets_canonical(self) -> "GuestCleanupPlan":
+    def _targets_canonical(self) -> GuestCleanupPlan:
         digests = [target.container_tag_hmac_sha256 for target in self.targets]
         if digests != sorted(set(digests)):
             raise ValueError("cleanup targets must be digest-sorted and unique")
@@ -967,7 +1024,7 @@ class GuestCleanupTargetProof(StrictModel):
         return _require_sorted_unique_references(value, "artifacts")
 
     @model_validator(mode="after")
-    def _outcome_failure_matrix(self) -> "GuestCleanupTargetProof":
+    def _outcome_failure_matrix(self) -> GuestCleanupTargetProof:
         failed = self.outcome in {"clear_failed", "absence_unproved"}
         if failed != (self.failure_code is not None):
             raise ValueError("cleanup outcome contradicts failure code")
@@ -1007,7 +1064,7 @@ class GuestCleanup(StrictModel):
         return _require_sorted_unique(value, "failure_codes")
 
     @model_validator(mode="after")
-    def _recompute_absence(self) -> "GuestCleanup":
+    def _recompute_absence(self) -> GuestCleanup:
         digests = [target.container_tag_hmac_sha256 for target in self.targets]
         if digests != sorted(set(digests)):
             raise ValueError("cleanup proof targets must be digest-sorted and unique")
