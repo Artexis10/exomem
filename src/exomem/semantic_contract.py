@@ -99,7 +99,14 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
 
 log = logging.getLogger(__name__)
 _REVIEW_FINGERPRINT_UNSET = object()
-_IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts"})
+# Trash is exempt, non-canonical content per the semantic-authoring contract
+# (mirrors `_SEMANTIC_UNIT_EXEMPT_PARTS`'s "_trash"/"trash" pair): a deleted
+# page's frontmatter must never be able to block a live governed write. Prune
+# it at the KB root so it is never census input at all, rather than adding a
+# tolerate-unparseable-pages path — that stays fail-closed for every
+# CANONICAL directory, which is where an unreadable/malformed page is still
+# a real signal worth refusing to vouch for (#545).
+_IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts", "_trash", "trash"})
 
 
 def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
