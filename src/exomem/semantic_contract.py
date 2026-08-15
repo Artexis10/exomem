@@ -1942,6 +1942,37 @@ def build_corpus_context(
     Candidate-bearing builds always take the uncached path.
     ``EXOMEM_DISABLE_CORPUS_CACHE=1`` restores the always-rebuild behavior.
     """
+    context, _census = build_corpus_context_with_census(
+        vault_root,
+        candidate=candidate,
+        registry=registry,
+        language_registry=language_registry,
+    )
+    return context
+
+
+def build_corpus_context_with_census(
+    vault_root: Path,
+    *,
+    candidate: SemanticPageState | None = None,
+    registry: relation_registry.RelationRegistry | None = None,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+) -> tuple[SemanticCorpusContext, tuple | None]:
+    """``build_corpus_context`` plus the exact census that validated it.
+
+    Identical corpus/cache mechanics to ``build_corpus_context`` (that
+    function is a thin wrapper over this one) — the only difference is a
+    second return so a caller about to compute ``corpus_validity_token`` can
+    reuse the census this call already walked instead of paying for another
+    one. The census is ``None`` whenever no single walk unambiguously matches
+    the returned context: candidate-bearing builds, a disabled cache, a
+    registry that does not match disk, a cold build whose post-publish
+    reconciliation never stabilized, or an in-flight-dedup waiter (it only
+    confirmed its own pre-wait walk matched the flight it is chasing, not
+    whatever the owning build's stabilization loop settles on or gives up on
+    afterward). A caller that gets ``None`` here has no cheaper option than
+    its own fresh walk — same as before this existed.
+    """
     root = Path(vault_root)
     relation_definitions = registry or relation_registry.load_registry(root)
     language = language_registry or semantic_language_registry.load_registry(root)
@@ -1974,7 +2005,7 @@ def build_corpus_context(
                     "semantic corpus context event-hit pages=%d",
                     len(event_entry[1].pages),
                 )
-                return event_entry[1]
+                return event_entry[1], event_entry[0]
         # This walk's meaning is only settled by the branch it lands in, and
         # every one of those branches decides while a cache lock is held. So
         # the disposition is recorded in place and emitted by `_census_walk_log`
@@ -2007,12 +2038,12 @@ def build_corpus_context(
                                 census_ms,
                             )
                             walk[1] = "hit"
-                            return entry[1]
+                            return entry[1], entry[0]
                     if entry is not None and entry[0] == census:
                         with _CORPUS_CONTEXT_CACHE_LOCK:
                             if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
                                 walk[1] = "hit"
-                                return entry[1]
+                                return entry[1], entry[0]
                 if entry is not None:
                     changed_paths = _markdown_census_delta(entry[0], census)
                     if changed_paths is not None:
@@ -2045,10 +2076,10 @@ def build_corpus_context(
                                         census_ms,
                                     )
                                     walk[1] = "patch"
-                                    return context
+                                    return context, census
                                 if current is not None and current is not entry:
                                     walk[1] = "hit"
-                                    return current[1]
+                                    return current[1], current[0]
             else:
                 census = None
 
@@ -2079,7 +2110,7 @@ def build_corpus_context(
             )
             flight.done.wait()
             if not same_inputs:
-                return build_corpus_context(
+                return build_corpus_context_with_census(
                     root,
                     candidate=candidate,
                     registry=registry,
@@ -2088,7 +2119,13 @@ def build_corpus_context(
             if flight.error is not None:
                 raise flight.error
             assert flight.result is not None
-            return flight.result
+            # Not `census`: that is this WAITER's own pre-wait walk, pinned
+            # only to confirm it is chasing the same flight (`same_inputs`
+            # above). The owner's stabilization loop can still reconcile
+            # `flight.result` to a different final census after that check,
+            # or give up entirely -- either way this waiter has no census
+            # that is honestly known to match the context it is returning.
+            return flight.result, None
 
     try:
         started = time.perf_counter()
@@ -2177,7 +2214,7 @@ def build_corpus_context(
             if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
                 del _CORPUS_CONTEXT_FLIGHTS[cache_key]
         flight.done.set()
-    return context
+    return context, (census if stored else None)
 
 
 def _build_corpus_context_uncached(

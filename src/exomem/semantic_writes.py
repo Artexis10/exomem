@@ -1680,7 +1680,7 @@ def _preflight_existing(
         _write_metric("exomem_write_corpus_context_ms", str(operation)),
         mutation_timing_span(timings, "preflight.corpus_context"),
     ):
-        before_corpus = semantic_contract.build_corpus_context(
+        before_corpus, before_corpus_census = semantic_contract.build_corpus_context_with_census(
             root, registry=registry, language_registry=language
         )
     resolver_freshness_after = freshness.triple(root, "vault")
@@ -1826,7 +1826,9 @@ def _preflight_existing(
             language_registry=language,
         )
     with mutation_timing_span(timings, "preflight.validity_token"):
-        census_token = _capture_validity_stamp(root, entry_generation)
+        census_token = _capture_validity_stamp(
+            root, entry_generation, corpus_census=before_corpus_census
+        )
     return ExistingPreflight(
         applicability,
         operation,
@@ -3205,11 +3207,19 @@ def _evaluate_structural(
 ) -> tuple[
     semantic_contract.SemanticContractResult,
     semantic_contract.SemanticPageState,
+    tuple | None,
 ]:
+    """Returns ``(result, state, corpus_census)``.
+
+    ``corpus_census`` is the exact census that validated the ``before`` corpus
+    context this evaluation just built, for a preflight caller to thread
+    straight into ``_capture_validity_stamp`` without paying for a second
+    walk; see ``semantic_contract.build_corpus_context_with_census``.
+    """
     registry = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     contracts = memory_schema.load_saved_contracts(root)
-    before = semantic_contract.build_corpus_context(
+    before, before_census = semantic_contract.build_corpus_context_with_census(
         root, registry=registry, language_registry=language
     )
     candidate = semantic_contract.build_page_state(
@@ -3239,6 +3249,7 @@ def _evaluate_structural(
             language_registry=language,
         ),
         candidate,
+        before_census,
     )
 
 
@@ -3276,7 +3287,9 @@ def preflight_creation(
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
     entry_generation = _entry_commit_generation(root)
-    result, state = _evaluate_structural(root, destination=path, source=source, operation=operation)
+    result, state, corpus_census = _evaluate_structural(
+        root, destination=path, source=source, operation=operation
+    )
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
@@ -3291,7 +3304,9 @@ def preflight_creation(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        census_token = _capture_validity_stamp(root, entry_generation)
+        census_token = _capture_validity_stamp(
+            root, entry_generation, corpus_census=corpus_census
+        )
         return CreationPreflight(
             "full",
             path,
@@ -3309,7 +3324,7 @@ def preflight_creation(
         if state.page_type is not None or semantic_contract.compiled_intent(state)
         else "not_semantic"
     )
-    census_token = _capture_validity_stamp(root, entry_generation)
+    census_token = _capture_validity_stamp(root, entry_generation, corpus_census=corpus_census)
     return CreationPreflight(
         applicability, path, source, draft_id, draft_token, False, result, None, state, census_token
     )
@@ -3324,19 +3339,35 @@ def _entry_commit_generation(root: Path):  # noqa: ANN201 - int | None
     return read_commit_generation(root)
 
 
-def _capture_validity_stamp(root: Path, entry_generation) -> tuple | None:  # noqa: ANN001
+def _capture_validity_stamp(
+    root: Path,
+    entry_generation,  # noqa: ANN001
+    *,
+    corpus_census: tuple | None = None,
+) -> tuple | None:
     """Assemble the preflight validity stamp WITHOUT a second corpus walk.
 
-    The corpus census is reused from the cache entry the validation's own
-    ``build_corpus_context`` call just walked/validated; only the cheap
-    review-artifact census is computed here. The stamp pairs that with the
-    entry commit-generation; the in-boundary admission check is then
+    Pass ``corpus_census`` when the caller's own ``build_corpus_context_with_census``
+    call already walked/validated one — this is the direct plumbing from the
+    corpus context the preflight just built, and it never depends on the
+    global process cache still holding that entry (a cold build that could not
+    cache, a candidate build, or a concurrent eviction between the build and
+    this capture would otherwise all fall through to a second walk). Omitting
+    it falls back to ``cached_corpus_census`` for a caller that has no corpus
+    context in hand. Either way, only the cheap review-artifact census is
+    computed here. The stamp pairs the result with the entry commit-generation;
+    the in-boundary admission check is then
     ``semantic_contract.validity_stamp_current`` — O(sidecars), no walk.
     """
     if entry_generation is None:
         return None
     sc_token = semantic_contract.corpus_validity_token(
-        root, corpus_census=semantic_contract.cached_corpus_census(root)
+        root,
+        corpus_census=(
+            corpus_census
+            if corpus_census is not None
+            else semantic_contract.cached_corpus_census(root)
+        ),
     )
     if sc_token is None:
         return None
@@ -3451,7 +3482,7 @@ def commit_creation(
             commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, _fresh_state = _evaluate_structural(
+            contract_result, _fresh_state, _fresh_census = _evaluate_structural(
                 root,
                 destination=preflight.destination,
                 source=preflight.source,
