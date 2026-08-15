@@ -62,9 +62,19 @@
 - [x] 8.3 Record the moved MCP discovery digest as the ChatGPT Personal Plugin pending attestation, keep the rollout state awaiting refresh, and report the moved fingerprint as release-blocking.
 - [x] 8.4 Re-render the derived hosted compatibility descriptor and both platform locks for the v1 and v2 candidates, verify the descriptor diff is confined to `observe_memory`'s three added arguments, and confirm every package archive stays byte-identical.
 - [x] 8.5 Update the three moved entries in the v1 release-identity fixture and record the reasoning for moving a frozen candidate's derived identity in `design.md`.
+- [x] 8.6 Re-render the `claude-connector` and `claude-plugin` directory packets, which embed the tool schemas and the descriptor digests; leave `openai-plugin` alone because it was already stale on `origin/main`.
+- [x] 8.7 Repoint the kind-mapping fairness evidence, whose line-number citations into `page-types.md` the scaffold teaching shifted.
 
-## 9. Targeted Verification
+## 9. Review Corrections
 
-- [x] 9.1 Run the new tests plus the adjacent semantic language, write contract, observe memory, unit recall, structured filter, note, audit, connector guardrail, and scaffold leak suites.
-- [x] 9.2 Run the four-way shard containing the changed tests, because a global vocabulary change can break distant tests.
-- [x] 9.3 Lint every changed file and validate the change strictly.
+- [x] 9.1 Scope the tool help's preservation claim to the governed keys plus unowned rows and state replace-on-omit for `tags`, `context`, and `relations`, because the help is digested into the shipped surface and the unscoped claim asserted the opposite of the behaviour. Pin both halves against the generated schema.
+- [x] 9.2 Enforce the `outcome` enum at the creation frontmatter boundary as well, so the no-stored-confidence doctrine is not defended for `confidence` and abandoned for its categorical twin. Put the policy beside `excluded_frontmatter_reason` so the two boundaries cannot drift, and test both routes.
+- [x] 9.3 Make the compact-conversion refusal name only exits the caller can actually take, and test the clause three ways including the remediation's own path.
+- [x] 9.4 Record why `to_dict` emits null where the presence-sensitive serializers omit, and stop calling key-normalized preservation "verbatim".
+
+## 10. Targeted Verification
+
+- [x] 10.1 Run the new tests plus the adjacent semantic language, write contract, observe memory, unit recall, structured filter, note, audit, connector guardrail, and scaffold leak suites.
+- [x] 10.2 Run **all four** shard groups against the final tree, not one. Both tests this change calls its load-bearing assertions live in groups 2 and 3, so a group-1-only run would claim coverage it did not provide.
+- [x] 10.3 Confirm any residual shard failure reproduces on unmodified `origin/main` before attributing it elsewhere.
+- [x] 10.4 Lint every changed file and validate the change strictly.
