@@ -32,6 +32,15 @@ scope it, and `limit` to cap reviewed items.
 It measures and stops there. It never writes `health`, never mutates a plan or
 a record, and never computes a score, ratio, percentage, or ranking — items are
 ordered by identity, and divergence is a block of exact integers left to your
-judgment. An evidence target that is missing, withheld, wrong-profile, or names
-an unknown view reports a bounded reason instead of a number, and missing and
-withheld targets are deliberately indistinguishable.
+judgment. It reports counts, never rows: a bound view's declared aggregate is
+withheld entirely, because `latest:` returns a whole record with its identity,
+`distinct:`/`group:` return record values, and `avg:` returns a mean. The
+matched count is the same under every aggregate, so nothing is lost.
+
+An evidence target that is missing, withheld, wrong-profile, or names an
+unknown view reports a bounded reason instead of a number. Missing and withheld
+targets are deliberately indistinguishable, so the review cannot be used to
+probe for hidden collections. `profile_mismatch` is the intended exception: it
+is only reachable once the collection has already been released to you, so it
+discloses nothing new and it catches a real authoring mistake — a plan pointing
+its evidence at another plan. Do not collapse it into `collection_unavailable`.

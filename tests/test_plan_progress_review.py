@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -241,6 +242,8 @@ item_schema:
     label:
       type: string
       required: true
+    minutes:
+      type: integer
     status:
       type: enum
       enum: [worked, shipped]
@@ -251,6 +254,25 @@ views:
   shipped:
     query:
       filters: {{status: shipped}}
+  latest:
+    query:
+      filters: {{status: worked}}
+      aggregate: latest:occurred_on
+  labels:
+    query:
+      filters: {{status: worked}}
+      aggregate: distinct:label
+  mean:
+    query:
+      filters: {{status: worked}}
+      aggregate: avg:minutes
+  grouped:
+    query:
+      aggregate: group:status
+  tally:
+    query:
+      filters: {{status: worked}}
+      aggregate: count
 ---
 
 Ordinary delivery observations.
@@ -332,6 +354,7 @@ def _build_vault(root: Path, *, worked: int = 2) -> None:
             item={
                 "occurred_on": f"2026-08-{index + 1:02d}",
                 "label": f"session-{index}",
+                "minutes": 30 + index,
                 "status": "worked",
             },
             why="record observed work",
@@ -341,12 +364,16 @@ def _build_vault(root: Path, *, worked: int = 2) -> None:
     )
 
 
-def _add_plan(root: Path, item: Mapping[str, Any]) -> str:
+def _add_plan(root: Path, item: Mapping[str, Any], plan_id: str | None = None) -> str:
     from exomem import planning
 
-    return planning.add(root, PLANNING_COLLECTION, item=dict(item), why="capture intent")[
-        "plan_id"
-    ]
+    return planning.add(
+        root,
+        PLANNING_COLLECTION,
+        item=dict(item),
+        plan_id=plan_id,
+        why="capture intent",
+    )["plan_id"]
 
 
 def _digest(root: Path) -> dict[str, str]:
@@ -357,14 +384,19 @@ def _digest(root: Path) -> dict[str, str]:
     }
 
 
-def _walk(payload: Any) -> Any:
+def _walk(payload: Any, key: Any = None) -> Any:
+    """Yield (key, value) for every node, including scalars nested in lists.
+
+    List elements inherit their container's key, so a float buried in a
+    `distinct` or `groups` list is still visible to the no-float assertion.
+    """
+    yield key, payload
     if isinstance(payload, Mapping):
-        for key, value in payload.items():
-            yield key, value
-            yield from _walk(value)
+        for name, value in payload.items():
+            yield from _walk(value, name)
     elif isinstance(payload, (list, tuple)):
         for value in payload:
-            yield from _walk(value)
+            yield from _walk(value, key)
 
 
 # --------------------------------------------------------------------------
@@ -619,9 +651,207 @@ def test_review_selector_restricts_to_one_planning_collection(tmp_path: Path) ->
     assert result["items_reviewed"] == 1
 
 
+def test_review_bounds_are_pinned_and_clamped() -> None:
+    """Production never passes a budget, so the defaults are the real bound.
+
+    Pinned by value: a mutation that widens either default or drops the clamp
+    would otherwise make "bounded independently of vault size" vacuous.
+    """
+    from exomem import plan_progress
+
+    assert plan_progress.DEFAULT_ITEM_LIMIT == 25
+    assert plan_progress.MAX_ITEM_LIMIT == 100
+    assert plan_progress.DEFAULT_EXECUTION_BUDGET == 64
+    assert plan_progress.MAX_EXECUTION_BUDGET == 256
+    assert plan_progress.MAX_EVIDENCE == 16
+    assert plan_progress._bounded(7, 25, 100) == 7
+    assert plan_progress._bounded(10_000, 25, 100) == 100
+    assert plan_progress._bounded(0, 25, 100) == 25
+    assert plan_progress._bounded(-3, 25, 100) == 25
+    assert plan_progress._bounded("many", 25, 100) == 25
+    assert plan_progress._bounded(None, 25, 100) == 25
+    assert plan_progress._bounded(True, 25, 100) == 25
+
+
+def test_unresolvable_selector_is_counted_not_silently_empty(tmp_path: Path) -> None:
+    from exomem import plan_progress
+
+    _build_vault(tmp_path)
+
+    result = plan_progress.review(
+        tmp_path, collection="Knowledge Base/Planning/Absent/_collection.md"
+    )
+
+    assert result["collections_scanned"] == 0
+    assert result["collections_unavailable"] == 1
+    assert result["items"] == []
+    assert "Absent" not in str(result)
+
+
+def test_records_collection_as_selector_is_counted_not_scanned(tmp_path: Path) -> None:
+    from exomem import plan_progress
+
+    _build_vault(tmp_path)
+
+    result = plan_progress.review(tmp_path, collection=RECORDS_COLLECTION)
+
+    assert result["collections_scanned"] == 0
+    assert result["collections_unavailable"] == 1
+    assert result["items"] == []
+
+
+def test_planning_collection_that_refuses_its_query_is_counted(tmp_path: Path) -> None:
+    """A refusing collection must leave a signal, not read as no divergence."""
+    from exomem import plan_progress
+
+    _build_vault(tmp_path)
+    _add_plan(
+        tmp_path,
+        _committed(
+            "Ship the thing",
+            [{"collection": RECORDS_REF, "role": "progress", "view": "worked"}],
+        ),
+    )
+    broken = tmp_path / "Knowledge Base" / "Planning" / "Broken"
+    (broken / "Items").mkdir(parents=True)
+    (broken / "_collection.md").write_text(
+        """---
+type: collection
+exomem_id: 7c1f0a44-6d2b-4a51-9f33-0b8e2c4d5a61
+title: Broken planning
+semantic_profile: planning
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Items
+  format_version: 1
+item_schema:
+  natural_key: [title]
+  fields:
+    title:
+      type: string
+      required: true
+---
+""",
+        encoding="utf-8",
+    )
+
+    result = plan_progress.review(tmp_path)
+
+    assert result["collections_scanned"] == 1
+    assert result["collections_unavailable"] == 1
+    assert result["items_reviewed"] == 1
+    assert "Broken" not in str(result)
+
+
+def test_unexpected_query_refusal_reports_query_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import plan_progress, record_governance
+    from exomem.structured_collections import CollectionError
+
+    _build_vault(tmp_path)
+    _add_plan(
+        tmp_path,
+        _committed(
+            "Ship the thing",
+            [{"collection": RECORDS_REF, "role": "progress", "view": "worked"}],
+        ),
+    )
+    real = record_governance.query_collection
+
+    def refusing(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("view") is not None:
+            raise CollectionError("RECORD_RESPONSE_TOO_LARGE", "rendered query is too large")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(record_governance, "query_collection", refusing)
+    result = plan_progress.review(tmp_path)
+
+    [item] = result["items"]
+    assert item["evidence"][0]["unresolved_reason"] == "query_unavailable"
+    assert item["evidence"][0]["observed"] is None
+    assert result["unavailable"]["query_unavailable"] == 1
+    assert item["divergence"]["progress_observations"] == 0
+
+
+def test_undeclared_evidence_field_does_not_refuse_the_collection(
+    tmp_path: Path,
+) -> None:
+    """A Planning manifest need not declare the optional evidence field."""
+    from exomem import plan_progress, planning
+
+    _build_vault(tmp_path)
+    plain = "Knowledge Base/Planning/Plain/_collection.md"
+    planning.create_collection(
+        tmp_path,
+        plain,
+        _PLANNING_MANIFEST.replace(
+            "    progress_evidence:\n      type: array\n      items: {type: object}\n", ""
+        ).replace(PLANNING_ID, "3f5b9c02-71ae-4d18-8c47-6a2e19b0d334"),
+        why="create planning collection without evidence",
+    )
+    planning.add(
+        tmp_path,
+        plain,
+        item={
+            "title": "Committed but unbound",
+            "kind": "outcome",
+            "status": "active",
+            "commitment": "committed",
+            "horizon": "quarter",
+        },
+        why="capture intent",
+    )
+
+    result = plan_progress.review(tmp_path)
+
+    assert result["collections_scanned"] == 2
+    assert result["collections_unavailable"] == 0
+    assert result["items"] == []
+
+
 # --------------------------------------------------------------------------
 # Hard non-goals
 # --------------------------------------------------------------------------
+
+
+def test_returned_sequence_is_identity_ordered_not_divergence_ordered(
+    tmp_path: Path,
+) -> None:
+    """The response sequence itself must carry no ranking.
+
+    Three items bind views with very different match counts. If anything
+    anywhere re-orders by divergence, this sequence changes.
+    """
+    from exomem import plan_progress
+
+    _build_vault(tmp_path, worked=3)
+    worked = {"collection": RECORDS_REF, "role": "progress", "view": "worked"}
+    shipped = {"collection": RECORDS_REF, "role": "progress", "view": "shipped"}
+    # Identity order is pinned, and the observation counts along it are 3, 0, 6:
+    # neither ascending nor descending, so any divergence-based ordering moves
+    # at least one item.
+    first = _add_plan(
+        tmp_path, _committed("First", [worked]), "11111111-1111-4111-8111-111111111111"
+    )
+    second = _add_plan(
+        tmp_path, _committed("Second", [shipped]), "22222222-2222-4222-8222-222222222222"
+    )
+    third = _add_plan(
+        tmp_path,
+        _committed("Third", [worked, dict(worked)]),
+        "33333333-3333-4333-8333-333333333333",
+    )
+
+    result = plan_progress.review(tmp_path)
+
+    assert [item["plan_id"] for item in result["items"]] == [first, second, third]
+    assert [
+        item["divergence"]["progress_observations"] for item in result["items"]
+    ] == [3, 0, 6]
 
 
 def test_review_leaves_the_vault_byte_identical(tmp_path: Path) -> None:
@@ -714,6 +944,7 @@ def test_review_response_carries_no_score_shaped_value(tmp_path: Path) -> None:
             "Ship the thing",
             [
                 {"collection": RECORDS_REF, "role": "progress", "view": "worked"},
+                {"collection": RECORDS_REF, "role": "progress", "view": "mean"},
                 {"collection": RECORDS_REF, "role": "completion", "view": "shipped"},
             ],
         ),
@@ -727,6 +958,38 @@ def test_review_response_carries_no_score_shaped_value(tmp_path: Path) -> None:
         assert all(type(value) is int for value in item["divergence"].values())
 
 
+def test_aggregate_declaring_views_leak_no_statistic(tmp_path: Path) -> None:
+    """`avg:` yields a float mean and `group:`/`distinct:` yield record values.
+
+    A bound view may declare any of them. None of it may reach the review.
+    """
+    from exomem import plan_progress
+
+    _build_vault(tmp_path, worked=3)
+    _add_plan(
+        tmp_path,
+        _committed(
+            "Aggregating evidence",
+            [
+                {"collection": RECORDS_REF, "role": "progress", "view": "mean"},
+                {"collection": RECORDS_REF, "role": "progress", "view": "grouped"},
+                {"collection": RECORDS_REF, "role": "completion", "view": "tally"},
+            ],
+        ),
+    )
+
+    result = plan_progress.review(tmp_path)
+
+    [item] = result["items"]
+    assert [entry["resolved"] for entry in item["evidence"]] == [True, True, True]
+    assert not [value for _, value in _walk(result) if isinstance(value, float)]
+    assert "avg" not in str(result)
+    assert "groups" not in str(result)
+    # The matched count survives every aggregate shape, so nothing is lost.
+    assert item["evidence"][0]["observed"]["matched"] == 3
+    assert item["divergence"]["progress_observations"] == 6
+
+
 def test_review_returns_no_record_rows_bodies_or_identities(tmp_path: Path) -> None:
     from exomem import plan_progress
 
@@ -735,7 +998,13 @@ def test_review_returns_no_record_rows_bodies_or_identities(tmp_path: Path) -> N
         tmp_path,
         _committed(
             "Ship the thing",
-            [{"collection": RECORDS_REF, "role": "progress", "view": "worked"}],
+            [
+                {"collection": RECORDS_REF, "role": "progress", "view": "worked"},
+                # `latest:` returns a whole record row and `distinct:` returns
+                # record values; both are reachable from an authored view.
+                {"collection": RECORDS_REF, "role": "progress", "view": "latest"},
+                {"collection": RECORDS_REF, "role": "completion", "view": "labels"},
+            ],
         ),
     )
 
@@ -743,7 +1012,11 @@ def test_review_returns_no_record_rows_bodies_or_identities(tmp_path: Path) -> N
 
     serialized = str(result)
     assert "session-0" not in serialized
+    assert "session-1" not in serialized
     assert "record_id" not in serialized
+    assert "item_version" not in serialized
+    assert "latest_by" not in serialized
+    assert "distinct" not in serialized
     assert "rows" not in serialized
     assert "body" not in serialized
 
@@ -834,6 +1107,81 @@ def test_review_memory_plan_progress_honours_path_and_limit(tmp_path: Path) -> N
     assert result["items_reviewed"] == 1
     assert result["items_matched"] == 2
     assert result["truncated"] is True
+
+
+def test_plan_progress_round_trips_over_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Surface parity: the generated command carries the mode to REST too."""
+    from starlette.testclient import TestClient
+
+    from exomem import commands, server
+
+    _build_vault(tmp_path)
+    _add_plan(
+        tmp_path,
+        _committed(
+            "Ship the thing",
+            [{"collection": RECORDS_REF, "role": "progress", "view": "worked"}],
+        ),
+    )
+    for surface in ("mcp", "rest", "cli"):
+        assert "review_memory" in {c.name for c in commands.product_commands_for(surface)}
+
+    # The server resolves and validates a vault root through its schema docs;
+    # the review leaf needs only the collections, so the repo's own schema
+    # scaffold is copied in for the facade alone.
+    shutil.copytree(
+        Path(__file__).parent / "fixtures" / "Knowledge Base" / "_Schema",
+        tmp_path / "Knowledge Base" / "_Schema",
+    )
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "plan-progress-key")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    monkeypatch.delenv("EXOMEM_CF_ACCESS_TEAM_DOMAIN", raising=False)
+    monkeypatch.delenv("EXOMEM_CF_ACCESS_AUD", raising=False)
+    client = TestClient(server.build_server(require_auth=False).http_app())
+
+    response = client.post(
+        "/api/review_memory",
+        json={"mode": "plan-progress"},
+        headers={"Authorization": "Bearer plan-progress-key"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["success"] is True, payload
+    data = payload["data"]
+    assert data["mode"] == "plan-progress"
+    assert data["items_reviewed"] == 1
+    assert data["items"][0]["evidence"][0]["observed"]["matched"] == 2
+
+
+def test_attention_mode_is_unaffected_by_plan_progress(tmp_path: Path) -> None:
+    """Divergence never enters the ranked Inbox."""
+    from exomem import commands
+
+    _build_vault(tmp_path)
+    _add_plan(
+        tmp_path,
+        _committed(
+            "Ship the thing",
+            [{"collection": RECORDS_REF, "role": "completion", "view": "shipped"}],
+        ),
+    )
+
+    attention = commands.op_review_memory(tmp_path, mode="attention")
+
+    serialized = str(attention)
+    assert "exomem://plan/" not in serialized
+    assert "plan-progress" not in serialized
+    assert "divergence" not in serialized
+    assert not [
+        item
+        for item in attention.get("items", [])
+        if "Planning" in str(item.get("path", ""))
+    ]
 
 
 def test_invalid_review_mode_names_plan_progress(tmp_path: Path) -> None:

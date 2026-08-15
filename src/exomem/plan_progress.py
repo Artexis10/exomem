@@ -167,7 +167,7 @@ def review(
     scanned = 0
     collections_unavailable = unresolved_selector
     query_truncated = False
-    selected: list[tuple[collections.CollectionManifest, Mapping[str, Any]]] = []
+    matched_rows: list[Mapping[str, Any]] = []
     for manifest in manifests:
         payload = _planning_page(root, manifest)
         if payload is None:
@@ -175,11 +175,12 @@ def review(
             continue
         scanned += 1
         query_truncated = query_truncated or payload.get("truncated") is True
-        selected.extend(
-            (manifest, row) for row in payload.get("rows", []) if selects_item(row)
-        )
+        matched_rows.extend(row for row in payload.get("rows", []) if selects_item(row))
 
-    selected.sort(key=lambda pair: (str(pair[1].get("collection_id", "")), str(pair[1].get("plan_id", ""))))
+    # One ordering implementation, used here: identity order decides which items
+    # truncation retains, so a ranking introduced anywhere would change both the
+    # sequence and the retained set.
+    selected = order_items(matched_rows)
     items_matched = len(selected)
     retained = selected[:item_limit]
 
@@ -188,7 +189,7 @@ def review(
     executed = 0
     bindings_truncated = False
     items: list[dict[str, Any]] = []
-    for _manifest, row in retained:
+    for row in retained:
         entries: list[dict[str, Any]] = []
         for binding in evidence_bindings(row):
             key = (binding["collection"], binding["view"])
@@ -326,13 +327,19 @@ def _observe(root: Path, reference: str, view: str) -> dict[str, Any] | str:
         or type(truncated) is not bool
     ):
         return "result_withheld"
+    # The view's declared aggregate is deliberately NOT passed through. A saved
+    # view may declare `latest:<col>` (a whole record row, including record_id
+    # and item_version), `distinct:<col>` / `group:<col>` (record values), or
+    # `avg:<col>` (a float mean) — rows, identities, and a score-shaped value,
+    # all three of which this review refuses to emit. `total_matched` is
+    # computed identically under every aggregate shape, so dropping the
+    # aggregate costs the reader nothing.
     return {
         "collection_id": projected.get("collection_id"),
         "snapshot": projected.get("snapshot"),
         "matched": matched,
         "returned": returned,
         "truncated": truncated,
-        "aggregate": projected.get("aggregate"),
     }
 
 

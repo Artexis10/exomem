@@ -30,16 +30,21 @@
 - [x] 4.1 Assert the vault is byte-identical before and after a review (hash every file), proving no plan, record, manifest, audit head, activity event, or review state is written.
 - [x] 4.1a Assert that under a configured external audience the only new paths are the governance kernel's own disclosure receipts, and that nothing existing changes.
 - [x] 4.2 Assert authored `health` is echoed unchanged and that no other health value, verdict, or suggestion appears anywhere in the response.
-- [x] 4.3 Assert the whole response contains no float and no key or string matching a score/percent/ratio/rank/severity shape.
+- [x] 4.3 Assert the whole response contains no float and no key or string matching a score/percent/ratio/rank/severity shape, with the traversal reaching scalars nested in lists.
 - [x] 4.4 Assert no Records row, body, or item identity leaks into the response.
+- [x] 4.4a Bind aggregate-declaring views (`latest:`, `distinct:`, `group:`, `avg:`, `count`) in the fixture so 4.3 and 4.4 are not blind, and assert the aggregate is withheld entirely while the matched count survives.
+- [x] 4.6 Assert the returned item SEQUENCE is identity-ordered with pinned plan IDs and non-monotonic observation counts, so any divergence-based ordering moves an item.
+- [x] 4.7 Pin the item limit, execution budget, evidence cap, and the `_bounded` clamp by value.
+- [x] 4.8 Assert `collections_unavailable` for an absent selector, a wrong-profile selector, and a discovered Planning collection whose query refuses; assert `query_unavailable` for an unexpected refusal.
 - [x] 4.5 Assert the review module imports no mutating entry point (add/update/triage/append/create/delete/write).
 
 ## 5. Command wiring and surface parity
 
 - [x] 5.1 Add the `plan-progress` branch to `commands.op_review_memory`, routing `collection` through the existing `path` argument and `limit` through the existing cap, with no signature change.
 - [x] 5.2 Extend the runtime `INVALID_MODE` message to name `plan-progress`.
-- [x] 5.3 Assert `review_memory(mode="plan-progress")` returns the mode envelope through the leaf and that an unchanged pinned MCP tool surface is preserved.
-- [x] 5.4 Assert `review_memory(mode="attention")` output is unaffected and that no attention category, review ref, or fingerprint is produced.
+- [x] 5.3 Assert `review_memory(mode="plan-progress")` returns the mode envelope through the leaf, round-trips over the REST facade, is registered on all three surfaces, and leaves the pinned MCP tool surface unchanged.
+- [x] 5.4 Assert `review_memory(mode="attention")` behaviourally surfaces no plan reference, divergence, or Planning-anchored item, and that no attention category, review ref, or fingerprint is produced.
+- [x] 5.5 Assert a Planning manifest that does not declare `progress_evidence` is scanned and returns zero items rather than refusing.
 
 ## 6. Gates
 

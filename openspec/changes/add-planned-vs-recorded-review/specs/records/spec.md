@@ -22,7 +22,7 @@ Records query views SHALL display bounded observed values and provenance. Domain
 
 A planned-versus-recorded reviewer SHALL reach Records only through the existing governed read path: resolution of a fully released manifest, authorization of the named saved view, authorization of the canonical source before it is parsed, and the default-deny query envelope. Records SHALL NOT gain a review-specific query surface, filter operator, saved-view feature, bulk export, or relaxed authorization path, and SHALL NOT resolve Planning, compare intent with observation, copy plan state, or mutate either side.
 
-A reviewer SHALL take only bounded provenance and counts from the envelope — the matched count, the returned count, the truncation flag, the view's declared aggregate, and the snapshot identifier — and SHALL NOT receive record rows, bodies, or item identities through the review. A withheld envelope SHALL yield no numbers at all rather than partial ones.
+A reviewer SHALL take only bounded provenance and counts from the envelope — the matched count, the returned count, the truncation flag, and the collection and snapshot identifiers — and SHALL NOT receive record rows, bodies, item identities, record values, or a view's declared aggregate through the review. A withheld envelope SHALL yield no numbers at all rather than partial ones.
 
 #### Scenario: Review cannot widen Records authorization
 - **WHEN** governance withholds a Records collection, its canonical source, or the named saved view
@@ -32,6 +32,11 @@ A reviewer SHALL take only bounded provenance and counts from the envelope — t
 - **WHEN** a bound saved view matches many records
 - **THEN** the review reports the exact matched and returned counts, the truncation flag, and the snapshot identifier
 - **AND** no record row, body, or item identity appears in the review response
+
+#### Scenario: An aggregating view discloses no more than a plain one
+- **WHEN** a bound view declares an aggregate that would return a full record row, distinct record values, grouped values, or a mean
+- **THEN** the review discloses exactly the same fields it discloses for a view with no aggregate
+- **AND** the aggregate's row, values, and statistic are withheld entirely rather than partially projected
 
 #### Scenario: Records keeps no review state
 - **WHEN** a plan-progress review executes bound Records views repeatedly

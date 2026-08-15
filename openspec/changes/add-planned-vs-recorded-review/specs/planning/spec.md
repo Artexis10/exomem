@@ -50,7 +50,9 @@ The review SHALL be bounded independently of vault size. It SHALL cap the number
 
 The review SHALL present authored intent next to observed numbers and SHALL leave every judgment to the human or calling agent. For each reviewed item it SHALL return the canonical `exomem://plan/<collection-uuid>/<plan-uuid>` reference, the authored intent fields it echoes unchanged, the ordered evidence bindings with their role, view, opaque collection reference, and either observed numbers or an unavailable reason, and a divergence block of non-negative integers containing `evidence_bindings`, `resolved_bindings`, `unresolved_bindings`, `progress_bindings`, `completion_bindings`, `progress_observations`, and `completion_observations`.
 
-Observed numbers per executed binding SHALL be the exact matched count, returned count, truncation flag, the saved view's own declared aggregate when it has one, and the canonical snapshot identifier. The review SHALL NOT return Records rows, bodies, or item identities.
+Observed numbers per executed binding SHALL be exactly the matched count, the returned count, the truncation flag, and the canonical collection and snapshot identifiers. The review SHALL NOT return Records rows, bodies, or item identities.
+
+A bound saved view's own declared aggregate SHALL NOT be passed through, whatever its shape. The aggregate grammar admits a latest-row selector that carries a complete record including its identity and version, distinct-value and grouped-value shapes that carry record values, and mean/sum/min/max shapes that carry a derived statistic — rows, identities, and a score-shaped value respectively, all three of which this review refuses. The matched count is computed identically under every aggregate shape, so refusing the aggregate withholds no count from the reader.
 
 The response SHALL be marked derived and read-only, SHALL carry a generation timestamp, and SHALL report the number of Planning collections scanned, the number of items matched, the number of items presented, item truncation, binding truncation, and a bounded tally of unavailable reasons.
 
@@ -60,6 +62,11 @@ Items SHALL be ordered deterministically by collection identity then plan identi
 - **WHEN** a committed active item binds two progress views and one completion view, and the completion view matches nothing
 - **THEN** the divergence block reports three bindings, two progress bindings, one completion binding, the exact progress match counts, and `completion_observations: 0`
 - **AND** the response contains no percentage, ratio, score, estimate, verdict, or severity
+
+#### Scenario: Aggregate-declaring evidence view leaks nothing
+- **WHEN** a bound saved view declares a latest-row, distinct-value, grouped-value, or mean aggregate
+- **THEN** the binding still resolves and reports its exact matched count
+- **AND** no record row, record identity, item version, record value, or derived statistic from that aggregate appears anywhere in the response
 
 #### Scenario: Authored health is echoed, never written
 - **WHEN** a reviewed item declares `health: unknown` while its completion evidence matches nothing
