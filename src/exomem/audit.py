@@ -54,6 +54,7 @@ import yaml
 
 from . import (
     access,
+    contradiction_stance,
     indexes,
     relation_registry,
     semantic_language_registry,
@@ -2959,11 +2960,106 @@ def _pair_polarity(vault_root: Path, a: str, b: str) -> dict | None:
         return None
 
 
+_ASSERTED_FIX = (
+    "Surfaced for REVIEW only — this is YOUR authored `contradicts` edge, not a "
+    "server judgment about which side is right. Read both: `replace` (supersede) "
+    "the stale one, `reconcile` them, or — if they are genuine rivals you intend "
+    "to keep — record the competing-alternatives stance with `triage_memory` "
+    "using `action='competing'`. Never auto-acted."
+)
+
+
+def _asserted_contradictions(
+    eligible: dict[str, find_module.ParsedPage],
+    pairs: list[tuple[str, str]],
+) -> tuple[list[AuditFinding], set[tuple[str, str]]]:
+    """Authored `contradicts` edges as contradiction findings, plus their pair keys.
+
+    The strongest contradiction signal a vault carries is the one the author wrote
+    down, and until this lane existed nothing consumed it. Unlike the proximity
+    sweep this needs NO embeddings — it reads typed graph edges — so it survives a
+    torch-less deploy and an `EXOMEM_DISABLE_EMBEDDINGS` run. Both endpoints must
+    clear the same `_is_active_compiled_rw` bar the proximity sweep uses, because
+    those are the only pages a contradiction can actually be reconciled against.
+
+    Deliberately NOT capped by `EXOMEM_CONTRADICTION_TOP_N`: that cap exists for the
+    combinatorial proximity sweep, and silently hiding an edge the user typed by hand
+    would be a different thing entirely.
+    """
+    findings: list[AuditFinding] = []
+    keys: set[tuple[str, str]] = set()
+    for a, b in pairs:
+        if a not in eligible or b not in eligible:
+            continue
+        keys.add((a, b))
+        findings.append(AuditFinding(
+            category="corpus_contradictions",
+            severity="info",
+            path=a,
+            detail=(
+                f"Authored `contradicts` edge with {b!r} — you asserted these "
+                "conflict. Is the conflict still live, or has one side become the "
+                "stale view?"
+            ),
+            proposed_fix=_ASSERTED_FIX,
+            paths=[a, b],
+            meta={
+                # Distinct from the proximity signal version for the same pair, so
+                # an asserted decision and a proximity decision can never collide.
+                "signal_version": content_hash(
+                    "asserted\n"
+                    + _page_signal_version(eligible[a])
+                    + "\n"
+                    + _page_signal_version(eligible[b])
+                )[:16],
+                "provenance": "asserted",
+                "relation_type": "contradicts",
+            },
+        ))
+    return findings, keys
+
+
 def _check_corpus_contradictions(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
     *,
     today: dt.date | None = None,
+) -> list[AuditFinding]:
+    """The contradiction queue: authored conflicts first, then measured proximity.
+
+    Two lanes, one category. Asserted entries come from authored `contradicts`
+    graph edges and are emitted FIRST — `attention` treats emission order as
+    intra-queue rank, so "ranked above proximity" needs no ranking code. Proximity
+    entries come from the embedding-band sweep below and keep their existing
+    priority, same-family demotion, and cap behaviour among themselves.
+
+    A pair that is both authored and in band surfaces once, as asserted: the
+    authored edge is strictly the stronger signal, and two rows for one decision
+    would double the pair's RRF vote in `attention`.
+    """
+    pairs = contradiction_stance.asserted_pairs(vault_root)
+    if not pairs and os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        # Nothing authored and no sidecar lane to run: keep the pre-existing
+        # torch-less fast path — one indexed graph query and out, without paying
+        # the eligibility walk this category used to skip entirely.
+        return []
+    eligible: dict[str, find_module.ParsedPage] = {
+        page.rel_path: page
+        for page in pages
+        if _is_active_compiled_rw(vault_root, page)
+    }
+    asserted, asserted_keys = _asserted_contradictions(eligible, pairs)
+    return asserted + _proximity_contradictions(
+        vault_root, eligible, today=today, exclude=asserted_keys
+    )
+
+
+def _proximity_contradictions(
+    vault_root: Path,
+    eligible: dict[str, find_module.ParsedPage],
+    *,
+    today: dt.date | None = None,
+    exclude: set[tuple[str, str]] | None = None,
 ) -> list[AuditFinding]:
     """Corpus-wide contradiction sweep: surface PAIRS of active read-write compiled
     conclusions whose embeddings sit in the band `[floor, dup_threshold)`.
@@ -3024,14 +3120,11 @@ def _check_corpus_contradictions(
     if not metadata or matrix.shape[0] == 0:
         return []
 
-    # Both endpoints of a flagged pair must be active read-write compiled.
-    eligible: dict[str, find_module.ParsedPage] = {
-        page.rel_path: page
-        for page in pages
-        if _is_active_compiled_rw(vault_root, page)
-    }
+    # Both endpoints of a flagged pair must be active read-write compiled — the
+    # caller already applied that gate when building `eligible`.
     if len(eligible) < 2:
         return []
+    excluded = exclude or set()
 
     rows_by_file: dict[str, list[int]] = {}
     for i, (fp, _cidx) in enumerate(metadata):
@@ -3053,6 +3146,10 @@ def _check_corpus_contradictions(
             score = float(col_max[int(j)])
             a, b = sorted((fp, other_fp))
             key = (a, b)
+            # Already surfaced as an authored contradiction: the stronger signal
+            # owns the pair, so it is not re-measured, re-counted, or re-capped.
+            if key in excluded:
+                continue
             if key not in pair_cos or score > pair_cos[key]:
                 pair_cos[key] = score
 
@@ -3108,6 +3205,7 @@ def _check_corpus_contradictions(
             "priority": round(priority, 4),
             "dormancy": round(dormancy, 4),
             "same_family": same_family,
+            "provenance": "proximity",
         }
         if polarity:
             meta["polarity"] = polarity["label"]

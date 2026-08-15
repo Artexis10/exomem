@@ -1911,7 +1911,7 @@ def _simple_capture_main(argv: list[str]) -> int:
 
 
 def _simple_review_main(argv: list[str]) -> int:
-    triage_actions = {"dismiss", "snooze", "reopen"}
+    triage_actions = {"dismiss", "snooze", "reopen", "competing"}
     if argv and argv[0] in triage_actions:
         action = argv[0]
         parser = argparse.ArgumentParser(
@@ -1950,7 +1950,7 @@ def _simple_review_main(argv: list[str]) -> int:
     parser.add_argument("--limit", type=int, default=25, help="attention item cap")
     parser.add_argument(
         "--state",
-        choices=("open", "all", "snoozed", "dismissed"),
+        choices=("open", "all", "snoozed", "dismissed", "competing"),
         default="open",
         help="review state view",
     )
@@ -2404,7 +2404,7 @@ def _print_review_human(result: dict) -> None:
         f"{all_total} total"
     )
     hidden = []
-    for name in ("snoozed", "dismissed"):
+    for name in ("snoozed", "dismissed", "competing"):
         if states.get(name):
             hidden.append(f"{states[name]} {name}")
     if hidden:

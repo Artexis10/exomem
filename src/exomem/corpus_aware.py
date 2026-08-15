@@ -291,6 +291,30 @@ def _best_cosine_per_file(
         return {}
 
 
+def _drop_declared_pairs(
+    vault_root: Path, self_path: str | None, candidates: list[DupCandidate]
+) -> list[DupCandidate]:
+    """Drop candidates the author already declared a rival pair with `self_path`.
+
+    Declared means a recorded competing-alternatives stance, an authored
+    `contradicts` edge between the two pages, or both answering one question. In
+    every case the proximity warning would only repeat what the author typed, and
+    the stance is fingerprint-bound, so editing either rival brings the warning
+    back. A draft with no page identity of its own (`self_path is None`) has no
+    pair to declare, so it warns exactly as before.
+    """
+    if not self_path or not candidates:
+        return candidates
+    from . import contradiction_stance
+
+    declared = contradiction_stance.declared_pairs(
+        vault_root, self_path, [candidate.path for candidate in candidates]
+    )
+    if not declared:
+        return candidates
+    return [candidate for candidate in candidates if candidate.path not in declared]
+
+
 def detect_duplicates(
     vault_root: Path,
     *,
@@ -344,7 +368,7 @@ def detect_duplicates(
         out.append(DupCandidate(path=fp, title=page.title, cosine=round(float(score), 4)))
         if len(out) >= top_n:
             break
-    return out
+    return _drop_declared_pairs(vault_root, self_path, out)
 
 
 def detect_contradictions(
@@ -422,7 +446,12 @@ def detect_contradictions(
     # Sharpen PROXIMITY → POLARITY on the flagged pairs (opt-in; no-op when the
     # EXOMEM_CLAIM_LEVEL gate is off, so `out` and every downstream warning are
     # byte-identical to baseline).
-    return _refine_contradictions(vault_root, title=title, body=body, candidates=out)
+    return _refine_contradictions(
+        vault_root,
+        title=title,
+        body=body,
+        candidates=_drop_declared_pairs(vault_root, self_path, out),
+    )
 
 
 def dup_warning(candidate: DupCandidate) -> str:
