@@ -22,6 +22,16 @@ from exomem.mutation_lock import (
 )
 
 
+def _boundary(snapshot: dict) -> dict:
+    """Drop the additive contention block so these assertions pin the flag keys.
+
+    Contention attribution has its own coverage in
+    `tests/test_readiness_honesty.py`; the assertions below exist to pin the
+    boundary state keys, which the stats block must never disturb.
+    """
+    return {key: value for key, value in snapshot.items() if key != "contention"}
+
+
 def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> None:
     source = tmp_path / "source.sqlite"
     destination = tmp_path / "quarantine" / "source.sqlite"
@@ -542,7 +552,7 @@ def test_cross_process_status_and_busy_error_report_verified_current_holder(
         assert entered.wait(2.0)
         contender = VaultMutationCoordinator(state_root, vault)
         snapshot = contender.snapshot()
-        assert snapshot | {"age_seconds": 0.0} == {
+        assert _boundary(snapshot) | {"age_seconds": 0.0} == {
             "state": "held",
             "request_id": "req-external",
             "operation": "edit_memory",
@@ -577,7 +587,7 @@ def test_stale_or_malformed_metadata_cannot_report_a_verified_holder(
     coordinator.metadata_path.parent.mkdir(parents=True, exist_ok=True)
     coordinator.metadata_path.write_text(payload, encoding="utf-8")
 
-    assert coordinator.snapshot() == {"state": "free"}
+    assert _boundary(coordinator.snapshot()) == {"state": "free"}
     assert not coordinator.metadata_path.exists()
 
 
@@ -594,7 +604,7 @@ def test_external_holder_without_valid_metadata_is_explicitly_unverified(
         if payload is not None:
             coordinator.metadata_path.write_text(payload, encoding="utf-8")
         snapshot = coordinator.snapshot()
-        assert snapshot == {
+        assert _boundary(snapshot) == {
             "state": "held",
             "request_id": "untracked",
             "operation": "unknown",
@@ -733,7 +743,7 @@ def test_probe_cleanup_cannot_delete_a_new_holders_metadata(
     assert not holder_entered.wait(0.05)
     continue_cleanup.set()
     status_thread.join(timeout=2.0)
-    assert status_result == [{"state": "free"}]
+    assert [_boundary(entry) for entry in status_result] == [{"state": "free"}]
     assert holder_entered.wait(1.0)
     snapshot = status_coordinator.snapshot()
     assert snapshot["verified"] is True
@@ -790,7 +800,7 @@ def test_holder_snapshot_is_content_free_and_clears_after_release(tmp_path: Path
         assert snapshot["age_seconds"] >= 0
         assert str(vault) not in str(snapshot)
 
-    assert coordinator.snapshot() == {"state": "free"}
+    assert _boundary(coordinator.snapshot()) == {"state": "free"}
 
 
 def test_active_mutation_snapshot_reports_oldest_process_holder(tmp_path: Path) -> None:
@@ -1030,7 +1040,7 @@ def test_orphan_snapshot_falls_back_to_unknown_holder_without_a_sidecar(
         mutation_lock_module._release_os_lock(metadata_handle)
         metadata_handle.close()
 
-    assert snapshot == {
+    assert _boundary(snapshot) == {
         "state": "held",
         "request_id": "untracked",
         "operation": "unknown",
