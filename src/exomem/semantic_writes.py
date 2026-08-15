@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import contextvars
 import datetime as dt
 import hashlib
 import json
@@ -1354,9 +1355,34 @@ def _existing_applicability(
     return "structural"
 
 
+# Which attempt an `exomem_write_*` sample belongs to. A stale validity stamp
+# re-runs the WHOLE preflight through the public `preflight_existing` (kept
+# public deliberately: tests monkeypatch that name as a race seam), so without
+# a discriminator a revalidating write contributes two indistinguishable
+# preflight samples and the series reports a doubled cost that no single
+# attempt ever paid. `preview` is the validate-only path: real work, but not
+# commit-path work, and it must not inflate the write series either.
+_WRITE_PHASE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "exomem_write_phase", default="initial"
+)
+
+
+@contextmanager
+def _write_phase(name: str | None):
+    """Label the `exomem_write_*` samples inside this block; `None` inherits."""
+    if name is None:
+        yield
+        return
+    token = _WRITE_PHASE.set(name)
+    try:
+        yield
+    finally:
+        _WRITE_PHASE.reset(token)
+
+
 @contextmanager
 def _write_metric(name: str, operation: str):
-    """Emit one `write.*` duration histogram for the wrapped phase.
+    """Emit one `exomem_write_*` duration histogram for the wrapped phase.
 
     Unconditional by design — the metrics module does its own gating, and a
     phase you can only see when a debug flag was set in advance is exactly the
@@ -1373,7 +1399,7 @@ def _write_metric(name: str, operation: str):
         metrics.observe_duration_ms(
             name,
             (time.perf_counter() - started) * 1000.0,
-            {"operation": operation, "outcome": outcome},
+            {"operation": operation, "outcome": outcome, "phase": _WRITE_PHASE.get()},
         )
 
 
@@ -1395,22 +1421,38 @@ def _timed_acquire(timings: MutationTimings | None, name: str, inner: Any):
 
 @contextmanager
 def _timed_boundary(timings: MutationTimings | None, guard: Any, *, operation: str):
-    """Enter the vault mutation boundary, timing only the wait to acquire it."""
+    """Enter the vault mutation boundary, timing only the wait to acquire it.
+
+    The wait is recorded on the way out, not on the way in. If `guard` never
+    admits us — lease contention or a boundary timeout, the starvation this
+    metric exists to explain — an emit placed inside the boundary would never
+    run, and the entire wait would resurface as a slow `..._commit_ms` with
+    nothing to say it was spent queueing.
+    """
     started = time.perf_counter()
-    stack = contextlib.ExitStack()
-    with stack:
-        stack.enter_context(mutation_timing_span(timings, "commit.boundary_acquire"))
+    span_stack = contextlib.ExitStack()
+    acquired = False
+
+    def _record(outcome: str) -> None:
+        waited_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        span_stack.close()
+        if timings is not None:
+            timings.boundary["waited_ms"] = waited_ms
+        metrics.observe_duration_ms(
+            "exomem_write_boundary_acquire_ms",
+            waited_ms,
+            {"operation": operation, "outcome": outcome, "phase": _WRITE_PHASE.get()},
+        )
+
+    try:
+        span_stack.enter_context(mutation_timing_span(timings, "commit.boundary_acquire"))
         with guard:
-            waited_ms = round((time.perf_counter() - started) * 1000.0, 3)
-            stack.close()
-            if timings is not None:
-                timings.boundary["waited_ms"] = waited_ms
-            metrics.observe_duration_ms(
-                "write.boundary_acquire_ms",
-                waited_ms,
-                {"operation": operation, "outcome": "ok"},
-            )
+            acquired = True
+            _record("ok")
             yield
+    finally:
+        if not acquired:
+            _record("error")
 
 
 def preflight_existing(
@@ -1434,7 +1476,10 @@ def preflight_existing(
     per-stage spans, or omit it and nothing about the behaviour or the
     returned payload changes.
     """
-    with _write_metric("write.preflight_ms", str(operation)):
+    with (
+        _write_phase("preview" if validate_only else None),
+        _write_metric("exomem_write_preflight_ms", str(operation)),
+    ):
         return _preflight_existing(
             vault_root,
             path=path,
@@ -1508,7 +1553,7 @@ def _preflight_existing(
         loaded_contracts = memory_schema.load_saved_contracts(root)
     resolver_freshness_before = freshness.triple(root, "vault")
     with (
-        _write_metric("write.corpus_context_ms", str(operation)),
+        _write_metric("exomem_write_corpus_context_ms", str(operation)),
         mutation_timing_span(timings, "preflight.corpus_context"),
     ):
         before_corpus = semantic_contract.build_corpus_context(
@@ -1887,6 +1932,12 @@ def _revalidate_existing_preflight(
     exactly as the existing cross-invocation replay path already does — this
     is the same warm revalidation, just triggered by a census mismatch instead
     of a second caller-supplied invocation.
+
+    Deliberately calls the PUBLIC ``preflight_existing`` — tests monkeypatch
+    that name to inject the race this path exists to survive, so routing around
+    it would silently disarm them. The nested preflight's own metrics are kept
+    apart from the first attempt's by the ``revalidate`` write phase rather
+    than by changing the call.
     """
     relation_disposition: str | None = None
     relation_review_hash: str | None = None
@@ -1895,17 +1946,18 @@ def _revalidate_existing_preflight(
         relation_disposition = "reviewed_none"
         relation_review_hash = preflight.transition_hash
         relation_review_reason = preflight.requested_decision.reason
-    return preflight_existing(
-        vault_root,
-        path=preflight.path,
-        after_source=preflight.after_source,
-        operation=preflight.operation,
-        expected_before_hash=preflight.before.source_hash,
-        transition_token=preflight.transition_token,
-        relation_disposition=relation_disposition,
-        relation_review_hash=relation_review_hash,
-        relation_review_reason=relation_review_reason,
-    )
+    with _write_phase("revalidate"):
+        return preflight_existing(
+            vault_root,
+            path=preflight.path,
+            after_source=preflight.after_source,
+            operation=preflight.operation,
+            expected_before_hash=preflight.before.source_hash,
+            transition_token=preflight.transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
+        )
 
 
 def commit_existing(
@@ -1921,7 +1973,7 @@ def commit_existing(
     per-stage spans, or omit it and nothing about the behaviour or the
     returned payload changes.
     """
-    with _write_metric("write.commit_ms", str(preflight.operation)):
+    with _write_metric("exomem_write_commit_ms", str(preflight.operation)):
         return _commit_existing(
             vault_root,
             preflight=preflight,
@@ -1978,7 +2030,7 @@ def _commit_existing(
         if not stamp_current:
             log_active_mutation_phase("semantic_revalidate_start")
             with (
-                _write_metric("write.revalidate_ms", operation_label),
+                _write_metric("exomem_write_revalidate_ms", operation_label),
                 mutation_timing_span(timings, "commit.revalidate"),
             ):
                 preflight = _revalidate_existing_preflight(root, preflight)

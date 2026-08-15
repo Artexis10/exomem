@@ -31,9 +31,12 @@ class MutationTimings:
         self._t0 = time.perf_counter()
         self.stages: dict[str, dict[str, Any]] = {}
         # Write-specific counterpart to FindTimings' cache/profile: how long
-        # the caller waited for the vault mutation boundary, and how many
-        # times it had to be re-attempted.
-        self.boundary: dict[str, Any] = {"waited_ms": None, "retries": 0}
+        # the caller waited for the vault mutation boundary. Recorded whether
+        # or not the boundary was ever acquired — a wait that never resolves
+        # is the one worth reading. A `retries` field belongs here too, but
+        # only once it can be sourced from the lease manager; an always-zero
+        # counter reads as "never retried", which would be a lie.
+        self.boundary: dict[str, Any] = {"waited_ms": None}
 
     @contextmanager
     def span(self, name: str):

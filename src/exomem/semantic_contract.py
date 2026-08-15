@@ -1268,19 +1268,53 @@ def call_context(name: str) -> Iterator[None]:
 def _observe_census_walk(elapsed_ms: float, outcome: str) -> None:
     """One full `_corpus_census` stat-walk, labelled by what it decided."""
     metrics.observe_duration_ms(
-        "corpus.census_walk_ms",
+        "exomem_corpus_census_walk_ms",
         elapsed_ms,
         {"caller": current_call_context(), "outcome": outcome},
     )
 
 
 def _timed_corpus_census(root: Path, outcome: str) -> tuple | None:
-    """A census walk whose disposition is already known when it starts."""
+    """A census walk whose disposition is already known when it starts.
+
+    For walks taken with NO corpus cache lock held. Under a lock, use
+    `_census_walk_log` + `_deferred_corpus_census` instead.
+    """
     started = time.perf_counter()
     try:
         return _corpus_census(root)
     finally:
         _observe_census_walk((time.perf_counter() - started) * 1000.0, outcome)
+
+
+@contextmanager
+def _census_walk_log() -> Iterator[list[list]]:
+    """Queue census-walk timings; emit them once the caller's locks are gone.
+
+    `metrics.observe_duration_ms` takes the metrics registry lock. Calling it
+    while `_CORPUS_CONTEXT_UPDATE_LOCK`/`_CORPUS_CONTEXT_CACHE_LOCK` is held
+    would let the instrument widen the very critical section it is measuring —
+    and this cache is contended by every reader and writer at once. Entries are
+    mutable `[elapsed_ms, outcome]` pairs so a walk whose disposition is only
+    settled several branches later can be corrected in place. Because this
+    context manager is entered OUTSIDE the locks, its exit runs after they have
+    all released, including on the `return`s taken from inside them.
+    """
+    sink: list[list] = []
+    try:
+        yield sink
+    finally:
+        for elapsed_ms, outcome in sink:
+            _observe_census_walk(elapsed_ms, outcome)
+
+
+def _deferred_corpus_census(root: Path, sink: list[list], outcome: str) -> tuple | None:
+    """A census walk taken under a lock; its metric is queued, not emitted."""
+    started = time.perf_counter()
+    try:
+        return _corpus_census(root)
+    finally:
+        sink.append([(time.perf_counter() - started) * 1000.0, outcome])
 
 
 def _corpus_census(root: Path) -> tuple | None:
@@ -1913,74 +1947,81 @@ def build_corpus_context(
                     len(event_entry[1].pages),
                 )
                 return event_entry[1]
-        started = time.perf_counter()
-        census = _corpus_census(root)
-        census_ms = (time.perf_counter() - started) * 1000.0
-        if census is not None and _registries_match_disk(root, relation_definitions, language):
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
-            if entry is not None and entry[0] == census:
-                with _CORPUS_CONTEXT_UPDATE_LOCK, _CORPUS_CONTEXT_CACHE_LOCK:
-                    current = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                    if current is not entry:
-                        entry = current
-                    elif entry[0] == census:
-                        current_token = freshness.triple(root, "vault")
-                        if current_token is not None:
-                            _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
-                        log.info(
-                            "semantic corpus context reused pages=%d census_ms=%.1f",
-                            len(entry[1].pages),
-                            census_ms,
-                        )
-                        _observe_census_walk(census_ms, "hit")
-                        return entry[1]
+        # This walk's meaning is only settled by the branch it lands in, and
+        # every one of those branches decides while a cache lock is held. So
+        # the disposition is recorded in place and emitted by `_census_walk_log`
+        # on the way out, once every lock below has released.
+        with _census_walk_log() as walk_log:
+            started = time.perf_counter()
+            census = _corpus_census(root)
+            census_ms = (time.perf_counter() - started) * 1000.0
+            # Nothing cached answered it unless a branch below says otherwise.
+            walk = [census_ms, "rebuild"]
+            walk_log.append(walk)
+            if census is not None and _registries_match_disk(
+                root, relation_definitions, language
+            ):
+                with _CORPUS_CONTEXT_CACHE_LOCK:
+                    entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
                 if entry is not None and entry[0] == census:
-                    with _CORPUS_CONTEXT_CACHE_LOCK:
-                        if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
-                            _observe_census_walk(census_ms, "hit")
+                    with _CORPUS_CONTEXT_UPDATE_LOCK, _CORPUS_CONTEXT_CACHE_LOCK:
+                        current = _CORPUS_CONTEXT_CACHE.get(cache_key)
+                        if current is not entry:
+                            entry = current
+                        elif entry[0] == census:
+                            current_token = freshness.triple(root, "vault")
+                            if current_token is not None:
+                                _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                            log.info(
+                                "semantic corpus context reused pages=%d census_ms=%.1f",
+                                len(entry[1].pages),
+                                census_ms,
+                            )
+                            walk[1] = "hit"
                             return entry[1]
-            if entry is not None:
-                changed_paths = _markdown_census_delta(entry[0], census)
-                if changed_paths is not None:
-                    started = time.perf_counter()
-                    context = _reconcile_markdown_delta(
-                        root,
-                        entry[1],
-                        changed_paths,
-                        relation_definitions=relation_definitions,
-                        language=language,
-                    )
-                    with _CORPUS_CONTEXT_UPDATE_LOCK:
-                        confirmed = _timed_corpus_census(root, "census")
+                    if entry is not None and entry[0] == census:
                         with _CORPUS_CONTEXT_CACHE_LOCK:
-                            current = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                            if confirmed == census and current is entry:
-                                _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
-                                _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
-                                    f"{language.schema_version}:{language.content_hash}"
-                                )
-                                current_token = freshness.triple(root, "vault")
-                                if current_token is not None:
-                                    _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
-                                log.info(
-                                    "semantic corpus context reconciled pages=%d "
-                                    "changed=%d reconcile_ms=%.1f census_ms=%.1f",
-                                    len(context.pages),
-                                    len(changed_paths),
-                                    (time.perf_counter() - started) * 1000.0,
-                                    census_ms,
-                                )
-                                _observe_census_walk(census_ms, "patch")
-                                return context
-                            if current is not None and current is not entry:
-                                _observe_census_walk(census_ms, "hit")
-                                return current[1]
-        else:
-            census = None
-        # Nothing cached could answer this walk: whatever happens below, the
-        # walk paid for a rebuild (or for waiting on someone else's).
-        _observe_census_walk(census_ms, "rebuild")
+                            if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
+                                walk[1] = "hit"
+                                return entry[1]
+                if entry is not None:
+                    changed_paths = _markdown_census_delta(entry[0], census)
+                    if changed_paths is not None:
+                        started = time.perf_counter()
+                        context = _reconcile_markdown_delta(
+                            root,
+                            entry[1],
+                            changed_paths,
+                            relation_definitions=relation_definitions,
+                            language=language,
+                        )
+                        with _CORPUS_CONTEXT_UPDATE_LOCK:
+                            confirmed = _deferred_corpus_census(root, walk_log, "census")
+                            with _CORPUS_CONTEXT_CACHE_LOCK:
+                                current = _CORPUS_CONTEXT_CACHE.get(cache_key)
+                                if confirmed == census and current is entry:
+                                    _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+                                    _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                                        f"{language.schema_version}:{language.content_hash}"
+                                    )
+                                    current_token = freshness.triple(root, "vault")
+                                    if current_token is not None:
+                                        _CORPUS_CONTEXT_EVENT_TOKENS[cache_key] = current_token
+                                    log.info(
+                                        "semantic corpus context reconciled pages=%d "
+                                        "changed=%d reconcile_ms=%.1f census_ms=%.1f",
+                                        len(context.pages),
+                                        len(changed_paths),
+                                        (time.perf_counter() - started) * 1000.0,
+                                        census_ms,
+                                    )
+                                    walk[1] = "patch"
+                                    return context
+                                if current is not None and current is not entry:
+                                    walk[1] = "hit"
+                                    return current[1]
+            else:
+                census = None
 
     flight: _CorpusContextFlight | None = None
     if census is not None and cache_key is not None:
@@ -2030,20 +2071,22 @@ def build_corpus_context(
         )
         build_ms = (time.perf_counter() - started) * 1000.0
         metrics.observe_duration_ms(
-            "corpus.build_ms",
+            "exomem_corpus_build_ms",
             build_ms,
             {"caller": current_call_context(), "outcome": "rebuild"},
         )
         stored = False
         if census is not None and cache_key is not None:
-            with _CORPUS_CONTEXT_UPDATE_LOCK:
+            # Entered outside the update lock, so its queued samples are
+            # emitted only after that lock releases.
+            with _census_walk_log() as publish_log, _CORPUS_CONTEXT_UPDATE_LOCK:
                 stable_census = census
                 # A busy watcher/media worker can change Markdown while the cold
                 # build runs. Once publication begins, serialize with event
                 # freshness+cache updates, absorb exact deltas, then stamp the same
                 # state atomically so a newer event context cannot be overwritten.
                 for _ in range(3):
-                    confirmed = _timed_corpus_census(root, "census")
+                    confirmed = _deferred_corpus_census(root, publish_log, "census")
                     if confirmed == stable_census:
                         break
                     if confirmed is None:

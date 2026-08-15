@@ -11,7 +11,10 @@ These tests pin the write-side instrument:
 * the response staying byte-identical when the instrument is not asked for,
 * a forced validity-stamp mismatch showing up as a real `commit.revalidate`
   span rather than silently doubling the write,
-* the unconditional `write.*` service histograms,
+* the unconditional `exomem_write_*` service histograms — including the one
+  emitted when the mutation boundary is never acquired at all,
+* the phase label that keeps a revalidation's nested preflight from being
+  double-counted as a second first-attempt preflight,
 * the corpus caller/outcome attribution that tells a warm census reuse apart
   from a cold rebuild.
 """
@@ -20,7 +23,10 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from contextlib import contextmanager
 from pathlib import Path
+
+import pytest
 
 from exomem import activation_manifest, semantic_contract, semantic_writes, writer_lease
 from exomem import edit as edit_module
@@ -135,7 +141,7 @@ def test_edit_write_reports_every_write_phase(tmp_path: Path, monkeypatch) -> No
 
     timings = payload["timings"]
     assert set(timings) == {"total_ms", "boundary", "stages"}
-    assert timings["boundary"]["retries"] == 0
+    assert set(timings["boundary"]) == {"waited_ms"}
     assert isinstance(timings["boundary"]["waited_ms"], float)
     stages = timings["stages"]
     for name in _ALWAYS_TAKEN_STAGES:
@@ -184,31 +190,134 @@ def test_stale_commit_generation_forces_a_timed_revalidate(tmp_path: Path) -> No
     assert stale["commit.revalidate"]["ms"] > 0.0
 
 
+def _histograms() -> set[tuple[str, tuple[tuple[str, str], ...]]]:
+    return {
+        (item["name"], tuple(sorted(item["labels"].items())))
+        for item in metrics_module.snapshot()["histograms"]
+    }
+
+
 def test_write_emits_the_write_service_histograms(tmp_path: Path) -> None:
     metrics_module.reset()
     _direct_write(tmp_path / "clean", bump=False, timings=None)
 
-    histograms = {
-        (item["name"], tuple(sorted(item["labels"].items())))
-        for item in metrics_module.snapshot()["histograms"]
-    }
+    histograms = _histograms()
     names = {name for name, _ in histograms}
     assert {
-        "write.preflight_ms",
-        "write.corpus_context_ms",
-        "write.boundary_acquire_ms",
-        "write.commit_ms",
+        "exomem_write_preflight_ms",
+        "exomem_write_corpus_context_ms",
+        "exomem_write_boundary_acquire_ms",
+        "exomem_write_commit_ms",
     } <= names
-    assert "write.revalidate_ms" not in names
-    expected_labels = (("operation", "edit"), ("outcome", "ok"))
-    assert ("write.commit_ms", expected_labels) in histograms
-    assert ("write.preflight_ms", expected_labels) in histograms
+    assert "exomem_write_revalidate_ms" not in names
+    # Underscore names, never dots: dots are illegal in Prometheus/OpenMetrics
+    # and the rest of the registry is already `exomem_*`.
+    assert not any(name.startswith(("write.", "corpus.")) for name in names)
+    ok = (("operation", "edit"), ("outcome", "ok"), ("phase", "initial"))
+    assert ("exomem_write_commit_ms", ok) in histograms
+    assert ("exomem_write_preflight_ms", ok) in histograms
 
     metrics_module.reset()
     _direct_write(tmp_path / "stale", bump=True, timings=None)
-    assert "write.revalidate_ms" in {
-        item["name"] for item in metrics_module.snapshot()["histograms"]
+    assert "exomem_write_revalidate_ms" in {
+        name for name, _ in _histograms()
     }
+
+
+def test_revalidation_preflight_is_labelled_apart_from_the_first_attempt(
+    tmp_path: Path,
+) -> None:
+    """A stale stamp re-runs the whole preflight through the public entrypoint.
+
+    Both preflights are real work and both must be visible, but summing them
+    into one series would report a doubled preflight cost that never happened
+    in a single attempt. The `phase` label keeps them apart without moving the
+    call off the public name (tests monkeypatch it as a race seam).
+    """
+    metrics_module.reset()
+    _direct_write(tmp_path / "stale", bump=True, timings=None)
+
+    phases = {
+        labels
+        for name, entry in _histograms()
+        if name == "exomem_write_preflight_ms"
+        for labels in [dict(entry).get("phase")]
+    }
+    assert phases == {"initial", "revalidate"}
+    corpus_phases = {
+        dict(entry).get("phase")
+        for name, entry in _histograms()
+        if name == "exomem_write_corpus_context_ms"
+    }
+    assert corpus_phases == {"initial", "revalidate"}
+
+
+def test_validate_only_preflight_is_labelled_a_preview(tmp_path: Path) -> None:
+    """A preview is real work but not commit-path work; it must not silently
+    inflate the write series it would otherwise be indistinguishable from."""
+    path = _seed(tmp_path)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+    metrics_module.reset()
+
+    semantic_writes.preflight_existing(
+        tmp_path,
+        path=PAGE,
+        after_source=after_source,
+        operation="edit",
+        validate_only=True,
+    )
+
+    phases = {
+        dict(entry).get("phase")
+        for name, entry in _histograms()
+        if name.startswith("exomem_write_")
+    }
+    assert phases == {"preview"}
+
+
+class _RefusingManager:
+    """A lease manager whose mutation boundary can never be acquired."""
+
+    def mutation_guard(self, *args, **kwargs):
+        @contextmanager
+        def _refuse():
+            raise RuntimeError("boundary unavailable")
+            yield  # pragma: no cover - unreachable, keeps this a generator
+
+        return _refuse()
+
+
+def test_boundary_acquire_is_measured_even_when_acquisition_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Lease contention is the exact case this metric exists for.
+
+    If the wait is only recorded once the boundary is held, the starvation
+    that never resolves emits nothing at all and the whole wait resurfaces as
+    a slow commit — the metric goes dark in precisely the incident it was
+    added to explain.
+    """
+    path = _seed(tmp_path)
+    after_source = path.read_text(encoding="utf-8").replace(BEFORE_LINE, AFTER_LINE)
+    timings = mutation_timings_module.MutationTimings()
+    preflight = semantic_writes.preflight_existing(
+        tmp_path, path=PAGE, after_source=after_source, operation="edit", timings=timings
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: _RefusingManager())
+    metrics_module.reset()
+
+    with pytest.raises(RuntimeError, match="boundary unavailable"):
+        semantic_writes.commit_existing(tmp_path, preflight=preflight, timings=timings)
+
+    histograms = _histograms()
+    failed = (("operation", "edit"), ("outcome", "error"), ("phase", "initial"))
+    assert ("exomem_write_boundary_acquire_ms", failed) in histograms
+    assert ("exomem_write_commit_ms", failed) in histograms
+    # The wait is on the collector too, not only in the histogram.
+    boundary = timings.as_dict()
+    assert isinstance(boundary["boundary"]["waited_ms"], float)
+    assert isinstance(boundary["stages"]["commit.boundary_acquire"]["ms"], float)
+    assert path.read_text(encoding="utf-8") != after_source
 
 
 def test_corpus_metrics_carry_caller_and_outcome(tmp_path: Path, monkeypatch) -> None:
@@ -228,7 +337,7 @@ def test_corpus_metrics_carry_caller_and_outcome(tmp_path: Path, monkeypatch) ->
         (item["name"], item["labels"].get("caller"), item["labels"].get("outcome"))
         for item in metrics_module.snapshot()["histograms"]
     }
-    assert ("corpus.census_walk_ms", "unknown", "rebuild") in observed
-    assert ("corpus.build_ms", "unknown", "rebuild") in observed
-    assert ("corpus.census_walk_ms", "write", "hit") in observed
-    assert ("corpus.build_ms", "write", "rebuild") not in observed
+    assert ("exomem_corpus_census_walk_ms", "unknown", "rebuild") in observed
+    assert ("exomem_corpus_build_ms", "unknown", "rebuild") in observed
+    assert ("exomem_corpus_census_walk_ms", "write", "hit") in observed
+    assert ("exomem_corpus_build_ms", "write", "rebuild") not in observed
