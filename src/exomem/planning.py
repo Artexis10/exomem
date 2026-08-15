@@ -46,7 +46,26 @@ class _PlanningEnvelope:
         return dict(self.payload)
 
 
-def normalize_item(item: Mapping[str, Any], *, apply_defaults: bool = True) -> dict[str, Any]:
+def motivation_is_governed(manifest: collections.CollectionManifest) -> bool:
+    """True when this collection declares `motivation` as the governed ref list.
+
+    A vault authored before this contract may legally have declared `motivation`
+    as its own free-text field. Imposing ref semantics on that value would refuse
+    it on every path that normalizes stored records — including the snapshot read
+    inside `query` — which would make one legacy item render the whole collection
+    unqueryable and unrepairable. So the governed shape is enforced only where the
+    manifest actually declares the array form.
+    """
+    field = manifest.schema.fields.get("motivation")
+    return field is not None and field.type == "array"
+
+
+def normalize_item(
+    item: Mapping[str, Any],
+    *,
+    apply_defaults: bool = True,
+    validate_motivation: bool = True,
+) -> dict[str, Any]:
     """Validate one authored Planning item without inferring from prose."""
     if not isinstance(item, Mapping):
         _invalid("item must be an object")
@@ -68,7 +87,7 @@ def normalize_item(item: Mapping[str, Any], *, apply_defaults: bool = True) -> d
     if values["kind"] == "area":
         if _AREA_FORBIDDEN & values.keys():
             _invalid("areas cannot carry delivery state or hierarchy")
-        _validate_optional(values)
+        _validate_optional(values, validate_motivation=validate_motivation)
         return values
     for name, allowed in (
         ("status", _STATUSES),
@@ -78,7 +97,7 @@ def normalize_item(item: Mapping[str, Any], *, apply_defaults: bool = True) -> d
     ):
         _enum(values.get(name), allowed, name)
     _validate_lifecycle(values)
-    _validate_optional(values)
+    _validate_optional(values, validate_motivation=validate_motivation)
     return values
 
 
@@ -170,7 +189,7 @@ def add(
     record_governance.require_mutation_visibility(vault_root, manifest)
     _validate_public_text(why, "why")
     _validate_public_text(body, "body")
-    values = normalize_item(item)
+    values = normalize_item(item, validate_motivation=motivation_is_governed(manifest))
     _validate_declared_text(manifest, values)
     snapshot = record_formats.load_adapter(
         vault_root,
@@ -564,7 +583,10 @@ def _valid_hierarchy_node(value: Any, manifest: collections.CollectionManifest) 
     if memory_refs.normalize_id(value.get("plan_id")) != value.get("plan_id"):
         return False
     try:
-        normalize_item(value, apply_defaults=False)
+        normalize_item(
+            value, apply_defaults=False,
+            validate_motivation=motivation_is_governed(manifest),
+        )
         for name, field_value in value.items():
             if name in manifest.schema.fields:
                 collections._validate_field_value(name, field_value, manifest.schema.fields[name])
@@ -733,8 +755,9 @@ def _validate_authorized_snapshot(
     snapshot = record_formats.load_adapter(
         vault_root, manifest, authorize_path=authorize_path
     ).read()
+    governed = motivation_is_governed(manifest)
     for record in snapshot.records:
-        normalize_item(record.values, apply_defaults=False)
+        normalize_item(record.values, apply_defaults=False, validate_motivation=governed)
     if validate_relationships:
         _validate_relationships(manifest, snapshot.records, None, None)
 
@@ -922,7 +945,10 @@ def update(
     if final == dict(matches[0].values) and (body is None or body == matches[0].body):
         raise CollectionError("INVALID_PLAN", "Planning update does not change authored state")
     _require_same_area_side(matches[0].values, final)
-    normalize_item(final, apply_defaults=False)
+    normalize_item(
+        final, apply_defaults=False,
+        validate_motivation=motivation_is_governed(manifest),
+    )
     _validate_declared_text(manifest, final)
     _validate_relationships(manifest, snapshot.records, plan_id, final)
     return records.update_record(
@@ -980,7 +1006,10 @@ def triage(
     if final == dict(matches[0].values):
         raise CollectionError("INVALID_PLAN", "Planning triage does not change authored state")
     _require_same_area_side(matches[0].values, final)
-    normalize_item(final, apply_defaults=False)
+    normalize_item(
+        final, apply_defaults=False,
+        validate_motivation=motivation_is_governed(manifest),
+    )
     _validate_declared_text(manifest, final)
     _validate_relationships(manifest, snapshot.records, plan_id, final)
     return records.update_record(
@@ -1063,7 +1092,10 @@ def _validate_relationships(
         if record.ambiguous or record.identity.key in plans:
             _relation_error()
         values = dict(record.values)
-        normalize_item(values, apply_defaults=False)
+        normalize_item(
+            values, apply_defaults=False,
+            validate_motivation=motivation_is_governed(manifest),
+        )
         plans[record.identity.key] = values
     if plan_id is not None and candidate is not None:
         plans[plan_id] = dict(candidate)
@@ -1144,7 +1176,10 @@ def _validate_final_relationships(
         (record.values for record in snapshot.records if record.identity.key == plan_id), values
     )
     _require_same_area_side(before, values)
-    normalize_item(values, apply_defaults=False)
+    normalize_item(
+        values, apply_defaults=False,
+        validate_motivation=motivation_is_governed(manifest),
+    )
     _validate_declared_text(manifest, values)
     _validate_relationships(manifest, snapshot.records, plan_id, values)
 
@@ -1190,7 +1225,9 @@ def _relation_error() -> Never:
     raise CollectionError("INVALID_PLAN_RELATION", "Planning relationship is not available")
 
 
-def _validate_optional(values: Mapping[str, Any]) -> None:
+def _validate_optional(
+    values: Mapping[str, Any], *, validate_motivation: bool = True
+) -> None:
     for name in ("health",):
         if name in values:
             _enum(values[name], _HEALTH, name)
@@ -1216,7 +1253,8 @@ def _validate_optional(values: Mapping[str, Any]) -> None:
             _bounded_string(tag, "tag", 128)
     _validate_evidence(values.get("progress_evidence"))
     _validate_execution(values.get("execution"))
-    _validate_motivation(values.get("motivation"))
+    if validate_motivation:
+        _validate_motivation(values.get("motivation"))
 
 
 def _validate_motivation(value: Any) -> None:

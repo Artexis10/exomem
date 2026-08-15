@@ -24,10 +24,11 @@ stale beliefs are prevented from doing.
 
 ### New Capabilities
 
-- `planning`: no `openspec/specs/planning/` capability exists yet even though
-  Planning already ships in `src/exomem/planning.py`; this change is the first
-  to formalize any part of that surface as an OpenSpec capability, scoped to
-  the `motivation` field and its query filter.
+- `planning`: no `openspec/specs/planning/` capability exists under
+  `openspec/specs/` yet, so this delta declares a new capability. Note that
+  `add-multi-horizon-planning` also declares `planning` and is complete but
+  unarchived; the two deltas share no requirement names, so archive order is
+  safe. This delta is scoped to the `motivation` field and its query filter.
 
 ### Modified Capabilities
 
@@ -45,4 +46,7 @@ None.
 - New focused tests in `tests/test_planning_motivation.py` covering shape
   validation, round-trip, the query filter, and the relation-graph non-goal.
 - Additive and optional: absence of `motivation` behaves exactly as before
-  this change; no existing Planning item is invalidated.
+  this change. The governed ref-list shape is enforced only where the manifest
+  declares `motivation` as an array, so a vault that had already declared its
+  own `motivation` field of another type keeps reading, querying and mutating
+  exactly as before rather than being refused on every normalized record.

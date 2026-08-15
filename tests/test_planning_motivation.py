@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from test_planning_mutation import _manifest
 
+from exomem import planning
 from exomem.structured_collections import CollectionError
 
 REF_A = "exomem://memory/5c252e6f-2639-4ee4-819a-fc9099200e1a"
@@ -26,6 +27,16 @@ def _manifest_with_motivation() -> str:
         "    health:\n      type: string\n"
         "    motivation:\n      type: array\n      items: {type: string}\n",
     )
+
+
+def _seed_collection_with(tmp_path: Path, manifest_text: str) -> str:
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    manifest_path = "Knowledge Base/Planning/Work/_collection.md"
+    from exomem.planning import create_collection
+
+    create_collection(tmp_path, manifest_path, manifest_text, why="create planning collection")
+    return manifest_path
 
 
 def _seed_collection(tmp_path: Path) -> str:
@@ -281,3 +292,65 @@ def test_motivation_update_can_be_deleted_like_other_optional_fields(tmp_path: P
         / f"{added['plan_id']}.md"
     )
     assert "motivation" not in item_path.read_text(encoding="utf-8")
+
+
+def test_legacy_untyped_motivation_field_does_not_brick_the_collection(tmp_path: Path) -> None:
+    """A vault that declared its own `motivation` field keeps working.
+
+    The governed ref-list shape is enforced only where the manifest declares
+    `motivation` as an array. Without that gate, `query` — which normalizes every
+    stored record — would refuse the whole collection because of one legacy item,
+    leaving it unqueryable and unrepairable.
+    """
+    manifest = _manifest().replace(
+        "    health:\n      type: string\n",
+        "    health:\n      type: string\n    motivation:\n      type: string\n",
+    )
+    collection = _seed_collection_with(tmp_path, manifest)
+
+    planning.add(
+        tmp_path,
+        collection,
+        item={"title": "Legacy", "motivation": "because the customer asked"},
+        why="legacy free-text motivation predating the governed contract",
+    )
+
+    rows = planning.query(tmp_path, collection)["rows"]
+    assert any(row.get("motivation") == "because the customer asked" for row in rows)
+
+
+def test_motivation_deletion_relies_on_optional_membership(tmp_path: Path) -> None:
+    """Pin `_OPTIONAL` membership as load-bearing, not incidental.
+
+    With `motivation` declared required, deletion is refused either way — but by
+    a different layer, and the code says which. In `_OPTIONAL` the Planning check
+    passes and the schema layer refuses with SCHEMA_REQUIRED_FIELD; drop it from
+    `_OPTIONAL` and Planning refuses first with INVALID_PLAN. Asserting the code
+    makes membership observable rather than decorative.
+    """
+    manifest = _manifest().replace(
+        "    health:\n      type: string\n",
+        "    health:\n      type: string\n"
+        "    motivation:\n      type: array\n      required: true\n"
+        "      items: {type: string}\n",
+    )
+    collection = _seed_collection_with(tmp_path, manifest)
+    added = planning.add(
+        tmp_path,
+        collection,
+        item={"title": "Required motivation", "motivation": [REF_A]},
+        why="seed an item whose motivation is declared required",
+    )
+
+    with pytest.raises(CollectionError) as raised:
+        planning.update(
+            tmp_path,
+            collection,
+            plan_id=added["plan_id"],
+            changes={"motivation": None},
+            expected_container_hash=added["after_container_hash"],
+            expected_item_version=added["after_item_hash"],
+            why="deleting a required field must be refused by the schema layer",
+        )
+
+    assert raised.value.code == "SCHEMA_REQUIRED_FIELD"
