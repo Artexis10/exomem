@@ -282,6 +282,19 @@ class EmbeddingIndex:
                 or own_instance != cached.instance
                 or own_gen != cached.generation + 1
             ):
+                log.info(
+                    "embedding matrix purge refused: paths=%s "
+                    "own=(epoch=%d, gen=%d, instance=%d) "
+                    "cached=(epoch=%d, gen=%d, instance=%d) delta=%d",
+                    sorted(paths),
+                    own_epoch,
+                    own_gen,
+                    own_instance,
+                    cached.epoch,
+                    cached.generation,
+                    cached.instance,
+                    own_gen - cached.generation,
+                )
                 self._cache = None
                 return
             keep = [i for i, (path, _chunk) in enumerate(cached.metadata) if path not in paths]
@@ -417,6 +430,19 @@ class EmbeddingIndex:
             if c is None:
                 return
             if own_epoch != c.epoch or own_instance != c.instance or own_gen != c.generation + 1:
+                log.info(
+                    "embedding matrix patch refused: rel_path=%s "
+                    "own=(epoch=%d, gen=%d, instance=%d) "
+                    "cached=(epoch=%d, gen=%d, instance=%d) delta=%d",
+                    rel_path,
+                    own_epoch,
+                    own_gen,
+                    own_instance,
+                    c.epoch,
+                    c.generation,
+                    c.instance,
+                    own_gen - c.generation,
+                )
                 return  # not contiguous with what THIS cache holds -> never splice
             try:
                 lo, hi = sidecar_store.file_block([m[0] for m in c.metadata], rel_path)
@@ -487,11 +513,12 @@ class EmbeddingIndex:
             # deliberately wrap the named full-reload seam.
             loaded = self._load_all_rows()
             log.info(
-                "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d",
+                "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d cached_gen=%d",
                 sidecar_store.reload_reason(c, loaded.epoch, loaded.generation),
                 len(loaded.metadata),
                 loaded.generation,
                 loaded.epoch,
+                c.generation if c is not None else -1,
             )
             self._cache = loaded
             return loaded.metadata, loaded.matrix

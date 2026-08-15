@@ -445,7 +445,6 @@ def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
     rels = list(dict.fromkeys(rels))
     from . import (
         claims,
-        embedding_index,
         embeddings,
         epistemic_graph,
         index_paths,
@@ -468,7 +467,7 @@ def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
     if index_paths.sidecar_path(vault_root).exists():
         succeeded &= _purge(
             "embeddings",
-            lambda: embedding_index.EmbeddingIndex(vault_root).purge_paths_if_present(rels),
+            lambda: embeddings.get_embedding_index(vault_root).purge_paths_if_present(rels),
         )
     graph_rels = [
         rel for rel in rels if recall_policy.is_recall_candidate(vault_root, vault_root / rel)
