@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -54,6 +55,24 @@ LOOPBACK_REDIRECT = "http://localhost:47831/callback"
 CLAUDE_CIMD_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata"
 CLAUDE_CIMD_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 SCOPES = "exomem.read exomem.write offline_access"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface 3xx instead of following it.
+
+    `/oauth/authorize` answers 303 and sets the transaction cookie ON THAT
+    RESPONSE. urlopen follows the redirect by default, so the caller sees the
+    final 200 HTML page and — because no cookie processor is installed — the
+    transaction cookie is dropped with the intermediate response. Returning None
+    here makes urllib raise HTTPError for the 3xx, which the caller already
+    handles, keeping both the status and the Set-Cookie headers.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def utc_now() -> datetime:
@@ -139,7 +158,7 @@ class ControlPlane:
         for key, value in request_headers.items():
             request.add_header(key, value)
         try:
-            with urllib.request.urlopen(request) as response:
+            with _OPENER.open(request) as response:
                 status, raw, cookie_headers = (
                     response.status,
                     response.read(),
@@ -398,7 +417,12 @@ def run(cp: ControlPlane, context: dict, token: str, locks: dict) -> None:
     )
 
     # The assignment expires while the cell provisions. Issue credentials NOW.
-    for platform, admission, sibling_client, redirects, package, archive, app_digest in (
+    # Both platforms in this one pass: promote-cohort needs a claudeArtifactId AND
+    # an openaiArtifactId, and each canary credential is welded to this bootstrap's
+    # own assignment/generation, so a second pass later cannot supply the other one.
+    # OpenAI registers `pinned` on a loopback redirect: there is no published
+    # ChatGPT client-metadata-document URL to admit by CIMD.
+    siblings = (
         (
             "claude",
             "cimd",
@@ -408,7 +432,17 @@ def run(cp: ControlPlane, context: dict, token: str, locks: dict) -> None:
             locks["claude_archive"],
             None,
         ),
-    ):
+        (
+            "openai",
+            "pinned",
+            f"exomem-reviewer-openai-{uuid.uuid4()}",
+            [LOOPBACK_REDIRECT],
+            locks["openai_package"],
+            locks["openai_archive"],
+            locks["openai_registered_app"],
+        ),
+    )
+    for platform, admission, sibling_client, redirects, package, archive, app_digest in siblings:
         config_sha = client_config_sha256(
             platform=platform,
             admission_mode=admission,
@@ -446,6 +480,11 @@ def run(cp: ControlPlane, context: dict, token: str, locks: dict) -> None:
                 "stagedClientReleaseId": stage["stage"]["id"],
                 "clientId": sibling_client,
                 "redirectUris": redirects,
+                # The stage row is matched with
+                #   stage.registered_app_id_sha256 IS NOT DISTINCT FROM <this>
+                # so omitting it on an OpenAI client whose stage carries the
+                # registered-app digest silently matches no stage and 400s.
+                **({"registeredAppIdSha256": app_digest} if app_digest else {}),
             },
         )
         if status != 200:
@@ -488,12 +527,17 @@ def load_locks(repo: Path) -> dict:
     generated = repo / "plugins" / "hosted" / "generated"
     claude = json.loads((generated / "claude.lock.json").read_text())
     claude_zip = json.loads((generated / "claude.zip.lock.json").read_text())
+    openai = json.loads((generated / "openai.lock.json").read_text())
+    openai_zip = json.loads((generated / "openai.zip.lock.json").read_text())
     fixture = json.loads(
         (repo / "plugins" / "hosted" / "marketplace-review-fixture-v1.json").read_text()
     )
     return {
         "claude_package": claude["artifact_sha256"],
         "claude_archive": claude_zip["archive_sha256"],
+        "openai_package": openai["artifact_sha256"],
+        "openai_archive": openai_zip["archive_sha256"],
+        "openai_registered_app": openai["registered_app_id_sha256"],
         "compatibility": claude["compatibility_sha256"],
         "contract": claude["schema_contract_sha256"],
         "plugin_version": claude["plugin_version"],
