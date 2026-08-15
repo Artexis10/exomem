@@ -462,6 +462,12 @@ class _Attempt:
     lifecycle_guard: vault.DirectoryCensusGuard | None
     language_registry: semantic_language_registry.SemanticLanguageRegistry
     reused: bool = False
+    before_corpus_census: tuple | None = None
+    """The exact census that validated ``before_corpus``, when this attempt
+    built it. A caller about to compute ``corpus_validity_token`` threads this
+    instead of paying a second stat-walk of the whole vault. ``None`` whenever
+    no single walk unambiguously matches ``before_corpus`` — a reused
+    pre-validated attempt, or a build the corpus cache could not caption."""
 
     @property
     def prevalidated_outcome(self) -> str:
@@ -3077,6 +3083,7 @@ def _attempt(
     else:
         stamp_current = False
     reused = reuse if stamp_current else None
+    before_census: tuple | None = None
     if reused is not None:
         before = reused.before_corpus
         candidate = reused.candidate
@@ -3085,7 +3092,7 @@ def _attempt(
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
         loaded_contracts = memory_schema.load_saved_contracts(root)
-        before = semantic_contract.build_corpus_context(
+        before, before_census = semantic_contract.build_corpus_context_with_census(
             root, registry=registry, language_registry=language
         )
         candidate = semantic_contract.build_page_state(
@@ -3233,6 +3240,7 @@ def _attempt(
         lifecycle_guard,
         language,
         reused is not None,
+        before_census,
     )
 
 
@@ -3717,10 +3725,19 @@ def prepare_commit_creation_draft(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
+        # Thread the census straight from the corpus context this preliminary
+        # attempt just built, so the validity token never re-walks the vault.
+        # `cached_corpus_census` remains the fallback for the cases that walk
+        # produced no captionable census (or an eviction landed since), which
+        # is all it could ever offer on its own.
         sc_token = (
             semantic_contract.corpus_validity_token(
                 root,
-                corpus_census=semantic_contract.cached_corpus_census(root),
+                corpus_census=(
+                    preliminary.before_corpus_census
+                    if preliminary.before_corpus_census is not None
+                    else semantic_contract.cached_corpus_census(root)
+                ),
             )
             if entry_generation is not None
             else None

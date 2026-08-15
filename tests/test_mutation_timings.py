@@ -630,3 +630,76 @@ def test_a_walk_nobody_consumed_is_not_reported_as_a_rebuild(
     assert ("exomem_corpus_census_walk_ms", "aborted") in observed
     assert ("exomem_corpus_census_walk_ms", "rebuild") not in observed
     assert ("exomem_corpus_build_ms", "rebuild") not in observed
+
+
+_DRAFT_ID = "00000000-0000-4000-8000-0000000005b2"
+_EXISTING_ID = "00000000-0000-4000-8000-0000000005b3"
+_DRAFT_PAGE = "Knowledge Base/Notes/Insights/candidate.md"
+_EXISTING_PAGE = "Knowledge Base/Notes/Insights/existing.md"
+_COMPILED_BODY = (
+    "Body.\n\n"
+    "## Observations\n\n"
+    "- [operating constraint] Keep retries bounded #reliability\n\n"
+    "## Relations\n"
+)
+
+
+def _compiled_source(page_id: str, *, title: str = "Candidate") -> str:
+    return (
+        "---\n"
+        f"title: {title}\n"
+        "type: insight\n"
+        "status: active\n"
+        f"exomem_id: {page_id}\n"
+        "---\n\n"
+        f"{_COMPILED_BODY}"
+    )
+
+
+def test_creation_draft_prepare_costs_one_census_walk(tmp_path: Path, monkeypatch) -> None:
+    """`prepare_commit_creation_draft` must not re-walk the vault for its stamp.
+
+    It holds `preliminary.before_corpus` from its own `_attempt` build, yet
+    asked `corpus_validity_token` for a census through the global process
+    cache. Against unpatched code an eviction landing between that build and
+    the capture -- the exact window a concurrent write opens -- makes
+    `cached_corpus_census` come back empty, so the token walks the whole
+    corpus a SECOND time. Threading the build's own census makes the eviction
+    irrelevant: still exactly one walk.
+    """
+    from exomem import relation_review
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _force_walk_confirmed_cache_path(monkeypatch)
+    semantic_contract.reset_corpus_context_cache()
+    existing = tmp_path / _EXISTING_PAGE
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(
+        _compiled_source(_EXISTING_ID, title="Existing"), encoding="utf-8", newline=""
+    )
+    source = _compiled_source(_DRAFT_ID)
+    validation = relation_review.validate_creation_draft(
+        tmp_path,
+        path=_DRAFT_PAGE,
+        source=source,
+        draft_id=_DRAFT_ID,
+        operation="create",
+    )
+    semantic_contract.build_corpus_context(tmp_path)  # warm the process cache
+
+    _evict_between_build_and_capture(monkeypatch, tmp_path)
+    calls = _spy_corpus_census(monkeypatch)
+
+    prepared = relation_review.prepare_commit_creation_draft(
+        tmp_path,
+        path=_DRAFT_PAGE,
+        source=source,
+        draft_id=_DRAFT_ID,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+
+    assert len(calls) == 1, f"expected exactly one census walk, got {len(calls)}"
+    assert prepared.reuse is not None
