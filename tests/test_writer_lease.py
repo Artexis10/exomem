@@ -22,7 +22,7 @@ from exomem import vault as vault_module
 from exomem import writer_lease as writer_lease_module
 from exomem.cli_ops import OpError, error_dict, http_status_for
 from exomem.lease_coordinator import SQLiteLeaseStore
-from exomem.mutation_lock import VaultMutationCoordinator
+from exomem.mutation_lock import VaultMutationCoordinator, active_mutation_snapshot
 from exomem.mutation_terminal import committed_terminal
 from exomem.vault import PlannedWrite, batch_atomic_write
 from exomem.writer_lease import (
@@ -1955,7 +1955,7 @@ def test_mutation_during_semantic_warm_returns_without_holding_boundary(
     assert payload["retry_after_ms"] == 750
     assert payload["request_id"] == "warm-request"
     assert calls == []
-    assert writer_lease_module.active_mutation_snapshot()["state"] == "free"
+    assert active_mutation_snapshot()["state"] == "free"
 
 
 def test_postcommit_error_cannot_escape_as_precommit_retryable(tmp_path: Path) -> None:
