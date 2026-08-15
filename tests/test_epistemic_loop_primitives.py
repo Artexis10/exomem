@@ -536,6 +536,29 @@ def test_a_row_that_merely_resembles_a_governed_key_is_preserved_not_swallowed(
     assert updated["unit"]["anchor"] == "retry-budget"
 
 
+def test_an_empty_valued_unowned_row_survives_without_trailing_whitespace(
+    tmp_path: Path,
+) -> None:
+    page, unit = _rich_page_with_rows(tmp_path, "- reviewer:\n")
+
+    updated = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="update",
+        category="reliability",
+        content="Retry budgets did not stop the incident class.",
+        kind="prediction",
+        unit_ref=unit.unit_ref,
+        expected_fingerprint=unit.fingerprint,
+        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+    )
+
+    source = page.read_text(encoding="utf-8")
+    assert "- reviewer:\n" in source
+    assert "- reviewer: \n" not in source
+    assert updated["unit"]["metadata"]["reviewer"] == ""
+
+
 @pytest.mark.parametrize(
     "authored,normalized",
     [("Verdict", "verdict"), ("check by", "check_by"), ("Check-By", "check_by")],
