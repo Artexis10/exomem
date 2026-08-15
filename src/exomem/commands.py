@@ -5138,19 +5138,24 @@ def op_triage_memory(
     if normalized == contradiction_stance_module.STANCE_ACTION:
         # "rivals; keep both" is a statement about a PAIR, so it is recorded on the
         # pair identity rather than on this item's composite signal — that is the
-        # only key the write-time draft check can reconstruct from two paths.
-        result = contradiction_stance_module.record_stance(
+        # only key the write-time draft check can reconstruct from two paths. The
+        # RESPONSE still reports the item's own identity, so a client that
+        # round-trips the returned fingerprint into `expected_fingerprint` is
+        # comparing like with like; the pair identities ride along under `pairs`.
+        recorded = contradiction_stance_module.record_stance(
             vault_root, reasons=item.reasons, until=until, why=why
         )
-        result["ref"] = ref
-        result.update(
-            {
-                "path": item.path,
-                "target_ref": item.target_ref,
-                "categories": item.categories,
-            }
-        )
-        return result
+        return {
+            "item_id": item.item_id,
+            "ref": item.ref or ref,
+            "fingerprint": item.fingerprint,
+            "state": "competing",
+            "decision": recorded[0]["decision"],
+            "pairs": recorded,
+            "path": item.path,
+            "target_ref": item.target_ref,
+            "categories": item.categories,
+        }
     result = review_state_module.ReviewStateStore(vault_root).apply(
         item.item_id or review_state_module.parse_review_ref(ref),
         item.fingerprint or "",

@@ -46,3 +46,15 @@
 - [x] 7.2 Run `uvx ruff check` on every changed file.
 - [x] 7.3 Confirm the guarded goldens and the MCP schema fixture are untouched by the diff.
 - [x] 7.4 Validate the OpenSpec change in strict mode.
+
+## 8. Correction round
+
+- [x] 8.1 Return every contradiction pair from `pairs_from_reasons`; record and clear the stance on each, and resolve an item to `competing` only when all its pairs are stanced.
+- [x] 8.2 Cover an anchor carrying two conflicts: record, honour, reopen-clears-all, and the drift-reopen transition that previously stranded a stance.
+- [x] 8.3 Parametrize the resurfacing test over both endpoints so the both-sides fingerprint binding is pinned.
+- [x] 8.4 Replace the per-anchor asserted-pair fan-out with one indexed `EpistemicGraphIndex.relation_edges` query, and cover the new method directly.
+- [x] 8.5 Build the write-time declared-pair snapshot once per call instead of per candidate.
+- [x] 8.6 Report the item's own identity from a `competing` triage, with pair identities under `pairs`.
+- [x] 8.7 Filter declared rivals inside each detect loop so an exempt pair cannot consume a `top_n` slot.
+- [x] 8.8 Pin the proximity `signal_version` formula, the inverted-band asserted path, and the warming-graph proximity path.
+- [x] 8.9 Correct the design.md cost claim and re-validate the change in strict mode.

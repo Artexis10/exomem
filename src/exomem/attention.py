@@ -433,17 +433,23 @@ def _apply_review_state(
             # contradiction pair itself still governs. The item-level record is
             # checked first because it is the more specific decision about this
             # exact signal composite.
-            pair = contradiction_stance_module.pair_from_reasons(item.reasons)
-            if pair is not None:
-                stance = contradiction_stance_module.pair_decision(
-                    vault_root,
-                    *pair,
-                    store=store,
-                    payload=state_payload,
-                    refs=refs,
-                )
-                if stance is not None:
-                    effective, decision = "competing", stance
+            pairs = contradiction_stance_module.pairs_from_reasons(item.reasons)
+            if pairs:
+                stances = [
+                    contradiction_stance_module.pair_decision(
+                        vault_root,
+                        *pair,
+                        store=store,
+                        payload=state_payload,
+                        refs=refs,
+                    )
+                    for pair in pairs
+                ]
+                # EVERY conflict on the anchor must be dispositioned before the item
+                # is: one un-stanced rival — a newly drifted pair, say — is still
+                # open review work, so the item honestly reopens.
+                if all(stance is not None for stance in stances):
+                    effective, decision = "competing", stances[0]
         item.item_id = review_id
         item.ref = review_state_module.review_ref(review_id)
         item.target_ref = target_ref

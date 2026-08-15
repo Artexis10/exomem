@@ -44,8 +44,10 @@ alongside the existing states.
 
 For a contradiction item, an item-level review decision SHALL take precedence over
 the pair stance; the pair stance SHALL be consulted only when no item-level decision
-applies. `reopen` on such an item SHALL clear both the item-level record and the pair
-stance.
+applies. An item carrying several contradiction pairs SHALL resolve to `competing`
+only when EVERY one of its pairs is stanced, because one un-stanced rival is still
+open review work. `reopen` on such an item SHALL clear both the item-level record and
+the stance on every pair it carries.
 
 #### Scenario: A competing item leaves the open view
 
@@ -59,6 +61,11 @@ stance.
 - **WHEN** a contradiction item carries both a matching item-level dismissal and a
   matching pair stance
 - **THEN** its effective state is `dismissed`
+
+#### Scenario: One un-stanced pair keeps the item open
+
+- **WHEN** an item carries two contradiction pairs and only one of them is stanced
+- **THEN** the item remains in the default open view
 
 #### Scenario: Reopen restores the item to the open view
 

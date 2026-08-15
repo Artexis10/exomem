@@ -149,10 +149,21 @@ re-affirm the stance.
 
 `attention._apply_review_state` checks the item-level record first; if that yields a
 non-open state, it wins, because it is the more specific decision about this exact
-signal composite. Otherwise, for an item carrying exactly one contradiction pair, the
-pair stance is consulted and can make the item `competing`. Since every queue filters
-by `item.state == state` and `competing` is not `open`, "honored by all queues" falls
-out of the existing filter rather than needing per-queue code.
+signal composite. Otherwise the pair stances for every contradiction the item carries
+are consulted, and the item becomes `competing` only when ALL of them are stanced.
+Since every queue filters by `item.state == state` and `competing` is not `open`,
+"honored by all queues" falls out of the existing filter rather than needing
+per-queue code.
+
+An item can carry more than one pair, and that is the ordinary shape, not an edge
+case: both lanes anchor a pair on `min(a, b)`, so a note that is the
+alphabetically-first endpoint of two conflicts is one item with two reasons. Treating
+that as "no pair" would make such an item unstanceable, and — worse — would strand an
+existing stance the moment a second pair drifted onto the same anchor: the record
+would stay live and keep muting the write-time warning while being impossible to
+re-affirm or clear. So `pairs_from_reasons` returns every pair, `record_stance`
+records each, and `clear_stance` clears each. `reopen` clears by review id rather
+than by fingerprint, so it also releases a stance recorded against older content.
 
 `competing` joins `VALID_ACTIONS` and `VALID_VIEWS` so the store, the state summary,
 and the `state=` view parameter all accept it. `reopen` on a contradiction-pair item
@@ -211,10 +222,22 @@ proximity pass ran — so an embeddings-off pack now reports
   reader's own explicit stance or their own authored edge, it is fingerprint-bound,
   and the pair still appears in the contradiction queue and in deep packs.
 - [The asserted lane adds a graph read to an audit category that previously touched
-  only the vector sidecar] -> It is one `relation_participants` lookup for the
-  participant set plus one anchored lookup per participating page, all indexed, and
-  the whole lane soft-fails to empty when the graph is disabled or warming rather
-  than fabricating or blocking.
+  only the vector sidecar] -> It is ONE indexed `relation_edges` query for the whole
+  vault, and the lane soft-fails to empty when the graph is disabled or warming
+  rather than fabricating or blocking. The obvious implementation — a participant
+  lookup plus an anchored lookup per participating page — is a trap:
+  `relation_participants` narrows by anchor in Python AFTER running the same
+  unnarrowed `relation_type IN (...)` query, so that shape costs O(pages x edges)
+  with one read snapshot per page (measured ~1 s at 250 authored edges) and it
+  reaches the retrieve/inject path through `find(pack=true)` and
+  `memory_context.assemble_context`. `relation_edges` exists because
+  `RelationFilterResult.provenance` keeps only one counterpart per page and so
+  cannot answer "which page is joined to which" in a single pass.
+- [The write-time exemption scales with vault edge count, not candidate count] ->
+  `DeclaredPairFilter` builds one `DeclaredEdges` snapshot (two indexed queries) and
+  one review-state read LAZILY on the first candidate and reuses both, so the cost is
+  flat in the number of candidates and is paid only on a write that would have warned
+  at all.
 - [A warming graph silently yields no asserted entries] -> Documented in the spec as
   an explicit absence contract rather than a fabricated result; the proximity lane is
   unaffected, and the next audit after the rebuild surfaces them.

@@ -40,6 +40,7 @@ from exomem import find as find_module
 from exomem import review_state as review_state_module
 from exomem.audit import AuditFinding
 from exomem.find import Hit
+from exomem.vault import content_hash
 
 _TODAY = dt.date(2026, 6, 27)
 _BODY = "Zylo narwhal quokka substrate measure-not-judge authored contradiction body."
@@ -329,6 +330,60 @@ def test_asserted_signal_version_differs_from_the_proximity_one(
     assert asserted.meta["signal_version"] != proximity.meta["signal_version"]
 
 
+def test_proximity_signal_version_is_unchanged_by_the_provenance_label(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding `meta.provenance` must not churn a stored dismissal.
+
+    `review_state.fingerprint` reads `meta.signal_version` verbatim, so if the label
+    had been folded into the version instead, every dismissal in a real vault would
+    resurface on upgrade. Pin the exact pre-change formula.
+    """
+    a = _seed(vault, "Notes/Insights/sig-a.md")
+    b = _seed(vault, "Notes/Insights/sig-b.md")
+    _install_vectors(vault, monkeypatch, [(a, b, 0.9)])
+    finding = next(f for f in _cc(vault) if _pair_key(f) == tuple(sorted((a, b))))
+
+    left, right = sorted((a, b))
+    page_left = find_module._CACHE.get(vault / left, vault)
+    page_right = find_module._CACHE.get(vault / right, vault)
+    expected = content_hash(
+        audit_module._page_signal_version(page_left)
+        + "\n"
+        + audit_module._page_signal_version(page_right)
+    )[:16]
+    assert finding.meta["signal_version"] == expected
+    assert finding.meta["provenance"] == "proximity"
+
+
+def test_asserted_entries_survive_an_inverted_band(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An inverted band disables the proximity sweep; an authored edge needs no band."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_FLOOR", "0.99")
+    monkeypatch.setenv("EXOMEM_DUP_THRESHOLD", "0.5")
+    b = _seed(vault, "Notes/Insights/ib-b.md")
+    a = _seed(vault, "Notes/Insights/ib-a.md", relations=[f"contradicts {_link(b)}"])
+    _build_graph(vault)
+    mine = [f for f in _cc(vault) if _pair_key(f) == tuple(sorted((a, b)))]
+    assert len(mine) == 1
+    assert mine[0].meta["provenance"] == "asserted"
+
+
+def test_a_warming_graph_leaves_the_proximity_lane_intact(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No graph sidecar at all: asserted entries are absent, proximity is unaffected."""
+    a = _seed(vault, "Notes/Insights/wg-a.md")
+    b = _seed(vault, "Notes/Insights/wg-b.md")
+    _install_vectors(vault, monkeypatch, [(a, b, 0.9)])
+    assert stance_module.asserted_pairs(vault) == []
+    mine = [f for f in _cc(vault) if _pair_key(f) == tuple(sorted((a, b)))]
+    assert len(mine) == 1
+    assert mine[0].meta["provenance"] == "proximity"
+
+
 def test_an_ineligible_endpoint_is_not_surfaced(vault: Path) -> None:
     b = _seed(vault, "Notes/Insights/el-b.md", status="archived")
     a = _seed(vault, "Notes/Insights/el-a.md", relations=[f"contradicts {_link(b)}"])
@@ -435,9 +490,25 @@ def test_competing_stance_removes_the_pair_from_the_open_view(rivals) -> None:
         vault, ref=ref, action="competing", why="rivals; keep both"
     )
     assert result["state"] == "competing"
-    assert sorted(result["pair"]) == sorted([a, b])
+    assert [sorted(pair["paths"]) for pair in result["pairs"]] == [sorted([a, b])]
     assert min(a, b) not in _open_paths(vault)
     assert min(a, b) in _open_paths(vault, state="competing")
+
+
+def test_competing_response_reports_the_item_identity_not_the_pair(rivals) -> None:
+    """A client round-tripping the returned fingerprint must not get a false
+    REVIEW_ITEM_CHANGED, so the envelope carries the ITEM's identity and the pair's
+    rides along under `pairs`."""
+    vault, _a, _b, ref = rivals
+    item = attention_module.item_by_ref(vault, ref)
+    result = commands_module.op_triage_memory(
+        vault, ref=ref, action="competing", why="rivals"
+    )
+    assert result["item_id"] == item.item_id
+    assert result["ref"] == ref
+    assert result["fingerprint"] == item.fingerprint
+    assert result["pairs"][0]["fingerprint"] != item.fingerprint
+    assert result["pairs"][0]["ref"].startswith("exomem://review/")
 
 
 def test_competing_stance_is_recorded_on_the_pair_identity(rivals) -> None:
@@ -447,12 +518,23 @@ def test_competing_stance_is_recorded_on_the_pair_identity(rivals) -> None:
     assert stance_module.is_competing(vault, b, a)
 
 
-def test_editing_a_rival_resurfaces_the_pair(rivals) -> None:
+@pytest.mark.parametrize("endpoint", ["left", "right"])
+def test_editing_either_rival_resurfaces_the_pair(rivals, endpoint: str) -> None:
+    """The stance must bind BOTH endpoints' content.
+
+    `pair_key` sorts by path, so a test that only ever rewrites the alphabetically
+    first note exercises the left half of `pair_signal_version` and nothing else — a
+    version that hashed only the left signal would survive it, and the "keep both"
+    record would then mute the pair forever no matter what happened to the other
+    note. Parametrizing pins both halves.
+    """
     vault, a, b, ref = rivals
     commands_module.op_triage_memory(vault, ref=ref, action="competing", why="rivals")
     assert min(a, b) not in _open_paths(vault)
 
-    target = vault / a
+    left, right = stance_module.pair_key(a, b)
+    edited = left if endpoint == "left" else right
+    target = vault / edited
     target.write_text(
         target.read_text(encoding="utf-8") + "\nA materially revised claim.\n",
         encoding="utf-8",
@@ -494,6 +576,130 @@ def test_competing_is_refused_for_an_item_without_a_pair(vault: Path) -> None:
         commands_module.op_triage_memory(
             vault, ref=item.ref, action="competing", why="not a pair"
         )
+
+
+# ----------------------------- an anchor with two conflicts -----------------------------
+
+
+@pytest.fixture
+def two_conflicts(vault: Path) -> tuple[Path, str, str, str, str]:
+    """One anchor that contradicts two other notes.
+
+    Both lanes anchor a pair on `min(a, b)`, so `tc-a` — alphabetically first —
+    collapses into ONE attention item carrying two contradiction reasons. This is the
+    ordinary "this conflicts with these two older ones" shape, not an edge case.
+    """
+    b = _seed(vault, "Notes/Insights/tc-b.md")
+    c = _seed(vault, "Notes/Insights/tc-c.md")
+    a = _seed(
+        vault,
+        "Notes/Insights/tc-a.md",
+        relations=[f"contradicts {_link(b)}", f"contradicts {_link(c)}"],
+    )
+    _build_graph(vault)
+    report = attention_module.attention(
+        vault, categories=["corpus_contradictions"], limit=0, today=_TODAY
+    )
+    item = next(i for i in report.items if i.path == a)
+    assert item.ref is not None
+    return vault, a, b, c, item.ref
+
+
+def test_an_anchor_with_two_conflicts_is_one_item_with_two_pairs(two_conflicts) -> None:
+    vault, a, b, c, _ref = two_conflicts
+    report = attention_module.attention(
+        vault, categories=["corpus_contradictions"], limit=0, today=_TODAY
+    )
+    item = next(i for i in report.items if i.path == a)
+    assert stance_module.pairs_from_reasons(item.reasons) == sorted(
+        [stance_module.pair_key(a, b), stance_module.pair_key(a, c)]
+    )
+
+
+def test_a_two_conflict_anchor_can_be_stanced_and_reopened(two_conflicts) -> None:
+    vault, a, b, c, ref = two_conflicts
+    result = commands_module.op_triage_memory(
+        vault, ref=ref, action="competing", why="both are live rivals"
+    )
+    assert result["state"] == "competing"
+    assert len(result["pairs"]) == 2
+    assert stance_module.is_competing(vault, a, b)
+    assert stance_module.is_competing(vault, a, c)
+    assert a not in _open_paths(vault)
+
+    commands_module.op_triage_memory(vault, ref=ref, action="reopen")
+    assert not stance_module.is_competing(vault, a, b)
+    assert not stance_module.is_competing(vault, a, c)
+    assert a in _open_paths(vault)
+
+
+def test_one_unstanced_pair_keeps_the_anchor_open(two_conflicts) -> None:
+    vault, a, b, c, _ref = two_conflicts
+    identity = stance_module.pair_identity(vault, a, b)
+    assert identity is not None
+    review_state_module.ReviewStateStore(vault).apply(
+        identity[0], identity[1], action="competing", why="only this one"
+    )
+    assert a in _open_paths(vault), "an un-stanced rival is still open review work"
+    assert stance_module.is_competing(vault, a, b)
+    assert not stance_module.is_competing(vault, a, c)
+
+
+def test_a_drifted_second_pair_never_strands_the_first_stance(vault: Path) -> None:
+    """The transition that used to trap a stance.
+
+    Stance (a, b); a third note later drifts into the band with `a`; the item
+    reopens. The original record must remain re-affirmable and clearable through the
+    same item — otherwise it would keep muting the write-time warning with no escape
+    but editing a rival.
+    """
+    b = _seed(vault, "Notes/Insights/dr-b.md")
+    a = _seed(vault, "Notes/Insights/dr-a.md", relations=[f"contradicts {_link(b)}"])
+    _build_graph(vault)
+    report = attention_module.attention(
+        vault, categories=["corpus_contradictions"], limit=0, today=_TODAY
+    )
+    ref = next(i for i in report.items if i.path == a).ref
+    commands_module.op_triage_memory(vault, ref=ref, action="competing", why="rivals")
+    assert a not in _open_paths(vault)
+
+    # A third note drifts in: `a` now anchors two conflicts.
+    c = _seed(vault, "Notes/Insights/dr-c.md", relations=[f"contradicts {_link(a)}"])
+    _build_graph(vault)
+    assert a in _open_paths(vault)
+    assert stance_module.is_competing(vault, a, b), "the first record is still live"
+
+    # Re-affirmable: stancing the item now covers both pairs.
+    report = attention_module.attention(
+        vault, categories=["corpus_contradictions"], limit=0, today=_TODAY
+    )
+    ref = next(i for i in report.items if i.path == a).ref
+    commands_module.op_triage_memory(vault, ref=ref, action="competing", why="both")
+    assert a not in _open_paths(vault)
+
+    # And clearable: reopen releases every pair, so nothing keeps muting a warning.
+    commands_module.op_triage_memory(vault, ref=ref, action="reopen")
+    assert not stance_module.is_competing(vault, a, b)
+    assert not stance_module.is_competing(vault, a, c)
+    assert a in _open_paths(vault)
+
+
+def test_reopen_clears_a_stance_recorded_against_older_content(vault: Path) -> None:
+    """Clearing keys on the review id, not the fingerprint, so a drifted record goes."""
+    b = _seed(vault, "Notes/Insights/oc-b.md")
+    a = _seed(vault, "Notes/Insights/oc-a.md", relations=[f"contradicts {_link(b)}"])
+    _build_graph(vault)
+    identity = stance_module.pair_identity(vault, a, b)
+    assert identity is not None
+    store = review_state_module.ReviewStateStore(vault)
+    store.apply(identity[0], "f" * 24, action="competing", why="stale fingerprint")
+
+    report = attention_module.attention(
+        vault, categories=["corpus_contradictions"], limit=0, today=_TODAY
+    )
+    item = next(i for i in report.items if i.path == a)
+    commands_module.op_triage_memory(vault, ref=item.ref, action="reopen")
+    assert store.load()["records"] == {}
 
 
 @pytest.mark.parametrize(
@@ -590,6 +796,41 @@ def test_a_competing_stance_exempts_the_pair(write_time: Path) -> None:
     )
     assert _overlap(write_time, a, b, 0.8) == []
     assert _dups(write_time, a, b, 0.99) == []
+
+
+def test_declared_rivals_do_not_consume_a_top_n_slot(write_time: Path) -> None:
+    """Exempt rivals must be filtered INSIDE the accumulation loop.
+
+    With `top_n=3`, three declared rivals ranked above a genuine near-duplicate would
+    otherwise fill every slot and the real duplicate warning would never fire.
+    """
+    q = _seed(write_time, "Notes/Insights/ts-question.md")
+    self_page = _seed(
+        write_time, "Notes/Insights/ts-self.md", relations=[f"answers {_link(q)}"]
+    )
+    rivals = [
+        _seed(
+            write_time,
+            f"Notes/Insights/ts-rival-{index}.md",
+            relations=[f"answers {_link(q)}"],
+        )
+        for index in range(3)
+    ]
+    genuine = _seed(write_time, "Notes/Insights/ts-genuine.md")
+    _build_graph(write_time)
+
+    # Rivals score higher than the genuine near-duplicate, so they sort first.
+    precomputed = {rival: 0.99 for rival in rivals}
+    precomputed[genuine] = 0.97
+    candidates = corpus_aware_module.detect_duplicates(
+        write_time,
+        title="Draft",
+        body=_BODY,
+        self_path=self_page,
+        precomputed=precomputed,
+        threshold=0.9,
+    )
+    assert [c.path for c in candidates] == [genuine]
 
 
 def test_a_draft_with_no_page_identity_still_warns(write_time: Path) -> None:

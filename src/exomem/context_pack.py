@@ -557,6 +557,8 @@ def _asserted_tension(
     """
     pairs: list[dict] = []
     keys: set[frozenset[str]] = set()
+    if len(by_canon) < 2:
+        return pairs, keys  # no pair is possible — don't touch the graph at all
     for a, b in contradiction_stance.asserted_pairs(vault_root):
         canon_a, canon_b = corpus_aware._canon(a), corpus_aware._canon(b)
         if canon_a not in by_canon or canon_b not in by_canon:

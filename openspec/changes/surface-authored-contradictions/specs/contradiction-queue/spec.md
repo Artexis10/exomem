@@ -90,14 +90,21 @@ the same stance is addressable both from the review queue and from a write-time
 check that knows only the two paths.
 
 The stance SHALL be fingerprint-bound to both endpoints' current content. Editing
-either note SHALL change the pair fingerprint so that the stored stance no longer
+EITHER note SHALL change the pair fingerprint so that the stored stance no longer
 matches and the pair resurfaces as open, exactly as a fingerprint-bound dismissal
-does. `reopen` on a stanced pair SHALL clear the pair stance.
+does; a change to only one endpoint SHALL be sufficient.
 
-The stance SHALL be refused for a review item that carries no counterpart, because
-"rivals; keep both" is meaningless for a single-note signal. Recording a stance MUST
-NOT mutate any note, MUST NOT supersede, merge, or rank either rival against the
-other, and MUST NOT change `find` ordering.
+A review item MAY carry more than one contradiction pair, because both lanes anchor a
+pair on the lower of its two paths. Recording the stance on such an item SHALL record
+it on every pair the item carries, and `reopen` SHALL clear the stance on every pair
+the item carries. Clearing SHALL release a stance recorded against an earlier content
+version as well as one matching the current fingerprint, so a stance can never become
+un-clearable while still suppressing a warning.
+
+The stance SHALL be refused only for a review item that carries no counterpart at
+all, because "rivals; keep both" is meaningless for a single-note signal. Recording a
+stance MUST NOT mutate any note, MUST NOT supersede, merge, or rank either rival
+against the other, and MUST NOT change `find` ordering.
 
 #### Scenario: A stance removes the pair from the open queue
 
@@ -107,9 +114,10 @@ other, and MUST NOT change `find` ordering.
 - **AND** no file under the vault other than the review-state store is created,
   modified, moved, or deleted
 
-#### Scenario: Editing a rival resurfaces the stance
+#### Scenario: Editing either rival resurfaces the stance
 
-- **WHEN** either note of a `competing` pair is edited
+- **WHEN** exactly one note of a `competing` pair is edited, whichever of the two it
+  is
 - **THEN** the pair fingerprint changes, the stored stance no longer applies, and the
   pair returns to the open view
 
@@ -117,6 +125,20 @@ other, and MUST NOT change `find` ordering.
 
 - **WHEN** `competing` is requested for a review item with no counterpart reference
 - **THEN** the request is refused with an explicit error and nothing is recorded
+
+#### Scenario: An anchor carrying two conflicts is stanceable
+
+- **WHEN** one note is the anchor of two contradiction pairs and `competing` is
+  recorded on that item
+- **THEN** both pairs are stanced and the item leaves the open view
+- **AND** `reopen` on that item clears both pair stances
+
+#### Scenario: A newly drifted pair reopens the item without stranding the stance
+
+- **WHEN** a stanced anchor later acquires a second, un-stanced contradiction pair
+- **THEN** the item returns to the open view
+- **AND** the original stance can still be re-affirmed or cleared through the same
+  item
 
 #### Scenario: Reopen clears the stance
 

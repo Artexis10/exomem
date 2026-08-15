@@ -291,10 +291,8 @@ def _best_cosine_per_file(
         return {}
 
 
-def _drop_declared_pairs(
-    vault_root: Path, self_path: str | None, candidates: list[DupCandidate]
-) -> list[DupCandidate]:
-    """Drop candidates the author already declared a rival pair with `self_path`.
+def _declared_pair_filter(vault_root: Path, self_path: str | None):
+    """A candidate-level "already declared a rival pair with `self_path`?" predicate.
 
     Declared means a recorded competing-alternatives stance, an authored
     `contradicts` edge between the two pages, or both answering one question. In
@@ -302,17 +300,14 @@ def _drop_declared_pairs(
     the stance is fingerprint-bound, so editing either rival brings the warning
     back. A draft with no page identity of its own (`self_path is None`) has no
     pair to declare, so it warns exactly as before.
+
+    Applied INSIDE each detect loop rather than to the finished list: filtering
+    afterwards would let an exempt rival consume a `top_n` slot, so three declared
+    rivals ranked above a genuine near-duplicate would suppress the real warning.
     """
-    if not self_path or not candidates:
-        return candidates
     from . import contradiction_stance
 
-    declared = contradiction_stance.declared_pairs(
-        vault_root, self_path, [candidate.path for candidate in candidates]
-    )
-    if not declared:
-        return candidates
-    return [candidate for candidate in candidates if candidate.path not in declared]
+    return contradiction_stance.DeclaredPairFilter(vault_root, self_path)
 
 
 def detect_duplicates(
@@ -352,6 +347,7 @@ def detect_duplicates(
     from . import recall_policy
 
     self_canon = _canon(self_path) if self_path else None
+    declared = _declared_pair_filter(vault_root, self_path)
     out: list[DupCandidate] = []
     for fp, score in sorted(best_per_file.items(), key=lambda t: -t[1]):
         if score < threshold:
@@ -365,10 +361,12 @@ def detect_duplicates(
             continue
         if types_filter and page.page_type not in types_filter:
             continue
+        if declared(fp):
+            continue  # already declared rivals — and it must not eat a `top_n` slot
         out.append(DupCandidate(path=fp, title=page.title, cosine=round(float(score), 4)))
         if len(out) >= top_n:
             break
-    return _drop_declared_pairs(vault_root, self_path, out)
+    return out
 
 
 def detect_contradictions(
@@ -419,6 +417,7 @@ def detect_contradictions(
     from . import find as find_module
 
     self_canon = _canon(self_path) if self_path else None
+    declared = _declared_pair_filter(vault_root, self_path)
     out: list[DupCandidate] = []
     for fp, score in sorted(best_per_file.items(), key=lambda t: -t[1]):
         if score >= ceiling:
@@ -440,18 +439,15 @@ def detect_contradictions(
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
+        if declared(fp):
+            continue  # already declared rivals — and it must not eat a `top_n` slot
         out.append(DupCandidate(path=fp, title=page.title, cosine=round(float(score), 4)))
         if len(out) >= top_n:
             break
     # Sharpen PROXIMITY → POLARITY on the flagged pairs (opt-in; no-op when the
     # EXOMEM_CLAIM_LEVEL gate is off, so `out` and every downstream warning are
     # byte-identical to baseline).
-    return _refine_contradictions(
-        vault_root,
-        title=title,
-        body=body,
-        candidates=_drop_declared_pairs(vault_root, self_path, out),
-    )
+    return _refine_contradictions(vault_root, title=title, body=body, candidates=out)
 
 
 def dup_warning(candidate: DupCandidate) -> str:

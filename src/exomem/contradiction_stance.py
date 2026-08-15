@@ -31,6 +31,7 @@ auto-dismisses. The reader decides; the server only remembers what they decided.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -181,11 +182,15 @@ def is_competing(
     )
 
 
-def pair_from_reasons(reasons: list[dict] | None) -> tuple[str, str] | None:
-    """The single contradiction pair a review item carries, or None.
+def pairs_from_reasons(reasons: list[dict] | None) -> list[tuple[str, str]]:
+    """EVERY distinct contradiction pair a review item carries, in pair order.
 
-    A stance is meaningless without exactly one counterpart, so an item flagged
-    over several distinct pairs (or none) yields None and the caller refuses.
+    Both contradiction lanes anchor a pair on `min(a, b)`, so a note that is the
+    alphabetically-first endpoint of two conflicts collapses into ONE attention item
+    carrying two reasons — the ordinary "this conflicts with these two older ones"
+    shape. Returning only a lone pair would leave such an item unstanceable and,
+    worse, leave an existing stance un-clearable once a second pair drifted onto the
+    same anchor while it kept muting the write-time warning. Callers handle the list.
     """
     pairs = {
         pair_key(paths[0], paths[1])
@@ -194,9 +199,7 @@ def pair_from_reasons(reasons: list[dict] | None) -> tuple[str, str] | None:
         for paths in [sorted(set(reason.get("related_paths") or []))]
         if len(paths) == 2
     }
-    if len(pairs) != 1:
-        return None
-    return next(iter(pairs))
+    return sorted(pair for pair in pairs if pair[0] != pair[1])
 
 
 def record_stance(
@@ -205,40 +208,57 @@ def record_stance(
     reasons: list[dict] | None,
     until: str | None = None,
     why: str | None = None,
-) -> dict[str, Any]:
-    """Persist the competing-alternatives stance for a review item's pair."""
-    pair = pair_from_reasons(reasons)
-    if pair is None:
+) -> list[dict[str, Any]]:
+    """Persist the competing-alternatives stance on every pair the item carries.
+
+    The triage surface addresses an ITEM, and an item can legitimately carry more
+    than one conflict, so "these are rivals I keep" applies to each of them. Every
+    pair record stays independently fingerprint-bound, so editing one rival reopens
+    only the pairs that note participates in.
+    """
+    pairs = pairs_from_reasons(reasons)
+    if not pairs:
         raise ValueError(
             "INVALID_REVIEW_ACTION: `competing` records that two notes are rivals "
-            "worth keeping, so it applies only to a review item carrying exactly "
+            "worth keeping, so it applies only to a review item carrying at least "
             "one contradiction pair"
         )
-    identity = pair_identity(vault_root, *pair)
-    if identity is None:
-        raise ValueError(
-            "REVIEW_ITEM_CHANGED: one side of the pair is no longer readable; "
-            "refresh the worklist and inspect the item again"
+    store = review_state_module.ReviewStateStore(Path(vault_root))
+    recorded: list[dict[str, Any]] = []
+    for pair in pairs:
+        identity = pair_identity(vault_root, *pair)
+        if identity is None:
+            raise ValueError(
+                "REVIEW_ITEM_CHANGED: one side of the pair is no longer readable; "
+                "refresh the worklist and inspect the item again"
+            )
+        applied = store.apply(
+            identity[0], identity[1], action=STANCE_ACTION, until=until, why=why
         )
-    result = review_state_module.ReviewStateStore(Path(vault_root)).apply(
-        identity[0], identity[1], action=STANCE_ACTION, until=until, why=why
-    )
-    result["pair"] = list(pair)
-    result["pair_ref"] = review_state_module.review_ref(identity[0])
-    return result
+        recorded.append(
+            {
+                "paths": list(pair),
+                "ref": applied["ref"],
+                "fingerprint": identity[1],
+                "decision": applied["decision"],
+            }
+        )
+    return recorded
 
 
 def clear_stance(vault_root: Path, *, reasons: list[dict] | None) -> None:
-    """Drop any recorded stance for a review item's pair. Best-effort, never raises."""
-    pair = pair_from_reasons(reasons)
-    if pair is None:
-        return
-    identity = pair_identity(vault_root, *pair)
-    if identity is None:
-        return
-    review_state_module.ReviewStateStore(Path(vault_root)).apply(
-        identity[0], identity[1], action="reopen"
-    )
+    """Drop every recorded stance on a review item's pairs. Never raises.
+
+    `ReviewStateStore.apply(action="reopen")` clears by review id, not by
+    fingerprint, so this also releases a stance recorded against an earlier content
+    version — which is exactly the state a drifted pair would otherwise be stuck in.
+    """
+    store = review_state_module.ReviewStateStore(Path(vault_root))
+    for pair in pairs_from_reasons(reasons):
+        identity = pair_identity(vault_root, *pair)
+        if identity is None:
+            continue
+        store.apply(identity[0], identity[1], action="reopen")
 
 
 # ----------------------------- authored graph edges -----------------------------
@@ -246,6 +266,48 @@ def clear_stance(vault_root: Path, *, reasons: list[dict] | None) -> None:
 
 def _index(vault_root: Path) -> epistemic_graph_module.EpistemicGraphIndex:
     return epistemic_graph_module.EpistemicGraphIndex(Path(vault_root))
+
+
+@dataclass(frozen=True)
+class DeclaredEdges:
+    """One snapshot of the authored edges that declare two pages as rivals.
+
+    Built from exactly TWO indexed queries for the whole vault, then answered from
+    memory. The earlier per-anchor form re-ran an unnarrowed edge query per page,
+    which is O(pages x edges) and reaches the retrieve/inject path through deep
+    packs.
+    """
+
+    contradicts: frozenset[tuple[str, str]]   # `pair_key` form
+    answers: dict[str, frozenset[str]]        # page -> the targets it answers
+
+
+def declared_edges(
+    vault_root: Path,
+    *,
+    index: epistemic_graph_module.EpistemicGraphIndex | None = None,
+) -> DeclaredEdges:
+    """Read both declaring relations in two queries. Empty on any unavailability."""
+    try:
+        idx = index or _index(vault_root)
+        contra = idx.relation_edges([CONTRADICTS])
+        answered = idx.relation_edges([ANSWERS])
+        pairs = (
+            frozenset(pair_key(src, dst) for src, dst in contra.edges)
+            if contra.status == "available"
+            else frozenset()
+        )
+        answers: dict[str, set[str]] = {}
+        if answered.status == "available":
+            for src, dst in answered.edges:
+                answers.setdefault(src, set()).add(dst)
+        return DeclaredEdges(
+            contradicts=frozenset(pair for pair in pairs if pair[0] != pair[1]),
+            answers={page: frozenset(targets) for page, targets in answers.items()},
+        )
+    except Exception as error:  # noqa: BLE001 — a graph miss never breaks a write
+        log.debug("declared-edge snapshot failed: %s", error)
+        return DeclaredEdges(contradicts=frozenset(), answers={})
 
 
 def asserted_pairs(
@@ -256,23 +318,17 @@ def asserted_pairs(
     """Deduped, unordered page pairs joined by an authored `contradicts` edge.
 
     `contradicts` is symmetric, so one authored bullet yields ONE pair, ordered by
-    path exactly like a proximity pair. A disabled, missing, or warming graph index
-    yields `[]` — an explicit absence, never a fabricated result.
+    path exactly like a proximity pair. One indexed query for the whole vault. A
+    disabled, missing, or warming graph index yields `[]` — an explicit absence,
+    never a fabricated result.
     """
     try:
         idx = index or _index(vault_root)
-        participants = idx.relation_participants([CONTRADICTS])
-        if participants.status != "available" or not participants.paths:
+        result = idx.relation_edges([CONTRADICTS])
+        if result.status != "available":
             return []
-        pairs: set[tuple[str, str]] = set()
-        for path in sorted(participants.paths):
-            anchored = idx.relation_participants([CONTRADICTS], anchor=path)
-            if anchored.status != "available":
-                continue
-            for other in anchored.paths:
-                if other != path:
-                    pairs.add(pair_key(path, other))
-        return sorted(pairs)
+        pairs = {pair_key(src, dst) for src, dst in result.edges}
+        return sorted(pair for pair in pairs if pair[0] != pair[1])
     except Exception as error:  # noqa: BLE001 — a graph miss never breaks review
         log.debug("asserted contradiction lookup failed: %s", error)
         return []
@@ -283,6 +339,7 @@ def structural_pair(
     a: str,
     b: str,
     *,
+    edges: DeclaredEdges | None = None,
     index: epistemic_graph_module.EpistemicGraphIndex | None = None,
 ) -> str | None:
     """Why the author already declared this pair as rivals, or None.
@@ -290,62 +347,73 @@ def structural_pair(
     Returns `"contradicts"` for an authored contradiction edge between the two, and
     `"answers_same_question"` when both pages answer one common target. Either way
     the write-time proximity warning would only tell the author what they typed.
+    Pass a prepared `edges` snapshot to answer many candidates without re-querying.
     """
     left, right = pair_key(a, b)
     if left == right:
         return None
-    try:
-        idx = index or _index(vault_root)
-        contra = idx.relation_participants([CONTRADICTS], anchor=left)
-        if contra.status == "available" and right in contra.paths:
-            return CONTRADICTS
-        left_answers = idx.relation_participants(
-            [ANSWERS], anchor=left, direction="outbound"
-        )
-        right_answers = idx.relation_participants(
-            [ANSWERS], anchor=right, direction="outbound"
-        )
-        if (
-            left_answers.status == "available"
-            and right_answers.status == "available"
-            and (left_answers.paths & right_answers.paths)
-        ):
-            return "answers_same_question"
-    except Exception as error:  # noqa: BLE001 — a graph miss never breaks a write
-        log.debug("structural pair lookup failed for (%s, %s): %s", left, right, error)
+    snapshot = edges if edges is not None else declared_edges(vault_root, index=index)
+    if (left, right) in snapshot.contradicts:
+        return CONTRADICTS
+    if snapshot.answers.get(left, frozenset()) & snapshot.answers.get(
+        right, frozenset()
+    ):
+        return "answers_same_question"
     return None
 
 
-def declared_pairs(vault_root: Path, self_path: str, others: list[str]) -> set[str]:
-    """The subset of `others` already declared a rival pair with `self_path`.
+class DeclaredPairFilter:
+    """Memoized "has the author already declared this pair?" predicate.
 
     Declared means the reader recorded a competing stance, or the pages already
     carry an authored `contradicts` edge, or both answer one question. Used by the
     write-time near-duplicate and overlap warnings, which have nothing to add once
-    the relationship is on the page. Best-effort: any failure declares nothing, so a
-    warning is never silently lost to an infrastructure problem.
+    the relationship is on the page.
+
+    Everything is built LAZILY on the first candidate and shared for the rest of the
+    call, so a write with no candidate pays nothing and a write with several pays two
+    graph queries and one state read in total rather than per candidate. Best-effort:
+    any failure declares nothing, so a warning is never silently lost to an
+    infrastructure problem.
     """
-    if not self_path or not others:
-        return set()
-    try:
-        idx = _index(vault_root)
-        store = review_state_module.ReviewStateStore(Path(vault_root))
-        payload = store.load()
-        declared: set[str] = set()
-        for other in others:
-            if not other:
-                continue
-            left, right = pair_key(self_path, other)
-            if left == right:
-                continue  # the draft's own page is never its own rival
-            if structural_pair(vault_root, self_path, other, index=idx) is not None:
-                declared.add(other)
-                continue
-            if is_competing(
-                vault_root, self_path, other, store=store, payload=payload
-            ):
-                declared.add(other)
+
+    def __init__(self, vault_root: Path, self_path: str | None):
+        self.vault_root = Path(vault_root)
+        self.self_path = str(self_path) if self_path else None
+        self._edges: DeclaredEdges | None = None
+        self._store: review_state_module.ReviewStateStore | None = None
+        self._payload: dict[str, Any] | None = None
+        self._cache: dict[str, bool] = {}
+
+    def __call__(self, other: str) -> bool:
+        if not self.self_path or not other:
+            return False
+        cached = self._cache.get(other)
+        if cached is not None:
+            return cached
+        declared = False
+        try:
+            left, right = pair_key(self.self_path, other)
+            if left != right:  # the draft's own page is never its own rival
+                if self._edges is None:
+                    self._edges = declared_edges(self.vault_root)
+                    self._store = review_state_module.ReviewStateStore(self.vault_root)
+                    self._payload = self._store.load()
+                declared = (
+                    structural_pair(
+                        self.vault_root, self.self_path, other, edges=self._edges
+                    )
+                    is not None
+                    or is_competing(
+                        self.vault_root,
+                        self.self_path,
+                        other,
+                        store=self._store,
+                        payload=self._payload,
+                    )
+                )
+        except Exception as error:  # noqa: BLE001 — never break a write
+            log.debug("declared-pair check failed for %s: %s", other, error)
+            declared = False
+        self._cache[other] = declared
         return declared
-    except Exception as error:  # noqa: BLE001 — never break a write
-        log.debug("declared-pair filter failed for %s: %s", self_path, error)
-        return set()
