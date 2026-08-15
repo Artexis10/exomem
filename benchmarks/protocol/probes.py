@@ -32,14 +32,20 @@ def classify_update_outcome(
 ) -> Literal["superseded", "both_returned", "stale_only", "unresolvable"]:
     labels: set[str] = set()
     for hit in hits:
+        # A structured label is the provider naming a record, so it matches
+        # exactly: a longer id merely containing the marker is a different
+        # record and must not read as current. Free text is the provider's
+        # rendering of what it stored — Exomem returns a note with YAML
+        # frontmatter — so the marker is contained, never equal. Markers are
+        # opaque tokens, so containment cannot collide by accident.
         if isinstance(hit, Mapping):
             label = hit.get("record_id") or hit.get("state") or hit.get("revision") or hit.get("kind") or ""
+            matches = lambda marker, value=str(label): value == marker  # noqa: E731
         else:
-            label = str(hit)
-        folded = str(label)
-        if folded == current_marker:
+            matches = lambda marker, value=str(hit): marker in value  # noqa: E731
+        if matches(current_marker):
             labels.add("current")
-        if folded == old_marker:
+        if matches(old_marker):
             labels.add("stale")
     if labels == {"current"}:
         return "superseded"
