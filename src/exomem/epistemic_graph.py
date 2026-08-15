@@ -235,8 +235,8 @@ _PUBLICATION_FAILURE_TYPES: tuple[type[BaseException], ...] = (
 _PUBLICATION_FAILURE_OP_CODES = frozenset(
     {
         "MUTATION_BUSY",
+        "MUTATION_WARMING",
         "MUTATION_LOCK_UNAVAILABLE",
-        "GRAPH_MUTATION_BUSY",
     }
 )
 
@@ -311,8 +311,9 @@ def _publication_identity(vault_root: Path) -> str:
     """Name the exact publication a refusal applies to.
 
     A refusal memo must expire the moment the vault asks for a *different*
-    publication, so it is keyed by the required checkpoint (or, with no
-    checkpoint, the sidecar's own mtime lineage) rather than by time alone.
+    publication, so it carries the durable checkpoint digest rather than
+    trusting time alone. A vault with no checkpoint yet has one unnamed
+    publication, and the time bound is the only thing scoping it.
     """
     try:
         checkpoint = graph_sync.read_checkpoint(vault_root)
