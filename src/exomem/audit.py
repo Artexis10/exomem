@@ -19,6 +19,15 @@ Checks (all read-only; no writes ever):
   `find` AND low inbound-link degree — a measurement-only review candidate.
   Surfaces it for the reader to judge (keep / supersede / archive); never
   decays, down-ranks, or moves anything (`find` ordering is unchanged).
+- `derivation_double_counting` (optional): walks `sources:` (`derived_from`)
+  chains for two failures ordinary checks cannot see. Support collapse: a
+  compiled page cites two or more sources as independent support that
+  themselves trace back to a shared ancestor — a source laundered into
+  "multiple sources agree". Circular derivation: a `sources:` chain that
+  loops back on itself. Both are informational/warn only, never error; the
+  traversal is bounded by depth and total-edge caps, and a dedicated
+  `truncated` finding makes a hit cap visible rather than silently reading as
+  "nothing found".
 - `corpus_contradictions`: corpus-wide sweep for pairs of ACTIVE read-write
   COMPILED conclusions whose embeddings sit in the contradiction band
   `[floor, dup_threshold)` — close enough to plausibly restate/refine/contradict
@@ -46,6 +55,7 @@ import math
 import os
 import re
 import stat
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -54,6 +64,7 @@ import yaml
 
 from . import (
     access,
+    contradiction_stance,
     indexes,
     relation_registry,
     semantic_language_registry,
@@ -61,6 +72,7 @@ from . import (
     temporal,
 )
 from . import find as find_module
+from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     _mask_code_spans,
@@ -84,6 +96,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
     "missing_sources",
+    "derivation_double_counting",
     "semantic_contract_drift",
     "semantic_malformed_unit",
     "semantic_category_governance",
@@ -392,6 +405,8 @@ def audit(
         findings.extend(_check_relation_debt(vault_root, pages))
     if "missing_sources" in selected:
         findings.extend(_check_missing_sources(vault_root, pages))
+    if "derivation_double_counting" in selected:
+        findings.extend(_check_derivation_double_counting(vault_root, pages))
     if "governance_receipts" in selected:
         findings.extend(_check_governance_receipts(vault_root))
     if "bridge_review" in selected:
@@ -1947,9 +1962,57 @@ def _check_frontmatter_compliance(
     findings: list[AuditFinding] = []
     for page in pages:
         fm = page.frontmatter
+        excluded = vault_module.first_excluded_field(fm)
+        if excluded is not None:
+            field, _reason = excluded
+            findings.append(AuditFinding(
+                category="frontmatter_compliance",
+                severity="warn",
+                path=page.rel_path,
+                detail=f"{field!r} is a schema-excluded frontmatter field.",
+                proposed_fix=f"Remove the {field!r} frontmatter field.",
+            ))
         page_type = fm.get("type")
         if not isinstance(page_type, str):
             continue
+        if page_type == "collection":
+            nested_excluded = vault_module.excluded_field_in_collection_frontmatter(fm)
+            if nested_excluded is not None:
+                field, _reason = nested_excluded
+                item_schema = fm.get("item_schema")
+                schema_fields = (
+                    item_schema.get("fields") if isinstance(item_schema, dict) else None
+                )
+                in_schema = isinstance(schema_fields, dict) and field in schema_fields
+                if in_schema:
+                    detail = (
+                        f"Collection item_schema.fields declares schema-excluded "
+                        f"field {field!r}."
+                    )
+                    proposed_fix = (
+                        f"Delete {field!r} from every item first, then revise the "
+                        "collection manifest to remove the field declaration."
+                    )
+                else:
+                    # The note field lives in the immutable storage descriptor, so
+                    # revise refuses with IMMUTABLE_COLLECTION_REPRESENTATION. The
+                    # only route out is a new collection plus migration.
+                    detail = (
+                        f"Collection Markdown-log note field declares schema-excluded "
+                        f"field {field!r}."
+                    )
+                    proposed_fix = (
+                        f"Delete {field!r} from every item, then migrate to a new "
+                        "collection whose note field uses a permitted name — the "
+                        "storage descriptor is immutable, so revise cannot remove it."
+                    )
+                findings.append(AuditFinding(
+                    category="frontmatter_compliance",
+                    severity="warn",
+                    path=page.rel_path,
+                    detail=detail,
+                    proposed_fix=proposed_fix,
+                ))
         required = _REQUIRED_FIELDS_BY_TYPE.get(page_type)
         if required:
             missing = [k for k in required if not fm.get(k)]
@@ -2503,6 +2566,391 @@ def _check_missing_sources(
     return sorted(findings, key=lambda finding: finding.path)
 
 
+# ---------------- check: derivation_double_counting ----------------
+
+# Bounds on the `sources:` (`derived_from`) chain walk. Both are env-overridable
+# so ops can tune without redeploying (same convention as `_stale_thresholds`).
+# The depth cap bounds how many hops are followed from any single node; the edge
+# cap bounds total work across the WHOLE audit pass (shared across every walk),
+# protecting a vault with thousands of notes and dense wikilinks from an
+# unbounded chain walk. Either cap being hit produces a dedicated `truncated`
+# finding rather than silently under-reporting.
+#
+# The edge default is derived, not guessed: a mutation-testing pass measured
+# this walk (no cross-walk closure reuse — every distinct `sources:`-bearing
+# page gets its own independent bounded BFS) consuming ~10 edges per sourced
+# page in a chain-shaped graph, exhausting a 2000 budget at ~200 sourced
+# pages. For a ~5,000-file vault, assuming a generous (over-)estimate of up to
+# half the corpus carrying `sources:` (2,500 sourced pages) at that same ~10
+# edges/page rate: 2,500 * 10 = 25,000 edges needed; doubled for margin =
+# 50,000. See design.md D2 for the full derivation and the stress-test that
+# validated it.
+_DERIVATION_DEFAULT_MAX_DEPTH = 12
+_DERIVATION_DEFAULT_MAX_EDGES = 50_000
+
+_DERIVATION_TRUNCATED_BY_DEPTH = "depth"
+_DERIVATION_TRUNCATED_BY_EDGES = "edges"
+
+
+def _derivation_traversal_limits() -> tuple[int, int]:
+    """(max_depth, max_edges); bad/non-positive env values fall back to default."""
+
+    def _int_env(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            log.warning("invalid %s=%r; using %s", name, raw, default)
+            return default
+        return value if value > 0 else default
+
+    return (
+        _int_env("EXOMEM_DERIVATION_MAX_DEPTH", _DERIVATION_DEFAULT_MAX_DEPTH),
+        _int_env("EXOMEM_DERIVATION_MAX_EDGES", _DERIVATION_DEFAULT_MAX_EDGES),
+    )
+
+
+@dataclass
+class _DerivationBudget:
+    """Total-edge cap shared across every walk in one audit pass."""
+
+    remaining: int
+
+    def take(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+
+@dataclass(frozen=True)
+class _DerivationWalk:
+    ancestors: frozenset[str]        # keys reachable from `start`, excluding `start`
+    cycle_path: tuple[str, ...] | None  # start -> ... -> start, if `start` reaches itself
+    truncated_reasons: frozenset[str]  # subset of {"depth", "edges"}; empty = complete
+
+
+def _derivation_direct_sources(
+    pages: list[find_module.ParsedPage],
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """(direct_sources, raw_by_key).
+
+    `direct_sources`: canon(page) -> ordered, de-duplicated canon(source) keys
+    from `sources:`. A page citing itself is kept (not filtered) so a trivial
+    self-reference is caught by cycle detection rather than silently dropped
+    from the graph.
+
+    `raw_by_key`: canon key -> the first raw `sources:` wikilink text observed
+    for it, so an UNRESOLVED target (no matching page) can still be rendered
+    as a plausible vault-relative path in a finding rather than an internal
+    lowercase canon key an agent cannot open.
+    """
+    direct: dict[str, list[str]] = {}
+    raw_by_key: dict[str, str] = {}
+    for page in pages:
+        key = _relevance_canon(page.rel_path)
+        seen: set[str] = set()
+        targets: list[str] = []
+        for link in _extract_wikilinks_from_value(page.frontmatter.get("sources")):
+            target_key = _relevance_canon(link)
+            if not target_key or target_key in seen:
+                continue
+            seen.add(target_key)
+            targets.append(target_key)
+            raw_by_key.setdefault(target_key, link)
+        direct[key] = targets
+    return direct, raw_by_key
+
+
+def _derivation_best_effort_path(raw: str) -> str:
+    """Reconstruct a plausible vault-relative rel_path for an unresolved
+    `sources:` target. Every other `AuditFinding.path` (and every path inside
+    `meta`) is a vault-relative rel_path an agent can open directly; falling
+    back to the internal lowercase canon key instead would silently break
+    that contract for exactly the pages a reviewer most needs to inspect.
+    """
+    cleaned = raw.strip().strip("/")
+    if not cleaned:
+        return raw
+    if not cleaned.startswith(kb_prefix()):
+        cleaned = kb_prefix() + cleaned
+    if not cleaned.lower().endswith(".md"):
+        cleaned = cleaned + ".md"
+    return cleaned
+
+
+def _bounded_ancestor_walk(
+    direct_sources: dict[str, list[str]],
+    start: str,
+    *,
+    max_depth: int,
+    budget: _DerivationBudget,
+) -> _DerivationWalk:
+    """BFS from `start` over `derived_from` edges, bounded by depth + a shared edge
+    budget. Always terminates: `seen` guards against revisiting a node regardless
+    of cycles, and the budget bounds total edges expanded across the whole audit
+    pass. Detects whether `start` is reachable from itself (a cycle) and
+    reconstructs one witness path.
+    """
+    parent: dict[str, str] = {}
+    seen = {start}
+    ancestors: set[str] = set()
+    frontier: deque[tuple[str, int]] = deque([(start, 0)])
+    cycle_path: tuple[str, ...] | None = None
+    truncated_reasons: set[str] = set()
+    while frontier:
+        node, depth = frontier.popleft()
+        if depth >= max_depth:
+            if direct_sources.get(node):
+                truncated_reasons.add(_DERIVATION_TRUNCATED_BY_DEPTH)
+            continue
+        for target in direct_sources.get(node, ()):
+            if not budget.take():
+                truncated_reasons.add(_DERIVATION_TRUNCATED_BY_EDGES)
+                break
+            if target == start:
+                if cycle_path is None:
+                    path = [node]
+                    cur = node
+                    while cur != start:
+                        cur = parent[cur]
+                        path.append(cur)
+                    cycle_path = tuple(reversed(path)) + (start,)
+                ancestors.add(target)
+                continue
+            ancestors.add(target)
+            if target not in seen:
+                seen.add(target)
+                parent[target] = node
+                frontier.append((target, depth + 1))
+    return _DerivationWalk(
+        ancestors=frozenset(ancestors),
+        cycle_path=cycle_path,
+        truncated_reasons=frozenset(truncated_reasons),
+    )
+
+
+def _nearest_shared_roots(
+    candidates: dict[str, set[str]],
+    walk,
+) -> dict[str, set[str]]:
+    """Collapse one converging ancestral tail to its nearest node(s) only.
+
+    A shared root `Y` is dropped when some OTHER candidate `X` can reach `Y`
+    (i.e. `Y` is further upstream than `X`, discovered on the same tail) —
+    keeping only the convergence point(s) closest to the citing page instead
+    of emitting one finding per node in a multi-hop shared tail. Pairwise and
+    order-independent, so it is correct regardless of candidate iteration
+    order. If every candidate ends up mutually dominated (a cycle among the
+    candidates themselves), keep one deterministic representative rather than
+    silently emitting nothing for a genuine collapse.
+
+    Known gap, deliberately not addressed: if the candidates form TWO (or
+    more) disjoint mutually-dominating cyclic clusters — e.g. {P, Q} each
+    reachable from the other, and separately {R, S} each reachable from the
+    other, with no path between the two clusters — every candidate across
+    BOTH clusters is "dominated by someone", so the single-survivor fallback
+    picks one representative overall and silently drops the other cluster's
+    distinct convergence point, not just redundant nodes on the same tail.
+    This is exotic (it requires the ancestor graph itself to contain a cycle,
+    which is separately reported as its own `warn`-severity `cycle` finding)
+    and not worth the extra bookkeeping a per-cluster fallback would need.
+    """
+    keys = list(candidates)
+    if len(keys) <= 1:
+        return dict(candidates)
+    dominated: set[str] = set()
+    for x in keys:
+        reachable_from_x = walk(x).ancestors
+        for y in keys:
+            if y != x and y in reachable_from_x:
+                dominated.add(y)
+    survivors = [k for k in keys if k not in dominated]
+    if not survivors:
+        survivors = [min(keys)]
+    return {root: candidates[root] for root in survivors}
+
+
+def _check_derivation_double_counting(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Walk `sources:` chains for support-collapse and circular derivation.
+
+    Read-only and observe-before-enforce: reports findings only, never rewrites
+    a relation, never demotes anything, never blocks a write. Severity is
+    `warn` for a genuine cycle (a structural inconsistency) and `info` for a
+    support-collapse candidate (a review candidate, not a defect) — never
+    `error`.
+    """
+    direct_sources, raw_by_key = _derivation_direct_sources(pages)
+    pages_by_canon = {_relevance_canon(page.rel_path): page for page in pages}
+    max_depth, max_edges = _derivation_traversal_limits()
+    budget = _DerivationBudget(max_edges)
+    walk_cache: dict[str, _DerivationWalk] = {}
+    truncated_reasons_seen: set[str] = set()
+    findings: list[AuditFinding] = []
+    cycles_reported: set[frozenset[str]] = set()
+
+    def walk(key: str) -> _DerivationWalk:
+        if key not in walk_cache:
+            walk_cache[key] = _bounded_ancestor_walk(
+                direct_sources, key, max_depth=max_depth, budget=budget
+            )
+        return walk_cache[key]
+
+    def display_path(key: str) -> str:
+        page = pages_by_canon.get(key)
+        if page is not None:
+            return page.rel_path
+        raw = raw_by_key.get(key)
+        return _derivation_best_effort_path(raw) if raw else key
+
+    # -- circular derivation: any node with outgoing `sources:` edges may loop.
+    for key in sorted(direct_sources):
+        if not direct_sources[key]:
+            continue
+        result = walk(key)
+        truncated_reasons_seen |= result.truncated_reasons
+        if result.cycle_path is None:
+            continue
+        identity = frozenset(result.cycle_path)
+        if identity in cycles_reported:
+            continue
+        cycles_reported.add(identity)
+        origin_page = pages_by_canon.get(key)
+        cycle_display = [display_path(k) for k in result.cycle_path]
+        findings.append(
+            AuditFinding(
+                category="derivation_double_counting",
+                severity="warn",
+                path=display_path(key),
+                detail=(
+                    "Circular derivation: "
+                    + " -> ".join(cycle_display)
+                    + " — this `sources:` chain supports itself."
+                ),
+                proposed_fix=(
+                    "Review the `sources:` chain for a mistaken back-reference and "
+                    "remove or correct one entry to break the cycle. Nothing is "
+                    "auto-written."
+                ),
+                meta={
+                    "kind": "cycle",
+                    "cycle": cycle_display,
+                    "signal_version": (
+                        _page_signal_version(origin_page) if origin_page else None
+                    ),
+                },
+            )
+        )
+
+    # -- support collapse: only from active, read-write, provenance-bearing
+    # compiled pages citing two or more sources as (nominally) independent
+    # support. Mirrors `_check_missing_sources`'s origination gate exactly,
+    # including its hub/snapshot/slug-suffix common-hub damping — a hub or
+    # snapshot page is EXPECTED to fan its `sources:` out from a shared root
+    # and would otherwise dominate this queue with non-actionable noise.
+    for page in pages:
+        if page.page_type not in _SOURCES_REQUIRED_TYPES:
+            continue
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if page.status in ("superseded", "archived", "draft", "dropped"):
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        stem = page.path.stem.lower()
+        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+            continue
+        if _STALE_SKIP_TAGS & set(page.tags):
+            continue
+        key = _relevance_canon(page.rel_path)
+        directs = direct_sources.get(key, [])
+        if len(directs) < 2:
+            continue
+
+        closures: dict[str, frozenset[str]] = {}
+        page_reasons: set[str] = set()
+        for source_key in directs:
+            result = walk(source_key)
+            closures[source_key] = frozenset({source_key}) | result.ancestors
+            page_reasons |= result.truncated_reasons
+        truncated_reasons_seen |= page_reasons
+
+        collapse_roots: dict[str, set[str]] = {}
+        for i, a in enumerate(directs):
+            for b in directs[i + 1 :]:
+                for shared_root in closures[a] & closures[b]:
+                    collapse_roots.setdefault(shared_root, set()).update({a, b})
+        # A page can never be its own shared ancestor — a back-citing source
+        # placing `key` in its own closure is a cycle, reported separately.
+        collapse_roots.pop(key, None)
+        if not collapse_roots:
+            continue
+        # One converging tail (C <- D <- E, both A and B reaching all three)
+        # is one situation, not one finding per node in the tail.
+        collapse_roots = _nearest_shared_roots(collapse_roots, walk)
+
+        for root in sorted(collapse_roots):
+            via = sorted(collapse_roots[root])
+            findings.append(
+                AuditFinding(
+                    category="derivation_double_counting",
+                    severity="info",
+                    path=page.rel_path,
+                    detail=(
+                        f"{len(via)} of this page's cited sources trace back to a "
+                        f"shared ancestor ({display_path(root)}); citing them as "
+                        "independent support double-counts that ancestor."
+                    ),
+                    proposed_fix=(
+                        "Review whether these citations are genuinely independent "
+                        "evidence or restate the same underlying source; if not, "
+                        "cite the shared ancestor once. Nothing is auto-written."
+                    ),
+                    meta={
+                        "kind": "support_collapse",
+                        "shared_ancestor": display_path(root),
+                        "via_sources": [display_path(v) for v in via],
+                        "signal_version": _page_signal_version(page),
+                        "truncated_reasons": sorted(page_reasons),
+                    },
+                )
+            )
+
+    if truncated_reasons_seen:
+        reasons_label = " and ".join(sorted(truncated_reasons_seen))
+        findings.append(
+            AuditFinding(
+                category="derivation_double_counting",
+                severity="info",
+                path=kb_prefix(),
+                detail=(
+                    f"derivation-chain traversal capped by {reasons_label} "
+                    f"(depth<={max_depth}, edges<={max_edges}); some ancestor "
+                    "chains may extend further than reported here."
+                ),
+                proposed_fix=(
+                    "Re-run scoped to the densest chains, or raise "
+                    "EXOMEM_DERIVATION_MAX_DEPTH / EXOMEM_DERIVATION_MAX_EDGES."
+                ),
+                meta={
+                    "kind": "truncated",
+                    "max_depth": max_depth,
+                    "max_edges": max_edges,
+                    "reasons": sorted(truncated_reasons_seen),
+                },
+            )
+        )
+
+    return sorted(
+        findings, key=lambda finding: (finding.path, str((finding.meta or {}).get("kind") or ""))
+    )
+
+
 # ---------------- check: stale_review ----------------
 
 # Staleness review targets living CONCLUSIONS only. Raw sources have their own
@@ -2910,11 +3358,106 @@ def _pair_polarity(vault_root: Path, a: str, b: str) -> dict | None:
         return None
 
 
+_ASSERTED_FIX = (
+    "Surfaced for REVIEW only — this is YOUR authored `contradicts` edge, not a "
+    "server judgment about which side is right. Read both: `replace` (supersede) "
+    "the stale one, `reconcile` them, or — if they are genuine rivals you intend "
+    "to keep — record the competing-alternatives stance with `triage_memory` "
+    "using `action='competing'`. Never auto-acted."
+)
+
+
+def _asserted_contradictions(
+    eligible: dict[str, find_module.ParsedPage],
+    pairs: list[tuple[str, str]],
+) -> tuple[list[AuditFinding], set[tuple[str, str]]]:
+    """Authored `contradicts` edges as contradiction findings, plus their pair keys.
+
+    The strongest contradiction signal a vault carries is the one the author wrote
+    down, and until this lane existed nothing consumed it. Unlike the proximity
+    sweep this needs NO embeddings — it reads typed graph edges — so it survives a
+    torch-less deploy and an `EXOMEM_DISABLE_EMBEDDINGS` run. Both endpoints must
+    clear the same `_is_active_compiled_rw` bar the proximity sweep uses, because
+    those are the only pages a contradiction can actually be reconciled against.
+
+    Deliberately NOT capped by `EXOMEM_CONTRADICTION_TOP_N`: that cap exists for the
+    combinatorial proximity sweep, and silently hiding an edge the user typed by hand
+    would be a different thing entirely.
+    """
+    findings: list[AuditFinding] = []
+    keys: set[tuple[str, str]] = set()
+    for a, b in pairs:
+        if a not in eligible or b not in eligible:
+            continue
+        keys.add((a, b))
+        findings.append(AuditFinding(
+            category="corpus_contradictions",
+            severity="info",
+            path=a,
+            detail=(
+                f"Authored `contradicts` edge with {b!r} — you asserted these "
+                "conflict. Is the conflict still live, or has one side become the "
+                "stale view?"
+            ),
+            proposed_fix=_ASSERTED_FIX,
+            paths=[a, b],
+            meta={
+                # Distinct from the proximity signal version for the same pair, so
+                # an asserted decision and a proximity decision can never collide.
+                "signal_version": content_hash(
+                    "asserted\n"
+                    + _page_signal_version(eligible[a])
+                    + "\n"
+                    + _page_signal_version(eligible[b])
+                )[:16],
+                "provenance": "asserted",
+                "relation_type": "contradicts",
+            },
+        ))
+    return findings, keys
+
+
 def _check_corpus_contradictions(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
     *,
     today: dt.date | None = None,
+) -> list[AuditFinding]:
+    """The contradiction queue: authored conflicts first, then measured proximity.
+
+    Two lanes, one category. Asserted entries come from authored `contradicts`
+    graph edges and are emitted FIRST — `attention` treats emission order as
+    intra-queue rank, so "ranked above proximity" needs no ranking code. Proximity
+    entries come from the embedding-band sweep below and keep their existing
+    priority, same-family demotion, and cap behaviour among themselves.
+
+    A pair that is both authored and in band surfaces once, as asserted: the
+    authored edge is strictly the stronger signal, and two rows for one decision
+    would double the pair's RRF vote in `attention`.
+    """
+    pairs = contradiction_stance.asserted_pairs(vault_root)
+    if not pairs and os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        # Nothing authored and no sidecar lane to run: keep the pre-existing
+        # torch-less fast path — one indexed graph query and out, without paying
+        # the eligibility walk this category used to skip entirely.
+        return []
+    eligible: dict[str, find_module.ParsedPage] = {
+        page.rel_path: page
+        for page in pages
+        if _is_active_compiled_rw(vault_root, page)
+    }
+    asserted, asserted_keys = _asserted_contradictions(eligible, pairs)
+    return asserted + _proximity_contradictions(
+        vault_root, eligible, today=today, exclude=asserted_keys
+    )
+
+
+def _proximity_contradictions(
+    vault_root: Path,
+    eligible: dict[str, find_module.ParsedPage],
+    *,
+    today: dt.date | None = None,
+    exclude: set[tuple[str, str]] | None = None,
 ) -> list[AuditFinding]:
     """Corpus-wide contradiction sweep: surface PAIRS of active read-write compiled
     conclusions whose embeddings sit in the band `[floor, dup_threshold)`.
@@ -2975,14 +3518,11 @@ def _check_corpus_contradictions(
     if not metadata or matrix.shape[0] == 0:
         return []
 
-    # Both endpoints of a flagged pair must be active read-write compiled.
-    eligible: dict[str, find_module.ParsedPage] = {
-        page.rel_path: page
-        for page in pages
-        if _is_active_compiled_rw(vault_root, page)
-    }
+    # Both endpoints of a flagged pair must be active read-write compiled — the
+    # caller already applied that gate when building `eligible`.
     if len(eligible) < 2:
         return []
+    excluded = exclude or set()
 
     rows_by_file: dict[str, list[int]] = {}
     for i, (fp, _cidx) in enumerate(metadata):
@@ -3004,6 +3544,10 @@ def _check_corpus_contradictions(
             score = float(col_max[int(j)])
             a, b = sorted((fp, other_fp))
             key = (a, b)
+            # Already surfaced as an authored contradiction: the stronger signal
+            # owns the pair, so it is not re-measured, re-counted, or re-capped.
+            if key in excluded:
+                continue
             if key not in pair_cos or score > pair_cos[key]:
                 pair_cos[key] = score
 
@@ -3059,6 +3603,7 @@ def _check_corpus_contradictions(
             "priority": round(priority, 4),
             "dormancy": round(dormancy, 4),
             "same_family": same_family,
+            "provenance": "proximity",
         }
         if polarity:
             meta["polarity"] = polarity["label"]

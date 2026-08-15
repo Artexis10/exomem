@@ -382,6 +382,11 @@ class SemanticUnitHit:
     parent_updated: str
     parent_superseded_by: list[str] = field(default_factory=list)
     relations: list[dict[str, Any]] = field(default_factory=list)
+    # Governed unit metadata. Absent means "not judged" / "no check date", which
+    # is a different statement from any value, so both stay `None` and are
+    # omitted from every serializer rather than emitted as null.
+    verdict: str | None = None
+    check_by: str | None = None
     relation_match: dict[str, Any] | None = None
     bm25_rank: int | None = None
     bm25_score: float | None = None
@@ -419,6 +424,10 @@ class SemanticUnitHit:
             "parent_status": self.parent_status,
             "parent_updated": self.parent_updated,
         }
+        if self.verdict is not None:
+            out["verdict"] = self.verdict
+        if self.check_by is not None:
+            out["check_by"] = self.check_by
         if self.parent_superseded_by:
             out["parent_superseded_by"] = self.parent_superseded_by
         if self.relation_match is not None:
@@ -453,6 +462,11 @@ class SemanticUnitHit:
             "parent_status": self.parent_status,
             "parent_updated": self.parent_updated,
         }
+        # A refuted unit ranks like any other, so the only way a compact reader
+        # can tell it apart from an unexamined one is this field. It costs a
+        # single short word and is the point of the whole primitive.
+        if self.verdict is not None:
+            out["verdict"] = self.verdict
         if self.mixed_units_truncated:
             out["mixed_units_truncated"] = self.mixed_units_truncated
         return out

@@ -18,6 +18,8 @@ from unittest import mock
 
 import pytest
 from jsonschema import Draft202012Validator
+from jsonschema import ValidationError as JsonSchemaValidationError
+from pydantic import ValidationError as PydanticValidationError
 
 SCHEMA_DIR = Path("benchmarks/protocol/schema")
 FIXTURE = Path("benchmarks/lme/fixtures/mini.json")
@@ -39,9 +41,20 @@ def emitted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     from equivalence.differ import compare_runs
     from lme.reader import StubReader
     from lme.runner import RunConfig, execute_run
+    from protocol.contracts import RATIFICATION_REPOSITORY_REVISION
+    from protocol.manifest import start_manifest
 
     root = tmp_path_factory.mktemp("conformance")
-    with mock.patch.dict(os.environ, {"PROTOCOL_FIXTURE_EMBEDDER": "1", "EXOMEM_DISABLE_EMBEDDINGS": "1"}):
+    pinned_start_manifest = lambda *args, **kwargs: start_manifest(  # noqa: E731
+        *args, contract_revision=RATIFICATION_REPOSITORY_REVISION, **kwargs
+    )
+    with (
+        mock.patch.dict(
+            os.environ,
+            {"PROTOCOL_FIXTURE_EMBEDDER": "1", "EXOMEM_DISABLE_EMBEDDINGS": "1"},
+        ),
+        mock.patch("lme.runner.start_manifest", side_effect=pinned_start_manifest),
+    ):
         result = execute_run(
             RunConfig(dataset=FIXTURE, out=root, reader_name="stub", run_id="conformance", provider="hybrid-rag-control"),
             reader=StubReader(),
@@ -411,9 +424,9 @@ def _accepts_both(model_name: str, payload: dict) -> None:
 def _rejects_both(model_name: str, payload: dict) -> None:
     import protocol.models as models
 
-    with pytest.raises(Exception):
+    with pytest.raises(PydanticValidationError):
         getattr(models, model_name).model_validate(payload)
-    with pytest.raises(Exception):
+    with pytest.raises(JsonSchemaValidationError):
         _validator(SCHEMA_BY_MODEL[model_name]).validate(payload)
 
 
@@ -421,7 +434,7 @@ def _rejects_model_only(model_name: str, payload: dict, exception: str) -> None:
     assert exception in SCHEMA_MODEL_EXCEPTIONS
     import protocol.models as models
 
-    with pytest.raises(Exception):
+    with pytest.raises(PydanticValidationError):
         getattr(models, model_name).model_validate(payload)
     _validator(SCHEMA_BY_MODEL[model_name]).validate(payload)
 

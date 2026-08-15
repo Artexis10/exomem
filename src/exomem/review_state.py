@@ -18,8 +18,19 @@ from .kbdir import kb_dirname
 SCHEMA_VERSION = 1
 STATE_FILENAME = ".review-state.json"
 REVIEW_PREFIX = "exomem://review/"
-VALID_ACTIONS = frozenset({"dismiss", "snooze", "reopen"})
-VALID_VIEWS = frozenset({"open", "all", "snoozed", "dismissed"})
+VALID_ACTIONS = frozenset({"dismiss", "snooze", "reopen", "competing"})
+VALID_VIEWS = frozenset({"open", "all", "snoozed", "dismissed", "competing"})
+# Every effective state a decision can resolve to, in report order. `all` is a view
+# over these, never a state an item is in.
+VALID_STATES: tuple[str, ...] = ("open", "snoozed", "dismissed", "competing")
+# Actions that leave a standing record; `reopen` clears rather than records.
+_RECORDING_ACTIONS = frozenset({"dismiss", "snooze", "competing"})
+_ACTION_STATE: dict[str, str] = {
+    "reopen": "open",
+    "dismiss": "dismissed",
+    "snooze": "snoozed",
+    "competing": "competing",
+}
 _LOCK = threading.Lock()
 
 
@@ -147,7 +158,7 @@ class ReviewStateStore:
         if not isinstance(record, dict):
             return None
         action = str(record.get("action") or "")
-        if action not in {"dismiss", "snooze"}:
+        if action not in _RECORDING_ACTIONS:
             return None
         return ReviewDecision(
             action=action,
@@ -173,6 +184,10 @@ class ReviewStateStore:
             return "open", None
         if decision.action == "dismiss":
             return "dismissed", decision
+        if decision.action == "competing":
+            # A competing-alternatives stance never expires on a clock: it is
+            # fingerprint-bound, so editing either rival is what reopens it.
+            return "competing", decision
         current = today or dt.date.today()
         until = _parse_until(decision.until)
         return ("snoozed", decision) if until >= current else ("open", decision)
@@ -229,7 +244,7 @@ class ReviewStateStore:
             "item_id": review_id,
             "ref": review_ref(review_id),
             "fingerprint": signal_fingerprint,
-            "state": "open" if action == "reopen" else "dismissed" if action == "dismiss" else "snoozed",
+            "state": _ACTION_STATE[action],
             "decision": decision,
         }
 

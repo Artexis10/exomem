@@ -27,6 +27,7 @@ BLOCK_TYPES: frozenset[str] = frozenset(
         "risk",
         "open_question",
         "hypothesis",
+        "prediction",
         "result",
         "metric",
         "failure",
@@ -60,6 +61,7 @@ _BLOCK_TYPE_ALIASES: dict[str, str] = {
     "open_questions": "open_question",
     "questions": "open_question",
     "hypotheses": "hypothesis",
+    "predictions": "prediction",
     "results": "result",
     "outcome": "result",
     "outcomes": "result",
@@ -92,8 +94,13 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _METADATA_RE = re.compile(r"^\s*[-*+]\s+([A-Za-z0-9 _-]+):\s*(.*)$")
 _NORMALIZE_RE = re.compile(r"[\s-]+")
+# Leading rows the language itself owns. A block whose only rows are these is
+# not "a block with content" — it has no body. `verdict` and `check_by` belong
+# here for the same reason `category` does: they are governed metadata, so a
+# `## Prediction` carrying only a verdict must still report `empty_rich_unit`
+# rather than pass as authored.
 _RESERVED_METADATA_KEYS = frozenset(
-    {"category", "id", "tags", "context", "relations"}
+    {"category", "id", "tags", "context", "relations", "verdict", "check_by"}
 )
 
 

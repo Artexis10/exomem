@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    contradiction_stance,
     corpus_aware,
     epistemic_graph,
     find_corpus,
@@ -544,18 +545,56 @@ def _supersession_edges(packed_pages: list[ParsedPage]) -> list[dict]:
     return edges
 
 
+def _asserted_tension(
+    vault_root: Path, by_canon: dict[str, str]
+) -> tuple[list[dict], set[frozenset[str]]]:
+    """Authored `contradicts` pairs among the packed notes, plus their canon keys.
+
+    An authored edge is the author's own stance, not a measurement, so it carries no
+    cosine and needs no sidecar — an embeddings-off pack still shows it. Labelling it
+    is the point: a reader must be able to tell "you said these conflict" from "these
+    sit close in vector space".
+    """
+    pairs: list[dict] = []
+    keys: set[frozenset[str]] = set()
+    if len(by_canon) < 2:
+        return pairs, keys  # no pair is possible — don't touch the graph at all
+    for a, b in contradiction_stance.asserted_pairs(vault_root):
+        canon_a, canon_b = corpus_aware._canon(a), corpus_aware._canon(b)
+        if canon_a not in by_canon or canon_b not in by_canon:
+            continue
+        keys.add(frozenset((canon_a, canon_b)))
+        left, right = sorted((by_canon[canon_a], by_canon[canon_b]))
+        pairs.append(
+            {
+                "a": left,
+                "b": right,
+                "cosine": None,
+                "provenance": "asserted",
+                "note": "authored `contradicts` edge — asserted, not measured",
+            }
+        )
+    pairs.sort(key=lambda d: (d["a"], d["b"]))
+    return pairs, keys
+
+
 def _tension_pairs(
     vault_root: Path, packed_pages: list[ParsedPage], max_tension: int
 ) -> tuple[list[dict], int, bool]:
-    """Proximity-tension pairs AMONG the packed notes whose pairwise cosine lands in the
-    contradiction band. Reuses the embedding sidecar; soft-fails to empty when off.
+    """Tension pairs AMONG the packed notes: authored `contradicts` edges first, then
+    proximity pairs whose pairwise cosine lands in the contradiction band. Reuses the
+    embedding sidecar for the proximity half only; soft-fails to empty when off.
 
     `embeddings_available` is True iff a cosine pass returned scores AND the band is
     active; an inverted/disabled band (floor >= ceiling) reports it False — the band is
-    off, so no tension can be measured regardless of the sidecar."""
+    off, so no proximity tension can be measured regardless of the sidecar. Asserted
+    pairs are independent of it and are surfaced either way.
+
+    A pair that is both authored and in band appears once, as asserted."""
     floor = corpus_aware._contradiction_floor()
     ceiling = corpus_aware._dup_threshold()
     by_canon = {corpus_aware._canon(p.rel_path): p.rel_path for p in packed_pages}
+    asserted, asserted_keys = _asserted_tension(vault_root, by_canon)
     pair_best: dict[frozenset[str], float] = {}
     embeddings_available = False
 
@@ -572,21 +611,25 @@ def _tension_pairs(
                 if not (floor <= score < ceiling):
                     continue
                 key = frozenset((self_canon, canon))
+                if key in asserted_keys:
+                    continue  # the authored edge owns this pair
                 if key not in pair_best or score > pair_best[key]:
                     pair_best[key] = score
 
-    pairs: list[dict] = []
+    proximity: list[dict] = []
     for key, score in pair_best.items():
         a, b = sorted(key)
-        pairs.append(
+        proximity.append(
             {
                 "a": by_canon[a],
                 "b": by_canon[b],
                 "cosine": round(float(score), 4),
+                "provenance": "proximity",
                 "note": "proximity, not polarity — reader decides",
             }
         )
-    pairs.sort(key=lambda d: (-d["cosine"], d["a"], d["b"]))
+    proximity.sort(key=lambda d: (-d["cosine"], d["a"], d["b"]))
+    pairs = asserted + proximity
     shown = pairs[:max_tension] if max_tension > 0 else pairs
     dropped = len(pairs) - len(shown)
     return shown, dropped, embeddings_available
