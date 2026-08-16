@@ -5,7 +5,7 @@ snapshot pair for the transition invariants — and returns an
 :class:`AssertionResult`. Nothing here reads a clock, a network, or a provider
 internal, so a result is a pure function of the fixture that produced it.
 
-Three rules hold across all eighteen:
+Three rules hold across all thirty-three:
 
 1. **Acceptance predicates, not implementations.** PREREGISTRATION §4 requires
    at least two structurally different representations to satisfy each
