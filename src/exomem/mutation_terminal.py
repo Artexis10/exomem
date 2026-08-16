@@ -56,6 +56,11 @@ _PLAN_RECEIPT_FIELDS = (
 STATES = ("needs_review", "committed", "rejected", "retryable", "indeterminate")
 TERMINAL_STATES = frozenset({"committed", "rejected"})
 
+#: The closed derived-graph outcome vocabulary a client may branch on. Absent
+#: means no graph work was required; `pending` means the write is durable but
+#: its derived graph is still rebuilding behind the response.
+_GRAPH_SYNC_OUTCOMES = frozenset({"completed", "failed", "pending"})
+
 #: Keys a client may branch on. Everything else in a response is advisory.
 _ENVELOPE_KEYS = (
     "ok",
@@ -555,8 +560,13 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
-    graph_result = result if result.get("graph_sync") in {"completed", "failed"} else leaf
-    if isinstance(graph_result, Mapping) and graph_result.get("graph_sync") in {"completed", "failed"}:
+    # `pending` (#576) is the fourth outcome: canonical bytes committed, the
+    # registered derived-graph rebuild has not converged yet. It has to survive
+    # into `compact` -- the default detail -- or a bounded write would be
+    # indistinguishable from one whose graph is current, which is the exact
+    # dishonesty the bound is not allowed to introduce.
+    graph_result = result if result.get("graph_sync") in _GRAPH_SYNC_OUTCOMES else leaf
+    if isinstance(graph_result, Mapping) and graph_result.get("graph_sync") in _GRAPH_SYNC_OUTCOMES:
         compact["graph_sync"] = graph_result["graph_sync"]
         for key in (
             "graph_sync_code",

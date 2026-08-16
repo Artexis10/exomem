@@ -94,6 +94,26 @@ _RECEIPT_TERMINAL_STATUSES = frozenset({"committed", "replayed", "rejected"})
 MAX_GRAPH_REBUILD_WAITERS = 128
 MAX_GRAPH_REBUILD_ATTEMPTS = 4
 
+#: How long an *interactive* mutation may join a registered graph rebuild before
+#: returning with an honest "still catching up" outcome (#576).
+#:
+#: The canonical bytes are already durable at `canonical_files_committed` and
+#: derived graph work is self-healing by design, so this join buys the caller
+#: nothing but a fresher derived read. Joining it without a timeout made a
+#: committed write return only when the `exomem-graph-rebuild` daemon published
+#: or died: 75-155 s against a 750 ms commit budget, and every one of those
+#: rebuilds failed, so the wait bought nothing at all.
+#:
+#: 2.0 s is chosen to sit just above the corpus-scale commit p95 ceiling the
+#: latency gate already enforces (`COMMIT_P95_MS = 1_500.0`), so the worst-case
+#: user-visible write stays the same order of magnitude as the write itself. It
+#: is deliberately NOT tuned to "usually be enough" for a full rebuild: a real
+#: full-corpus pass costs 20-175 s, so any bound that sometimes succeeds would
+#: also sometimes stall a user for minutes. Work that finishes inside it is work
+#: that was already done or nearly done (a coalesced flight, a small vault);
+#: everything else returns `pending` and converges behind the caller.
+INTERACTIVE_GRAPH_JOIN_TIMEOUT_SECONDS = 2.0
+
 #: `reconcile` is an internal registry name, not something a caller can run.
 #: The MCP surface is `maintain_memory(mode="reconcile")` and the CLI dispatches
 #: on the public product names (`exomem maintain --reconcile`); "run reconcile"
@@ -2469,6 +2489,41 @@ def wait_for_registered(
     return None if item is None else item[0].wait(timeout)
 
 
+def join_registered_bounded(
+    vault_root: Path, *, state_root: Path | None = None
+) -> bool:
+    """Join a registered rebuild on behalf of a caller that is serving a request.
+
+    The single seam every request-serving join goes through (#576), rather than
+    a timeout threaded through each call site by hand. The first analysis of
+    this incident bounded one site and left an identical unbounded join in
+    `mutation_guard` that then produced the worst case measured -- a 300 s
+    single-unit append. One named helper makes the bounded set greppable, and
+    `test_bounded_graph_join.py` fails on any new `wait_for_registered` caller
+    that is neither this helper nor a declared opt-out.
+
+    Returns True when the flight converged inside
+    `INTERACTIVE_GRAPH_JOIN_TIMEOUT_SECONDS`, and False when it is still
+    running -- in which case the canonical bytes are durable, the flight keeps
+    going on its own thread, and the caller owes its own caller an honest
+    "derived graph is still catching up". Every other failure still raises, so
+    a real rebuild failure is not laundered into "still pending".
+
+    Deliberately not the default of `wait_for_registered`: `reconcile`, whose
+    terminal exists to prove the graph is readable, must keep blocking, and a
+    default that silently changed under it would be the same class of bug.
+    """
+    try:
+        wait_for_registered(
+            vault_root,
+            INTERACTIVE_GRAPH_JOIN_TIMEOUT_SECONDS,
+            state_root=state_root,
+        )
+    except TimeoutError:
+        return False
+    return True
+
+
 def start_registered(vault_root: Path, *, state_root: Path | None = None) -> GraphRebuildStart | None:
     """Start captured work without joining it, for standalone post-commit fanout."""
     item = (_PENDING_WAITERS.get() or {}).get(_registration_key(vault_root, state_root))
@@ -3016,4 +3071,30 @@ def committed_graph_failure(
         "graph_sync_code": code,
         "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
         "graph_sync_remediation": remediation,
+    }
+
+
+def committed_graph_pending(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
+    """The canonical bytes committed; the derived graph has not converged yet.
+
+    A fourth outcome alongside absent/`completed`/`failed`, and the reason the
+    bounded join above is safe to take: a fast write that let a caller infer a
+    fresh derived graph would be worse than the slow one it replaces. `failed`
+    would be a different lie -- nothing failed, the registered rebuild is simply
+    still running and will publish behind this response.
+
+    Derived reads degrade rather than break while this is true: the graph lane
+    falls back to wikilink expansion, `graph_context` reports
+    `available: false`, and relation-filtered recall raises the existing typed
+    `RETRIEVAL_INDEX_WARMING` with its own retry hint. None of them block.
+    """
+    return {
+        "graph_sync": "pending",
+        "graph_sync_code": "GRAPH_SYNC_REBUILD_IN_PROGRESS",
+        "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
+        "graph_sync_remediation": (
+            "The write is durable. Derived graph relations are still rebuilding, so "
+            "relation-filtered recall may report warming and graph context may report "
+            f"available: false for a short time; re-read shortly, or {_RECONCILE_HINT}"
+        ),
     }

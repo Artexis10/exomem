@@ -63,6 +63,26 @@ REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 # single pass — while a supersession that survives it is not transient, so
 # re-running the rebuild cannot be what fixes it.
 REBUILD_SUPERSESSION_RETRIES = 1
+
+#: #576. `REBUILD_STABILIZATION_ATTEMPTS` is the attempt *floor*, not the
+#: ceiling: two passes cannot converge against a corpus that is still being
+#: written to, and failing is precisely what strands the availability marker so
+#: the next write falls back into another full rebuild -- a loop that feeds
+#: itself. An attempt invalidated by a moving projection may therefore re-target
+#: the newer baseline instead of exhausting.
+#:
+#: The re-target is bounded by BOTH a wall-clock deadline and an attempt
+#: ceiling, because neither alone is a bound here. An attempt ceiling is not one
+#: when a full-corpus pass costs 20-175 s (8 passes would be ~23 min); a
+#: deadline alone is not one when a pass is cheap enough to spin. 120 s keeps
+#: the worst case (deadline plus the one pass already in flight when it
+#: expires) at or below today's two full passes at production scale, so this
+#: never costs more wall time than the code it replaces -- it only spends it
+#: better. Hitting either bound raises `GraphProjectionMoved` exactly as today:
+#: same Class C type, same admitted cause, and the single
+#: `mark_external_pending` in the `finally` below is untouched.
+REBUILD_STABILIZATION_DEADLINE_SECONDS = 120.0
+REBUILD_STABILIZATION_MAX_ATTEMPTS = 8
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
 _RESOLVER_TOPOLOGY_KEY = "recall_resolver_topology"
@@ -746,6 +766,27 @@ def _recall_projection_identity(
     """
     policy_version, access_fingerprint = recall_policy.recall_policy_identity(vault_root)
     return disk_freshness, policy_version, access_fingerprint
+
+
+def _may_restabilize(attempts: int, *, retarget: bool, started: float) -> bool:
+    """Whether `_rebuild_all_locked` may run another stabilization attempt (#576).
+
+    Three rules, in order:
+
+    * below `REBUILD_STABILIZATION_ATTEMPTS` this is unconditionally True, so a
+      bound can never buy fewer attempts than the code it replaced;
+    * above it, only an attempt invalidated by a *moving projection* earns
+      another one -- a Class B publication refusal is not made truer by
+      repetition (#566);
+    * and that extension stops at whichever of the attempt ceiling and the
+      elapsed deadline comes first, so continuous writes cannot turn the
+      re-target into an unbounded restart loop.
+    """
+    if attempts < REBUILD_STABILIZATION_ATTEMPTS:
+        return True
+    if not retarget or attempts >= REBUILD_STABILIZATION_MAX_ATTEMPTS:
+        return False
+    return (time.monotonic() - started) < REBUILD_STABILIZATION_DEADLINE_SECONDS
 
 
 def _incremental_projection_identity(
@@ -1438,6 +1479,11 @@ class EpistemicGraphIndex:
                             note_publication_refusal(self.vault_root)
                             raise
                         clear_publication_refusal(self.vault_root)
+                        log.info(
+                            "graph rebuild published publication_attempts=%s generation=%s",
+                            attempts,
+                            required.generation if required is not None else None,
+                        )
                         return report
                     finally:
                         _release_publication_hold(publication_hold)
@@ -1467,6 +1513,9 @@ class EpistemicGraphIndex:
         # exception type already carries that classification; only the memo is
         # new, so the next cycle does not re-pay the same doomed rebuild.
         note_publication_refusal(self.vault_root)
+        log.info(
+            "graph rebuild publication exhausted publication_attempts=%s", attempts
+        )
         raise graph_sync.GraphRebuildRegistrationError(
             "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
             # "run reconcile" is an internal registry name that matches neither
@@ -1752,8 +1801,19 @@ class EpistemicGraphIndex:
         # cause belonging to the branch it takes.
         moved_cause = "no stabilization attempt completed"
         publication_cause = "no stabilization attempt completed"
+        # #576. Whether the *last* attempt was invalidated by a moving
+        # projection, which is the only condition worth re-targeting: the
+        # newer baseline is sampled fresh at the top of every attempt, so an
+        # attempt that lost a race to a concurrent write can win the next one.
+        # Class B (the marker would not publish) is deliberately excluded --
+        # retrying it just re-pays a doomed pass, which is #566's finding.
+        retarget = False
+        attempts = 0
+        started = time.monotonic()
         try:
-            for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
+            while _may_restabilize(attempts, retarget=retarget, started=started):
+                attempts += 1
+                retarget = False
                 before_disk = _disk_vault_freshness(self.vault_root)
                 before = _recall_projection_identity(self.vault_root, disk_freshness=before_disk)
                 resolver = find_module.recall_resolver_snapshot(
@@ -1772,6 +1832,7 @@ class EpistemicGraphIndex:
                     # Class C, first admitted cause.
                     self._mark_unavailable()
                     projection_moved = True
+                    retarget = True
                     moved_cause = "the supplied freshness identity did not name the resolver bytes"
                     find_module.unload_ram_caches()
                     continue
@@ -1824,6 +1885,7 @@ class EpistemicGraphIndex:
                         # The projection moved between writing the availability
                         # marker and confirming it: Class C, second cause.
                         projection_moved = True
+                        retarget = True
                         moved_cause = (
                             "the recall projection moved after the availability "
                             "marker was written"
@@ -1867,19 +1929,28 @@ class EpistemicGraphIndex:
                     # resolver source versions changed across the pass: Class C,
                     # second admitted cause.
                     projection_moved = True
+                    retarget = True
                     if after_identity != before:
                         moved_cause = "the recall projection identity moved across the pass"
                     elif after_membership != resolver_membership:
                         moved_cause = "the recall membership moved across the pass"
                     else:
                         moved_cause = "the resolver source versions moved across the pass"
-            attempts = (
+            exhausted = (
                 "epistemic graph rebuild did not stabilize after "
-                f"{REBUILD_STABILIZATION_ATTEMPTS} attempts"
+                f"{attempts} attempts in {time.monotonic() - started:.1f}s"
+            )
+            log.info(
+                "graph rebuild stabilization exhausted attempts=%s elapsed_ms=%.1f "
+                "class=%s cause=%s",
+                attempts,
+                (time.monotonic() - started) * 1000.0,
+                "C" if projection_moved else "B",
+                moved_cause if projection_moved else publication_cause,
             )
             if projection_moved:
                 raise GraphProjectionMoved(
-                    f"{attempts} (Class C, projection moved): {moved_cause}"
+                    f"{exhausted} (Class C, projection moved): {moved_cause}"
                 )
             # Class B by elimination: this pass proved nothing stale and still
             # could not publish, which is precisely what
@@ -1892,7 +1963,7 @@ class EpistemicGraphIndex:
             # a full doomed rebuild indefinitely, and left the registry
             # permanently cool for every later write to pay.
             raise GraphPublicationUnavailable(
-                f"{attempts} (Class B, publication failure): {publication_cause}"
+                f"{exhausted} (Class B, publication failure): {publication_cause}"
             )
         finally:
             if pass_started and not stable:
@@ -2520,7 +2591,20 @@ class EpistemicGraphIndex:
         created_paths: Iterable[Path] = (),
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
     ) -> dict[str, int]:
-        def fallback() -> dict[str, int]:
+        def fallback(reason: str) -> dict[str, int]:
+            # #576 F3. The single most-wanted number in the incident, and the
+            # one nothing logged: which gate sent essentially every write down
+            # the full-rebuild path. Without it the join-rate flip -- 0-7% of
+            # writes joining a rebuild, then 83-100% -- could not be attributed
+            # from the service log at all, and two published analyses of this
+            # incident named the wrong mechanism before one measured it.
+            log.info(
+                "graph incremental refresh fell back reason=%s external_pending=%s "
+                "graph_checkpoint=%s",
+                reason,
+                freshness.external_pending(self.vault_root),
+                graph_checkpoint.checkpoint_sha256 if graph_checkpoint is not None else None,
+            )
             if graph_checkpoint is None:
                 return {
                     "indexed_files": 0,
@@ -2543,28 +2627,33 @@ class EpistemicGraphIndex:
             for path in paths:
                 rel = _vault_rel(self.vault_root, path)
                 if rel is None:
-                    return fallback()
+                    return fallback("path_outside_vault")
                 try:
                     expected_paths.append(
                         (rel, vault_module.content_hash(path.read_bytes().decode("utf-8")))
                     )
                 except (OSError, UnicodeDecodeError):
-                    return fallback()
+                    return fallback("path_unreadable")
             expected_created = sorted(
                 rel
                 for path in created_paths
                 if (rel := _vault_rel(self.vault_root, Path(path))) is not None
             )
-            if (
-                durable_checkpoint != graph_checkpoint
-                or graph_checkpoint.scope != "paths"
-                or graph_checkpoint.paths != tuple(sorted(expected_paths))
-                or graph_checkpoint.created_paths != tuple(expected_created)
-            ):
-                return fallback()
+            # Named individually rather than as one disjunction: these are the
+            # four candidate gates the incident could not choose between, and a
+            # single "receipt binding mismatch" line would have left the same
+            # question open.
+            if durable_checkpoint != graph_checkpoint:
+                return fallback("durable_checkpoint_moved")
+            if graph_checkpoint.scope != "paths":
+                return fallback("checkpoint_scope_is_not_paths")
+            if graph_checkpoint.paths != tuple(sorted(expected_paths)):
+                return fallback("checkpoint_paths_mismatch")
+            if graph_checkpoint.created_paths != tuple(expected_created):
+                return fallback("checkpoint_created_paths_mismatch")
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
-            return fallback()
+            return fallback("graph_snapshot_unavailable")
         if graph_checkpoint is not None:
             graph_values = dict(
                 snapshot.execute(
@@ -2582,16 +2671,16 @@ class EpistemicGraphIndex:
                 and acknowledged.generation == predecessor
             ):
                 snapshot.close()
-                return fallback()
+                return fallback("acknowledgement_is_not_the_predecessor")
         stored_checkpoint = self._stored_recall_checkpoint(snapshot)
         if stored_checkpoint is None or not freshness.recall_is_live(self.vault_root, "vault"):
             snapshot.close()
-            return fallback()
+            return fallback("recall_checkpoint_absent_or_registry_not_live")
         delta = freshness.recall_delta_since(self.vault_root, "vault", stored_checkpoint)
         if not delta.complete:
             snapshot.close()
             self._mark_unavailable()
-            return fallback()
+            return fallback("recall_delta_incomplete")
         checkpoint = delta.to
         before = (
             checkpoint.triple,
@@ -2601,7 +2690,7 @@ class EpistemicGraphIndex:
         if not self._delta_target_still_current(delta):
             snapshot.close()
             self._mark_unavailable()
-            return fallback()
+            return fallback("delta_target_moved")
         created_rels = {
             rel
             for path in created_paths
@@ -2611,7 +2700,7 @@ class EpistemicGraphIndex:
         if stored_entries is None:
             snapshot.close()
             self._mark_unavailable()
-            return fallback()
+            return fallback("stored_resolver_entries_unreadable")
         snapshot.close()
         resolver = find_module.recall_resolver_snapshot_at_checkpoint(
             self.vault_root,
@@ -2619,7 +2708,7 @@ class EpistemicGraphIndex:
         )
         if resolver is None:
             self._mark_unavailable()
-            return fallback()
+            return fallback("resolver_snapshot_unavailable")
         topology_changed = any(
             (
                 rel.removesuffix(".md") in resolver.full_paths,
@@ -2635,7 +2724,7 @@ class EpistemicGraphIndex:
         if topology_changed:
             topology_snapshot = self._open_read_snapshot(require_current_projection=False)
             if topology_snapshot is None:
-                return fallback()
+                return fallback("topology_snapshot_unavailable")
             full_topology = self._stored_full_resolver_topology(
                 topology_snapshot,
                 set(stored_entries),
@@ -2643,7 +2732,7 @@ class EpistemicGraphIndex:
             topology_snapshot.close()
             if full_topology is None:
                 self._mark_unavailable()
-                return fallback()
+                return fallback("stored_topology_unreadable")
             indexed_sources, linked_sources, stored_resolver_fingerprint = full_topology
             old_resolver = resolver.fork()
             old_resolver.on_entries_changed(
@@ -2656,7 +2745,7 @@ class EpistemicGraphIndex:
             )
             if _resolver_topology_fingerprint(old_resolver) != stored_resolver_fingerprint:
                 self._mark_unavailable()
-                return fallback()
+                return fallback("stored_topology_fingerprint_mismatch")
             resolver_fingerprint = _resolver_topology_fingerprint(resolver)
 
         delta_paths = set(delta.changed | delta.deleted)
@@ -2666,7 +2755,7 @@ class EpistemicGraphIndex:
         # the event checkpoint.
         if any(str(path) not in delta_paths for path in paths):
             self._mark_unavailable()
-            return fallback()
+            return fallback("caller_path_outside_delta")
 
         refresh_paths = set(delta_paths)
         topology_versions: dict[str, GraphSourceSignature] = {}
@@ -2708,7 +2797,7 @@ class EpistemicGraphIndex:
                 if resolver_version_result is None:
                     find_module.unload_ram_caches()
                 self._mark_unavailable()
-                return fallback()
+                return fallback("topology_proof_moved")
             resolver_versions = resolver_version_result
             affected, topology_versions = affected_result
             refresh_paths.update(str(self.vault_root / rel) for rel in affected)
@@ -2766,7 +2855,7 @@ class EpistemicGraphIndex:
                 ):
                     stable = True
                     return report
-                rebuilt = fallback()
+                rebuilt = fallback("incremental_marker_refused")
                 stable = True
                 return rebuilt
             stable = True
@@ -2774,7 +2863,7 @@ class EpistemicGraphIndex:
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
-        return fallback()
+        return fallback("unreachable")
 
     def _refresh_paths_pass(
         self,
@@ -4201,7 +4290,26 @@ def upsert_after_write(
 def _rebuild_outcome(
     index: EpistemicGraphIndex, checkpoint: graph_sync.GraphSyncCheckpoint
 ) -> graph_sync.GraphBuildOutcome:
-    index._rebuild_all_off_boundary()
+    # #576 F3. Elapsed wall time around the whole registered rebuild, on both
+    # the publishing and the failing path. Read alongside the publication- and
+    # stabilization-attempt counts the two loops inside it log, this is what
+    # separates "one slow pass" from "several retried passes" -- the
+    # distinction the incident needed and could not make.
+    started = time.monotonic()
+    try:
+        index._rebuild_all_off_boundary()
+    except BaseException:
+        log.info(
+            "graph rebuild finished outcome=failed elapsed_ms=%.1f generation=%s",
+            (time.monotonic() - started) * 1000.0,
+            checkpoint.generation,
+        )
+        raise
+    log.info(
+        "graph rebuild finished outcome=published elapsed_ms=%.1f generation=%s",
+        (time.monotonic() - started) * 1000.0,
+        checkpoint.generation,
+    )
     return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
 

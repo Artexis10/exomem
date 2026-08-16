@@ -392,9 +392,22 @@ def test_full_rebuild_retries_when_target_is_renamed_after_snapshot(
     )
 
 
-def test_full_rebuild_twice_moving_vault_is_marked_unavailable(
+def test_full_rebuild_of_a_continuously_moving_vault_is_marked_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A vault that moves under every pass exhausts its bound and stays unavailable.
+
+    Renamed from `..._twice_moving_vault_...` for #576. The contract this test
+    exists for is unchanged and still asserted: a projection that never settles
+    raises `did not stabilize` and leaves the graph unavailable. What changed is
+    the number in the middle. Two attempts were a ceiling; they are now the
+    floor, because two passes cannot converge against a corpus still being
+    written to and the resulting Class C failure is what stranded the
+    availability marker and sent the next write into another full rebuild. So
+    this asserts the new bound -- the attempt ceiling, since this vault moves on
+    every acquisition and so never reaches the elapsed deadline -- rather than
+    the removed one.
+    """
     vault = tmp_path / "vault"
     _seed(vault)
     real_snapshot = find_module.recall_resolver_snapshot
@@ -417,7 +430,8 @@ def test_full_rebuild_twice_moving_vault_is_marked_unavailable(
     with pytest.raises(RuntimeError, match="did not stabilize"):
         index.rebuild_all()
 
-    assert acquisitions == 2
+    assert acquisitions == epistemic_graph.REBUILD_STABILIZATION_MAX_ATTEMPTS
+    assert acquisitions > epistemic_graph.REBUILD_STABILIZATION_ATTEMPTS
     assert index.available() is False
 
 
