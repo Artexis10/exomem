@@ -1,9 +1,10 @@
 """Durable structured logs of find() queries and write events.
 
-Two JSONL files under the repo `logs/` dir (already gitignored via `logs/*`,
-NSSM-rotated neighborhood, NEVER Obsidian-synced — query text can name sensitive
-Evidence scopes, so it stays on the box at the same trust boundary as
-`logs/exomem.log`):
+Two JSONL files under the resolved log dir (`logging_config.resolve_log_dir()`
+— the repo `logs/` dir in a source checkout, gitignored via `logs/*`,
+NSSM-rotated neighborhood; a per-platform location for a packaged install —
+NEVER Obsidian-synced — query text can name sensitive Evidence scopes, so it
+stays on the box at the same trust boundary as `exomem.log`):
 
 - `logs/queries.jsonl` : one object per find() call (query + ranking signals)
 - `logs/writes.jsonl`  : one object per note/add/replace write (path + citations)
@@ -33,12 +34,21 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .logging_config import resolve_log_dir
+
 log = logging.getLogger(__name__)
 
 # Module-level defaults (patchable in tests). $EXOMEM_LOG_DIR is consulted
 # PER CALL via `_target`/`current_log_dir` — never frozen at import — so a
-# container or test can flip the env var without reloading the module.
-_LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
+# container or test can flip the env var without reloading the module. The
+# unset-fallback itself IS frozen at import (matching `resolve_log_dir()`'s
+# own contract) via the SAME resolution `logging_config.resolve_log_dir()`
+# uses for every other log file, so queries.jsonl/writes.jsonl/reads.jsonl
+# always stay co-located with exomem.log/exomem-cli.log/exomem-media.log —
+# a bare `<repo>/logs` guess here previously left these three behind on a
+# wheel install once EXOMEM_LOG_DIR-unset resolution stopped assuming a
+# checkout (issue #552).
+_LOG_DIR = resolve_log_dir()
 QUERIES_PATH = _LOG_DIR / "queries.jsonl"
 WRITES_PATH = _LOG_DIR / "writes.jsonl"
 READS_PATH = _LOG_DIR / "reads.jsonl"

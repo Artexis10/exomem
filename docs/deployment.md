@@ -923,7 +923,9 @@ is still enforced on every request; a genuinely expired, revoked, or invalid
 credential still requires authorization, but a normal restart does not.
 
 **macOS / Linux:** `bash scripts/restart.sh` — launchd `kickstart -k` on macOS,
-`systemctl --user restart` on Linux. It truncates `logs/exomem.log` and tails it.
+`systemctl --user restart` on Linux. It truncates `logs/exomem.log` and tails it
+(a repo-mode/dev install; a packaged install's `exomem.log` lives under its
+resolved log directory instead — see § Logs below).
 
 **Windows:** `install-service.ps1` grants your user account start/stop rights on
 the service, so day-to-day restarts don't need UAC:
@@ -931,8 +933,16 @@ the service, so day-to-day restarts don't need UAC:
 ```powershell
 sc.exe stop exomem
 sc.exe start exomem
-Get-Content logs\exomem.log -Tail 6
+$logDir = ((exomem doctor --json | ConvertFrom-Json).checks | Where-Object { $_.id -eq 'observability' }).details.log_dir
+Get-Content "$logDir\exomem.log" -Tail 6
 ```
+
+(`install-service.ps1` pins `EXOMEM_LOG_DIR` — `%ProgramData%\exomem\logs` by
+default — into the service's environment for a `-Release` install, so its
+`exomem.log` is NOT under the repo checkout's `logs\` folder. `exomem doctor`
+reports the resolved path directly, which the command above reads rather than
+hardcoding it, so it stays correct whether the box uses the default or an
+operator-pinned override.)
 
 If you skipped the grant (or installed from an older version of the script),
 re-run the install script — it's idempotent and will only add the ACE if it's
@@ -953,12 +963,22 @@ sc.exe start exomem
 
 ## Logs
 
-- `logs/exomem.log` — application log (rotated in-process, 5 MB × 5 files; same on
-  every platform).
-- `logs/service.out.log`, `logs/service.err.log` — service stdout/stderr. On
-  Windows NSSM writes and rotates these; launchd/systemd write them but do **not**
-  rotate them (the app's own `exomem.log` is the durable, self-rotating record). On
-  Linux, `journalctl --user -u exomem` is the primary stdout/stderr view.
+- `exomem.log` — application log (rotated in-process, 5 MB × 5 files; same on
+  every platform), under the **resolved log directory**
+  (`logging_config.resolve_log_dir()`, see `docs/observability.md`): the repo
+  `logs/` folder for a repo-mode/dev checkout, or the pinned/per-platform
+  location (`%ProgramData%\exomem\logs` by default on a Windows
+  `-Release`/service install) otherwise. `exomem doctor --json` always reports
+  the actual resolved path under the `observability` check's `log_dir` detail
+  — read it from there rather than assuming `logs/exomem.log`.
+- `logs/service.out.log`, `logs/service.err.log` — service stdout/stderr,
+  always under the checkout's own `logs/` folder regardless of profile or
+  `EXOMEM_LOG_DIR` (NSSM's `AppStdout`/`AppStderr` redirect targets, set by
+  `install-service.ps1` relative to the checkout it was run from — a separate
+  concern from the app's own structured logging). On Windows NSSM writes and
+  rotates these; launchd/systemd write them but do **not** rotate them (the
+  app's own `exomem.log` is the durable, self-rotating record). On Linux,
+  `journalctl --user -u exomem` is the primary stdout/stderr view.
 
 ## Troubleshooting
 
@@ -970,7 +990,7 @@ sc.exe start exomem
 | claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EXOMEM_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
 | Existing client receives one `401 invalid_token` after the durable-session cutover | Legacy FastMCP reference JWT is intentionally not dual-read | Complete one final login without deleting or changing the connector URL. If a durable session later gets 401, inspect it with `exomem auth sessions`. |
 | Authenticated tools return `503` without `WWW-Authenticate` | Authoritative session storage is unavailable or corrupt | Repair the coordinator/network/storage path. Do not reauthorize: a fresh login uses the same unavailable authority. |
-| claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `logs/exomem.log`. Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
+| claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `exomem.log` (see § Logs for its resolved path — not always under `logs/`). Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
 | Edits to `.env` not picked up | service didn't restart | Restart the service (elevated on Windows). Confirm the python process restarted. |
 | 404 / Funnel "no service" | Tunnel disabled or pointing at the wrong port | `tailscale funnel status` (or check `cloudflared`); re-run the tunnel command from step 2. |
 | `KB vault not found` on startup | vault path moved or `EXOMEM_VAULT_PATH` wrong | set `EXOMEM_VAULT_PATH` to the absolute vault root in `.env`. |

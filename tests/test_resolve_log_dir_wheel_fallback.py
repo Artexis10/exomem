@@ -129,7 +129,7 @@ def test_explicit_default_still_wins_over_a_simulated_wheel_install(
 # --- the fallback lands somewhere sane and platform-appropriate ------------
 
 
-def test_wheel_install_fallback_lands_in_a_per_user_platform_location(
+def test_wheel_install_fallback_lands_in_a_per_platform_location(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("EXOMEM_LOG_DIR", raising=False)
@@ -140,12 +140,174 @@ def test_wheel_install_fallback_lands_in_a_per_user_platform_location(
 
     assert result.name == "logs"
     if sys.platform == "win32":
-        local_appdata = Path(
-            __import__("os").environ.get("LOCALAPPDATA")
-            or (Path.home() / "AppData" / "Local")
-        )
-        assert result == local_appdata / "Exomem" / "logs"
+        # Machine-wide, NOT the user profile: a LocalSystem-run service and
+        # an operator's own-user `exomem` CLI must land on the same
+        # directory, matching `mode.config_path()`'s own rationale for
+        # exactly this split. See the win32-branch tests below for the
+        # ALLUSERSPROFILE/hardcoded-fallback tiers, exercised via a
+        # monkeypatched `sys.platform` so they run on any host OS.
+        import os as _os
+
+        program_data = _os.environ.get("PROGRAMDATA") or _os.environ.get("ALLUSERSPROFILE") or r"C:\ProgramData"
+        assert result == Path(program_data) / "exomem" / "logs"
     elif sys.platform == "darwin":
         assert result == Path.home() / "Library" / "Logs" / "Exomem"
     else:
         assert result.parent.name == "exomem"
+
+
+# --- win32 branch, exercised via a monkeypatched sys.platform so it runs on
+# --- every CI host OS, not just when the test happens to execute on Windows.
+# --- Windows is the platform that matters for production (the live incident
+# --- was a Windows service), so it must not go untested on Linux CI.
+
+
+def test_win32_fallback_uses_programdata_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(logging_config.sys, "platform", "win32")
+    monkeypatch.setenv("PROGRAMDATA", r"C:\CustomProgramData")
+    monkeypatch.delenv("ALLUSERSPROFILE", raising=False)
+
+    result = logging_config._user_log_dir()
+
+    assert result == Path(r"C:\CustomProgramData") / "exomem" / "logs"
+
+
+def test_win32_fallback_uses_alluserprofile_when_programdata_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(logging_config.sys, "platform", "win32")
+    monkeypatch.delenv("PROGRAMDATA", raising=False)
+    monkeypatch.setenv("ALLUSERSPROFILE", r"C:\Users\All Users")
+
+    result = logging_config._user_log_dir()
+
+    assert result == Path(r"C:\Users\All Users") / "exomem" / "logs"
+
+
+def test_win32_fallback_uses_hardcoded_programdata_when_both_env_vars_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(logging_config.sys, "platform", "win32")
+    monkeypatch.delenv("PROGRAMDATA", raising=False)
+    monkeypatch.delenv("ALLUSERSPROFILE", raising=False)
+
+    result = logging_config._user_log_dir()
+
+    assert result == Path("C:" + "\\ProgramData") / "exomem" / "logs"
+
+
+def test_win32_fallback_never_touches_the_user_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The defect this guards: a LocalSystem-run service's `%LOCALAPPDATA%`/
+    `Path.home()` resolves to `C:\\Windows\\System32\\config\\systemprofile\\...`
+    -- unreadable without elevation, and no operator-run `exomem doctor` can
+    ever find it. The win32 branch must not read either signal at all."""
+    monkeypatch.setattr(logging_config.sys, "platform", "win32")
+    monkeypatch.setenv("PROGRAMDATA", r"C:\ProgramData")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Windows\System32\config\systemprofile\AppData\Local")
+
+    def _forbidden_home() -> Path:
+        raise AssertionError("win32 branch must not call Path.home()")
+
+    monkeypatch.setattr(logging_config.Path, "home", staticmethod(_forbidden_home))
+
+    result = logging_config._user_log_dir()
+
+    assert "systemprofile" not in str(result)
+    assert result == Path(r"C:\ProgramData") / "exomem" / "logs"
+
+
+def test_win32_fallback_directory_name_matches_mode_config_path_lowercase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matches `mode.config_path()`'s `%PROGRAMDATA%\\exomem\\config.json`
+    convention exactly -- lowercase `exomem`, not `Exomem`."""
+    monkeypatch.setattr(logging_config.sys, "platform", "win32")
+    monkeypatch.setenv("PROGRAMDATA", r"C:\ProgramData")
+
+    result = logging_config._user_log_dir()
+
+    assert result.parent.name == "exomem"
+    assert result.name == "logs"
+
+
+# --- darwin/linux branches, also exercised via monkeypatched sys.platform --
+
+
+def test_darwin_fallback_uses_home_library_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(logging_config.sys, "platform", "darwin")
+    fake_home = Path("/Users/fakeuser")
+    monkeypatch.setattr(logging_config.Path, "home", staticmethod(lambda: fake_home))
+
+    result = logging_config._user_log_dir()
+
+    assert result == fake_home / "Library" / "Logs" / "Exomem"
+
+
+def test_linux_fallback_uses_xdg_state_home_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(logging_config.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_STATE_HOME", "/custom/state")
+
+    result = logging_config._user_log_dir()
+
+    assert result == Path("/custom/state") / "exomem" / "logs"
+
+
+def test_linux_fallback_uses_home_local_state_when_xdg_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(logging_config.sys, "platform", "linux")
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    fake_home = Path("/home/fakeuser")
+    monkeypatch.setattr(logging_config.Path, "home", staticmethod(lambda: fake_home))
+
+    result = logging_config._user_log_dir()
+
+    assert result == fake_home / ".local" / "state" / "exomem" / "logs"
+
+
+# --- resolve_log_dir() must never raise, even when Path.home() itself can't
+# --- resolve (e.g. a container with no $HOME and no /etc/passwd entry) -----
+
+
+def _raising_home() -> Path:
+    raise RuntimeError("could not determine home directory")
+
+
+def test_darwin_fallback_survives_an_unresolvable_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(logging_config.sys, "platform", "darwin")
+    monkeypatch.setattr(logging_config.Path, "home", staticmethod(_raising_home))
+
+    result = logging_config._user_log_dir()  # must not raise
+
+    assert result.name == "logs"
+    assert result.parent.name == "exomem"
+
+
+def test_linux_fallback_survives_an_unresolvable_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(logging_config.sys, "platform", "linux")
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setattr(logging_config.Path, "home", staticmethod(_raising_home))
+
+    result = logging_config._user_log_dir()  # must not raise
+
+    assert result.name == "logs"
+    assert result.parent.name == "exomem"
+
+
+def test_resolve_log_dir_end_to_end_survives_an_unresolvable_home_on_a_wheel_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The full call chain a wheel install with EXOMEM_LOG_DIR unset would
+    actually take, on a homeless POSIX host, must not raise out of an
+    early-startup logging bootstrap that none of server.py/__main__.py/
+    media_worker_child.py guard against."""
+    monkeypatch.delenv("EXOMEM_LOG_DIR", raising=False)
+    fake_file = _fake_wheel_module_file(tmp_path)
+    monkeypatch.setattr(logging_config, "__file__", str(fake_file))
+    monkeypatch.setattr(logging_config.sys, "platform", "linux")
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setattr(logging_config.Path, "home", staticmethod(_raising_home))
+
+    result = logging_config.resolve_log_dir()  # must not raise
+
+    assert result.name == "logs"

@@ -191,7 +191,23 @@ if ($Release) {
     }
 }
 
+# Pin EXOMEM_LOG_DIR explicitly rather than let the running service
+# independently re-derive its own fallback: `resolve_log_dir()` (issue #552)
+# resolves an unset EXOMEM_LOG_DIR to %ProgramData%\exomem\logs for a wheel
+# install with no override, so pinning it here to that SAME value doesn't
+# change behavior today -- but it makes the service (via AppEnvironmentExtra
+# below) and any operator-run CLI on this box (`exomem doctor`, `exomem
+# trace`) PROVABLY agree, rather than merely happening to because both sides
+# independently compute the identical formula. It also survives a future
+# change to that fallback without silently moving where a running service's
+# logs land underneath an operator who never re-ran this script. Respects an
+# operator's own explicit `.env` override -- only pins when unset there.
 $serviceEnv = Read-DotenvMap
+if (-not $serviceEnv.Contains("EXOMEM_LOG_DIR")) {
+    $logDirBase = if ($env:ProgramData) { $env:ProgramData } elseif ($env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE } else { "C:\ProgramData" }
+    $serviceEnv["EXOMEM_LOG_DIR"] = Join-Path $logDirBase "exomem\logs"
+}
+$appLogDir = $serviceEnv["EXOMEM_LOG_DIR"]
 Set-ProcessEnvFromMap -Map $serviceEnv
 
 $doctorArgs = @("-m", "exomem", "doctor", "--profile", $Profile)
@@ -303,4 +319,4 @@ if ($connectorPending) {
 } else {
     Write-Host "Installed, started, and connector-cleared service '$ServiceName' bound to ${BindHost}:${Port}."
 }
-Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr), exomem.log (app)"
+Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr, NSSM-rotated); $appLogDir\exomem.log (app, EXOMEM_LOG_DIR)"

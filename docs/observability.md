@@ -7,8 +7,18 @@ HTTP request, or a mutation.
 
 ## Files
 
-All under the resolved log directory (`$EXOMEM_LOG_DIR`, else
-`<checkout>/logs`, else `/data/logs` in the Docker image):
+All under the resolved log directory (`logging_config.resolve_log_dir()`):
+`$EXOMEM_LOG_DIR` when set (the Docker image sets it to `/data/logs`), else
+`<checkout>/logs` when running from a genuine source checkout, else a
+per-platform location for a packaged (wheel) install with no override:
+`%ProgramData%\exomem\logs` on Windows (machine-wide, since the service
+commonly runs as `LocalSystem` while the `exomem` CLI runs as the logged-in
+user), `~/Library/Logs/Exomem` on macOS, `$XDG_STATE_HOME/exomem/logs`
+(falling back to `~/.local/state/exomem/logs`) on Linux. `exomem doctor`
+reports the resolved path under the `observability` check's `log_dir` detail
+(`--json`), so a misresolved directory is never silent. Every file below
+resolves through this SAME function — none of them may compute their own
+directory independently.
 
 | File                     | Contents                                                     |
 | ------------------------ | -------------------------------------------------------------- |

@@ -66,6 +66,7 @@ from . import (
     access,
     contradiction_stance,
     indexes,
+    logging_config,
     relation_registry,
     semantic_language_registry,
     semantic_units,
@@ -116,11 +117,15 @@ _LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
 DEFAULT_LEGACY_SAMPLE_LIMIT = 5
 MAX_LEGACY_SAMPLE_LIMIT = 50
 
-# Repo-global feedback-loop logs (written by the running service) + the golden
-# query set, used by the relevance_pairs_pending check. Module-level so tests
-# can monkeypatch them to point at an isolated fixture.
+# Feedback-loop logs (written by the running service) + the golden query set,
+# used by the relevance_pairs_pending check. Module-level so tests can
+# monkeypatch them to point at an isolated fixture. `_RELEVANCE_LOGS_DIR` MUST
+# route through the same `resolve_log_dir()` every other log file uses —
+# `queries.jsonl`/`writes.jsonl` live under it (via `query_log.py`), and a
+# hardcoded `<repo>/logs` guess here left them unfindable once
+# EXOMEM_LOG_DIR-unset resolution stopped assuming a checkout (issue #552).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_RELEVANCE_LOGS_DIR = _REPO_ROOT / "logs"
+_RELEVANCE_LOGS_DIR = logging_config.resolve_log_dir()
 _RELEVANCE_GOLDEN = _REPO_ROOT / "tests" / "golden" / "queries.yaml"
 
 # Matches [[Target]] or [[Target|Alias]]. Target may contain '/' for paths.

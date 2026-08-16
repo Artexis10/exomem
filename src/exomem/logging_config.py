@@ -54,34 +54,84 @@ def _is_source_checkout(candidate_root: Path) -> bool:
     return (candidate_root / "pyproject.toml").is_file()
 
 
+def _safe_home() -> Path | None:
+    """`Path.home()`, but non-raising.
+
+    It raises `RuntimeError` when the home directory cannot be determined —
+    a real case, not a hypothetical: a container running as a UID with no
+    matching `/etc/passwd` entry and no `$HOME` set. `resolve_log_dir()`
+    previously could never raise, and none of its three call sites
+    (`server.py`, `__main__.py`, `media_worker_child.py`) guard against it —
+    a homeless environment must degrade to `_homeless_fallback()`, not crash
+    startup.
+    """
+    try:
+        return Path.home()
+    except RuntimeError:
+        return None
+
+
+def _homeless_fallback() -> Path:
+    """Last resort when even `Path.home()` cannot resolve: the OS temp
+    directory, which has its own robust fallback chain (`TMPDIR`/`TEMP`/`TMP`,
+    then a platform default) and does not depend on a resolvable home
+    directory. Trades "correctly per-user" for "always returns a path
+    `resolve_log_dir()` can hand back without raising".
+    """
+    import tempfile
+
+    return Path(tempfile.gettempdir()) / "exomem" / "logs"
+
+
 def _user_log_dir() -> Path:
-    """Per-user, per-platform log location for when this isn't a source
-    checkout (e.g. a wheel install with EXOMEM_LOG_DIR unset) — the venv's
-    own `Lib`/`site-packages` directory is not writable by convention and not
+    """Per-platform log location for when this isn't a source checkout (e.g.
+    a wheel install with EXOMEM_LOG_DIR unset) — the venv's own
+    `Lib`/`site-packages` directory is not writable by convention and not
     where a log directory belongs.
 
-    Mirrors `install_info.managed_manifest_path()`'s per-platform root
-    (`%LOCALAPPDATA%\\Exomem` on Windows, `~/Library/...Exomem` on macOS, XDG
-    on Linux) so installs already familiar with that split find logs in the
-    sibling convention for their platform. Linux uses `XDG_STATE_HOME` (falling
-    back to `~/.local/state`) rather than XDG's config dir, since logs are
-    state, not configuration, per the XDG Base Directory spec.
+    Windows is machine-wide (`%PROGRAMDATA%/exomem/logs`, with the same
+    `ALLUSERSPROFILE` / `C:\\ProgramData` fallback chain and lowercase
+    `exomem` directory name as `mode.config_path()`), NOT the user profile:
+    the exomem service commonly runs as `LocalSystem` while an operator's
+    `exomem` CLI runs as their own logged-in user, and a home- or
+    `%LOCALAPPDATA%`-relative path resolves to two different, mutually
+    unreadable profiles — exactly `mode.config_path()`'s own rationale,
+    reused here rather than `install_info.managed_manifest_path()`'s
+    per-user root, which answers a different question (per-user CLI install
+    identity, correctly per-user) and would send a LocalSystem service's logs
+    to its restricted system profile where no operator-run `exomem doctor`
+    could ever find them.
+
+    macOS and Linux keep the per-user convention (services there commonly run
+    as the user, not a system account): `~/Library/Logs/Exomem` on macOS,
+    `$XDG_STATE_HOME/exomem/logs` (falling back to `~/.local/state`) on
+    Linux — state, not configuration, per the XDG Base Directory spec.
     """
     if sys.platform == "win32":
-        root = os.environ.get("LOCALAPPDATA", "").strip()
-        base = Path(root) if root else Path.home() / "AppData" / "Local"
-        return base / "Exomem" / "logs"
+        base = (
+            os.environ.get("PROGRAMDATA")
+            or os.environ.get("ALLUSERSPROFILE")
+            or "C:" + r"\ProgramData"
+        )
+        return Path(base) / "exomem" / "logs"
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Logs" / "Exomem"
+        home = _safe_home()
+        if home is not None:
+            return home / "Library" / "Logs" / "Exomem"
+        return _homeless_fallback()
     root = os.environ.get("XDG_STATE_HOME", "").strip()
-    base = Path(root) if root else Path.home() / ".local" / "state"
-    return base / "exomem" / "logs"
+    if root:
+        return Path(root) / "exomem" / "logs"
+    home = _safe_home()
+    if home is not None:
+        return home / ".local" / "state" / "exomem" / "logs"
+    return _homeless_fallback()
 
 
 def resolve_log_dir(default: Path | None = None) -> Path:
     """The log directory: $EXOMEM_LOG_DIR when set, else `default`, else the
     checkout-derived `<repo>/logs` when this genuinely IS a source checkout,
-    else a per-user platform log location.
+    else a per-platform log location (`_user_log_dir()`).
 
     EXOMEM_LOG_DIR exists for installs where the package directory isn't
     writable — containers (the image sets it to /data/logs) and non-root
@@ -97,6 +147,19 @@ def resolve_log_dir(default: Path | None = None) -> Path:
     itself (`<venv>/Lib`) — logs then land at `<venv>/Lib/logs`, invisible
     next to the actual venv/service layout. `_is_source_checkout()` detects
     the checkout case positively instead of assuming it.
+
+    This function never raises: `_user_log_dir()`'s Windows branch never
+    touches `Path.home()` (it reads `%PROGRAMDATA%`/`%ALLUSERSPROFILE%`, with
+    a hardcoded `C:\\ProgramData` last resort), and its macOS/Linux branches
+    fall back to the OS temp directory if `Path.home()` itself cannot
+    resolve — every one of this function's callers is unguarded against a
+    raise from an early-startup logging bootstrap.
+
+    Every process-role log (`exomem.log`/`exomem-cli.log`/`exomem-media.log`)
+    and every JSONL sidecar (`queries.jsonl`/`writes.jsonl`/`reads.jsonl` via
+    `query_log.py`, `mutations.jsonl`, and the relevance-audit reader in
+    `audit.py`) route through this SAME function so they always stay
+    co-located — none of them may compute a log directory independently.
     """
     env = os.environ.get("EXOMEM_LOG_DIR", "").strip()
     if env:
