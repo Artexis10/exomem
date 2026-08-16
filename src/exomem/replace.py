@@ -457,6 +457,12 @@ def replace(
     bridge_of: list[str] | None = None,
     bridge_scope: str | None = None,
     bridge_review: str | None = None,
+    # Inert on this path, kept aligned with `note()` on purpose. `replace()`
+    # calls `note(..., _return_prepared=True)`, which returns a `_PreparedNote`
+    # BEFORE the advisory block that reads this flag, so the value has never
+    # reached the suggestion pass and flipping it changed no behaviour. It is
+    # held at the same default so that if `_return_prepared` handling ever
+    # changes, a stale `True` here cannot silently reintroduce the cost.
     suggestions: bool = False,
     project_category: str | None = None,
     reason: str | None = None,

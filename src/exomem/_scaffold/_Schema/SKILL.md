@@ -346,8 +346,8 @@ Examples:
 - "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
 - "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from prose or elapsed time.
 - "Compile these three sources" -> draft a sourced note with
-  `remember(suggestions=true)` link suggestions, then write after the
-  applicable approval rule.
+  `remember(suggestions=true, response_detail="full")` link suggestions, then
+  write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for
   keep/edit/supersede/archive.
 - "This new strategy replaces the old one" -> use supersession so history stays
@@ -960,10 +960,10 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
 5. **Skill shows the draft, waits for confirmation.** You can revise inline.
 6. **On confirm: calls `remember` to write the page**, updates the relevant
    `index.md`, appends to `log.md`, and reports paths. The write result carries
-   any near-duplicate `warning`, and a `suggestions` block when the call asked
-   for one with `suggestions=true` — wire in the relevant links via
-   **edit_memory** (or, for a genuine duplicate, prefer `replace_memory` over a
-   parallel page).
+   any near-duplicate `warning`, and a `suggestions` block only when the call
+   asked for one with `suggestions=true` **and** `response_detail="full"` —
+   wire in the relevant links via **edit_memory** (or, for a genuine duplicate,
+   prefer `replace_memory` over a parallel page).
 
 When you approve a scope of multiple files upfront, the workflow collapses to a
 single batch write (see Write discipline § 3, batch waiver).

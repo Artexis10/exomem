@@ -7,12 +7,14 @@ cataloged event keeps today's full-blanking, fail-closed behavior unchanged.
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 
 import pytest
 
 from exomem import hosted_runtime, privacy_log
-from exomem.log_events import log_event
+from exomem.log_events import JsonLinesFormatter, log_event
 
 
 @pytest.fixture()
@@ -94,6 +96,35 @@ def test_non_hosted_structured_record_is_untouched(
     )
     record = caplog.records[-1]
     assert record.content == {"message": "not hosted, stays as-is"}
+
+def test_hosted_blanked_record_emits_only_allowed_keys(hosted_logger, caplog) -> None:
+    """Pin what a fully-blanked record actually PUTS ON DISK, not what the
+    LogRecord looks like.
+
+    The boundary blanks a record in place (`msg`/`args`/`fields`/`content`/
+    `exc_*`); it does not rebuild the payload from an allowlist. So every key
+    `JsonLinesFormatter` chooses to emit is one the boundary must have
+    explicitly considered, and a new formatter key silently rides through
+    redaction by default. Every other test in this file asserts on record
+    attributes, which is precisely how `thread` was first added without anyone
+    noticing it crossed the boundary.
+
+    If this fails because you added a formatter key: decide whether its value
+    can ever carry tenant- or content-derived text. If it can, either make the
+    source static or drop the key in the redacted branch. Only then widen the
+    set below.
+    """
+    hosted_logger.warning("plain message with /secret/vault/path.md inside")
+    payload = json.loads(JsonLinesFormatter().format(caplog.records[-1]))
+
+    assert set(payload) == {"event", "level", "logger", "message", "thread", "ts"}
+    assert payload["message"] == "event=hosted_log_redacted code=HOSTED_CONTENT_REDACTED"
+    assert "/secret/vault/path.md" not in json.dumps(payload)
+    # Every exomem thread name is a static literal, so `thread` is content-free
+    # by construction — `tests/test_log_thread_identity.py` pins the one site
+    # that used to interpolate a vault path.
+    assert payload["thread"] == threading.current_thread().name
+
 
 def test_hosted_uncataloged_extra_record_is_fully_blanked(hosted_logger, caplog) -> None:
     """The boundary itself must blank `content`/`fields` for any record whose

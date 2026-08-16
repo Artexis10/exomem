@@ -378,6 +378,13 @@ def _build_write_feedback(
     # `related_pages: 0` is ambiguous on its own once the pass is default-off —
     # it cannot separate "ran, found nothing" from "never ran". Say which, and
     # name the route back, so a default write is never silently less useful.
+    #
+    # `response_detail` is part of that route, not decoration. Every write
+    # command defaults to compact (`commands._build_product_commands`), and
+    # compact carries neither `suggestions` nor `write_feedback` —
+    # `mutation_terminal.project_terminal` only re-attaches the leaf under
+    # `detail="full"`. A caller replaying this dict without it would pay the
+    # retrieval pass and still be handed nothing back.
     suggestions_feedback: dict[str, object] = {
         "related_pages": suggestions_count,
         "computed": suggestions_requested,
@@ -385,7 +392,7 @@ def _build_write_feedback(
     if not suggestions_requested:
         suggestions_feedback["route"] = {
             "tool": "remember",
-            "args": {"suggestions": True},
+            "args": {"suggestions": True, "response_detail": "full"},
         }
 
     relation_feedback: dict[str, object] = {
@@ -463,6 +470,8 @@ def _legacy_note(
     published: str | None = None,
     host: str | None = None,
     editor: str | None = None,
+    # Inert: `_legacy_note`'s only caller is `_legacy_replace`, which has no
+    # callers of its own. Kept aligned with `note()` so the two do not drift.
     suggestions: bool = False,
     today: dt.date | None = None,
     project_category: str | None = None,

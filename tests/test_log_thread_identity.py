@@ -1,7 +1,7 @@
 """Every `exomem*.log` record names the thread that emitted it.
 
 Request threads and background daemons (`exomem-graph-rebuild`,
-`exomem-lexical-repair-*`) interleave in one file, and without a thread name
+`exomem-lexical-repair`) interleave in one file, and without a thread name
 adjacency reads as causation — issue #576 drew two wrong conclusions that way.
 `JsonLinesFormatter` therefore carries the emitting thread's name on every
 record.
@@ -24,13 +24,22 @@ from __future__ import annotations
 
 import json
 import logging
-import re
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from exomem.log_events import JsonLinesFormatter, log_event
+
+# The tool-surface miner is a script, not a package module; reuse its REAL
+# regex rather than a copy, or this test would keep passing after the script's
+# pattern changed. Same `sys.path` seam `tests/test_latency_gate.py` uses.
+_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+from analyze_tool_surface import _LINE_RE  # noqa: E402
 
 
 @pytest.fixture()
@@ -160,6 +169,40 @@ def test_obs_cli_trace_still_joins_records_carrying_a_thread_name(
     assert server_entry["fields"]["request_id"] == request_id
 
 
+def test_lexical_repair_thread_name_carries_no_vault_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one site that used to interpolate a path into a thread name.
+
+    `thread` survives hosted-cell redaction: `privacy_log` blanks records in
+    place rather than rebuilding them from an allowlist. In a hosted cell the
+    vault root is `EXOMEM_VAULT_PATH`, whose basename is a tenant path
+    component, so a thread name is a content-free surface and must not be
+    derived from the vault at all. Every other exomem thread name is already a
+    static literal.
+    """
+    from exomem import lexstore
+
+    vault = tmp_path / "tenant-acme-42-vault"
+    vault.mkdir()
+    observed: list[str] = []
+
+    class _StubStore:
+        def rebuild_atomic(self) -> None:
+            observed.append(threading.current_thread().name)
+
+    monkeypatch.setattr(lexstore, "get_store", lambda root: _StubStore())
+    lexstore._schedule_repair(vault)
+
+    deadline = time.monotonic() + 5.0
+    while not observed and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert observed, "lexical repair thread never ran"
+    assert observed[0] == "exomem-lexical-repair"
+    assert "tenant-acme-42" not in observed[0]
+
+
 def test_jsonl_journals_do_not_gain_a_thread_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -204,14 +247,15 @@ def test_tool_surface_line_regex_still_mines_middleware_traces(
     """`scripts/analyze_tool_surface.py` regexes raw `exomem.log` lines.
 
     It reads the `event=... tool=...` text the call middleware embeds in
-    `message`, so a new sibling JSON key must not land between them.
+    `message`, so a new sibling JSON key must not land between them. The
+    script's own `_LINE_RE` is imported rather than copied — a local copy would
+    keep passing after the real pattern changed.
     """
-    line_re = re.compile(r"event=tool_(start|success|error)\b.*?\btool=(\S+)")
     logger.info("event=tool_start tool=remember request_id=abc123")
     formatted = JsonLinesFormatter().format(caplog.records[-1])
 
     assert "thread" in json.loads(formatted)
-    match = line_re.search(formatted)
+    match = _LINE_RE.search(formatted)
     assert match is not None
     assert match.group(1) == "start"
     assert match.group(2).rstrip('",') == "remember"

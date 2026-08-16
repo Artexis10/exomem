@@ -556,7 +556,12 @@ def op_bootstrap(
                 "reason in the agent",
                 "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
                 "remember or replace_memory for page-level conclusions; observe_memory for one semantic unit; edit_memory for other small page corrections",
-                "read warnings/suggestions/write_feedback and follow up on unresolved links or duplicate warnings",
+                (
+                    "read the returned warnings and follow up on unresolved links "
+                    "or duplicate warnings; write_feedback needs "
+                    "response_detail='full', and suggestions additionally need "
+                    "remember(suggestions=true)"
+                ),
             ],
             "save_rule": (
                 "Save durable decisions, solved problems, diagnosed failures, "
@@ -582,7 +587,11 @@ def op_bootstrap(
                     "Dataview-style `supports:: [[...]]` fields are not relation syntax"
                 ),
                 "write with remember, observe_memory, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
-                "inspect warnings, suggestions, and write_feedback from the write result",
+                (
+                    "inspect the warnings on the write result; add "
+                    "response_detail='full' to see write_feedback, and "
+                    "remember(suggestions=true) as well to see suggestions"
+                ),
                 "apply any accepted links through edit_memory",
                 "report the written path",
             ],

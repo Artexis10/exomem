@@ -137,7 +137,7 @@ class JsonLinesFormatter(logging.Formatter):
     """One JSON object per line; works for structured and plain records alike.
 
     `thread` names the emitting thread on every record. Request threads and
-    background daemons (`exomem-graph-rebuild`, `exomem-lexical-repair-*`)
+    background daemons (`exomem-graph-rebuild`, `exomem-lexical-repair`)
     interleave in one file, and without it adjacency reads as causation — that
     misled issue #576 twice, once into asserting a rebuild ran inside a request
     when it runs on a daemon, and once into nearly mis-attributing a 63 s stall.
