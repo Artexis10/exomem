@@ -1654,6 +1654,12 @@ class EpistemicGraphIndex:
         # refused replacement, any OS or ownership error — is Class B and must
         # leave vault freshness untouched.
         projection_moved = False
+        # Which non-stabilization actually fired.  Both raises below share one
+        # sentence, so without this the class survives only in the exception
+        # type and the specific cause is discarded entirely — which is why a
+        # cell that logged this failure 34 times could not be diagnosed from
+        # its log at all.
+        cause = "no stabilization attempt completed"
         try:
             for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
                 before_disk = _disk_vault_freshness(self.vault_root)
@@ -1674,15 +1680,23 @@ class EpistemicGraphIndex:
                     # Class C, first admitted cause.
                     self._mark_unavailable()
                     projection_moved = True
+                    cause = "the supplied freshness identity did not name the resolver bytes"
                     find_module.unload_ram_caches()
                     continue
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
                 after_disk = _disk_vault_freshness(self.vault_root)
+                # Bound to names so the `else` below can say *which* of the three
+                # conditions moved without re-running either O(vault) proof.  The
+                # walrus keeps the short-circuit exactly as it was: membership is
+                # still not captured when the identity already differs.
+                after_identity = _recall_projection_identity(
+                    self.vault_root, disk_freshness=after_disk
+                )
+                after_membership: frozenset[str] | None = None
                 if (
-                    _recall_projection_identity(self.vault_root, disk_freshness=after_disk)
-                    == before
-                    and self._recall_membership() == resolver_membership
+                    after_identity == before
+                    and (after_membership := self._recall_membership()) == resolver_membership
                     and self._source_versions_current(resolver_versions)
                 ):
                     live_checkpoint = (
@@ -1717,6 +1731,12 @@ class EpistemicGraphIndex:
                         # The projection moved between writing the availability
                         # marker and confirming it: Class C, second cause.
                         projection_moved = True
+                        cause = (
+                            "the recall projection moved after the availability "
+                            "marker was written"
+                        )
+                    else:
+                        cause = "the availability marker would not publish"
                     # A marker that would not publish is a publication failure,
                     # not proof that the registry is behind the disk.
                     self._mark_unavailable()
@@ -1725,10 +1745,31 @@ class EpistemicGraphIndex:
                     # resolver source versions changed across the pass: Class C,
                     # second admitted cause.
                     projection_moved = True
-            message = "epistemic graph rebuild did not stabilize after 2 attempts"
+                    if after_identity != before:
+                        cause = "the recall projection identity moved across the pass"
+                    elif after_membership != resolver_membership:
+                        cause = "the recall membership moved across the pass"
+                    else:
+                        cause = "the resolver source versions moved across the pass"
+            attempts = (
+                "epistemic graph rebuild did not stabilize after "
+                f"{REBUILD_STABILIZATION_ATTEMPTS} attempts"
+            )
             if projection_moved:
-                raise GraphProjectionMoved(message)
-            raise RuntimeError(message)
+                raise GraphProjectionMoved(f"{attempts} (Class C, projection moved): {cause}")
+            # Class B by elimination: this pass proved nothing stale and still
+            # could not publish, which is precisely what
+            # `GraphPublicationUnavailable` names.  A bare `RuntimeError` here
+            # was unclassified, so `may_mark_external_pending` answered True and
+            # `file_watcher._recover_external_pending` cooled vault freshness
+            # instead of arming the bounded refusal memo.  That allocated a
+            # fresh external-pending epoch on every recovery cycle, which is
+            # what re-armed the same lane for the next one: the loop fed itself
+            # a full doomed rebuild indefinitely, and left the registry
+            # permanently cool for every later write to pay.
+            raise GraphPublicationUnavailable(
+                f"{attempts} (Class B, publication failure): {cause}"
+            )
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
