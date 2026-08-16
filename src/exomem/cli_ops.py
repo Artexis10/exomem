@@ -274,31 +274,60 @@ def error_dict(exc: Exception) -> dict:
 def leaf_contract_code(exc: BaseException) -> str | None:
     """Return the stable refusal code an exception carries, or `None`.
 
-    Mirrors `error_dict`'s classification precedence — a duck-typed
-    `as_public_dict()` payload (e.g. `OpError`, `vault.BatchWriteError`),
-    then `OpError.code` directly, then the "CODE: message" leaf-contract
-    convention on a plain `ValueError`/`TypeError`/`RuntimeError` — but
-    returns `None` instead of a fallback sentinel (`error_dict` uses
-    "OP_ERROR"/"INTERNAL") when nothing structured is found. Callers that
-    need a code for *every* exception (like `error_dict`, which must always
-    answer a client) keep their own fallback; callers that must not invent a
-    plausible-looking code for a genuinely unexpected exception (like the
-    mutation journal) use `None` to fall back to the exception's class name
-    instead — so real bugs stay visible as bugs.
+    Mirrors `error_dict`'s FULL classification precedence, in the same
+    order:
+
+    1. The semantic chain walk (`semantic_validation_error_dict`), which can
+       surface a code from `exc.__cause__`/`__context__` rather than `exc`
+       itself. This matters because ~25 sites in `commands.py` re-wrap a
+       `SemanticWriteError` as `raise ValueError(f"{e.code}: {e.reason}")
+       from e` — the re-wrap's own `str()` carries the *raw* `e.code` (e.g.
+       "SEMANTIC_CONTRACT_VIOLATION"), but `as_semantic_validation_error()`
+       on the chained cause projects the *canonical* semantic code (e.g.
+       "missing_semantic_unit") that the client actually receives via
+       `error_dict`. Skipping this step would journal a code no client ever
+       saw for a whole refusal class — exactly the join-breaking gap this
+       lane exists to close.
+    2. A duck-typed `as_public_dict()` payload (e.g. `OpError`,
+       `vault.BatchWriteError`).
+    3. `OpError.code` directly.
+    4. The "CODE: message" leaf-contract convention on a plain
+       `ValueError`/`TypeError`/`RuntimeError`.
+
+    Unlike `error_dict` (which must always answer a client and so falls back
+    to "OP_ERROR"/"INTERNAL"), this returns `None` — never a fallback
+    sentinel — when nothing structured is found. That includes a structured
+    source whose "code" is present but empty (`{"code": ""}`): no current
+    caller produces this, but an empty string is not a real refusal code, so
+    it is treated the same as "nothing found" rather than returned in place
+    of `None`. Callers use `None` to fall back to the exception's own class
+    name instead of inventing a plausible-looking code for a genuinely
+    unexpected error — so real bugs stay visible as bugs.
     """
+
+    def _code_of(payload: object) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        code = payload.get("code")
+        return code if isinstance(code, str) and code else None
+
+    semantic_code = _code_of(semantic_validation_error_dict(exc))
+    if semantic_code is not None:
+        return semantic_code
     public_dict = getattr(exc, "as_public_dict", None)
     if callable(public_dict):
         try:
             payload = public_dict()
         except Exception:  # noqa: BLE001 - fall through to the narrower checks
             payload = None
-        if isinstance(payload, dict) and isinstance(payload.get("code"), str):
-            return payload["code"]
-    if isinstance(exc, OpError):
+        public_code = _code_of(payload)
+        if public_code is not None:
+            return public_code
+    if isinstance(exc, OpError) and exc.code:
         return exc.code
     if isinstance(exc, (ValueError, TypeError, RuntimeError)):
         m = _CODE_PREFIX.match(str(exc))
-        if m:
+        if m and m.group(1):
             return m.group(1)
     return None
 
