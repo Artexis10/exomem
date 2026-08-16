@@ -1129,9 +1129,13 @@ def _get_nli_model():
         try:
             from sentence_transformers import CrossEncoder
 
-            from . import accel
+            from . import accel, model_cache
 
-            _NLI_MODEL = CrossEncoder(name, device=accel.select_device())
+            device = accel.select_device()
+            _NLI_MODEL = model_cache.load_offline_first(
+                name,
+                lambda **kw: CrossEncoder(name, device=device, **kw),
+            )
         except Exception as e:  # noqa: BLE001 — optional path; degrade to heuristic
             log.warning("NLI polarity model unavailable (%s); using heuristic", e)
             _NLI_IMPORT_FAILED = True

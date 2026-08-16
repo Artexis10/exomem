@@ -13,7 +13,9 @@ Three canonical modes (aliases in `_ALIASES` so whatever a user types works):
                    auto-selects CUDA; bulk index may still use the GPU in a separate
                    process. Models and O(vault) caches stay lazy at boot.
 - **performance** — use my GPU for speed. Steady-state on CUDA when a capable GPU is
-                   present; release when idle. Aliases: `gpu`, `turbo`.
+                   present, and models stay resident: preload is a promise that no
+                   request pays a load, so the idle reaper is not allowed to undo it
+                   (`reap_models_when_idle`). Aliases: `gpu`, `turbo`.
 
 Resolution precedence: `EXOMEM_MODE` env → the per-machine config file
 (`%PROGRAMDATA%/exomem/config.json` on Windows, `~/.exomem/config.json` on POSIX, or
@@ -60,6 +62,7 @@ _MODE_ENV = "EXOMEM_MODE"
 _QUIET_ALIAS_ENV = "EXOMEM_QUIET_MODE"
 _CONFIG_PATH_ENV = "EXOMEM_CONFIG_PATH"
 _RELEASE_ENV = "EXOMEM_RELEASE_GPU_WHEN_IDLE"
+_PRELOAD_ENV = "EXOMEM_PRELOAD_MODELS"
 _WATCHER_MAX_EMBED_FILES_ENV = "EXOMEM_WATCHER_MAX_EMBED_FILES"
 
 
@@ -151,9 +154,18 @@ def resolve_mode() -> str:
     return DEFAULT_MODE
 
 
-def preload_models() -> bool:
-    """Whether policy permits eager model preload (performance only)."""
-    return resolve_mode() == "performance"
+def preload_models(mode_name: str | None = None) -> bool:
+    """Whether policy permits eager model preload (performance, or an explicit opt-in).
+
+    `EXOMEM_PRELOAD_MODELS` (truthy/falsy) overrides the mode default. The override
+    is read HERE rather than only in `warmup` so `resolved()` — and therefore
+    `status.policy` — reports what warm-up will actually do; a process could
+    otherwise preload while reporting `preload_models: false`, or the reverse.
+    """
+    override = os.environ.get(_PRELOAD_ENV)
+    if override is not None and override.strip() != "":
+        return _truthy(override)
+    return (mode_name or resolve_mode()) == "performance"
 
 
 def preload_cpu_caches() -> bool:
@@ -204,6 +216,28 @@ def release_when_idle() -> bool:
     return True
 
 
+def reap_models_when_idle() -> bool:
+    """Whether the idle reaper may unload the MODEL singletons, as opposed to caches.
+
+    Preload and idle-unload are contradictory promises about the same object.
+    Preload says no user request ever pays a model load; the reaper hands exactly
+    that load to whichever request arrives after the idle window closes. That is
+    how a process with `preload_models: true` still reports `module_loaded: false`
+    and still logs cold loads long after boot — the preload ran, and was undone.
+
+    So preload pins the models it loaded. Caches keep reaping either way: they are
+    cheap to rebuild and nothing promised to hold them. An EXPLICIT
+    `EXOMEM_RELEASE_GPU_WHEN_IDLE` stays authoritative in both directions — an
+    operator who asked for the VRAM back gets it, and pays the reload.
+    """
+    if not release_when_idle():
+        return False
+    override = os.environ.get(_RELEASE_ENV)
+    if override is not None and override.strip() != "":
+        return True
+    return not preload_models()
+
+
 def bulk_gpu_opted() -> bool:
     """Whether an in-server bulk index (rebuild_all) may use the GPU.
 
@@ -226,6 +260,7 @@ def resolved() -> dict:
         "defer_expensive_indexes": defer_expensive_indexes(),
         "watcher_policy": watcher_policy().as_dict(),
         "release_when_idle": release_when_idle(),
+        "reap_models_when_idle": reap_models_when_idle(),
         "bulk_gpu": bulk_gpu_opted(),
     }
 

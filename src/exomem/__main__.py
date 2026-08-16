@@ -769,6 +769,7 @@ def _mode_main(argv: list[str]) -> int:
             print(f"  retain_cpu_caches:       {policy['retain_cpu_caches']}")
             print(f"  defer_expensive_indexes: {policy['defer_expensive_indexes']}")
             print(f"  release_when_idle:       {policy['release_when_idle']}")
+            print(f"  reap_models_when_idle:   {policy['reap_models_when_idle']}")
             print(f"  bulk_gpu:                {policy['bulk_gpu']}")
             print(f"  config: {policy['config_path']}")
         return 0

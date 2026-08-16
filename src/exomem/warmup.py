@@ -49,11 +49,14 @@ def model_preload_allowed(mode_name: str | None = None) -> bool:
     Normal and quiet modes default to lazy model loads on every OS. Multiple local
     clients naturally mean multiple Python processes, and eager BGE/CLIP preloads
     multiply memory residency. `EXOMEM_PRELOAD_MODELS=1` explicitly opts in.
+
+    The decision itself lives in `mode.preload_models` so that `mode.resolved()` —
+    and therefore `status.policy` and `doctor` — report the same answer warm-up
+    acts on, rather than the mode default with the override invisibly applied here.
     """
-    override = os.environ.get("EXOMEM_PRELOAD_MODELS")
-    if override is not None and override.strip() != "":
-        return override.strip().lower() not in {"0", "false", "no", "off"}
-    return (mode_name or "normal") == "performance"
+    from . import mode
+
+    return mode.preload_models(mode_name or "normal")
 
 
 def warm_caches(
