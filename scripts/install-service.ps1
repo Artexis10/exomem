@@ -184,28 +184,39 @@ function Install-ReleaseVenv {
 
 if ($Release) {
     $python = Install-ReleaseVenv
+    # Wheel-backed service venv: `resolve_log_dir()` resolves an unset
+    # EXOMEM_LOG_DIR to %ProgramData%\exomem\logs there (not a checkout).
+    $logDirBase = if ($env:ProgramData) { $env:ProgramData } elseif ($env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE } else { "C:\ProgramData" }
+    $pinnedLogDir = Join-Path $logDirBase "exomem\logs"
 } else {
     $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path $python)) {
         throw "Python venv not found at $python. Run 'uv sync' in $repoRoot first, or pass -Release to install a PyPI-backed service venv."
     }
+    # Editable checkout: `resolve_log_dir()` resolves an unset EXOMEM_LOG_DIR
+    # to <repo>\logs there -- the same $logDir this script already uses for
+    # the NSSM stdout/stderr redirects, and the same folder `restart.ps1`
+    # tails.
+    $pinnedLogDir = $logDir
 }
 
 # Pin EXOMEM_LOG_DIR explicitly rather than let the running service
-# independently re-derive its own fallback: `resolve_log_dir()` (issue #552)
-# resolves an unset EXOMEM_LOG_DIR to %ProgramData%\exomem\logs for a wheel
-# install with no override, so pinning it here to that SAME value doesn't
-# change behavior today -- but it makes the service (via AppEnvironmentExtra
-# below) and any operator-run CLI on this box (`exomem doctor`, `exomem
-# trace`) PROVABLY agree, rather than merely happening to because both sides
-# independently compute the identical formula. It also survives a future
-# change to that fallback without silently moving where a running service's
-# logs land underneath an operator who never re-ran this script. Respects an
-# operator's own explicit `.env` override -- only pins when unset there.
+# independently re-derive its own fallback. `$pinnedLogDir` is computed per
+# install mode above to be the SAME value `resolve_log_dir()` (issue #552)
+# already resolves an unset EXOMEM_LOG_DIR to for the interpreter this
+# install will actually run -- %ProgramData%\exomem\logs for the wheel-backed
+# -Release venv, <repo>\logs for a repo-mode editable checkout -- so the pin
+# changes behavior in NEITHER mode today. What it buys is that the service
+# (via AppEnvironmentExtra below) and any operator-run CLI on this box
+# (`exomem doctor`, `exomem trace`) PROVABLY agree, rather than merely
+# happening to because both sides independently compute the identical
+# formula. It also survives a future change to that fallback without silently
+# moving where a running service's logs land underneath an operator who never
+# re-ran this script. Respects an operator's own explicit `.env` override --
+# only pins when unset there.
 $serviceEnv = Read-DotenvMap
 if (-not $serviceEnv.Contains("EXOMEM_LOG_DIR")) {
-    $logDirBase = if ($env:ProgramData) { $env:ProgramData } elseif ($env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE } else { "C:\ProgramData" }
-    $serviceEnv["EXOMEM_LOG_DIR"] = Join-Path $logDirBase "exomem\logs"
+    $serviceEnv["EXOMEM_LOG_DIR"] = $pinnedLogDir
 }
 $appLogDir = $serviceEnv["EXOMEM_LOG_DIR"]
 Set-ProcessEnvFromMap -Map $serviceEnv

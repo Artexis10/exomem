@@ -41,13 +41,15 @@ log = logging.getLogger(__name__)
 # Module-level defaults (patchable in tests). $EXOMEM_LOG_DIR is consulted
 # PER CALL via `_target`/`current_log_dir` — never frozen at import — so a
 # container or test can flip the env var without reloading the module. The
-# unset-fallback itself IS frozen at import (matching `resolve_log_dir()`'s
-# own contract) via the SAME resolution `logging_config.resolve_log_dir()`
-# uses for every other log file, so queries.jsonl/writes.jsonl/reads.jsonl
-# always stay co-located with exomem.log/exomem-cli.log/exomem-media.log —
-# a bare `<repo>/logs` guess here previously left these three behind on a
-# wheel install once EXOMEM_LOG_DIR-unset resolution stopped assuming a
-# checkout (issue #552).
+# constant below, by contrast, freezes `resolve_log_dir()`'s ENTIRE answer at
+# import — its env branch included, not just the unset fallback — so when
+# EXOMEM_LOG_DIR is already exported at import time this holds that env value
+# too, and only a module reload re-derives it. It is the SAME resolution
+# `logging_config.resolve_log_dir()` uses for every other log file, so
+# queries.jsonl/writes.jsonl/reads.jsonl always stay co-located with
+# exomem.log/exomem-cli.log/exomem-media.log — a bare `<repo>/logs` guess here
+# previously left these three behind on a wheel install once
+# EXOMEM_LOG_DIR-unset resolution stopped assuming a checkout (issue #552).
 _LOG_DIR = resolve_log_dir()
 QUERIES_PATH = _LOG_DIR / "queries.jsonl"
 WRITES_PATH = _LOG_DIR / "writes.jsonl"

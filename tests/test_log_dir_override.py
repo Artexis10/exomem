@@ -209,18 +209,41 @@ def test_query_log_uses_module_default_when_env_unset(
 # independently reimplementing the same formula and hoping they match.
 
 
+# `query_log._LOG_DIR` and `audit._RELEVANCE_LOGS_DIR` freeze
+# `resolve_log_dir()`'s ENTIRE answer at import — env branch included — so on a
+# box where EXOMEM_LOG_DIR is exported before pytest starts (this project's own
+# Docker images set it, and the `resolve_log_dir()` docstring tells operators to
+# export it) those constants already hold the env value and `delenv` alone
+# cannot restore the unset precondition these two assert. Reload each module
+# under the cleared env so its constant is re-derived from that precondition,
+# then undo the monkeypatch BEFORE the restoring reload so the cleanup reload
+# doesn't itself bake the cleared env in (monkeypatch's own teardown runs after
+# this function returns, too late for a reload done here) — the same discipline
+# as the sentinel tests below.
+
+
 def test_query_log_current_dir_agrees_with_resolve_log_dir_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("EXOMEM_LOG_DIR", raising=False)
-    assert query_log.current_log_dir() == logging_config.resolve_log_dir()
+    try:
+        reloaded = importlib.reload(query_log)
+        assert reloaded.current_log_dir() == logging_config.resolve_log_dir()
+    finally:
+        monkeypatch.undo()
+        importlib.reload(query_log)
 
 
 def test_audit_relevance_logs_dir_agrees_with_resolve_log_dir_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("EXOMEM_LOG_DIR", raising=False)
-    assert audit._RELEVANCE_LOGS_DIR == logging_config.resolve_log_dir()
+    try:
+        reloaded = importlib.reload(audit)
+        assert reloaded._RELEVANCE_LOGS_DIR == logging_config.resolve_log_dir()
+    finally:
+        monkeypatch.undo()
+        importlib.reload(audit)
 
 
 # The two agreement tests above hold in THIS process's checkout environment
