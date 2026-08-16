@@ -62,6 +62,37 @@ def iter_index_markdown(vault_root: Path):
         yield from iter_recall_markdown(vault_root, find_module._walk_md(kb))
 
 
+def rel_to_vault(vault_root: Path, path: Path) -> str | None:
+    """Vault-relative POSIX path, or `None` when `path` is not in the vault.
+
+    The single place derived indexes decide vault membership. `relative_to` is
+    purely lexical, so mixing spellings of one directory — a resolved root
+    against an unresolved path, or the reverse — declares every file in the
+    vault to be outside it. Each caller reacts by skipping the file, so the
+    result is a silently empty index rather than an error. Symlinked roots are
+    ordinary: macOS `/tmp` is a link to `/private/tmp`, and synced or mounted
+    vaults sit behind one routinely.
+
+    Callers build their paths from the same root they pass here, so the lexical
+    comparison answers first and costs what it always did; resolving is the
+    fallback for the mixed-spelling case that started this. Membership is a
+    question about location, not about link structure: an in-vault name whose
+    target lives elsewhere stays a member, because symlinking an external file
+    into a vault is a way of putting it in the vault. Paths that do not exist
+    still answer, because deletion sync asks about files that are already gone.
+    """
+    path = Path(path)
+    root = Path(vault_root)
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        pass
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
 def is_embeddable_path(path: Path) -> bool:
     """True when a path is markdown content that derived indexes should consider."""
     if path.suffix.lower() != ".md":

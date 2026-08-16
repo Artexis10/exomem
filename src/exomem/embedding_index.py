@@ -907,11 +907,13 @@ class EmbeddingIndex:
         """
         from . import freshness, recall_policy
 
-        root = self.vault_root.resolve()
         rows: list[tuple[str, tuple[int, int, int]]] = []
         for path in index_paths.iter_index_markdown(self.vault_root):
+            rel = index_paths.rel_to_vault(self.vault_root, path)
+            if rel is None:
+                continue
             try:
-                rows.append((path.relative_to(root).as_posix(), freshness.stat_signature(path)))
+                rows.append((rel, freshness.stat_signature(path)))
             except (OSError, ValueError):
                 continue
         return recall_policy.recall_policy_identity(self.vault_root), tuple(sorted(rows))
