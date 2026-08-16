@@ -58,6 +58,22 @@ from .normalize import ingest_field_groups, neutralize, render_neutral_session
 from equivalence.selection import CANONICAL_LME_S_SOURCE, load_frozen_lme_selection, select_lme_s_25
 
 
+def _dataset_case_count(dataset: LmeDataset) -> int:
+    """Rows in the pinned source, including any this parse deferred.
+
+    `DatasetIdentity` pairs this count with a sha256 taken over the whole file,
+    so it has to describe the file rather than our yield from it. Scoped
+    deferral makes those two numbers diverge: `len(questions)` silently became
+    "rows we could parse" the moment a bad row could be carried instead of
+    raised, which would label a 500-row digest as 493 cases.
+
+    The census covers every source row. It is empty only for datasets built
+    directly rather than loaded — pilot slices, fixtures — where the questions
+    are all the rows there are.
+    """
+    return len(dataset.census) or len(dataset.questions)
+
+
 class LmeRunInvalid(RuntimeError):
     """The run was invalidated by an environment fault and has no score."""
 
@@ -607,7 +623,7 @@ def execute_run(
         source="xiaowu0162/longmemeval-cleaned",
         revision=(CANONICAL_LME_S_SOURCE["revision"] if config.canonical_selection else config.dataset_revision or "fixture-local"),
         sha256=dataset_checksum,
-        case_count=len(parent_dataset.questions),
+        case_count=_dataset_case_count(parent_dataset),
     )
     pilot = (
         {
