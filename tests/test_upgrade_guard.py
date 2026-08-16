@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -59,6 +60,7 @@ SHELLS = [
         ),
     ),
 ]
+
 
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
@@ -141,10 +143,32 @@ _DRIVER = """
     # what turned an informational `uv` banner into an aborted deploy under 5.1.
     param([string]$Common, [string]$Python, [string]$Profile = "standard", [string]$PackageVersion = "")
     $ErrorActionPreference = "Stop"
-    . $Common
-    Install-ExomemPackage -Python $Python -Profile $Profile -PackageVersion $PackageVersion
+    try {
+        . $Common
+        Install-ExomemPackage -Python $Python -Profile $Profile -PackageVersion $PackageVersion
+    } catch {
+        # Report the failure ourselves. PowerShell's own error formatter hard-wraps
+        # to the host width and injects ANSI, so asserting on it is console-width
+        # dependent -- which is how this suite passed on a 200-column Windows
+        # console and failed on a CI runner. The error id is kept because the 5.1
+        # lane asserts specifically on NativeCommandError.
+        Write-Host "DRIVER-ERROR[$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)"
+        exit 1
+    }
     Write-Host "DRIVER-COMPLETED"
 """
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _flat(result: subprocess.CompletedProcess[str]) -> str:
+    """Both streams, ANSI stripped and whitespace collapsed.
+
+    Anything PowerShell renders itself (warnings especially) is wrapped to the
+    host width, so a phrase can be split mid-sentence by a newline that depends on
+    the terminal running the suite.
+    """
+    return " ".join(_ANSI.sub("", result.stdout + result.stderr).split())
 
 
 def _fixture(tmp_path: Path, *, installed: str | None) -> tuple[Path, Path, dict[str, str]]:
@@ -237,7 +261,7 @@ def test_install_that_changes_nothing_fails_loudly(shell: str, tmp_path: Path) -
 
     assert result.returncode != 0, (result.stdout, result.stderr)
     assert "DRIVER-COMPLETED" not in result.stdout
-    combined = result.stdout + result.stderr
+    combined = _flat(result)
     assert "Install did not take" in combined
     assert "0.52.3" in combined and "0.52.2" in combined
 
@@ -289,7 +313,7 @@ def test_uv_informational_stderr_never_aborts_the_run(shell: str, tmp_path: Path
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "DRIVER-COMPLETED" in result.stdout
     assert "Using Python 3.13.11 environment at: fake-venv" in result.stdout
-    assert "NativeCommandError" not in result.stdout + result.stderr
+    assert "NativeCommandError" not in _flat(result)
 
 
 @pytest.mark.parametrize("shell", SHELLS)
@@ -307,7 +331,7 @@ def test_uv_failure_is_reported_as_a_failure_with_its_exit_code(
     )
 
     assert result.returncode != 0
-    combined = result.stdout + result.stderr
+    combined = _flat(result)
     assert "uv pip install failed" in combined
     assert "uv exit 2" in combined
     assert "Install did not take" not in combined
@@ -321,7 +345,7 @@ def test_nothing_installed_at_all_is_fatal(shell: str, tmp_path: Path) -> None:
     )
 
     assert result.returncode != 0
-    combined = result.stdout + result.stderr
+    combined = _flat(result)
     assert "no exomem version is importable" in combined
     assert "not installed" in combined
 
@@ -342,7 +366,7 @@ def test_an_explicit_pin_is_asserted_even_when_the_resolve_fails(
     )
 
     assert result.returncode != 0
-    assert "Install did not take" in result.stdout + result.stderr
+    assert "Install did not take" in _flat(result)
 
 
 @pytest.mark.parametrize("shell", SHELLS)
@@ -360,9 +384,8 @@ def test_unresolvable_target_degrades_out_loud_instead_of_silently(
     )
 
     assert result.returncode == 0, (result.stdout, result.stderr)
-    combined = result.stdout + result.stderr
     assert "target:    unresolved" in result.stdout
-    assert "Target version unresolved" in combined
+    assert "Target version unresolved" in _flat(result)
 
 
 _PARSE_DRIVER = """
