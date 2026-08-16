@@ -34,9 +34,14 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "unprocessed_source",
     "relation_debt",
 )
+# Registered — selectable via `categories` — but deliberately NOT default. The
+# default union above stays byte-for-byte what it was, so a grandfathered corpus
+# of long-closed epistemic windows cannot evict the signal already on a user's
+# daily surface at upgrade time. See `audit.EPISTEMIC_REVIEW_CATEGORIES`.
 ATTENTION_CATEGORIES: tuple[str, ...] = (
     *DEFAULT_ATTENTION_CATEGORIES,
     *audit_module.TYPED_SEMANTIC_CATEGORIES,
+    *audit_module.EPISTEMIC_REVIEW_CATEGORIES,
 )
 _SEVERITY_RANK: dict[str, int] = {"info": 0, "warn": 1, "error": 2}
 _SEVERITY_BY_RANK: dict[int, str] = {v: k for k, v in _SEVERITY_RANK.items()}
