@@ -25,6 +25,7 @@ from protocol.models import (
     MemoryBenchExport,
     MemoryBenchPrivateGold,
     MemoryBenchRunPlan,
+    PreregistrationLineage,
     RunManifest,
 )
 from equivalence.selection import CANONICAL_LME_S_SOURCE, load_frozen_lme_selection, select_lme_s_25
@@ -1468,6 +1469,9 @@ def _started_manifest(
         "provider_variant": plan.provider_variant,
         "control_config_sha256": None,
         "preregistration_identity": preregistration_identity,
+        "preregistration_lineage": PreregistrationLineage.for_manifest(
+            preregistration_identity
+        ),
     }).model_dump(mode="json")
 
 

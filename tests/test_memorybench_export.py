@@ -2368,3 +2368,102 @@ def test_feedback5_private_gold_parent_symlink_never_writes_or_chmods_outside_ou
     assert (tmp_path / "output/guest-cleanup.v1.json").is_file()
     manifest = json.loads((tmp_path / "output/manifest.json").read_text())
     assert manifest["status"] == "INVALID" and manifest["finalized_at"] is not None
+
+
+def _amended_identity(*, amended: bool):
+    """A pre-registration identity with, or without, one acknowledged amendment.
+
+    Built by hand rather than derived from the repository so the test states
+    which case it is exercising instead of depending on whether the real
+    contract happens to carry an amendment today.
+    """
+    from protocol.contracts import (
+        AmendmentIdentity,
+        ContractArtifactIdentity,
+        PreregistrationIdentity,
+        ReceiptIdentity,
+    )
+
+    original = ContractArtifactIdentity(
+        path="benchmarks/epistemic/PREREGISTRATION.md",
+        sha256="a" * 64,
+        repository_revision="1" * 40,
+    )
+    ratification = ReceiptIdentity(
+        receipt_path="benchmarks/epistemic/contracts/ratification.v1.json",
+        receipt_sha256="b" * 64,
+        introduction_revision="2" * 40,
+    )
+    if not amended:
+        return PreregistrationIdentity(
+            contract_revision="2" * 40,
+            original=original,
+            ratification=ratification,
+            amendments=(),
+            effective=original,
+        )
+    effective = ContractArtifactIdentity(
+        path=original.path, sha256="c" * 64, repository_revision="3" * 40
+    )
+    amendment = AmendmentIdentity(
+        sequence=1,
+        receipt=ReceiptIdentity(
+            receipt_path="benchmarks/epistemic/contracts/amendment-0001.v1.json",
+            receipt_sha256="d" * 64,
+            introduction_revision="4" * 40,
+        ),
+        parent_contract_sha256=original.sha256,
+        contract=effective,
+        affected_sections=("§7",),
+        rationale="reason",
+        effective_policy="after acknowledgment",
+        acknowledgment_status="acknowledged",
+        introduced_family_ids=(),
+    )
+    return PreregistrationIdentity(
+        contract_revision="4" * 40,
+        original=original,
+        ratification=ratification,
+        amendments=(amendment,),
+        effective=effective,
+    )
+
+
+def test_started_manifest_carries_lineage_for_an_amended_preregistration(
+    tmp_path: Path,
+) -> None:
+    """An amended pre-registration must reach the manifest as lineage.
+
+    `RunManifest` refuses an amended identity that arrives without lineage, so
+    omitting it here does not mislabel the run — it stops the guest lane from
+    producing a manifest at all, before the first case is ingested. The direct
+    lane derives lineage in `protocol.manifest`; this construction site is the
+    second author of the same manifest and had to be told separately.
+    """
+    import memorybench.export as export
+    from protocol.models import MemoryBenchRunPlan, PreregistrationLineage
+
+    plan = MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path))
+    identity = _amended_identity(amended=True)
+
+    manifest = export._started_manifest(plan, "2026-08-16T00:00:00Z", identity, {})
+
+    assert manifest["preregistration_lineage"] == (
+        PreregistrationLineage.from_identity(identity).model_dump(mode="json")
+    )
+
+
+def test_started_manifest_omits_lineage_for_an_unamended_preregistration(
+    tmp_path: Path,
+) -> None:
+    """Lineage records amendments; a base-only run has none to record."""
+    import memorybench.export as export
+    from protocol.models import MemoryBenchRunPlan
+
+    plan = MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path))
+
+    manifest = export._started_manifest(
+        plan, "2026-08-16T00:00:00Z", _amended_identity(amended=False), {}
+    )
+
+    assert manifest["preregistration_lineage"] is None
