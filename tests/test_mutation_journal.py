@@ -5,13 +5,14 @@ timing, content-classified targets, and best-effort (never-raises) writes.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from exomem import metrics, mutation_journal
+from exomem import metrics, mutation_journal, semantic_contract, semantic_writes
 from exomem.cli_ops import OpError
 from exomem.writer_lease import LeaseConfig, LeaseManager
 
@@ -162,3 +163,168 @@ def test_rotates_at_size_cap(tmp_path: Path, _journal_log_dir: Path, monkeypatch
         )
     rotated = _journal_log_dir / "mutations.jsonl.1"
     assert rotated.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #553: the journal must classify a leaf-contract `ValueError` by its
+# real refusal code, not by the Python exception class name — while a
+# genuinely unexpected exception (not the "CODE: message" leaf-contract
+# shape) must keep its class name so real bugs stay visible as bugs instead
+# of being laundered into a plausible-looking refusal code.
+# --------------------------------------------------------------------------- #
+def test_leaf_contract_valueerror_is_journaled_with_its_real_code(
+    tmp_path: Path, _journal_log_dir: Path
+) -> None:
+    def boom():
+        raise ValueError("NOT_FOUND: no such vault path: Knowledge Base/missing.md")
+
+    command = _command(writes=True, leaf=boom)
+    with pytest.raises(ValueError):
+        _standalone_manager(tmp_path / "state").invoke(
+            command, (), {}, mutation_request_id="req-leaf-contract"
+        )
+
+    records = _read_journal(_journal_log_dir)
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failed"
+    assert records[0]["error_code"] == "NOT_FOUND"
+
+
+def test_op_error_keeps_its_own_code_in_the_journal(
+    tmp_path: Path, _journal_log_dir: Path
+) -> None:
+    def boom():
+        raise OpError("STALE_CONTRACT", "the parent hash moved under you")
+
+    command = _command(writes=True, leaf=boom)
+    with pytest.raises(OpError):
+        _standalone_manager(tmp_path / "state").invoke(
+            command, (), {}, mutation_request_id="req-op-error"
+        )
+
+    records = _read_journal(_journal_log_dir)
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failed"
+    assert records[0]["error_code"] == "STALE_CONTRACT"
+
+
+@pytest.mark.parametrize(
+    ("exc_factory", "expected_class_name"),
+    [
+        (lambda: ValueError("something went wrong"), "ValueError"),
+        (lambda: KeyError("missing"), "KeyError"),
+        # Control for test_bug_raised_inside_except_semanticwriteerror_handler_
+        # is_not_laundered_into_its_refusal_code below: the SAME exception
+        # type, with no semantic context in flight, already journals its own
+        # class name — proves it is specifically the (implicit) chain that
+        # is at risk of being misattributed, not something about TypeError.
+        (lambda: TypeError("bad type somewhere"), "TypeError"),
+    ],
+)
+def test_unexpected_exception_keeps_its_class_name_in_the_journal(
+    tmp_path: Path,
+    _journal_log_dir: Path,
+    exc_factory,  # noqa: ANN001
+    expected_class_name: str,
+) -> None:
+    def boom():
+        raise exc_factory()
+
+    command = _command(writes=True, leaf=boom)
+    with pytest.raises((ValueError, KeyError, TypeError)):
+        _standalone_manager(tmp_path / "state").invoke(
+            command, (), {}, mutation_request_id="req-unexpected"
+        )
+
+    records = _read_journal(_journal_log_dir)
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failed"
+    # Not a real refusal code and not laundered into one — the class name
+    # stays visible so this reads as a bug, not a governed refusal.
+    assert records[0]["error_code"] == expected_class_name
+
+
+def _semantic_write_error() -> semantic_writes.SemanticWriteError:
+    finding = semantic_contract.ContractFinding(
+        code="missing_semantic_unit",
+        severity="error",
+        path="Knowledge Base/Notes/x.md",
+        span=None,
+        detail="page has no semantic unit",
+        remediation="add one",
+        governed_element_identity=(),
+        resolved_rule=("r", "r", "r"),
+    )
+    return semantic_writes.SemanticWriteError(
+        "SEMANTIC_CONTRACT_VIOLATION", "no unit", validation_findings=(finding,)
+    )
+
+
+def test_teardown_bug_during_semantic_unwind_is_not_laundered_into_its_refusal_code(
+    tmp_path: Path, _journal_log_dir: Path
+) -> None:
+    """Realistic shape of the laundering bug the semantic-chain step must NOT
+    reintroduce: writer_lease's mutation boundary runs teardown code
+    (lease-release/graph-sync/`finally`) around every leaf invocation,
+    including the ~21 `except SemanticWriteError:` handlers across
+    create_file.py/edit.py/append_to_file.py/link.py that re-raise the
+    refusal `from error`. If that teardown itself has a bug — here,
+    `{}["lease_handle"]` — the resulting KeyError's `__context__` is set to
+    the in-flight SemanticWriteError IMPLICITLY (no `from` in the bug's own
+    code). The journal must record the real bug's class name, not the
+    refusal it happened to interrupt.
+    """
+
+    @contextlib.contextmanager
+    def mutation_boundary():
+        try:
+            yield
+        finally:
+            {}["lease_handle"]  # a genuine teardown bug, not a semantic refusal
+
+    def boom():
+        with mutation_boundary():
+            raise _semantic_write_error()
+
+    command = _command(writes=True, leaf=boom)
+    with pytest.raises(KeyError):
+        _standalone_manager(tmp_path / "state").invoke(
+            command, (), {}, mutation_request_id="req-teardown-bug"
+        )
+
+    records = _read_journal(_journal_log_dir)
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failed"
+    assert records[0]["error_code"] == "KeyError"
+
+
+def test_bug_raised_inside_except_semanticwriteerror_handler_is_not_laundered_into_its_refusal_code(
+    tmp_path: Path, _journal_log_dir: Path
+) -> None:
+    """Second reachable shape: a genuine bug raised directly inside an
+    `except SemanticWriteError:` handler, without `from` — its `__context__`
+    is still set implicitly to the SemanticWriteError being handled. Pairs
+    with the `TypeError` control case in
+    test_unexpected_exception_keeps_its_class_name_in_the_journal (same
+    exception type, no semantic context in flight, already journals its own
+    class name) to prove it is specifically the chain that matters. The
+    journal must record the bug's own class name here too, not the semantic
+    refusal it interrupted.
+    """
+
+    def boom():
+        try:
+            raise _semantic_write_error()
+        except semantic_writes.SemanticWriteError:
+            raise TypeError("bad type somewhere")  # noqa: B904 - deliberately no `from`
+
+    command = _command(writes=True, leaf=boom)
+    with pytest.raises(TypeError):
+        _standalone_manager(tmp_path / "state").invoke(
+            command, (), {}, mutation_request_id="req-handler-bug"
+        )
+
+    records = _read_journal(_journal_log_dir)
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failed"
+    assert records[0]["error_code"] == "TypeError"

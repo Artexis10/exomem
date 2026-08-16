@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from .cli_ops import OpError
+from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
     VaultMutationCoordinator,
     canonical_mutation_identity,
@@ -2933,7 +2933,15 @@ class LeaseManager:
                 command=command.name,
                 receipt=receipt,
                 outcome="failed",
-                error_code=error.code if isinstance(error, OpError) else type(error).__name__,
+                # `OpError` carries a real code directly; a leaf-contract
+                # `ValueError` ("CODE: message") encodes one in its string
+                # form (issue #553 — the journal was recording the Python
+                # exception class name for these, losing the refusal
+                # classification entirely). Anything that doesn't match
+                # either structured shape keeps its class name so a
+                # genuinely unexpected exception stays visible as a bug
+                # rather than being laundered into a plausible-looking code.
+                error_code=leaf_contract_code(error) or type(error).__name__,
                 duration_ms=round((time.perf_counter() - t_start) * 1000, 2),
                 scope=implicit_idempotency_scope or idempotency_principal_scope,
                 targets=[str(mutation_subject)],

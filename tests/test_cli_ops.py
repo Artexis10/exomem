@@ -2,11 +2,49 @@
 
 from __future__ import annotations
 
+import datetime
+import json
+
 import pytest
 
 from exomem import cli_ops
 from exomem import vault as vault_module
 from exomem.commands import Param
+
+
+# Real stdlib exceptions used as leaf_contract_code boundary cases (see
+# test_leaf_contract_code_is_none_for_unexpected_exceptions): built once at
+# module scope so pytest.param can carry live exception instances.
+def _fromisoformat_error(value: str) -> ValueError:
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError as e:
+        return e
+    raise AssertionError("expected fromisoformat to raise")  # pragma: no cover
+
+
+def _json_decode_error() -> json.JSONDecodeError:
+    try:
+        json.loads("{}x")
+    except json.JSONDecodeError as e:
+        return e
+    raise AssertionError("expected json.loads to raise")  # pragma: no cover
+
+
+def _int_base10_error() -> ValueError:
+    try:
+        int("x", 10)
+    except ValueError as e:
+        return e
+    raise AssertionError("expected int() to raise")  # pragma: no cover
+
+
+def _unicode_decode_error() -> UnicodeDecodeError:
+    try:
+        b"\xff".decode("utf-8")
+    except UnicodeDecodeError as e:
+        return e
+    raise AssertionError("expected bytes.decode to raise")  # pragma: no cover
 
 
 def test_envelope_success_shape() -> None:
@@ -91,6 +129,125 @@ def test_mutation_lock_errors_have_actionable_remediation(code: str) -> None:
     error = cli_ops.error_dict(cli_ops.OpError(code, "hosted mutation unavailable"))
     assert error["code"] == code
     assert error["remediation"]
+
+
+# ---------------- leaf_contract_code (issue #553: journal classification) ----------------
+
+
+def test_leaf_contract_code_from_op_error() -> None:
+    assert cli_ops.leaf_contract_code(cli_ops.OpError("BAD_BOOL", "nope")) == "BAD_BOOL"
+
+
+def test_leaf_contract_code_parses_leaf_contract_valueerror() -> None:
+    err = ValueError("NOT_FOUND: no such file")
+    assert cli_ops.leaf_contract_code(err) == "NOT_FOUND"
+
+
+def test_leaf_contract_code_from_as_public_dict_exception() -> None:
+    # BatchWriteError (vault.py) carries `.code`/`as_public_dict()` like OpError
+    # but isn't an OpError subclass — the duck-typed public-dict path must
+    # still surface its real code.
+    from exomem import vault as vault_module
+
+    error = vault_module.BatchWriteError(
+        "BATCH_ROLLBACK_INCOMPLETE",
+        vault_module.BatchTargetSummary(1, ("a.md",), 0),
+        committed=False,
+    )
+    assert cli_ops.leaf_contract_code(error) == "BATCH_ROLLBACK_INCOMPLETE"
+
+
+def test_leaf_contract_code_prefers_semantic_chain_over_leaf_prefix() -> None:
+    # ~25 sites in commands.py re-wrap a SemanticWriteError as
+    # `raise ValueError(f"{e.code}: {e.reason}") from e`. The re-wrap's own
+    # str() carries the *raw* SemanticWriteError.code
+    # ("SEMANTIC_CONTRACT_VIOLATION"), but `as_semantic_validation_error()`
+    # on the chained `__cause__` projects the *canonical* semantic code
+    # ("missing_semantic_unit") that `error_dict` — and therefore the
+    # client — actually surfaces. The journal must agree with what the
+    # client saw, not with the discarded raw prefix.
+    from exomem import semantic_contract, semantic_writes
+
+    finding = semantic_contract.ContractFinding(
+        code="missing_semantic_unit",
+        severity="error",
+        path="Knowledge Base/Notes/x.md",
+        span=None,
+        detail="page has no semantic unit",
+        remediation="add one",
+        governed_element_identity=(),
+        resolved_rule=("r", "r", "r"),
+    )
+    cause = semantic_writes.SemanticWriteError(
+        "SEMANTIC_CONTRACT_VIOLATION",
+        "page has no semantic unit",
+        validation_findings=(finding,),
+    )
+    try:
+        raise ValueError(f"{cause.code}: {cause.reason}") from cause
+    except ValueError as rewrapped:
+        assert str(rewrapped) == "SEMANTIC_CONTRACT_VIOLATION: page has no semantic unit"
+        assert cli_ops.leaf_contract_code(rewrapped) == "missing_semantic_unit"
+        # Parity with the client-facing envelope: the journal must not
+        # diverge from what error_dict actually answers for the same error.
+        assert cli_ops.error_dict(rewrapped)["code"] == "missing_semantic_unit"
+
+
+def test_leaf_contract_code_semantic_chain_outranks_public_dict_and_own_code() -> None:
+    # Precedence check in isolation from the real semantic-authoring
+    # machinery: a chained cause exposing `as_semantic_validation_error()`
+    # must win even over an exception that ALSO carries its own
+    # `as_public_dict()`/`.code` (which would otherwise win via the
+    # duck-typed or OpError branches).
+    class _Cause(Exception):
+        def as_semantic_validation_error(self):
+            return {"code": "missing_semantic_unit"}
+
+    rewrap = cli_ops.OpError("SEMANTIC_CONTRACT_VIOLATION", "page has no semantic unit")
+    rewrap.__cause__ = _Cause("synthetic cause")
+    assert cli_ops.leaf_contract_code(rewrap) == "missing_semantic_unit"
+
+
+def test_leaf_contract_code_empty_string_code_is_treated_as_absent() -> None:
+    # Nothing in the codebase produces an empty "code" today, but the
+    # contract is pinned explicitly: an empty string is not a real refusal
+    # code, so `leaf_contract_code` must not return it in place of `None`.
+    # The mutation journal's `leaf_contract_code(error) or
+    # type(error).__name__` then still falls back to the class name.
+    class _EmptyCode(Exception):
+        def as_public_dict(self):
+            return {"code": ""}
+
+    error = _EmptyCode("does not matter")
+    assert cli_ops.leaf_contract_code(error) is None
+    assert (cli_ops.leaf_contract_code(error) or type(error).__name__) == "_EmptyCode"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("just a message, no code prefix"),
+        TypeError("bad type somewhere"),
+        RuntimeError("something broke"),
+        KeyError("missing"),
+        # Boundary cases: real stdlib exceptions whose messages sit close to
+        # the "CODE: message" shape (a leading capital, an embedded colon)
+        # without actually matching `_CODE_PREFIX` — must still yield None,
+        # not a code sniffed out of an unrelated message.
+        pytest.param(
+            _fromisoformat_error("2026"),
+            id="date-fromisoformat",
+        ),
+        pytest.param(_json_decode_error(), id="json-decode-error"),
+        pytest.param(_int_base10_error(), id="int-base10"),
+        pytest.param(_unicode_decode_error(), id="unicode-decode-error"),
+    ],
+)
+def test_leaf_contract_code_is_none_for_unexpected_exceptions(exc: BaseException) -> None:
+    # Case 3's safety property: an exception that is NOT the leaf-contract
+    # "CODE: message" shape must yield None, not a laundered/plausible code —
+    # callers fall back to the exception's own class name.
+    assert cli_ops.leaf_contract_code(exc) is None
 
 
 # ---------------- coercion ----------------
