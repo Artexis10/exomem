@@ -1,6 +1,6 @@
 """Discrimination tests: every registered assertion separates pass from fail.
 
-Each of the 18 pre-registered assertions gets at least one hand-built passing
+Each of the 33 pre-registered assertions gets at least one hand-built passing
 snapshot (or snapshot pair) and one failing one. A registry entry with no
 discriminating pair is a hole, so the coverage test below is as load-bearing as
 the pairs themselves.
@@ -537,6 +537,299 @@ def loop_journey_state_coherent_fail() -> AssertionContext:
 
 Factory = Callable[[], AssertionContext]
 
+# --------------------------------------------------------------------------
+# Amendment sequence 2 (no-nudge, f20-f26).
+#
+# Each fail fixture removes exactly one mechanism from its pass fixture — the
+# vacuity hunt the house discipline requires. Where a fail fixture merely
+# *added* something, the assertion would be passing for the wrong reason.
+# --------------------------------------------------------------------------
+
+
+def surface(name: str, projection: str = "complete") -> StateItem:
+    """A surface marker: the queue was projected, and how completely."""
+
+    return item(
+        f"surface-{name}",
+        kind="container",
+        raw={"surface": name, "projection": projection},
+    )
+
+
+def all_surfaces(projection: str = "complete") -> tuple[StateItem, ...]:
+    return tuple(
+        surface(name, projection)
+        for name in (
+            "audit_findings",
+            "review_queue",
+            "proposal_queue",
+            "due_state_counters",
+        )
+    )
+
+
+def signal(
+    signal_id: str,
+    *,
+    signal_class: str,
+    targets: str,
+    on: str = "review_queue",
+    review_state: str | None = "open",
+    extra: dict[str, str] | None = None,
+) -> StateItem:
+    raw = {"signal_class": signal_class, "targets": targets, "surface": on}
+    raw.update(extra or {})
+    return item(
+        signal_id,
+        kind="container",
+        review_state=review_state,
+        raw=raw,
+    )
+
+
+def signal_absence_checked_across_all_surfaces_pass() -> AssertionContext:
+    twin = item("note-weekly-log", raw={"cluster_count": "5"})
+    return AssertionContext(
+        snapshot=snapshot((twin, *all_surfaces())), subject="note-weekly-log"
+    )
+
+
+def signal_absence_checked_across_all_surfaces_fail() -> AssertionContext:
+    """The relocated nag: no queue item, but the counters block names the twin.
+
+    Mechanism removed: nothing. Mechanism *moved* — which is exactly the cheat
+    the meta-predicate exists to catch, so the quiet assertion must still fail.
+    """
+
+    twin = item("note-weekly-log", raw={"cluster_count": "5"})
+    relocated = signal(
+        "counter-entry",
+        signal_class="promotion",
+        targets="note-weekly-log",
+        on="due_state_counters",
+    )
+    return AssertionContext(
+        snapshot=snapshot((twin, relocated, *all_surfaces())), subject="note-weekly-log"
+    )
+
+
+def structural_signal_surfaced_within_budget_pass() -> AssertionContext:
+    note = item("note-accumulating", raw={"cluster_count": "3"})
+    proposal = signal(
+        "sig-split", signal_class="promotion", targets="note-accumulating", on="proposal_queue"
+    )
+    return AssertionContext(
+        snapshot=snapshot((note, proposal, *all_surfaces())), subject="note-accumulating"
+    )
+
+
+def structural_signal_surfaced_within_budget_fail() -> AssertionContext:
+    """Mechanism removed: the detector emits no signal. Everything else identical."""
+
+    note = item("note-accumulating", raw={"cluster_count": "3"})
+    return AssertionContext(
+        snapshot=snapshot((note, *all_surfaces())), subject="note-accumulating"
+    )
+
+
+def entity_candidate_surfaced_from_recurrence_pass() -> AssertionContext:
+    identity = item("entity-kaupunki", raw={"source_count": "3"})
+    candidate = signal(
+        "sig-entity", signal_class="entity_candidate", targets="entity-kaupunki"
+    )
+    return AssertionContext(
+        snapshot=snapshot((identity, candidate, *all_surfaces())), subject="entity-kaupunki"
+    )
+
+
+def entity_candidate_surfaced_from_recurrence_fail() -> AssertionContext:
+    """Mechanism removed: the recurrence sensor emits nothing."""
+
+    identity = item("entity-kaupunki", raw={"source_count": "3"})
+    return AssertionContext(
+        snapshot=snapshot((identity, *all_surfaces())), subject="entity-kaupunki"
+    )
+
+
+def contradiction_surfaced_unprompted_pass() -> AssertionContext:
+    conclusion = item("claim-budget", kind="claim")
+    evidence = item("ev-measurement", kind="evidence")
+    pair = signal(
+        "sig-conflict",
+        signal_class="contradiction",
+        targets="claim-budget,ev-measurement",
+    )
+    return AssertionContext(
+        snapshot=snapshot((conclusion, evidence, pair, *all_surfaces())),
+        subject="claim-budget",
+        counterpart="ev-measurement",
+    )
+
+
+def contradiction_surfaced_unprompted_fail() -> AssertionContext:
+    """Mechanism removed: the signal names only one side, so no pair surfaced."""
+
+    conclusion = item("claim-budget", kind="claim")
+    evidence = item("ev-measurement", kind="evidence")
+    half = signal("sig-conflict", signal_class="contradiction", targets="claim-budget")
+    return AssertionContext(
+        snapshot=snapshot((conclusion, evidence, half, *all_surfaces())),
+        subject="claim-budget",
+        counterpart="ev-measurement",
+    )
+
+
+def _dismissal_prior() -> EpistemicStateSnapshot:
+    dismissed = item(
+        "note-standalone",
+        review_state="dismissed",
+        raw={"fingerprint": "fp-abc123", "passes": "0"},
+    )
+    return snapshot((dismissed, *all_surfaces()), phase="p1")
+
+
+def dismissal_respected_across_passes_pass() -> AssertionContext:
+    survived = item(
+        "note-standalone",
+        review_state="dismissed",
+        raw={"fingerprint": "fp-abc123", "passes": "4"},
+    )
+    return AssertionContext(
+        snapshot=snapshot((survived, *all_surfaces()), phase="p2"),
+        prior=_dismissal_prior(),
+        subject="note-standalone",
+    )
+
+
+def dismissal_respected_across_passes_fail() -> AssertionContext:
+    """Mechanism removed: the triage store stops binding, so the same fingerprint returns."""
+
+    survived = item(
+        "note-standalone",
+        review_state="dismissed",
+        raw={"fingerprint": "fp-abc123", "passes": "4"},
+    )
+    resurfaced = signal(
+        "sig-again",
+        signal_class="promotion",
+        targets="note-standalone",
+        extra={"fingerprint": "fp-abc123"},
+    )
+    return AssertionContext(
+        snapshot=snapshot((survived, resurfaced, *all_surfaces()), phase="p2"),
+        prior=_dismissal_prior(),
+        subject="note-standalone",
+    )
+
+
+def counter_emission_not_repeated_per_write_pass() -> AssertionContext:
+    block = item(
+        "surface-due_state_counters",
+        kind="container",
+        raw={
+            "surface": "due_state_counters",
+            "projection": "complete",
+            "emissions": "1",
+            "writes": "12",
+        },
+    )
+    return AssertionContext(snapshot=snapshot((block,)))
+
+
+def counter_emission_not_repeated_per_write_fail() -> AssertionContext:
+    """Mechanism removed: batching is gone, so one block is emitted per write."""
+
+    block = item(
+        "surface-due_state_counters",
+        kind="container",
+        raw={
+            "surface": "due_state_counters",
+            "projection": "complete",
+            "emissions": "12",
+            "writes": "12",
+        },
+    )
+    return AssertionContext(snapshot=snapshot((block,)))
+
+
+def _packet_units() -> tuple[StateItem, ...]:
+    return (
+        item("dec-adopt-tunnel", kind="decision"),
+        item("oq-latency-budget", kind="open_question"),
+        item("plan-alpha", raw={"plan": "plan-alpha"}),
+        item("decoy-foreign", kind="decision", raw={"decoy": "yes"}),
+    )
+
+
+def continuation_packet_reconstructs_session_pass() -> AssertionContext:
+    packet = item(
+        "packet-session-7",
+        kind="container",
+        cites=("dec-adopt-tunnel", "oq-latency-budget", "plan-alpha"),
+        raw={"packet": "packet-session-7"},
+    )
+    return AssertionContext(snapshot=snapshot((packet, *_packet_units())))
+
+
+def continuation_packet_reconstructs_session_fail() -> AssertionContext:
+    """Mechanism removed: the packet drops a seeded unit it must hold by reference."""
+
+    packet = item(
+        "packet-session-7",
+        kind="container",
+        cites=("dec-adopt-tunnel", "plan-alpha"),
+        raw={"packet": "packet-session-7"},
+    )
+    return AssertionContext(snapshot=snapshot((packet, *_packet_units())))
+
+
+def restructure_signal_cleared_by_state_change_pass() -> AssertionContext:
+    parent = item("note-restructured")
+    children = (
+        item("note-child-a", raw={"restructure_child": "note-restructured"}),
+        item("note-child-b", raw={"restructure_child": "note-restructured"}),
+    )
+    return AssertionContext(
+        snapshot=snapshot((parent, *children, *all_surfaces())), subject="note-restructured"
+    )
+
+
+def restructure_signal_cleared_by_state_change_fail() -> AssertionContext:
+    """Mechanism removed: the lifecycle churns, proposing the new children back together."""
+
+    parent = item("note-restructured")
+    children = (
+        item("note-child-a", raw={"restructure_child": "note-restructured"}),
+        item("note-child-b", raw={"restructure_child": "note-restructured"}),
+    )
+    churn = signal(
+        "sig-merge-back",
+        signal_class="merge",
+        targets="note-child-a",
+        extra={"passes": "1"},
+    )
+    return AssertionContext(
+        snapshot=snapshot((parent, *children, churn, *all_surfaces())),
+        subject="note-restructured",
+    )
+
+
+def due_state_block_present_in_carrier_pass() -> AssertionContext:
+    response = item(
+        "resp-capture",
+        kind="container",
+        raw={"response_detail": "compact", "targets": "due_state_counters"},
+    )
+    return AssertionContext(snapshot=snapshot((response, *all_surfaces())))
+
+
+def due_state_block_present_in_carrier_fail() -> AssertionContext:
+    """Mechanism removed: the carrier drops the block from the compact response."""
+
+    response = item("resp-capture", kind="container", raw={"response_detail": "compact"})
+    return AssertionContext(snapshot=snapshot((response, *all_surfaces())))
+
+
 DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "exactly_one_current_revision": (
         exactly_one_current_revision_pass,
@@ -603,6 +896,42 @@ DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "loop_journey_state_coherent": (
         loop_journey_state_coherent_pass,
         loop_journey_state_coherent_fail,
+    ),
+    "signal_absence_checked_across_all_surfaces": (
+        signal_absence_checked_across_all_surfaces_pass,
+        signal_absence_checked_across_all_surfaces_fail,
+    ),
+    "structural_signal_surfaced_within_budget": (
+        structural_signal_surfaced_within_budget_pass,
+        structural_signal_surfaced_within_budget_fail,
+    ),
+    "entity_candidate_surfaced_from_recurrence": (
+        entity_candidate_surfaced_from_recurrence_pass,
+        entity_candidate_surfaced_from_recurrence_fail,
+    ),
+    "contradiction_surfaced_unprompted": (
+        contradiction_surfaced_unprompted_pass,
+        contradiction_surfaced_unprompted_fail,
+    ),
+    "dismissal_respected_across_passes": (
+        dismissal_respected_across_passes_pass,
+        dismissal_respected_across_passes_fail,
+    ),
+    "counter_emission_not_repeated_per_write": (
+        counter_emission_not_repeated_per_write_pass,
+        counter_emission_not_repeated_per_write_fail,
+    ),
+    "continuation_packet_reconstructs_session": (
+        continuation_packet_reconstructs_session_pass,
+        continuation_packet_reconstructs_session_fail,
+    ),
+    "restructure_signal_cleared_by_state_change": (
+        restructure_signal_cleared_by_state_change_pass,
+        restructure_signal_cleared_by_state_change_fail,
+    ),
+    "due_state_block_present_in_carrier": (
+        due_state_block_present_in_carrier_pass,
+        due_state_block_present_in_carrier_fail,
     ),
 }
 

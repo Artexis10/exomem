@@ -1,0 +1,70 @@
+# f25 restructure_lifecycle. The point of the family is that applying a
+# suggestion resolves it: the signal disappears because the state changed, not
+# because anyone dismissed it. A product that quietly records a dismissal to
+# clear its own suggestion fails here even though the queue looks identical.
+scenario_id: f25-restructure-lifecycle
+family_id: f25
+kind: operational
+public_coverage: none
+phases:
+  - phase_id: p1-suggested
+    ops:
+      - op: ingest_source
+        ref: f25-accumulated-note
+      - op: maintenance_pass
+        ref: sweep-1
+      - op: snapshot
+        ref: s1
+  - phase_id: p2-applied
+    ops:
+      - op: apply_restructure
+        ref: f25-subject
+        detail: split into two children through the documented interface
+      - op: maintenance_pass
+        ref: sweep-2
+      - op: maintenance_pass
+        ref: sweep-3
+      - op: snapshot
+        ref: s2
+    expect:
+      - assert: restructure_signal_cleared_by_state_change
+        subject: f25-subject
+      - assert: signal_absence_checked_across_all_surfaces
+        subject: f25-subject
+fairness:
+  why_neutral: >-
+    A suggestion that survives being taken, or new children immediately
+    proposed for merging back, teaches a reader to stop reading suggestions.
+    Both harms are independent of how any product represents restructures.
+  public_coverage_subtraction: >-
+    No public suite measures signal lifecycle after a restructure; this scenario
+    reports state invariants only.
+  mechanisms:
+    - provider_role: subject
+      mechanism: signal absent from every open view with no dismissal recorded for it
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:46
+    - provider_role: comparator-a
+      mechanism: documented signal-lifecycle record showing resolution by state change
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:46
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: restructure.apply
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: documented restructure execution
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:70
+      reason: The restructure routes through the product's documented interface.
+      competitor_surface: documented split or reorganize surface
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, restructure_signal_cleared_by_state_change and
+    signal_absence_checked_across_all_surfaces.

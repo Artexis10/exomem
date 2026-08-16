@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "set_id": "no-nudge-at1-calibration",
+  "rubric": "benchmarks/judge-agreement/at1-agent-track-rubric.md",
+  "amendment_sequence": 2,
+  "dimensions": ["AT-1a", "AT-1b"],
+  "scale": {"min": 1, "max": 5},
+  "blind": true,
+  "randomized": true,
+  "minimum_samples_per_dimension_per_arm": 3,
+  "items": [
+    {
+      "id": "at1a-clear-yes",
+      "dimension": "AT-1a",
+      "corpus": "epistemic.corpora.no_nudge.f20_corpus",
+      "target": "f20-subject",
+      "expected_band": [4, 5],
+      "why": "Three structurally distinct clusters on one page; a careful owner acts on a split proposal here."
+    },
+    {
+      "id": "at1a-clear-no",
+      "dimension": "AT-1a",
+      "corpus": "epistemic.corpora.no_nudge.f20_corpus",
+      "target": "f20-twin-log",
+      "expected_band": [1, 2],
+      "why": "A weekly log is heterogeneous on purpose; proposing to split it is the dominant real-vault false positive."
+    },
+    {
+      "id": "at1b-sufficient",
+      "dimension": "AT-1b",
+      "corpus": "epistemic.corpora.no_nudge.f24_corpus",
+      "target": "f24-packet",
+      "expected_band": [4, 5],
+      "why": "Every seeded decision, the open question, and latest plan state are referenced; no decoys."
+    },
+    {
+      "id": "at1b-insufficient",
+      "dimension": "AT-1b",
+      "corpus": "epistemic.corpora.no_nudge.f24_corpus(complete=False)",
+      "target": "f24-packet",
+      "expected_band": [1, 2],
+      "why": "The latest plan state is missing, so a fresh agent must ask the user to re-explain."
+    }
+  ],
+  "status": "calibration_set_defined_judge_not_yet_run",
+  "note": "A judge must reproduce the expected bands at the harness's existing agreement threshold before any AT-1 score is publishable. Failure is reported as failure; scores are withheld, never down-weighted."
+}

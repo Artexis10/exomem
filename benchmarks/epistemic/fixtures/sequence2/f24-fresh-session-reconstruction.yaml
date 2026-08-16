@@ -1,0 +1,72 @@
+# f24 fresh_session_reconstruction. The decoy set is the same size as the seeded
+# set, so a packet that simply took everything scores no better than one that
+# took nothing. `no_retired_state_served_as_current` rides along under the
+# sequence-2 scope extension: a packet that hands a fresh session a superseded
+# decision by reference is serving retired state, which is an integrity failure
+# and not merely an incomplete packet.
+scenario_id: f24-fresh-session-reconstruction
+family_id: f24
+kind: operational
+public_coverage: none
+phases:
+  - phase_id: p1-seed
+    ops:
+      - op: ingest_source
+        ref: f24-seeded-units
+      - op: ingest_source
+        ref: f24-foreign-decoys
+      - op: snapshot
+        ref: s1
+  - phase_id: p2-fresh-session
+    ops:
+      - op: stop_engine
+        ref: session-end
+      - op: start_engine
+        ref: session-start
+      - op: fresh_agent
+        ref: f24-fresh
+      - op: snapshot
+        ref: s2
+    expect:
+      - assert: continuation_packet_reconstructs_session
+      - assert: no_retired_state_served_as_current
+    catastrophic_if_failed:
+      - no_retired_state_served_as_current
+fairness:
+  why_neutral: >-
+    A fresh session that cannot recover what was decided makes the user the
+    memory. Holding units by reference rather than by copy is what keeps the
+    packet honest as state moves on, and the same-sized foreign decoy set makes
+    indiscriminate inclusion an explicit failure rather than a cheap pass.
+  public_coverage_subtraction: >-
+    Cross-session continuation overlap is answer-accuracy scored in the public
+    lanes; this scenario reports state invariants only.
+  mechanisms:
+    - provider_role: subject
+      mechanism: packet artifact referencing seeded units within a documented size budget
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:45
+    - provider_role: comparator-a
+      mechanism: documented continuation endpoint whose response resolves each unit
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:45
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: session.restart
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: documented engine stop and start
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:17
+      reason: The restart uses the documented lifecycle operations only.
+      competitor_surface: documented restart or reconnect procedure
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, continuation_packet_reconstructs_session; §3
+    for the sequence-2 scope extension of no_retired_state_served_as_current.

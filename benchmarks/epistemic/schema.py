@@ -33,6 +33,7 @@ from .registry import (
     PREREGISTERED_FAMILY_IDS,
     REQUIRES_ITEM_PAIR,
     REQUIRES_SNAPSHOT_PAIR,
+    REQUIRES_SUBJECT,
     RegistryError,
     resolve,
 )
@@ -50,7 +51,36 @@ OpKind = Literal[
     "fresh_agent",
     "export",
     "snapshot",
+    # Added by the 2026-08 no-nudge amendment (§7) for families f20-f26.
+    # ``maintenance_pass`` is the only operation allowed to intervene between
+    # evidence ingest and an unprompted assertion — see
+    # :func:`_validate_unprompted_trajectory`; the other three route a triage
+    # decision, a restructure, and an engagement-level change through the
+    # product's documented surfaces rather than through privileged internals.
+    "maintenance_pass",
+    "triage_decision",
+    "apply_restructure",
+    "configure",
 ]
+
+#: The only operations that may occur between evidence ingest and an unprompted
+#: assertion. ``maintenance_pass`` is the intervention the families explicitly
+#: permit — an autonomous housekeeping run is not the user asking — and
+#: ``snapshot`` is an observation rather than an intervention.
+#:
+#: Stated as an allowlist on purpose. The first version denied ``agent_turn``
+#: and nothing else while its own error message promised that "only
+#: maintenance_pass may intervene", so a scenario could have routed a
+#: ``triage_decision`` or a ``configure`` between the two and still loaded — and
+#: either of those is a user act that could have prompted the surfacing the
+#: family claims was unprompted. A denylist has to be remembered every time an
+#: OpKind is added; this does not.
+UNPROMPTED_SAFE_OPS: frozenset[str] = frozenset({"maintenance_pass", "snapshot"})
+
+#: Families whose whole claim is that the user never asked. Their assertions are
+#: worthless if a topical turn could have prompted the surfacing, so the loader
+#: refuses such a trajectory rather than scoring it.
+UNPROMPTED_FAMILIES: frozenset[str] = frozenset({"f20", "f21", "f22"})
 
 ScenarioKind = Literal["corpus", "operational"]
 
@@ -245,6 +275,43 @@ def _validate_pair_requirements(scenario: Scenario, source: str) -> None:
                     f"{source}: phase {phase.phase_id!r} expects {assertion!r} without a "
                     "declared freshness_bound_s; adoption latency would be unscoreable"
                 )
+            if assertion in REQUIRES_SUBJECT and not expectation.subject:
+                raise ScenarioLoadError(
+                    f"{source}: phase {phase.phase_id!r} expects {assertion!r} without a "
+                    "subject; a quiet or targeted assertion with no subject silently "
+                    "degrades into a far weaker snapshot-wide claim"
+                )
+
+
+def _validate_unprompted_trajectory(scenario: Scenario, source: str) -> None:
+    """f20-f22 prove the user never asked, so the trajectory may not contain a turn.
+
+    No query-log inspection is needed inside the bench: unpromptedness is a
+    property of the scripted trajectory itself. Between the first evidence
+    ingest and the snapshot an unprompted family asserts on, only maintenance
+    operations may intervene. Enforcing this at load time rather than in an
+    assertion means a scenario that would have measured a *prompted* surfacing
+    never runs at all, instead of quietly reporting a number nobody can use.
+    """
+
+    if scenario.family_id not in UNPROMPTED_FAMILIES:
+        return
+    ingested = False
+    for phase in scenario.phases:
+        for op in phase.ops:
+            if op.op == "ingest_source":
+                ingested = True
+            elif ingested and op.op not in UNPROMPTED_SAFE_OPS:
+                raise ScenarioLoadError(
+                    f"{source}: family {scenario.family_id} asserts unprompted surfacing, but "
+                    f"phase {phase.phase_id!r} runs a {op.op!r} operation after "
+                    "evidence ingest; only maintenance_pass may intervene"
+                )
+        if phase.expect and not ingested:
+            raise ScenarioLoadError(
+                f"{source}: family {scenario.family_id} expects an unprompted surfacing in "
+                f"phase {phase.phase_id!r} before any evidence was ingested"
+            )
 
 
 def load_scenario_text(text: str, *, source: str) -> Scenario:
@@ -267,6 +334,7 @@ def load_scenario_text(text: str, *, source: str) -> Scenario:
     try:
         _validate_names(scenario, source)
         _validate_pair_requirements(scenario, source)
+        _validate_unprompted_trajectory(scenario, source)
         scenario.bound_assertions()
     except RegistryError as error:
         raise ScenarioLoadError(f"{source}: {error}") from error

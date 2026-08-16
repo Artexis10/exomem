@@ -24,11 +24,11 @@ PREREGISTRATION = REPO_ROOT / "benchmarks" / "epistemic" / "PREREGISTRATION.md"
 
 
 def test_registry_keys_equal_the_preregistered_section_two_list() -> None:
-    """18 ratified names plus the 6 the 2026-08 §7 amendment added."""
+    """18 ratified names, the 6 from §7 sequence 1, and the 9 from sequence 2."""
 
     names = parse_preregistered_assertions(PREREGISTRATION.read_text(encoding="utf-8"))
-    assert len(names) == 24
-    assert len(set(names)) == 24
+    assert len(names) == 33
+    assert len(set(names)) == 33
     assert set(ASSERTION_REGISTRY) == set(names)
     assert set(PREREGISTERED_ASSERTIONS) == set(names)
 
@@ -138,25 +138,26 @@ def test_m3_preregistration_records_the_evidence_path_amendment() -> None:
 def test_family_registry_matches_preregistration_section_one() -> None:
     """§1 drift test, mirroring the §2 assertion drift test.
 
-    14 ratified families plus f15-f19 from the 2026-08 §7 amendment. Being in
-    this table is registration, not release: the two are separate, and the gate
-    that keeps them separate lives in ``test_epistemic_amendment_governance.py``.
-    It withheld f15-f19 until the founder acknowledged the receipt on
-    2026-08-15, and would withhold the next amendment's families the same way.
+    14 ratified families, f15-f19 from §7 sequence 1, and f20-f26 from §7
+    sequence 2. Being in this table is registration, not release: the two are
+    separate, and the gate that keeps them separate lives in
+    ``test_epistemic_amendment_governance.py``. It withheld f15-f19 until the
+    founder acknowledged the receipt on 2026-08-15, and it withholds f20-f26
+    now, exactly the same way, because sequence 2 is still pending.
     """
 
     from epistemic.registry import PREREGISTERED_FAMILIES, parse_preregistered_families
 
     parsed = parse_preregistered_families(PREREGISTRATION.read_text(encoding="utf-8"))
-    assert len(parsed) == 19
-    assert [family_id for family_id, _name in parsed] == [f"f{n:02d}" for n in range(1, 20)]
+    assert len(parsed) == 26
+    assert [family_id for family_id, _name in parsed] == [f"f{n:02d}" for n in range(1, 27)]
     assert PREREGISTERED_FAMILIES == parsed
 
 
 def test_family_ids_are_exposed_for_load_time_validation() -> None:
     from epistemic.registry import PREREGISTERED_FAMILY_IDS
 
-    assert PREREGISTERED_FAMILY_IDS == frozenset(f"f{n:02d}" for n in range(1, 20))
+    assert PREREGISTERED_FAMILY_IDS == frozenset(f"f{n:02d}" for n in range(1, 27))
 
 
 def test_amendment_introduced_families_are_a_subset_of_the_registered_table() -> None:
@@ -168,4 +169,16 @@ def test_amendment_introduced_families_are_a_subset_of_the_registered_table() ->
     )
 
     assert set(AMENDMENT_INTRODUCED_FAMILIES) <= PREREGISTERED_FAMILY_IDS
-    assert set(AMENDMENT_INTRODUCED_FAMILIES) == {f"f{n:02d}" for n in range(15, 20)}
+    sequence_one = {f"f{n:02d}" for n in range(15, 20)}
+    sequence_two = {f"f{n:02d}" for n in range(20, 27)}
+    assert {
+        family_id
+        for family_id, sequence in AMENDMENT_INTRODUCED_FAMILIES.items()
+        if sequence == 1
+    } == sequence_one
+    assert {
+        family_id
+        for family_id, sequence in AMENDMENT_INTRODUCED_FAMILIES.items()
+        if sequence == 2
+    } == sequence_two
+    assert set(AMENDMENT_INTRODUCED_FAMILIES) == sequence_one | sequence_two

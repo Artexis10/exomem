@@ -1,0 +1,85 @@
+# f23 dismissal_respect. Operational: the dismissal must survive repeated
+# maintenance passes, an engine restart, and prominence reconfiguration across
+# the full level range. The counter-emission half rides the same trajectory
+# because nagging by repeated counters is the same trust failure by another
+# route, and a bulk batch is the only place it becomes visible.
+scenario_id: f23-dismissal-respect
+family_id: f23
+kind: operational
+public_coverage: none
+phases:
+  - phase_id: p1-dismiss
+    ops:
+      - op: ingest_source
+        ref: f23-seed
+      - op: maintenance_pass
+        ref: sweep-1
+      - op: triage_decision
+        ref: dismiss-f23-subject
+        detail: dismiss
+      - op: snapshot
+        ref: s1
+  - phase_id: p2-survive
+    ops:
+      - op: maintenance_pass
+        ref: sweep-2
+      - op: stop_engine
+        ref: restart
+      - op: start_engine
+        ref: restart
+      - op: maintenance_pass
+        ref: sweep-3
+      - op: configure
+        ref: prominence-min
+        detail: engagement level minimum
+      - op: configure
+        ref: prominence-max
+        detail: engagement level maximum
+      - op: maintenance_pass
+        ref: sweep-4
+      - op: ingest_source
+        ref: f23-bulk-batch
+      - op: snapshot
+        ref: s2
+    expect:
+      - assert: dismissal_respected_across_passes
+        subject: f23-subject
+      - assert: counter_emission_not_repeated_per_write
+fairness:
+  why_neutral: >-
+    A dismissal the system forgets is worse than never having offered the
+    suggestion, and a counters block repeated once per write in a bulk batch is
+    the same nag delivered many times. Both harms are independent of how any
+    product stores triage state.
+  public_coverage_subtraction: >-
+    No public suite measures triage durability or counter governance; this
+    scenario reports state invariants only.
+  mechanisms:
+    - provider_role: subject
+      mechanism: fingerprint-keyed triage store surviving passes, restart and reconfiguration
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:44
+    - provider_role: comparator-a
+      mechanism: documented per-item review state resolving to the same fingerprint
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:44
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: triage.write
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: documented triage decision
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:70
+      reason: The dismissal routes through the product's documented triage surface.
+      competitor_surface: documented dismiss/snooze/reopen surface
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, dismissal_respected_across_passes and
+    counter_emission_not_repeated_per_write.

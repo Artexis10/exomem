@@ -1,4 +1,4 @@
-"""The 18 pre-registered assertions, as deterministic functions over snapshots.
+"""The 33 pre-registered assertions, as deterministic functions over snapshots.
 
 Every assertion takes an :class:`AssertionContext` — one snapshot, or a
 snapshot pair for the transition invariants — and returns an
@@ -31,14 +31,21 @@ Three rules hold across all eighteen:
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, TypeVar
 
 from membench.scoring.gates import states_value
 from pydantic import Field
 
+from .budgets import (
+    CONTINUATION_PACKET_UNIT_BUDGET,
+    ENTITY_EMERGENCE_SOURCE_BUDGET,
+    RESTRUCTURE_QUIET_WINDOW_PASSES,
+    STRUCTURAL_EMERGENCE_CLUSTER_BUDGET,
+)
 from .snapshot import EpistemicStateSnapshot, StateItem, StrictModel
 
 #: The five-valued outcome vocabulary from the spec.
@@ -134,6 +141,137 @@ JOURNEY_STAGES: tuple[str, ...] = (
     "revision",
 )
 
+#: Vocabularies for the 2026-08 no-nudge families (f20-f26).
+#:
+#: Same closed-set discipline as everything above, and one addition of its own:
+#: these families are *behaviour-not-vocabulary* by contract, so none of these
+#: tokens may ever be matched against fixture prose. They are matched against a
+#: single structured attribute value, and the f20 generator separately asserts
+#: that no cluster-name token appears in any assertion parameter. A detector
+#: that learned the fixture's words rather than its structure fails the family.
+
+#: Attribute keys under which a projector records what class of signal an item
+#: is. A "signal" here is any autonomously surfaced queue entry.
+SIGNAL_CLASS_RAW_KEYS: frozenset[str] = frozenset(
+    {"signal_class", "signal", "signal_kind", "candidate_kind"}
+)
+#: Signal classes that propose promoting or splitting accumulated structure.
+#: f20's positive requires one of these; its twins forbid all of them.
+PROMOTION_SIGNAL_CLASSES: frozenset[str] = frozenset(
+    {"promotion", "promote", "structural", "structure", "split", "extract", "emergence"}
+)
+#: Signal classes that propose a recurring identity as an entity candidate.
+ENTITY_SIGNAL_CLASSES: frozenset[str] = frozenset(
+    {"entity_candidate", "entity", "identity_candidate", "identity"}
+)
+#: Signal classes that surface a contradiction or invalidation pair.
+CONTRADICTION_SIGNAL_CLASSES: frozenset[str] = frozenset(
+    {"contradiction", "conflict", "invalidation", "divergence_pair"}
+)
+#: Signal classes that propose folding items back together. f25 forbids these
+#: against the children a just-applied restructure created.
+MERGE_SIGNAL_CLASSES: frozenset[str] = frozenset(
+    {"merge", "consolidation", "consolidate", "combine", "fold"}
+)
+#: Every class that counts as promotion-class for the false-positive ceiling.
+#: The ceiling is about *any* unsolicited promotion of a twin, so entity and
+#: structural proposals both count; a merge proposal does not, because f25
+#: measures that separately and against different subjects.
+UNSOLICITED_PROPOSAL_CLASSES: frozenset[str] = PROMOTION_SIGNAL_CLASSES | ENTITY_SIGNAL_CLASSES
+
+#: Every signal class this amendment knows about. A quiet assertion that proves
+#: absence over *this* is proving absence of nagging as such, rather than of one
+#: dialect of it.
+ALL_SIGNAL_CLASSES: frozenset[str] = (
+    PROMOTION_SIGNAL_CLASSES
+    | ENTITY_SIGNAL_CLASSES
+    | CONTRADICTION_SIGNAL_CLASSES
+    | MERGE_SIGNAL_CLASSES
+)
+
+#: ``assertion name -> the signal classes it proves absence over``. Populated by
+#: :func:`claims_absence` where each predicate is defined, so the vocabulary a
+#: quiet assertion is answerable for is stated next to its implementation rather
+#: than inferred by whoever reads it later.
+ABSENCE_CLAIM_CLASSES: dict[str, frozenset[str]] = {}
+
+#: ``family -> extra signal classes its quiet assertion must also prove absent``.
+#:
+#: f22 is why this exists. Its twin's quiet assertion is the meta-predicate
+#: itself, so there is no family-specific callable to carry the declaration, and
+#: with only the promotion-class vocabulary a product that surfaced *every*
+#: similar pair as a contradiction produced false positives no assertion in the
+#: family could see. The mapping is code, not fixture data: a scenario cannot
+#: reach it, and it is unioned in, so a family can only ever be held to *more*
+#: than the default — never less.
+FAMILY_ABSENCE_CLASSES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {"f22": CONTRADICTION_SIGNAL_CLASSES}
+)
+
+_AssertionT = TypeVar("_AssertionT", bound=Callable[..., "AssertionResult"])
+
+
+def claims_absence(*vocabularies: frozenset[str]) -> Callable[[_AssertionT], _AssertionT]:
+    """Mark a predicate as an absence claim and declare its signal vocabulary.
+
+    The marker is what ``COMPOSES_ABSENCE_META`` is checked against, so a future
+    quiet assertion cannot be added to the registry while quietly staying out of
+    the set that forces it to compose the meta-predicate. The declared classes
+    are always unioned with :data:`UNSOLICITED_PROPOSAL_CLASSES`: a predicate may
+    widen what it proves silence about, never narrow it.
+    """
+
+    def decorate(fn: _AssertionT) -> _AssertionT:
+        fn.absence_claim = True  # type: ignore[attr-defined]
+        ABSENCE_CLAIM_CLASSES[fn.__name__] = UNSOLICITED_PROPOSAL_CLASSES.union(*vocabularies)
+        return fn
+
+    return decorate
+
+
+#: Attribute keys naming which surface an item was observed on.
+SURFACE_RAW_KEYS: frozenset[str] = frozenset({"surface", "queue", "view"})
+#: Attribute keys naming what an item is about.
+TARGET_RAW_KEYS: frozenset[str] = frozenset({"targets", "target", "about", "subject_id"})
+#: Attribute keys carrying a surface's projection completeness.
+PROJECTION_RAW_KEYS: frozenset[str] = frozenset({"projection", "projected", "surface_state"})
+#: The only projection value that permits a quiet assertion to conclude silence.
+#: Anything else — including an explicitly empty projection — is an error.
+PROJECTION_COMPLETE: str = "complete"
+
+#: The surfaces on which absence must be proven before any quiet assertion may
+#: pass. The counters block is in this list deliberately: without it, a product
+#: that stops emitting a queue item but keeps naming the twin in its due-state
+#: counters would pass a quiet assertion while still nagging the user.
+DECLARED_ABSENCE_SURFACES: tuple[str, ...] = (
+    "audit_findings",
+    "review_queue",
+    "proposal_queue",
+    "due_state_counters",
+)
+
+#: Attribute keys carrying how many structurally distinct clusters have
+#: accumulated on a note, and how many distinct sources an identity recurs in.
+CLUSTER_COUNT_RAW_KEYS: frozenset[str] = frozenset({"cluster_count", "clusters"})
+SOURCE_COUNT_RAW_KEYS: frozenset[str] = frozenset({"source_count", "sources", "distinct_sources"})
+#: Attribute keys carrying a durable triage fingerprint and its decision.
+FINGERPRINT_RAW_KEYS: frozenset[str] = frozenset(
+    {"fingerprint", "signal_fingerprint", "dismissal_fingerprint"}
+)
+#: Attribute keys carrying how many maintenance passes an item has survived,
+#: and how many writes a counters block was emitted for.
+PASS_COUNT_RAW_KEYS: frozenset[str] = frozenset({"passes", "pass_count", "maintenance_passes"})
+EMISSION_COUNT_RAW_KEYS: frozenset[str] = frozenset({"emissions", "emission_count"})
+WRITE_COUNT_RAW_KEYS: frozenset[str] = frozenset({"writes", "write_count", "batch_size"})
+#: Attribute keys marking an item as the continuation packet, and the response
+#: detail level a carrier journey ran at.
+PACKET_RAW_KEYS: frozenset[str] = frozenset({"packet", "continuation_packet", "packet_id"})
+RESPONSE_DETAIL_RAW_KEYS: frozenset[str] = frozenset({"response_detail", "detail"})
+#: Attribute key marking an item as a foreign-project decoy the packet must
+#: exclude entirely, and one marking a restructure's newly created child.
+DECOY_RAW_KEYS: frozenset[str] = frozenset({"decoy", "foreign_project"})
+RESTRUCTURE_CHILD_RAW_KEYS: frozenset[str] = frozenset({"restructure_child", "child_of"})
+
 #: Cap on how many offenders one evidence string lists (as the gates do).
 _MAX_LISTED = 8
 
@@ -171,6 +309,23 @@ class AssertionContext:
     external_edit_at: str | None = None
     #: Allowed reconstruction loss for the export comparison, 0.0 - 1.0.
     tolerance: float = 0.0
+    #: The scenario's family, supplied by the runner. Read only to widen a quiet
+    #: assertion's signal vocabulary (see :data:`FAMILY_ABSENCE_CLASSES`); it can
+    #: never narrow one, so it cannot be used to make an assertion easier.
+    family: str | None = None
+
+    @property
+    def absence_surfaces(self) -> tuple[str, ...]:
+        """The surfaces this context must prove absence on.
+
+        Fixed, not negotiable: the canonical four in
+        :data:`DECLARED_ABSENCE_SURFACES`. An earlier version let a caller widen
+        this list, but nothing ever did, and a widening path no scenario reaches
+        is a claim about rigour rather than rigour — so the list is simply the
+        registered one and a scenario has no say in it.
+        """
+
+        return DECLARED_ABSENCE_SURFACES
 
     def replace(self, **changes: object) -> AssertionContext:
         return replace(self, **changes)  # type: ignore[arg-type]
@@ -665,7 +820,17 @@ def exactly_one_current_revision(ctx: AssertionContext) -> AssertionResult:
 
 
 def no_retired_state_served_as_current(ctx: AssertionContext) -> AssertionResult:
-    """Retired state is never served as, or marked, current. CATASTROPHIC."""
+    """Retired state is never served as, or marked, current. CATASTROPHIC.
+
+    **Scope extension, amendment sequence 2 (2026-08-16).** A continuation
+    packet is a serving surface: handing a fresh session a retired decision by
+    reference is the same harm as returning it from a query, and f24 would
+    otherwise measure packet *completeness* while saying nothing about packet
+    *currency*. So the packet's referenced units are treated as served items.
+    This is an extension of an existing catastrophic assertion's scope, stated
+    explicitly in §7 rather than smuggled in, and it adds no new catastrophic
+    assertion — the §3 set is unchanged.
+    """
 
     name = "no_retired_state_served_as_current"
     gated = _gate(ctx, name, "current")
@@ -678,6 +843,23 @@ def no_retired_state_served_as_current(ctx: AssertionContext) -> AssertionResult
 
     def retired(item: StateItem) -> bool:
         return item.current == "no" or bool(item.retired_reason) or item.id in superseded
+
+    packet = _packet_item(snapshot)
+    if packet is not None:
+        packet_served = sorted(_packet_referenced_ids(snapshot, packet))
+        stale = [
+            f"{item_id} (current={item.current}, retired_reason={item.retired_reason!r})"
+            for item_id in packet_served
+            if (item := by_id.get(item_id)) is not None and retired(item)
+        ]
+        if stale:
+            return _result(
+                name,
+                "fail",
+                f"continuation packet {packet.id} serves retired state as current: "
+                f"{_listed(stale)}",
+                ctx.subject,
+            )
 
     if ctx.served_items is not None:
         offenders: list[str] = []
@@ -2140,5 +2322,693 @@ def loop_journey_state_coherent(ctx: AssertionContext) -> AssertionResult:
         "pass",
         f"all {len(JOURNEY_STAGES)} stages recorded across {len(sessions)} sessions, "
         "linked, and unchanged across the restart",
+        ctx.subject,
+    )
+
+
+# --------------------------------------------------------------------------
+# 20-26: the no-nudge families (amendment sequence 2)
+#
+# f20-f22 are expected to be *red* on the current runtime, and the quiet halves
+# blocked, because the detectors, consumers and carriers they measure do not
+# exist yet. That is the contract: these are falsification targets filed before
+# the machinery, never tests tuned to pass.
+# --------------------------------------------------------------------------
+
+
+def _raw_int(item: StateItem, keys: frozenset[str]) -> int | None:
+    """A non-negative integer recorded under a documented attribute, or ``None``."""
+
+    found = _raw_value(item, keys)
+    if found is None:
+        return None
+    try:
+        parsed = int(found[1].strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _normalized(value: str) -> str:
+    return value.strip().casefold().replace("-", "_")
+
+
+def _signal_targets(item: StateItem) -> tuple[str, ...]:
+    """Item ids a signal is about, from its documented target attribute."""
+
+    found = _raw_value(item, TARGET_RAW_KEYS)
+    if found is None:
+        return ()
+    return tuple(part.strip() for part in found[1].replace(";", ",").split(",") if part.strip())
+
+
+def _signal_surface(item: StateItem) -> str | None:
+    found = _raw_value(item, SURFACE_RAW_KEYS)
+    return _normalized(found[1]) if found is not None else None
+
+
+def _surface_projection(snapshot: EpistemicStateSnapshot, surface: str) -> str | None:
+    """How completely ``surface`` was projected, or ``None`` when it is missing.
+
+    A *surface marker* carries both a surface name and a projection status; a
+    signal sitting on the surface carries a signal class instead. Keeping the
+    two apart is what stops a queue that happens to hold one entry from being
+    read as proof that the queue was projected at all.
+    """
+
+    for item in snapshot.items:
+        if _signal_surface(item) != _normalized(surface):
+            continue
+        projection = _raw_value(item, PROJECTION_RAW_KEYS)
+        if projection is not None:
+            return _normalized(projection[1])
+    return None
+
+
+def _signals_targeting(
+    snapshot: EpistemicStateSnapshot,
+    subject: str,
+    vocabulary: frozenset[str],
+) -> tuple[tuple[StateItem, str], ...]:
+    """``(signal item, class token)`` for every signal of ``vocabulary`` about ``subject``."""
+
+    found: list[tuple[StateItem, str]] = []
+    for item in snapshot.items:
+        token = _raw_states(item, SIGNAL_CLASS_RAW_KEYS, vocabulary)
+        if token is None or subject not in _signal_targets(item):
+            continue
+        found.append((item, token))
+    return tuple(found)
+
+
+def _packet_item(snapshot: EpistemicStateSnapshot) -> StateItem | None:
+    """The continuation packet, identified by its documented attribute."""
+
+    for item in snapshot.items:
+        if _raw_value(item, PACKET_RAW_KEYS) is not None:
+            return item
+    return None
+
+
+def _packet_referenced_ids(
+    snapshot: EpistemicStateSnapshot, packet: StateItem
+) -> frozenset[str]:
+    """Unit ids the packet holds **by reference**, never by inlined copy."""
+
+    return frozenset(packet.cites) | frozenset(
+        relation.object
+        for relation in snapshot.relations
+        if relation.subject == packet.id and relation.predicate in EVIDENCE_PREDICATES
+    )
+
+
+def _is_decoy(item: StateItem) -> bool:
+    found = _raw_value(item, DECOY_RAW_KEYS)
+    return found is not None and _normalized(found[1]) in {"yes", "true", "1"}
+
+
+@claims_absence()
+def signal_absence_checked_across_all_surfaces(
+    ctx: AssertionContext, *, on_behalf_of: str | None = None
+) -> AssertionResult:
+    """The anti-vacuity meta-predicate: silence proven on every declared surface.
+
+    Three cheats this exists to turn into structural failures. A product that
+    stops emitting a queue item for a twin but still names it in the due-state
+    counters block has *relocated* the nag, not removed it — so the counters
+    block is one of the surfaces absence must be proven on. A projector that
+    silently returns nothing for a surface has proven nothing at all — so an
+    empty or missing projection is an error, never a pass. And a product that
+    renames its nag into a signal class this predicate was not watching has
+    changed nothing the user experiences — so the vocabulary is declared per
+    caller and per family, and only ever widened.
+
+    ``on_behalf_of`` is the composing predicate's own name, which is how a
+    family declares the classes it is answerable for. Every negative control in
+    f20-f26 composes this, which is what makes the family's false-positive
+    ceiling worth asserting at all.
+    """
+
+    name = "signal_absence_checked_across_all_surfaces"
+    vocabulary = ABSENCE_CLAIM_CLASSES[on_behalf_of or name] | FAMILY_ABSENCE_CLASSES.get(
+        ctx.family or "", frozenset()
+    )
+    gated = _gate(ctx, name, "signal", "review_state", "due_state_counters")
+    if gated is not None:
+        return gated
+
+    subject = ctx.subject
+    if not subject:
+        return _result(
+            name, "blocked", "quiet assertion requires the subject it proves silence about", None
+        )
+
+    surfaces = ctx.absence_surfaces
+    unprojected = [
+        f"{surface}({_surface_projection(ctx.snapshot, surface) or 'missing'})"
+        for surface in surfaces
+        if _surface_projection(ctx.snapshot, surface) != PROJECTION_COMPLETE
+    ]
+    if unprojected:
+        return _result(
+            name,
+            "blocked",
+            f"absence cannot be established for {subject}: {_listed(unprojected)} "
+            "did not project completely; an unprojected surface is an error, never silence",
+            subject,
+        )
+
+    offenders = [
+        f"{item.id} ({token} on {_signal_surface(item) or 'unnamed surface'})"
+        for item, token in _signals_targeting(ctx.snapshot, subject, vocabulary)
+    ]
+    if offenders:
+        return _result(
+            name,
+            "fail",
+            f"{subject} is named by unsolicited signal(s) despite the quiet "
+            f"expectation: {_listed(offenders)}",
+            subject,
+        )
+    return _result(
+        name,
+        "pass",
+        f"no signal in the {len(vocabulary)}-class vocabulary names {subject} on any of the "
+        f"{len(surfaces)} completely projected surfaces ({', '.join(surfaces)})",
+        subject,
+    )
+
+
+def structural_signal_surfaced_within_budget(ctx: AssertionContext) -> AssertionResult:
+    """f20: accumulated structure surfaces a promotion-class signal, in budget.
+
+    Binds to structure, never to vocabulary: the discriminator is the count of
+    structurally distinct durable-unit clusters the note carries, and the budget
+    comes from the frozen constants module so no fixture can retune it.
+    """
+
+    name = "structural_signal_surfaced_within_budget"
+    gated = _gate(ctx, name, "signal", "review_state")
+    if gated is not None:
+        return gated
+
+    subject = ctx.subject
+    if not subject:
+        return _result(name, "blocked", "f20 requires the accumulating note as subject", None)
+    item = ctx.snapshot.item(subject)
+    if item is None:
+        return _result(name, "unsupported", f"{subject} is not present in the snapshot", subject)
+
+    clusters = _raw_int(item, CLUSTER_COUNT_RAW_KEYS)
+    if clusters is None:
+        return _result(
+            name,
+            "unsupported",
+            f"{subject} records no cluster count; the structural budget cannot be measured",
+            subject,
+        )
+
+    open_signals = [
+        (signal, token)
+        for signal, token in _signals_targeting(ctx.snapshot, subject, PROMOTION_SIGNAL_CLASSES)
+        if not _is_closed(signal.review_state)
+    ]
+    if not open_signals:
+        return _result(
+            name,
+            "fail",
+            f"{subject} accumulated {clusters} structurally distinct cluster(s) and no "
+            "promotion-class signal is present in any open view",
+            subject,
+        )
+    if clusters > STRUCTURAL_EMERGENCE_CLUSTER_BUDGET:
+        return _result(
+            name,
+            "fail",
+            f"{subject} surfaced only after {clusters} clusters, past the frozen budget of "
+            f"{STRUCTURAL_EMERGENCE_CLUSTER_BUDGET}",
+            subject,
+        )
+    signal, token = open_signals[0]
+    return _result(
+        name,
+        "pass",
+        f"{signal.id} ({token}) surfaced for {subject} at {clusters} cluster(s), within the "
+        f"frozen budget of {STRUCTURAL_EMERGENCE_CLUSTER_BUDGET}",
+        subject,
+    )
+
+
+def entity_candidate_surfaced_from_recurrence(ctx: AssertionContext) -> AssertionResult:
+    """f21: an identity recurring with reusable facts surfaces as a candidate.
+
+    The discriminator is *distinct sources carrying reusable facts*, not string
+    frequency — which is exactly what the frequency-matched incidental-mention
+    twin exists to prove, since a mutant that counted occurrences would
+    otherwise pass both halves of the family.
+    """
+
+    name = "entity_candidate_surfaced_from_recurrence"
+    gated = _gate(ctx, name, "signal", "review_state")
+    if gated is not None:
+        return gated
+
+    subject = ctx.subject
+    if not subject:
+        return _result(name, "blocked", "f21 requires the recurring identity as subject", None)
+    item = ctx.snapshot.item(subject)
+    if item is None:
+        return _result(name, "unsupported", f"{subject} is not present in the snapshot", subject)
+
+    sources = _raw_int(item, SOURCE_COUNT_RAW_KEYS)
+    if sources is None:
+        return _result(
+            name,
+            "unsupported",
+            f"{subject} records no distinct-source count; recurrence cannot be measured",
+            subject,
+        )
+
+    surfaced = [
+        (signal, token)
+        for signal, token in _signals_targeting(ctx.snapshot, subject, ENTITY_SIGNAL_CLASSES)
+        if not _is_closed(signal.review_state)
+    ]
+    if not surfaced:
+        return _result(
+            name,
+            "fail",
+            f"{subject} recurs across {sources} distinct source(s) and no entity-candidate "
+            "signal is present in any open view",
+            subject,
+        )
+    if sources < ENTITY_EMERGENCE_SOURCE_BUDGET:
+        return _result(
+            name,
+            "fail",
+            f"{subject} surfaced on only {sources} distinct source(s); the frozen threshold is "
+            f"{ENTITY_EMERGENCE_SOURCE_BUDGET}, so this is a premature candidate",
+            subject,
+        )
+    signal, token = surfaced[0]
+    return _result(
+        name,
+        "pass",
+        f"{signal.id} ({token}) surfaced for {subject} across {sources} distinct source(s)",
+        subject,
+    )
+
+
+def contradiction_surfaced_unprompted(ctx: AssertionContext) -> AssertionResult:
+    """f22: invalidating evidence surfaces the pair without the user asking.
+
+    Unpromptedness is a *trajectory* property the loader enforces (zero topical
+    agent turns between evidence ingest and the asserted snapshot), so what is
+    left to assert here is that the pair actually surfaced. The surfacing route
+    is reported in the evidence string and never asserted: which queue found it
+    is a fact worth recording, not a property a product must satisfy one way.
+    """
+
+    name = "contradiction_surfaced_unprompted"
+    gated = _gate(ctx, name, "signal", "contradicts", "review_state")
+    if gated is not None:
+        return gated
+
+    subject, counterpart = ctx.subject, ctx.counterpart
+    if not subject or not counterpart:
+        return _result(
+            name,
+            "blocked",
+            "f22 requires both the conclusion and the invalidating evidence",
+            subject,
+        )
+
+    for signal, token in _signals_targeting(ctx.snapshot, subject, CONTRADICTION_SIGNAL_CLASSES):
+        if counterpart not in _signal_targets(signal) or _is_closed(signal.review_state):
+            continue
+        route = _signal_surface(signal) or "unnamed surface"
+        return _result(
+            name,
+            "pass",
+            f"{signal.id} ({token}) surfaces {subject} against {counterpart}; "
+            f"surfacing route reported: {route}",
+            subject,
+        )
+    return _result(
+        name,
+        "fail",
+        f"no open contradiction-class signal pairs {subject} with {counterpart}",
+        subject,
+    )
+
+
+@claims_absence(ALL_SIGNAL_CLASSES)
+def dismissal_respected_across_passes(ctx: AssertionContext) -> AssertionResult:
+    """f23: a dismissed fingerprint stays dismissed until something material changes.
+
+    The two halves are inseparable. Respecting a dismissal *forever* would be a
+    bug, not a feature, so a changed fingerprint reopening the item is a pass;
+    an unchanged fingerprint reappearing is the failure. Where nothing reappears
+    at all, the meta-predicate is composed rather than trusted, so a product
+    cannot pass by relocating the item to a surface nobody checked.
+
+    The reappearance match is over **every** signal class with no subset
+    anywhere in the path. Re-raising a dismissed fingerprint as a contradiction,
+    a merge or a conflict is the same nag wearing a different hat, and the user
+    experiencing it cannot tell the difference.
+    """
+
+    name = "dismissal_respected_across_passes"
+    gated = _gate(ctx, name, "dismissal", "review_state", "signal")
+    if gated is not None:
+        return gated
+
+    subject = ctx.subject
+    if not subject:
+        return _result(name, "blocked", "f23 requires the dismissed item as subject", None)
+    prior = ctx.prior
+    if prior is None:
+        return _result(name, "blocked", "f23 compares a dismissal against a later pass", subject)
+
+    dismissed = prior.item(subject)
+    if dismissed is None:
+        return _result(
+            name, "unsupported", f"{subject} is absent from the earlier snapshot", subject
+        )
+    recorded = _raw_value(dismissed, FINGERPRINT_RAW_KEYS)
+    if recorded is None or not _is_closed(dismissed.review_state):
+        return _result(
+            name,
+            "unsupported",
+            f"{subject} carries no closed triage decision with a fingerprint to respect",
+            subject,
+        )
+    dismissed_fingerprint = _normalized(recorded[1])
+
+    unchanged: list[str] = []
+    for signal, token in _signals_targeting(
+        ctx.snapshot, subject, ABSENCE_CLAIM_CLASSES["dismissal_respected_across_passes"]
+    ):
+        if _is_closed(signal.review_state):
+            continue
+        found = _raw_value(signal, FINGERPRINT_RAW_KEYS)
+        if found is not None and _normalized(found[1]) != dismissed_fingerprint:
+            return _result(
+                name,
+                "pass",
+                f"{signal.id} ({token}) reopened {subject} under a changed fingerprint "
+                f"{found[1]!r}; a material change is supposed to reopen",
+                subject,
+            )
+        unchanged.append(f"{signal.id} ({token})")
+    if unchanged:
+        return _result(
+            name,
+            "fail",
+            f"{subject} reappeared under the dismissed fingerprint {recorded[1]!r}: "
+            f"{_listed(unchanged)}",
+            subject,
+        )
+
+    absence = signal_absence_checked_across_all_surfaces(
+        ctx, on_behalf_of="dismissal_respected_across_passes"
+    )
+    if absence.outcome != "pass":
+        return _result(
+            name,
+            absence.outcome,
+            f"dismissal of {subject} cannot be confirmed: {absence.evidence}",
+            subject,
+        )
+    passes = _raw_int(ctx.snapshot.item(subject) or dismissed, PASS_COUNT_RAW_KEYS)
+    survived = f" across {passes} maintenance pass(es)" if passes is not None else ""
+    return _result(
+        name, "pass", f"{subject} stayed dismissed{survived}; {absence.evidence}", subject
+    )
+
+
+def counter_emission_not_repeated_per_write(ctx: AssertionContext) -> AssertionResult:
+    """f23: a bulk batch does not emit one identical counters block per write.
+
+    Counter-repetition is nagging under another name — the user asked for one
+    batch and received N notifications — so the governance is asserted here
+    rather than left to product taste.
+    """
+
+    name = "counter_emission_not_repeated_per_write"
+    gated = _gate(ctx, name, "due_state_counters", "signal")
+    if gated is not None:
+        return gated
+
+    blocks = [
+        item
+        for item in ctx.snapshot.items
+        if _signal_surface(item) == "due_state_counters"
+        and _raw_value(item, EMISSION_COUNT_RAW_KEYS) is not None
+    ]
+    if not blocks:
+        return _result(
+            name,
+            "unsupported",
+            "no due-state counters block records an emission count",
+            ctx.subject,
+        )
+    block = blocks[0]
+    emissions = _raw_int(block, EMISSION_COUNT_RAW_KEYS)
+    writes = _raw_int(block, WRITE_COUNT_RAW_KEYS)
+    if emissions is None or writes is None:
+        return _result(
+            name,
+            "unsupported",
+            f"{block.id} does not record both an emission count and a write count",
+            ctx.subject,
+        )
+    if writes < 2:
+        return _result(
+            name,
+            "unsupported",
+            f"{block.id} records {writes} write(s); counter repetition needs a bulk batch",
+            ctx.subject,
+        )
+    if emissions >= writes:
+        return _result(
+            name,
+            "fail",
+            f"{block.id} emitted {emissions} counters block(s) for {writes} write(s): one "
+            "identical block per write is counter-repetition",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "pass",
+        f"{block.id} emitted {emissions} counters block(s) for a batch of {writes} write(s)",
+        ctx.subject,
+    )
+
+
+def continuation_packet_reconstructs_session(ctx: AssertionContext) -> AssertionResult:
+    """f24: the packet holds every seeded unit by reference, and no decoy.
+
+    Containment is *by reference*: a packet that inlines content is a copy, and
+    a copy is precisely how a continuation aid drifts away from the state it
+    claims to reconstruct.
+    """
+
+    name = "continuation_packet_reconstructs_session"
+    gated = _gate(ctx, name, "continuation_packet", "cites")
+    if gated is not None:
+        return gated
+
+    packet = _packet_item(ctx.snapshot)
+    if packet is None:
+        return _result(
+            name, "fail", "no continuation packet is present in the snapshot", ctx.subject
+        )
+    referenced = _packet_referenced_ids(ctx.snapshot, packet)
+
+    required = tuple(
+        item
+        for item in ctx.snapshot.items
+        if item.id != packet.id
+        and not _is_decoy(item)
+        and (item.kind in {"decision", "open_question"} or _raw_value(item, PLAN_RAW_KEYS))
+    )
+    missing = [item.id for item in required if item.id not in referenced]
+    if missing:
+        return _result(
+            name, "fail", f"{packet.id} omits seeded unit(s): {_listed(missing)}", ctx.subject
+        )
+
+    decoys = [item.id for item in ctx.snapshot.items if _is_decoy(item) and item.id in referenced]
+    if decoys:
+        return _result(
+            name,
+            "fail",
+            f"{packet.id} admits foreign-project decoy(s): {_listed(decoys)}",
+            ctx.subject,
+        )
+    if len(referenced) > CONTINUATION_PACKET_UNIT_BUDGET:
+        return _result(
+            name,
+            "fail",
+            f"{packet.id} references {len(referenced)} unit(s), past the frozen size budget of "
+            f"{CONTINUATION_PACKET_UNIT_BUDGET}",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "pass",
+        f"{packet.id} references all {len(required)} seeded unit(s), excludes every decoy, and "
+        f"holds {len(referenced)} unit(s) within the budget of {CONTINUATION_PACKET_UNIT_BUDGET}",
+        ctx.subject,
+    )
+
+
+@claims_absence(MERGE_SIGNAL_CLASSES)
+def restructure_signal_cleared_by_state_change(ctx: AssertionContext) -> AssertionResult:
+    """f25: an applied restructure clears its own signal, without a dismissal.
+
+    Clearing by dismissal would be the product hiding its own suggestion rather
+    than the state change resolving it, so a dismissal recorded for the subject
+    fails here even though the signal is gone. The second half forbids churn:
+    nothing may propose folding the new children back together inside the frozen
+    quiet window.
+    """
+
+    name = "restructure_signal_cleared_by_state_change"
+    gated = _gate(ctx, name, "signal", "review_state")
+    if gated is not None:
+        return gated
+
+    subject = ctx.subject
+    if not subject:
+        return _result(name, "blocked", "f25 requires the restructured note as subject", None)
+
+    item = ctx.snapshot.item(subject)
+    if (
+        item is not None
+        and _raw_value(item, FINGERPRINT_RAW_KEYS) is not None
+        and _is_closed(item.review_state)
+    ):
+        return _result(
+            name,
+            "fail",
+            f"{subject}'s structural signal is held by a dismissal ({item.review_state}), not "
+            "cleared by the applied restructure",
+            subject,
+        )
+
+    absence = signal_absence_checked_across_all_surfaces(
+        ctx, on_behalf_of="restructure_signal_cleared_by_state_change"
+    )
+    if absence.outcome != "pass":
+        return _result(
+            name,
+            absence.outcome,
+            f"the restructured signal for {subject} is not demonstrably cleared: "
+            f"{absence.evidence}",
+            subject,
+        )
+
+    children = tuple(
+        candidate
+        for candidate in ctx.snapshot.items
+        if (found := _raw_value(candidate, RESTRUCTURE_CHILD_RAW_KEYS)) is not None
+        and (_normalized(found[1]) in {"yes", "true", "1"} or found[1].strip() == subject)
+    )
+    churn: list[str] = []
+    for child in children:
+        for signal, token in _signals_targeting(ctx.snapshot, child.id, MERGE_SIGNAL_CLASSES):
+            passes = _raw_int(signal, PASS_COUNT_RAW_KEYS)
+            if passes is None or passes <= RESTRUCTURE_QUIET_WINDOW_PASSES:
+                churn.append(f"{signal.id} ({token} -> {child.id})")
+    if churn:
+        return _result(
+            name,
+            "fail",
+            f"merge-class churn targets the new children inside the frozen window of "
+            f"{RESTRUCTURE_QUIET_WINDOW_PASSES} pass(es): {_listed(churn)}",
+            subject,
+        )
+    return _result(
+        name,
+        "pass",
+        f"{subject}'s signal is absent from every open view with no dismissal recorded, and "
+        f"{len(children)} new child(ren) drew no merge-class proposal inside the frozen window",
+        subject,
+    )
+
+
+def due_state_block_present_in_carrier(ctx: AssertionContext) -> AssertionResult:
+    """f26: the due-state block reaches a thin client's compact responses.
+
+    Every other family measures a detector or an end state, so a runtime could
+    satisfy all of them while no signal ever arrived anywhere a user could see
+    it. This asserts the delivery path itself, against the compact responses the
+    journey actually received.
+    """
+
+    name = "due_state_block_present_in_carrier"
+    gated = _gate(ctx, name, "due_state_counters", "continuation_packet")
+    if gated is not None:
+        return gated
+
+    responses = tuple(
+        item
+        for item in ctx.snapshot.items
+        if (found := _raw_value(item, RESPONSE_DETAIL_RAW_KEYS)) is not None
+        and _normalized(found[1]) == "compact"
+    )
+    if not responses:
+        return _result(
+            name,
+            "unsupported",
+            "no compact response was captured; the carrier path cannot be observed",
+            ctx.subject,
+        )
+
+    projection = _surface_projection(ctx.snapshot, "due_state_counters")
+    carried = [
+        response.id
+        for response in responses
+        if "due_state_counters" in set(_signal_targets(response))
+    ]
+    # The two reasons a block can be missing are not the same finding, and
+    # folding them together was hiding one of them. "The carrier delivered
+    # nothing" is the family's negative result; "we never observed the surface"
+    # is an error in the observation, and must not be reported as a product
+    # failure. Both branches are reachable, which is what makes the guard a
+    # guard rather than a comment.
+    if projection != PROJECTION_COMPLETE:
+        if carried:
+            return _result(
+                name,
+                "blocked",
+                f"{_listed(carried)} reference a due-state block but the due_state_counters "
+                f"surface did not project completely ({projection or 'missing'}); the "
+                "observation contradicts itself and cannot settle delivery",
+                ctx.subject,
+            )
+        return _result(
+            name,
+            "fail",
+            f"none of the {len(responses)} compact response(s) carries a due-state block "
+            f"({_listed(response.id for response in responses)}), and the due_state_counters "
+            f"surface projected {projection or 'nothing'}: the block did not reach the client",
+            ctx.subject,
+        )
+    if not carried:
+        return _result(
+            name,
+            "fail",
+            f"none of the {len(responses)} compact response(s) carries a due-state block: "
+            f"{_listed(response.id for response in responses)}",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "pass",
+        f"{len(carried)} of {len(responses)} compact response(s) carry the due-state block: "
+        f"{_listed(carried)}",
         ctx.subject,
     )

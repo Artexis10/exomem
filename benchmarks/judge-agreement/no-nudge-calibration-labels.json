@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "study": "no-nudge-emergence-calibration",
+  "protocol": "benchmarks/judge-agreement/no-nudge-calibration-protocol.md",
+  "amendment_sequence": 2,
+  "status": "not_run",
+  "blocked_on": "founder decision on annotator staffing and the small-cohort fallback (tasks.md 3.5)",
+  "annotators": [],
+  "labels": [],
+  "medians": null,
+  "pairwise_agreement": null,
+  "note": "Empty by design. The constants in benchmarks/epistemic/budgets.py are PROVISIONAL until this file carries at least three annotators' raw labels and the §7 entry is re-dated with the resulting medians."
+}

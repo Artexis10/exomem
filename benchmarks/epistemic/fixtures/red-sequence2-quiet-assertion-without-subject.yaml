@@ -1,0 +1,38 @@
+# RED fixture: a quiet assertion that names nothing to be quiet about.
+#
+# Deliberately filed against f01, a ratified family, so the refusal under test
+# is the subject requirement and not the sequence-2 withhold gate — a fixture
+# that could refuse for two reasons proves neither. Without this rule the
+# meta-predicate silently degrades from "no signal names this twin" into "no
+# signal exists anywhere", which an empty snapshot satisfies.
+scenario_id: red-sequence2-quiet-assertion-without-subject
+family_id: f01
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1
+    ops:
+      - op: ingest_source
+        ref: src-1
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: signal_absence_checked_across_all_surfaces
+fairness:
+  why_neutral: red fixture; never scored
+  public_coverage_subtraction: none
+  mechanisms:
+    - provider_role: subject
+      mechanism: none
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:14
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+  acceptance_predicate: none
