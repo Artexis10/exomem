@@ -94,6 +94,7 @@ from . import review_state as review_state_module
 from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
+from . import semantic_units as semantic_units_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import traversal_profiles as traversal_profiles_module
@@ -374,6 +375,10 @@ def op_bootstrap(
                 "planning": (
                     "intended future state, goals, priorities, commitments, and candidate work"
                 ),
+                "prediction": (
+                    "a checkable claim about a future observation, which is neither "
+                    "observed state nor intent to act; see epistemic_contract"
+                ),
             },
             "capture_examples": (
                 "Route durable measurements, completed sessions, transactions, maintenance "
@@ -447,8 +452,93 @@ def op_bootstrap(
             "contracts; repositories, git, tests, and code own software execution truth."
         ),
     }
+    # The doctrine every client tier has to receive. The shipped skill scaffold
+    # carries this at length but reaches only skill-capable surfaces, and this
+    # payload is the entire contract a hosted or generic MCP client ever sees. The
+    # commitments live here or half the client base never learns they exist.
+    #
+    # They deliberately name no command. `_filter_bootstrap_payload` deletes any
+    # string mentioning a command the active surface cannot call, so a commitment
+    # phrased as a tool call would vanish on exactly the reduced surfaces that most
+    # need to be told to supersede rather than overwrite. Routing already lives in
+    # `tool_defaults` and `authoring_contract.route_by_intent`; it is not repeated.
+    #
+    # The vocabulary is read from the modules that own it instead of retyped, so a
+    # new outcome or governed metadata key is taught the day it ships.
+    #
+    # Deferred extension point: per-vault due state ("N predictions past their check
+    # date", "N unfinished experiments") belongs here as one further, vault-derived
+    # key. It is blocked on the epistemic review and audit-category work defining
+    # "due" and "unfinished" exactly once. A predicate invented here would be the one
+    # users see, and would turn that work into a breaking change to a public contract
+    # rather than an addition to it. Nothing in this section has to move to make room.
+    epistemic_contract = {
+        "commitments": {
+            "preserve_the_record": (
+                "Captured raw material is append-only: never rewrite or delete a "
+                "captured source or preserved evidence. Correct the record by "
+                "capturing better material and superseding the conclusion built on "
+                "the worse."
+            ),
+            "supersede_never_overwrite": (
+                "When a durable conclusion changes, supersede it so the earlier view "
+                "stays readable and linked. Never overwrite what was believed; a "
+                "store that silently rewrites its own past cannot be audited."
+            ),
+            "state_the_expectation_first": (
+                "Write down what you expect before the answer arrives. A durable "
+                "expectation about a future observation is a prediction unit with a "
+                "check_by date; an expectation recorded afterwards proves nothing."
+            ),
+            "judge_categorically": (
+                "Close a claim with one word from the outcome vocabulary below. This "
+                "substrate keeps no numeric confidence, credence, or probability: a "
+                "verdict is lifecycle state, never a score."
+            ),
+            "keep_the_negative_result": (
+                "Refuted is not superseded. A refuted claim keeps active standing and "
+                "full rank, because a negative result is knowledge rather than "
+                "replaced knowledge. Record a real conflict as a typed contradicts "
+                "relation instead of quietly reconciling it away."
+            ),
+        },
+        "vocabulary": {
+            "outcomes": list(semantic_units_module.EPISTEMIC_OUTCOMES),
+            "governed_unit_metadata": list(
+                semantic_units_module.GOVERNED_UNIT_METADATA_KEYS
+            ),
+            "verdict": (
+                "The judgment: exactly one outcome word, shared with an experiment "
+                "page's outcome. A number, percentage, or hedge is rejected outright."
+            ),
+            "check_by": (
+                "One exact ISO calendar date (YYYY-MM-DD) naming the day to revisit "
+                "the claim. A due date, not an expiry: nothing is removed, decayed, or "
+                "downranked when it passes; it becomes findable as overdue."
+            ),
+            "metadata_form": (
+                "Rich-form only; a compact observation carries no metadata. Both rows "
+                "are preserved across edits, so correcting wording never costs a verdict."
+            ),
+            "kinds": {
+                "open_question": "a question this store has not answered yet",
+                "hypothesis": "a proposed explanation still under test",
+                "prediction": "a checkable claim about a future observation",
+            },
+            "relations": {
+                "contradicts": "edge to material conflicting with this claim",
+                "supersedes": "edge to the page whose current view this replaces",
+            },
+        },
+        "capture_nudge": (
+            "When the user states a durable expectation about a future observation, "
+            "capture it then as a prediction unit with a check_by date. Left in prose, "
+            "or in the assistant's own short-term memory, nothing can ever check it. "
+            "Skip passing speculation; capture what the user would want held to."
+        ),
+    }
     payload: dict = {
-        "contract_version": "2026-08-11.1",
+        "contract_version": "2026-08-16.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -489,6 +579,7 @@ def op_bootstrap(
         "records": records_contract,
         "semantic_authoring": semantic_authoring_projection,
         "planning": planning_contract,
+        "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -615,6 +706,19 @@ def op_bootstrap(
                 "pattern": "Reusable solution with Problem, Solution, When to use, When not to use, and typed Relations.",
                 "experiment": "Primary protocol with Hypothesis, Protocol, Results, and Conclusion.",
                 "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and typed Relations.",
+                "question": (
+                    "Not a page type: an `## Open Question` block inside a compiled "
+                    "page naming what is unresolved and what would settle it."
+                ),
+                "hypothesis": (
+                    "Not a page type: a `## Hypothesis` block inside a compiled page "
+                    "stating the mechanism and what would falsify it."
+                ),
+                "prediction": (
+                    "Not a page type: a `## Prediction` block inside a compiled page "
+                    "with `- check_by: YYYY-MM-DD`, closed later with `- verdict: "
+                    "<outcome>`. Editing the wording preserves the verdict."
+                ),
             },
             "semantic_units": {
                 "contract": semantic_authoring_projection,

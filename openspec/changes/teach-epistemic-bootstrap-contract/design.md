@@ -30,7 +30,8 @@ Goals:
   including the compact profile.
 - Make the taught vocabulary identical to the shipped vocabulary, and provable to be so.
 - Keep the doctrine intact on a reduced surface.
-- Stay inside the compact byte budget without weakening the existing gate.
+- Write the doctrine dense enough that the compact byte budget is a real constraint on
+  its wording rather than a reason to demote it out of compact.
 
 Non-Goals:
 
@@ -53,13 +54,20 @@ names, raising the odds a future edit phrases a commitment in routable terms. A 
 section named for the discipline is also the thing a client can grep for, which is the
 literal failure this change fixes.
 
-**Commitments are tool-agnostic; routes are a separate, droppable sub-key.**
-`_filter_bootstrap_payload` deletes strings naming unavailable commands. The five
-commitments therefore name no tool. The tool routes that realise them live in a separate
-`routes` mapping, where per-key deletion degrades the section gracefully instead of
-silently removing a commitment. This mirrors the existing comment on the `engagement`
-contract, which is deliberately tool-agnostic for the same reason. A test asserts the
-commitments survive a surface exporting almost nothing.
+**Commitments name no tool, and the section carries no routing of its own.**
+`_filter_bootstrap_payload` deletes strings naming unavailable commands, so a commitment
+phrased as a tool call would vanish on exactly the reduced surfaces that most need to be
+told to supersede rather than overwrite. The five commitments therefore name no tool.
+This mirrors the existing comment on the `engagement` contract, which is deliberately
+tool-agnostic for the same reason, and a test asserts the commitments survive a surface
+exporting almost nothing.
+
+The first draft carried a sibling `routes` mapping so the tool advice could be dropped
+per-key without touching a commitment. It was removed: `tool_defaults.supersede`,
+`tool_defaults.mutate_semantic_unit`, and `authoring_contract.route_by_intent` already
+route these intents, and a second copy would be a second thing to drift, paid for out of
+a byte budget that turned out to be the binding constraint. The doctrine says what must
+be true; the existing routing sections say which call makes it true.
 
 **The vocabulary is derived from the modules that own it, not retyped.**
 The payload builds its outcome list from `semantic_units.EPISTEMIC_OUTCOMES` and its
@@ -127,12 +135,22 @@ the whole `records` section — survives on a surface that does not export Recor
 
 ## Risks / Trade-offs
 
-**The compact budget tightens.** The section costs roughly two kilobytes of the three
-available under the pinned ceiling. That narrows the runway for the next payload
-addition. Accepted: the ceiling exists to force exactly this judgment, and the audit's
-verdict is that this is the highest-value use of the remaining bytes. The mitigation is
-that the budget gate is left untouched and unraised, so the next addition confronts the
-same question honestly.
+**The compact byte ceiling is raised, from 56,000 to 58,000.** This was not the plan and
+is worth stating plainly. The doctrine costs about 3.1 KB against a 52,877-byte floor,
+taking compact to 55,971 — 29 bytes under the ceiling. Trimming to a genuine margin was
+attempted first and two rounds of compression bought only a few hundred bytes; going
+further would have meant dropping either the recipes or a commitment, which is the
+change gutting itself to satisfy a number.
+
+Leaving the ceiling at 56,000 would have been worse than raising it. A budget nothing
+can grow under is a tripwire: the next unrelated one-word edit fails a gate that is not
+about it, and the constant would go on claiming headroom that does not exist. The
+constant's own comment sets the protocol — "never raise it without deciding the extra
+bytes earn a caller's context" — and that decision is recorded in the comment itself,
+including the pre-change floor, what was added, and why. The raise restores roughly the
+growth headroom the original ceiling expressed; it does not fund a second such addition,
+and it stays far below the 64 KB point the gate was built to catch. The
+compact-versus-full saving ratio is unaffected at 26%, well above its 15% floor.
 
 **Doctrine can drift from behaviour.** Prose that describes behaviour is prose that can
 become false. Mitigated structurally: the outcome vocabulary and the metadata keys are

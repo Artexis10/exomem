@@ -19,10 +19,21 @@ import pytest
 
 from exomem import commands
 
-#: Ceiling for the compact payload. Chosen above the measured 52 KB so ordinary growth
+#: Ceiling for the compact payload. Chosen above the measured floor so ordinary growth
 #: is fine, and far below the 64 KB regression point. Lower it when compact shrinks
 #: further; never raise it without deciding the extra bytes earn a caller's context.
-COMPACT_BYTE_CEILING = 56_000
+#:
+#: Raised once, from 56,000, and the decision is on the record. The epistemic contract
+#: added ~3.1 KB to a 52,877-byte floor, taking compact to 55,971 and leaving 29 bytes
+#: of headroom — a ceiling nothing can grow under is a tripwire, not a budget. Those
+#: bytes earn their place: the payload is the entire contract a hosted or generic MCP
+#: client ever receives, and without them such a client never learns that raw material
+#: is append-only, that a changed conclusion is superseded rather than overwritten, or
+#: that a refuted claim stays active. That doctrine reached only skill-capable Claude
+#: surfaces, so one vault got two epistemologies depending on which client wrote to it.
+#: The raise restores roughly the growth headroom the original ceiling expressed; it
+#: does not buy room for a second such addition, which must argue for itself again.
+COMPACT_BYTE_CEILING = 58_000
 
 #: The defect was compact and full being near-identical. A profile that does not
 #: measurably differ from full is not a profile.

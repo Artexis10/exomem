@@ -80,8 +80,10 @@ None. This change adds requirements to an existing capability.
 - Affects `src/exomem/commands.py` `op_bootstrap` payload data and the pinned
   `contract_version` constant in `tests/test_bootstrap.py`.
 - Adds `tests/test_epistemic_bootstrap_contract.py`.
-- Consumes part of the compact-payload byte budget pinned by
-  `tests/test_bootstrap_compact_budget.py`; the section is written dense for that
-  reason and the budget gate stays green.
+- Raises `COMPACT_BYTE_CEILING` in `tests/test_bootstrap_compact_budget.py` from 56,000
+  to 58,000, with the decision recorded in that constant's comment. The doctrine takes
+  compact from 52,877 to 55,971 bytes, leaving 29 bytes under the old ceiling; see
+  `design.md` for why the raise is preferred to trimming further or to leaving a gate
+  nothing can grow under.
 - Introduces no tool, argument, index, model call, migration, or ranking change, and
   inspects no vault content. Reading bootstrap still writes nothing.
