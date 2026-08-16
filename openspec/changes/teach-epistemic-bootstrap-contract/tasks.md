@@ -19,10 +19,15 @@
 - [x] 1.8 Assert the section is present on the compact profile and on every profile.
 - [x] 1.9 Assert the commitments survive a reduced `ActiveSurfaceDescriptor`, and that
   the filtered section names no unavailable command.
+- [x] 1.9a Parametrise the same assertion over every profile in
+  `commands.PRODUCT_SURFACE_PROFILES` via `hosted_gateway.hosted_agent_surface_descriptor`,
+  so narrowing a shipped hosted profile cannot regress the doctrine with the suite green.
 - [x] 1.10 Assert the Records `intent_boundary` distinguishes a future-observation claim
   from observed state and planning intent.
-- [x] 1.11 Add the regression pinning the audit's original defect: the payload as a whole
-  now teaches append-only, supersession, contradiction, and the outcome vocabulary.
+- [x] 1.11 Add the keyword regression against the *measured* `origin/main` baseline, not
+  against zero: pin the pre-change occurrence counts and assert each term strictly
+  exceeds its own baseline, so a revert fails rather than coasting on words the payload
+  already contained. Exclude `immutable`, which was zero before and stays zero.
 - [x] 1.12 Run the new file and record the verbatim red output before writing any
   implementation.
 

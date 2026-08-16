@@ -9,9 +9,11 @@ other client — hosted agents, generic MCP clients, anything without the skill 
 only the `bootstrap` payload. That payload is the entire contract those clients ever
 receive.
 
-The payload does not teach any of it. It contains zero occurrences of "append-only",
-"immutable", or the word for the discipline itself; two of "supersed", both incidental
-routing labels; and one of "contradict", inside a filter example. The loop primitives
+The payload does not teach any of it. Measured on `origin/main` @ 64475616, the compact
+payload contains "epistemic" twice, "supersed" five times, and "contradict" twice — and
+every one of those occurrences is a routing label, a filter example, or a traversal
+profile name. Not one of them tells an agent what to do. "append-only" appears zero
+times, and none of the five outcome words appears at all. The loop primitives
 shipped in `add-epistemic-loop-primitives` — the `prediction` kind, the governed
 `verdict` and `check_by` unit-metadata keys, and the closed five-word outcome
 vocabulary — are addressable through the tools but are named nowhere a generic client
@@ -81,9 +83,12 @@ None. This change adds requirements to an existing capability.
   `contract_version` constant in `tests/test_bootstrap.py`.
 - Adds `tests/test_epistemic_bootstrap_contract.py`.
 - Raises `COMPACT_BYTE_CEILING` in `tests/test_bootstrap_compact_budget.py` from 56,000
-  to 58,000, with the decision recorded in that constant's comment. The doctrine takes
-  compact from 52,877 to 55,971 bytes, leaving 29 bytes under the old ceiling; see
-  `design.md` for why the raise is preferred to trimming further or to leaving a gate
-  nothing can grow under.
+  to 58,000, with the decision and its arithmetic recorded in that constant's comment.
+  The doctrine takes compact from 52,877 to 56,075 bytes — a 3,198-byte growth that
+  lands 75 bytes past the old ceiling. The raise spends the growth budget the old
+  ceiling expressed and pre-authorises 1,925 bytes more; see `design.md` for the
+  cheaper option that was available and deliberately not taken.
+- Moves the compact-versus-full saving from 32.74% to 31.46%, well above the 15%
+  `MINIMUM_SAVING_RATIO` floor, which is untouched.
 - Introduces no tool, argument, index, model call, migration, or ranking change, and
   inspects no vault content. Reading bootstrap still writes nothing.

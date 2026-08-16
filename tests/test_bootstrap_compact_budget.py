@@ -23,16 +23,27 @@ from exomem import commands
 #: is fine, and far below the 64 KB regression point. Lower it when compact shrinks
 #: further; never raise it without deciding the extra bytes earn a caller's context.
 #:
-#: Raised once, from 56,000, and the decision is on the record. The epistemic contract
-#: added ~3.1 KB to a 52,877-byte floor, taking compact to 55,971 and leaving 29 bytes
-#: of headroom — a ceiling nothing can grow under is a tripwire, not a budget. Those
-#: bytes earn their place: the payload is the entire contract a hosted or generic MCP
-#: client ever receives, and without them such a client never learns that raw material
-#: is append-only, that a changed conclusion is superseded rather than overwritten, or
-#: that a refuted claim stays active. That doctrine reached only skill-capable Claude
-#: surfaces, so one vault got two epistemologies depending on which client wrote to it.
-#: The raise restores roughly the growth headroom the original ceiling expressed; it
-#: does not buy room for a second such addition, which must argue for itself again.
+#: Raised once, from 56,000, and the decision is on the record with its arithmetic.
+#: The epistemic contract added 3,198 bytes to a 52,877-byte floor, taking compact to
+#: 56,075 — 75 bytes past the old ceiling. Those bytes earn their place, because the
+#: payload is the entire contract a hosted or generic MCP client ever receives, and
+#: without them such a client never learns that raw material is append-only, that a
+#: changed conclusion is superseded rather than overwritten, or that a refuted claim
+#: stays active. That doctrine reached only skill-capable Claude surfaces, so one vault
+#: got two epistemologies depending on which client wrote to it.
+#:
+#: Fitting under 56,000 was possible and was declined on the merits: dropping the
+#: `kinds` (193 B) and `relations` (145 B) sub-blocks of the payload's epistemic
+#: vocabulary would have landed compact at 55,737, a real 263 bytes clear. They restate
+#: material the payload carries elsewhere, and they were kept anyway, because an agent
+#: reading the doctrine should not have to assemble the vocabulary from three other
+#: sections to act on it.
+#:
+#: Be clear about what the raise is: this change spent the entire growth budget the old
+#: ceiling expressed and pre-authorised 1,925 bytes more. It is not headroom restored.
+#: A second addition of this size must argue for itself from scratch, and 58,000 still
+#: sits ~6 KB below the 64,070-byte regression point the gate was built to catch.
+#: `MINIMUM_SAVING_RATIO` below is untouched; the saving moved 32.74% -> 31.46%.
 COMPACT_BYTE_CEILING = 58_000
 
 #: The defect was compact and full being near-identical. A profile that does not

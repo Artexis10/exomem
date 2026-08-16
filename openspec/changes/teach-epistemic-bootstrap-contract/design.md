@@ -136,21 +136,35 @@ the whole `records` section — survives on a surface that does not export Recor
 ## Risks / Trade-offs
 
 **The compact byte ceiling is raised, from 56,000 to 58,000.** This was not the plan and
-is worth stating plainly. The doctrine costs about 3.1 KB against a 52,877-byte floor,
-taking compact to 55,971 — 29 bytes under the ceiling. Trimming to a genuine margin was
-attempted first and two rounds of compression bought only a few hundred bytes; going
-further would have meant dropping either the recipes or a commitment, which is the
-change gutting itself to satisfy a number.
+is worth stating plainly, with the arithmetic, because a gate relaxation justified by
+wrong numbers is a worse precedent than the two kilobytes.
 
-Leaving the ceiling at 56,000 would have been worse than raising it. A budget nothing
-can grow under is a tripwire: the next unrelated one-word edit fails a gate that is not
-about it, and the constant would go on claiming headroom that does not exist. The
-constant's own comment sets the protocol — "never raise it without deciding the extra
-bytes earn a caller's context" — and that decision is recorded in the comment itself,
-including the pre-change floor, what was added, and why. The raise restores roughly the
-growth headroom the original ceiling expressed; it does not fund a second such addition,
-and it stays far below the 64 KB point the gate was built to catch. The
-compact-versus-full saving ratio is unaffected at 26%, well above its 15% floor.
+The measurements, taken by extracting `origin/main` @ 64475616 with `git archive` and
+importing that tree ahead of the working copy: the pre-change compact payload is 52,877
+bytes; the doctrine adds 3,198; compact lands at 56,075, which is **75 bytes past** the
+old 56,000 ceiling. The compact-versus-full saving moves from 32.74% to 31.46%, against
+a 15% `MINIMUM_SAVING_RATIO` floor that is untouched.
+
+**A cheaper option existed and was declined on the merits, not for lack of room.**
+`vocabulary.kinds` (193 bytes) and `vocabulary.relations` (145 bytes) restate material
+the payload already carries: the kinds are governed block types the authoring recipes
+also describe, and `contradicts` / `supersedes` already appear in `search_guidance`'s
+relation-filter example. Cutting both would have landed compact at 55,737, a genuine 263
+bytes under the old ceiling, with no gate change at all. They were kept anyway. For a
+payload that is a generic client's entire contract, an agent reading the doctrine should
+not have to assemble the vocabulary from three other sections to act on it; locality is
+worth 338 bytes here. That is the tradeoff — not an impossibility.
+
+So the raise should be described honestly: this change **spent the whole growth budget
+the old ceiling expressed and pre-authorised 1,925 bytes more.** It does not restore
+equivalent headroom, and a second addition of this size must argue for itself from
+scratch. What makes it defensible rather than merely convenient is that the constant's
+own comment sets the protocol — "never raise it without deciding the extra bytes earn a
+caller's context" — that the decision and its numbers are recorded in that comment, that
+58,000 still sits roughly 6 KB below the 64,070-byte regression point the gate was built
+to catch, and that the two ways of staying under 56,000 were both worse: cut the
+vocabulary's locality, or land 6 bytes clear, which is a tripwire rather than a budget —
+the next unrelated word would fail a gate that is not about it.
 
 **Doctrine can drift from behaviour.** Prose that describes behaviour is prose that can
 become false. Mitigated structurally: the outcome vocabulary and the metadata keys are

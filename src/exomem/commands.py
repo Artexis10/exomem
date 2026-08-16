@@ -517,8 +517,10 @@ def op_bootstrap(
                 "downranked when it passes; it becomes findable as overdue."
             ),
             "metadata_form": (
-                "Rich-form only; a compact observation carries no metadata. Both rows "
-                "are preserved across edits, so correcting wording never costs a verdict."
+                "verdict and check_by are `- key: value` rows under a rich `## Heading` "
+                "unit; a compact `- [category] ...` observation carries no metadata. "
+                "Both survive an edit to the unit's wording, so fixing a typo never "
+                "costs a verdict."
             ),
             "kinds": {
                 "open_question": "a question this store has not answered yet",

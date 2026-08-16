@@ -2,11 +2,15 @@
 
 The shipped `SKILL.md` scaffold carries this product's whole epistemology, and it
 reaches only skill-capable Claude surfaces. Every other client — hosted agents,
-generic MCP clients — sees the `bootstrap` payload and nothing else. Before this
-change that payload contained no occurrence of "append-only" or "immutable", two
-incidental occurrences of "supersed", and one of "contradict" inside a filter
-example, so the two client tiers produced two different epistemologies against
-one vault.
+generic MCP clients — sees the `bootstrap` payload and nothing else.
+
+The pre-change payload was not silent about these words, it was uninstructive. The
+compact payload on `origin/main` @ 64475616 contained "epistemic" twice, "supersed"
+five times, and "contradict" twice — every one of them a routing label, a filter
+example, or a traversal-profile name, none of them telling an agent what to do.
+"append-only" appeared zero times, and not one of the five epistemic outcome words
+appeared at all. So the two client tiers produced two different epistemologies
+against one vault.
 
 These tests pin the doctrine onto the path every tier actually reads, and pin the
 taught vocabulary to the modules that own it so prose cannot drift away from
@@ -18,7 +22,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from exomem import commands, semantic_blocks, semantic_units
+import pytest
+
+from exomem import commands, hosted_gateway, semantic_blocks, semantic_units
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 #: Every commitment the portable contract has to carry, keyed by payload key.
@@ -128,11 +134,14 @@ def test_taught_kinds_are_governed_block_types(vault: Path) -> None:
         assert description
 
 
-def test_metadata_form_rule_is_taught(vault: Path) -> None:
+def test_metadata_form_rule_names_its_referent(vault: Path) -> None:
+    """"Both rows are preserved" is unresolvable to a client reading only JSON."""
     form = _contract(vault)["vocabulary"]["metadata_form"].lower()
 
-    assert "rich" in form
-    assert "preserved" in form
+    for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS:
+        assert key in form, key
+    assert "rich" in form and "compact" in form
+    assert "survive an edit" in form
 
 
 # ------------------------------------------------------------------ capture nudge
@@ -186,27 +195,49 @@ def test_every_profile_carries_the_contract(vault: Path) -> None:
         assert contract["vocabulary"]["outcomes"], profile
 
 
-def test_reduced_surface_keeps_every_commitment(vault: Path) -> None:
-    """The bifurcation this change fixes is a reduced surface losing the doctrine."""
-    descriptor = ActiveSurfaceDescriptor(
-        surface="test",
-        profile="tier-one-only",
-        tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory"),
-    )
-
+def _assert_doctrine_intact(descriptor: ActiveSurfaceDescriptor, vault: Path) -> None:
     with active_surface(descriptor):
         payload = commands.op_bootstrap(vault)
 
     contract = payload["epistemic_contract"]
-    assert tuple(contract["commitments"]) == _COMMITMENTS
+    assert tuple(contract["commitments"]) == _COMMITMENTS, descriptor.profile
     assert tuple(contract["vocabulary"]["outcomes"]) == (
         semantic_units.EPISTEMIC_OUTCOMES
-    )
+    ), descriptor.profile
 
     serialized = json.dumps(contract)
-    for unavailable in set(commands.PRODUCT_PUBLIC_NAMES) - {"bootstrap", "ask_memory"}:
-        assert unavailable not in serialized, unavailable
+    for unavailable in set(commands.PRODUCT_PUBLIC_NAMES) - set(
+        descriptor.product_commands
+    ):
+        assert unavailable not in serialized, (descriptor.profile, unavailable)
+
+
+def test_reduced_surface_keeps_every_commitment(vault: Path) -> None:
+    """The bifurcation this change fixes is a reduced surface losing the doctrine."""
+    _assert_doctrine_intact(
+        ActiveSurfaceDescriptor(
+            surface="test",
+            profile="tier-one-only",
+            tier2_enabled=False,
+            product_commands=("bootstrap", "ask_memory"),
+        ),
+        vault,
+    )
+
+
+@pytest.mark.parametrize("profile", sorted(commands.PRODUCT_SURFACE_PROFILES))
+def test_every_shipped_hosted_profile_keeps_the_doctrine(
+    profile: str, vault: Path
+) -> None:
+    """A synthetic descriptor proves the filter; the shipped profiles are the product.
+
+    Parametrised over the live profile registry rather than a hand-listed pair, so
+    adding or narrowing a hosted profile cannot regress the doctrine with this suite
+    still green.
+    """
+    _assert_doctrine_intact(
+        hosted_gateway.hosted_agent_surface_descriptor(profile), vault
+    )
 
 
 def test_contract_version_moved_for_the_new_section(vault: Path) -> None:
@@ -216,14 +247,34 @@ def test_contract_version_moved_for_the_new_section(vault: Path) -> None:
 # --------------------------------------------------- the original audit defect
 
 
+#: Occurrences in the compact payload built from `origin/main` @ 64475616, measured
+#: by extracting that tree with `git archive` and importing it ahead of the working
+#: copy. Every assertion below is strictly above its baseline, so a revert of the
+#: doctrine fails this test instead of coasting on words the payload already had.
+_BASELINE_OCCURRENCES = {
+    "epistemic": 2,
+    "append-only": 0,
+    "supersed": 5,
+    "contradict": 2,
+}
+
+
 def test_payload_no_longer_omits_the_doctrine(vault: Path) -> None:
-    """Regression for the counts the audit measured on the pre-change payload."""
+    """Regression against the measured pre-change payload, not against zero.
+
+    `immutable` is deliberately absent from this list: it was zero before and is
+    still zero, so the payload teaches append-only provenance in other words and
+    this test must not imply otherwise.
+    """
     serialized = json.dumps(commands.op_bootstrap(vault)).lower()
 
-    assert "epistemic" in serialized
-    assert "append-only" in serialized
-    assert serialized.count("supersed") > 2
-    assert serialized.count("contradict") > 1
+    for term, baseline in _BASELINE_OCCURRENCES.items():
+        assert serialized.count(term) > baseline, (
+            f"{term!r} occurs {serialized.count(term)} times, no more instructively "
+            f"than the {baseline} incidental occurrences already on origin/main"
+        )
+
+    # None of the five appeared in the pre-change payload at all.
     for outcome in semantic_units.EPISTEMIC_OUTCOMES:
         assert outcome in serialized, outcome
 
