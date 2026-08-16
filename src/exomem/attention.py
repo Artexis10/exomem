@@ -1,9 +1,10 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the five default measurement-only queues that `audit` already produces —
-`bridge_review`, `corpus_contradictions`, `stale_review`, `unprocessed_source`, and
-`relation_debt` — into a single ranked list while retaining opt-in registered semantic
-categories. The composition is pure measurement: each queue already emits its findings
+Composes the six default measurement-only queues that `audit` already produces —
+`bridge_review`, `prediction_window`, `corpus_contradictions`, `stale_review`,
+`unprocessed_source`, and `relation_debt` — into a single ranked list while retaining
+opt-in registered semantic and epistemic-lifecycle categories. The composition is pure
+measurement: each queue already emits its findings
 in intra-queue rank order, and this module fuses those ranks with Reciprocal Rank Fusion
 (the same `fusion` utility `find` uses) and dedups by anchor path. No note content is
 read, embedded, or compared here; nothing is mutated; `find` ordering is untouched. The
@@ -27,17 +28,26 @@ from . import review_state as review_state_module
 from .audit import AuditFinding
 
 # The default queues in deterministic tiebreak-preference order (highest first).
+#
+# The order runs from explicitly AUTHORED commitments to INFERRED signals.
+# `bridge_review` and `prediction_window` are both dates a human wrote down — a
+# governance review date and an epistemic check date — so they outrank everything
+# below them, which is inference: a cosine proximity band that cannot tell
+# agreement from contradiction, an age-and-degree heuristic, an empty-field scan,
+# and a missing-edge scan. Ranking a guess above a promise would be the wrong way
+# round.
 DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "bridge_review",
+    "prediction_window",
     "corpus_contradictions",
     "stale_review",
     "unprocessed_source",
     "relation_debt",
 )
-# Registered — selectable via `categories` — but deliberately NOT default. The
-# default union above stays byte-for-byte what it was, so a grandfathered corpus
-# of long-closed epistemic windows cannot evict the signal already on a user's
-# daily surface at upgrade time. See `audit.EPISTEMIC_REVIEW_CATEGORIES`.
+# Registered — selectable via `categories` — but deliberately NOT default,
+# because these read old fields that a long-lived vault can already hold a large
+# backlog of. See `audit.EPISTEMIC_REVIEW_CATEGORIES` for why their sibling
+# `prediction_window` sits in the default union above instead.
 ATTENTION_CATEGORIES: tuple[str, ...] = (
     *DEFAULT_ATTENTION_CATEGORIES,
     *audit_module.TYPED_SEMANTIC_CATEGORIES,

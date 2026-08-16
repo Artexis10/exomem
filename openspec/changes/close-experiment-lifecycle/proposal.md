@@ -12,7 +12,7 @@ The result is a silent hole with a documentation-shaped lid on it. Closing it is
 ## What Changes
 
 - Add an `unfinished_experiments` audit category: an experiment whose `started` date is present, whose elapsed time exceeds its declared `duration`, and which records no `outcome:`. Severity is `info` — always a review candidate, never a blocking finding — and the queue is ordered oldest-first by elapsed age.
-- Register `unfinished_experiments` as a selectable `attention` category. It is **not** added to the default attention union, so the default daily review surface is byte-for-byte unchanged and a grandfathered corpus of long-dormant experiments cannot flood it on upgrade.
+- Register `unfinished_experiments` as a selectable `attention` category. It is **not** added to the default attention union, so this change leaves the default daily review surface untouched and a grandfathered corpus of long-dormant experiments cannot flood it on upgrade. (The sibling change `add-prediction-window-review` does widen that union, for a queue whose fields are too new to have a backlog; the reasoning for treating the two differently is in `design.md`.)
 - Correct the false rationale in `audit.py`'s `stale_review` scope comment so it cites the check that now actually exists, and so it stops implying a `production-log` lifecycle check that still does not exist.
 - Correct the shipped scaffold's `audit-checks.md` entry so the documented predicate is the implemented predicate — including that the trigger is a missing `outcome:`, not a `status: active` value, because a `concluded` experiment with no recorded outcome is exactly the case the check exists to catch.
 
@@ -34,6 +34,7 @@ An open-ended experiment (`duration: ongoing`, or any duration that is not a fin
 
 - Affects `src/exomem/audit.py` (category registry, one new check function, one corrected comment), `src/exomem/attention.py` (registered-category tuple), and `src/exomem/_scaffold/_Schema/references/audit-checks.md`.
 - `src/exomem/note.py` needs no change: `STATUS_EXPERIMENT` already carries `concluded` and `EXPERIMENT_OUTCOME_VALUES` already aliases `semantic_units.EPISTEMIC_OUTCOMES`. The enum work this change was scoped to do landed with the epistemic loop primitives.
-- Default `audit()` gains one `info` category. Default `attention()` is unchanged, because the new category is registered but not default-selected. Selecting any explicit category set that omits `unfinished_experiments` reproduces prior behaviour exactly.
+- Default `audit()` gains one `info` category. Default `attention()` is unaffected by this change, because the new category is registered but not default-selected. Selecting any explicit category set that omits `unfinished_experiments` reproduces prior behaviour exactly.
+- Touches none of the `attention-queue` capability's existing requirements — the default union and its normative tiebreak order are left alone here, so this change is reviewable independently of the sibling change that does move them.
 - Introduces no model, no new relation kind, no new page type, no new sidecar, and no ranking change. `find` ordering is untouched.
 - Does **not** close the scaffold's second unbacked claim, "Unfinished production lifecycles". That check also does not exist; this change corrects the comment that wrongly implied it and records the gap as a named follow-up rather than silently widening scope.

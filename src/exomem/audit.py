@@ -125,19 +125,26 @@ TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
     "semantic_strict_schema_drift",
     "semantic_relation_disposition",
 )
-# Epistemic LIFECYCLE queues: "did this loop ever close?", as distinct from the
-# default queues' "is this still true?" / "does this conflict?". `attention`
-# registers them as selectable categories but deliberately keeps them OUT of its
-# default union (see `attention.DEFAULT_ATTENTION_CATEGORIES`), following the
-# activation-manifest precedent: a new review category surfaces grandfathered
-# items as review CANDIDATES, never as blocking findings, and never by evicting
-# the signal already on a user's daily surface. A vault running for two years can
-# hold dozens of long-closed windows; dropping all of them into the default queue
-# on upgrade would not be a feature. Selecting any category set that omits these
-# reproduces prior behaviour exactly.
+# Epistemic LIFECYCLE queues that are OPT-IN: registered as selectable
+# `attention` categories but deliberately kept OUT of its default union (see
+# `attention.DEFAULT_ATTENTION_CATEGORIES`).
+#
+# The gate is BACKLOG PROFILE, not category kind. `prediction_window` is the same
+# sort of lifecycle check and it IS in the default union, because the fields it
+# reads (`check_by`, the `prediction` kind) shipped with the epistemic loop
+# primitives and no vault can hold a grandfathered population of them. The fields
+# `unfinished_experiments` reads (`started`, `duration`) predate the package
+# rename, so a long-lived vault can genuinely hold dozens of long-closed windows,
+# and dropping all of them onto the daily surface at upgrade time would evict the
+# signal already there rather than add to it.
+#
+# That is the activation-manifest precedent applied where it bites: a new
+# category surfaces grandfathered items as review CANDIDATES, never as blocking
+# findings, and never by displacing a surface someone already relies on. Where
+# there is no grandfathered population, the precedent has nothing to protect and
+# opt-in only hides the queue from the people it exists for.
 EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     "unfinished_experiments",
-    "prediction_window",
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset(
     {"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES}

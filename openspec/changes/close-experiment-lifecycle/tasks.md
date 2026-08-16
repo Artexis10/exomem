@@ -13,8 +13,9 @@
 ## 2. Attention Registration Tests
 
 - [x] 2.1 Add a failing test that `attention(categories=["unfinished_experiments"])` surfaces the overdue experiment as a ranked item carrying its reason.
-- [x] 2.2 Add a failing test that a default `attention()` call over the same vault surfaces no `unfinished_experiments` item, proving the default union is untouched.
-- [x] 2.3 Add a failing test that `attention.DEFAULT_ATTENTION_CATEGORIES` is byte-for-byte the pre-existing five-queue tuple in its existing order.
+- [x] 2.2 Add a failing test that a default `attention()` call over the same vault surfaces no `unfinished_experiments` item, proving this change does not touch the default union.
+- [x] 2.3 Add a test pinning `attention.DEFAULT_ATTENTION_CATEGORIES` to its exact tuple and order, so any widening of the daily surface has to be an explicit edit. (This change does not widen it; the sibling `add-prediction-window-review` does, and updates the pin.)
+- [x] 2.4 Record the backlog-profile reasoning at the definition of `audit.EPISTEMIC_REVIEW_CATEGORIES`, so a reader comparing the two lifecycle queues sees a deliberate split rather than an inconsistency.
 
 ## 3. Audit Check Implementation
 

@@ -95,33 +95,123 @@ inheriting a decision recorded against different authored content.
 - **WHEN** a surfaced unit's authored content is changed and the queue is recomputed
 - **THEN** the finding's `signal_version` differs from the value recorded before the edit
 
-### Requirement: Prediction Window Is Registered But Not Default In Attention
+### Requirement: Prediction Window Reaches The Audit Surface
 
-`prediction_window` SHALL be a valid `attention` category, selectable through the existing
-`categories` filter, and SHALL be rejected by neither the attention validator nor the audit
-validator. It MUST NOT be added to the default attention category union, so an `attention`
-call made without a category filter SHALL compose exactly the `bridge_review`,
-`corpus_contradictions`, `stale_review`, `unprocessed_source`, and `relation_debt` queues
-as before, in their existing tiebreak-preference order.
+`prediction_window` SHALL be a valid `audit` category, selectable through the existing
+`categories` filter and rejected by neither the audit validator nor the attention
+validator. Selecting a category set that omits `prediction_window` SHALL reproduce the
+prior behaviour of both `audit` and `attention` exactly, so the category can be disabled
+without residue.
 
-Selecting a category set that omits `prediction_window` SHALL reproduce the prior behaviour
-of both `audit` and `attention` exactly, so the category can be disabled without residue.
+#### Scenario: The category is selectable on audit
 
-#### Scenario: The default attention union is unchanged
+- **WHEN** `audit` is called with `categories=["prediction_window"]`
+- **THEN** the due prediction is reported and the summary counts it under that category
+  name
 
-- **WHEN** `attention` is called without a category filter over a vault holding a due
-  prediction
-- **THEN** no `prediction_window` item is surfaced and the composed categories are exactly
-  the pre-existing default union
-
-#### Scenario: The category is selectable
+#### Scenario: The category is selectable on attention
 
 - **WHEN** `attention` is called with `categories=["prediction_window"]`
 - **THEN** the due prediction is surfaced as a ranked review item carrying its reason, and
   no `ValueError` is raised for the category name
 
-#### Scenario: The category reaches the audit surface
+## MODIFIED Requirements
 
-- **WHEN** `audit` is called with `categories=["prediction_window"]`
-- **THEN** the due prediction is reported and the summary counts it under that category
-  name
+### Requirement: Unified Review Surface Composed From The Epistemic Queues
+
+The default `attention` category union SHALL preserve the existing review queues
+and the already-shipped `relation_debt` queue while adding `bridge_review` and
+`prediction_window`. Its default category and tiebreak-preference order SHALL be
+`bridge_review`, `prediction_window`, `corpus_contradictions`, `stale_review`,
+`unprocessed_source`, and `relation_debt`. That order SHALL run from explicitly
+authored commitments to inferred signals: a governance review date and an
+epistemic check date are both dates a human wrote down, so they SHALL outrank a
+proximity band, an age-and-degree heuristic, an empty-field scan, and a
+missing-edge scan. The broader registered attention category set SHALL continue to
+admit its existing typed semantic categories and its opt-in epistemic-lifecycle
+categories. `attention` SHALL consume one audit
+pass over its selected categories and SHALL remain read-only.
+
+`bridge_review` SHALL use read-only reference resolution; it SHALL not write
+canonical governance facts or review state during scanning. A release grant's
+bridge SHALL surface per approved audience for only these generic,
+bridge-path-anchored causes: due review date, bridge edited/stale approval,
+source or relevant restriction changed, and source unavailable/ambiguous. Detail,
+metadata, related paths, review context, and public responses SHALL not disclose
+restricted source title, path, ref, or other provenance.
+
+#### Scenario: Default attention composes the effective queue union
+
+- **WHEN** `attention` is called without a category filter
+- **THEN** it composes bridge review, prediction window, contradiction,
+  stale-review, unprocessed source, and relation-debt findings in the stated
+  default order without removing any existing queue
+- **AND** no file under the vault is created, modified, moved, or deleted
+
+#### Scenario: A due prediction reaches the daily surface unasked
+
+- **WHEN** `attention` is called without a category filter over a vault holding a
+  due, unresolved prediction
+- **THEN** that prediction is surfaced as a ranked review item without the caller
+  naming the `prediction_window` category
+
+#### Scenario: Category subset and registered-category validation
+
+- **WHEN** `attention` is called with `categories=["bridge_review"]`
+- **THEN** only bridge-review items are surfaced
+- **AND** `bridge_review`, `prediction_window`, `relation_debt`, and registered
+  typed semantic categories are accepted, while an unregistered category raises a
+  `ValueError` naming the valid set
+
+#### Scenario: Source drift produces a private bridge finding
+
+- **WHEN** an approved dependency changes, is deleted, or resolves ambiguously
+- **THEN** the bridge surfaces with a generic `bridge_review` cause and no source
+  provenance
+
+### Requirement: Deterministic Cross-Queue Ranking By Reciprocal Rank Fusion
+
+The system SHALL rank the effective category union by the existing deterministic
+weighted Reciprocal Rank Fusion over each queue's emission order, with `k=60` and
+equal default weights. It SHALL deduplicate by anchor path (partitioned by a
+bridge review's audience partition or a prediction's unit partition where
+present). Identical inputs SHALL order
+by score descending, then the best contributing category in this exact preference
+order: `bridge_review`, `prediction_window`, `corpus_contradictions`,
+`stale_review`, `unprocessed_source`, `relation_debt`, then path and partition.
+Reasons and category lists SHALL use that same category preference after their
+intra-queue rank.
+
+`meta.signal_version` for `bridge_review` SHALL deterministically include bridge
+bytes, review date, approval identity, cause, and dependency-state digest, and
+SHALL exclude today. A due date SHALL surface review work without expiring an
+otherwise exact release. Triage, dismissal, and snooze SHALL neither approve nor
+renew a bridge; a dismissed item SHALL resurface only when facts change. Audience
+partitions SHALL be independent. Exact reapproval of current bridge and dependency
+state SHALL clear stale findings.
+
+#### Scenario: Rank-major interleave at equal weights
+
+- **WHEN** each default queue contributes several findings in its emission order
+- **THEN** equal weights surface every queue's rank-1 before any rank-2, with ties
+  broken by the effective category preference
+- **AND** running the ranking twice over identical findings yields identical output
+
+#### Scenario: Equal-score categories use the effective tiebreak
+
+- **WHEN** equal-weight queues contribute equal-score items
+- **THEN** the deterministic order prefers bridge review, prediction window,
+  contradiction, stale review, unprocessed source, then relation debt before
+  path/partition
+
+#### Scenario: Due review remains stable across dates
+
+- **WHEN** the same due bridge is scanned on different later dates without a fact
+  change
+- **THEN** its signal version remains stable and its release is not expired solely
+  by the due date
+
+#### Scenario: Exact reapproval clears a stale review
+
+- **WHEN** a stale bridge receives a new exact release approval after review
+- **THEN** the stale bridge-review finding no longer appears for that audience

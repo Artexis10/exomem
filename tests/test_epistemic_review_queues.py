@@ -257,9 +257,23 @@ def test_unfinished_experiments_is_selectable_but_not_default_in_attention(
     )
 
 
-def test_default_attention_union_is_unchanged() -> None:
+def test_default_attention_union_is_pinned() -> None:
+    """The default union is a deliberate list, so widening it must be deliberate.
+
+    This assertion exists to FAIL when someone adds a category to the daily
+    review surface without arguing for it. Adding one is legitimate — this
+    branch does it for `prediction_window` — but it costs an explicit edit here
+    and, one level up, a MODIFIED delta against the attention-queue spec that
+    pins the same order normatively.
+
+    The ordering runs from explicitly AUTHORED commitments to INFERRED signals:
+    a governance review date and an epistemic check date are both dates a human
+    wrote down, so they outrank a cosine proximity band, an age heuristic, an
+    empty-field scan, and a missing-edge scan.
+    """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
+        "prediction_window",
         "corpus_contradictions",
         "stale_review",
         "unprocessed_source",
@@ -498,20 +512,79 @@ def test_two_due_predictions_on_one_page_are_two_review_items(vault: Path) -> No
     assert len({item.fingerprint for item in report.items}) == 2
 
 
-def test_prediction_window_is_selectable_but_not_default_in_attention(
-    vault: Path,
-) -> None:
+def test_prediction_window_is_in_the_default_attention_union(vault: Path) -> None:
+    """A due prediction must reach the daily surface without being asked for.
+
+    Unlike `unfinished_experiments`, this vocabulary is one day old, so no vault
+    can hold a grandfathered backlog to flood the queue with. Opt-in would buy
+    nothing and cost the whole point: a prediction that surfaces only when you
+    already thought to ask about predictions has not closed any loop.
+    """
     rel = _prediction_page(
         vault, "autovacuum", _prediction_block("p1", check_by="2026-08-02")
     )
 
+    assert "prediction_window" in attention_module.DEFAULT_ATTENTION_CATEGORIES
     assert "prediction_window" in attention_module.ATTENTION_CATEGORIES
-    assert "prediction_window" not in attention_module.DEFAULT_ATTENTION_CATEGORIES
+
+    default = attention_module.attention(vault, today=TODAY)
+    assert rel in [item.path for item in default.items]
+    surfaced = next(item for item in default.items if item.path == rel)
+    assert "prediction_window" in surfaced.categories
 
     selected = attention_module.attention(
         vault, categories=["prediction_window"], today=TODAY
     )
     assert [item.path for item in selected.items] == [rel]
 
+
+def test_prediction_window_outranks_the_inferred_queues_on_a_tie() -> None:
+    """Tiebreak order: an authored check date beats a cosine band and an age heuristic."""
+    findings = [
+        audit_module.AuditFinding(
+            category=category,
+            severity="info",
+            path=f"{category}.md",
+            detail=category,
+            proposed_fix="x",
+        )
+        for category in (
+            "corpus_contradictions",
+            "stale_review",
+            "prediction_window",
+            "relation_debt",
+        )
+    ]
+
+    report = attention_module._rank(findings)
+
+    assert [item.categories[0] for item in report.items] == [
+        "prediction_window",
+        "corpus_contradictions",
+        "stale_review",
+        "relation_debt",
+    ]
+
+
+def test_only_prediction_window_joins_the_default_union(vault: Path) -> None:
+    """The two queues are split on backlog profile, and the split must be visible.
+
+    `unfinished_experiments` reads `started`/`duration`, which predate the
+    package rename, so a long-lived vault can hold dozens of long-closed
+    windows. `prediction_window` reads `check_by`, which shipped with the
+    epistemic loop primitives one day before this change. Same mechanism,
+    opposite grandfathered population, so opposite default.
+    """
+    _experiment(vault, "vacuum-tuning", started="2026-04-18", duration="30 days")
+    prediction = _prediction_page(
+        vault, "autovacuum", _prediction_block("p1", check_by="2026-08-02")
+    )
+
     default = attention_module.attention(vault, today=TODAY)
-    assert all("prediction_window" not in item.categories for item in default.items)
+    surfaced = {
+        category for item in default.items for category in item.categories
+    }
+
+    assert "prediction_window" in surfaced
+    assert "unfinished_experiments" not in surfaced
+    assert prediction in [item.path for item in default.items]

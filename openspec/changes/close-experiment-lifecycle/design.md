@@ -54,6 +54,25 @@ It also keeps this change honest about the spec it touches. The attention-queue 
 
 Promoting the category into the default union later is a deliberate, separately-argued change, and it should be argued with evidence from real vaults about queue volume.
 
+### The gate is backlog profile, so the sibling prediction queue is default and this one is not
+
+`add-prediction-window-review` lands the same shape of lifecycle check on the same branch and **does** join the default union. That asymmetry is the decision, not an inconsistency, and it is worth stating plainly because a reader comparing the two changes will otherwise read one of them as an oversight.
+
+The test is whether a grandfathered population can exist:
+
+| | `unfinished_experiments` | `prediction_window` |
+|---|---|---|
+| Fields read | `started`, `duration`, `outcome` | `check_by`, `verdict` |
+| Fields introduced | before the package rename (`9f30990e`, 2026-07-02) and earlier | epistemic loop primitives (`74d74578`, 2026-08-15) |
+| Possible backlog on upgrade | dozens of long-closed windows in an established vault | structurally none — the field is a day old |
+| Default union | **no** | **yes** |
+
+The activation-manifest precedent exists to stop a pre-existing population from arriving on the daily surface all at once. Where such a population is possible, as here, opt-in is the protection. Where it is structurally impossible, the precedent has nothing to protect and opt-in only hides a queue from the people it was built for.
+
+So this check waits. The right way to promote it is the way its sibling earned its place: an argument about this specific queue's volume in real vaults, not a general appeal to symmetry between the two.
+
+`audit.EPISTEMIC_REVIEW_CATEGORIES` — the opt-in tuple this category belongs to — carries this reasoning in a comment at the definition, so the split is legible from the code without reading either proposal.
+
 ### Severity is `info`, and the fix text defers every decision
 
 `info` is the severity every measurement-only queue in this module uses (`stale_review`, `relation_debt`, `unprocessed_source` when fresh). An overdue experiment is not a defect: the honest reading may be "extend the duration", "this quietly became ongoing", or "write it up". The `proposed_fix` names all three and auto-applies none, in the same register as the surrounding queues.

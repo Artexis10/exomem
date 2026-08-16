@@ -66,21 +66,26 @@ extending the duration, and archiving the experiment.
 
 `unfinished_experiments` SHALL be a valid `attention` category, selectable through the
 existing `categories` filter, and SHALL be rejected by neither the attention validator
-nor the audit validator. It MUST NOT be added to the default attention category union,
-so an `attention` call made without a category filter SHALL compose exactly the
-`bridge_review`, `corpus_contradictions`, `stale_review`, `unprocessed_source`, and
-`relation_debt` queues as before, in their existing tiebreak-preference order.
+nor the audit validator. It MUST NOT be a member of the default attention category
+union, so an `attention` call made without a category filter SHALL NOT surface an
+`unfinished_experiments` item.
+
+The exclusion SHALL be justified by backlog profile rather than by category kind. The
+`started` and `duration` fields this check reads long predate it, so an established
+vault can already hold a large population of long-closed windows, and admitting them to
+the daily surface at upgrade time would displace the signal already there. A sibling
+epistemic-lifecycle category whose fields are new enough to have no such population
+SHALL NOT be excluded on this reasoning.
 
 Selecting a category set that omits `unfinished_experiments` SHALL reproduce the prior
 behaviour of both `audit` and `attention` exactly, so the category can be disabled
 without residue.
 
-#### Scenario: The default attention union is unchanged
+#### Scenario: The default attention surface excludes the category
 
 - **WHEN** `attention` is called without a category filter over a vault holding an
   overdue experiment
-- **THEN** no `unfinished_experiments` item is surfaced and the composed categories are
-  exactly the pre-existing default union
+- **THEN** no `unfinished_experiments` item is surfaced
 
 #### Scenario: The category is selectable
 

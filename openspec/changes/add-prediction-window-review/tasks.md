@@ -17,14 +17,17 @@
 - [x] 2.2 Add a failing test that two due units on one page compose as two `attention` items sharing the page path with distinct review identities and distinct fingerprints.
 - [x] 2.3 Add a failing test that editing a surfaced unit's authored content changes its `signal_version`, so the review item resurfaces rather than inheriting a prior decision.
 
-## 3. Attention Registration Tests
+## 3. Default-Union Tests
 
 - [x] 3.1 Add a failing test that `attention(categories=["prediction_window"])` surfaces the due prediction as a ranked item carrying its reason.
-- [x] 3.2 Add a failing test that a default `attention()` call over the same vault surfaces no `prediction_window` item, proving the default union is untouched.
+- [x] 3.2 Add a failing test that a **default** `attention()` call over the same vault surfaces the due prediction without the caller naming the category.
+- [x] 3.3 Replace the default-union guard with one that pins the exact six-tuple in its exact order, so a later addition to the daily surface fails the test rather than passing silently.
+- [x] 3.4 Add a failing tiebreak test that at equal RRF scores `prediction_window` orders ahead of `corpus_contradictions`, `stale_review`, and `relation_debt`.
+- [x] 3.5 Add a failing test that asserts the split directly: over one vault holding both an overdue experiment and a due prediction, a default `attention()` surfaces the prediction and not the experiment.
 
 ## 4. Audit Check Implementation
 
-- [x] 4.1 Add `prediction_window` to `audit.ALL_CATEGORIES` and to the registered-but-not-default epistemic review category tuple that `attention` consumes.
+- [x] 4.1 Add `prediction_window` to `audit.ALL_CATEGORIES` and to `attention.DEFAULT_ATTENTION_CATEGORIES` in second tiebreak position, leaving `audit.EPISTEMIC_REVIEW_CATEGORIES` to carry only the opt-in experiment queue.
 - [x] 4.2 Implement `_check_prediction_window`: page scoping, the `check_by` substring prefilter, one `parse_semantic_units` call per candidate page with the vault's language and relation registries, and the unit-local due/unresolved predicate.
 - [x] 4.3 Resolve each relation kind through the relation registry to its canonical key before testing membership in the resolving family, so a registered alias is honoured.
 - [x] 4.4 Emit `info` findings anchored on the parent path with `meta` carrying `signal_version`, `review_partition`, `unit_ref`, `anchor`, `kind`, `check_by`, and `overdue_days`; order most-overdue-first with deterministic tiebreaks.
@@ -33,8 +36,10 @@
 
 ## 5. Attention Wiring
 
-- [x] 5.1 Extend the epistemic review category tuple that `attention.ATTENTION_CATEGORIES` consumes, leaving `DEFAULT_ATTENTION_CATEGORIES` unchanged.
-- [x] 5.2 Confirm no change is required in `commands.py`: the existing generic `categories` plumbing on `review_memory(mode="attention"|"audit")` already reaches the new category, and no tool docstring is edited.
+- [x] 5.1 Record the ordering principle — authored commitments before inferred signals — as a comment on `DEFAULT_ATTENTION_CATEGORIES`, so the next queue addition has a criterion to argue against rather than a list to append to.
+- [x] 5.2 Update the `attention.py` module docstring, which enumerates the default queues and would otherwise be made stale by this change. It is a plain module docstring, not a pinned MCP tool description, so it carries no fingerprint cost.
+- [x] 5.3 Confirm no change is required in `commands.py`: the existing generic `categories` plumbing on `review_memory(mode="attention"|"audit")` already reaches the new category, and no tool docstring is edited.
+- [x] 5.4 Modify the two `attention-queue` requirements that pin the default union and the RRF tiebreak order, reproducing each existing block verbatim before editing, and confirm `close-experiment-lifecycle` still touches neither.
 
 ## 6. Verification
 

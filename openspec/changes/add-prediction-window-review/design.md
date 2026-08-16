@@ -16,7 +16,7 @@ A unit's `- relations:` rows carry `kind: target` entries. The kind is resolved 
 - Keep the check a pure measurement over authored Markdown — no model, no inference about whether the prediction *came true*, only whether anyone has said so.
 - Make each due prediction its own review item with its own review state, so a decision about one prediction never disposes of another.
 - Make an edit to a prediction resurface it honestly, rather than letting a dismissal recorded against different text carry over.
-- Keep the upgrade path safe for a grandfathered corpus: an existing vault with old `check_by` dates must not have its daily review surface replaced by them.
+- Put a due prediction on the daily review surface by default, because a queue that only answers when explicitly asked has not removed the remembering it exists to remove.
 
 **Non-Goals:**
 
@@ -55,13 +55,29 @@ So the predicate keys on the authored obligation — a due `check_by` — and ca
 
 The trade-off is that a partition keyed on the fingerprint changes whenever the unit changes, so review state does not survive an edit. That is the intended semantics here, and it is the same trade-off the fingerprint itself already makes.
 
-### Registered as an attention category, deliberately not a default one
+### It joins the default union, because there is no backlog for opt-in to protect
 
-`prediction_window` joins `audit.ALL_CATEGORIES`, so a default `audit()` reports it, but it is added to `attention.ATTENTION_CATEGORIES` **without** joining `DEFAULT_ATTENTION_CATEGORIES`.
+`prediction_window` joins both `audit.ALL_CATEGORIES` and `attention.DEFAULT_ATTENTION_CATEGORIES`.
 
-This follows the activation-manifest precedent: a new review category surfaces grandfathered items as review candidates, never as blocking findings, and never by displacing a surface users already rely on. A vault that adopted `check_by` early may hold many long-past dates whose predictions were settled in prose; dropping all of them into the default daily queue on upgrade would evict that queue's existing signal in favour of a backlog.
+The activation-manifest precedent says a new review category must surface grandfathered items as review candidates, never as blocking findings, and never by displacing a surface users already rely on. The operative word is *grandfathered*. That precedent protects against a population of pre-existing items arriving all at once; where no such population can exist, it has nothing to protect and opt-in is pure cost.
 
-It also keeps the change honest about the spec it touches. The attention-queue capability pins the default union and its exact tiebreak order as a normative requirement with its own scenarios. Leaving the default untouched means this change **adds** a requirement rather than rewriting a load-bearing one, and the byte-for-byte-revert property is real: any category selection omitting `prediction_window` reproduces prior behaviour exactly.
+`check_by` and the `prediction` kind shipped with the epistemic loop primitives (`74d74578`, 2026-08-15) — one day before this change. It is not merely unlikely that a vault holds a backlog of due predictions; it is structurally impossible, because the field needed to author one has existed for about a day. Every `check_by` this queue will ever surface was authored after the queue was designed.
+
+Its sibling `close-experiment-lifecycle` is the opposite case and stays opt-in for exactly that reason: `started` and `duration` predate the package rename (`9f30990e`, 2026-07-02) and earlier still, so an established vault can hold dozens of long-closed windows. Same mechanism, opposite grandfathered population, opposite default. `audit.EPISTEMIC_REVIEW_CATEGORIES` carries the opt-in one and says so in a comment, so the split reads as a decision rather than an inconsistency.
+
+Opt-in here would also cost the change its entire point. `attention` is the daily front door; `check_by` exists to answer "what is due". A due prediction that surfaces only when the reader already thought to ask about predictions has not closed the loop — it has moved the remembering one step earlier, which is precisely the work the queue was supposed to remove.
+
+The spec cost is real and paid deliberately. The attention-queue capability pins the default union and its tiebreak order normatively, so this change **modifies** two existing requirements — the union requirement and the RRF tiebreak requirement — reproducing both verbatim before editing. `close-experiment-lifecycle` touches neither, so only one change carries a delta against them and the two remain independently reviewable.
+
+### Second in the tiebreak order: authored commitments outrank inferred signals
+
+The default order becomes `bridge_review`, `prediction_window`, `corpus_contradictions`, `stale_review`, `unprocessed_source`, `relation_debt`.
+
+The organising principle, previously implicit and now stated in the spec, is that the order runs from what a human explicitly *wrote down* to what the system *inferred*. `bridge_review` fires on a governance review date someone committed to. `prediction_window` fires on an epistemic check date someone committed to. Everything below is inference: `corpus_contradictions` is a cosine band that by its own documentation cannot tell agreement from contradiction, `stale_review` is an age-and-degree heuristic, `unprocessed_source` is an empty-field scan, `relation_debt` is a missing-edge scan.
+
+Placing an authored deadline behind a proximity measurement would rank a guess above a promise. It sits after `bridge_review` rather than before it because a bridge review carries an external commitment to another audience, where a check date is a commitment to oneself; when both tie, the one with someone else waiting on it goes first.
+
+This is a tiebreak only. It decides nothing about which items are surfaced and has no effect on `find`.
 
 ### Ordering is most-overdue-first
 
@@ -79,7 +95,9 @@ Only read-write pages participate; index and log pages are skipped; and `superse
 
 **Partitioning by fingerprint means review state does not survive an edit.** Intended: a dismissal is a statement about specific text. The alternative — partitioning on the authored `id` anchor — would preserve state across edits but would silently apply a dismissal to a rewritten prediction, and would not work at all for a unit with no authored anchor.
 
-**A grandfathered vault sees a new `info` category in default `audit()` output.** Accepted; bounded to a lint report a human reads, not a gate. `attention()` — the daily surface — is unchanged.
+**This is the one change on the branch that is not inert on upgrade.** Default `audit()` gains an `info` category and default `attention()` gains a queue. Accepted on the backlog argument above — the vocabulary is a day old, so the queue starts empty for every existing vault and fills only with predictions authored after it existed. The bound is checked rather than assumed: a vault with no `check_by` rows produces no findings, so an upgrader who has not adopted the primitives sees no change at all.
+
+**The default tiebreak order is now widened, and a future addition could widen it thoughtlessly.** Mitigated by pinning the exact tuple in a test whose whole purpose is to fail on an unargued change, and by the spec now stating the ordering *principle* (authored before inferred) rather than only the resulting list — so the next person adding a queue has a criterion to argue against instead of a list to append to.
 
 **`resolves` and `evidenced_by` clear a prediction without saying which way it went.** Deliberate. The check measures whether anyone has engaged with the prediction, not what they concluded; concluding is the `verdict`'s job. A unit that cites its resolving evidence but records no verdict is arguably still incomplete, but flagging it here would conflate "nobody checked" with "somebody checked and did not write a verdict row", and only the first is what this queue is for.
 
