@@ -25,6 +25,34 @@ log = logging.getLogger(__name__)
 VECTOR_DIM = 768
 SEMANTIC_UNIT_SCHEMA_VERSION = 3
 
+# Per-path change log for the read-side bounded catch-up (see sidecar_store's
+# "bounded catch-up" note). The table records the generation at which each
+# `chunks.file_path` was last mutated; the two meta keys bound the contiguous run
+# of generations that log fully covers, so a bump from any writer that does not
+# maintain it — an older generation-AWARE binary sharing this vault, a manual
+# repair, a future in-tree writer — forces the full reload instead of reading as
+# "this write changed nothing".
+CHUNK_PATH_LOG = sidecar_store.PathChangeLog(
+    "chunk_path_log", "chunk_path_log_from", "chunk_path_log_upto"
+)
+
+# Catch-up bounds. PATHS is the real cost knob, not generations: one bump can
+# retire a whole batch of paths (a purge) and many bumps can rewrite one path
+# (repeated upserts), so the changed-path count — not the generation delta — is
+# what the splice actually pays for. Per path it costs one `file_block` walk over
+# the key list plus that path's rows; the whole delta then costs ONE concatenate.
+# A full reload instead fetches and re-materializes every vector blob (a ~3 KB
+# BLOB per row against a bare string compare per key), so the per-path unit is
+# more than an order of magnitude cheaper than the per-row unit it replaces. 32
+# is set an order of magnitude below where those two could plausibly meet, and
+# comfortably above the 1-11 path deltas seen in production; it is a safety bound
+# on a fallback, not a tuned break-even, and the fallback is always correct.
+# GENERATIONS is only a cheap pre-filter: a cache that far behind belongs to an
+# idle process rejoining a busy vault, where one clean reload is the simpler
+# answer.
+CATCHUP_MAX_PATHS = 32
+CATCHUP_MAX_GENERATIONS = 64
+
 # --------------------------------------------------------------- generation meta
 #
 # The matrix caches key on an in-band WRITE GENERATION, not the sidecar file's
@@ -57,6 +85,66 @@ class _EmbCache(NamedTuple):
     recall_policy_identity: tuple[str, str]
     metadata: list[tuple[str, int]]
     matrix: np.ndarray
+
+
+def _splice_path_blocks(
+    metadata: list[tuple[str, int]],
+    matrix: np.ndarray,
+    replacements: dict[str, tuple[list[tuple[str, int]], np.ndarray | None]],
+) -> tuple[list[tuple[str, int]], np.ndarray]:
+    """Replace whole per-path row blocks in a `(metadata, matrix)` pair.
+
+    THE splice: the write-side single-path patch and the read-side bounded
+    catch-up both go through here, so there is exactly one implementation of
+    "swap a file's contiguous block for its current rows, keeping the pair sorted
+    by file_path and the two halves the same length".
+
+    `metadata` is sorted by file_path (both producers keep it that way), so
+    `sidecar_store.file_block` locates each path's block — or, for a path with no
+    rows yet, its insertion point. It scans from index 0 every time, so this is
+    O(paths x rows), not a single pass; that is affordable only because the
+    caller bounds the path count (CATCHUP_MAX_PATHS). The replacements are
+    processed in sorted order and `cursor` only ever moves forward, so blocks
+    that go backwards mean the caller handed in unsorted metadata and raise
+    rather than silently scrambling the matrix. An empty replacement (`new_vecs`
+    None or zero rows) deletes the block.
+
+    Copy-on-write: builds fresh containers and never mutates the arrays a
+    concurrent reader may be holding. Raises ValueError on any inconsistency;
+    both callers treat that as "drop the cache and take the full reload".
+    """
+    keys = [m[0] for m in metadata]
+    out_meta: list[tuple[str, int]] = []
+    parts: list[np.ndarray] = []
+    cursor = 0
+    for path in sorted(replacements):
+        lo, hi = sidecar_store.file_block(keys, path)
+        if lo < cursor:
+            raise ValueError(
+                f"unsorted matrix metadata at {path}: block starts at {lo}, "
+                f"behind cursor {cursor}"
+            )
+        out_meta.extend(metadata[cursor:lo])
+        parts.append(matrix[cursor:lo])
+        new_meta, new_vecs = replacements[path]
+        out_meta.extend(new_meta)
+        if new_vecs is not None and new_vecs.shape[0]:
+            parts.append(new_vecs)
+        cursor = hi
+    out_meta.extend(metadata[cursor:])
+    parts.append(matrix[cursor:])
+    parts = [p for p in parts if p.shape[0]]
+    new_matrix = (
+        np.concatenate(parts, axis=0)
+        if parts
+        else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+    )
+    if len(out_meta) != new_matrix.shape[0]:
+        raise ValueError(
+            f"splice invariant broken for {sorted(replacements)}: "
+            f"{len(out_meta)} meta rows vs {new_matrix.shape[0]} vectors"
+        )
+    return out_meta, new_matrix
 
 
 class SemanticUnitVectorHit(NamedTuple):
@@ -148,6 +236,10 @@ class EmbeddingIndex:
             "ON semantic_unit_vectors(parent_path, parent_generation)"
         )
         sidecar_store.ensure_meta_table(conn, "chunks", self.path.name)
+        # Before any write on this connection: every writer must have the log, so
+        # that a writer which bumps the generation without logging its paths is
+        # DETECTED rather than silently caught up (see sidecar_store).
+        sidecar_store.ensure_path_change_log(conn, CHUNK_PATH_LOG)
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
         ).fetchone()
@@ -194,10 +286,14 @@ class EmbeddingIndex:
                     )
                     if vec_on:
                         self._vec.dual_insert(conn, "file_path = ?", (rel_path,))
-                # Bump the write generation INSIDE this txn, then read back the
-                # FULL (epoch, generation, instance) token — stable under the
-                # write lock. The cache keys on it, not the mtime.
-                sidecar_store.bump_meta(conn, "generation")
+                # Bump the write generation INSIDE this txn — declaring the path
+                # it changed, so a reader one generation behind can catch up from
+                # the log instead of full-loading — then read back the FULL
+                # (epoch, generation, instance) token, stable under the write
+                # lock. The cache keys on it, not the mtime.
+                sidecar_store.bump_generation_for_paths(
+                    conn, CHUNK_PATH_LOG, [rel_path]
+                )
                 own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
@@ -231,6 +327,7 @@ class EmbeddingIndex:
             vec_on = vec_gate(self, conn)
             with conn:
                 removed = 0
+                removed_paths: list[str] = []
                 for rel_path in paths:
                     chunk_count = conn.execute(
                         "SELECT COUNT(*) FROM chunks WHERE file_path = ?", (rel_path,)
@@ -249,8 +346,14 @@ class EmbeddingIndex:
                         (rel_path,),
                     )
                     removed += 1
+                    removed_paths.append(rel_path)
                 if removed:
-                    sidecar_store.bump_meta(conn, "generation")
+                    # ONE bump for the whole batch — hence the explicit path list:
+                    # the generation delta alone could never say how many, or
+                    # which, paths this retired.
+                    sidecar_store.bump_generation_for_paths(
+                        conn, CHUNK_PATH_LOG, removed_paths
+                    )
                     sidecar_store.bump_meta(conn, "semantic_unit_generation")
                     own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
@@ -445,23 +548,9 @@ class EmbeddingIndex:
                 )
                 return  # not contiguous with what THIS cache holds -> never splice
             try:
-                lo, hi = sidecar_store.file_block([m[0] for m in c.metadata], rel_path)
-                new_metadata = c.metadata[:lo] + list(new_meta) + c.metadata[hi:]
-                parts = [c.matrix[:lo]]
-                if new_vecs is not None and new_vecs.shape[0]:
-                    parts.append(new_vecs)
-                parts.append(c.matrix[hi:])
-                parts = [p for p in parts if p.shape[0]]
-                new_matrix = (
-                    np.concatenate(parts, axis=0)
-                    if parts
-                    else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+                new_metadata, new_matrix = _splice_path_blocks(
+                    c.metadata, c.matrix, {rel_path: (list(new_meta), new_vecs)}
                 )
-                if len(new_metadata) != new_matrix.shape[0]:
-                    raise ValueError(
-                        f"splice invariant broken for {rel_path}: "
-                        f"{len(new_metadata)} meta rows vs {new_matrix.shape[0]} vectors"
-                    )
                 self._cache = _EmbCache(
                     c.epoch,
                     own_gen,
@@ -509,6 +598,21 @@ class EmbeddingIndex:
             )
             if served is not None:
                 return served.metadata, served.matrix
+            # Bounded catch-up BEFORE the full reload: a cache a couple of
+            # generations behind (the common case — another instance wrote, or a
+            # patch was refused as non-contiguous) is patched from the changed
+            # paths' rows alone, instead of paying the O(vault) SELECT + stack.
+            if c is not None and c.recall_policy_identity == policy_identity:
+                try:
+                    patched = self._catch_up_cache(c)
+                except Exception as e:  # noqa: BLE001 — always fall back, never raise
+                    log.warning(
+                        "embedding matrix catch-up failed (%s); taking the full load", e
+                    )
+                    patched = None
+                if patched is not None:
+                    self._cache = patched
+                    return patched.metadata, patched.matrix
             # Keep this call zero-argument: cache tests and production probes
             # deliberately wrap the named full-reload seam.
             loaded = self._load_all_rows()
@@ -542,6 +646,92 @@ class EmbeddingIndex:
             "epoch": c.epoch,
             "generation": c.generation,
         }
+
+    def _catch_up_cache(self, c: _EmbCache) -> _EmbCache | None:
+        """Patch a slightly-stale warm cache forward from the changed paths only.
+
+        Returns the patched cache, or None when this delta is not eligible (the
+        caller then takes the full reload). Call under `self._lock` with `c` the
+        cache that was just found stale and already known to match the current
+        recall-policy identity.
+
+        Everything the decision rests on — the meta token, the change log, the
+        replacement rows, and the row count that cross-checks them — is read
+        inside ONE explicit `BEGIN`, for exactly the reason `_load_all_rows`
+        does it: python sqlite3 in autocommit gives every bare SELECT its own
+        snapshot, so a split read could pair one write's generation with another
+        write's rows and then label the result as current.
+
+        What keeps an unlogged generation bump from being read as "this write
+        changed nothing" is `catchup_is_eligible`'s run check, NOT the `COUNT(*)`
+        below: a count cannot see an in-place re-embed of an existing chunk,
+        which preserves the row count exactly. The count is a cheap secondary
+        cross-check for insert/delete-shaped divergence only.
+        """
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            try:
+                epoch, gen, instance = sidecar_store.read_meta_token(conn)
+                run = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
+                if not sidecar_store.catchup_is_eligible(
+                    c,
+                    epoch,
+                    gen,
+                    instance,
+                    run=run,
+                    max_generations=CATCHUP_MAX_GENERATIONS,
+                ):
+                    return None
+                changed = sidecar_store.changed_paths_since(
+                    conn, CHUNK_PATH_LOG, c.generation, limit=CATCHUP_MAX_PATHS
+                )
+                if len(changed) > CATCHUP_MAX_PATHS:
+                    return None  # wider than the bound — one clean reload is cheaper
+                replacements: dict[
+                    str, tuple[list[tuple[str, int]], np.ndarray | None]
+                ] = {}
+                for path in changed:
+                    rows = conn.execute(
+                        "SELECT chunk_idx, vector FROM chunks "
+                        "WHERE file_path = ? ORDER BY chunk_idx",
+                        (path,),
+                    ).fetchall()
+                    key = sys.intern(path)
+                    replacements[key] = (
+                        [(key, idx) for idx, _blob in rows],
+                        np.stack(
+                            [np.frombuffer(blob, dtype=np.float32) for _idx, blob in rows],
+                            axis=0,
+                        )
+                        if rows
+                        else None,
+                    )
+                total_rows = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+            finally:
+                conn.rollback()  # read-only txn — release the snapshot
+        finally:
+            conn.close()
+        metadata, matrix = _splice_path_blocks(c.metadata, c.matrix, replacements)
+        if len(metadata) != total_rows:
+            raise ValueError(
+                f"catch-up row count disagrees with the sidecar: {len(metadata)} "
+                f"spliced vs {total_rows} stored (gen {c.generation} -> {gen})"
+            )
+        log.info(
+            "embedding matrix catch-up: reason=%s paths=%d rows=%d gen=%d epoch=%d "
+            "cached_gen=%d delta=%d",
+            sidecar_store.CATCHUP_REASON,
+            len(replacements),
+            len(metadata),
+            gen,
+            epoch,
+            c.generation,
+            gen - c.generation,
+        )
+        return _EmbCache(
+            epoch, gen, instance, c.mtime, c.recall_policy_identity, metadata, matrix
+        )
 
     def _load_all_rows(self, policy_identity: tuple[str, str] | None = None) -> _EmbCache:
         """Full reload from the sidecar → an `_EmbCache`.
@@ -1052,8 +1242,10 @@ class EmbeddingIndex:
                 # serving empty until this commit moves the token — the same
                 # exposure a full reload always had racing a wipe/rebuild window,
                 # unchanged by this PR. epoch catches re-embeds that changed no
-                # file mtimes.
-                sidecar_store.bump_meta(conn, "generation")
+                # file mtimes. The per-path change log cannot describe a
+                # whole-table rewrite, so it resets and a fresh logged run starts
+                # here — no cache may be caught up across this write.
+                sidecar_store.bump_generation_for_reset(conn, CHUNK_PATH_LOG)
                 sidecar_store.bump_meta(conn, "epoch")
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")
         finally:
