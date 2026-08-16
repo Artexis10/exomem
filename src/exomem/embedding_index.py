@@ -237,10 +237,9 @@ class EmbeddingIndex:
         )
         sidecar_store.ensure_meta_table(conn, "chunks", self.path.name)
         # Before any write on this connection: every writer must have the log, so
-        # that every generation past its floor is recorded (see sidecar_store).
-        sidecar_store.ensure_path_change_log(
-            conn, CHUNK_PATH_LOG
-        )
+        # that a writer which bumps the generation without logging its paths is
+        # DETECTED rather than silently caught up (see sidecar_store).
+        sidecar_store.ensure_path_change_log(conn, CHUNK_PATH_LOG)
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
         ).fetchone()
@@ -1244,11 +1243,9 @@ class EmbeddingIndex:
                 # exposure a full reload always had racing a wipe/rebuild window,
                 # unchanged by this PR. epoch catches re-embeds that changed no
                 # file mtimes. The per-path change log cannot describe a
-                # whole-table rewrite, so it resets and its authority floor moves
+                # whole-table rewrite, so it resets and a fresh logged run starts
                 # here — no cache may be caught up across this write.
-                sidecar_store.bump_generation_for_reset(
-                    conn, CHUNK_PATH_LOG
-                )
+                sidecar_store.bump_generation_for_reset(conn, CHUNK_PATH_LOG)
                 sidecar_store.bump_meta(conn, "epoch")
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")
         finally:

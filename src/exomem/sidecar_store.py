@@ -182,7 +182,9 @@ def reload_reason(old_cache, new_epoch: int, new_gen: int) -> str:
 # count) and neither can "the newest generation was logged" (a gap earlier in the
 # window still passes). So the two markers in `meta` bound a CONTIGUOUS RUN of
 # logged generations: `<upto_key>` is the newest logged generation and
-# `<from_key>` the oldest generation of the unbroken run ending there. Each
+# `<from_key>` sits one BELOW the run's oldest logged generation — i.e. it is the
+# oldest *cache* generation the run can carry forward, which is what the
+# `cache.generation >= from` check below compares against. Each
 # logged bump extends the run, or — finding itself not adjacent to the previous
 # logged generation — restarts it, permanently excluding the window containing
 # the gap. Catch-up then requires `upto == gen` (the newest generation is logged)
