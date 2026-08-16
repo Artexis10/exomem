@@ -52,6 +52,17 @@ UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
 REBUILD_STABILIZATION_ATTEMPTS = 2
 REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
+# How many publication attempts may be spent re-running a rebuild that a newer
+# external epoch superseded (issue #571). Deliberately far below
+# `REBUILD_PUBLICATION_ATTEMPTS`: a superseded attempt can itself cost two
+# stabilization passes, so charging the whole publication budget to this one
+# condition would quadruple a rebuild's cost, and `claim_rebuild_owner` is held
+# for the duration and serializes graph rebuilds against each other. One retry
+# is what the evidence supports — every logged episode cleared on the very next
+# reconcile, and the "epoch marked before the call" control publishes in a
+# single pass — while a supersession that survives it is not transient, so
+# re-running the rebuild cannot be what fixes it.
+REBUILD_SUPERSESSION_RETRIES = 1
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
 _RESOLVER_TOPOLOGY_KEY = "recall_resolver_topology"
@@ -263,6 +274,22 @@ class GraphPublicationUnavailable(graph_sync.GraphRebuildRegistrationError):
             f"Retry the mutation, or {graph_sync._RECONCILE_HINT}",
         )
         self.args = (f"{message}: {self.args[0]}",)
+
+
+class GraphPublicationSuperseded(GraphPublicationUnavailable):
+    """Class B: a newer external epoch landed mid-pass and superseded this one.
+
+    A distinct type, not a distinct message, because `_rebuild_all_off_boundary`
+    has to catch *exactly* this refusal and no other. `GraphPublicationUnavailable`
+    also names a lost rebuild owner and a marker that would not publish for any
+    other reason — both genuinely doomed for this call — so the base type alone
+    cannot separate them, and widening the catch to it would silently retry a
+    publication that has already been proven hopeless.
+
+    Everything the classification contract reads comes from the base: this is
+    still a `graph_sync.GraphRebuildRegistrationError`, so `is_publication_failure`
+    answers True and `may_mark_external_pending` answers False.
+    """
 
 
 class GraphProjectionMoved(RuntimeError):
@@ -1230,6 +1257,7 @@ class EpistemicGraphIndex:
         """Build and prove a private sidecar before its bounded replacement hold."""
         live = self.path
         attempts = 0
+        superseded_retries = 0
         epoch_error: graph_sync.GraphEpochIncoherent | None = None
         # Artifacts of an earlier failed publication belong to this projection
         # (contract R3). Collect them before adding another one, so repeated
@@ -1312,7 +1340,51 @@ class EpistemicGraphIndex:
                 # while the actual SQLite target remains private.
                 if "_index_path" in self.__dict__:
                     temporary_index._index_path = self._index_path  # type: ignore[method-assign]
-                report = temporary_index._rebuild_all_locked()
+                try:
+                    report = temporary_index._rebuild_all_locked()
+                except GraphPublicationSuperseded:
+                    # A newer external epoch landed mid-pass. This loop is the
+                    # only place that can clear it — `prepare_recall_publication`
+                    # above returns `None` for exactly this condition and this
+                    # seam answers it — which is why an epoch marked *before* the
+                    # call already publishes in a single pass. Reconcile and
+                    # retry here so an interactive write converges inside the
+                    # same call instead of failing and waiting ~5 minutes for the
+                    # next reconcile tick with the graph unavailable.
+                    #
+                    # Bounded by its own budget rather than the publication one.
+                    # A superseded attempt is not always one pass: the marker can
+                    # fail on stabilization attempt 1 for an unrelated reason and
+                    # only then be superseded on attempt 2, so charging the whole
+                    # publication budget here would cost eight passes where the
+                    # unfixed code costs two. `claim_rebuild_owner` is held
+                    # across all of them and serializes graph rebuilds against
+                    # each other, so that is not free.
+                    #
+                    # Exhausting the retry re-raises this same refusal, which is
+                    # already the classification the caller needs — Class B,
+                    # `may_mark_external_pending` False — and carries the
+                    # runnable remediation its base builds. The memo is what
+                    # stops the next cycle re-paying the same doomed rebuild.
+                    #
+                    # Only this subtype is caught; a genuinely doomed
+                    # `GraphPublicationUnavailable` still propagates unchanged.
+                    if superseded_retries >= REBUILD_SUPERSESSION_RETRIES:
+                        # Still reconcile before giving up. The epoch this
+                        # publication could not overtake is otherwise left set,
+                        # which is what fences the graph for the ~5 minutes
+                        # until the next reconcile tick — the availability gap
+                        # this issue is about. Best effort: the classified
+                        # refusal is the outcome the caller must see either way.
+                        try:
+                            self._reconcile_recall_publication()
+                        except Exception:  # noqa: BLE001 - the refusal is the outcome
+                            pass
+                        note_publication_refusal(self.vault_root)
+                        raise
+                    superseded_retries += 1
+                    self._reconcile_recall_publication()
+                    continue
                 ticket = self._prepare_publication_ticket(
                     temporary,
                     epoch=graph_sync.GraphPublicationEpoch(
@@ -1397,8 +1469,13 @@ class EpistemicGraphIndex:
         note_publication_refusal(self.vault_root)
         raise graph_sync.GraphRebuildRegistrationError(
             "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+            # "run reconcile" is an internal registry name that matches neither
+            # the MCP tool nor the CLI — the #479 defect. This remediation
+            # reaches `graph_sync_remediation` in the mutation terminal verbatim,
+            # so it has to name a surface the reader can actually run, the same
+            # substitution `GraphPublicationUnavailable` already makes.
             "graph publication did not stabilize after "
-            f"{REBUILD_PUBLICATION_ATTEMPTS} attempts; run reconcile to recover the derived graph.",
+            f"{REBUILD_PUBLICATION_ATTEMPTS} attempts; {graph_sync._RECONCILE_HINT}",
         )
 
     def _reconcile_recall_publication(self) -> None:
@@ -1714,6 +1791,7 @@ class EpistemicGraphIndex:
                     and (after_membership := self._recall_membership()) == resolver_membership
                     and self._source_versions_current(resolver_versions)
                 ):
+                    superseded = False
                     live_checkpoint = (
                         freshness.recall_checkpoint(self.vault_root, "vault")
                         if freshness.recall_is_live(self.vault_root, "vault")
@@ -1750,11 +1828,40 @@ class EpistemicGraphIndex:
                             "the recall projection moved after the availability "
                             "marker was written"
                         )
+                    elif freshness.external_pending(self.vault_root):
+                        # `_mark_available`'s first false-term. The pass itself
+                        # proved nothing stale — identity, membership and source
+                        # versions all agree across it — so this is not
+                        # instability, it is a newer external epoch superseding
+                        # the publication.
+                        superseded = True
+                        publication_cause = (
+                            "a newer external epoch superseded this rebuild publication"
+                        )
                     else:
                         publication_cause = "the availability marker would not publish"
                     # A marker that would not publish is a publication failure,
                     # not proof that the registry is behind the disk.
                     self._mark_unavailable()
+                    if superseded and not projection_moved:
+                        # Nothing in this loop can clear `external_pending`:
+                        # `_mark_unavailable` does not, and `unload_ram_caches`
+                        # is only on the `resolver_versions is None` branch. Only
+                        # the caller's prepare/reconcile seam can. Attempt 2
+                        # would therefore rebuild the whole graph again and fail
+                        # at this identical guard, deterministically — 43 times
+                        # in ten hours on the reported cell. Refuse as Class B
+                        # instead of paying that second doomed pass.
+                        #
+                        # Gated on `projection_moved` being False so the mixed
+                        # run cannot mis-fire: a sticky Class C owes the registry
+                        # exactly one `mark_external_pending` from the `finally`
+                        # block below, and raising Class B here would both
+                        # misname the class and still allocate that epoch.
+                        raise GraphPublicationSuperseded(
+                            "epistemic graph rebuild refused a superseded publication "
+                            f"(Class B, publication failure): {publication_cause}"
+                        )
                 else:
                     # `_recall_projection_identity`, `_recall_membership` or the
                     # resolver source versions changed across the pass: Class C,
