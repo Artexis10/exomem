@@ -271,6 +271,38 @@ def error_dict(exc: Exception) -> dict:
     return {"code": "INTERNAL", "message": text, "remediation": None}
 
 
+def leaf_contract_code(exc: BaseException) -> str | None:
+    """Return the stable refusal code an exception carries, or `None`.
+
+    Mirrors `error_dict`'s classification precedence — a duck-typed
+    `as_public_dict()` payload (e.g. `OpError`, `vault.BatchWriteError`),
+    then `OpError.code` directly, then the "CODE: message" leaf-contract
+    convention on a plain `ValueError`/`TypeError`/`RuntimeError` — but
+    returns `None` instead of a fallback sentinel (`error_dict` uses
+    "OP_ERROR"/"INTERNAL") when nothing structured is found. Callers that
+    need a code for *every* exception (like `error_dict`, which must always
+    answer a client) keep their own fallback; callers that must not invent a
+    plausible-looking code for a genuinely unexpected exception (like the
+    mutation journal) use `None` to fall back to the exception's class name
+    instead — so real bugs stay visible as bugs.
+    """
+    public_dict = getattr(exc, "as_public_dict", None)
+    if callable(public_dict):
+        try:
+            payload = public_dict()
+        except Exception:  # noqa: BLE001 - fall through to the narrower checks
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("code"), str):
+            return payload["code"]
+    if isinstance(exc, OpError):
+        return exc.code
+    if isinstance(exc, (ValueError, TypeError, RuntimeError)):
+        m = _CODE_PREFIX.match(str(exc))
+        if m:
+            return m.group(1)
+    return None
+
+
 def http_status_for(code: str) -> int:
     """HTTP status for an error code (REST). Defaults to 400."""
     if code in _NOT_FOUND_CODES or code.endswith("_NOT_FOUND"):

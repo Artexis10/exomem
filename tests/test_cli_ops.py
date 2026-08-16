@@ -93,6 +93,48 @@ def test_mutation_lock_errors_have_actionable_remediation(code: str) -> None:
     assert error["remediation"]
 
 
+# ---------------- leaf_contract_code (issue #553: journal classification) ----------------
+
+
+def test_leaf_contract_code_from_op_error() -> None:
+    assert cli_ops.leaf_contract_code(cli_ops.OpError("BAD_BOOL", "nope")) == "BAD_BOOL"
+
+
+def test_leaf_contract_code_parses_leaf_contract_valueerror() -> None:
+    err = ValueError("NOT_FOUND: no such file")
+    assert cli_ops.leaf_contract_code(err) == "NOT_FOUND"
+
+
+def test_leaf_contract_code_from_as_public_dict_exception() -> None:
+    # BatchWriteError (vault.py) carries `.code`/`as_public_dict()` like OpError
+    # but isn't an OpError subclass — the duck-typed public-dict path must
+    # still surface its real code.
+    from exomem import vault as vault_module
+
+    error = vault_module.BatchWriteError(
+        "BATCH_ROLLBACK_INCOMPLETE",
+        vault_module.BatchTargetSummary(1, ("a.md",), 0),
+        committed=False,
+    )
+    assert cli_ops.leaf_contract_code(error) == "BATCH_ROLLBACK_INCOMPLETE"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("just a message, no code prefix"),
+        TypeError("bad type somewhere"),
+        RuntimeError("something broke"),
+        KeyError("missing"),
+    ],
+)
+def test_leaf_contract_code_is_none_for_unexpected_exceptions(exc: BaseException) -> None:
+    # Case 3's safety property: an exception that is NOT the leaf-contract
+    # "CODE: message" shape must yield None, not a laundered/plausible code —
+    # callers fall back to the exception's own class name.
+    assert cli_ops.leaf_contract_code(exc) is None
+
+
 # ---------------- coercion ----------------
 
 _PARAMS = (

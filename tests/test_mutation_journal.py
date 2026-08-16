@@ -162,3 +162,76 @@ def test_rotates_at_size_cap(tmp_path: Path, _journal_log_dir: Path, monkeypatch
         )
     rotated = _journal_log_dir / "mutations.jsonl.1"
     assert rotated.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #553: the journal must classify a leaf-contract `ValueError` by its
+# real refusal code, not by the Python exception class name — while a
+# genuinely unexpected exception (not the "CODE: message" leaf-contract
+# shape) must keep its class name so real bugs stay visible as bugs instead
+# of being laundered into a plausible-looking refusal code.
+# --------------------------------------------------------------------------- #
+def test_leaf_contract_valueerror_is_journaled_with_its_real_code(
+    tmp_path: Path, _journal_log_dir: Path
+) -> None:
+    def boom():
+        raise ValueError("NOT_FOUND: no such vault path: Knowledge Base/missing.md")
+
+    command = _command(writes=True, leaf=boom)
+    with pytest.raises(ValueError):
+        _standalone_manager(tmp_path / "state").invoke(
+            command, (), {}, mutation_request_id="req-leaf-contract"
+        )
+
+    records = _read_journal(_journal_log_dir)
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failed"
+    assert records[0]["error_code"] == "NOT_FOUND"
+
+
+def test_op_error_keeps_its_own_code_in_the_journal(
+    tmp_path: Path, _journal_log_dir: Path
+) -> None:
+    def boom():
+        raise OpError("STALE_CONTRACT", "the parent hash moved under you")
+
+    command = _command(writes=True, leaf=boom)
+    with pytest.raises(OpError):
+        _standalone_manager(tmp_path / "state").invoke(
+            command, (), {}, mutation_request_id="req-op-error"
+        )
+
+    records = _read_journal(_journal_log_dir)
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failed"
+    assert records[0]["error_code"] == "STALE_CONTRACT"
+
+
+@pytest.mark.parametrize(
+    ("exc_factory", "expected_class_name"),
+    [
+        (lambda: ValueError("something went wrong"), "ValueError"),
+        (lambda: KeyError("missing"), "KeyError"),
+    ],
+)
+def test_unexpected_exception_keeps_its_class_name_in_the_journal(
+    tmp_path: Path,
+    _journal_log_dir: Path,
+    exc_factory,  # noqa: ANN001
+    expected_class_name: str,
+) -> None:
+    def boom():
+        raise exc_factory()
+
+    command = _command(writes=True, leaf=boom)
+    with pytest.raises((ValueError, KeyError)):
+        _standalone_manager(tmp_path / "state").invoke(
+            command, (), {}, mutation_request_id="req-unexpected"
+        )
+
+    records = _read_journal(_journal_log_dir)
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failed"
+    # Not a real refusal code and not laundered into one — the class name
+    # stays visible so this reads as a bug, not a governed refusal.
+    assert records[0]["error_code"] == expected_class_name
