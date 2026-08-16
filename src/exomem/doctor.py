@@ -2300,6 +2300,7 @@ def _check_observability() -> DoctorCheck:
     warnings: list[str] = []
 
     log_dir = resolve_log_dir()
+    details["log_dir"] = str(log_dir)
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         probe_path = log_dir / f".exomem-doctor-probe-{os.getpid()}"
