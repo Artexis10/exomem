@@ -195,6 +195,10 @@ def test_bootstrap_routes_observed_state_to_records_without_activating_state(
     assert contract["intent_boundary"] == {
         "records": "observed events, measurements, transactions, sessions, and state changes",
         "planning": "intended future state, goals, priorities, commitments, and candidate work",
+        "prediction": (
+            "a checkable claim about a future observation, which is neither "
+            "observed state nor intent to act; see epistemic_contract"
+        ),
     }
     assert "ordinary editable files" in contract["manual_first"]
     assert "schema" in contract["template_rule"]
@@ -432,7 +436,7 @@ def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
     out = commands.op_bootstrap(vault)
     guidance = json.dumps(out["workflow"]).lower()
 
-    assert out["contract_version"] == "2026-08-11.1"
+    assert out["contract_version"] == "2026-08-16.1"
     for required in (
         "show the note title by default",
         "normal user-facing prose",
