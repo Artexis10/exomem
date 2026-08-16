@@ -15,8 +15,9 @@ The unclassified Class B raise is the reported defect. `may_mark_external_pendin
 answered True for it, so `file_watcher._recover_external_pending` took the
 `mark_external_pending` branch, never armed the Class B refusal memo, and
 `publication_refusal_active` never tripped -- so a doomed full rebuild was
-re-paid on every recovery cycle. The reported cell logged 34 such cycles at
-~62 min intervals and burned ~41 h of CPU on rebuilds that were all discarded.
+re-paid on every recovery cycle. The reported cell logged 143 such cycles over
+days, at ~62 min intervals, holding ~4.5 cores continuously on rebuilds that
+were all discarded.
 
 Class B exhaustion is exactly what `GraphPublicationUnavailable` already
 documents: "A rebuild proved nothing stale but still could not publish".
@@ -92,6 +93,27 @@ def _move_the_resolver_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         EpistemicGraphIndex, "_resolver_source_versions", lambda *_args, **_kwargs: None
     )
+
+
+def _move_the_resolver_identity_on_the_first_attempt_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Class C on attempt 1; every later attempt resolves its source versions."""
+    real = EpistemicGraphIndex._resolver_source_versions
+    attempts = 0
+
+    def first_attempt_moves(
+        self: EpistemicGraphIndex,
+        resolver: vault_module.WikilinkResolver,
+        expected_membership: frozenset[str],
+    ) -> dict[str, epistemic_graph.GraphSourceSignature] | None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return None
+        return real(self, resolver, expected_membership)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_resolver_source_versions", first_attempt_moves)
 
 
 # --- F1: the exhaustion is a classified Class B publication failure ---------
@@ -259,3 +281,50 @@ def test_the_message_distinguishes_a_moved_source_version_from_the_others(
     message = str(raised.value)
     assert "Class C" in message
     assert "resolver source versions" in message
+
+
+def test_a_mixed_run_reports_the_cause_of_the_class_it_actually_raises(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attempt 1 fires Class C, attempt 2 fires Class B; only two attempts exist.
+
+    `projection_moved` is sticky by design -- the conservative choice, and the
+    raised type must stay `GraphProjectionMoved`. A single sticky `cause`
+    string is not: the last writer wins, so the Class B cause overwrote the
+    Class C one and the message announced "Class C, projection moved" while
+    quoting the reason the *marker* would not publish. That contradiction lands
+    in exactly the mixed failure this message exists to explain.
+    """
+    _move_the_resolver_identity_on_the_first_attempt_only(monkeypatch)
+    _refuse_the_availability_marker(monkeypatch)
+
+    with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
+        EpistemicGraphIndex(vault)._rebuild_all_locked()
+
+    message = str(raised.value)
+    assert "Class C" in message
+    assert "resolver bytes" in message, "the Class C label must quote the Class C cause"
+    assert "availability marker" not in message, (
+        "the Class C label quoted the Class B cause: " + message
+    )
+
+
+# --- The classified type must not cost the write path its runnable command ---
+
+
+def test_the_class_b_remediation_keeps_the_runnable_reconcile_command() -> None:
+    """`graph_sync._run` no longer wraps this raise, so it carries its own hint.
+
+    A bare `RuntimeError` fell through to `_run`'s `else` and became
+    `GraphRebuildStopped`, whose remediation is built from `_RECONCILE_HINT`.
+    `GraphPublicationUnavailable` subclasses `GraphRebuildRegistrationError`,
+    so it now passes through unwrapped and its own remediation reaches
+    `graph_sync_remediation` in the mutation terminal payload verbatim. It has
+    to name the same runnable surfaces -- "run reconcile" is an internal
+    registry name that matches neither the MCP tool nor the CLI (#479).
+    """
+    remediation = epistemic_graph.GraphPublicationUnavailable("exhausted").remediation
+
+    assert graph_sync._RECONCILE_HINT in remediation
+    assert 'maintain_memory(mode="reconcile")' in remediation
+    assert "exomem maintain --reconcile" in remediation

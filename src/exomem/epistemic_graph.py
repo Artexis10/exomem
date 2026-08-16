@@ -254,7 +254,13 @@ class GraphPublicationUnavailable(graph_sync.GraphRebuildRegistrationError):
     def __init__(self, message: str) -> None:
         super().__init__(
             "GRAPH_SYNC_PUBLICATION_UNAVAILABLE",
-            "Retry the mutation, or run reconcile to recover the derived graph.",
+            # `graph_sync._run` wraps only an *unclassified* builder failure, so
+            # this type reaches `graph_sync_remediation` in the mutation
+            # terminal payload verbatim rather than as `GraphRebuildStopped`.
+            # It therefore has to carry the runnable command itself: "run
+            # reconcile" is an internal registry name that matches neither the
+            # MCP tool nor the CLI, which is the #479 defect.
+            f"Retry the mutation, or {graph_sync._RECONCILE_HINT}",
         )
         self.args = (f"{message}: {self.args[0]}",)
 
@@ -1657,9 +1663,18 @@ class EpistemicGraphIndex:
         # Which non-stabilization actually fired.  Both raises below share one
         # sentence, so without this the class survives only in the exception
         # type and the specific cause is discarded entirely — which is why a
-        # cell that logged this failure 34 times could not be diagnosed from
+        # cell that logged this failure 143 times could not be diagnosed from
         # its log at all.
-        cause = "no stabilization attempt completed"
+        #
+        # Tracked per class rather than as one string, because `projection_moved`
+        # is sticky across attempts and a run may fire both: a Class C condition
+        # on one attempt and the Class B one on another.  One shared string lets
+        # the later attempt overwrite the earlier, so the raise announces one
+        # class and quotes the other class's cause — in precisely the mixed
+        # failure this message exists to explain.  Each raise reads only the
+        # cause belonging to the branch it takes.
+        moved_cause = "no stabilization attempt completed"
+        publication_cause = "no stabilization attempt completed"
         try:
             for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
                 before_disk = _disk_vault_freshness(self.vault_root)
@@ -1680,7 +1695,7 @@ class EpistemicGraphIndex:
                     # Class C, first admitted cause.
                     self._mark_unavailable()
                     projection_moved = True
-                    cause = "the supplied freshness identity did not name the resolver bytes"
+                    moved_cause = "the supplied freshness identity did not name the resolver bytes"
                     find_module.unload_ram_caches()
                     continue
                 pass_started = True
@@ -1731,12 +1746,12 @@ class EpistemicGraphIndex:
                         # The projection moved between writing the availability
                         # marker and confirming it: Class C, second cause.
                         projection_moved = True
-                        cause = (
+                        moved_cause = (
                             "the recall projection moved after the availability "
                             "marker was written"
                         )
                     else:
-                        cause = "the availability marker would not publish"
+                        publication_cause = "the availability marker would not publish"
                     # A marker that would not publish is a publication failure,
                     # not proof that the registry is behind the disk.
                     self._mark_unavailable()
@@ -1746,17 +1761,19 @@ class EpistemicGraphIndex:
                     # second admitted cause.
                     projection_moved = True
                     if after_identity != before:
-                        cause = "the recall projection identity moved across the pass"
+                        moved_cause = "the recall projection identity moved across the pass"
                     elif after_membership != resolver_membership:
-                        cause = "the recall membership moved across the pass"
+                        moved_cause = "the recall membership moved across the pass"
                     else:
-                        cause = "the resolver source versions moved across the pass"
+                        moved_cause = "the resolver source versions moved across the pass"
             attempts = (
                 "epistemic graph rebuild did not stabilize after "
                 f"{REBUILD_STABILIZATION_ATTEMPTS} attempts"
             )
             if projection_moved:
-                raise GraphProjectionMoved(f"{attempts} (Class C, projection moved): {cause}")
+                raise GraphProjectionMoved(
+                    f"{attempts} (Class C, projection moved): {moved_cause}"
+                )
             # Class B by elimination: this pass proved nothing stale and still
             # could not publish, which is precisely what
             # `GraphPublicationUnavailable` names.  A bare `RuntimeError` here
@@ -1768,7 +1785,7 @@ class EpistemicGraphIndex:
             # a full doomed rebuild indefinitely, and left the registry
             # permanently cool for every later write to pay.
             raise GraphPublicationUnavailable(
-                f"{attempts} (Class B, publication failure): {cause}"
+                f"{attempts} (Class B, publication failure): {publication_cause}"
             )
         finally:
             if pass_started and not stable:
