@@ -1070,15 +1070,13 @@ def upsert_after_write_status(
 ) -> EmbeddingSyncStatus:
     """Re-embed eligible files and return an observable bounded outcome."""
     global _IMPORT_FAILED
-    root = vault_root.resolve()
     md_paths: list[Path] = []
     rejected_paths: list[str] = []
     for path in written_paths:
         if not index_paths.is_embeddable_path(path):
             continue
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
+        rel = index_paths.rel_to_vault(vault_root, path)
+        if rel is None:
             continue
         # Admission is intentionally before defer/model/page-cache/content work.
         # A raw Record stays structured-only even when the vector backend is off.
@@ -1115,12 +1113,10 @@ def upsert_after_write_status(
 
         if readiness.should_defer("embeddings"):
             rels: list[str] = []
-            root = vault_root.resolve()
             for path in md_paths:
-                try:
-                    rels.append(path.resolve().relative_to(root).as_posix())
-                except (OSError, ValueError):
-                    continue
+                rel = index_paths.rel_to_vault(vault_root, path)
+                if rel is not None:
+                    rels.append(rel)
             try:
                 race_receipts = deferred_index.add_receipts(vault_root, rels)
             except (OSError, sqlite3.Error):
