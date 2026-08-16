@@ -17,6 +17,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, cast
 from uuid import uuid4
 
@@ -25,6 +26,32 @@ from . import commands, hosted_gateway
 PLUGIN_ROOT = Path("plugins/hosted")
 DEFAULT_CANDIDATE = "hosted-alpha-agent-v1"
 LIFECYCLE_CANDIDATE = "hosted-alpha-agent-v2"
+EPISTEMIC_CANDIDATE = "hosted-alpha-agent-v3"
+#: Every distributable candidate and the surface profile it pins. A third
+#: candidate is what retired the old pairwise `== LIFECYCLE_CANDIDATE`
+#: branching: membership questions now ask the registry, not a constant.
+CANDIDATE_PROFILES: Mapping[str, str] = MappingProxyType(
+    {
+        DEFAULT_CANDIDATE: commands.HOSTED_ALPHA_AGENT_PROFILE,
+        LIFECYCLE_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V2_PROFILE,
+        EPISTEMIC_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V3_PROFILE,
+    }
+)
+#: Candidates whose profile exposes `record_memory`. These pin the Records
+#: reader floor, bind their own selection cases, and must clear live Records
+#: acceptance for their own profile identifier before promotion.
+RECORDS_CANDIDATES: frozenset[str] = frozenset({LIFECYCLE_CANDIDATE, EPISTEMIC_CANDIDATE})
+#: Candidate-scoped skills, rendered on top of the shared `SKILL_NAMES`. Each
+#: candidate carries its own copies: a candidate package is immutable once its
+#: lock pins `skills_sha256`, so sharing a file across candidates would let one
+#: candidate's edit silently invalidate another's recorded release identity.
+CANDIDATE_SKILL_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        DEFAULT_CANDIDATE: (),
+        LIFECYCLE_CANDIDATE: ("exomem-records",),
+        EPISTEMIC_CANDIDATE: ("exomem-records", "exomem-supersede"),
+    }
+)
 PLATFORMS = ("claude", "openai")
 DIRECTORY_CHANNELS = ("claude-connector", "claude-plugin", "openai-plugin")
 REGISTERED_OPENAI_APP_ID = "plugin_asdk_app_6a5e3d26f2b08191a04424d1c1b33fc0"
@@ -45,6 +72,11 @@ SKILL_NAMES = (
     "exomem-review",
 )
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+# Names the prose scanners must still recognize as *callable* so an undeclared
+# mention is caught. This is a recognition vocabulary, not an exclusion policy:
+# `edit_memory` and `replace_memory` are members of `hosted-alpha-agent-v3`, and
+# per-profile availability is decided by `validate_skill_text` against the
+# resolved profile, never by membership here.
 _LEGACY_OR_EXCLUDED_TOOLS = frozenset(
     {
         "edit_memory",
@@ -195,12 +227,18 @@ def _records_live_acceptance_module() -> Any:
     return module
 
 
+def _candidate_profile(candidate: str) -> str:
+    profile = CANDIDATE_PROFILES.get(candidate)
+    if profile is None:
+        raise ValueError("unsupported Hosted candidate")
+    return profile
+
+
 def _candidate_root(root: Path, candidate: str) -> Path:
     if candidate == DEFAULT_CANDIDATE:
         return root / PLUGIN_ROOT
-    if candidate == LIFECYCLE_CANDIDATE:
-        return root / PLUGIN_ROOT / "candidates" / candidate
-    raise ValueError("unsupported Hosted candidate")
+    _candidate_profile(candidate)
+    return root / PLUGIN_ROOT / "candidates" / candidate
 
 
 def _validate_definition(
@@ -265,24 +303,21 @@ def load_definition(
     repo_root: Path | None = None, *, candidate: str = DEFAULT_CANDIDATE
 ) -> HostedDefinition:
     root = _repo_root(repo_root)
-    profile = (
-        commands.HOSTED_ALPHA_AGENT_PROFILE
-        if candidate == DEFAULT_CANDIDATE
-        else commands.HOSTED_ALPHA_AGENT_V2_PROFILE
-    )
     return load_definition_file(
-        _candidate_root(root, candidate) / "definition.json", expected_profile=profile
+        _candidate_root(root, candidate) / "definition.json",
+        expected_profile=_candidate_profile(candidate),
     )
 
 
 def _skill_paths(root: Path, candidate: str = DEFAULT_CANDIDATE) -> tuple[Path, ...]:
     base = root / PLUGIN_ROOT / "skills"
     paths = tuple(base / name / "SKILL.md" for name in SKILL_NAMES)
-    if candidate == LIFECYCLE_CANDIDATE:
-        return paths + (_candidate_root(root, candidate) / "skills/exomem-records/SKILL.md",)
-    if candidate == DEFAULT_CANDIDATE:
-        return paths
-    raise ValueError("unsupported Hosted candidate")
+    _candidate_profile(candidate)
+    candidate_root = _candidate_root(root, candidate)
+    return paths + tuple(
+        candidate_root / "skills" / name / "SKILL.md"
+        for name in CANDIDATE_SKILL_NAMES.get(candidate, ())
+    )
 
 
 def _frontmatter(text: str, skill: Path) -> dict[str, Any]:
@@ -459,13 +494,16 @@ def validate_hosted_public_inputs(
     ]
     paths = [path for path in paths if path.exists()]
     paths.extend(_skill_paths(root))
-    lifecycle_root = _candidate_root(root, LIFECYCLE_CANDIDATE)
-    if lifecycle_root.exists():
-        paths.extend(
-            path
-            for path in lifecycle_root.rglob("*")
-            if path.is_file() or path.is_symlink()
-        )
+    for candidate in CANDIDATE_PROFILES:
+        if candidate == DEFAULT_CANDIDATE:
+            continue
+        candidate_root = _candidate_root(root, candidate)
+        if candidate_root.exists():
+            paths.extend(
+                path
+                for path in candidate_root.rglob("*")
+                if path.is_file() or path.is_symlink()
+            )
     directories = ["assets", "acceptance", "promotion", "directory"]
     if include_generated:
         directories.append("generated")
@@ -478,9 +516,20 @@ def validate_hosted_public_inputs(
                 if (path.is_file() or path.is_symlink())
                 and (include_generated or "generated" not in path.parts)
             )
+    # `transition_token` is a documented governance continuation value, not a
+    # credential: the server returns it from a validate pass and the caller
+    # echoes it back unchanged, and a mismatched one is rejected rather than
+    # trusted. It appears verbatim inside `edit_memory`'s canonical MCP
+    # description, which the generated compatibility descriptor copies wholesale
+    # -- so the credential-assignment heuristic below would otherwise fail every
+    # candidate whose profile exposes `edit_memory`, and the only "fix" would be
+    # editing a canonical tool description and moving the registered external
+    # connector fingerprint. The exemption is by exact identifier, anchored on
+    # both sides, so `API_TOKEN=`, bare `token:`, and `secret=` still fail.
     forbidden = re.compile(
         r"(?i)(\[todo:|\$\{[^}]+\}|exomem_vault_path|localhost|127\.0\.0\.1|"
-        r"file://|[A-Z0-9_]*(?:token|secret|password)\s*[:=]|"
+        r"file://|(?<![A-Za-z0-9_])(?!transition_token\b)"
+        r"[A-Z0-9_]*(?:token|secret|password)\s*[:=]|"
         r"\btenant[_-]?id\b|\bvault[_-]?path\b|"
         r"\breviewer[_-]?(?:email|identity)\b|\binvite[_-]?(?:url|link|token)\b|"
         r"\bdomain[_-]?challenge\b|(?:[A-Z]:\\[^\\\s]+\\[^\\\s]+|\\\\[^\\\s]+\\[^\\\s]+)|"
@@ -532,7 +581,7 @@ def validate_hosted_public_inputs(
                     or "directory" in path.parts
                     or (
                         "candidates" in path.parts
-                        and LIFECYCLE_CANDIDATE in path.parts
+                        and not CANDIDATE_PROFILES.keys().isdisjoint(path.parts)
                         and "generated" not in path.parts
                     )
                     or path.name.startswith("acceptance-")
@@ -1480,7 +1529,7 @@ def compatibility_manifest(
         "oauth_discovery": oauth_overlay,
         "oauth_discovery_sha256": _sha256(_canonical_json(oauth_overlay)),
     }
-    if candidate == LIFECYCLE_CANDIDATE:
+    if candidate in RECORDS_CANDIDATES:
         base["minimum_records_reader_version"] = 2
     return {**base, "compatibility_sha256": _sha256(_canonical_json(base))}
 
@@ -1614,7 +1663,7 @@ def _package_lock(
         if registered_app_id is None:
             raise ValueError("OpenAI package lock requires a registered app identity")
         lock["registered_app_id_sha256"] = _registered_app_id_sha256(registered_app_id)
-    if candidate == LIFECYCLE_CANDIDATE:
+    if candidate in RECORDS_CANDIDATES:
         lock["minimum_records_reader_version"] = 2
         selection_path = _candidate_root(root, candidate) / "selection-cases.json"
         lock["selection_cases_sha256"] = _sha256(
@@ -2249,9 +2298,11 @@ def _load_acceptance_fixture(root: Path) -> dict[str, Any]:
 
 
 def _selection_cases(
-    root: Path, lock: Mapping[str, Any]
+    root: Path, lock: Mapping[str, Any], *, candidate: str = LIFECYCLE_CANDIDATE
 ) -> tuple[dict[str, str], dict[str, tuple[str, str, str, bool]], dict[str, tuple[str, str, str, str]]]:
-    path = _candidate_root(root, LIFECYCLE_CANDIDATE) / "selection-cases.json"
+    if candidate not in RECORDS_CANDIDATES:
+        raise ValueError("selection cases belong to a Records-bearing candidate")
+    path = _candidate_root(root, candidate) / "selection-cases.json"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -2347,6 +2398,7 @@ def _current_release_binding(
 def _validate_records_acceptance(
     root: Path, evidence: dict[str, Any], *, compatibility: dict[str, Any], lock: dict[str, Any], expectation: Any,
     require_fresh: bool = True,
+    candidate: str = LIFECYCLE_CANDIDATE,
 ) -> None:
     if not isinstance(expectation, dict) or set(expectation) != {
         "deployment_sha256", "vault_purpose", "reset_epoch", "principal_hmac_sha256",
@@ -2358,7 +2410,7 @@ def _validate_records_acceptance(
         raise ValueError("Records promotion requires closed lifecycle evidence")
     if lock.get("minimum_records_reader_version") != 2:
         raise ValueError("Records lifecycle candidate does not bind reader floor 2")
-    prompt_cases, prompt_results, contracts = _selection_cases(root, lock)
+    prompt_cases, prompt_results, contracts = _selection_cases(root, lock, candidate=candidate)
     if (
         expectation["selection_cases_sha256"] != lock["selection_cases_sha256"]
         or expectation["prompt_cases"] != prompt_cases
@@ -2372,7 +2424,7 @@ def _validate_records_acceptance(
         deployment_sha256=expectation["deployment_sha256"],
         package="exomem",
         release_version=lock["plugin_version"],
-        profile=LIFECYCLE_CANDIDATE,
+        profile=candidate,
         minimum_records_reader_version=2,
         surface_digest=compatibility["schema_contract_sha256"],
         vault_purpose=expectation["vault_purpose"],
@@ -2454,7 +2506,7 @@ def _validate_promotion_evidence(
         *required_counts,
         *required_operations,
     }
-    if candidate == LIFECYCLE_CANDIDATE:
+    if candidate in RECORDS_CANDIDATES:
         required.add("records_acceptance")
     if evidence.get("mocked") or set(evidence) != required:
         raise ValueError("live promotion requires exact real content-bearing client evidence")
@@ -2545,7 +2597,7 @@ def _validate_promotion_evidence(
     ).hexdigest()
     if not hmac.compare_digest(evidence["operator_signature"], expected_signature):
         raise ValueError("promotion operator signature is invalid")
-    if candidate == LIFECYCLE_CANDIDATE:
+    if candidate in RECORDS_CANDIDATES:
         _validate_records_acceptance(
             root,
             evidence,
@@ -2553,6 +2605,7 @@ def _validate_promotion_evidence(
             lock=lock,
             expectation=records_expectation,
             require_fresh=require_fresh,
+            candidate=candidate,
         )
     return compatibility, lock, archive_lock
 
@@ -2578,7 +2631,7 @@ def promote(
         raise ValueError("promotion requires an operator-trusted signing key")
     root = _repo_root(repo_root)
     expected_states = {"pending", "failed"}
-    if candidate == LIFECYCLE_CANDIDATE:
+    if candidate in RECORDS_CANDIDATES:
         expected_states.add("live")
     if expected_state not in expected_states or not re.fullmatch(
         r"[0-9a-f]{64}", str(expected_record_sha256 or "")
@@ -2627,7 +2680,7 @@ def promote(
             "platform": platform,
             **(
                 {"candidate": candidate, "minimum_records_reader_version": 2}
-                if candidate == LIFECYCLE_CANDIDATE
+                if candidate in RECORDS_CANDIDATES
                 else {}
             ),
             "state": "live",
@@ -2674,7 +2727,7 @@ def demote(
             {
                 "schema_version": 1,
                 "platform": platform,
-                **({"candidate": candidate, "minimum_records_reader_version": 2} if candidate == LIFECYCLE_CANDIDATE else {}),
+                **({"candidate": candidate, "minimum_records_reader_version": 2} if candidate in RECORDS_CANDIDATES else {}),
                 "state": "failed",
                 "reason": reason,
             },
