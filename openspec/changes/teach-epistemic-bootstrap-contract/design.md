@@ -162,9 +162,10 @@ scratch. What makes it defensible rather than merely convenient is that the cons
 own comment sets the protocol — "never raise it without deciding the extra bytes earn a
 caller's context" — that the decision and its numbers are recorded in that comment, that
 58,000 still sits roughly 6 KB below the 64,070-byte regression point the gate was built
-to catch, and that the two ways of staying under 56,000 were both worse: cut the
-vocabulary's locality, or land 6 bytes clear, which is a tripwire rather than a budget —
-the next unrelated word would fail a gate that is not about it.
+to catch, and that every way of staying under 56,000 required cutting the vocabulary's
+locality. The cheapest of them, dropping `relations` alone, would have left 70 bytes
+clear — a tripwire rather than a budget, where the next unrelated word fails a gate that
+is not about it.
 
 **Doctrine can drift from behaviour.** Prose that describes behaviour is prose that can
 become false. Mitigated structurally: the outcome vocabulary and the metadata keys are
