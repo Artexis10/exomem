@@ -26,6 +26,14 @@ Checks (all read-only; no writes ever):
   the loop. An open-ended or unparseable `duration` (`ongoing`) declares no
   window and so can never exceed one — never flagged. Measurement-only at `info`,
   ordered oldest-first; nothing is auto-concluded or archived.
+- `prediction_window`: a rich semantic unit whose authored `check_by` date has
+  arrived or passed with nothing recorded against it. "Nothing recorded" is
+  deliberately UNIT-LOCAL: no `verdict` on the unit, and no outbound relation on
+  the unit itself resolving to `supports`/`contradicts`/`resolves`/`evidenced_by`.
+  Inbound edges do not count, because relation targets still lose their
+  `#fragment` and so cannot address a unit. Measurement-only at `info`, ordered
+  most-overdue-first, partitioned per unit by fingerprint so each due prediction
+  is its own review item; never judges whether the prediction held.
 - `derivation_double_counting` (optional): walks `sources:` (`derived_from`)
   chains for two failures ordinary checks cannot see. Support collapse: a
   compiled page cites two or more sources as independent support that
@@ -99,7 +107,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
     "relation_debt", "governance_receipts", "bridge_review",
     "duplicated_sidecar", "semantic_recall_isolation",
-    "unfinished_experiments",
+    "unfinished_experiments", "prediction_window",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -129,6 +137,7 @@ TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
 # reproduces prior behaviour exactly.
 EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     "unfinished_experiments",
+    "prediction_window",
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset(
     {"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES}
@@ -420,6 +429,8 @@ def audit(
         findings.extend(_check_stale_review(vault_root, pages, today=today))
     if "unfinished_experiments" in selected:
         findings.extend(_check_unfinished_experiments(vault_root, pages, today=today))
+    if "prediction_window" in selected:
+        findings.extend(_check_prediction_window(vault_root, pages, today=today))
     if "corpus_contradictions" in selected:
         findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
     if "relation_registry" in selected:
@@ -3104,6 +3115,150 @@ def _check_unfinished_experiments(
     # has lost more of the context its write-up needs than a 300d one 30d late.
     rows.sort(key=lambda row: (-row[0], row[1]))
     return [finding for _, _, finding in rows]
+
+
+# ---------------- check: prediction_window ----------------
+
+# Authoring one of these on the unit is the signal that SOMEBODY ENGAGED with the
+# prediction. Deliberately not a judgment of which way it went — concluding is
+# `verdict`'s job; this queue only measures whether anyone looked.
+_PREDICTION_RESOLVING_RELATIONS = frozenset(
+    {"supports", "contradicts", "resolves", "evidenced_by"}
+)
+# A unit inherits its page's standing (see the epistemic loop primitives), so a
+# due prediction on a parked page is not outstanding work.
+_PREDICTION_PARKED_STATUSES = frozenset({"superseded", "archived", "draft"})
+
+
+def _check_prediction_window(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    today: dt.date | None = None,
+) -> list[AuditFinding]:
+    """Surface authored `check_by` dates that came due with nothing recorded.
+
+    `check_by` exists to answer exactly one question — what is due? — and until
+    now nothing asked it. The retrieval half already landed (`unit.check_by` is a
+    typed date in the structured-filter registry, so a due-by query is answerable
+    on request); this is the missing PUSH, so an outstanding obligation surfaces
+    without the author having to remember to go looking for it.
+
+    "Nothing recorded" is deliberately UNIT-LOCAL: no `verdict` on the unit, and
+    no outbound relation authored ON THE UNIT ITSELF resolving to one of
+    `_PREDICTION_RESOLVING_RELATIONS`. A relation elsewhere on the parent page
+    does not clear it, and neither does an inbound edge from another note.
+
+    That is forced, not lazy. `epistemic_graph` still strips the `#fragment` off a
+    relation target, so an edge authored against `[[Note#unit-abc]]` lands on
+    `Note`, not on unit `abc`. Building the predicate on inbound edges today would
+    mean either page-level granularity — where ANY inbound `contradicts` silently
+    clears EVERY due prediction on that page — or a second, private, fragment-aware
+    traversal that would immediately disagree with the graph everyone else queries.
+    Both are worse than the bounded false positive this leaves: a prediction
+    resolved only from elsewhere keeps surfacing until someone records the verdict
+    where the loop's own documentation says it belongs. Widening this once
+    fragment targets resolve can only ever REMOVE findings, never add them.
+
+    The trigger is the authored `check_by`, not `kind == "prediction"`: the parser
+    reserves `check_by` for every governed kind, so a `## Hypothesis` carrying one
+    has authored a real due date, and ignoring it would relocate this very bug one
+    field over.
+
+    Measurement-only at `info`: never judges whether the prediction held, never
+    writes a verdict, never touches `find` ordering.
+    """
+    today = today or dt.date.today()
+    relations = relation_registry.load_registry(vault_root)
+    language = semantic_language_registry.load_registry(vault_root)
+
+    rows: list[tuple[int, str, str, AuditFinding]] = []
+    for page in pages:
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if (page.status or "") in _PREDICTION_PARKED_STATUSES:
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        # Cheap prefilter: a page with no authored check date cannot match, so a
+        # vault that has never used the primitive pays a substring scan and no
+        # parse at all.
+        if "check_by" not in page.body:
+            continue
+
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            page_type=page.page_type,
+        )
+        for unit in document.rich_units:
+            if not unit.check_by:
+                continue
+            due = _parse_fm_date(unit.check_by)
+            if due is None or due > today:
+                continue
+            if unit.verdict:
+                continue
+            if any(
+                relations.resolve(
+                    relation.kind, origin="semantic_relation"
+                ).canonical in _PREDICTION_RESOLVING_RELATIONS
+                for relation in unit.relations
+            ):
+                continue
+
+            overdue_days = (today - due).days
+            fingerprint = unit.fingerprint or ""
+            label = unit.title or unit.anchor or unit.kind
+            rows.append((
+                overdue_days,
+                page.rel_path,
+                fingerprint,
+                AuditFinding(
+                    category="prediction_window",
+                    severity="info",
+                    path=page.rel_path,
+                    detail=(
+                        f"Check window closed on {due.isoformat()} "
+                        f"({overdue_days}d ago) for {label!r} with no verdict and "
+                        f"no resolving relation recorded on the unit."
+                    ),
+                    proposed_fix=(
+                        "Surfaced for REVIEW only — nothing is judged, written, or "
+                        "expired. Record a categorical `verdict:` on the unit, "
+                        "attach the evidence that settles it with a "
+                        "`supports`/`contradicts`/`resolves`/`evidenced_by` "
+                        "relation, or move `check_by` out if the question is still "
+                        "genuinely open."
+                    ),
+                    meta={
+                        # The UNIT's fingerprint, not the page's: an edit to this
+                        # prediction must resurface it rather than inherit a
+                        # dismissal recorded against different words.
+                        "signal_version": fingerprint,
+                        # Same value as the review partition, so a page holding
+                        # several due predictions composes several INDEPENDENT
+                        # review items instead of one whose dismissal would
+                        # silently dispose of predictions nobody read.
+                        "review_partition": fingerprint,
+                        "unit_ref": unit.unit_ref,
+                        "anchor": unit.anchor,
+                        "kind": unit.kind,
+                        "check_by": due.isoformat(),
+                        "overdue_days": overdue_days,
+                    },
+                ),
+            ))
+
+    # Most-overdue-first. Unlike an experiment — where the decaying write-up
+    # context makes raw age the right signal — `check_by` is an explicitly
+    # authored commitment, so distance past the date the author chose IS the
+    # urgency. Path then fingerprint keep it deterministic.
+    rows.sort(key=lambda row: (-row[0], row[1], row[2]))
+    return [finding for _, _, _, finding in rows]
 
 
 # ---------------- check: stale_review ----------------
