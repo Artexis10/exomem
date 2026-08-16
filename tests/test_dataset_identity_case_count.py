@@ -24,9 +24,11 @@ These tests pin the derivation itself and guard the run that must not change.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 from lme.dataset import LmeDataset, load_dataset_bytes
 from lme.reader import StubReader
 from lme.runner import RunConfig, _dataset_case_count, execute_run
@@ -78,8 +80,17 @@ def test_a_dataset_built_without_a_census_falls_back_to_its_questions() -> None:
     assert _dataset_case_count(detached) == 2
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("sentence_transformers") is None,
+    reason="requires the embeddings extra and a warm Hugging Face cache",
+)
 def test_a_normal_run_records_the_source_row_count(tmp_path: Path) -> None:
-    """End-to-end guard: the healthy path keeps the value it always had."""
+    """End-to-end guard: the healthy path keeps the value it always had.
+
+    Scoring a case needs the real semantic capability, so this is the one test
+    here that cannot run in the lean matrix. The three derivation tests above
+    carry the actual contract and run everywhere.
+    """
     rows = [_row("keep-1"), _row("keep-2")]
     dataset_path = tmp_path / "dataset.json"
     dataset_path.write_text(json.dumps(rows), encoding="utf-8")
