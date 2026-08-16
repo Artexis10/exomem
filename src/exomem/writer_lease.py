@@ -2263,7 +2263,19 @@ class LeaseManager:
             root = Path(vault_root)
             try:
                 graph_sync.start_registered(root, state_root=self.config.state_dir)
-                graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
+                # The second unbounded join (#576), and the one that produced
+                # the worst case measured in production: a 300 s single-unit
+                # `observe_memory` append, against 14.3 s for the `remember`
+                # immediately before it. This guard is held while serving a
+                # request exactly like `after_operation_guard` is, so it takes
+                # the same seam. There is no terminal envelope here to carry
+                # `pending`, so the honest report is the log line below -- the
+                # leaf's own bounded index/readiness paths already tell its
+                # caller the derived graph is not current.
+                if not graph_sync.join_registered_if_settled(
+                    root, state_root=self.config.state_dir
+                ):
+                    logger.info("direct mutation left its graph rebuild running")
             except graph_sync.GraphRebuildRegistrationError:
                 # Direct leaf APIs have no terminal-envelope seam for a graph
                 # failure. Canonical bytes and the exact durable failure handle
@@ -2513,7 +2525,37 @@ class LeaseManager:
                 if required is None and not has_reconcile_handoff:
                     return terminal_result
                 if required is not None:
-                    graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
+                    # An interactive write takes a derived-graph outcome only if
+                    # one is already there (#576/#588); it never waits for one.
+                    # Maintenance whose whole purpose is to make the graph
+                    # current opts back in to the unbounded join rather than
+                    # every write paying for it: `reconcile` proves readability
+                    # in its own terminal below, and a rebuild handoff has
+                    # nothing to hand off until the flight lands.
+                    joins_unbounded = (
+                        has_reconcile_handoff
+                        or command.name == "reconcile"
+                        or (
+                            command.name == "maintain_memory"
+                            and kwargs.get("mode") == "reconcile"
+                        )
+                    )
+                    if joins_unbounded:
+                        # graph-join: unbounded by design (reconcile proves the
+                        # graph is readable in its own terminal).
+                        graph_sync.wait_for_registered(
+                            root, state_root=self.config.state_dir
+                        )
+                    elif not graph_sync.join_registered_if_settled(
+                        root, state_root=self.config.state_dir
+                    ):
+                        # The flight keeps running on its own daemon thread and
+                        # publishes behind this response; the caller is told the
+                        # derived graph has not caught up yet rather than left
+                        # to infer that it has.
+                        return with_graph_outcome(
+                            terminal_result, graph_sync.committed_graph_pending(required)
+                        )
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
                 terminal_result = finish_reconcile_graph_status(
                     terminal_result, current=False
