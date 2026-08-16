@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.53.0](https://github.com/Artexis10/exomem/compare/v0.52.3...v0.53.0) (2026-08-16)
+
+
+### Features
+
+* **benchmarks:** file the no-nudge bench families f20-f26 as amendment sequence 2 ([#590](https://github.com/Artexis10/exomem/issues/590)) ([290a534](https://github.com/Artexis10/exomem/commit/290a53479345202c27fe9aa8fab1b8c2081f33f1))
+* **memory:** teach the epistemic contract in the bootstrap payload ([#554](https://github.com/Artexis10/exomem/issues/554)) ([3aae818](https://github.com/Artexis10/exomem/commit/3aae81858f8c1e58946cd67efa8b039a9969e92d))
+
+
+### Bug Fixes
+
+* **embeddings:** preload the model off the request path and stop revalidating cached weights ([#586](https://github.com/Artexis10/exomem/issues/586)) ([7bbceec](https://github.com/Artexis10/exomem/commit/7bbceec217a208914ebd57e38d3ae7ae3bd4ca0d))
+* **graph:** converge a superseded publication instead of paying a doomed rebuild pass ([#577](https://github.com/Artexis10/exomem/issues/577)) ([4a0c790](https://github.com/Artexis10/exomem/commit/4a0c790b3fe8299e3ead674a6fdb33ed649f8699))
+* **index:** index the vault when its root is reached through a symlink ([#556](https://github.com/Artexis10/exomem/issues/556)) ([929975e](https://github.com/Artexis10/exomem/commit/929975e7354b1dec29448ce663700a756aca85c6))
+* **memory:** stop paying 26s for write suggestions the default reply discards ([#582](https://github.com/Artexis10/exomem/issues/582)) ([4f66c87](https://github.com/Artexis10/exomem/commit/4f66c87fede834ef5115f68e7fbcc6ae7b132e18))
+* **ops:** fail the upgrade when the installed version does not change ([#587](https://github.com/Artexis10/exomem/issues/587)) ([1b33efe](https://github.com/Artexis10/exomem/commit/1b33efe6a2a239d6cbcaee02536f60cf6773f4ad))
+
 ## [0.52.3](https://github.com/Artexis10/exomem/compare/v0.52.2...v0.52.3) (2026-08-16)
 
 
