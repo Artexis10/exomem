@@ -42,6 +42,10 @@ class ResourceSlot:
     inflight: Callable[[], int]
     last_activity: Callable[[], float]
     unload: Callable[[], bool]
+    #: True for a model singleton, which policy may pin (see `mode.reap_models_when_idle`).
+    #: Caches are always reclaimable: they rebuild locally and cheaply, whereas a reaped
+    #: model is reloaded from the hub cache on whichever request arrives next.
+    is_model: bool = False
 
 
 def idle_seconds() -> float:
@@ -59,9 +63,22 @@ def idle_seconds() -> float:
 ModelSlot = ResourceSlot
 
 
+def _model_reaping_allowed() -> bool:
+    """Whether policy lets this tick unload model singletons.
+
+    Read per tick rather than captured at `start()`, so a live mode switch takes
+    effect on the next tick without restarting the thread.
+    """
+    from . import mode
+
+    return mode.reap_models_when_idle()
+
+
 def _should_unload(slot: ResourceSlot, now: float, threshold: float) -> bool:
-    """Pure decision: unload iff not warming, loaded, not in-flight, idle-window elapsed."""
+    """Pure decision: unload iff policy allows it and the slot is loaded, quiet, and stale."""
     if readiness.is_warming():
+        return False
+    if slot.is_model and not _model_reaping_allowed():
         return False
     if not slot.is_loaded():
         return False
@@ -97,21 +114,24 @@ def _quiet_cache_slot(
 
 
 def default_slots() -> list[ResourceSlot]:
-    """Default reclaimable resources: models always, CPU caches only in quiet mode."""
+    """Default reclaimable resources: models when policy allows, CPU caches in quiet mode."""
     from . import bm25, embeddings as e, find
 
     return [
         ResourceSlot(
             "embeddings", lambda: e._MODEL is not None,
             e.BGE_GUARD.inflight, e.BGE_GUARD.last_activity, e.unload_model,
+            is_model=True,
         ),
         ResourceSlot(
             "reranker", lambda: e._RERANKER is not None,
             e.RERANKER_GUARD.inflight, e.RERANKER_GUARD.last_activity, e.unload_reranker,
+            is_model=True,
         ),
         ResourceSlot(
             "clip", lambda: e._CLIP_MODEL is not None,
             e.CLIP_GUARD.inflight, e.CLIP_GUARD.last_activity, e.unload_clip_model,
+            is_model=True,
         ),
         _quiet_cache_slot(
             "index-matrices",

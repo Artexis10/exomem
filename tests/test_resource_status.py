@@ -45,6 +45,10 @@ def test_collect_does_not_import_torch_or_probe_cuda(monkeypatch, tmp_path: Path
         "embeddings": False,
         "reranker": False,
         "clip": False,
+        # Policy sits beside residency so the promise/reality gap is readable here
+        # rather than in the log. Both are pure env/config reads — no import.
+        "preload_policy": False,
+        "reap_when_idle": True,
     }
     assert status["media"]["worker_active"] is False
     assert not (tmp_path / "Knowledge Base" / ".media-jobs.sqlite").exists()

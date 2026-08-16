@@ -1397,8 +1397,9 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
         )
     from . import embeddings
 
-    bge_dir = "models--" + embeddings.MODEL_NAME.replace("/", "--")
-    if not _model_cached(_hf_hub_dir(), bge_dir):
+    from . import model_cache
+
+    if not model_cache.is_cached(embeddings.MODEL_NAME):
         # doctor must never trigger a download — skip the live probe rather than
         # let embed_texts() fetch the model over the network.
         return _check(
@@ -1458,51 +1459,96 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
 def _hf_hub_dir() -> Path:
     """The local HuggingFace hub cache directory (honors HF_HUB_CACHE / HF_HOME).
 
-    Directory resolution only — never touches the network.
+    Delegates to `model_cache` so doctor reports the directory the RUNTIME will
+    actually load from — two implementations of this would drift.
     """
-    if os.environ.get("HF_HUB_CACHE"):
-        return Path(os.environ["HF_HUB_CACHE"])
-    if os.environ.get("HF_HOME"):
-        return Path(os.environ["HF_HOME"]) / "hub"
-    return Path.home() / ".cache" / "huggingface" / "hub"
+    from . import model_cache
+
+    return model_cache.hub_dir()
 
 
 def _model_cached(hub: Path, dirname: str) -> bool:
     """True if a model's snapshot dir exists and is non-empty — a pure directory
     check, so a caller can gate model-loading work on it WITHOUT risking a
     download (doctor never fetches)."""
-    snapshots = hub / dirname / "snapshots"
-    try:
-        return snapshots.is_dir() and any(snapshots.iterdir())
-    except OSError:
-        return False
+    from . import model_cache
+
+    return model_cache.snapshot_populated(hub, dirname)
+
+
+def _check_model_residency() -> DoctorCheck:
+    """Whether an embed is about to pay a model load, and whether it will hit the network.
+
+    Until this check existed, the only way to know a write was about to pay ~35s
+    was to read the server log after it had already paid it. `loaded` is the model
+    singleton, not the module — `status.models.module_loaded` answers the narrower
+    question and reads as this one. `offline_load` says whether the load resolves
+    purely from the cache directory or revalidates every file against the hub.
+    """
+    from . import embeddings, mode, model_cache
+
+    resident = embeddings._MODEL is not None
+    cached = model_cache.is_cached(embeddings.MODEL_NAME)
+    offline = model_cache.should_load_offline(embeddings.MODEL_NAME)
+    preload = mode.preload_models()
+    details = {
+        "model": embeddings.MODEL_NAME,
+        "loaded": resident,
+        "cache_dir": str(model_cache.hub_dir()),
+        "bi_encoder_cached": cached,
+        "offline_load": offline,
+        "preload_policy": preload,
+        "reap_models_when_idle": mode.reap_models_when_idle(),
+    }
+    if resident:
+        return _check(
+            "models.residency",
+            "pass",
+            f"{embeddings.MODEL_NAME} is resident; embeds pay no load.",
+            details=details,
+        )
+    if not cached:
+        return _check(
+            "models.residency",
+            "pass",
+            f"{embeddings.MODEL_NAME} is not loaded and not cached; the next embed "
+            "downloads it inline.",
+            "Run `exomem warm` to fetch it, then `exomem mode performance` to preload "
+            "it at startup instead of inside a request.",
+            details=details,
+        )
+    where = "from the local cache" if offline else "revalidating every file against the hub"
+    return _check(
+        "models.residency",
+        "pass",
+        f"{embeddings.MODEL_NAME} is cached but not loaded; the next embed loads it {where}.",
+        None
+        if preload
+        else "Run `exomem mode performance` (or set EXOMEM_PRELOAD_MODELS=1) to load it at "
+        "startup instead of inside whichever request arrives first.",
+        details=details,
+    )
 
 
 def _check_models_cache() -> DoctorCheck:
     """Local HF-cache presence for the three search models. Read-only: this
     inspects directories only — doctor never downloads anything."""
-    from . import embeddings
+    from . import embeddings, model_cache
 
     hub = _hf_hub_dir()
     backend = _resolved_embedding_backend()
 
-    expected = {
-        embeddings.MODEL_NAME: "models--" + embeddings.MODEL_NAME.replace("/", "--"),
-    }
+    expected = [embeddings.MODEL_NAME]
     # The reranker and CLIP are sentence-transformers models. On a lane that
     # withholds torch they can never be cached, so listing them as misses is a
     # WARN no action can clear — and `exomem warm`, the remediation, cannot
     # fetch them either.
     if _serves_reranker_and_clip(backend):
-        expected[embeddings.RERANKER_NAME] = "models--" + embeddings.RERANKER_NAME.replace(
-            "/", "--"
-        )
-        # sentence-transformers resolves bare names under its org.
-        expected[embeddings.CLIP_MODEL_NAME] = (
-            "models--sentence-transformers--" + embeddings.CLIP_MODEL_NAME
-        )
+        # `snapshot_dirname` knows that sentence-transformers resolves a bare name
+        # (CLIP) under its own org, so that rule lives in one place.
+        expected.extend([embeddings.RERANKER_NAME, embeddings.CLIP_MODEL_NAME])
 
-    missing = [name for name, dirname in expected.items() if not _model_cached(hub, dirname)]
+    missing = [name for name in expected if not model_cache.is_cached(name, hub)]
     if not missing:
         return _check(
             "models.cache",
@@ -2501,7 +2547,7 @@ def doctor(
         # about an absent framework, not a finding about the configured one.
         if extra == "embeddings":
             checks.extend([_check_torch_cuda(), _check_torch_device()])
-        checks.extend([_check_models_cache(), _check_sqlite_vec()])
+        checks.extend([_check_models_cache(), _check_model_residency(), _check_sqlite_vec()])
         mps_headroom = _check_mps_headroom()
         if mps_headroom is not None:
             checks.append(mps_headroom)

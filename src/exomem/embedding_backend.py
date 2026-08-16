@@ -27,7 +27,7 @@ from typing import Protocol
 
 import numpy as np
 
-from . import accel
+from . import accel, model_cache
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +126,10 @@ class _TorchEncoder:
         # Heavy import stays local — keyword-mode and a lean install must not pay it.
         from sentence_transformers import SentenceTransformer
 
-        model = SentenceTransformer(model_name, device=device)
+        model = model_cache.load_offline_first(
+            model_name,
+            lambda **kw: SentenceTransformer(model_name, device=device, **kw),
+        )
         self._model = _maybe_half(model, device) if half else model
         self.device = device
 
@@ -228,10 +231,13 @@ def _providers(device: str) -> list[str]:
 
 
 def _resolve(model_name: str, filename: str) -> str:
-    """Path to a model file, from the local hub cache when offline."""
+    """Path to a model file, from the local hub cache when the snapshot is resident."""
     from huggingface_hub import hf_hub_download
 
-    return hf_hub_download(model_name, filename)
+    return model_cache.load_offline_first(
+        model_name,
+        lambda **kw: hf_hub_download(model_name, filename, **kw),
+    )
 
 
 def _max_seq_length(model_name: str) -> int:
