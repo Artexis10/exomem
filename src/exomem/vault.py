@@ -212,6 +212,55 @@ _GRAPH_REBUILD_RUNTIME_FILE_NAME = re.compile(
     r"(?:-(?:journal|wal|shm))?$",
     re.ASCII,
 )
+# The lexical sidecar's detached-build temp, minted at lexstore.py's
+# `LexicalStore.rebuild_atomic` as
+# `self.path.with_name(f"{self.path.name}.rebuild-{uuid.uuid4().hex}.tmp")`
+# where `self.path.name` is always `.lexical.sqlite` (`lexstore.lexical_path`,
+# issue #551). This is the one PUBLIC matcher for that shape — both
+# `graph_sync.sweep_abandoned_temporaries` and `doctor.py`'s
+# `_check_rebuild_temp_orphans` call `is_lexical_rebuild_runtime_file_name`
+# rather than keep their own copy. `governance/tool.py`'s
+# `_LEXICAL_REBUILD_TEMP_RE` still independently encodes this same shape for
+# its own unrelated membership-classification purpose (out of this module's
+# scope to touch) — keep it, and `lexstore.py`'s mint site itself, in sync if
+# this shape ever changes.
+_LEXICAL_REBUILD_RUNTIME_FILE_NAME = re.compile(
+    r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp"
+    r"(?:-(?:journal|wal|shm))?$",
+    re.ASCII,
+)
+
+#: Age (by mtime) above which a matching rebuild-temp file is treated as an
+#: orphan/abandoned candidate rather than a legitimate in-flight rebuild. This
+#: is NOT "written continuously" for the lexical family: under
+#: `PRAGMA journal_mode=WAL` (lexstore.py's `_connect_setup`) an in-flight
+#: build's writes land in the temp's `-wal` companion, and the MAIN temp
+#: file's own mtime only advances at SQLite's periodic auto-checkpoints
+#: (default: every ~1000 pages, ~4 MB) and at the final WAL fold
+#: (`_fold_to_single_file`) — not on every write. 60 minutes is comfortably
+#: above the write gap between checkpoints on any plausible corpus (issue
+#: #551's own incident: abandoned lexical-rebuild temps sat unmodified for
+#: days-to-weeks, not minutes) while still catching a truly abandoned temp
+#: promptly.
+#:
+#: One window is genuinely uncovered by mtime freshness, as a documented
+#: trade-off rather than a defect: after the fold and `conn.close()`
+#: (lexstore.py:2576) `rebuild_atomic` runs a full second `_walk_entries()`
+#: corpus re-walk plus guard checks before the publishing `os.replace`
+#: (lexstore.py:2646), touching the temp not at all. If that tail alone ever
+#: exceeded this threshold on some pathological corpus, the sweep could in
+#: principle reap a build still finishing that walk. This threshold is the
+#: same one `doctor.py` already chose for its own orphan diagnostic before
+#: this file's `sweep_abandoned_temporaries` reused it for deletion — raise
+#: it if that tail is ever observed to approach it in practice.
+#:
+#: Shared by two independent consumers rather than copied a third time:
+#: `graph_sync.sweep_abandoned_temporaries` (the LEXICAL family's only
+#: abandonment signal — that family cannot participate in
+#: `claim_rebuild_owner`/`register_temporary` the way the graph family does,
+#: so a matching name alone is never sufficient there) and `doctor.py`'s
+#: read-only `_check_rebuild_temp_orphans` diagnostic (for both families).
+REBUILD_TEMP_STALE_AGE_SECONDS = 60 * 60
 
 
 def is_graph_reset_runtime_dir_name(name: str) -> bool:
@@ -222,6 +271,11 @@ def is_graph_reset_runtime_dir_name(name: str) -> bool:
 def is_graph_rebuild_runtime_file_name(name: str) -> bool:
     """Whether ``name`` is one exact graph rebuild SQLite artifact."""
     return _GRAPH_REBUILD_RUNTIME_FILE_NAME.fullmatch(name) is not None
+
+
+def is_lexical_rebuild_runtime_file_name(name: str) -> bool:
+    """Whether ``name`` is one exact lexical rebuild SQLite artifact."""
+    return _LEXICAL_REBUILD_RUNTIME_FILE_NAME.fullmatch(name) is not None
 
 
 def in_excluded_scan_dir(rel_path: str) -> bool:

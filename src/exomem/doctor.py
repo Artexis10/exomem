@@ -24,7 +24,6 @@ import importlib
 import importlib.util
 import json
 import os
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -99,32 +98,24 @@ _REBUILD_TEMP_ORPHAN_FAIL_COUNT = 5
 _REBUILD_TEMP_ORPHAN_FAIL_BYTES = 50 * 1024 * 1024
 
 #: Age (by mtime) above which a matching rebuild-temp file is treated as an
-#: orphan candidate rather than a legitimate in-flight rebuild. A single
-#: `rebuild_atomic()` pass (corpus scan + delta replay + WAL fold, or the
-#: graph-rebuild equivalent) writes to its temp file throughout the build, so
-#: an active one has a continuously fresh mtime; only a killed process leaves
-#: one whose mtime stops advancing. 60 minutes is comfortably above any
-#: plausible single-build write gap (the incident's abandoned files sat
-#: unmodified for days-to-weeks — 30 rebuilds spanning July 25-Aug 15 — not
-#: minutes) while still catching a truly abandoned temp promptly. Below this
-#: age, size is NOT evidence of a leak: the incident's own abandoned files
-#: averaged ~79 MB, well above the 50 MB fail-by-bytes threshold, but a
-#: same-sized in-flight rebuild is routine and must not fail.
-_REBUILD_TEMP_STALE_AGE_SECONDS = 60 * 60
-
-#: lexstore.rebuild_atomic() (lexstore.py:2469) names its detached build sibling
-#: `<lexical sidecar name>.rebuild-<uuid4().hex>.tmp`, optionally with a
-#: `-wal`/`-shm`/`-journal` companion suffix, and reaps it in its own `finally`
-#: on any graceful return — so a surviving one means the process was killed
-#: mid-build. No PUBLIC matcher for this name exists to import: lexstore.py
-#: itself has none, and governance/tool.py carries an identical PRIVATE regex
+#: orphan candidate rather than a legitimate in-flight rebuild. Below this
+#: age, size is NOT evidence of a leak either: the incident's own abandoned
+#: files averaged ~79 MB, well above the 50 MB fail-by-bytes threshold, but a
+#: same-sized in-flight rebuild is routine and must not fail. Defined once in
+#: `vault.REBUILD_TEMP_STALE_AGE_SECONDS` (see its own comment for the full
+#: rationale) and reused here rather than copied — the same threshold also
+#: gates `graph_sync.sweep_abandoned_temporaries`'s actual deletion of the
+#: lexical family, not just this read-only diagnostic.
+#:
+#: `vault.is_lexical_rebuild_runtime_file_name` is likewise the one PUBLIC
+#: matcher for lexstore.rebuild_atomic()'s (lexstore.py:2469) detached build
+#: sibling `<lexical sidecar name>.rebuild-<uuid4().hex>.tmp[-wal|-shm|
+#: -journal]`, which it reaps in its own `finally` on any graceful return —
+#: so a surviving one means the process was killed mid-build.
+#: governance/tool.py carries an independent PRIVATE regex
 #: (`_LEXICAL_REBUILD_TEMP_RE`) for its own unrelated fail-closed
-#: non-Markdown-membership purpose — private, and governance/tool.py is out of
-#: this task's scope to touch. This is a hand-derived duplicate of that same
-#: pattern, sourced from lexstore's construction call rather than guessed.
-_LEXICAL_REBUILD_TEMP_RE = re.compile(
-    r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$"
-)
+#: non-Markdown-membership purpose — private, and governance/tool.py is out
+#: of this module's scope to touch.
 
 
 @dataclass
@@ -828,17 +819,18 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
       (tested) user file.
     - `.lexical.sqlite.rebuild-<32-hex>.tmp[-wal|-shm|-journal]` —
       lexstore.rebuild_atomic()'s detached build sibling (lexstore.py:2469),
-      matched via `_LEXICAL_REBUILD_TEMP_RE` (see its module-level comment for
-      why this is hand-derived rather than imported).
+      matched via `vault.is_lexical_rebuild_runtime_file_name` (the same
+      matcher `graph_sync.sweep_abandoned_temporaries` uses to gate its
+      actual deletion of this family).
 
     A matching name alone is NOT evidence of an orphan: a legitimate in-flight
     rebuild has a matching name too, and can legitimately be large (the
     incident's own abandoned files averaged ~79 MB). Only a file whose mtime is
-    older than `_REBUILD_TEMP_STALE_AGE_SECONDS` is treated as a stale orphan
-    candidate; WARN/FAIL thresholds evaluate STALE counts/bytes exclusively, so
-    a fresh in-flight temporary of any size or count never trips them — its
-    remediation ("stop the service...") would itself create a real orphan if
-    followed against a rebuild that is still running.
+    older than `vault.REBUILD_TEMP_STALE_AGE_SECONDS` is treated as a stale
+    orphan candidate; WARN/FAIL thresholds evaluate STALE counts/bytes
+    exclusively, so a fresh in-flight temporary of any size or count never
+    trips them — its remediation ("stop the service...") would itself create a
+    real orphan if followed against a rebuild that is still running.
 
     `details` reports, per family (`details["graph_rebuild"]`,
     `details["lexical_rebuild"]`) and combined: total `count`/`total_bytes`
@@ -848,13 +840,15 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     and no rebuild in flight, so remediation names `exomem maintain` run
     out-of-process (it reads the vault from EXOMEM_VAULT_PATH, not `--vault`).
     """
+    from . import vault as vault_module
+
     empty_family = {"count": 0, "total_bytes": 0, "stale_count": 0, "stale_bytes": 0}
     details: dict[str, object] = {
         "count": 0,
         "total_bytes": 0,
         "stale_count": 0,
         "stale_bytes": 0,
-        "stale_age_seconds": _REBUILD_TEMP_STALE_AGE_SECONDS,
+        "stale_age_seconds": vault_module.REBUILD_TEMP_STALE_AGE_SECONDS,
         "graph_rebuild": dict(empty_family),
         "lexical_rebuild": dict(empty_family),
     }
@@ -865,7 +859,6 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             "No vault configured; rebuild temporaries were not inspected.",
             details=details,
         )
-    from . import vault as vault_module
 
     kb = Path(vault_root) / kb_dirname()
     graph_orphans: list[Path] = []
@@ -880,7 +873,7 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             name = entry.name
             if vault_module.is_graph_rebuild_runtime_file_name(name):
                 graph_orphans.append(entry)
-            elif _LEXICAL_REBUILD_TEMP_RE.fullmatch(name) is not None:
+            elif vault_module.is_lexical_rebuild_runtime_file_name(name):
                 lexical_orphans.append(entry)
 
     now = time.time()
@@ -895,7 +888,7 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             except OSError:
                 continue
             total += st.st_size
-            if now - st.st_mtime > _REBUILD_TEMP_STALE_AGE_SECONDS:
+            if now - st.st_mtime > vault_module.REBUILD_TEMP_STALE_AGE_SECONDS:
                 stale_count += 1
                 stale_total += st.st_size
         return {
@@ -919,7 +912,7 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     details["stale_bytes"] = stale_bytes
     mb = total_bytes / (1024 * 1024)
     stale_mb = stale_bytes / (1024 * 1024)
-    age_minutes = _REBUILD_TEMP_STALE_AGE_SECONDS // 60
+    age_minutes = vault_module.REBUILD_TEMP_STALE_AGE_SECONDS // 60
 
     if count == 0:
         return _check(
@@ -2300,6 +2293,7 @@ def _check_observability() -> DoctorCheck:
     warnings: list[str] = []
 
     log_dir = resolve_log_dir()
+    details["log_dir"] = str(log_dir)
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         probe_path = log_dir / f".exomem-doctor-probe-{os.getpid()}"

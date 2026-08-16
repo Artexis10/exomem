@@ -242,6 +242,41 @@ def semantic_validation_error_dict(exc: Exception) -> dict[str, Any] | None:
     return None
 
 
+def _semantic_validation_error_dict_cause_only(exc: BaseException) -> dict[str, Any] | None:
+    """Like `semantic_validation_error_dict`, but follows `__cause__` only.
+
+    `semantic_validation_error_dict` also follows `__context__` — the chain
+    Python sets IMPLICITLY whenever one exception is raised while another is
+    already being handled, with no `from` required. That is correct for
+    `error_dict`, which must always answer a client with *some* code and
+    accepts the (rare) risk of an implicit chain. It is NOT safe for a
+    caller that must tell a genuine bug apart from a refusal: a teardown bug
+    (a `finally`/`__exit__`/lease-release/graph-sync failure) that fires
+    while a semantic refusal is unwinding gets `__context__` set to that
+    refusal automatically, with no `from` anywhere in the bug's own code.
+    Following `__context__` there would misattribute the bug's own class
+    name to the refusal code it happened to interrupt. This variant follows
+    only the EXPLICIT `raise ... from e` idiom (`__cause__`) — the one
+    `commands.py`'s `raise ValueError(f"{e.code}: {e.reason}") from e`
+    re-wraps actually use — so an implicit, incidental `__context__` chain
+    never contributes a code.
+    """
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        projector = getattr(current, "as_semantic_validation_error", None)
+        if callable(projector):
+            try:
+                payload = projector()
+            except Exception:  # noqa: BLE001 - keep the original error path intact
+                payload = None
+            if isinstance(payload, dict):
+                return payload
+        current = current.__cause__
+    return None
+
+
 def error_dict(exc: Exception) -> dict:
     """Convert any raised error into the envelope's `error` block.
 
@@ -269,6 +304,95 @@ def error_dict(exc: Exception) -> dict:
             return {"code": code, "message": message, "remediation": _REMEDIATION.get(code)}
         return {"code": "OP_ERROR", "message": text, "remediation": None}
     return {"code": "INTERNAL", "message": text, "remediation": None}
+
+
+def leaf_contract_code(exc: BaseException) -> str | None:
+    """Return the stable refusal code an exception carries, or `None`.
+
+    This is DELIBERATELY STRICTER than `error_dict`'s classification, not a
+    mirror of it. `error_dict` answers a client, who has already lost the
+    ability to see anything other than a code — every exception must map to
+    *some* code, so `error_dict` accepts a small amount of misattribution
+    risk (see below) in exchange for never leaving a request unanswered.
+    This function feeds the mutation journal instead, whose entire job is
+    separating genuine refusals from genuine bugs — a code that looks
+    like a refusal but was actually produced by a bug is worse here than a
+    class name that's merely uninformative, because it hides the bug inside
+    what reads as normal traffic. So where the two intentionally diverge,
+    this function is the more conservative one:
+
+    1. The semantic chain walk uses `_semantic_validation_error_dict_cause_only`
+       (walks `exc.__cause__` only), NOT `error_dict`'s
+       `semantic_validation_error_dict` (which also walks `__context__`).
+       `__context__` is set IMPLICITLY by Python whenever an exception is
+       raised while another is already being handled — no `from` required —
+       so it can carry an unrelated `SemanticWriteError` merely because a
+       teardown bug happened to fire while that refusal was unwinding
+       (`finally`/`__exit__`/lease-release/graph-sync code in `writer_lease`
+       runs inside every one of the ~21 `except SemanticWriteError:`
+       handlers across `create_file.py`/`edit.py`/`append_to_file.py`/
+       `link.py`). `error_dict` accepts that risk; the journal must not, or
+       a live bug in that teardown path would be invisible in the refusal
+       distribution — recorded as a benign content refusal instead of a
+       bug. `__cause__` only picks up the EXPLICIT
+       `raise ValueError(f"{e.code}: {e.reason}") from e` re-wrap idiom
+       `commands.py` uses at ~25 sites, which is the case this step exists
+       to fix: the re-wrap's own `str()` carries the *raw* `e.code` (e.g.
+       "SEMANTIC_CONTRACT_VIOLATION"), while `as_semantic_validation_error()`
+       on the explicitly-chained cause projects the *canonical* semantic
+       code (e.g. "missing_semantic_unit") that the client actually receives
+       via `error_dict`.
+    2. A duck-typed `as_public_dict()` payload (e.g. `OpError`,
+       `vault.BatchWriteError`).
+    3. `OpError.code` directly.
+    4. The "CODE: message" leaf-contract convention on a plain
+       `ValueError`/`TypeError`/`RuntimeError`.
+
+    Two more inert divergences from `error_dict`, for accuracy: if the
+    semantic payload has no `"code"` key, or `code == ""`, `error_dict`
+    returns that payload verbatim (so a client could see a codeless error
+    block). This function instead falls through to steps 2-4 on `exc`
+    itself. Nothing exercises this today — `as_semantic_validation_error()`
+    always sets a non-empty canonical finding code — but if it ever
+    happened, falling through is the safer direction for a journal: it
+    still prefers a real code over `None` when one is available lower in
+    the precedence, rather than silently accepting an empty one.
+
+    Unlike `error_dict`, this returns `None` — never a fallback sentinel —
+    when nothing structured is found. Callers use `None` to fall back to
+    the exception's own class name instead of inventing a plausible-looking
+    code for a genuinely unexpected error — so real bugs stay visible as
+    bugs.
+    """
+
+    def _code_of(payload: object) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        code = payload.get("code")
+        return code if isinstance(code, str) and code else None
+
+    semantic_code = _code_of(_semantic_validation_error_dict_cause_only(exc))
+    if semantic_code is not None:
+        return semantic_code
+    public_dict = getattr(exc, "as_public_dict", None)
+    if callable(public_dict):
+        try:
+            payload = public_dict()
+        except Exception:  # noqa: BLE001 - fall through to the narrower checks
+            payload = None
+        public_code = _code_of(payload)
+        if public_code is not None:
+            return public_code
+    if isinstance(exc, OpError) and exc.code:
+        return exc.code
+    if isinstance(exc, (ValueError, TypeError, RuntimeError)):
+        # `_CODE_PREFIX`'s first group is `[A-Z][A-Z0-9_]+` (one-or-more
+        # after the first char), so a match can never capture an empty
+        # string — no `and m.group(1)` truthiness check needed here.
+        m = _CODE_PREFIX.match(str(exc))
+        if m:
+            return m.group(1)
+    return None
 
 
 def http_status_for(code: str) -> int:

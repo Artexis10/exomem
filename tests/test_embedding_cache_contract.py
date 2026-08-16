@@ -274,11 +274,17 @@ def test_purge_refusal_on_non_contiguous_write_is_logged(
 
 
 def test_full_load_log_names_the_stale_cache_generation(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The full-load log line (embedding_index.py:489-495) now carries
     `cached_gen=<old cache generation or -1>` so a production
-    `reason=genuine` entry names the exact gap that forced the reload."""
+    `reason=genuine` entry names the exact gap that forced the reload.
+
+    The warm-but-stale half pins `CATCHUP_MAX_PATHS` to 0: since #531 H4 a small
+    external delta is absorbed by the bounded catch-up (logged under
+    `reason=catchup`), so a GENUINE full reload has to be provoked by putting the
+    delta out of catch-up range — which is exactly what `reason=genuine` is
+    supposed to mean now."""
     vault = _fresh_vault(tmp_path)
     idx = embeddings.get_embedding_index(vault)
     idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
@@ -300,6 +306,7 @@ def test_full_load_log_names_the_stale_cache_generation(
     external = embedding_index.EmbeddingIndex(vault)
     external.upsert_file("c.md", ["c"], _mat([0, 0, 1]), 3.0)
 
+    monkeypatch.setattr(embedding_index, "CATCHUP_MAX_PATHS", 0)  # out of catch-up range
     idx.all_vectors()
     warm_loads = [r for r in caplog.records if "embedding matrix full load" in r.getMessage()]
     assert warm_loads

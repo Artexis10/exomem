@@ -2821,6 +2821,20 @@ def readable_sidecar(path: Path) -> Path | None:
     return None if path.name.startswith(_TEMP_PREFIX) else path
 
 
+# The lexical sidecar's detached-build temp, minted at lexstore.py's
+# `LexicalStore.rebuild_atomic` as
+# `self.path.with_name(f"{self.path.name}.rebuild-{uuid.uuid4().hex}.tmp")`
+# where `self.path.name` is always `.lexical.sqlite` (`lexstore.lexical_path`,
+# issue #551). Only the glob pre-filter prefix lives here — the strict match
+# is `vault.is_lexical_rebuild_runtime_file_name`, the one PUBLIC matcher for
+# this shape (also used by `doctor.py`'s `_check_rebuild_temp_orphans`).
+# `governance/tool.py`'s `_LEXICAL_REBUILD_TEMP_RE` still independently
+# encodes the same shape for its own unrelated membership-classification
+# purpose — keep it, and `lexstore.py`'s mint site itself, in sync if this
+# shape ever changes.
+_LEXICAL_TEMP_PREFIX = ".lexical.sqlite.rebuild-"
+
+
 def sweep_abandoned_temporaries(
     vault_root: Path,
     live: Path,
@@ -2828,33 +2842,121 @@ def sweep_abandoned_temporaries(
     live_paths: set[Path],
     state_root: Path | None = None,
 ) -> list[Path]:
+    """Unlink abandoned rebuild temporaries sharing `live`'s parent directory.
+
+    Two families, one pass, deliberately asymmetric on how "abandoned" is
+    proven — a matching name is necessary but never sufficient on its own:
+
+    - Graph (`.graph-rebuild-*.sqlite[-journal|-wal|-shm]`): its mint site
+      (`temporary_sidecar_path`) is only ever written by a builder that holds
+      `claim_rebuild_owner` for the builder's ENTIRE run, including the final
+      `replace_sidecar` (`epistemic_graph.py`). This sweep must ALSO hold that
+      same claim (`probe`, below) before it may touch anything, and the claim
+      is exclusive — so a successful claim here already proves no builder
+      currently holds it, which means any name-matching graph temp found is
+      abandoned by construction. No age check is needed or applied.
+      One pre-existing, unchanged-by-this-function exception:
+      `epistemic_graph.py` deliberately sets `preserve_temporary = True` and
+      releases BOTH the claim and the registration (in the same `finally`, see
+      its `_rebuild_all_off_boundary`) when `graph_sync.replace_sidecar`
+      raises `GraphSidecarReplaceUnavailable` — the complete sidecar is kept
+      recoverable rather than discarded (contract R2). That temp then sits
+      unclaimed and unregistered exactly like an abandoned one, so THIS sweep
+      would remove it too; `epistemic_graph._reap_preserved_temporaries` is
+      the dedicated bounded reaper for that class instead. "Abandoned by
+      construction" describes every OTHER graph temp this sweep can see, not
+      a universal.
+    - Lexical (`.lexical.sqlite.rebuild-*.tmp[-wal|-shm|-journal]`):
+      `lexstore.py`'s `rebuild_atomic` has no dependency on `graph_sync`
+      (adding one would invert the module dependency) and so never
+      registers or claims its temp. A name match alone is therefore NOT
+      evidence of abandonment for this family — a live build's temp looks
+      byte-for-byte identical to an abandoned one by name and can
+      legitimately be large. Only an mtime older than
+      `vault.REBUILD_TEMP_STALE_AGE_SECONDS` counts as abandoned here
+      (mirrors doctor.py's read-only `_check_rebuild_temp_orphans`, which
+      gates its own orphan diagnostic on the same threshold for the same
+      reason).
+
+    Each family is swept inside its own `try`/`except OSError`: an unlink or
+    enumeration failure in one family (an unexpected directory matching the
+    glob, a transient sharing violation beyond plain `PermissionError`, ...)
+    must not abort the other family's pass — this is issue #551's only
+    reaper for the lexical family, so a graph-side failure silently starving
+    it would resume the exact leak this function exists to close.
+    """
+    from . import vault as vault_module
+
     probe = live.with_name(f"{_TEMP_PREFIX}sweep-{secrets.token_hex(12)}.sqlite")
     if not claim_rebuild_owner(vault_root, probe, state_root=state_root):
         return []
     removed: list[Path] = []
     try:
         active_paths = {path.resolve() for path in live_paths} | live_temporary_paths()
-        for candidate in live.parent.glob(f"{_TEMP_PREFIX}*.sqlite*"):
-            base_name = candidate.name
-            for companion_suffix in ("-journal", "-wal", "-shm"):
-                if base_name.endswith(companion_suffix):
-                    base_name = base_name.removesuffix(companion_suffix)
-                    break
-            if (
-                re.fullmatch(
-                    rf"{re.escape(_TEMP_PREFIX)}[0-9a-f]{{64}}-[0-9a-f]{{24}}\.sqlite",
-                    base_name,
+        # (glob pre-filter, strict PUBLIC matcher, requires-mtime-staleness).
+        families: tuple[tuple[str, Callable[[str], bool], bool], ...] = (
+            (
+                f"{_TEMP_PREFIX}*.sqlite*",
+                vault_module.is_graph_rebuild_runtime_file_name,
+                False,
+            ),
+            (
+                f"{_LEXICAL_TEMP_PREFIX}*.tmp*",
+                vault_module.is_lexical_rebuild_runtime_file_name,
+                True,
+            ),
+        )
+        for glob_pattern, matches_name, stale_gated in families:
+            try:
+                for candidate in live.parent.glob(glob_pattern):
+                    if not matches_name(candidate.name):
+                        continue
+                    base_name = candidate.name
+                    for companion_suffix in ("-journal", "-wal", "-shm"):
+                        if base_name.endswith(companion_suffix):
+                            base_name = base_name.removesuffix(companion_suffix)
+                            break
+                    if candidate.with_name(base_name).resolve() in active_paths:
+                        continue
+                    if stale_gated:
+                        try:
+                            # `Path.stat()` follows symlinks by default. A
+                            # broken symlink whose own name happens to match
+                            # the lexical shape therefore raises OSError here
+                            # and is silently left in place rather than
+                            # reaped — a small, self-limited leak (one dead
+                            # link, not a growing sidecar), not a safety
+                            # issue: `unlink()` below only ever removes the
+                            # link itself, never a target it points at.
+                            age_seconds = time.time() - candidate.stat().st_mtime
+                        except OSError:
+                            # Vanished between glob() and stat() (or is a
+                            # broken symlink, see above): another sweep or
+                            # the builder itself already resolved it, or
+                            # there is nothing safely stat-able to age-check.
+                            continue
+                        if age_seconds <= vault_module.REBUILD_TEMP_STALE_AGE_SECONDS:
+                            # Fresh mtime: this family carries no ownership
+                            # signal of its own, so a recent write is the
+                            # only evidence that a build is still in flight.
+                            continue
+                    try:
+                        candidate.unlink(missing_ok=True)
+                    except PermissionError:
+                        # Windows readers hold delete-sharing authority. A
+                        # retained complete temp is recoverable state, so
+                        # leave it for the next sweep after that reader
+                        # closes.
+                        continue
+                    removed.append(candidate)
+            except OSError:
+                logger.warning(
+                    "abandoned-temporary sweep failed for family glob %r; other "
+                    "families are still swept this pass",
+                    glob_pattern,
+                    exc_info=True,
                 )
-                and candidate.with_name(base_name).resolve() not in active_paths
-            ):
-                try:
-                    candidate.unlink(missing_ok=True)
-                except PermissionError:
-                    # Windows readers hold delete-sharing authority. A retained
-                    # complete temp is recoverable state, so leave it for the
-                    # next sweep after that reader closes.
-                    continue
-                removed.append(candidate)
+                continue
         return removed
     finally:
         release_rebuild_owner(vault_root, probe, state_root=state_root)

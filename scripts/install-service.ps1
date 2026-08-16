@@ -184,14 +184,47 @@ function Install-ReleaseVenv {
 
 if ($Release) {
     $python = Install-ReleaseVenv
+    # Wheel-backed service venv: `resolve_log_dir()` resolves an unset
+    # EXOMEM_LOG_DIR to %ProgramData%\exomem\logs there (not a checkout).
+    # The last tier is spelled as a concatenation, exactly as the Python side
+    # (`_user_log_dir()`, `mode.config_path()`) spells its own `"C:" + r"\ProgramData"`:
+    # the literal must stay byte-identical to Python's, so `$env:SystemDrive` is
+    # deliberately NOT used -- it resolves to a non-C: volume on a box where Windows
+    # was installed elsewhere, which would silently pin a directory the service's own
+    # `resolve_log_dir()` would never pick.
+    $logDirBase = if ($env:ProgramData) { $env:ProgramData } elseif ($env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE } else { "C:" + "\ProgramData" }
+    $pinnedLogDir = Join-Path $logDirBase "exomem\logs"
 } else {
     $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path $python)) {
         throw "Python venv not found at $python. Run 'uv sync' in $repoRoot first, or pass -Release to install a PyPI-backed service venv."
     }
+    # Editable checkout: `resolve_log_dir()` resolves an unset EXOMEM_LOG_DIR
+    # to <repo>\logs there -- the same $logDir this script already uses for
+    # the NSSM stdout/stderr redirects, and the same folder `restart.ps1`
+    # tails.
+    $pinnedLogDir = $logDir
 }
 
+# Pin EXOMEM_LOG_DIR explicitly rather than let the running service
+# independently re-derive its own fallback. `$pinnedLogDir` is computed per
+# install mode above to be the SAME value `resolve_log_dir()` (issue #552)
+# already resolves an unset EXOMEM_LOG_DIR to for the interpreter this
+# install will actually run -- %ProgramData%\exomem\logs for the wheel-backed
+# -Release venv, <repo>\logs for a repo-mode editable checkout -- so the pin
+# changes behavior in NEITHER mode today. What it buys is that the service
+# (via AppEnvironmentExtra below) and any operator-run CLI on this box
+# (`exomem doctor`, `exomem trace`) PROVABLY agree, rather than merely
+# happening to because both sides independently compute the identical
+# formula. It also survives a future change to that fallback without silently
+# moving where a running service's logs land underneath an operator who never
+# re-ran this script. Respects an operator's own explicit `.env` override --
+# only pins when unset there.
 $serviceEnv = Read-DotenvMap
+if (-not $serviceEnv.Contains("EXOMEM_LOG_DIR")) {
+    $serviceEnv["EXOMEM_LOG_DIR"] = $pinnedLogDir
+}
+$appLogDir = $serviceEnv["EXOMEM_LOG_DIR"]
 Set-ProcessEnvFromMap -Map $serviceEnv
 
 $doctorArgs = @("-m", "exomem", "doctor", "--profile", $Profile)
@@ -303,4 +336,4 @@ if ($connectorPending) {
 } else {
     Write-Host "Installed, started, and connector-cleared service '$ServiceName' bound to ${BindHost}:${Port}."
 }
-Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr), exomem.log (app)"
+Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr, NSSM-rotated); $appLogDir\exomem.log (app, EXOMEM_LOG_DIR)"
