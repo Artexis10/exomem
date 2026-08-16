@@ -26,13 +26,22 @@ The system SHALL define the immutable profile `hosted-alpha-agent-v3` in the can
 
 A Hosted surface profile that exposes a broad page-mutation command SHALL refuse any invocation whose caller-supplied write target names the governed schema tree (`_Schema`) or the policy tree (`_Governance`). The refusal MUST happen at the hosted command boundary, before lifecycle admission and before the command leaf, and MUST return a stable machine-readable error.
 
-Path matching MUST be per path segment and case-insensitive, so a differently cased segment, a `..` traversal, a `.` prefix, a doubled or backslash separator, a trailing separator, or a nested path is refused identically. Matching MUST consider every interpretation of the argument the write leaf could take, and MUST refuse if *any* interpretation names a protected tree. In particular an absolute-*shaped* target — one beginning with any number of `/` or `\` separators — MUST be refused whether or not it resolves inside the vault, and whether or not it resolves at all: the write leaf treats a rooted-looking target as vault-relative, so a reading that dismisses it as "outside the vault, therefore not ours" is a bypass. Matching MUST additionally resolve the target against the vault root — for relative targets as well as absolute-shaped ones — so a target that reaches a protected tree through a link, without naming it in any segment, is refused. The guard MUST NOT fail open: a parse, resolution, or filesystem error while evaluating one interpretation MUST NOT suppress the others, and an argument the guard cannot interpret MUST be refused rather than allowed.
+**The guard and the command leaf MUST NOT hold independent notions of the same path.** The guard SHALL derive the target it judges by calling the same normalisation the leaf calls to decide which file to open — one shared function, invoked by both, not a copy of one in each. A guard that re-implements the leaf's normalisation is non-conformant even while it happens to agree, because the defect is the divergence, not any particular disagreement. In particular, the normalisation MUST supply the governed-folder prefix when the caller omitted it, since the leaves do, and a guard that joins at a different root evaluates a path the leaf never touches.
+
+Matching MUST apply both of the following readings to every candidate target, and MUST refuse if *any* reading names a protected tree:
+
+- A **spelling** reading, per path component, case-insensitive, and insensitive to trailing dots and spaces because the target platform strips them before the filesystem sees the component. The reading MUST be correct for every platform the cell can be deployed on rather than for the authoring platform alone, so drive-qualified, UNC, and extended-length spellings MUST be segmented as the deploying platform would segment them.
+- A **resolution** reading, which resolves the deepest ancestor of the target that exists on disk and tests containment against the resolved protected tree roots, then applies the spelling reading to the unresolved remainder. Resolution is what expands an OS-level alias, junction, or link whose name is not a protected tree name; resolving the deepest *existing* ancestor is what keeps that working when the target itself does not exist yet, which is the normal case for creating a new document.
+
+The guard MUST NOT fail open. Any error while evaluating any reading — parsing, resolution, filesystem, or an argument that cannot be read at all — MUST result in refusal, never in an allow and never in falling through to an answer derived from the remaining readings alone.
+
+Where a guarded command exposes more than one caller-supplied target argument, every such argument MUST be guarded. Partial coverage of a guarded command SHALL NOT be treated as coverage.
 
 This requirement replaces the protection that `hosted-alpha-agent-v1` obtained from *not exposing* `edit_memory` or `replace_memory`, recorded in that profile's own requirement as "the command is absent from the profile and rejected before invocation or lifecycle admission" for a path under `_Schema`. Profile absence SHALL NOT be relied upon as the control once a profile exposes those commands.
 
 The guard SHALL be scoped to Hosted surface profiles. Local, CLI, and MCP surfaces on a single-user vault MUST retain the ability to customise that vault's own `_Schema`, and reads of either tree MUST remain unaffected.
 
-Every mutating command a Hosted profile exposes MUST be classified either as guarded or as constrained by its own command leaf, and the cell MUST refuse to serve a profile with an unclassified mutation. Recording a command as leaf-constrained SHALL NOT be a way to wave it through: each such command MUST be shown either to expose no caller-supplied path argument, or to leave a protected-tree target unchanged through its own leaf without the guard firing.
+Every mutating command a Hosted profile exposes MUST be classified either as guarded or as constrained by its own command leaf, and the cell MUST refuse to serve a profile with an unclassified mutation. Recording a command as leaf-constrained SHALL NOT be a way to wave it through: every caller-supplied argument that can shape where such a command writes MUST be shown to leave both protected trees byte-identical and unchanged in membership, without the guard firing. The set of arguments so checked MUST be derived from the command's published schema rather than from a hand-maintained list, so an argument added later is covered by default rather than certified by omission.
 
 #### Scenario: A hosted agent tries to rewrite the schema tree
 
@@ -50,10 +59,26 @@ Every mutating command a Hosted profile exposes MUST be classified either as gua
 - **WHEN** the target is expressed with a differently cased tree segment, a `..` traversal, a leading `./`, doubled or backslash separators, a trailing separator, or a deeper nested path
 - **THEN** every form is refused with the same stable error
 
+#### Scenario: The target omits the governed-folder prefix
+
+- **WHEN** the target is written without the governed-folder prefix, which the command's own description invites, so the leaf will supply it before opening the file
+- **THEN** the guard judges the same prefixed target the leaf will open, rather than a path rooted somewhere the leaf never looks
+
 #### Scenario: The target reaches a protected tree without naming it
 
-- **WHEN** the target is a relative path that traverses a link into `_Schema` or `_Governance`, so no segment of the text is a protected tree name
-- **THEN** it is refused with the same stable error, because the target is also resolved against the vault root
+- **WHEN** the target reaches `_Schema` or `_Governance` through an operating-system alias, junction, or link, so no component of the text is a protected tree name
+- **THEN** it is refused with the same stable error, because the deepest existing ancestor of the target is resolved and tested for containment
+- **AND** this holds whether or not the target itself exists yet
+
+#### Scenario: A component carries trailing dots or spaces
+
+- **WHEN** a component of the target is spelled with trailing dots or spaces, which the target platform strips before the filesystem sees it
+- **THEN** it is refused identically to the bare component
+
+#### Scenario: The target is drive-qualified or UNC
+
+- **WHEN** the target is spelled with a drive prefix, a UNC root, or an extended-length prefix
+- **THEN** it is segmented as the deploying platform would segment it, and a protected component in it is refused
 
 #### Scenario: The target is absolute-shaped
 
@@ -75,8 +100,18 @@ Every mutating command a Hosted profile exposes MUST be classified either as gua
 #### Scenario: A leaf-constrained classification is checked rather than trusted
 
 - **WHEN** a mutating command is recorded as constrained by its own command leaf
-- **THEN** it either exposes no caller-supplied path argument at all, or a protected-tree target passed to it is refused by that leaf with the protected tree left byte-identical
+- **THEN** every argument in its published schema that could shape a write target is probed against a protected tree, and both protected trees are left byte-identical and unchanged in membership
 - **AND** the refusal does not come from the protected-tree guard, which would mean the classification was wrong
+
+#### Scenario: The guard cannot read an argument
+
+- **WHEN** evaluating a target raises at any point — an unreadable value, a resolution error, or a filesystem error
+- **THEN** the invocation is refused
+
+#### Scenario: A guarded command carries a second target argument
+
+- **WHEN** a guarded command exposes more than one caller-supplied target argument
+- **THEN** each of them is guarded, and a protected tree named through any of them is refused identically
 
 ### Requirement: A Widened Profile Is Additive And Never Mutates A Published Profile
 

@@ -29,6 +29,13 @@
 - [x] 4.7 Resolve relative targets against the vault root as well, so a link into a protected tree is refused even when no segment names one, with a red-first test for the symlink shape.
 - [x] 4.8 Prove `TARGET_CONSTRAINED_MUTATIONS` per member instead of claiming it, deriving each member's path arguments from the generated tool-schema fixture.
 - [x] 4.9 Encode the guarded-set membership rule as `v3 - v2` and record that `plan_memory`'s guard is defence in depth over its own `_require_profile_layer` constraint.
+- [x] 4.10 Extract the page write leaves' rel-form computation into one shared `kbdir` function, call it from `edit._resolve`, `replace._resolve_kb_path` and the guard, and assert the leaves do not re-implement it.
+- [x] 4.11 Replace segment-name matching with resolution of the deepest existing ancestor plus containment against the resolved protected roots, keeping the spelling reading for the unresolved remainder.
+- [x] 4.12 Make the spelling reading platform-correct: strip trailing dots and spaces, and segment under both Posix and Windows flavours so drive-qualified, UNC and extended-length spellings are covered.
+- [x] 4.13 Make fail-closed a property of the whole evaluation rather than of individual arms, with a test that an unreadable argument refuses.
+- [x] 4.14 Guard every caller-supplied target argument of a guarded command, adding `plan_memory.collection`.
+- [x] 4.15 Widen the classification sweep from `"path" in key` to every string argument in the pinned schema, asserting both protected trees unchanged in bytes and membership.
+- [x] 4.16 Add a native-NTFS 8.3 test that runs on Windows and skips elsewhere, and state in `design.md` which cases are simulated here.
 
 ## 5. Close The Value-Blind Credential Exemption
 
@@ -47,4 +54,5 @@
 - [ ] 7.1 Add a write-verb selection matrix disambiguating `remember` / `edit_memory` / `replace_memory`; v3 must not be promoted before it passes.
 - [ ] 7.2 Extend the protected-tree guard to the legacy full private command route, or record that route's trust boundary as a deliberate exclusion in a spec of its own.
 - [ ] 7.3 Add a CI render/check step for the v3 candidate, matching the v2 step in the release workflow.
+- [ ] 7.5 Run the hosted protected-tree suite on Windows to confirm the native NTFS 8.3 case; it is the one case this worktree cannot exercise, and `test_guard_refuses_a_native_ntfs_short_name_alias` skips here.
 - [ ] 7.4 Measure whether `edit_memory`'s 9 KB `operation` `oneOf` survives the ChatGPT action cache before extending v3 to the OpenAI channel.

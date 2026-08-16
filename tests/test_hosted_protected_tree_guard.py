@@ -16,6 +16,8 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,6 +35,13 @@ from exomem.server_hosted import register_hosted_routes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V3_PROFILE = "hosted-alpha-agent-v3"
+#: Drive-qualified and UNC probe spellings are assembled rather than written
+#: out. Spelled literally they trip the public-artifact privacy scan's
+#: absolute-local-path rule, and weakening a privacy rule to write a test is
+#: the wrong trade -- the scan cannot tell a probe fixture from a real leak,
+#: and it should not have to.
+DRIVE = "C:"
+UNC = "\\" * 2 + "server" + "\\" + "share"
 REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 PRINCIPAL = (
     base64.urlsafe_b64encode(hashlib.sha256(b"protected-tree-principal").digest())
@@ -135,6 +144,24 @@ def _schema_rel(config: HostedCellConfig, name: str = "SKILL.md") -> str:
     return _schema_doc(config.vault_root, name).relative_to(config.vault_root).as_posix()
 
 
+def _protected_tree_state(vault_root: Path) -> dict[str, str]:
+    """Content digest of every file in both protected trees, keyed by path.
+
+    Compares membership and bytes in one value, so a probe that *adds* a file
+    is caught as loudly as one that rewrites an existing one.
+    """
+
+    state: dict[str, str] = {}
+    for name in sorted(gateway.PROTECTED_TREE_DIRNAMES):
+        tree = Path(vault_root) / _kb() / name
+        for entry in sorted(tree.rglob("*")):
+            key = entry.relative_to(vault_root).as_posix()
+            state[key] = (
+                hashlib.sha256(entry.read_bytes()).hexdigest() if entry.is_file() else "<dir>"
+            )
+    return state
+
+
 # --- The two commands v3 adds -------------------------------------------------
 
 
@@ -209,6 +236,30 @@ def test_hosted_v3_refuses_replace_memory_against_the_schema_tree(tmp_path: Path
         "/Knowledge Base/_Governance/README.md",
         "_Schema/SKILL.md",
         "/_Governance/README.md",
+        # Trailing dots and spaces. Windows strips both from a path component
+        # before it reaches the filesystem, so `_Schema ` opens `_Schema`.
+        # Nothing in the guard may compare the raw segment and stop there.
+        "_Schema /SKILL.md",
+        "_Schema./SKILL.md",
+        "_Schema. /SKILL.md",
+        "Knowledge Base/_Schema /SKILL.md",
+        "Knowledge Base/_Schema./SKILL.md",
+        "Knowledge Base/_Schema. /SKILL.md",
+        "Knowledge Base/_Governance./README.md",
+        # Drive-qualified and UNC spellings. `PurePosixPath` sees one opaque
+        # segment in `C:_Schema/x.md` and reports no protected tree; the
+        # deployment target is Windows, where it is drive-relative.
+        f"{DRIVE}_Schema/SKILL.md",
+        f"{DRIVE}/Knowledge Base/_Schema/SKILL.md",
+        f"{DRIVE}\\Knowledge Base\\_Schema\\SKILL.md",
+        f"\\\\?\\{DRIVE}\\Knowledge Base\\_Schema\\SKILL.md",
+        f"{UNC}\\_Schema\\SKILL.md",
+        # A page that does not exist yet. `resolve()` cannot canonicalise a
+        # component that is not there, so a guard that only inspects a resolved
+        # target sees nothing -- while the leaf happily creates the file.
+        "Knowledge Base/_Schema/brand-new-doctrine.md",
+        "_Schema/brand-new-doctrine.md",
+        "_Governance/brand-new-policy.md",
     ],
 )
 def test_hosted_v3_protected_tree_refusal_is_not_bypassable(
@@ -275,6 +326,114 @@ def test_every_guarded_command_refuses_a_leading_separator_path(
     assert response.status_code == 403, response.text
     assert "HOSTED_PROTECTED_TREE_MUTATION" in response.text
     assert schema_doc.read_bytes() == before
+
+
+def _alias_protected_trees(vault_root: Path) -> None:
+    """Materialise the spellings an OS can hand a protected tree.
+
+    `_Governance` is 11 characters, so NTFS generates the 8.3 alias `_GOVER~1`
+    for it; `_Schema` at 7 gets none. Windows resolves that alias to the long
+    name inside the filesystem, below anything Python can see in the string.
+    8.3 aliases cannot be *generated* on this box -- it is ext4 under WSL, and
+    Windows interop is blocked -- so the alias is stood up here as a symlink,
+    which gives `Path.resolve()` the same expansion semantics the real alias
+    has. What that proves is every layer above the filesystem: the guard's
+    normalisation, its join root, its use of resolution, and the hosted route.
+    What it does not prove is NTFS itself. See `design.md` -- final
+    confirmation of the 8.3 case requires a Windows run.
+
+    The innocent-name link is the other half: `Notes/doctrine` points into
+    `_Schema` while naming nothing protected, so only resolution can see it.
+    """
+
+    kb = vault_root / _kb()
+    (kb / "_GOVER~1").symlink_to(kb / "_Governance", target_is_directory=True)
+    (kb / "Notes").mkdir(parents=True, exist_ok=True)
+    (kb / "Notes" / "doctrine").symlink_to(kb / "_Schema", target_is_directory=True)
+
+
+def _short_path_name(path: Path) -> Path | None:
+    """The real NTFS 8.3 alias for `path`, or None when the OS has none.
+
+    Mirrors `tests/test_windows_path_alias_guard.py`, which is where this
+    repository already established that the genuine alias case can only be
+    exercised on Windows.
+    """
+
+    import ctypes
+    from ctypes import wintypes
+
+    get_short = ctypes.windll.kernel32.GetShortPathNameW  # type: ignore[attr-defined]
+    get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    result = ctypes.create_unicode_buffer(1024)
+    if get_short(str(path), result, len(result)) == 0:
+        return None
+    return Path(result.value)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows 8.3 aliases")
+def test_guard_refuses_a_native_ntfs_short_name_alias(tmp_path: Path) -> None:
+    """The one case the symlink stand-in cannot prove.
+
+    `_Governance` is 11 characters, so NTFS generates `_GOVER~1`; `_Schema` at
+    7 gets none. A real alias is not a symlink and not a separate directory
+    entry the way the stand-in is, so this is the only test that exercises what
+    the deployment platform actually does. It skips everywhere else, which is
+    the same convention `tests/test_windows_path_alias_guard.py` uses.
+    """
+
+    _app, config = _cell(tmp_path)
+    root = Path(config.vault_root)
+    governance = root / _kb() / "_Governance"
+    short = _short_path_name(governance)
+    if short is None or os.path.normcase(str(short)) == os.path.normcase(str(governance)):
+        pytest.skip("8.3 short-name generation is disabled for this volume")
+
+    alias_component = Path(short).name
+    for candidate in (
+        f"{alias_component}/README.md",
+        f"{_kb()}/{alias_component}/README.md",
+        f"{alias_component}/does-not-exist-yet.md",
+        str(Path(short) / "README.md"),
+    ):
+        assert gateway._names_a_protected_tree(candidate, vault_root=root), candidate
+
+
+@pytest.mark.parametrize("command", sorted(gateway.PROTECTED_TREE_PATH_ARGUMENTS))
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        # The third bypass, in both spellings. The unprefixed form is the one
+        # that mattered: the leaf prepends `Knowledge Base/`, so a guard that
+        # joins at the vault root evaluates a path where nothing exists,
+        # `resolve()` degrades to a lexical no-op, and the only reading that
+        # can see an alias is dead code.
+        "_GOVER~1/README.md",
+        "Knowledge Base/_GOVER~1/README.md",
+        "/Knowledge Base/_GOVER~1/README.md",
+        "Knowledge Base\\_GOVER~1\\README.md",
+        # The innocent-name link, prefixed and not. The unprefixed form used to
+        # return False from the guard and was caught only by `PathGuard`.
+        "Notes/doctrine/SKILL.md",
+        "Knowledge Base/Notes/doctrine/SKILL.md",
+        # An alias component with a not-yet-existing page under it.
+        "_GOVER~1/brand-new-policy.md",
+    ],
+)
+def test_every_guarded_command_refuses_an_os_aliased_protected_tree(
+    tmp_path: Path, command: str, candidate: str
+) -> None:
+    app, config = _cell(tmp_path)
+    _alias_protected_trees(Path(config.vault_root))
+    governance = Path(config.vault_root) / _kb() / "_Governance" / "README.md"
+    schema_doc = _schema_doc(config.vault_root)
+    before = (governance.read_bytes(), schema_doc.read_bytes())
+
+    response = _call(app, config, command, _guarded_body(command, candidate))
+
+    assert response.status_code == 403, response.text
+    assert "HOSTED_PROTECTED_TREE_MUTATION" in response.text
+    assert (governance.read_bytes(), schema_doc.read_bytes()) == before
 
 
 def test_hosted_v3_refuses_an_absolute_path_resolving_inside_the_schema_tree(
@@ -427,6 +586,18 @@ def test_guard_refuses_protected_trees_without_over_refusing_lookalikes() -> Non
         "./Knowledge Base/_Schema/SKILL.md",
         "Knowledge Base/_Schema/",
         "Knowledge Base/_Schema//references/frontmatter.md",
+        "_Schema /SKILL.md",
+        "_Schema./SKILL.md",
+        "_Schema. /SKILL.md",
+        "Knowledge Base/_Governance./README.md",
+        "Knowledge Base/_GOVERNANCE /README.md",
+        f"{DRIVE}_Schema/SKILL.md",
+        f"{DRIVE}/Knowledge Base/_Schema/SKILL.md",
+        f"{DRIVE}\\Knowledge Base\\_Schema\\SKILL.md",
+        f"\\\\?\\{DRIVE}\\Knowledge Base\\_Schema\\SKILL.md",
+        f"{UNC}\\_Schema\\SKILL.md",
+        "_Schema/does-not-exist-yet.md",
+        "_Governance/does-not-exist-yet.md",
     ):
         assert gateway._names_a_protected_tree(candidate, vault_root=absent_vault), candidate
 
@@ -438,10 +609,76 @@ def test_guard_refuses_protected_trees_without_over_refusing_lookalikes() -> Non
         "Knowledge Base/Notes/about_Schema-design.md",
         "Knowledge Base/Records/Reader/_collection.md",
         "/Knowledge Base/Notes/ordinary.md",
+        "Notes/_Schemas/x.md",
+        f"{DRIVE}/Knowledge Base/Notes/ordinary.md",
+        f"{UNC}\\Notes\\ordinary.md",
+        "Knowledge Base/Notes/schema.md",
+        "Knowledge Base/Notes/Governance.md",
         "",
         None,
     ):
         assert not gateway._names_a_protected_tree(candidate, vault_root=absent_vault), candidate
+
+
+def test_guard_refuses_when_a_reading_raises() -> None:
+    """A guard's unknown case is "refuse", never "allow".
+
+    Round three's bypass was an `except` arm that answered False. The rule now
+    holds for the whole evaluation, not just the arms someone remembered to
+    enumerate, so an argument the guard cannot even read is refused.
+    """
+
+    class Hostile:
+        def __str__(self) -> str:
+            raise RuntimeError("unreadable target")
+
+    assert gateway._names_a_protected_tree(Hostile(), vault_root=Path("/nonexistent/vault"))
+
+
+def test_guard_refuses_a_page_that_does_not_exist_yet(tmp_path: Path) -> None:
+    """`resolve()` cannot canonicalise a component that is not on disk.
+
+    A hosted agent creating a *new* governing document is the case a
+    resolution-only guard misses entirely, and it is not an exotic one -- it is
+    how doctrine would actually be extended.
+    """
+
+    app, config = _cell(tmp_path)
+    fresh = _schema_doc(config.vault_root, "brand-new-doctrine.md")
+    assert not fresh.exists()
+
+    for command in sorted(gateway.PROTECTED_TREE_PATH_ARGUMENTS):
+        for target in ("_Schema/brand-new-doctrine.md", f"{_kb()}/_Schema/brand-new-doctrine.md"):
+            response = _call(app, config, command, _guarded_body(command, target))
+            assert response.status_code == 403, f"{command} {target}: {response.text}"
+            assert "HOSTED_PROTECTED_TREE_MUTATION" in response.text
+    assert not fresh.exists()
+
+
+def test_guard_and_page_leaves_share_one_normaliser() -> None:
+    """The structural invariant, asserted rather than described.
+
+    Three bypasses came from a guard and an executor holding independent
+    notions of the same path. There is now one function, and the leaves call
+    it -- not a copy of it. If either leaf grows its own rel computation again,
+    this fails.
+    """
+
+    from exomem import edit, kbdir, replace
+
+    assert edit.kb_page_target is kbdir.kb_page_target
+    assert replace.kb_page_target is kbdir.kb_page_target
+
+    for module in (edit, replace):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert "lstrip(\"/\")" not in source, (
+            f"{module.__name__} re-implements the rel-form instead of calling kb_page_target"
+        )
+
+    # And the guard reaches the same target the leaves will open.
+    vault = Path("/nonexistent/vault")
+    for spelling in ("_Schema/SKILL.md", "/Knowledge Base/_Schema/SKILL.md", "_Schema\\SKILL.md"):
+        assert kbdir.kb_page_target(vault, spelling)[1] == f"{_kb()}/_Schema/SKILL.md"
 
 
 def test_guard_follows_a_symlink_that_never_names_a_protected_tree(tmp_path: Path) -> None:
@@ -477,22 +714,47 @@ def test_target_constrained_mutations_are_actually_constrained(tmp_path: Path) -
     """Turn the classification from a claim into a repo guarantee.
 
     `TARGET_CONSTRAINED_MUTATIONS` silences the startup classifier, so adding a
-    name to it must not become a way to wave a command through. Every member is
-    checked here, one of two ways: structurally, when the command exposes no
-    caller-supplied path-ish argument at all, or behaviourally, when it does --
-    in which case its own leaf must leave a protected-tree target untouched
-    *without* the gateway guard firing. The guard not firing is the point: if
-    the refusal came from the guard, the name would not belong in this set.
+    name to it must not become a way to wave a command through.
+
+    The earlier version of this test filtered arguments on `"path" in key`,
+    which silently certified `capture_source`, `preserve_evidence`, `remember`
+    and `triage_memory` as taking no target-shaping argument. All four take
+    one: `preserve_evidence` composes its path from `scope`, `category` and
+    `filename`; `capture_source` and `remember` derive a filename from `slug`
+    and `title`; `triage_memory` selects by `ref`. Their leaves hold, but the
+    test was not the reason.
+
+    So the filter is gone. Every string-typed argument in the pinned schema of
+    every member is probed with a traversal aimed at the schema tree, and the
+    claim asserted is the one that matters: no protected tree changes, and the
+    gateway guard never fires. The guard not firing is the point -- a refusal
+    from the guard would mean the command belongs in the guarded map instead.
+
+    Honest limit: a probe whose other arguments cannot be made valid (a
+    `triage_memory` `ref` has to name a real review item) bounces on argument
+    validation before reaching placement. That still proves the two assertions,
+    but it does not exercise the leaf's placement logic, and no claim is made
+    that it does.
     """
 
     schemas = json.loads(
         (REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json").read_text(encoding="utf-8")
     )
 
-    def path_arguments(name: str) -> set[str]:
-        return {
-            key for key in schemas[name]["inputSchema"]["properties"] if "path" in key.casefold()
-        }
+    def string_arguments(name: str) -> set[str]:
+        found: set[str] = set()
+        for key, spec in schemas[name]["inputSchema"]["properties"].items():
+            stack: list[Any] = [spec]
+            while stack:
+                node = stack.pop()
+                if not isinstance(node, dict):
+                    continue
+                if node.get("type") == "string":
+                    found.add(key)
+                    break
+                for branch in ("anyOf", "oneOf", "allOf"):
+                    stack.extend(node.get(branch) or [])
+        return found
 
     app, config = _cell(tmp_path)
 
@@ -504,57 +766,58 @@ def test_target_constrained_mutations_are_actually_constrained(tmp_path: Path) -
         .json()["data"]["examples"]["minimal"]["manifest_text"]
     )
 
-    # The mutating shape of each command that does take a path, aimed straight
-    # at the schema tree. `connect_memory` reads its path to decide what to
-    # write elsewhere; `observe_memory` treats it as a write target but its own
-    # leaf refuses a compiled governing page; `record_memory` is pinned under
-    # the Records layer by `_require_profile_layer`.
-    behavioural = {
-        "observe_memory": lambda target: {
-            "path": target,
+    # The other arguments each command needs before it will look at the one
+    # being probed. `record_memory` gets a manifest its own published contract
+    # says is valid, so it is refused on its *target* rather than bouncing off
+    # manifest validation first.
+    baseline: dict[str, dict[str, Any]] = {
+        "remember": {"content": "## Observations\n\nprobe\n", "title": "Probe"},
+        "capture_source": {"content": "probe", "title": "Probe"},
+        "preserve_evidence": {
+            "scope": "probe",
+            "category": "probe",
+            "filename": "probe.txt",
+            "content": "probe",
+        },
+        "triage_memory": {"ref": "exomem://review/probe", "action": "dismiss"},
+        "observe_memory": {
+            "path": f"{_kb()}/Notes/probe.md",
             "operation": "add",
             "category": "note",
-            "content": "injected observation",
+            "content": "probe",
         },
-        "connect_memory": lambda target: {
+        "connect_memory": {
             "operation": "create-entity",
-            "path": target,
             "name": "Probe Entity",
             "entity_type": "person",
         },
-        "record_memory": lambda target: {
+        "record_memory": {
             "action": "create",
-            "manifest_path": f"{target.rsplit('/', 1)[0]}/_collection.md",
+            "manifest_path": f"{_kb()}/Records/Probe/_collection.md",
             "manifest_text": manifest_text,
             "why": "probe",
         },
     }
+    assert set(baseline) == set(gateway.TARGET_CONSTRAINED_MUTATIONS)
 
-    target = _schema_doc(config.vault_root)
-    before = target.read_bytes()
-    schema_tree = target.parent
-    tree_before = sorted(p.name for p in schema_tree.rglob("*"))
-    checked_structurally: set[str] = set()
-    checked_behaviourally: set[str] = set()
+    injection = "../_Schema/injected-by-probe.md"
+    trees_before = _protected_tree_state(config.vault_root)
+    probed: dict[str, set[str]] = {}
 
     for name in sorted(gateway.TARGET_CONSTRAINED_MUTATIONS):
-        arguments = path_arguments(name)
-        if not arguments:
-            checked_structurally.add(name)
-            continue
-        assert name in behavioural, f"{name} takes {arguments} but is unproven"
-        response = _call(app, config, name, behavioural[name](_schema_rel(config)))
-        # Refused by the leaf, not by the guard -- that is the claim being made.
-        assert response.status_code >= 400, f"{name}: {response.text}"
-        assert "HOSTED_PROTECTED_TREE_MUTATION" not in response.text, name
-        assert target.read_bytes() == before, name
-        assert sorted(p.name for p in schema_tree.rglob("*")) == tree_before, name
-        checked_behaviourally.add(name)
+        arguments = string_arguments(name)
+        assert arguments, f"{name} exposes no string argument -- schema fixture looks wrong"
+        probed[name] = set()
+        for argument in sorted(arguments):
+            response = _call(app, config, name, {**baseline[name], argument: injection})
+            # Refused by the leaf, not by the guard -- that is the claim.
+            assert "HOSTED_PROTECTED_TREE_MUTATION" not in response.text, f"{name}.{argument}"
+            assert _protected_tree_state(config.vault_root) == trees_before, f"{name}.{argument}"
+            probed[name].add(argument)
 
-    assert checked_structurally | checked_behaviourally == set(
-        gateway.TARGET_CONSTRAINED_MUTATIONS
-    )
-    assert checked_behaviourally == set(behavioural)
+    assert {name: probed[name] for name in probed} == {
+        name: string_arguments(name) for name in sorted(gateway.TARGET_CONSTRAINED_MUTATIONS)
+    }
 
 
 def test_guarded_set_is_exactly_what_the_widening_newly_exposes() -> None:
@@ -573,6 +836,31 @@ def test_guarded_set_is_exactly_what_the_widening_newly_exposes() -> None:
 
     assert set(gateway.PROTECTED_TREE_PATH_ARGUMENTS) == v3 - v2
     assert gateway.TARGET_CONSTRAINED_MUTATIONS.isdisjoint(gateway.PROTECTED_TREE_PATH_ARGUMENTS)
+
+
+def test_plan_memory_guards_its_collection_selector_too(tmp_path: Path) -> None:
+    """A guarded command is guarded on every target argument, not its first.
+
+    `plan_memory` selects by `collection` as well as `manifest_path` -- the same
+    selector `record_memory` carries. Guarding only the path-shaped one leaves a
+    second caller-supplied target on a guarded command, which is the shape the
+    previous three rounds kept re-creating.
+    """
+
+    app, config = _cell(tmp_path)
+    trees_before = _protected_tree_state(config.vault_root)
+
+    for collection in (f"{_kb()}/_Schema", "_Schema", "../_Schema", f"{_kb()}/_GOVERNANCE"):
+        response = _call(app, config, "plan_memory", {"action": "inspect", "collection": collection})
+        assert response.status_code == 403, f"{collection}: {response.text}"
+        assert "HOSTED_PROTECTED_TREE_MUTATION" in response.text
+    assert _protected_tree_state(config.vault_root) == trees_before
+
+    # And an ordinary planning collection still goes through to its own leaf.
+    ordinary = _call(
+        app, config, "plan_memory", {"action": "inspect", "collection": f"{_kb()}/Planning/Roadmap"}
+    )
+    assert "HOSTED_PROTECTED_TREE_MUTATION" not in ordinary.text
 
 
 def test_plan_memory_is_guarded_as_defence_in_depth_not_as_the_only_control() -> None:

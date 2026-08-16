@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from fastmcp.tools import FunctionTool
@@ -23,6 +23,7 @@ from .hosted_runtime import (
     SUPPORTED_HOSTED_PROTOCOL_VERSIONS,
     HostedCellConfig,
 )
+from .kbdir import kb_dirname, kb_page_target, kb_relative_form
 
 CONTRACT_SCHEMA_VERSION = 1
 TRANSFER_GRANT_VERSION = 1
@@ -183,10 +184,18 @@ PROTECTED_TREE_DIRNAMES: frozenset[str] = frozenset({"_Schema", "_Governance"})
 #: planning manifest under `Knowledge Base/Planning/`, so a protected tree is
 #: unreachable through it either way. For `edit_memory` and `replace_memory`
 #: the guard *is* the control.
+#:
+#: Within a guarded command *every* caller-supplied target argument is listed,
+#: not just the obvious one -- partial coverage of a guarded command is how a
+#: guard grows its next hole. `plan_memory` selects by `collection` as well as
+#: `manifest_path`, so both are here. `replace_memory`'s `slug` names the
+#: successor page's filename but cannot reach a tree: `vault.resolve_filename_slug`
+#: admits lowercase ASCII kebab-case only, which has no `/`, `.` or `_` to spell
+#: one with.
 PROTECTED_TREE_PATH_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "edit_memory": ("path",),
     "replace_memory": ("old_path",),
-    "plan_memory": ("manifest_path",),
+    "plan_memory": ("collection", "manifest_path"),
 }
 
 #: Mutating commands that do not need the guard because their own leaf refuses a
@@ -219,78 +228,175 @@ TARGET_CONSTRAINED_MUTATIONS: frozenset[str] = frozenset(
 )
 
 
+def _folded_segment(part: str) -> str:
+    """One path component reduced to what the filesystem will actually match.
+
+    Case is folded, and trailing dots and spaces are dropped because Windows
+    strips them from a component before the call reaches the filesystem --
+    `_Schema ` and `_Schema.` both open `_Schema`. A guard that compares the
+    component as typed reports "not protected" for both.
+    """
+
+    return part.strip().rstrip(". ").casefold()
+
+
 def _has_protected_segment(parts: Iterable[str]) -> bool:
-    folded = {name.casefold() for name in PROTECTED_TREE_DIRNAMES}
-    return any(part.casefold() in folded for part in parts)
+    folded = {_folded_segment(name) for name in PROTECTED_TREE_DIRNAMES}
+    return any(_folded_segment(part) in folded for part in parts)
+
+
+def _spelling_names_a_protected_tree(text: str) -> bool:
+    """Segment check under every flavour a target platform could apply.
+
+    `PurePosixPath` alone is wrong for the platform this actually deploys to:
+    it reads `C:_Schema/x.md` as one opaque component and reports no protected
+    tree, while Windows reads it as drive-relative and opens `_Schema`. Both
+    flavours are applied and either one is enough to refuse, which also covers
+    UNC and `\\\\?\\` spellings without special-casing them.
+    """
+
+    return any(
+        _has_protected_segment(flavour(text).parts)
+        for flavour in (PurePosixPath, PureWindowsPath)
+    )
+
+
+def _deepest_existing(target: Path) -> tuple[Path, tuple[str, ...]]:
+    """Split `target` into its deepest existing ancestor and the tail below it.
+
+    `resolve()` cannot canonicalise a component that is not on disk, and the
+    interesting targets usually are not: a hosted agent asking to create a new
+    page inside `_Schema` names a file that does not exist yet. Resolving the
+    deepest ancestor that *does* exist is what lets an alias, junction or link
+    in the middle of the path be expanded, while the tail stays available for
+    the literal check.
+
+    A symlink counts as existing even when it dangles, so a broken link is
+    resolved rather than walked through.
+    """
+
+    remainder: list[str] = []
+    current = target
+    while True:
+        try:
+            if current.exists() or current.is_symlink():
+                return current, tuple(reversed(remainder))
+        except OSError:
+            pass
+        parent = current.parent
+        if parent == current:
+            return current, tuple(reversed(remainder))
+        remainder.append(current.name)
+        current = parent
+
+
+def _protected_roots(vault_root: Path) -> tuple[Path, ...]:
+    """The resolved real directories this guard exists to protect."""
+
+    kb = Path(vault_root) / kb_dirname()
+    roots: list[Path] = []
+    for name in sorted(PROTECTED_TREE_DIRNAMES):
+        candidate = kb / name
+        if candidate.exists() or candidate.is_symlink():
+            roots.append(candidate.resolve())
+    return tuple(roots)
+
+
+def _resolution_names_a_protected_tree(target: Path, vault_root: Path) -> bool:
+    """Resolve `target` as far as the filesystem allows and judge the result.
+
+    This is the reading that sees what a *name* cannot: an NTFS 8.3 alias
+    (`_GOVER~1` for `_Governance`), a junction, a symlink, or a `..` chain that
+    lands inside a protected tree without ever spelling it. Containment is
+    tested against the resolved protected roots rather than by comparing
+    component names, because by the time the OS has resolved the path the
+    alias is gone and only the real location remains.
+    """
+
+    existing, remainder = _deepest_existing(target)
+    resolved = existing.resolve()
+
+    for root in _protected_roots(vault_root):
+        if resolved == root or root in resolved.parents:
+            return True
+
+    # Protected trees are not only the two at the KB root -- a nested one is
+    # protected too -- so the resolved location is also read per segment.
+    # Scoped to the vault where possible so a host directory above the vault
+    # cannot decide the answer; outside the vault, over-refuse.
+    try:
+        scoped = resolved.relative_to(Path(vault_root).resolve()).parts
+    except ValueError:
+        scoped = resolved.parts
+    if _has_protected_segment(scoped):
+        return True
+
+    # The tail below the deepest existing ancestor was never resolved, so it
+    # gets the literal reading. This is what refuses a not-yet-existing page
+    # inside `_Schema`.
+    return _has_protected_segment(remainder)
+
+
+def _evaluate_protected_tree(value: object, *, vault_root: Path | None) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+
+    # Spelling readings. `kb_relative_form` is the leaf's own normaliser, so
+    # the first of these is literally the rel-form the write will use; the raw
+    # text is kept because a Windows drive or UNC prefix is only parseable
+    # before the KB prefix is prepended.
+    for text in (kb_relative_form(raw), raw, raw.replace("\\", "/").lstrip("/")):
+        if _spelling_names_a_protected_tree(text):
+            return True
+
+    if vault_root is None:
+        return False
+
+    root = Path(vault_root)
+    # Resolution readings, one per leaf that can open this argument. The page
+    # write leaves join at the *KB* root via `kb_page_target`; the collection
+    # leaves join at the *vault* root. Evaluating only one of them is how the
+    # third bypass worked: `_GOVER~1/README.md` resolved to nothing under the
+    # vault root, so the alias was never expanded.
+    targets = [kb_page_target(root, raw)[0], root / raw.replace("\\", "/").lstrip("/")]
+    literal = Path(raw)
+    if literal.is_absolute():
+        targets.append(literal)
+    return any(_resolution_names_a_protected_tree(target, root) for target in targets)
 
 
 def _names_a_protected_tree(value: object, *, vault_root: Path | None) -> bool:
     """Return whether `value` names a path that touches a protected subtree.
 
-    Matching is per *segment* and case-folded, which is what makes the check
-    hard to walk around: `..` traversal, `.` prefixes, doubled or backslash
-    separators, trailing separators, and nesting all still leave the tree's
-    own name as a segment. A path that merely traverses *out* of a protected
-    tree is refused too; over-refusing an exotic path costs a caller nothing
-    and under-refusing one costs the tenant its doctrine.
+    Three bypasses of this guard had one cause: the guard and the executor held
+    independent notions of the same path. Round two matched segment names the
+    executor never compared. Round three branched on `is_absolute()` while the
+    executor stripped the separator and wrote the file. Round four joined at
+    the vault root while the executor joined at the *KB* root, so an unprefixed
+    `_GOVER~1/README.md` resolved to nothing and its NTFS 8.3 alias was never
+    expanded. Enumerating shapes did not fix any of them.
 
-    Every interpretation of the argument is evaluated and *any* hit refuses.
-    The literal-segment reading runs first and unconditionally, because the
-    guard and the write leaf do not agree on what "absolute" means: a leading
-    separator makes `Path.is_absolute()` true here, while `edit_memory`'s
-    resolver treats a rooted-looking path as vault-relative, strips the
-    separator, and writes the real file. An earlier version branched on
-    `is_absolute()` and returned False when the path would not resolve under
-    the vault root, so `/Knowledge Base/_Schema/SKILL.md` -- one character away
-    from a refused path -- committed a write. A guard's unknown case must be
-    "refuse", never "allow", and no arm below can overturn a literal hit: a
-    resolution failure `continue`s to the next reading instead of answering.
+    So the guard no longer has a normaliser of its own. It calls
+    `kbdir.kb_relative_form` -- the same function `edit._resolve` and
+    `replace._resolve_kb_path` call -- and judges the path the executor will
+    actually open. Two readings then run over every candidate target, and any
+    hit refuses: a *spelling* reading, per component, case-folded, with
+    trailing dots and spaces stripped and both Posix and Windows flavours
+    applied; and a *resolution* reading, which resolves the deepest existing
+    ancestor so aliases and links are expanded by the OS, tests containment
+    against the resolved protected roots, then applies the spelling reading to
+    the tail that could not be resolved.
+
+    Over-refusing an exotic path costs a caller nothing; under-refusing one
+    costs the tenant its doctrine. Any exception anywhere in the evaluation
+    therefore refuses: a guard's unknown case is never "allow".
     """
 
-    raw = str(value or "").strip()
-    if not raw:
-        return False
-    text = raw.replace("\\", "/")
-
-    # Interpretation 1: exactly as written. Leading separators, doubled
-    # separators and `..` do not remove a segment, so this is what catches the
-    # leading-separator shape the leaf normalises away.
-    if _has_protected_segment(PurePosixPath(text).parts):
+    try:
+        return _evaluate_protected_tree(value, vault_root=vault_root)
+    except Exception:  # noqa: BLE001 - deliberate: an unreadable target is refused
         return True
-
-    # Interpretation 2: leading separators stripped, which is how the write
-    # leaf itself reads a rooted-looking path. Redundant with the first reading
-    # for every shape seen so far, and kept explicit so a future change to
-    # either normaliser cannot quietly leave only one of them covered.
-    stripped = text.lstrip("/")
-    if stripped != text and _has_protected_segment(PurePosixPath(stripped).parts):
-        return True
-
-    # Interpretation 3: a real filesystem path resolved against this cell's
-    # vault root. This is the only reading that catches a link, or a `..` chain
-    # that lands inside a protected tree without ever naming it. Relative text
-    # is resolved too, not just absolute-shaped text, because a relative path
-    # traverses a link just as easily. Everything is joined to the vault root
-    # rather than the process CWD, so the answer does not depend on where the
-    # cell happens to be running; an absolute path is additionally read at face
-    # value, which is how a link *outside* the vault pointing in is caught. A
-    # failure here adds nothing and subtracts nothing: the readings above have
-    # already returned, and each attempt continues past its own error.
-    if vault_root is not None:
-        root = Path(vault_root)
-        candidate = Path(text)
-        attempts = [root / stripped]
-        if candidate.is_absolute():
-            attempts.append(candidate)
-        for attempt in attempts:
-            try:
-                resolved = attempt.resolve().relative_to(root.resolve())
-            except (ValueError, OSError):
-                continue
-            if _has_protected_segment(resolved.parts):
-                return True
-
-    return False
 
 
 def protected_tree_argument(
