@@ -104,15 +104,21 @@ MAX_GRAPH_REBUILD_ATTEMPTS = 4
 #: or died: 75-155 s against a 750 ms commit budget, and every one of those
 #: rebuilds failed, so the wait bought nothing at all.
 #:
-#: 2.0 s is chosen to sit just above the corpus-scale commit p95 ceiling the
-#: latency gate already enforces (`COMMIT_P95_MS = 1_500.0`), so the worst-case
-#: user-visible write stays the same order of magnitude as the write itself. It
-#: is deliberately NOT tuned to "usually be enough" for a full rebuild: a real
-#: full-corpus pass costs 20-175 s, so any bound that sometimes succeeds would
-#: also sometimes stall a user for minutes. Work that finishes inside it is work
-#: that was already done or nearly done (a coalesced flight, a small vault);
-#: everything else returns `pending` and converges behind the caller.
-INTERACTIVE_GRAPH_JOIN_TIMEOUT_SECONDS = 2.0
+#: 0.25 s. The first draft used 2.0 s, sized against the gate's p95 ceiling
+#: (`COMMIT_P95_MS = 1_500.0`), and CI proved that wrong: the same gate enforces
+#: `COMMIT_MEDIAN_MS = 750.0`, so a 2.0 s ceiling blows the *median* budget by
+#: construction the moment it is reached. It was, at 2091 ms / 2259 ms for 2k /
+#: 8k pages -- barely moving with corpus size, because the number measured was
+#: the bound rather than the work. A bound must fit inside the tightest budget
+#: of the caller it protects, not the loosest.
+#:
+#: It is deliberately NOT tuned to "usually be enough" for a full rebuild: a
+#: real full-corpus pass costs 20-175 s, so any bound that sometimes succeeds
+#: would also sometimes stall a user for minutes. Nothing is lost by shrinking
+#: it, because the only flights it can ever catch are ones already finishing --
+#: a coalesced flight, a warm no-op, a small vault. A pass that needs 250 ms
+#: more than this is a pass that needed 20 s more.
+INTERACTIVE_GRAPH_JOIN_TIMEOUT_SECONDS = 0.25
 
 #: `reconcile` is an internal registry name, not something a caller can run.
 #: The MCP surface is `maintain_memory(mode="reconcile")` and the CLI dispatches
