@@ -151,6 +151,23 @@ def test_reserved_runtime_trees_do_not_enter_identity_census_or_cache_token(
     assert not semantic_contract._prune_identity_census_directory(
         kb, kb / "Notes", graph_rebuild
     )
+    lexical_rebuild = f".lexical.sqlite.rebuild-{'a' * 32}.tmp"
+    assert semantic_contract._prune_identity_census_directory(kb, kb, lexical_rebuild)
+    assert semantic_contract._prune_identity_census_directory(
+        kb, kb, f"{lexical_rebuild}-wal"
+    )
+    assert semantic_contract._prune_identity_census_directory(
+        kb, kb, f"{lexical_rebuild}-shm"
+    )
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb, lexical_rebuild.upper()
+    )
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb, ".lexical.sqlite.rebuild-user-copy.tmp"
+    )
+    assert not semantic_contract._prune_identity_census_directory(
+        kb, kb / "Notes", lexical_rebuild
+    )
     assert vault_module.in_excluded_scan_dir(
         f"Knowledge Base/.graph-reset-{'f' * 24}/private.md"
     )
