@@ -4,13 +4,13 @@
 
 Each write-path advisory — the near-duplicate warning, the contradiction-band warning, and the overlap warning — SHALL carry a stable review reference and a signal fingerprint derived from the advisory's endpoints and their content signal versions. Before emitting an advisory, the system SHALL consult the portable review state: an advisory whose exact `(review identity, fingerprint)` pair was dismissed SHALL NOT be emitted; a snoozed pair SHALL NOT be emitted before its expiry.
 
-A material change to either endpoint SHALL produce a different fingerprint, and the advisory SHALL then be emitted again. Ranking drift, unrelated writes, and repeated identical page states SHALL NOT change the fingerprint.
+A material change to the counterpart endpoint SHALL produce a different fingerprint, and the advisory SHALL then be emitted again. A change to the written page itself SHALL resurface a dismissed advisory only when it changes the detected signal class for the pair. Ranking drift, unrelated writes, the triggering write's own change to the written page, and repeated identical page states SHALL NOT change the fingerprint.
 
 Suppression SHALL be failure-isolated in the emitting direction: review state that cannot be read or parsed SHALL cause the advisory to be emitted, and SHALL NOT fail, delay, or alter the committed mutation.
 
 #### Scenario: A dismissed duplicate warning stays quiet on the next write
 
-- **WHEN** a near-duplicate advisory for a page pair is dismissed through triage, and a further write commits to the same page with both endpoints materially unchanged
+- **WHEN** a near-duplicate advisory for a page pair is dismissed through triage, and a further write commits to the same page with the counterpart materially unchanged and the detected signal class unchanged
 - **THEN** the committed result carries no near-duplicate advisory for that pair
 - **AND** the mutation outcome, status, and path are unchanged from an emission-free write
 

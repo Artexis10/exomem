@@ -31,10 +31,12 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from .kbdir import kb_prefix
+from .vault import content_hash
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +50,15 @@ RELATED_OVERFETCH = 3  # fetch limit * this from find(), then re-rank + trim
 
 # Lead-body word budget for the synthesized "what is this about" query.
 _QUERY_LEAD_WORDS = 400
+_WRITE_ADVISORY_NAMESPACE = "write-advisory"
+_WRITE_ADVISORY_KINDS = frozenset(
+    {"near-duplicate", "contradiction-band", "overlap"}
+)
+_WRITE_ADVISORY_REF_PREFIX = f"exomem://review/{_WRITE_ADVISORY_NAMESPACE}/"
+# Coupled to mutation_terminal._MAX_WARNING_CHARS: identity must survive compact
+# projection, whose generic projector truncates warning strings from the right.
+_WRITE_ADVISORY_WARNING_CHARS = 300
+_WRITE_ADVISORY_FINGERPRINT_RE = re.compile(r"[0-9a-f]{24}")
 
 
 def _dup_threshold() -> float:
@@ -123,6 +134,293 @@ class DupCandidate:
             d["polarity_score"] = self.polarity_score
             d["polarity_method"] = self.polarity_method
         return d
+
+
+@dataclass(frozen=True)
+class WriteAdvisoryIdentity:
+    """Stable, triageable identity for one write-time corpus advisory."""
+
+    kind: str
+    review_id: str
+    ref: str
+    fingerprint: str
+
+
+def _advisory_path(
+    vault_root: Path,
+    path: str,
+    *,
+    require_file: bool = True,
+) -> str:
+    clean = str(path or "").replace("\\", "/").lstrip("/")
+    if not clean:
+        raise ValueError("write advisory endpoint path is required")
+    if not clean.lower().endswith(".md"):
+        clean = f"{clean}.md"
+    root = Path(vault_root)
+    if not (root / clean).is_file() and not clean.startswith(kb_prefix()):
+        clean = f"{kb_prefix()}{clean}"
+    if require_file and not (root / clean).is_file():
+        raise ValueError(f"write advisory endpoint is unreadable: {path}")
+    return clean
+
+
+def write_advisory_ref(review_id: str) -> str:
+    """Render the dedicated public ref namespace for write advisories."""
+    from . import review_state
+
+    # Reuse the review-id validator without exposing a generic queue ref.
+    review_state.review_ref(review_id)
+    return f"{_WRITE_ADVISORY_REF_PREFIX}{review_id}"
+
+
+def is_write_advisory_ref(value: str) -> bool:
+    return str(value or "").strip().lower().startswith(_WRITE_ADVISORY_REF_PREFIX)
+
+
+def parse_write_advisory_ref(value: str) -> str:
+    from . import review_state
+
+    raw = str(value or "").strip()
+    if not raw.lower().startswith(_WRITE_ADVISORY_REF_PREFIX):
+        raise ValueError(
+            "INVALID_REVIEW_REFERENCE: expected "
+            f"{_WRITE_ADVISORY_REF_PREFIX}<id>"
+        )
+    return review_state.parse_review_ref(
+        f"{review_state.REVIEW_PREFIX}{raw[len(_WRITE_ADVISORY_REF_PREFIX):]}"
+    )
+
+
+def write_advisory_identity(
+    vault_root: Path,
+    *,
+    kind: str,
+    self_path: str,
+    candidate: DupCandidate,
+    refs: dict[str, str] | None = None,
+    candidate_signal_version: str | None = None,
+) -> WriteAdvisoryIdentity:
+    """Derive one pair-stable review identity from refs and counterpart content.
+
+    The payload intentionally mirrors queue review fingerprints: immutable endpoint
+    refs plus the counterpart's normalized signal version, rather than ranking score,
+    raw file bytes, write time, or the triggering page's just-written content.
+    """
+    from . import contradiction_stance, review_state
+
+    if kind not in _WRITE_ADVISORY_KINDS:
+        raise ValueError(f"unknown write advisory kind: {kind}")
+    root = Path(vault_root)
+    self_rel = _advisory_path(root, self_path, require_file=refs is None)
+    candidate_rel = _advisory_path(root, candidate.path)
+    if refs is None or self_rel not in refs or candidate_rel not in refs:
+        refs = review_state.refs_for_paths(root, [self_rel, candidate_rel])
+    counterpart_signal = candidate_signal_version
+    if counterpart_signal is None:
+        counterpart_signal = contradiction_stance.page_signal_version(root, candidate_rel)
+    if counterpart_signal is None:
+        raise ValueError(f"write advisory counterpart is unreadable: {candidate.path}")
+    left_ref, right_ref = sorted((str(refs[self_rel]), str(refs[candidate_rel])))
+    category = f"{_WRITE_ADVISORY_NAMESPACE}:{kind}"
+    signal_version = content_hash(
+        f"{category}\n{left_ref}\n{right_ref}\n{counterpart_signal}"
+    )[:16]
+    review_id = review_state.item_id(f"{category}:{left_ref}|{right_ref}")
+    fingerprint = review_state.fingerprint(
+        target_ref=left_ref,
+        categories=[category],
+        reasons=[{"category": category, "meta": {"signal_version": signal_version}}],
+        related_refs=[right_ref],
+    )
+    return WriteAdvisoryIdentity(kind, review_id, write_advisory_ref(review_id), fingerprint)
+
+
+def _render_write_advisory(kind: str, candidate: DupCandidate) -> str:
+    return dup_warning(candidate) if kind == "near-duplicate" else overlap_warning(candidate)
+
+
+def _render_identified_write_advisory(
+    kind: str,
+    candidate: DupCandidate,
+    identity: WriteAdvisoryIdentity,
+) -> str:
+    suffix = f" [review: {identity.ref}; fingerprint: {identity.fingerprint}]"
+    prose = _render_write_advisory(kind, candidate)
+    budget = _WRITE_ADVISORY_WARNING_CHARS - len(suffix)
+    if len(prose) > budget:
+        prose = prose[: max(0, budget - 1)].rstrip() + "…"
+    return prose + suffix
+
+
+def emit_write_advisories(
+    vault_root: Path,
+    *,
+    self_path: str,
+    kind: str,
+    candidates: list[DupCandidate],
+    apply_declared_pair_filter: bool = False,
+) -> list[str]:
+    """Render one advisory class after portable-state suppression, failing open."""
+    return emit_write_advisory_groups(
+        vault_root,
+        self_path=self_path,
+        groups=[(kind, candidates)],
+        apply_declared_pair_filter=apply_declared_pair_filter,
+    )
+
+
+def emit_write_advisory_groups(
+    vault_root: Path,
+    *,
+    self_path: str,
+    groups: list[tuple[str, list[DupCandidate]]],
+    apply_declared_pair_filter: bool = False,
+) -> list[str]:
+    """Render all advisory classes with one ref batch and one review-state read."""
+    from . import contradiction_stance, review_state
+
+    for kind, _candidates in groups:
+        if kind not in _WRITE_ADVISORY_KINDS:
+            raise ValueError(f"unknown write advisory kind: {kind}")
+    advisories = [
+        (kind, candidate)
+        for kind, candidates in groups
+        for candidate in candidates
+    ]
+    if not advisories:
+        return []
+
+    root = Path(vault_root)
+    declared_pair = (
+        contradiction_stance.DeclaredPairFilter(root, self_path)
+        if apply_declared_pair_filter
+        else None
+    )
+    eligible: list[tuple[str, DupCandidate, str]] = []
+    warnings: list[str] = []
+    for kind, candidate in advisories:
+        try:
+            if declared_pair is not None and declared_pair(candidate.path):
+                continue
+            eligible.append((kind, candidate, _advisory_path(root, candidate.path)))
+        except Exception as error:  # noqa: BLE001 — advisory state must fail open
+            log.debug("write advisory suppression failed open: %s", error)
+            warnings.append(_render_write_advisory(kind, candidate))
+
+    if not eligible:
+        return warnings
+
+    try:
+        self_rel = _advisory_path(root, self_path, require_file=False)
+        paths = [
+            self_rel,
+            *(candidate_rel for _kind, _candidate, candidate_rel in eligible),
+        ]
+        refs = review_state.refs_for_paths(root, paths)
+        counterpart_paths = dict.fromkeys(
+            candidate_rel for _kind, _candidate, candidate_rel in eligible
+        )
+        signals = {
+            candidate_rel: contradiction_stance.page_signal_version(root, candidate_rel)
+            for candidate_rel in counterpart_paths
+        }
+        if any(signal is None for signal in signals.values()):
+            raise ValueError("one or more write advisory counterparts are unreadable")
+        store = review_state.ReviewStateStore(root)
+        payload = store.load()
+        emitted: list[str] = []
+        for kind, candidate, candidate_rel in eligible:
+            identity = write_advisory_identity(
+                root,
+                kind=kind,
+                self_path=self_rel,
+                candidate=candidate,
+                refs=refs,
+                candidate_signal_version=signals[candidate_rel],
+            )
+            state, _decision = store.effective_state(
+                identity.review_id,
+                identity.fingerprint,
+                payload=payload,
+            )
+            if state in {"dismissed", "snoozed"}:
+                continue
+            emitted.append(_render_identified_write_advisory(kind, candidate, identity))
+        warnings.extend(emitted)
+    except Exception as error:  # noqa: BLE001 — advisory state must fail open
+        log.debug("write advisory suppression failed open: %s", error)
+        warnings.extend(
+            _render_write_advisory(kind, candidate)
+            for kind, candidate, _path in eligible
+        )
+    return warnings
+
+
+def detected_overlap_advisory_groups(
+    candidates: list[DupCandidate],
+) -> list[tuple[str, list[DupCandidate]]]:
+    """Split proximity candidates by their detected warning signal class."""
+    contradiction_band = [
+        candidate for candidate in candidates if candidate.polarity == "contradict"
+    ]
+    overlap = [candidate for candidate in candidates if candidate.polarity != "contradict"]
+    return [("overlap", overlap), ("contradiction-band", contradiction_band)]
+
+
+def triage_write_advisory(
+    vault_root: Path,
+    *,
+    ref: str,
+    action: str,
+    until: str | None = None,
+    why: str | None = None,
+    expected_fingerprint: str | None = None,
+) -> dict:
+    """Record a decision for a surfaced write advisory without creating a queue item."""
+    from . import review_state
+
+    normalized = str(action or "").strip().lower()
+    if normalized not in {"dismiss", "snooze", "reopen"}:
+        raise ValueError(
+            "INVALID_REVIEW_ACTION: write advisories accept dismiss, snooze, or reopen"
+        )
+    if normalized == "dismiss" and not str(why or "").strip():
+        raise ValueError("INVALID_REVIEW_ACTION: write-advisory dismiss requires `why`")
+    if (
+        normalized != "reopen"
+        and expected_fingerprint is not None
+        and not _WRITE_ADVISORY_FINGERPRINT_RE.fullmatch(expected_fingerprint)
+    ):
+        raise ValueError(
+            "INVALID_REVIEW_FINGERPRINT: expected exactly 24 lowercase hex characters"
+        )
+    review_id = parse_write_advisory_ref(ref)
+    store = review_state.ReviewStateStore(vault_root)
+    if normalized == "reopen":
+        # Reopen clears every historical fingerprint for the stable pair identity.
+        result = store.apply(
+            review_id,
+            expected_fingerprint or "",
+            action="reopen",
+            until=until,
+            why=why,
+        )
+    else:
+        if not expected_fingerprint:
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: write-advisory dismiss/snooze requires "
+                "the surfaced fingerprint"
+            )
+        result = store.apply(
+            review_id,
+            expected_fingerprint,
+            action=normalized,
+            until=until,
+            why=why,
+        )
+    result["ref"] = write_advisory_ref(review_id)
+    return result
 
 
 def _canon(path: str) -> str:

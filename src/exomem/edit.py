@@ -845,13 +845,17 @@ def commit_edit(
     if body_changed and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         match = _FM_PATTERN.match(new_text)
         try:
+            candidates = corpus_aware.detect_contradictions(
+                vault_root,
+                title="",
+                body=match.group(2) if match is not None else new_text,
+                self_path=rel_path,
+            )
             warnings.extend(
-                corpus_aware.overlap_warning(candidate)
-                for candidate in corpus_aware.detect_contradictions(
+                corpus_aware.emit_write_advisory_groups(
                     vault_root,
-                    title="",
-                    body=match.group(2) if match is not None else new_text,
                     self_path=rel_path,
+                    groups=corpus_aware.detected_overlap_advisory_groups(candidates),
                 )
             )
         except Exception as error:  # noqa: BLE001 — nudges never break an edit

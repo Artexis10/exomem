@@ -2445,6 +2445,30 @@ _RELATION_DEBT_TYPES = frozenset(
 )
 
 
+def relation_debt_eligible(
+    vault_root: Path,
+    *,
+    page_type: str | None,
+    rel_path: str,
+    status: str | None,
+    tags: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+) -> bool:
+    """Whether one page participates in the shared relation-debt predicate."""
+    if page_type not in _RELATION_DEBT_TYPES:
+        return False
+    path = PurePosixPath(str(rel_path).replace("\\", "/"))
+    if path.name in ("index.md", "log.md"):
+        return False
+    if status in ("superseded", "archived", "draft", "dropped"):
+        return False
+    if access.access_tier(vault_root, path.as_posix()) != access.TIER_READ_WRITE:
+        return False
+    stem = path.stem.lower()
+    if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+        return False
+    return not bool(_STALE_SKIP_TAGS & set(tags))
+
+
 def _check_relation_debt(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -2454,18 +2478,13 @@ def _check_relation_debt(
     relations = relation_registry.load_registry(vault_root)
     language = semantic_language_registry.load_registry(vault_root)
     for page in pages:
-        if page.page_type not in _RELATION_DEBT_TYPES:
-            continue
-        if page.path.name in ("index.md", "log.md"):
-            continue
-        if page.status in ("superseded", "archived", "draft", "dropped"):
-            continue
-        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
-            continue
-        stem = page.path.stem.lower()
-        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
-            continue
-        if _STALE_SKIP_TAGS & set(page.tags):
+        if not relation_debt_eligible(
+            vault_root,
+            page_type=page.page_type,
+            rel_path=page.rel_path,
+            status=page.status,
+            tags=page.tags,
+        ):
             continue
 
         document = semantic_units.parse_semantic_units(
