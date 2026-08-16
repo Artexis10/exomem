@@ -414,8 +414,11 @@ def test_windows_installer_gates_remote_and_verifies_before_success() -> None:
 
     assert "Install-ExomemPackage" in text
     assert '[string]$Profile = "standard"' in text
-    assert '"uv", "pip", "install", "--upgrade", "--python", $Python, $pkg' in common
+    assert '"uv", "pip", "install", "--upgrade", "--refresh-package", "exomem", "--python", $Python, $pkg' in common
     assert '"[embeddings,media]"' in common
+    # #578: installing is not deploying. The installer shares this helper, so a
+    # fresh venv that ends up with nothing in it has to fail here too.
+    assert "Assert-ExomemInstallApplied" in common
     assert "Preflight: exomem doctor --profile remote" in text
     assert "function Test-McpEndpoint" in text
     assert "-SkipHttpErrorCheck" in text

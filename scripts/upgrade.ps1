@@ -10,6 +10,9 @@
 # stop/start, which your user already has rights for (install-service.ps1 grants
 # RPWPCR). Re-registering the service still needs install-service.ps1.
 #
+# Requires PowerShell 7+ (pwsh). Windows PowerShell 5.1 is refused up front rather
+# than allowed to fail obscurely partway: -SkipHttpErrorCheck below is 7.0+ only.
+#
 # Usage:
 #   pwsh -File scripts/upgrade.ps1
 #   pwsh -File scripts/upgrade.ps1 -Profile media
@@ -32,6 +35,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 . "$PSScriptRoot\_service-common.ps1"
+
+Assert-ExomemPowerShell7 -ScriptName "upgrade.ps1"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
@@ -71,6 +76,9 @@ Write-Host "  repo:      $repoVersion"
 Install-ExomemPackage -Python $ServicePy -Profile $Profile -PackageVersion $PackageVersion
 Repair-TorchCuda -Python $ServicePy -Profile $Profile -CudaTorch $CudaTorch
 
+# Reaching here means Install-ExomemPackage already ASSERTED that $after equals the
+# version it resolved before installing. This line is the receipt for that check,
+# not the check itself -- reading it as the check is what let #578 through.
 $after = Get-ExomemInstalledVersion -PythonPath $ServicePy
 Write-Host "Installed version: $before -> $after"
 
