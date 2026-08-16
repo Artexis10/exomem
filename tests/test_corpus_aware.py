@@ -363,6 +363,7 @@ def test_note_attaches_suggestions_for_near_twin(vault: Path, embeddings_enabled
         title="Near twin of progressive disclosure",
         tags=["ux"],
         status="draft",
+        suggestions=True,  # default-off since #576; this asserts the pass itself
     )
     d = res.as_dict()
     assert d["path"]

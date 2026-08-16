@@ -131,10 +131,13 @@ Use this loop whenever a durable conclusion should enter Exomem:
 6. Write, then inspect the result. The default committed response carries
    `warnings` (when the write warned) and an optional `structure_suggestion`.
    The fuller structural checklist — `write_feedback` with `sources.cited`,
-   `links.body_wikilinks`, and `relations.relation_debt`, plus corpus-aware
-   `suggestions` — lives under `diagnostics` and needs `response_detail="full"`.
-   Ask for it when provenance or connectivity is in doubt; if all three counts
-   are zero and that is not honest, fix it before reporting.
+   `links.body_wikilinks`, and `relations.relation_debt` — lives under
+   `diagnostics` and needs `response_detail="full"`. Ask for it when provenance
+   or connectivity is in doubt; if all three counts are zero and that is not
+   honest, fix it before reporting. Corpus-aware `suggestions` are **off by
+   default** because they cost a whole retrieval pass on the write path; pass
+   `suggestions=true` (with `response_detail="full"`) when you want them.
+   `write_feedback.suggestions.computed` tells you whether they ran.
 7. If a near-duplicate warning fires, prefer `edit_memory` or `replace_memory` over a parallel page. If suggestions are useful, add them with a follow-up `edit_memory`.
 8. If the write returned a `structure_suggestion`, handle it as below.
 9. Report one line: `Saved -> <path>`.
@@ -342,8 +345,9 @@ Examples:
   rather than creating one silently.
 - "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
 - "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from prose or elapsed time.
-- "Compile these three sources" -> draft a sourced note with `remember` link suggestions,
-  then write after the applicable approval rule.
+- "Compile these three sources" -> draft a sourced note with
+  `remember(suggestions=true, response_detail="full")` link suggestions, then
+  write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for
   keep/edit/supersede/archive.
 - "This new strategy replaces the old one" -> use supersession so history stays
@@ -955,10 +959,11 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    pages you'd otherwise miss.
 5. **Skill shows the draft, waits for confirmation.** You can revise inline.
 6. **On confirm: calls `remember` to write the page**, updates the relevant
-   `index.md`, appends to `log.md`, and reports paths. The write result carries a
-   `suggestions` block and any near-duplicate `warning` — wire in the relevant
-   links via **edit_memory** (or, for a genuine duplicate, prefer
-   `replace_memory` over a parallel page).
+   `index.md`, appends to `log.md`, and reports paths. The write result carries
+   any near-duplicate `warning`, and a `suggestions` block only when the call
+   asked for one with `suggestions=true` **and** `response_detail="full"` —
+   wire in the relevant links via **edit_memory** (or, for a genuine duplicate,
+   prefer `replace_memory` over a parallel page).
 
 When you approve a scope of multiple files upfront, the workflow collapses to a
 single batch write (see Write discipline § 3, batch waiver).

@@ -4291,8 +4291,8 @@
           "description": "ISO date when an approved bridge should be reviewed again."
         },
         "suggestions": {
-          "default": true,
-          "description": "Include link suggestions in the result.",
+          "default": false,
+          "description": "Off by default. Set `suggestions=true` to also get a `suggestions` block of existing pages this note should probably link to (read it under `response_detail='full'`). It costs one whole retrieval pass over the corpus on the write path, so a plain write no longer pays it. Near-duplicate and overlap warnings are a dedupe guardrail and stay on either way; `write_feedback.suggestions.computed` says which happened.",
           "type": "boolean"
         },
         "project_category": {
