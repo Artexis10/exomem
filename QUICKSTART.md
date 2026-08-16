@@ -324,7 +324,13 @@ uv run python -m exomem index --vault "/path/to/your/Obsidian"
 uv run python -m exomem reconcile --vault "/path/to/your/Obsidian"
 ```
 
-Use `performance` only when you explicitly want GPU-capable bulk/model work:
+Use `performance` only when you explicitly want GPU-capable bulk/model work. It
+preloads the models at startup and keeps them resident — idle reclamation still
+evicts caches, but not the preloaded models, because reloading one costs whichever
+request arrives next about half a minute. `exomem doctor --profile hybrid` reports
+that state under `models.residency`: whether a model is loaded, whether its weights
+are in the local HuggingFace cache, and whether the next load resolves from that
+cache instead of revalidating it over the network.
 
 ```bash
 uv run python -m exomem mode performance

@@ -118,9 +118,8 @@ def load_offline_first(model_name: str, loader: Callable[..., T]) -> T:
     try:
         return loader(local_files_only=True)
     except Exception as e:  # noqa: BLE001 — any offline failure is a reason to go online
-        log.info(
-            "local-only load of %s failed (%s); retrying with hub access",
-            model_name,
-            e,
-        )
+        # Routine during a first-ever population: the snapshot dir exists as soon as
+        # the FIRST file lands, so later files in the same repo see a "cached" model
+        # and miss locally. Cheap (no network) and self-correcting, hence info.
+        log.info("%s not fully resolvable offline (%s); using hub access", model_name, e)
         return loader()

@@ -1399,7 +1399,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
 
     from . import model_cache
 
-    if not model_cache.is_cached(embeddings.MODEL_NAME):
+    if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(embeddings.MODEL_NAME)):
         # doctor must never trigger a download — skip the live probe rather than
         # let embed_texts() fetch the model over the network.
         return _check(
@@ -1488,7 +1488,7 @@ def _check_model_residency() -> DoctorCheck:
     from . import embeddings, mode, model_cache
 
     resident = embeddings._MODEL is not None
-    cached = model_cache.is_cached(embeddings.MODEL_NAME)
+    cached = _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(embeddings.MODEL_NAME))
     offline = model_cache.should_load_offline(embeddings.MODEL_NAME)
     preload = mode.preload_models()
     details = {
@@ -1544,11 +1544,15 @@ def _check_models_cache() -> DoctorCheck:
     # WARN no action can clear — and `exomem warm`, the remediation, cannot
     # fetch them either.
     if _serves_reranker_and_clip(backend):
-        # `snapshot_dirname` knows that sentence-transformers resolves a bare name
-        # (CLIP) under its own org, so that rule lives in one place.
         expected.extend([embeddings.RERANKER_NAME, embeddings.CLIP_MODEL_NAME])
 
-    missing = [name for name in expected if not model_cache.is_cached(name, hub)]
+    # `snapshot_dirname` knows that sentence-transformers resolves a bare name
+    # (CLIP) under its own org, so that layout rule lives in one place.
+    missing = [
+        name
+        for name in expected
+        if not _model_cached(hub, model_cache.snapshot_dirname(name))
+    ]
     if not missing:
         return _check(
             "models.cache",

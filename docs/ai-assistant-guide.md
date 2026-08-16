@@ -442,7 +442,7 @@ Resource mode is separate from search knobs:
 | --- | --- |
 | `quiet` | Low-resource CPU mode; avoid warm-up and release models when idle |
 | `normal` | CPU-first default; keyword/BM25 recall is ready first |
-| `performance` | Explicit opt-in for GPU-capable steady-state work |
+| `performance` | Explicit opt-in for GPU-capable steady-state work; models preload at startup and stay resident, so no request pays a model load |
 
 Do not interpret a slow diagnostic search with rerank enabled as "Exomem is
 slow" without checking timings, resource mode, cache state, and whether a model
