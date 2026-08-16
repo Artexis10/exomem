@@ -15,9 +15,11 @@ outbound resolving relation *on the unit itself* clears it, because
 `epistemic_graph` still strips `#fragment` off a relation target, so an inbound
 edge cannot address a unit today.
 
-Both categories are registered for opt-in `attention` selection and deliberately
-absent from the default union, so a grandfathered corpus cannot flood the daily
-review surface on upgrade.
+The two are split on backlog profile, not category kind. `prediction_window`
+joins the DEFAULT attention union, because `check_by` shipped a day before the
+queue and no vault can hold a grandfathered population of due predictions.
+`unfinished_experiments` stays opt-in, because `started`/`duration` predate the
+package rename and an established vault can hold dozens of long-closed windows.
 """
 
 from __future__ import annotations
@@ -588,3 +590,279 @@ def test_only_prediction_window_joins_the_default_union(vault: Path) -> None:
     assert "prediction_window" in surfaced
     assert "unfinished_experiments" not in surfaced
     assert prediction in [item.path for item in default.items]
+
+
+# ==========================================================================
+# Review fixes — prefilter fidelity, row collision, scope guards, scaffold
+# ==========================================================================
+
+
+@pytest.mark.parametrize(
+    "row", ["check_by", "Check By", "check by", "check-by", "CHECK_BY"]
+)
+def test_every_spelling_the_parser_accepts_is_surfaced(vault: Path, row: str) -> None:
+    """The cheap prefilter must not be narrower than the parser it guards.
+
+    `semantic_blocks.normalize_label` lowercases and maps `[\\s-]+` to `_`, so
+    all five of these author a genuine governed `check_by` and `find` already
+    surfaces every one of them. A raw case-sensitive substring prefilter drops
+    four, and for a queue whose entire justification is that an unsurfaced
+    obligation is one nobody meets, a silent miss is the worst failure it has.
+    """
+    rel = _prediction_page(
+        vault,
+        "autovacuum",
+        f"## Prediction\n\n- id: p1\n- {row}: 2026-08-02\n\nBacklog clears.\n",
+    )
+
+    findings = _findings(vault, "prediction_window")
+
+    assert _paths(findings) == [rel], f"{row!r} parsed a check_by but was not surfaced"
+    assert findings[0].meta is not None
+    assert findings[0].meta["check_by"] == "2026-08-02"
+
+
+def test_partitioned_and_unpartitioned_signals_compose_one_row() -> None:
+    """A note flagged by a partitioned queue AND a page-level queue is ONE item.
+
+    `_rank` anchors a partitioned finding on `path\\0partition`, which shares no
+    key with the same page's unpartitioned findings. Left alone, the note takes
+    two rows of the daily surface and its RRF votes never sum — contradicting
+    the attention-queue capability's additivity requirement.
+    """
+    findings = [
+        audit_module.AuditFinding(
+            category="prediction_window",
+            severity="info",
+            path="N.md",
+            detail="due prediction",
+            proposed_fix="x",
+            meta={"review_partition": "unit-a", "signal_version": "unit-a"},
+        ),
+        audit_module.AuditFinding(
+            category="stale_review",
+            severity="warn",
+            path="N.md",
+            detail="possibly stale",
+            proposed_fix="x",
+        ),
+    ]
+
+    report = attention_module._rank(findings)
+
+    assert [item.path for item in report.items] == ["N.md"]
+    item = report.items[0]
+    assert item.categories == ["prediction_window", "stale_review"]
+    assert len(item.reasons) == 2
+    assert item.severity == "warn"  # max over the merged reasons
+    k = attention_module._RRF_K
+    assert item.score == round(1.0 / (k + 1) + 1.0 / (k + 1), 6)
+
+
+def test_merged_row_outranks_a_singly_flagged_one() -> None:
+    """The whole point of summing: a doubly-flagged note must rise."""
+    findings = [
+        audit_module.AuditFinding(
+            category="prediction_window",
+            severity="info",
+            path="both.md",
+            detail="due",
+            proposed_fix="x",
+            meta={"review_partition": "unit-a", "signal_version": "unit-a"},
+        ),
+        audit_module.AuditFinding(
+            category="prediction_window",
+            severity="info",
+            path="only.md",
+            detail="due",
+            proposed_fix="x",
+            meta={"review_partition": "unit-b", "signal_version": "unit-b"},
+        ),
+        audit_module.AuditFinding(
+            category="stale_review",
+            severity="info",
+            path="both.md",
+            detail="stale",
+            proposed_fix="x",
+        ),
+    ]
+
+    report = attention_module._rank(findings)
+
+    paths = [item.path for item in report.items]
+    assert paths.index("both.md") < paths.index("only.md")
+    assert paths.count("both.md") == 1
+
+
+def test_page_signals_attach_to_each_of_several_partitioned_items() -> None:
+    """N due predictions still give N triageable items, each carrying page context.
+
+    The page-level reason must not vanish, and it must not become a phantom
+    extra row either.
+    """
+    findings = [
+        audit_module.AuditFinding(
+            category="prediction_window",
+            severity="info",
+            path="N.md",
+            detail=f"due {anchor}",
+            proposed_fix="x",
+            meta={"review_partition": anchor, "signal_version": anchor},
+        )
+        for anchor in ("unit-a", "unit-b")
+    ] + [
+        audit_module.AuditFinding(
+            category="relation_debt",
+            severity="info",
+            path="N.md",
+            detail="no outbound edges",
+            proposed_fix="x",
+        )
+    ]
+
+    report = attention_module._rank(findings)
+
+    assert [item.path for item in report.items] == ["N.md", "N.md"]
+    for item in report.items:
+        assert "relation_debt" in item.categories
+        assert "prediction_window" in item.categories
+    partitions = {
+        reason["meta"]["review_partition"]
+        for item in report.items
+        for reason in item.reasons
+        if (reason.get("meta") or {}).get("review_partition")
+    }
+    assert partitions == {"unit-a", "unit-b"}
+
+
+def test_due_prediction_and_page_signal_are_one_row_over_a_real_vault(
+    vault: Path,
+) -> None:
+    """End to end: the collision the default-union promotion made routine."""
+    rel = _prediction_page(
+        vault, "autovacuum", _prediction_block("p1", check_by="2026-08-02")
+    )
+
+    report = attention_module.attention(
+        vault, categories=["prediction_window", "relation_debt"], today=TODAY
+    )
+
+    rows = [item for item in report.items if item.path == rel]
+    assert len(rows) == 1, [item.as_dict() for item in rows]
+    assert set(rows[0].categories) == {"prediction_window", "relation_debt"}
+    assert len({item.item_id for item in report.items}) == len(report.items)
+
+
+# ---- m6: the scope guards the ADDED requirements assert with SHALL ----
+
+
+def test_experiment_scope_guard_requires_the_experiment_page_type(vault: Path) -> None:
+    """A non-experiment page carrying the same fields must not be surfaced."""
+    _write(
+        vault,
+        f"{INSIGHTS}/looks-like-one.md",
+        "---\ntitle: x\ntype: insight\nstatus: active\ncreated: 2025-01-01\n"
+        'updated: 2025-01-01\nstarted: 2024-01-01\nduration: "30 days"\n---\n\nBody.\n',
+    )
+
+    assert _findings(vault, "unfinished_experiments") == []
+
+
+def test_experiment_scope_guard_requires_a_started_date(vault: Path) -> None:
+    _write(
+        vault,
+        f"{EXPERIMENTS}/no-start.md",
+        "---\ntitle: x\ntype: experiment\ndomain: infrastructure\nstatus: active\n"
+        'created: 2020-01-01\nupdated: 2020-01-01\nduration: "30 days"\nn: 1\n---\n\nBody.\n',
+    )
+
+    assert _findings(vault, "unfinished_experiments") == []
+
+
+def test_experiment_scope_guard_skips_index_and_log_pages(vault: Path) -> None:
+    for name in ("index.md", "log.md"):
+        _write(
+            vault,
+            f"{EXPERIMENTS}/{name}",
+            "---\ntitle: x\ntype: experiment\ndomain: infrastructure\nstatus: active\n"
+            "created: 2020-01-01\nupdated: 2020-01-01\nstarted: 2020-01-01\n"
+            'duration: "30 days"\nn: 1\n---\n\nBody.\n',
+        )
+
+    assert _findings(vault, "unfinished_experiments") == []
+
+
+def test_experiment_scope_guard_honours_the_access_tier(vault: Path) -> None:
+    _experiment(vault, "vacuum-tuning", started="2026-04-18", duration="30 days")
+    _write(vault, "Knowledge Base/_access.yaml", "readonly:\n- Notes/Experiments\n")
+
+    assert _findings(vault, "unfinished_experiments") == []
+
+
+def test_prediction_scope_guard_skips_index_and_log_pages(vault: Path) -> None:
+    for name in ("index.md", "log.md"):
+        _write(
+            vault,
+            f"{INSIGHTS}/{name}",
+            "---\ntitle: x\ntype: insight\nstatus: active\ncreated: 2026-01-01\n"
+            "updated: 2026-01-01\n---\n\n## Prediction\n\n- id: p1\n"
+            "- check_by: 2020-01-01\n\nBody.\n",
+        )
+
+    assert _findings(vault, "prediction_window") == []
+
+
+def test_prediction_scope_guard_honours_the_access_tier(vault: Path) -> None:
+    _prediction_page(
+        vault, "autovacuum", _prediction_block("p1", check_by="2026-08-02")
+    )
+    _write(vault, "Knowledge Base/_access.yaml", "readonly:\n- Notes/Insights\n")
+
+    assert _findings(vault, "prediction_window") == []
+
+
+@pytest.mark.parametrize("status", ["dropped", "planned"])
+def test_author_parked_statuses_generate_no_review_work(
+    vault: Path, status: str
+) -> None:
+    """`dropped` and `planned` are inactive everywhere else in the codebase.
+
+    A note the author explicitly dropped must not generate daily review work.
+    """
+    _experiment(
+        vault, "parked", started="2020-01-01", duration="30 days", status=status
+    )
+    _prediction_page(
+        vault, "parked-pred", _prediction_block("p1", check_by="2020-01-01"),
+        status=status,
+    )
+
+    assert _findings(vault, "unfinished_experiments") == []
+    assert _findings(vault, "prediction_window") == []
+
+
+# ---- M3: the default queue must be documented at least as well as the opt-in one ----
+
+
+def test_scaffold_documents_the_prediction_window_queue() -> None:
+    """Every user now sees this queue unasked, so the shipped doc must describe it.
+
+    The justification for documenting `unfinished_experiments` was that the
+    scaffold had advertised it since the skill shipped. The same standard cuts
+    harder here: this one arrives on the daily surface without being asked for.
+    """
+    doc = (
+        Path(audit_module.__file__).parent
+        / "_scaffold"
+        / "_Schema"
+        / "references"
+        / "audit-checks.md"
+    ).read_text(encoding="utf-8")
+
+    entry = next(
+        line for line in doc.splitlines() if "Prediction window" in line
+    )
+    assert "prediction_window" in entry
+    assert "check_by" in entry
+    assert "verdict" in entry
+    assert "default" in entry

@@ -2994,10 +2994,18 @@ def _check_derivation_double_counting(
 
 # ---------------- check: unfinished_experiments ----------------
 
-# Out of rotation by the author's own declaration — an archived or superseded
-# experiment is deliberately parked and a draft never started, so none of them
-# owes a result. Mirrors the scope discipline of the other measurement queues.
-_EXPERIMENT_PARKED_STATUSES = frozenset({"archived", "superseded", "draft"})
+# Out of rotation by the author's own declaration — archived or superseded is
+# deliberately parked, a draft never started, a dropped one was abandoned on
+# purpose, and a planned one has not begun. None of them owes a result, and a
+# note the author explicitly dropped generating daily review work would be the
+# system arguing with a decision already made.
+#
+# The set matches what `_check_relation_debt`, `activation.py`, and
+# `semantic_contract.py` already treat as inactive; it previously claimed to
+# mirror that discipline while omitting `dropped` and `planned`.
+_EXPERIMENT_PARKED_STATUSES = frozenset(
+    {"archived", "superseded", "draft", "dropped", "planned"}
+)
 
 # `duration:` is free text by contract ("30 days", "2 weeks", "ongoing"), so the
 # span parser is deliberately small and fails CLOSED: anything it does not
@@ -3132,9 +3140,22 @@ def _check_unfinished_experiments(
 _PREDICTION_RESOLVING_RELATIONS = frozenset(
     {"supports", "contradicts", "resolves", "evidenced_by"}
 )
+# The prefilter that decides whether a page is worth parsing. It MUST NOT be
+# narrower than `semantic_blocks.normalize_label`, which lowercases a metadata
+# key and collapses `[\s-]+` to `_` — so `- Check By:`, `- check by:` and
+# `- check-by:` all author a genuine governed `check_by` that `find` and the
+# structured filters already see. A raw case-sensitive `"check_by" in body` test
+# silently dropped all three before parsing, which for this queue is the worst
+# failure available: the whole justification is that an unsurfaced obligation is
+# one nobody meets, and a miss here is indistinguishable from "nothing is due".
+_CHECK_BY_PREFILTER = re.compile(r"check[\s_-]*by", re.IGNORECASE)
 # A unit inherits its page's standing (see the epistemic loop primitives), so a
-# due prediction on a parked page is not outstanding work.
-_PREDICTION_PARKED_STATUSES = frozenset({"superseded", "archived", "draft"})
+# due prediction on a parked page is not outstanding work. Same inactive set the
+# rest of the codebase uses — `dropped` and `planned` included, because a
+# prediction on a note the author dropped is not an obligation anyone still owes.
+_PREDICTION_PARKED_STATUSES = frozenset(
+    {"superseded", "archived", "draft", "dropped", "planned"}
+)
 
 
 def _check_prediction_window(
@@ -3188,9 +3209,11 @@ def _check_prediction_window(
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
         # Cheap prefilter: a page with no authored check date cannot match, so a
-        # vault that has never used the primitive pays a substring scan and no
-        # parse at all.
-        if "check_by" not in page.body:
+        # vault that has never used the primitive pays one regex scan and no
+        # parse at all. Deliberately looser than the exact key — see
+        # `_CHECK_BY_PREFILTER`; over-matching costs a parse, under-matching
+        # loses a real obligation.
+        if not _CHECK_BY_PREFILTER.search(page.body):
             continue
 
         document = semantic_units.parse_semantic_units(

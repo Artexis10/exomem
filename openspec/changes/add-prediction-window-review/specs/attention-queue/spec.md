@@ -123,11 +123,11 @@ The default `attention` category union SHALL preserve the existing review queues
 and the already-shipped `relation_debt` queue while adding `bridge_review` and
 `prediction_window`. Its default category and tiebreak-preference order SHALL be
 `bridge_review`, `prediction_window`, `corpus_contradictions`, `stale_review`,
-`unprocessed_source`, and `relation_debt`. That order SHALL run from explicitly
-authored commitments to inferred signals: a governance review date and an
-epistemic check date are both dates a human wrote down, so they SHALL outrank a
-proximity band, an age-and-degree heuristic, an empty-field scan, and a
-missing-edge scan. The broader registered attention category set SHALL continue to
+`unprocessed_source`, and `relation_debt`. A queue that fires on a date the
+author wrote down SHALL outrank every queue that infers its own candidates, so
+`bridge_review` and `prediction_window` SHALL precede the remaining four; the
+relative order of those four is historical and carries no normative claim. The
+broader registered attention category set SHALL continue to
 admit its existing typed semantic categories and its opt-in epistemic-lifecycle
 categories. `attention` SHALL consume one audit
 pass over its selected categories and SHALL remain read-only.
@@ -215,3 +215,50 @@ state SHALL clear stale findings.
 
 - **WHEN** a stale bridge receives a new exact release approval after review
 - **THEN** the stale bridge-review finding no longer appears for that audience
+
+### Requirement: Multi-Signal Additivity With Dedup By Anchor
+
+The system SHALL dedup items by anchor path into one item per path carrying a `reasons`
+list (one reason per contributing finding), and a path flagged by more than one queue
+SHALL receive the sum of its per-queue RRF votes so it ranks above any item flagged by
+only one queue at the same per-queue rank. A `corpus_contradictions` pair SHALL surface
+under its anchor path with the other endpoint preserved in the reason's `related_paths`;
+the second endpoint SHALL NOT become its own item unless independently flagged.
+
+A partitioned queue SHALL refine that anchor rather than escape it. Where a path carries
+partitioned findings, the system SHALL emit one item per partition and SHALL fold that
+path's unpartitioned findings into every one of them, contributing both their reasons and
+their RRF votes. A path's unpartitioned findings MUST NOT form an additional item of their
+own whenever that path also carries a partitioned finding, so a note is never listed once
+for its page-level signals and again for a partition. A path carrying exactly one
+partitioned finding SHALL therefore compose exactly one item, and the per-queue votes of
+that item SHALL still sum.
+
+#### Scenario: A doubly-flagged note rises and keeps both reasons
+
+- **WHEN** note `N` appears in both `stale_review` and as a `corpus_contradictions`
+  anchor
+- **THEN** `N` is a single item whose `categories` lists both, whose `reasons` holds both
+  findings, and whose score equals the sum of the two RRF votes
+- **AND** `N` ranks above an otherwise-equivalent item flagged by only one queue
+
+#### Scenario: A partitioned queue co-flagging with a page-level queue stays one row
+
+- **WHEN** note `N` carries one due prediction and is also flagged by `stale_review`
+- **THEN** `N` composes exactly one item whose `categories` lists both, whose `reasons`
+  holds both findings, and whose score is the sum of the two RRF votes
+- **AND** `N` ranks above an otherwise-equivalent item flagged by only one queue
+
+#### Scenario: Several partitions each inherit the page-level reasons
+
+- **WHEN** note `N` carries two due predictions and is also flagged by `relation_debt`
+- **THEN** `N` composes two items with distinct review identities, each carrying its own
+  prediction reason and the shared `relation_debt` reason
+- **AND** no additional item is composed for the `relation_debt` finding alone
+
+#### Scenario: Contradiction pair preserved under its anchor
+
+- **WHEN** a contradiction finding has `path=A` and `paths=[A,B]`
+- **THEN** the item's path is `A` and its contradiction reason carries
+  `related_paths=[A,B]`
+- **AND** `B` is not surfaced as its own item unless `B` is independently flagged

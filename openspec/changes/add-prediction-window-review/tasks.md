@@ -38,12 +38,24 @@
 
 - [x] 5.1 Record the ordering principle — authored commitments before inferred signals — as a comment on `DEFAULT_ATTENTION_CATEGORIES`, so the next queue addition has a criterion to argue against rather than a list to append to.
 - [x] 5.2 Update the `attention.py` module docstring, which enumerates the default queues and would otherwise be made stale by this change. It is a plain module docstring, not a pinned MCP tool description, so it carries no fingerprint cost.
-- [x] 5.3 Confirm no change is required in `commands.py`: the existing generic `categories` plumbing on `review_memory(mode="attention"|"audit")` already reaches the new category, and no tool docstring is edited.
-- [x] 5.4 Modify the two `attention-queue` requirements that pin the default union and the RRF tiebreak order, reproducing each existing block verbatim before editing, and confirm `close-experiment-lifecycle` still touches neither.
+- [x] 5.3 Correct `op_attention`'s docstring. It is the registered description for the `attention` command on CLI, MCP, and REST, and it still enumerated four queues and a four-item `categories` set. Verified empirically that it is NOT part of the pinned surface: after editing it, `git diff --exit-code tests/fixtures/mcp_tool_schemas.json src/exomem/tool_surface_contract.json` stays clean even after running `test_tool_surface_contract.py` and `test_consolidated_tools.py`, and the description string appears in neither pinned file. `review_memory`'s own docstring is still untouched.
+- [x] 5.4 Confirm `op_review_memory` needs no change: the existing generic `categories` plumbing already reaches the new category, and its pinned docstring is not edited.
+- [x] 5.5 Modify the three `attention-queue` requirements this change moves — the default union, the RRF tiebreak order, and multi-signal additivity — reproducing each existing block verbatim before editing, and confirm `close-experiment-lifecycle` still touches none of them.
 
-## 6. Verification
+## 6. Composition Repair (found in review)
 
-- [x] 6.1 Run the new test file plus `tests/test_audit.py`, `tests/test_attention.py`, and `tests/test_epistemic_loop_primitives.py` green with `EXOMEM_DISABLE_EMBEDDINGS=1`.
-- [x] 6.2 Confirm `git diff --exit-code tests/fixtures/mcp_tool_schemas.json src/exomem/tool_surface_contract.json` is clean — the pinned tool surface must not move.
-- [x] 6.3 Run the CI-required `uvx ruff check . --select F` gate clean, and the full-config `uvx ruff check` clean on every file this change touches. (A bare repo-wide `uvx ruff check .` reports a large pre-existing advisory baseline that predates this change; CI gates on `--select F` for exactly that reason.)
-- [x] 6.4 Run `openspec validate add-prediction-window-review --strict` and `openspec validate --specs --strict` clean.
+- [x] 6.1 Add a failing test that a partitioned finding and an unpartitioned finding on the same path compose ONE item whose votes sum — `test_multi_signal_additivity_and_dedup` covers only unpartitioned findings.
+- [x] 6.2 Add a failing test that a page with two due predictions plus a page-level signal composes two items, each carrying the shared reason, with no third item for the page-level finding alone.
+- [x] 6.3 Fold a path's unpartitioned findings into each of its partitioned items in `_rank` — reasons, RRF votes, and severity — and stop emitting the standalone unpartitioned item for that path.
+- [x] 6.4 Add the end-to-end test over a real vault, since the default-union promotion is what made the collision routine.
+- [x] 6.5 Widen the `check_by` prefilter to match `normalize_label`, and cover every spelling the parser accepts (`Check By`, `check by`, `check-by`, `CHECK_BY`).
+- [x] 6.6 Add `dropped` and `planned` to both parked-status sets, matching what `_check_relation_debt`, `activation.py`, and `semantic_contract.py` already treat as inactive.
+- [x] 6.7 Cover the scope guards the ADDED requirements assert with SHALL — page type, `started` present, index/log exclusion, and access tier — for both queues.
+- [x] 6.8 Document `prediction_window` in the shipped scaffold's `audit-checks.md`, with a pin test, because every user now sees this queue unasked.
+
+## 7. Verification
+
+- [x] 7.1 Run the new test file plus `tests/test_audit.py`, `tests/test_attention.py`, and `tests/test_epistemic_loop_primitives.py` green with `EXOMEM_DISABLE_EMBEDDINGS=1`.
+- [x] 7.2 Confirm `git diff --exit-code tests/fixtures/mcp_tool_schemas.json src/exomem/tool_surface_contract.json` is clean — the pinned tool surface must not move.
+- [x] 7.3 Run the CI-required `uvx ruff check . --select F` gate clean, and the full-config `uvx ruff check` clean on every file this change touches. (A bare repo-wide `uvx ruff check .` reports a large pre-existing advisory baseline that predates this change; CI gates on `--select F` for exactly that reason.)
+- [x] 7.4 Run `openspec validate add-prediction-window-review --strict` and `openspec validate --specs --strict` clean.

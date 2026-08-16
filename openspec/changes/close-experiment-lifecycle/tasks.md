@@ -36,10 +36,15 @@
 - [x] 5.2 Rewrite the "Unfinished experiments" entry in `src/exomem/_scaffold/_Schema/references/audit-checks.md` to state the implemented predicate, the `info` severity, the open-ended-duration carve-out, the ordering, and that the category is opt-in on the attention surface.
 - [x] 5.3 Confirm `note.py` needs no change — `STATUS_EXPERIMENT` already carries `concluded` and `EXPERIMENT_OUTCOME_VALUES` already aliases the shared epistemic outcome vocabulary — and record that finding in `design.md`.
 
-## 6. Verification
+## 6. Scope Repair (found in review)
 
-- [x] 6.1 Run the new test file plus `tests/test_audit.py`, `tests/test_attention.py`, and `tests/test_epistemic_loop_primitives.py` green with `EXOMEM_DISABLE_EMBEDDINGS=1`.
-- [x] 6.2 Run `tests/test_scaffold_no_leak.py` to confirm the scaffold edit introduces no personal or vault-structure token.
-- [x] 6.3 Confirm `git diff --exit-code tests/fixtures/mcp_tool_schemas.json src/exomem/tool_surface_contract.json` is clean — the pinned tool surface must not move.
-- [x] 6.4 Run the CI-required `uvx ruff check . --select F` gate clean, and the full-config `uvx ruff check` clean on every file this change touches. (A bare repo-wide `uvx ruff check .` reports a large pre-existing advisory baseline that predates this change; CI gates on `--select F` for exactly that reason.)
-- [x] 6.5 Run `openspec validate close-experiment-lifecycle --strict` and `openspec validate --specs --strict` clean.
+- [x] 6.1 Add `dropped` and `planned` to the parked-status set. Both are treated as inactive by `_check_relation_debt`, `activation.py`, and `semantic_contract.py`, so a note the author explicitly dropped was generating daily review work, and the comment claimed to mirror a discipline it did not follow.
+- [x] 6.2 Cover the scope guards the ADDED requirement asserts with SHALL, none of which had a test: the `experiment` page type, `started` present, index/log exclusion, and the read-write access tier. Removing any one of them previously changed no test result.
+
+## 7. Verification
+
+- [x] 7.1 Run the new test file plus `tests/test_audit.py`, `tests/test_attention.py`, and `tests/test_epistemic_loop_primitives.py` green with `EXOMEM_DISABLE_EMBEDDINGS=1`.
+- [x] 7.2 Run `tests/test_scaffold_no_leak.py` to confirm the scaffold edit introduces no personal or vault-structure token.
+- [x] 7.3 Confirm `git diff --exit-code tests/fixtures/mcp_tool_schemas.json src/exomem/tool_surface_contract.json` is clean — the pinned tool surface must not move.
+- [x] 7.4 Run the CI-required `uvx ruff check . --select F` gate clean, and the full-config `uvx ruff check` clean on every file this change touches. (A bare repo-wide `uvx ruff check .` reports a large pre-existing advisory baseline that predates this change; CI gates on `--select F` for exactly that reason.)
+- [x] 7.5 Run `openspec validate close-experiment-lifecycle --strict` and `openspec validate --specs --strict` clean.
