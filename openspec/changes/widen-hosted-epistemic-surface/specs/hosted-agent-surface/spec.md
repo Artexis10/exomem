@@ -24,9 +24,15 @@ The system SHALL define the immutable profile `hosted-alpha-agent-v3` in the can
 
 ### Requirement: Hosted Agents Cannot Rewrite Governed Schema Or Policy
 
-A Hosted surface profile that exposes a broad page-mutation command SHALL refuse any invocation whose caller-supplied write target names the governed schema tree (`_Schema`) or the policy tree (`_Governance`). The refusal MUST happen at the hosted command boundary, before lifecycle admission and before the command leaf, and MUST return a stable machine-readable error.
+A Hosted surface profile that exposes a broad page-mutation command SHALL refuse any invocation whose **caller-supplied write target** names the governed schema tree (`_Schema`) or the policy tree (`_Governance`). The refusal MUST happen at the hosted command boundary, before lifecycle admission and before the command leaf, and MUST return a stable machine-readable error.
 
-**The guard and the command leaf MUST NOT hold independent notions of the same path.** The guard SHALL derive the target it judges by calling the same normalisation the leaf calls to decide which file to open — one shared function, invoked by both, not a copy of one in each. A guard that re-implements the leaf's normalisation is non-conformant even while it happens to agree, because the defect is the divergence, not any particular disagreement. In particular, the normalisation MUST supply the governed-folder prefix when the caller omitted it, since the leaves do, and a guard that joins at a different root evaluates a path the leaf never touches.
+The property is about the *target*, not about the trees being untouched, and the difference is load-bearing. System-owned artifacts whose location is fixed in code MAY be written inside a protected tree on the ordinary success path: the semantic-write machinery records one relation-review sidecar per committed page create or supersession at a hardcoded path under `_Schema`, on every profile including those that expose no page-mutation command at all. Such a location MUST be fixed in code rather than derived from any caller-supplied value, MUST be enumerated explicitly rather than inferred, and MUST NOT be exempted from the guard — so an agent may cause such an artifact to be created but MUST NOT be able to name one as a target and rewrite it. Assertions that a protected tree is unchanged MUST exclude the enumerated system-owned locations by name, so that the remainder of the tree is genuinely checked rather than the check being skipped.
+
+The guard SHALL judge each target according to the leaf that will consume it. A page-write target names a *file*, and the write leaves supply the Markdown suffix when the caller omits it, so the final component of such a target MUST NOT be read as a directory the caller is entering: an extensionless spelling of a legitimate page MUST be treated identically to its suffixed spelling. A collection target names a directory or manifest and receives no suffix, so every component of it counts.
+
+**The guard and the command leaf MUST NOT hold independent notions of the same path.** The guard SHALL derive the target it judges by calling the same normalisation the leaf calls to decide which file to open — one shared function, invoked by both, not a copy of one in each. A guard that re-implements the leaf's normalisation is non-conformant even while it happens to agree, because the defect is the divergence, not any particular disagreement. In particular, the normalisation MUST supply the governed-folder prefix when the caller omitted it, since the leaves do, and a guard that joins at a different root evaluates a path the leaf never touches. Conformance MUST be established behaviourally — by observing that the leaf routes through the shared function — rather than by asserting an import survives or by matching the text of the code, both of which pass for a re-implementation.
+
+Where a leaf's normalisation genuinely cannot be shared, the guard MUST evaluate a superset of the interpretations that leaf could take, never a subset. Folding a separator the leaf treats as an ordinary filename character narrows the guard's view and is non-conformant.
 
 Matching MUST apply both of the following readings to every candidate target, and MUST refuse if *any* reading names a protected tree:
 
@@ -85,6 +91,17 @@ Every mutating command a Hosted profile exposes MUST be classified either as gua
 - **WHEN** the target begins with one or more `/` or `\` separators — whether it resolves inside the vault, outside it, or nowhere at all
 - **THEN** it is refused with the same stable error, because the write leaf would read it as vault-relative
 - **AND** a failure to parse or resolve any one interpretation does not cause the guard to allow the invocation
+
+#### Scenario: A successful write records its system-owned sidecar
+
+- **WHEN** an ordinary create or supersession commits through a Hosted profile
+- **THEN** the relation-review sidecar is written at its hardcoded location inside `_Schema` and nothing else under either protected tree changes
+- **AND** naming that same sidecar as a write target is refused with the guard's stable error
+
+#### Scenario: A page target is spelled without its extension
+
+- **WHEN** a page-write target names an ordinary page and omits the Markdown suffix the leaf would supply
+- **THEN** it is allowed exactly as its suffixed spelling would be, because the final component names a file rather than a tree
 
 #### Scenario: Ordinary governed pages and reads are unaffected
 

@@ -52,16 +52,29 @@ def kb_relative_form(path: str) -> str:
     return rel
 
 
-def kb_page_target(vault_root: Path, path: str) -> tuple[Path, str]:
-    """Return ``(absolute candidate, rel-form)`` for a caller-supplied page path.
+def kb_page_relative_form(path: str) -> str:
+    """The KB-relative rel-form of a *page* target, Markdown suffix included.
 
-    The Markdown suffix is supplied when absent, matching what the write leaves
-    do before they open the file. No filesystem access and no validation: the
-    caller still has to decide whether the result exists, escapes the KB, or is
-    allowed. This answers only "which file does this text name?".
+    Extensionless input is a supported shape -- the leaves supply the suffix --
+    so the rel-form a page write actually uses is this one, not
+    ``kb_relative_form``. A guard that judges the unsuffixed form treats the
+    final component as a directory the caller might be entering, when the leaf
+    will make it a file.
     """
 
     rel = kb_relative_form(path)
     if not rel.endswith(".md"):
         rel = rel + ".md"
+    return rel
+
+
+def kb_page_target(vault_root: Path, path: str) -> tuple[Path, str]:
+    """Return ``(absolute candidate, rel-form)`` for a caller-supplied page path.
+
+    No filesystem access and no validation: the caller still has to decide
+    whether the result exists, escapes the KB, or is allowed. This answers only
+    "which file does this text name?".
+    """
+
+    rel = kb_page_relative_form(path)
     return Path(vault_root) / rel, rel

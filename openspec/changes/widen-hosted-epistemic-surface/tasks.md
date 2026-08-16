@@ -36,6 +36,11 @@
 - [x] 4.14 Guard every caller-supplied target argument of a guarded command, adding `plan_memory.collection`.
 - [x] 4.15 Widen the classification sweep from `"path" in key` to every string argument in the pinned schema, asserting both protected trees unchanged in bytes and membership.
 - [x] 4.16 Add a native-NTFS 8.3 test that runs on Windows and skips elsewhere, and state in `design.md` which cases are simulated here.
+- [x] 4.17 Narrow the requirement to caller-supplied write *targets*, enumerate the system-owned relation-review sidecar explicitly without exempting it from the guard, and snapshot the protected trees on the success paths.
+- [x] 4.18 Evaluate `root / Path(raw)` for collection targets so the reproduction of that leaf's join over-approximates instead of under-approximating on a backslash component.
+- [x] 4.19 Replace the identity-and-grep shared-normaliser assertion with a behavioural one, and show all four re-implementation mutants failing.
+- [x] 4.20 Judge a page target as the file its leaf opens, so an extensionless spelling of a legitimate page is not refused while its `.md` spelling is allowed.
+- [x] 4.21 Correct the `preserve_evidence` docstring claim that it carries no caller-chosen path argument, and the "any exception" fail-closed wording.
 
 ## 5. Close The Value-Blind Credential Exemption
 
@@ -54,5 +59,9 @@
 - [ ] 7.1 Add a write-verb selection matrix disambiguating `remember` / `edit_memory` / `replace_memory`; v3 must not be promoted before it passes.
 - [ ] 7.2 Extend the protected-tree guard to the legacy full private command route, or record that route's trust boundary as a deliberate exclusion in a spec of its own.
 - [ ] 7.3 Add a CI render/check step for the v3 candidate, matching the v2 step in the release workflow.
-- [ ] 7.5 Run the hosted protected-tree suite on Windows to confirm the native NTFS 8.3 case; it is the one case this worktree cannot exercise, and `test_guard_refuses_a_native_ntfs_short_name_alias` skips here.
+- [ ] 7.5 Run the hosted protected-tree suite on Windows to confirm the native NTFS 8.3 case; it is the one case this worktree cannot exercise, and `test_guard_refuses_a_native_ntfs_short_name_alias` skips here. Include `_Schema::$INDEX_ALLOCATION/x.md`, the one identified spelling that would fold to something other than `_schema` and is unverified on real NTFS.
+- [ ] 7.6 SECURITY: give `preserve_evidence` a `PathGuard`. It writes via bare `write_text()`/`write_bytes()`, so under the in-vault-link threat model the protected-tree guard accepts, attacker-chosen bytes can be planted inside `_Schema` (create-only; `ARTIFACT_EXISTS` blocks overwrite). Pre-existing and shared with v1 and v2, so it is out of scope here, but it is the one place a leaf-constrained command can still reach a protected tree.
+- [ ] 7.7 Relocate relation-review artifacts out of `_Schema`. Operational per-page receipts do not belong in the governing-doctrine tree, and their being there is what forces a carve-out into a security control. Needs a data migration for existing vaults and covers `lifecycle_decision_path` and `lifecycle_prepared_path` too.
+- [ ] 7.8 Give a tenant a way out of a self-inflicted lock-out: `preserve_evidence` can create `Evidence/_Schema/...`, after which every later `edit_memory` of that ordinary file is a permanent 403 from the hosted surface.
+- [ ] 7.9 Re-examine the protected-tree guard if any write path ever stops going through `batch_atomic_write`'s temp-and-rename. Hardlinks are invisible to the resolution reading; an in-place writer would reopen that.
 - [ ] 7.4 Measure whether `edit_memory`'s 9 KB `operation` `oneOf` survives the ChatGPT action cache before extending v3 to the OpenAI channel.

@@ -144,22 +144,45 @@ def _schema_rel(config: HostedCellConfig, name: str = "SKILL.md") -> str:
     return _schema_doc(config.vault_root, name).relative_to(config.vault_root).as_posix()
 
 
-def _protected_tree_state(vault_root: Path) -> dict[str, str]:
+def _protected_tree_state(vault_root: Path, *, include_system_owned: bool = False) -> dict[str, str]:
     """Content digest of every file in both protected trees, keyed by path.
 
-    Compares membership and bytes in one value, so a probe that *adds* a file
+    Compares membership and bytes in one value, so a write that *adds* a file
     is caught as loudly as one that rewrites an existing one.
+
+    The system-owned review-artifact sidecar is excluded by default, and that
+    exclusion is deliberate rather than incidental: an ordinary successful
+    `remember` or `replace_memory` creates `_Schema/relation-reviews/<id>.json`
+    on every profile including v1. Excluding it by name is what lets every
+    other assertion in this module say "nothing in the protected trees moved"
+    and mean it. Pass `include_system_owned=True` to see the sidecar itself.
     """
 
     state: dict[str, str] = {}
+    kb = _kb()
     for name in sorted(gateway.PROTECTED_TREE_DIRNAMES):
-        tree = Path(vault_root) / _kb() / name
+        tree = Path(vault_root) / kb / name
         for entry in sorted(tree.rglob("*")):
             key = entry.relative_to(vault_root).as_posix()
+            if not include_system_owned and gateway.is_system_owned_protected_path(
+                key.removeprefix(f"{kb}/")
+            ):
+                continue
             state[key] = (
                 hashlib.sha256(entry.read_bytes()).hexdigest() if entry.is_file() else "<dir>"
             )
     return state
+
+
+def _compact_note(title: str, body: str = "body.") -> str:
+    return "\n\n".join(
+        (
+            f"# {title}",
+            body,
+            "## Observations",
+            "- [operating constraint] Keep retries bounded #reliability",
+        )
+    ) + "\n"
 
 
 # --- The two commands v3 adds -------------------------------------------------
@@ -471,6 +494,7 @@ def test_hosted_v3_still_edits_ordinary_governed_pages(tmp_path: Path) -> None:
     created = commands_module.op_remember(
         config.vault_root, title="Ordinary conclusion", content=body, note_type="insight"
     )
+    trees_before = _protected_tree_state(config.vault_root)
     operation = {
         "kind": "replace_string",
         "old_string": "Keep retries bounded",
@@ -500,6 +524,163 @@ def test_hosted_v3_still_edits_ordinary_governed_pages(tmp_path: Path) -> None:
     assert "HOSTED_PROTECTED_TREE_MUTATION" not in ordinary.text
     assert protected.status_code == 403, protected.text
     assert "HOSTED_PROTECTED_TREE_MUTATION" in protected.text
+    # The success path is snapshotted too. No successful-write test used to
+    # assert this, which is exactly why the review-artifact sidecar sat inside
+    # `_Schema` unnoticed while a requirement said nothing writes there.
+    assert _protected_tree_state(config.vault_root) == trees_before
+
+
+def test_an_ordinary_supersession_writes_only_the_system_owned_sidecar(tmp_path: Path) -> None:
+    """The permitted path our own requirement was false about.
+
+    A plain successful `remember` or `replace_memory` -- no attack, no exotic
+    spelling -- creates `_Schema/relation-reviews/<page-identity>.json`, because
+    `relation_review.review_artifact_path` hardcodes that location. It happens
+    on every profile including v1. So "a hosted profile never writes inside
+    `_Schema`" was never true, and the requirement now says the true thing
+    instead: no tenant-chosen write *target* inside the protected trees.
+
+    This pins both halves. The sidecar appears, its location is fixed rather
+    than caller-supplied, and nothing else under either tree moves.
+    """
+
+    app, config = _cell(tmp_path)
+    root = Path(config.vault_root)
+    everything_before = set(_protected_tree_state(root, include_system_owned=True))
+    trees_before = _protected_tree_state(root)
+
+    created = _call(
+        app,
+        config,
+        "remember",
+        {
+            "content": _compact_note("Original Conclusion"),
+            "title": "Original Conclusion",
+            "note_type": "insight",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    superseded = _call(
+        app,
+        config,
+        "replace_memory",
+        {
+            "old_path": created.json()["data"]["path"],
+            "content": _compact_note("Tenant Chosen Title", "revised."),
+            "title": "Tenant Chosen Title",
+            "note_type": "insight",
+            "reason": "tenant supplied reason",
+        },
+    )
+    assert superseded.status_code == 200, superseded.text
+
+    added = set(_protected_tree_state(root, include_system_owned=True)) - everything_before
+    assert added, "the sidecar this carve-out exists for was not created"
+    for key in added:
+        assert gateway.is_system_owned_protected_path(key.removeprefix(f"{_kb()}/")), key
+
+    # Everything outside the system-owned sidecar is byte-identical.
+    assert _protected_tree_state(root) == trees_before
+
+    # And the tenant can never edit what it caused to be created.
+    sidecar = sorted(key for key in added if key.endswith(".json"))[0]
+    refused = _call(
+        app,
+        config,
+        "edit_memory",
+        {
+            "path": sidecar,
+            "why": "probe",
+            "operation": {"kind": "replace_body", "new_body": "# hijacked\n"},
+        },
+    )
+    assert refused.status_code == 403, refused.text
+    assert "HOSTED_PROTECTED_TREE_MUTATION" in refused.text
+
+
+def test_the_collection_leaf_join_is_over_approximated_not_under(tmp_path: Path) -> None:
+    """`\\` is a separator to the guard and a filename character to the leaf.
+
+    `structured_collections.parse_manifest_bytes` does `root / Path(raw)`, where
+    a backslash is an ordinary character on POSIX. The guard folds `\\` to `/`
+    first, so a component containing one resolved nowhere the guard looked while
+    the leaf's own join landed inside `_Schema`. Not exploitable today, but only
+    because of leaf behaviour the guard neither depends on nor asserts -- the
+    exact pattern this whole exercise exists to stop accepting.
+    """
+
+    app, config = _cell(tmp_path)
+    root = Path(config.vault_root)
+    planning = root / _kb() / "Planning"
+    planning.mkdir(parents=True, exist_ok=True)
+    (planning / "back\\slash").symlink_to(root / _kb() / "_Schema", target_is_directory=True)
+
+    probe = f"{_kb()}/Planning/back\\slash/_collection.md"
+    assert gateway._names_a_protected_tree(probe, vault_root=root, kind="collection")
+
+    for argument in gateway.PROTECTED_TREE_PATH_ARGUMENTS["plan_memory"].arguments:
+        response = _call(app, config, "plan_memory", {"action": "inspect", argument: probe})
+        assert response.status_code == 403, f"{argument}: {response.text}"
+        assert "HOSTED_PROTECTED_TREE_MUTATION" in response.text
+
+
+def test_extensionless_page_spellings_are_not_over_refused(tmp_path: Path) -> None:
+    """A page target is a file; its own name cannot be a protected tree.
+
+    Extensionless input is a supported shape -- `kb_page_target` supplies the
+    suffix -- so `Knowledge Base/Notes/_Schema` and `.../Notes/_Schema.md` are
+    the same file. Refusing one and allowing the other is incoherent, and the
+    refusal is the wrong half: nothing is being written into a tree.
+    """
+
+    app, config = _cell(tmp_path)
+    root = Path(config.vault_root)
+
+    for spelling in (
+        f"{_kb()}/Notes/_Schema",
+        f"{_kb()}/Notes/_Schema.md",
+        f"{_kb()}/_Schema.md",
+        f"{_kb()}/_Governance.md",
+        "Notes/_Governance",
+        "Notes/_Schema",
+    ):
+        assert not gateway._names_a_protected_tree(spelling, vault_root=root), spelling
+
+    # A collection target keeps every component, because its leaf appends no
+    # suffix and the final component really is a directory it would enter.
+    for spelling in (f"{_kb()}/_Schema", "_Schema", f"{_kb()}/_Governance"):
+        assert gateway._names_a_protected_tree(spelling, vault_root=root, kind="collection"), (
+            spelling
+        )
+
+    # End to end: the extensionless spelling of an ordinary page is editable.
+    body = (
+        "A durable conclusion.\n\n"
+        "## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n"
+    )
+    created = commands_module.op_remember(
+        config.vault_root, title="Ordinary conclusion", content=body, note_type="insight"
+    )
+    trees_before = _protected_tree_state(root)
+    response = _call(
+        app,
+        config,
+        "edit_memory",
+        {
+            "path": created["path"].removesuffix(".md"),
+            "why": "extensionless spelling of the same page",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Keep retries bounded",
+                "new_string": "Keep retries bounded and logged",
+                "validate_only": True,
+            },
+        },
+    )
+    assert response.status_code < 400, response.text
+    assert "HOSTED_PROTECTED_TREE_MUTATION" not in response.text
+    assert _protected_tree_state(root) == trees_before
 
 
 def test_hosted_v3_still_reads_the_schema_tree(tmp_path: Path) -> None:
@@ -614,6 +795,13 @@ def test_guard_refuses_protected_trees_without_over_refusing_lookalikes() -> Non
         f"{UNC}\\Notes\\ordinary.md",
         "Knowledge Base/Notes/schema.md",
         "Knowledge Base/Notes/Governance.md",
+        # Extensionless spellings of legitimate pages. The leaf opens each as
+        # `<name>.md`, so the final component is a filename and never a tree.
+        "Knowledge Base/Notes/_Schema",
+        "Knowledge Base/Notes/_Governance",
+        "Knowledge Base/_Schema.md",
+        "Knowledge Base/_Governance.md",
+        "Notes/_Schema",
         "",
         None,
     ):
@@ -666,18 +854,43 @@ def test_guard_and_page_leaves_share_one_normaliser() -> None:
 
     from exomem import edit, kbdir, replace
 
+    # Identity catches a wrapper rebind. It does not catch a re-inlining, which
+    # leaves the import in place and unused -- and neither does grepping for one
+    # spelling of one line: `re.sub(r"^/+", "", ...)` and a `removeprefix` loop
+    # both walk straight past that. So the real assertion is behavioural.
     assert edit.kb_page_target is kbdir.kb_page_target
     assert replace.kb_page_target is kbdir.kb_page_target
 
-    for module in (edit, replace):
-        source = Path(module.__file__).read_text(encoding="utf-8")
-        assert "lstrip(\"/\")" not in source, (
-            f"{module.__name__} re-implements the rel-form instead of calling kb_page_target"
+    calls: list[tuple[str, str]] = []
+
+    def sentinel(vault_root: Path, path: str) -> tuple[Path, str]:
+        calls.append((str(vault_root), path))
+        return kbdir.kb_page_target(vault_root, path)
+
+    vault = Path("/nonexistent/vault")
+    for module, resolver, argument in (
+        (edit, "_resolve", "path"),
+        (replace, "_resolve_kb_path", "old_path"),
+    ):
+        original = module.kb_page_target
+        calls.clear()
+        module.kb_page_target = sentinel  # type: ignore[attr-defined]
+        try:
+            with pytest.raises(Exception):  # noqa: B017 - NOT_FOUND is expected and irrelevant
+                getattr(module, resolver)(vault, "_Schema/SKILL.md")
+        finally:
+            module.kb_page_target = original  # type: ignore[attr-defined]
+        assert calls == [(str(vault), "_Schema/SKILL.md")], (
+            f"{module.__name__}.{resolver} does not route {argument} through kb_page_target"
         )
 
-    # And the guard reaches the same target the leaves will open.
-    vault = Path("/nonexistent/vault")
-    for spelling in ("_Schema/SKILL.md", "/Knowledge Base/_Schema/SKILL.md", "_Schema\\SKILL.md"):
+    # And the shared function reaches the target the guard judges.
+    for spelling in (
+        "_Schema/SKILL.md",
+        "/Knowledge Base/_Schema/SKILL.md",
+        "_Schema\\SKILL.md",
+        "_Schema/SKILL",
+    ):
         assert kbdir.kb_page_target(vault, spelling)[1] == f"{_kb()}/_Schema/SKILL.md"
 
 
