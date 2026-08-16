@@ -2977,8 +2977,10 @@ def due_state_block_present_in_carrier(ctx: AssertionContext) -> AssertionResult
     # folding them together was hiding one of them. "The carrier delivered
     # nothing" is the family's negative result; "we never observed the surface"
     # is an error in the observation, and must not be reported as a product
-    # failure. Both branches are reachable, which is what makes the guard a
-    # guard rather than a comment.
+    # failure. No shipped projector produces the blocked branch today
+    # (journey_snapshot carries items only on a complete projection); it is a
+    # defensive self-consistency check, exercised via hand-mutated snapshots
+    # in the tests.
     if projection != PROJECTION_COMPLETE:
         if carried:
             return _result(

@@ -24,4 +24,4 @@
 ## 4. Verification
 
 - [x] 4.1 All sequence-2 families execute and f20–f22 positives are red on the current runtime; twins and controls behave as specified.
-- [x] 4.2 Registry drift gate green; strict OpenSpec validation green; lean suite green; no product-code diffs in this change.
+- [x] 4.2 Registry drift gate green; strict OpenSpec validation green; lean suite green apart from 91 pre-existing environmental failures confined to the two membench modules and attributed against the origin/main baseline (10742 passed; CI authoritative); no product-code diffs in this change.

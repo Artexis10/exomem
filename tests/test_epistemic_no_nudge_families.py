@@ -592,7 +592,9 @@ def test_any_intervention_after_ingest_refuses_an_unprompted_family(
         f"      - op: {intervening}\n        ref: user-acts\n",
     )
     assert prompted != text
-    with pytest.raises(ScenarioLoadError, match="only maintenance_pass may intervene"):
+    with pytest.raises(
+        ScenarioLoadError, match="only maintenance_pass and snapshot may intervene"
+    ):
         load_scenario_text(prompted, source="f20-prompted.yaml")
 
 
@@ -878,9 +880,6 @@ def test_the_family_vocabulary_widens_and_can_never_narrow() -> None:
     default = ABSENCE_CLAIM_CLASSES["signal_absence_checked_across_all_surfaces"]
     assert UNSOLICITED_PROPOSAL_CLASSES <= default
     assert CONTRADICTION_SIGNAL_CLASSES <= FAMILY_ABSENCE_CLASSES["f22"] | default
-    for family, extra in FAMILY_ABSENCE_CLASSES.items():
-        widened = default | extra
-        assert default <= widened, family
 
 
 @pytest.mark.parametrize(

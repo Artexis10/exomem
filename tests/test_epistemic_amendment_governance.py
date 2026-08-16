@@ -535,9 +535,7 @@ def test_real_loop_closure_receipt_records_the_founder_acknowledgment() -> None:
     across the transition.
     """
 
-    from protocol.contracts import AmendmentReceipt
-
-    from protocol.contracts import working_amendment_receipts
+    from protocol.contracts import AmendmentReceipt, working_amendment_receipts
 
     receipt = AmendmentReceipt.model_validate_json(LOOP_CLOSURE_RECEIPT.read_bytes())
     assert receipt.parent_contract_sha256 == (

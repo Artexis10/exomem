@@ -305,7 +305,7 @@ def _validate_unprompted_trajectory(scenario: Scenario, source: str) -> None:
                 raise ScenarioLoadError(
                     f"{source}: family {scenario.family_id} asserts unprompted surfacing, but "
                     f"phase {phase.phase_id!r} runs a {op.op!r} operation after "
-                    "evidence ingest; only maintenance_pass may intervene"
+                    "evidence ingest; only maintenance_pass and snapshot may intervene"
                 )
         if phase.expect and not ingested:
             raise ScenarioLoadError(
