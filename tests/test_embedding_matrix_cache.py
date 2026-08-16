@@ -240,6 +240,8 @@ def test_external_writer_is_served_without_a_full_reload(tmp_path, monkeypatch):
     assert count["n"] == 0
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
     assert matrix.shape[0] == 2
+    assert np.array_equal(matrix[0][:2], [1, 0])  # a.md untouched by the splice
+    assert np.array_equal(matrix[1][:2], [0, 1])  # b.md carries the writer's vector
     # A second read reuses; still no reload.
     idx.all_vectors()
     assert count["n"] == 0

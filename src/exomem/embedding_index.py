@@ -26,11 +26,15 @@ VECTOR_DIM = 768
 SEMANTIC_UNIT_SCHEMA_VERSION = 3
 
 # Per-path change log for the read-side bounded catch-up (see sidecar_store's
-# "bounded catch-up" note). CHUNK_PATH_LOG_TABLE records the generation at which
-# each `chunks.file_path` was last mutated; CHUNK_PATH_LOG_MARKER is the meta key
-# holding the generation from which that log is authoritative.
-CHUNK_PATH_LOG_TABLE = "chunk_path_log"
-CHUNK_PATH_LOG_MARKER = "chunk_path_log_from"
+# "bounded catch-up" note). The table records the generation at which each
+# `chunks.file_path` was last mutated; the two meta keys bound the contiguous run
+# of generations that log fully covers, so a bump from any writer that does not
+# maintain it — an older generation-AWARE binary sharing this vault, a manual
+# repair, a future in-tree writer — forces the full reload instead of reading as
+# "this write changed nothing".
+CHUNK_PATH_LOG = sidecar_store.PathChangeLog(
+    "chunk_path_log", "chunk_path_log_from", "chunk_path_log_upto"
+)
 
 # Catch-up bounds. PATHS is the real cost knob, not generations: one bump can
 # retire a whole batch of paths (a purge) and many bumps can rewrite one path
@@ -97,11 +101,13 @@ def _splice_path_blocks(
 
     `metadata` is sorted by file_path (both producers keep it that way), so
     `sidecar_store.file_block` locates each path's block — or, for a path with no
-    rows yet, its insertion point. Processing the replacements in sorted order
-    therefore walks the input once, left to right; blocks that go backwards mean
-    the caller handed in unsorted metadata and raise rather than silently
-    scrambling the matrix. An empty replacement (`new_vecs` None or zero rows)
-    deletes the block.
+    rows yet, its insertion point. It scans from index 0 every time, so this is
+    O(paths x rows), not a single pass; that is affordable only because the
+    caller bounds the path count (CATCHUP_MAX_PATHS). The replacements are
+    processed in sorted order and `cursor` only ever moves forward, so blocks
+    that go backwards mean the caller handed in unsorted metadata and raise
+    rather than silently scrambling the matrix. An empty replacement (`new_vecs`
+    None or zero rows) deletes the block.
 
     Copy-on-write: builds fresh containers and never mutates the arrays a
     concurrent reader may be holding. Raises ValueError on any inconsistency;
@@ -233,7 +239,7 @@ class EmbeddingIndex:
         # Before any write on this connection: every writer must have the log, so
         # that every generation past its floor is recorded (see sidecar_store).
         sidecar_store.ensure_path_change_log(
-            conn, CHUNK_PATH_LOG_TABLE, CHUNK_PATH_LOG_MARKER
+            conn, CHUNK_PATH_LOG
         )
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
@@ -287,7 +293,7 @@ class EmbeddingIndex:
                 # (epoch, generation, instance) token, stable under the write
                 # lock. The cache keys on it, not the mtime.
                 sidecar_store.bump_generation_for_paths(
-                    conn, CHUNK_PATH_LOG_TABLE, [rel_path]
+                    conn, CHUNK_PATH_LOG, [rel_path]
                 )
                 own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
@@ -347,7 +353,7 @@ class EmbeddingIndex:
                     # the generation delta alone could never say how many, or
                     # which, paths this retired.
                     sidecar_store.bump_generation_for_paths(
-                        conn, CHUNK_PATH_LOG_TABLE, removed_paths
+                        conn, CHUNK_PATH_LOG, removed_paths
                     )
                     sidecar_store.bump_meta(conn, "semantic_unit_generation")
                     own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
@@ -657,28 +663,29 @@ class EmbeddingIndex:
         snapshot, so a split read could pair one write's generation with another
         write's rows and then label the result as current.
 
-        The final `COUNT(*)` is the cheap cross-check that the log told the whole
-        truth: if some write ever bumped the generation without declaring its
-        paths, the spliced matrix would disagree with the sidecar's row count and
-        this refuses rather than serving it.
+        What keeps an unlogged generation bump from being read as "this write
+        changed nothing" is `catchup_is_eligible`'s run check, NOT the `COUNT(*)`
+        below: a count cannot see an in-place re-embed of an existing chunk,
+        which preserves the row count exactly. The count is a cheap secondary
+        cross-check for insert/delete-shaped divergence only.
         """
         conn = self._connect()
         try:
             conn.execute("BEGIN")
             try:
                 epoch, gen, instance = sidecar_store.read_meta_token(conn)
-                floor = sidecar_store.path_change_log_floor(conn, CHUNK_PATH_LOG_MARKER)
+                run = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
                 if not sidecar_store.catchup_is_eligible(
                     c,
                     epoch,
                     gen,
                     instance,
-                    floor=floor,
+                    run=run,
                     max_generations=CATCHUP_MAX_GENERATIONS,
                 ):
                     return None
                 changed = sidecar_store.changed_paths_since(
-                    conn, CHUNK_PATH_LOG_TABLE, c.generation, limit=CATCHUP_MAX_PATHS
+                    conn, CHUNK_PATH_LOG, c.generation, limit=CATCHUP_MAX_PATHS
                 )
                 if len(changed) > CATCHUP_MAX_PATHS:
                     return None  # wider than the bound — one clean reload is cheaper
@@ -1240,7 +1247,7 @@ class EmbeddingIndex:
                 # whole-table rewrite, so it resets and its authority floor moves
                 # here — no cache may be caught up across this write.
                 sidecar_store.bump_generation_for_reset(
-                    conn, CHUNK_PATH_LOG_TABLE, CHUNK_PATH_LOG_MARKER
+                    conn, CHUNK_PATH_LOG
                 )
                 sidecar_store.bump_meta(conn, "epoch")
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")

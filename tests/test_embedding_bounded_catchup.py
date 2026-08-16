@@ -76,6 +76,37 @@ def _seed(idx, count: int = 4) -> None:
         idx.upsert_file(f"f{i:02d}.md", ["c"], _mat([float(i), 0.0]), float(i))
 
 
+def _skew_write(path: Path, rel_path: str, vectors: np.ndarray) -> int:
+    """Write one path exactly as a generation-AWARE 0.52.2 binary does on the wire.
+
+    Replaces the path's rows and bumps `meta.generation` in one transaction, and
+    writes NO change-log row -- that binary has never heard of one. This is not
+    hypothetical: `scripts/upgrade.ps1` restarts the service BEFORE calling
+    `Sync-ExomemUvCli` (upgrade.ps1:144), and `-SkipRestart` / `-CliSync never`
+    skip that sync outright, so "new service, old CLI, one vault" is a supported
+    reachable state; `docs/deployment.md:377-379` documents direct CLI
+    maintenance against that same vault.
+
+    On origin/main such a write ALWAYS invalidated the warm matrix, because any
+    generation bump did. The catch-up must not regress that.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        with conn:
+            conn.execute("DELETE FROM chunks WHERE file_path = ?", (rel_path,))
+            conn.executemany(
+                "INSERT INTO chunks (file_path, chunk_idx, chunk_text, vector, file_mtime) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (rel_path, i, "t", vectors[i].astype(np.float32).tobytes(), 9.0)
+                    for i in range(vectors.shape[0])
+                ],
+            )
+            return sidecar_store.bump_meta(conn, "generation")
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # The fire: a 2-generation drift must NOT cost a full O(vault) reload
 # --------------------------------------------------------------------------- #
@@ -346,16 +377,137 @@ def test_legacy_generation_zero_sidecar_is_never_caught_up(tmp_path, monkeypatch
 
 
 # --------------------------------------------------------------------------- #
+# The regression guard: an UNLOGGED generation bump must never be absorbed
+# --------------------------------------------------------------------------- #
+
+
+def test_unlogged_bump_with_unchanged_row_count_forces_a_full_reload(
+    tmp_path, monkeypatch
+):
+    """The case no row-count cross-check can see.
+
+    A generation-aware older binary replaces one chunk's vector in place: same
+    path, same chunk count, different bytes, `meta.generation` bumped, no change
+    -log row. `COUNT(*)` is identical before and after, so the count check is
+    blind to it. Only a per-generation assertion that the log actually covers
+    the whole delta window can refuse this -- and refuse it it must, because on
+    origin/main this write invalidated the matrix and served the new vector.
+    """
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)
+    idx.all_vectors()  # warm
+    warm_rows = len(idx._cache.metadata)
+
+    count = _count_loads(monkeypatch, idx)
+    _skew_write(idx.path, "a.md", _mat([7, 7]))  # same row count, new vector
+
+    metadata, matrix = idx.all_vectors()
+
+    assert len(metadata) == warm_rows  # the row count genuinely did not move
+    assert count["n"] == 1, "an unlogged generation bump was absorbed as a catch-up"
+    row = matrix[[m[0] for m in metadata].index("a.md")]
+    assert np.array_equal(row[:2], [7, 7]), "served the stale pre-skew vector"
+    truth_meta, truth_matrix = _ground_truth(vault)
+    assert metadata == truth_meta
+    assert np.array_equal(matrix, truth_matrix)
+
+
+def test_unlogged_bump_is_not_papered_over_by_later_logged_writes(tmp_path, monkeypatch):
+    """The permanence case, and the one a "last bump was logged" check misses.
+
+    The skew write is followed by five ordinary logged writes with NO read in
+    between, so by the time the reader looks, the most recent generation IS
+    logged. Asserting only that would wave the whole window through and leave
+    the stale block resident indefinitely -- its log row sits behind the cache
+    generation, so no later delta ever revisits it. The log must be trusted only
+    across an unbroken run of logged generations.
+    """
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)
+    idx.all_vectors()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    _skew_write(idx.path, "a.md", _mat([7, 7]))
+
+    external = embeddings.EmbeddingIndex(vault)
+    for i in range(5):
+        external.upsert_file(f"later{i}.md", ["x"], _mat([0, 0, float(i)]), float(20 + i))
+
+    metadata, matrix = idx.all_vectors()
+
+    assert count["n"] == 1
+    row = matrix[[m[0] for m in metadata].index("a.md")]
+    assert np.array_equal(row[:2], [7, 7]), "stale block survived behind later writes"
+    truth_meta, truth_matrix = _ground_truth(vault)
+    assert metadata == truth_meta
+    assert np.array_equal(matrix, truth_matrix)
+
+
+def test_catchup_resumes_after_an_unlogged_bump_heals(tmp_path, monkeypatch):
+    """The refusal is scoped, not permanent: once the reader has full-loaded past
+    the gap, a fresh contiguous run of logged writes is catch-up-eligible again."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.all_vectors()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    _skew_write(idx.path, "a.md", _mat([7, 7]))
+    idx.all_vectors()  # heals via one full reload
+    assert count["n"] == 1
+
+    embeddings.EmbeddingIndex(vault).upsert_file("c.md", ["c"], _mat([0, 1]), 3.0)
+    metadata, matrix = idx.all_vectors()
+
+    assert count["n"] == 1  # back to patching
+    truth_meta, truth_matrix = _ground_truth(vault)
+    assert metadata == truth_meta
+    assert np.array_equal(matrix, truth_matrix)
+
+
+def test_dropped_change_log_table_is_not_trusted_from_its_surviving_markers(
+    tmp_path, monkeypatch
+):
+    """Recovery gap: a repair that drops the log table while `meta` survives must
+    not let an empty log read as "nothing changed"."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)
+    idx.all_vectors()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    conn = sqlite3.connect(idx.path)
+    try:
+        with conn:
+            conn.execute("DROP TABLE chunk_path_log")
+            conn.execute("DELETE FROM chunks WHERE file_path = 'b.md'")
+            sidecar_store.bump_meta(conn, "generation")
+    finally:
+        conn.close()
+
+    metadata, _ = idx.all_vectors()
+    assert count["n"] == 1
+    assert [m[0] for m in metadata] == ["a.md"]
+
+
+# --------------------------------------------------------------------------- #
 # Structural guard: a generation bump must always declare what it changed
 # --------------------------------------------------------------------------- #
 
 
 def test_no_bare_generation_bump_in_the_embedding_sidecar() -> None:
-    """The catch-up reads an unlogged generation as "this write changed no chunk
-    rows". A bare `bump_meta(conn, "generation")` would therefore let a stale
-    cache advance its label without ever receiving the rows -- exactly the
-    corruption `_patch_cache`'s contiguity gate exists to prevent. Every bump
-    must go through a helper that records the affected paths (or resets the log).
+    """Keep in-tree bumps on the logging helpers, so this module's own writes stay
+    catch-up-eligible instead of silently degrading every reader to a full reload.
+
+    This is a lint, not the safety guarantee: correctness rests on the runtime
+    invariant (`catchup_is_eligible` refuses unless the log's contiguous run
+    covers the whole delta window), which is what protects against writers this
+    grep cannot see -- other modules, wrapped calls, older binaries.
     """
     source = (
         Path(__file__).resolve().parent.parent / "src" / "exomem" / "embedding_index.py"
