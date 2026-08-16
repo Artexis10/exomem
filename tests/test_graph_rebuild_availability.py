@@ -2702,3 +2702,170 @@ def test_temp_sweep_removes_abandoned_sqlite_companions_but_keeps_active_set(
     assert set(removed) == set(abandoned_set)
     assert all(not path.exists() for path in abandoned_set)
     assert all(path.exists() for path in active_set)
+
+
+# --- Publication robustness: the replace must not depend on a reader leaving --
+
+
+def _refuse_replacement_onto(monkeypatch: pytest.MonkeyPatch, live: Path) -> None:
+    """Model Windows refusing `os.replace` onto one open destination only.
+
+    Patching `os.replace` wholesale would also break the vault mutation lock,
+    which uses it for unrelated runtime state.
+    """
+    real_replace = os.replace
+
+    def refuse_for_live(source, destination, *args, **kwargs):
+        try:
+            refused = Path(destination) == live
+        except TypeError:  # pragma: no cover - descriptor-based call
+            refused = False
+        if refused:
+            raise PermissionError("live graph sidecar has an open reader")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(graph_sync.os, "replace", refuse_for_live)
+
+
+def test_refused_replacement_publishes_in_place_without_moving_the_live_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reader that never lets go no longer costs the vault its publication.
+
+    Windows refuses `os.replace` while any handle is open on the destination.
+    Publishing the same proven bytes *into* the existing file leaves the
+    directory entry — and therefore every open handle — intact, which is what
+    lets a resident service's reader see the new content instead of pinning the
+    old sidecar forever.
+    """
+    import sqlite3
+
+    from exomem.epistemic_graph import EpistemicGraphIndex
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/in-place-publish.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "# Before\n")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    index = EpistemicGraphIndex(tmp_path)
+    index.rebuild_all()
+    live = index.path
+    identity_before = live.stat()
+    note.write_text("# After the refused replacement\n", encoding="utf-8")
+
+    _refuse_replacement_onto(monkeypatch, live)
+    # A reader that stays open across the whole publication, exactly the
+    # resident-service condition the issue reports.
+    with closing(sqlite3.connect(f"{live.resolve().as_uri()}?mode=ro", uri=True)) as reader:
+        reader.execute("SELECT COUNT(*) FROM graph_meta").fetchone()
+
+        index.rebuild_all()
+
+        published = dict(
+            reader.execute(
+                "SELECT key, value FROM graph_meta WHERE key IN "
+                "('schema_version', 'recall_projection_identity')"
+            ).fetchall()
+        )
+
+    identity_after = live.stat()
+    assert (identity_after.st_dev, identity_after.st_ino) == (
+        identity_before.st_dev,
+        identity_before.st_ino,
+    ), "an in-place publication must not move the live directory entry"
+    assert published.get("schema_version") is not None
+    assert published.get("recall_projection_identity") is not None
+    assert index.available() is True
+    assert not list(
+        live.parent.glob(".graph-rebuild-*.sqlite")
+    ), "a landed publication leaves no preserved temporary"
+
+
+def test_publication_refused_by_both_paths_still_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When neither publication path can land, the old sidecar survives intact."""
+    from exomem import epistemic_graph
+    from exomem.epistemic_graph import EpistemicGraphIndex
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/both-paths-refused.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "# Before\n")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    index = EpistemicGraphIndex(tmp_path)
+    index.rebuild_all()
+    old_live = index.path.read_bytes()
+    note.write_text("# After\n", encoding="utf-8")
+    epistemic_graph.clear_publication_memos()
+
+    _refuse_replacement_onto(monkeypatch, index.path)
+    monkeypatch.setattr(graph_sync, "_publish_sidecar_in_place", lambda *_args: False)
+
+    with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable):
+        index.rebuild_all()
+
+    assert index.path.read_bytes() == old_live
+    retained = list(index.path.parent.glob(".graph-rebuild-*.sqlite"))
+    assert len(retained) == 1, "exactly one complete build stays recoverable"
+    assert epistemic_graph.publication_refusal_active(tmp_path) is True
+
+
+def test_live_sidecar_readers_are_registered_and_drained_for_a_publication_hold(
+    tmp_path: Path,
+) -> None:
+    """The publisher owns an in-process registry of live-sidecar readers."""
+    from exomem import epistemic_graph
+    from exomem.epistemic_graph import EpistemicGraphIndex
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/reader-registry.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(note, "# Registry\n")],
+        vault_root=tmp_path,
+        post_commit_fanout=False,
+    )
+    index = EpistemicGraphIndex(tmp_path)
+    index.rebuild_all()
+    key = epistemic_graph._sidecar_registry_key(index.path)
+    epistemic_graph.reset_publication_holds()
+
+    snapshot = index._open_read_snapshot()
+    assert snapshot is not None
+    assert len(epistemic_graph._SIDECAR_READERS.get(key, {})) == 1
+    snapshot.close()
+    assert key not in epistemic_graph._SIDECAR_READERS
+
+    # A reader whose owning thread is gone can never close itself; the hold is
+    # the only place it is safe to collect one.
+    import sqlite3
+
+    leaked: list = []
+
+    def leak_a_reader() -> None:
+        leaked.append(index._open_read_snapshot())
+
+    worker = threading.Thread(target=leak_a_reader)
+    worker.start()
+    worker.join(10)
+    assert leaked and leaked[0] is not None
+    assert len(epistemic_graph._SIDECAR_READERS.get(key, {})) == 1
+
+    held = epistemic_graph._acquire_publication_hold(index.path)
+    try:
+        assert held == key
+        assert not epistemic_graph._SIDECAR_READERS.get(key)
+        # Really closed, not merely deregistered: a handle that stays open is
+        # still blocking the replacement the hold exists to enable.
+        with pytest.raises(sqlite3.ProgrammingError):
+            leaked[0].execute("SELECT 1")
+        # Single flight: a second publisher does not get the same hold.
+        assert epistemic_graph._acquire_publication_hold(index.path) is None
+    finally:
+        epistemic_graph._release_publication_hold(held)
+    assert key not in epistemic_graph._SIDECAR_PUBLICATION_HOLDS
+    # A released hold lets readers back in immediately.
+    reopened = index._open_read_snapshot()
+    assert reopened is not None
+    reopened.close()

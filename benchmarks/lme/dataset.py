@@ -6,7 +6,7 @@ import datetime as dt
 import json
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -106,9 +106,11 @@ class LmeQuestion:
             )
         if not self.question.strip():
             raise DatasetValidationError(f"question {self.question_id!r} has empty text")
+        # A repeated haystack session id is data, not a fault: 13 of the 500
+        # pinned rows carry one, and MemoryBench's loader ingests them. Each
+        # occurrence stays its own session — position distinguishes them
+        # downstream, and answer sessions resolve against the id set either way.
         session_ids = [session.session_id for session in self.sessions]
-        if len(session_ids) != len(set(session_ids)):
-            raise DatasetValidationError(f"question {self.question_id!r} repeats a session id")
         unknown = set(self.answer_session_ids) - set(session_ids)
         if unknown:
             message = (
@@ -139,13 +141,41 @@ class LmeQuestion:
 @dataclass(frozen=True)
 class LmeDataset:
     questions: tuple[LmeQuestion, ...]
+    #: question_id -> why that row failed validation, kept rather than raised so
+    #: a row the run never selects cannot refuse the run. Raised at point of use.
+    deferred_errors: Mapping[str, str] = field(default_factory=dict)
+    #: (question_id, question_type) for EVERY source row in order, including
+    #: deferred ones. The comparative cohort is a property of the source, so
+    #: selection must regenerate against the full census, never against the
+    #: subset this loader happened to accept.
+    census: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         ids = [question.question_id for question in self.questions]
         if not ids:
+            # Deferral must not mask the diagnosis: if nothing loaded, the
+            # reason the rows failed is more useful than their absence.
+            if self.deferred_errors:
+                raise DatasetValidationError(sorted(self.deferred_errors.values())[0])
             raise DatasetValidationError("dataset contains no questions")
         if len(ids) != len(set(ids)):
             raise DatasetValidationError("dataset repeats a question_id")
+        overlap = set(ids) & set(self.deferred_errors)
+        if overlap:
+            raise DatasetValidationError(
+                f"question {sorted(overlap)[0]!r} is both loaded and deferred"
+            )
+
+    def require(self, question_id: str) -> LmeQuestion:
+        """Fetch a question, surfacing a deferred validation error if it has one."""
+
+        deferred = self.deferred_errors.get(question_id)
+        if deferred is not None:
+            raise DatasetValidationError(deferred)
+        for question in self.questions:
+            if question.question_id == question_id:
+                return question
+        raise DatasetValidationError(f"dataset has no question {question_id!r}")
 
 
 def _required(row: Mapping[str, Any], key: str, *, question_id: str) -> Any:
@@ -215,6 +245,11 @@ def _question(raw: object, index: int) -> LmeQuestion:
     text_fields = {}
     for key in ("question_id", "question_type", "question", "answer"):
         value = _required(raw, key, question_id=question_id)
+        # 32 of the 500 pinned rows are counting questions whose gold is a JSON
+        # number rather than a string. That is the release's own encoding, so
+        # the gold is read at face value; a bool is not a number here.
+        if key == "answer" and isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
         if not isinstance(value, str):
             raise DatasetValidationError(f"question {question_id!r} field {key} must be a string")
         text_fields[key] = value
@@ -240,7 +275,25 @@ def load_dataset_bytes(raw: bytes) -> LmeDataset:
         payload = payload.get("questions")
     if not isinstance(payload, list):
         raise DatasetValidationError("dataset root must be a list or a questions object")
-    return LmeDataset(tuple(_question(raw, index) for index, raw in enumerate(payload)))
+    questions: list[LmeQuestion] = []
+    deferred: dict[str, str] = {}
+    census: list[tuple[str, str]] = []
+    for index, row in enumerate(payload):
+        if isinstance(row, Mapping):
+            identity, kind = row.get("question_id"), row.get("question_type")
+            if isinstance(identity, str) and identity and isinstance(kind, str) and kind:
+                census.append((identity, kind))
+        try:
+            questions.append(_question(row, index))
+        except DatasetValidationError as error:
+            # Defer rather than refuse: selection may never touch this row, and
+            # one unusable row must not block a cohort that excludes it. The
+            # error is re-raised by `require()` if the run actually needs it.
+            identity = row.get("question_id") if isinstance(row, Mapping) else None
+            if not isinstance(identity, str) or not identity or identity in deferred:
+                raise
+            deferred[identity] = str(error)
+    return LmeDataset(tuple(questions), deferred, tuple(census))
 
 
 def stable_dataset_bytes(path: Path | str) -> bytes:

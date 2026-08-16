@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.52.2](https://github.com/Artexis10/exomem/compare/v0.52.1...v0.52.2) (2026-08-15)
+
+
+### Bug Fixes
+
+* **contract:** stop the identity census walking trash and failing closed on deleted pages ([#547](https://github.com/Artexis10/exomem/issues/547)) ([9b0f7ec](https://github.com/Artexis10/exomem/commit/9b0f7ec76b7cc37d625c01b0df5a836b21a808b3))
+
+## [0.52.1](https://github.com/Artexis10/exomem/compare/v0.52.0...v0.52.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **benchmarks:** match update-probe markers inside rendered provider text ([#533](https://github.com/Artexis10/exomem/issues/533)) ([0bc46d6](https://github.com/Artexis10/exomem/commit/0bc46d6a8fe9b122732c12fabed4015b845304d9))
+* **benchmarks:** read the pinned LongMemEval release as the data it actually is ([#532](https://github.com/Artexis10/exomem/issues/532)) ([423b091](https://github.com/Artexis10/exomem/commit/423b0911fbf9a29cc7e44b1773146f5bb3384125))
+
+## [0.52.0](https://github.com/Artexis10/exomem/compare/v0.51.0...v0.52.0) (2026-08-15)
+
+
+### Features
+
+* **benchmarks:** add the Basic Memory controlled-direct row ([cf38bb5](https://github.com/Artexis10/exomem/commit/cf38bb55739eabc6b2fa272be16fe3c698db8680))
+* **benchmarks:** give the export somewhere to put what the guest observed ([542d8a4](https://github.com/Artexis10/exomem/commit/542d8a4f413a4260889811a4ae40d8299252f7d6))
+* **benchmarks:** record the founder acknowledgment of amendment sequence 1 ([#535](https://github.com/Artexis10/exomem/issues/535)) ([a98d4a6](https://github.com/Artexis10/exomem/commit/a98d4a6b356547a6660fde1a145288891e79a5d8))
+* **benchmarks:** report per-op ingest latency in membench ([#520](https://github.com/Artexis10/exomem/issues/520)) ([a3c60d5](https://github.com/Artexis10/exomem/commit/a3c60d555778d66168614e2ac16339735cdd0026))
+* **doctor:** add write-path observability checks ([#518](https://github.com/Artexis10/exomem/issues/518)) ([2f13a1f](https://github.com/Artexis10/exomem/commit/2f13a1ff021cf486e2ed32dbe6f311c23840cd69))
+* **edit:** accept validate_only as a top-level edit_memory field ([#519](https://github.com/Artexis10/exomem/issues/519)) ([aec913f](https://github.com/Artexis10/exomem/commit/aec913f21e5a2825b5e3859db704b6019030e5be))
+* **gate:** bound the read-after-write and cold-preflight cost in the write-latency gate ([#527](https://github.com/Artexis10/exomem/issues/527)) ([8a21078](https://github.com/Artexis10/exomem/commit/8a21078fd96de055fd9c22b47e5a573cf6fc2ed1))
+* **memory:** add the epistemic loop primitives ([#530](https://github.com/Artexis10/exomem/issues/530)) ([74d7457](https://github.com/Artexis10/exomem/commit/74d74578af53b96a79c69fda40c0108e0307fc42))
+* **memory:** advise when a page outgrows its own declared scope ([#538](https://github.com/Artexis10/exomem/issues/538)) ([483dc27](https://github.com/Artexis10/exomem/commit/483dc272cf1845ad28548906fc9e34a126f851f5))
+* **memory:** audit derivation chains for double-counting and cycles ([#515](https://github.com/Artexis10/exomem/issues/515)) ([4c8ac71](https://github.com/Artexis10/exomem/commit/4c8ac71488a45aa16fbf9a55d6f4afac8aeadb26))
+* **memory:** instrument the write path with per-phase timings and metrics ([#523](https://github.com/Artexis10/exomem/issues/523)) ([993001b](https://github.com/Artexis10/exomem/commit/993001b66789bcbfa0750312d78d6e98877abed7))
+* **memory:** surface authored contradictions and a competing-alternatives stance ([#524](https://github.com/Artexis10/exomem/issues/524)) ([e4e57a9](https://github.com/Artexis10/exomem/commit/e4e57a978c682f9e5663f113599ff289869cfab2))
+* **planning:** add read-only planned-vs-recorded review ([#525](https://github.com/Artexis10/exomem/issues/525)) ([14b524a](https://github.com/Artexis10/exomem/commit/14b524a5d16bd4ce790aaeaa43783145b39a4d33))
+* **planning:** link plans to their motivating knowledge ([#513](https://github.com/Artexis10/exomem/issues/513)) ([8e077e4](https://github.com/Artexis10/exomem/commit/8e077e47a30dc579022ba763717077c00c771d79))
+* **readiness:** report the mutation boundary honestly and attribute contention ([#522](https://github.com/Artexis10/exomem/issues/522)) ([5af122a](https://github.com/Artexis10/exomem/commit/5af122adcd9910013609e983f63bda891e909f4c))
+
+
+### Bug Fixes
+
+* **benchmarks:** derive the LME CLI provider choices from the registry ([5c14472](https://github.com/Artexis10/exomem/commit/5c14472db2c9283f2f670f2b9bcd4749ef6b848b))
+* **embeddings:** route suppressed-path purges through the shared index and log strand probes ([#534](https://github.com/Artexis10/exomem/issues/534)) ([bc4b404](https://github.com/Artexis10/exomem/commit/bc4b4044012cbe47cc595e6b95a8051040664850))
+* **graph:** publish without depending on the reader, and stop failures poisoning vault freshness ([#541](https://github.com/Artexis10/exomem/issues/541)) ([86f6e3b](https://github.com/Artexis10/exomem/commit/86f6e3b218ad53886a85c64559ee8aeea93b94b6))
+* **memory:** close the confidence-exclusion write bypass ([#512](https://github.com/Artexis10/exomem/issues/512)) ([ed9c967](https://github.com/Artexis10/exomem/commit/ed9c967a51bfefc959779b7f41cf51d129b610d2))
+* **memory:** corpus-cache lifecycle honesty — classified publish failures and populate-on-miss ([#540](https://github.com/Artexis10/exomem/issues/540)) ([3e0e7bd](https://github.com/Artexis10/exomem/commit/3e0e7bd065c424c020591dd08c0ac4e9c556ff32))
+* **memory:** thread the validating census into the preflight validity token ([#537](https://github.com/Artexis10/exomem/issues/537)) ([e26e9e8](https://github.com/Artexis10/exomem/commit/e26e9e81342ac0b2eadcce59dd7365ef7baa5970))
+* **mutation:** show the warnings behind warnings_count in compact responses ([#507](https://github.com/Artexis10/exomem/issues/507)) ([c708d66](https://github.com/Artexis10/exomem/commit/c708d66baad1f70f615f215623f7ffbe4d80783e))
+* **write:** fail loud with a distinct code when a reviewed transition token has expired ([#536](https://github.com/Artexis10/exomem/issues/536)) ([cc9d2d9](https://github.com/Artexis10/exomem/commit/cc9d2d98ed7ece2553b55d8a732020d717bfed32))
+
 ## [0.51.0](https://github.com/Artexis10/exomem/compare/v0.50.0...v0.51.0) (2026-08-14)
 
 

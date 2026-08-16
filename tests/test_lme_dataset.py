@@ -60,5 +60,11 @@ def test_abstention_rows_tolerate_missing_and_unknown_answer_sessions(tmp_path: 
     non_abstention["answer_session_ids"] = ["not-in-the-haystack"]
     invalid_path = tmp_path / "invalid.json"
     invalid_path.write_text(json.dumps(rows), encoding="utf-8")
+    # The refusal moved from load time to point of use: a cohort run must not be
+    # blocked by a row it never selects, but an invalid row can never be used.
+    invalid = load_dataset(invalid_path)
+    identity = non_abstention["question_id"]
+    assert identity in invalid.deferred_errors
+    assert "unknown answer sessions" in invalid.deferred_errors[identity]
     with pytest.raises(DatasetValidationError, match="unknown answer sessions"):
-        load_dataset(invalid_path)
+        invalid.require(identity)
