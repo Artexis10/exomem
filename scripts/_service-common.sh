@@ -55,6 +55,57 @@ exomem_installed_version() {
     "$python" -c "import importlib.metadata as m; print(m.version('exomem'))" 2>/dev/null
 }
 
+# Pull the exomem version out of a `uv pip install` plan read on stdin, or print
+# nothing. uv prints its plan as " + exomem==0.52.3" (extras normalised away), and
+# prints NO "+ exomem" line when it would install nothing.
+exomem_install_plan_version() {
+    sed -n 's|^[[:space:]]*+[[:space:]]*exomem==\([^[:space:]]*\)[[:space:]]*$|\1|p' | head -n1
+}
+
+# Print the concrete version an install of $2 would land in the interpreter $1, or
+# return nonzero when it cannot be resolved. $3 is the currently-installed version.
+#
+# `--dry-run` resolves without writing, so the target can be shown to the operator
+# BEFORE the install lands and the post-install assertion has something concrete to
+# compare against when no --package-version was pinned. `--refresh-package exomem`
+# is load-bearing: uv serves the package index out of its HTTP cache, so an unpinned
+# `--upgrade` can resolve to a release that is no longer latest and exit 0 having
+# done nothing -- and a target read through the same stale cache would agree with
+# the stale install and vouch for it. uv writes its whole plan to stderr.
+exomem_resolve_target_version() {
+    local python="$1" requirement="$2" installed="${3:-}" plan target
+    plan="$(uv pip install --dry-run --upgrade --refresh-package exomem \
+        --python "$python" "$requirement" 2>&1)" || return 1
+    target="$(printf '%s\n' "$plan" | exomem_install_plan_version)"
+    if [[ -n "$target" ]]; then printf '%s\n' "$target"; return 0; fi
+    # uv planned no change to exomem, so the resolved target is the installed one.
+    if [[ -n "$installed" ]]; then printf '%s\n' "$installed"; return 0; fi
+    return 1
+}
+
+# Fail when an install reported success without changing what is installed.
+# #578: uv exited 0 having installed nothing, the script printed
+# "Installed version: 0.52.2 -> 0.52.2" as a REPORT, and the deploy continued onto
+# a service that restarted cleanly on the old build. before/after were already
+# known; this turns the report into a gate. Args: requirement before after target.
+exomem_assert_install_applied() {
+    local requirement="$1" before="${2:-}" after="${3:-}" target="${4:-}" was
+    was="${before:-not installed}"
+    if [[ -z "$after" ]]; then
+        echo "upgrade: install of '$requirement' reported success but no exomem version is importable from that interpreter (was: $was). Nothing was deployed." >&2
+        return 1
+    fi
+    if [[ -z "$target" ]]; then
+        echo "upgrade: target version unresolved, so this run can only assert that SOMETHING is installed ($after). Re-run with --package-version <version> for a checked upgrade." >&2
+        return 0
+    fi
+    if [[ "$after" != "$target" ]]; then
+        echo "upgrade: install did not take: '$requirement' resolved to $target, but the interpreter still reports $after (was: $was). uv exited 0 without applying the change; re-run with --package-version $target, and check that uv is not resolving from a stale index cache." >&2
+        return 1
+    fi
+    return 0
+}
+
 # Version declared in the repo checkout. Deliberately offline: comparing against
 # the repo rather than PyPI keeps every gate usable on a disconnected box.
 exomem_repo_version() {

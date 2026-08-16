@@ -258,7 +258,10 @@ def test_windows_service_installer_supports_release_env_and_cuda() -> None:
     assert "EXOMEM_MCP_LEGACY_COMPAT" in install
     assert "Test-McpEndpoint -HostName $BindHost -EndpointPort $Port" in install
 
-    assert '"uv", "pip", "install", "--upgrade", "--python", $Python, $pkg' in common
+    # `--refresh-package exomem` is not decoration: uv serves the package index
+    # from its HTTP cache, so an unpinned `--upgrade` can resolve back to the
+    # installed release and exit 0 having done nothing (#578).
+    assert '"uv", "pip", "install", "--upgrade", "--refresh-package", "exomem", "--python", $Python, $pkg' in common
     assert "https://download.pytorch.org/whl/cu132" in common
 
 
