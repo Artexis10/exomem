@@ -156,6 +156,164 @@ def reload_reason(old_cache, new_epoch: int, new_gen: int) -> str:
     return "genuine"
 
 
+# ------------------------------------------------------------ bounded catch-up
+#
+# A generation delta says HOW MANY writes happened, never WHICH rows they
+# touched: one bump can retire a whole batch of paths (a purge) and many bumps
+# can rewrite one path (repeated upserts). So the delta alone cannot drive an
+# incremental read — the sidecar has to record what each generation changed.
+#
+# `<log_table>(file_path, generation)` is that record: one row per path, holding
+# the generation at which it was LAST mutated (inserted, updated, or deleted —
+# a delete leaves its log row behind precisely so the reader can see it). It is
+# written inside the same transaction as the generation bump, so a path appears
+# in the delta iff its rows changed in that window.
+#
+# `<marker_key>` in `meta` is the log's authority floor: the generation in force
+# when the log started recording. Writes at or before it predate the log and are
+# invisible to it, so only a cache at or past the floor may be caught up. Below
+# the floor — and for gen 0, an epoch change, or an instance change — the full
+# reload remains the only correct answer.
+
+CATCHUP_REASON = "catchup"
+
+
+def _check_log_table(log_table: str) -> None:
+    """Reject a non-identifier table name (these are interpolated into SQL)."""
+    if not log_table.isidentifier():
+        raise ValueError(f"unsupported change-log table name: {log_table!r}")
+
+
+def ensure_path_change_log(conn: sqlite3.Connection, log_table: str, marker_key: str) -> None:
+    """Create the per-path change log and stamp its authority floor once.
+
+    Call this from the sidecar's connect path, BEFORE any write: every writer
+    then has the table, so every generation after the floor is recorded. The
+    floor is read outside a write lock on purpose — landing one generation
+    either side of a concurrent commit is safe, because both a slightly low and
+    a slightly high floor only ever make catch-up MORE conservative.
+    """
+    _check_log_table(log_table)
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {log_table} ("
+        "file_path TEXT PRIMARY KEY, generation INTEGER NOT NULL)"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS {log_table}_generation ON {log_table}(generation)"
+    )
+    if conn.execute("SELECT 1 FROM meta WHERE key = ?", (marker_key,)).fetchone():
+        return
+    _epoch, generation, _instance = read_meta_token(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", (marker_key, generation)
+    )
+    conn.commit()
+
+
+def bump_generation_for_paths(
+    conn: sqlite3.Connection, log_table: str, paths, /
+) -> int:
+    """Bump `generation` AND record the paths it changed, in the caller's txn.
+
+    Bumping and recording are ONE call by design. The reader treats an unlogged
+    generation as "this write changed no rows", so a bump that forgot to declare
+    its paths would let a stale cache advance its label without ever receiving
+    the rows — the same corruption the write-side contiguity gate exists to
+    prevent, arriving through the read side instead.
+    """
+    _check_log_table(log_table)
+    generation = bump_meta(conn, "generation")
+    rows = [(path, generation) for path in dict.fromkeys(paths)]
+    if rows:
+        conn.executemany(
+            f"INSERT INTO {log_table} (file_path, generation) VALUES (?, ?) "
+            "ON CONFLICT(file_path) DO UPDATE SET generation = excluded.generation",
+            rows,
+        )
+    return generation
+
+
+def bump_generation_for_reset(
+    conn: sqlite3.Connection, log_table: str, marker_key: str
+) -> int:
+    """Bump `generation` for a whole-table rewrite, in the caller's txn.
+
+    A wipe-and-rebuild changes every path at once; enumerating them would make
+    the log as big as the corpus and buy nothing, since such a write also bumps
+    the epoch and no cache may be caught up across that. So the log is emptied
+    and its authority floor moves to the new generation — catch-up resumes from
+    the next ordinary write.
+    """
+    _check_log_table(log_table)
+    generation = bump_meta(conn, "generation")
+    conn.execute(f"DELETE FROM {log_table}")
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (marker_key, generation),
+    )
+    return generation
+
+
+def path_change_log_floor(conn: sqlite3.Connection, marker_key: str) -> int | None:
+    """The generation the change log became authoritative at, or None."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (marker_key,)).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return int(row[0])
+
+
+def changed_paths_since(
+    conn: sqlite3.Connection, log_table: str, generation: int, *, limit: int
+) -> list[str]:
+    """Paths mutated strictly after `generation`, per the change log.
+
+    Reads `limit + 1` rows so the caller can detect "too many to be worth
+    patching" without materializing a delta it is going to throw away.
+
+    Read this in the SAME explicit transaction as the meta token and the rows it
+    selects — python sqlite3 in autocommit gives every bare SELECT its own
+    snapshot, so a split read could pair a generation with another write's log.
+    """
+    _check_log_table(log_table)
+    return [
+        str(row[0])
+        for row in conn.execute(
+            f"SELECT file_path FROM {log_table} WHERE generation > ? LIMIT ?",
+            (generation, max(limit, 0) + 1),
+        )
+    ]
+
+
+def catchup_is_eligible(
+    c,
+    epoch: int,
+    gen: int,
+    instance: int,
+    *,
+    floor: int | None,
+    max_generations: int,
+) -> bool:
+    """Whether a warm cache may be patched forward instead of fully reloaded.
+
+    ONLY a forward generation delta on the same physical sidecar qualifies. An
+    epoch change (a re-embed replaced vectors the log never names) or an instance
+    change (the ABA case: the sidecar was deleted and recreated, so its counters
+    restarted and its rows are unrelated) must still force the full reload, as
+    must a generation-0 legacy sidecar, whose freshness is mtime-keyed and which
+    has no log history behind it.
+    """
+    if c is None or gen < 1 or c.generation < 1:
+        return False
+    if c.epoch != epoch or c.instance != instance:
+        return False
+    if gen <= c.generation:  # already fresh, or a sidecar that moved backwards
+        return False
+    if floor is None or c.generation < floor:
+        return False  # the window reaches back before the log recorded anything
+    return (gen - c.generation) <= max_generations
+
+
 def peek_sidecar_token(path: Path) -> tuple[int, int, int] | None:
     """Read `(epoch, generation, instance)` without creating or migrating a sidecar."""
     if not path.exists():

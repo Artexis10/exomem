@@ -215,9 +215,15 @@ def test_incremental_matches_full_reload(tmp_path, monkeypatch):
     assert np.array_equal(spliced_matrix, reload_matrix)
 
 
-def test_external_writer_triggers_exactly_one_reload(tmp_path, monkeypatch):
+def test_external_writer_is_served_without_a_full_reload(tmp_path, monkeypatch):
     """An out-of-band sidecar change (a writer that bypassed the shared instance)
-    is caught by the mtime gate: exactly one reload, reflecting the new content."""
+    is caught and served with the new content.
+
+    Was `test_external_writer_triggers_exactly_one_reload`: until the bounded
+    catch-up (#531 H4) the only way to absorb an external write was to throw the
+    whole matrix away and re-`SELECT` the vault. A one-generation delta now
+    patches just the changed path's block, so the assertion moved from "exactly
+    one full reload" to "zero, and the content is still right"."""
     vault = _fresh_vault(tmp_path)
     idx = embeddings.get_embedding_index(vault)
     idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
@@ -231,11 +237,12 @@ def test_external_writer_triggers_exactly_one_reload(tmp_path, monkeypatch):
     _bump_mtime(idx.path)  # guarantee a distinct mtime for the gate
 
     metadata, matrix = idx.all_vectors()
-    assert count["n"] == 1
+    assert count["n"] == 0
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
-    # A second read reuses; no further reload.
+    assert matrix.shape[0] == 2
+    # A second read reuses; still no reload.
     idx.all_vectors()
-    assert count["n"] == 1
+    assert count["n"] == 0
 
 
 def test_utime_bump_alone_does_not_reload(tmp_path, monkeypatch):
@@ -475,7 +482,11 @@ def test_writer_under_held_reader_txn_no_reload(tmp_path, monkeypatch):
 
 def test_external_writer_detected_via_generation(tmp_path, monkeypatch):
     """A second instance writing the sidecar bumps the on-disk generation; the
-    shared index detects it and serves the new rows — with NO mtime bump needed."""
+    shared index detects it and serves the new rows — with NO mtime bump needed.
+
+    Since #531 H4 the detection is absorbed by the bounded catch-up rather than a
+    full reload: one generation behind, one changed path, so the block is patched
+    in and no O(vault) `SELECT` runs."""
     vault = _fresh_vault(tmp_path)
     idx = embeddings.get_embedding_index(vault)
     idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
@@ -486,14 +497,19 @@ def test_external_writer_detected_via_generation(tmp_path, monkeypatch):
     external.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)  # bumps DB generation
 
     metadata, matrix = idx.all_vectors()
-    assert count["n"] == 1
+    assert count["n"] == 0
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
+    assert np.array_equal(matrix[1][:2], [0, 1])  # the external writer's vector
     idx.all_vectors()
-    assert count["n"] == 1  # second read reuses the reloaded cache
+    assert count["n"] == 0  # second read reuses the patched cache
 
 
 def test_external_delete_detected_via_generation(tmp_path, monkeypatch):
-    """An external delete bumps the generation; the block is dropped on next read."""
+    """An external delete bumps the generation; the block is dropped on next read.
+
+    Since #531 H4 that drop is a catch-up splice, not a full reload: the deleted
+    path leaves a row in the per-path change log, which is how the reader learns
+    a block vanished when no surviving row could tell it."""
     vault = _fresh_vault(tmp_path)
     idx = embeddings.get_embedding_index(vault)
     idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
@@ -505,7 +521,7 @@ def test_external_delete_detected_via_generation(tmp_path, monkeypatch):
     external.delete_file("a.md")  # bumps DB generation
 
     metadata, matrix = idx.all_vectors()
-    assert count["n"] == 1
+    assert count["n"] == 0
     assert [m[0] for m in metadata] == ["b.md"]
     assert matrix.shape[0] == 1
 
