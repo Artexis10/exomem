@@ -145,7 +145,73 @@ class HostedJSONResponse(JSONResponse):
         ).encode("utf-8")
 
 
+def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
+    """Static code -> (message, remediation) for refusals a person can fix.
+
+    This boundary redacts exception-derived text, and that is not negotiable:
+    `cli_ops.error_dict` falls back to `{"code": "OP_ERROR", "message":
+    str(exc)}`, so copying its message through would hand raw exception text —
+    vault paths included — to a hosted client for any unclassified failure. So
+    the table is keyed on the code alone, which was already crossing.
+
+    The authoring entries are derived from the contract's own definitions
+    rather than transcribed, because a copy drifts the moment the contract's
+    wording is tuned. The disposition entries are authored here: the contract's
+    versions are addressed to an agent that can run a validate/retry loop
+    (`validate_only=true`, `transition_token=<returned>`), which is not
+    something a person typing into a box can do.
+
+    A code absent from this table degrades to the generic message and a null
+    remediation — the safe direction for anything unrecognised.
+    """
+    from . import semantic_authoring
+
+    findings = semantic_authoring.AUTHORING_CONTRACT.findings
+    unit = findings["missing_semantic_unit"]
+    empty = findings["empty_rich_unit"]
+
+    disposition = (
+        "This memory needs a link to something already saved before it can be "
+        "recorded as a conclusion. Add a typed relation to a related memory, or "
+        "save it as a source instead if it is raw material rather than a "
+        "settled conclusion."
+    )
+    return {
+        "missing_semantic_unit": (
+            "the memory has no semantic unit to record",
+            f"{unit['compact_remediation']} {unit['rich_remediation']}",
+        ),
+        "empty_rich_unit": (
+            "the memory has a heading with no content under it",
+            empty["remediation"],
+        ),
+        "SEMANTIC_CONTRACT_BLOCKED": (
+            "the memory does not yet meet the authoring contract",
+            disposition,
+        ),
+        "RELATION_DISPOSITION_MISSING": (
+            "the memory needs a qualifying relation or an explicit review",
+            disposition,
+        ),
+        "RELATION_DISPOSITION_STALE": (
+            "the memory's relation review is out of date",
+            disposition,
+        ),
+    }
+
+
+_HOSTED_REFUSAL_GUIDANCE: dict[str, tuple[str, str]] = _hosted_refusal_guidance()
+
+
+def _remediation_for(code: str) -> str | None:
+    guidance = _HOSTED_REFUSAL_GUIDANCE.get(code)
+    return guidance[1] if guidance is not None else None
+
+
 def _message_for(code: str) -> str:
+    guidance = _HOSTED_REFUSAL_GUIDANCE.get(code)
+    if guidance is not None:
+        return guidance[0]
     if code == "HOSTED_UNAUTHORIZED":
         return "private authentication failed"
     if code == "HOSTED_CELL_CONTEXT_MISMATCH":
@@ -304,7 +370,7 @@ def _error_response(
     error = {
         "code": code,
         "message": _message_for(code),
-        "remediation": None,
+        "remediation": _remediation_for(code),
     }
     if details is not None:
         error.update(

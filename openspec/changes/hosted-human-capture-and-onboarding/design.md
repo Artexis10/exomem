@@ -2,9 +2,19 @@
 
 ## Context
 
-Reproduced locally on 2026-08-16 against fresh vaults. Scaffolded and un-scaffolded
-vaults behave identically, so vault init is not involved — an earlier hypothesis that it
-was is recorded here as rejected so it is not re-investigated.
+Reproduced locally on 2026-08-16 against fresh vaults, with `relation_review._translate`
+instrumented and `cli_ops.error_dict` called directly — the same function
+`server_hosted._execute_command` calls on the failure path.
+
+Two hypotheses were tested and rejected before the real one held:
+
+1. **Rejected — vault scaffolding.** Scaffolded and un-scaffolded vaults behave
+   identically, so vault init is not involved.
+2. **Rejected — `commands.py` flattening starves `_translate`.** `_translate` runs
+   deeper in the stack than `commands.py`, so it cannot be downstream of the flattening.
+   The instrumented spy never fired on this path. `error_dict` also recovers the code by
+   walking `__cause__`/`__context__` and, failing that, by parsing `CODE: reason` from
+   the message, so the flattening is survivable.
 
 The engine is sound. `capture_source` already accepts ordinary prose repeatedly and the
 result is retrievable:
@@ -15,61 +25,86 @@ OK 'Kim train'        -> Knowledge Base/Sources/Other/2026-08-16-kim-train.md
 find 'dentist'        -> the captured source
 ```
 
-So no new lane is needed. The work is making refusals legible, and specifying the lane
-so the UI has something to be correct against.
+`cli_ops.error_dict` is also sound — it already returns the specific code and the full
+remediation. The loss happens in exactly one place, `server_hosted._error_response`.
 
 ## Goals / Non-Goals
 
 **Goals**
-- A refused write names its cause and carries the evaluator's remediation.
+- A hosted refusal carries a message and remediation the recipient can act on.
 - The capture lane is specified as the supported path for unstructured human capture.
 
 **Non-Goals**
 - Relaxing the semantic contract on `remember`. It is doing its job.
-- Moving contract enforcement from write-time to promotion-time. That remains an open
-  question worth revisiting, but it is a larger change and this one does not need it.
+- Rewriting the 26 flattening sites in `commands.py`. Real fragility, not this bug;
+  changing 26 raise sites that many tests assert message text against is a
+  disproportionate risk for a latent issue.
+- Changing `relation_review._translate`. It is not on this path.
+- Moving contract enforcement from write-time to promotion-time. Still an open question,
+  and this change does not need it.
 - Any UI change; that is the companion `substrate` change.
 
 ## Decisions
 
-### Preserve the structured error rather than re-deriving the code downstream
+### Restore remediation with a static table, not by passing exception text through
 
-`commands.py` raises `ValueError(f"{e.code}: {e.reason}")` at 26 sites. The comment at
-one of them explains why: *"FastMCP serializes raised exceptions; we want a structured
-shape."* The intent was right and the execution loses the structure it was trying to
-create — the code ends up inside a string, and `relation_review._translate` inspects
-`.code`, finds `None`, and falls through to `SEMANTIC_CREATION_FAILED`.
+`_error_response` currently hardcodes `remediation: None` and derives the message from
+`_message_for(code)`. The obvious fix — copy `error["message"]` and
+`error["remediation"]` from the `error_dict` payload — is **rejected**. That payload is
+derived from the exception, and the handler that produced it is explicitly a redaction
+boundary (*"private boundary redacts exception text"*); `error_dict`'s own fallback
+branch returns `{"code": "OP_ERROR", "message": str(exc)}`, so passing the message
+through would send raw exception text to a hosted client for any unclassified failure.
 
-**Decision:** raise an exception type that is still a `ValueError` (so every existing
-`except ValueError` keeps working, and the serialized message is unchanged) but that
-carries `.code`, `.reason` and `.remediation` as attributes.
+**Decision:** add `_remediation_for(code)`, a pure code → static-text lookup mirroring
+the existing `_message_for(code)`, and extend `_message_for` with entries for the
+contract-refusal codes. Nothing derived from an exception crosses the boundary; the code
+was already crossing it. This follows the module's established pattern — `details` is
+likewise filtered through the `_HOSTED_MUTATION_DETAIL_FIELDS` allowlist rather than
+copied wholesale.
 
-*Alternative rejected:* parse the code back out of the message string in `_translate`.
-It would work and it is smaller, but it re-derives structure that was thrown away one
-frame earlier, and the next raise site that formats its message differently breaks it
-silently.
+*Alternative rejected:* allowlist which codes may pass their real message through. It
+gives a better message for the codes in the list, but it makes the redaction guarantee
+conditional on table maintenance — a new code that forgets the list leaks by default.
+A static table fails the other way: a missing entry degrades to today's generic message,
+which is the safe direction.
 
-*Alternative rejected:* change all 26 sites to raise a non-`ValueError`. Larger blast
-radius across callers and tests for no additional benefit.
+### Source the remediation text from the contract definitions
 
-### `remediation: null` must mean "none was produced"
+Where the authoring contract already defines remediation
+(`semantic_authoring.AUTHORING_CONTRACT.findings`), derive the table entry from it at
+import time rather than hand-copying the string, so the two cannot drift. These
+definitions are static module data, not exception-derived, so this respects the boundary.
 
-Today it means "we lost it". Once the code survives, remediation should survive with it;
-where the evaluator genuinely produced none, the response should say so explicitly
-rather than leaving a caller unable to distinguish the two.
+`RELATION_DISPOSITION_MISSING` and `RELATION_DISPOSITION_STALE` are built in
+`semantic_contract._disposition_finding` with per-instance remediation text and are not
+in `AUTHORING_CONTRACT.findings`, so their hosted entries are authored here. Their
+in-contract wording is tuned to an agent retry loop (`validate_only=true`,
+`transition_token=<returned>`); the hosted entry says the equivalent thing to a person.
+
+### The specific code, where we already have it
+
+`missing_semantic_unit` surfaces specifically because `SemanticWriteError.
+as_semantic_validation_error` projects it. `RELATION_DISPOSITION_MISSING` does not — it
+is outside `AUTHORING_CONTRACT.findings`, so the projector returns `None` and the
+envelope code `SEMANTIC_CONTRACT_BLOCKED` surfaces instead.
+
+**Decision:** leave the projector alone and give `SEMANTIC_CONTRACT_BLOCKED` its own
+hosted entry. Widening the canonical projection changes non-hosted callers too, and
+`test_disposition_remediation_is_route_neutral` guards a response-budget ceiling on that
+text. The hosted user gets actionable guidance either way; precision beyond that is not
+worth the blast radius here.
 
 ### The capture lane is specified, not built
 
 `capture_source` exists and works. The spec records it as the supported path for
-unstructured human capture so the UI change is measured against a requirement rather
-than an implementation detail that could drift.
+unstructured human capture so the UI change is measured against a requirement.
 
 ## Risks
 
-- **26 raise sites.** A single mechanical transform keyed on the exact
-  `raise ValueError(f"{e.code}: {e.reason}")` shape, with the count asserted, rather
-  than 26 hand edits — the same discipline used for the nine admission predicates in
-  substrate, where a missed site would have failed only at a later stage.
-- **Message stability.** Some tests likely assert on the flattened message text. Keeping
-  the new type a `ValueError` with an identical `str()` keeps them passing; any that
-  fail are asserting on the bug and should be updated deliberately, not silenced.
+- **Under-fixing.** This makes refusals legible; it does not make the hosted capture box
+  work. That depends entirely on the companion `substrate` routing change. Neither is
+  sufficient alone, and the acceptance test is on the `substrate` side.
+- **Table drift.** A contract code added later without a hosted entry degrades to
+  today's generic message. That is the safe direction, and a test asserts the entries
+  that exist stay wired to their contract-definition source.

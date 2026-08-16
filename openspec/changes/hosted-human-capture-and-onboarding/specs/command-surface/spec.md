@@ -1,29 +1,39 @@
 ## ADDED Requirements
 
-### Requirement: Contract Failures Keep Their Code And Remediation Across Surfaces
+### Requirement: Hosted Refusals Carry Actionable Guidance
 
-A semantic-contract failure carries a machine-readable code and, where the evaluator produced one, a
-remediation string describing what would make the write succeed. The command surface SHALL preserve
-both to the caller. It MUST NOT flatten a structured contract error into a message-only exception,
-because a downstream translator that inspects `.code` will then fall through to a generic code and
-report `remediation: null` for every distinct cause.
+A refusal returned across the hosted cell boundary SHALL carry a message describing the
+refusal and, where one is defined for its code, a remediation string describing what would
+make the request succeed. It MUST NOT report `remediation: null` for a code that has a
+defined remediation.
 
-Where a stable public code is required at a boundary, the surface SHALL derive it from the original
-error rather than substituting a catch-all, and SHALL carry the remediation alongside it.
+The boundary redacts exception-derived text, and that guarantee is unchanged: the message
+and remediation SHALL be resolved from a static table keyed on the refusal code, never
+copied from the raised exception. A code with no table entry SHALL degrade to the existing
+generic message rather than passing exception text through.
 
-#### Scenario: A blocked write reports the specific cause
+Where the semantic authoring contract already defines remediation for a code, the hosted
+entry SHALL be derived from that definition rather than duplicating its text, so the two
+cannot drift.
 
-- **WHEN** a write is refused because the page has no valid semantic unit
-- **THEN** the caller receives the code `missing_semantic_unit`, not a generic creation-failed code
-- **AND** the response carries the evaluator's remediation text
-- **AND** the same holds for a refusal caused by a missing relation disposition, with its own
-  distinct code
+#### Scenario: A blocked write reports remediation the caller can act on
 
-#### Scenario: An unrecognised failure stays honest
+- **WHEN** a hosted write is refused because the page has no valid semantic unit
+- **THEN** the response carries the code `missing_semantic_unit`
+- **AND** the response carries a non-null remediation describing what to add
+- **AND** the message is specific to the refusal rather than the generic hosted-failure text
 
-- **WHEN** a write fails for a reason the evaluator did not classify
-- **THEN** the caller receives the generic code
-- **AND** the response states that no remediation is available rather than implying none was produced
+#### Scenario: A relation-disposition refusal is equally actionable
+
+- **WHEN** a hosted write is refused because the page needs a qualifying relation or an
+  explicit current review
+- **THEN** the response carries a non-null remediation
+
+#### Scenario: An unrecognised failure stays redacted
+
+- **WHEN** a hosted request fails with a code that has no table entry
+- **THEN** the response carries the generic hosted-failure message and `remediation: null`
+- **AND** no text derived from the raised exception appears in the response
 
 ### Requirement: Human Capture Is Served By The Capture Lane
 
