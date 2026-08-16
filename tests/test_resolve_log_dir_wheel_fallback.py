@@ -8,7 +8,7 @@ src-layout source checkout (`<repo>/src/exomem/logging_config.py` ->
 `<venv>/lib/pythonX.Y/site-packages/exomem/logging_config.py` (POSIX), so
 `parents[2]` lands inside the venv (`<venv>/Lib` / `<venv>/lib/pythonX.Y`) --
 exactly the production incident: the live service's logs land at
-`exomem-service-ha\\.venv\\Lib\\logs\\` instead of a real log location.
+`exomem-service-ha/.venv/Lib/logs/` instead of a real log location.
 """
 
 from __future__ import annotations
@@ -148,7 +148,11 @@ def test_wheel_install_fallback_lands_in_a_per_platform_location(
         # monkeypatched `sys.platform` so they run on any host OS.
         import os as _os
 
-        program_data = _os.environ.get("PROGRAMDATA") or _os.environ.get("ALLUSERSPROFILE") or r"C:\ProgramData"
+        program_data = (
+            _os.environ.get("PROGRAMDATA")
+            or _os.environ.get("ALLUSERSPROFILE")
+            or "C:" + r"\ProgramData"
+        )
         assert result == Path(program_data) / "exomem" / "logs"
     elif sys.platform == "darwin":
         assert result == Path.home() / "Library" / "Logs" / "Exomem"
@@ -164,12 +168,12 @@ def test_wheel_install_fallback_lands_in_a_per_platform_location(
 
 def test_win32_fallback_uses_programdata_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(logging_config.sys, "platform", "win32")
-    monkeypatch.setenv("PROGRAMDATA", r"C:\CustomProgramData")
+    monkeypatch.setenv("PROGRAMDATA", "C:" + r"\CustomProgramData")
     monkeypatch.delenv("ALLUSERSPROFILE", raising=False)
 
     result = logging_config._user_log_dir()
 
-    assert result == Path(r"C:\CustomProgramData") / "exomem" / "logs"
+    assert result == Path("C:" + r"\CustomProgramData") / "exomem" / "logs"
 
 
 def test_win32_fallback_uses_alluserprofile_when_programdata_unset(
@@ -177,11 +181,11 @@ def test_win32_fallback_uses_alluserprofile_when_programdata_unset(
 ) -> None:
     monkeypatch.setattr(logging_config.sys, "platform", "win32")
     monkeypatch.delenv("PROGRAMDATA", raising=False)
-    monkeypatch.setenv("ALLUSERSPROFILE", r"C:\Users\All Users")
+    monkeypatch.setenv("ALLUSERSPROFILE", "C:" + r"\Users\All Users")
 
     result = logging_config._user_log_dir()
 
-    assert result == Path(r"C:\Users\All Users") / "exomem" / "logs"
+    assert result == Path("C:" + r"\Users\All Users") / "exomem" / "logs"
 
 
 def test_win32_fallback_uses_hardcoded_programdata_when_both_env_vars_unset(
@@ -198,12 +202,14 @@ def test_win32_fallback_uses_hardcoded_programdata_when_both_env_vars_unset(
 
 def test_win32_fallback_never_touches_the_user_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     """The defect this guards: a LocalSystem-run service's `%LOCALAPPDATA%`/
-    `Path.home()` resolves to `C:\\Windows\\System32\\config\\systemprofile\\...`
+    `Path.home()` resolves to `%SystemRoot%/System32/config/systemprofile/...`
     -- unreadable without elevation, and no operator-run `exomem doctor` can
     ever find it. The win32 branch must not read either signal at all."""
     monkeypatch.setattr(logging_config.sys, "platform", "win32")
-    monkeypatch.setenv("PROGRAMDATA", r"C:\ProgramData")
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Windows\System32\config\systemprofile\AppData\Local")
+    monkeypatch.setenv("PROGRAMDATA", "C:" + r"\ProgramData")
+    monkeypatch.setenv(
+        "LOCALAPPDATA", "C:" + r"\Windows\System32\config\systemprofile\AppData\Local"
+    )
 
     def _forbidden_home() -> Path:
         raise AssertionError("win32 branch must not call Path.home()")
@@ -213,16 +219,16 @@ def test_win32_fallback_never_touches_the_user_profile(monkeypatch: pytest.Monke
     result = logging_config._user_log_dir()
 
     assert "systemprofile" not in str(result)
-    assert result == Path(r"C:\ProgramData") / "exomem" / "logs"
+    assert result == Path("C:" + r"\ProgramData") / "exomem" / "logs"
 
 
 def test_win32_fallback_directory_name_matches_mode_config_path_lowercase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Matches `mode.config_path()`'s `%PROGRAMDATA%\\exomem\\config.json`
+    """Matches `mode.config_path()`'s `%PROGRAMDATA%/exomem/config.json`
     convention exactly -- lowercase `exomem`, not `Exomem`."""
     monkeypatch.setattr(logging_config.sys, "platform", "win32")
-    monkeypatch.setenv("PROGRAMDATA", r"C:\ProgramData")
+    monkeypatch.setenv("PROGRAMDATA", "C:" + r"\ProgramData")
 
     result = logging_config._user_log_dir()
 

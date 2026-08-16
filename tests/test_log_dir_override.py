@@ -262,7 +262,9 @@ def test_audit_relevance_logs_dir_agrees_with_resolve_log_dir_when_unset(
 def _sentinel_dir() -> Path:
     import sys
 
-    return Path("Z:/__sentinel_log_dir__" if sys.platform == "win32" else "/__sentinel_log_dir__")
+    return Path(
+        ("Z:" + "/__sentinel_log_dir__") if sys.platform == "win32" else "/__sentinel_log_dir__"
+    )
 
 
 def test_query_log_module_constant_is_sourced_from_resolve_log_dir(

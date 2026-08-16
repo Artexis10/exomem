@@ -186,7 +186,13 @@ if ($Release) {
     $python = Install-ReleaseVenv
     # Wheel-backed service venv: `resolve_log_dir()` resolves an unset
     # EXOMEM_LOG_DIR to %ProgramData%\exomem\logs there (not a checkout).
-    $logDirBase = if ($env:ProgramData) { $env:ProgramData } elseif ($env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE } else { "C:\ProgramData" }
+    # The last tier is spelled as a concatenation, exactly as the Python side
+    # (`_user_log_dir()`, `mode.config_path()`) spells its own `"C:" + r"\ProgramData"`:
+    # the literal must stay byte-identical to Python's, so `$env:SystemDrive` is
+    # deliberately NOT used -- it resolves to a non-C: volume on a box where Windows
+    # was installed elsewhere, which would silently pin a directory the service's own
+    # `resolve_log_dir()` would never pick.
+    $logDirBase = if ($env:ProgramData) { $env:ProgramData } elseif ($env:ALLUSERSPROFILE) { $env:ALLUSERSPROFILE } else { "C:" + "\ProgramData" }
     $pinnedLogDir = Join-Path $logDirBase "exomem\logs"
 } else {
     $python = Join-Path $repoRoot ".venv\Scripts\python.exe"

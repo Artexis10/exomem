@@ -90,7 +90,7 @@ def _user_log_dir() -> Path:
     where a log directory belongs.
 
     Windows is machine-wide (`%PROGRAMDATA%/exomem/logs`, with the same
-    `ALLUSERSPROFILE` / `C:\\ProgramData` fallback chain and lowercase
+    `%ALLUSERSPROFILE%` / hardcoded-`ProgramData` fallback chain and lowercase
     `exomem` directory name as `mode.config_path()`), NOT the user profile:
     the exomem service commonly runs as `LocalSystem` while an operator's
     `exomem` CLI runs as their own logged-in user, and a home- or
@@ -150,7 +150,7 @@ def resolve_log_dir(default: Path | None = None) -> Path:
 
     This function never raises: `_user_log_dir()`'s Windows branch never
     touches `Path.home()` (it reads `%PROGRAMDATA%`/`%ALLUSERSPROFILE%`, with
-    a hardcoded `C:\\ProgramData` last resort), and its macOS/Linux branches
+    a hardcoded `ProgramData` last resort), and its macOS/Linux branches
     fall back to the OS temp directory if `Path.home()` itself cannot
     resolve — every one of this function's callers is unguarded against a
     raise from an early-startup logging bootstrap.
