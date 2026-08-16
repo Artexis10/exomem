@@ -22,6 +22,41 @@ The system SHALL define the immutable profile `hosted-alpha-agent-v3` in the can
 - **THEN** it still excludes coordination internals, transfer, media processing, adoption, maintenance, schema administration, and every Tier-2 command
 - **AND** those exclusions cannot be bypassed by selecting another surface or enabling Tier-2
 
+### Requirement: Hosted Agents Cannot Rewrite Governed Schema Or Policy
+
+A Hosted surface profile that exposes a broad page-mutation command SHALL refuse any invocation whose caller-supplied write target names the governed schema tree (`_Schema`) or the policy tree (`_Governance`). The refusal MUST happen at the hosted command boundary, before lifecycle admission and before the command leaf, and MUST return a stable machine-readable error. Path matching MUST be per path segment and case-insensitive, so a differently cased segment, a `..` traversal, a `.` prefix, a doubled or backslash separator, a trailing separator, a nested path, or an absolute path resolving inside the vault is refused identically.
+
+This requirement replaces the protection that `hosted-alpha-agent-v1` obtained from *not exposing* `edit_memory` or `replace_memory`, recorded in that profile's own requirement as "the command is absent from the profile and rejected before invocation or lifecycle admission" for a path under `_Schema`. Profile absence SHALL NOT be relied upon as the control once a profile exposes those commands.
+
+The guard SHALL be scoped to Hosted surface profiles. Local, CLI, and MCP surfaces on a single-user vault MUST retain the ability to customise that vault's own `_Schema`, and reads of either tree MUST remain unaffected.
+
+#### Scenario: A hosted agent tries to rewrite the schema tree
+
+- **WHEN** a Hosted profile exposing `edit_memory` or `replace_memory` receives an invocation whose write target is inside `_Schema`
+- **THEN** the cell refuses it with a stable error before lifecycle admission and before the command leaf
+- **AND** no byte of the targeted document changes
+
+#### Scenario: A hosted agent tries to rewrite the policy tree
+
+- **WHEN** the same invocation targets a document inside `_Governance`
+- **THEN** it is refused identically
+
+#### Scenario: The refusal is probed for an escape
+
+- **WHEN** the target is expressed with a differently cased tree segment, a `..` traversal, a leading `./`, doubled or backslash separators, a trailing separator, a deeper nested path, or an absolute path that resolves inside the vault
+- **THEN** every form is refused with the same stable error
+
+#### Scenario: Ordinary governed pages and reads are unaffected
+
+- **WHEN** the same command targets an ordinary compiled page, or any command reads from a protected tree
+- **THEN** the guard does not fire and the request proceeds to its normal handling
+- **AND** a local single-user surface may still customise its own `_Schema`
+
+#### Scenario: A profile exposes an unclassified mutation
+
+- **WHEN** a Hosted profile exposes a mutating command that is neither covered by the protected-tree guard nor recorded as constrained by its own command leaf
+- **THEN** the cell refuses to serve that profile rather than exposing an unguarded write primitive
+
 ### Requirement: A Widened Profile Is Additive And Never Mutates A Published Profile
 
 Adding a Hosted profile SHALL NOT change the membership, pinned order, generated package bytes, package lock, or recorded release identity of any already-published profile. A new profile MUST be introduced as a new registry entry and a new candidate package; an existing profile MUST NOT be relabelled, reordered, or extended in place.

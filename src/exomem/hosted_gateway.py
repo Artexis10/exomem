@@ -9,8 +9,9 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastmcp.tools import FunctionTool
@@ -147,6 +148,124 @@ def _mcp_tool_contract(
         for key, value in tool.to_mcp_tool().model_dump(mode="json", by_alias=True).items()
         if value is not None
     }
+
+
+#: Vault subtrees a hosted tenant's own agent may read but never rewrite.
+#:
+#: `_Schema` is the vault's governing doctrine -- `schema.py` loads
+#: `_Schema/references/frontmatter.md` and `page-types.md` as *the* frontmatter
+#: and page-type contract -- and `_Governance` is the policy tree. Neither is
+#: ordinary content.
+#:
+#: `hosted-alpha-agent-v1` protected both by accident of omission: it simply did
+#: not expose a broad page-mutation command, and its own specification recorded
+#: that absence as the control ("the command is absent from the profile and
+#: rejected before invocation or lifecycle admission", including for a path
+#: under `_Schema`). `hosted-alpha-agent-v3` exposes `edit_memory` and
+#: `replace_memory`, so that control has to become a real one. A hosted tenant
+#: is hookless and has the least out-of-band supervision of any tier; a
+#: prompt-injected `capture_source` would otherwise be enough to rewrite the
+#: doctrine that governs every later write.
+PROTECTED_TREE_DIRNAMES: frozenset[str] = frozenset({"_Schema", "_Governance"})
+
+#: Caller-supplied write-target arguments, per command, that the guard inspects.
+#: Only commands introduced by a widened profile appear here, so no already
+#: published profile changes behaviour.
+PROTECTED_TREE_PATH_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "edit_memory": ("path",),
+    "replace_memory": ("old_path",),
+    "plan_memory": ("manifest_path",),
+}
+
+#: Mutating commands that do not need the guard because their own leaf refuses a
+#: protected-tree target. `observe_memory` is the proven case: it rejects a
+#: `_Schema` document with `OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE` because
+#: the tree holds no writable compiled page. The rest carry no caller-chosen
+#: page write target at all. Membership here is asserted, not assumed --
+#: `assert_profile_mutations_are_classified` refuses to serve a profile whose
+#: mutating commands are not all accounted for in one list or the other, so a
+#: later widening cannot reopen this hole by silence.
+TARGET_CONSTRAINED_MUTATIONS: frozenset[str] = frozenset(
+    {
+        "remember",
+        "observe_memory",
+        "capture_source",
+        "preserve_evidence",
+        "triage_memory",
+        "connect_memory",
+        "record_memory",
+    }
+)
+
+
+def _names_a_protected_tree(value: object, *, vault_root: Path | None) -> bool:
+    """Return whether `value` names a path that touches a protected subtree.
+
+    Matching is per *segment* and case-folded, which is what makes the check
+    hard to walk around: `..` traversal, `.` prefixes, doubled or backslash
+    separators, trailing separators, and nesting all still leave the tree's
+    own name as a segment. A path that merely traverses *out* of a protected
+    tree is refused too; over-refusing an exotic path costs a caller nothing
+    and under-refusing one costs the tenant its doctrine.
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    text = raw.replace("\\", "/")
+    candidate = Path(text)
+    parts: tuple[str, ...]
+    if candidate.is_absolute():
+        if vault_root is None:
+            return False
+        try:
+            parts = candidate.resolve().relative_to(Path(vault_root).resolve()).parts
+        except (ValueError, OSError):
+            # Absolute and outside this vault: vault confinement rejects it,
+            # and it is not this guard's question to answer.
+            return False
+    else:
+        parts = PurePosixPath(text).parts
+    folded = {name.casefold() for name in PROTECTED_TREE_DIRNAMES}
+    return any(part.casefold() in folded for part in parts)
+
+
+def protected_tree_argument(
+    command_name: str,
+    kwargs: Mapping[str, Any],
+    *,
+    vault_root: Path | None = None,
+) -> str | None:
+    """Return the argument naming a protected subtree, or None when clean."""
+
+    for argument in PROTECTED_TREE_PATH_ARGUMENTS.get(command_name, ()):
+        if argument in kwargs and _names_a_protected_tree(
+            kwargs[argument], vault_root=vault_root
+        ):
+            return argument
+    return None
+
+
+def assert_profile_mutations_are_classified(profile: str) -> None:
+    """Fail closed when a hosted profile exposes an unclassified mutation.
+
+    Called once while registering the hosted routes, so a cell configured for a
+    profile whose write surface nobody has triaged refuses to start rather than
+    serving an unguarded write primitive over the tenant's own doctrine.
+    """
+
+    unclassified = sorted(
+        command.name
+        for command in commands_module.product_commands_for_profile(profile, "rest")
+        if not command.read_only
+        and command.name not in PROTECTED_TREE_PATH_ARGUMENTS
+        and command.name not in TARGET_CONSTRAINED_MUTATIONS
+    )
+    if unclassified:
+        raise HostedGatewayError(
+            "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+            "hosted agent surface profile exposes an unclassified mutation",
+        )
 
 
 def hosted_agent_surface_descriptor(

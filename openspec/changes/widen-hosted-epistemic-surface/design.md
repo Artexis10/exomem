@@ -35,23 +35,62 @@ Non-Goals:
 
 Appending rather than interleaving matters because `command_surface_sha256` is order-sensitive; a prefix-preserving order makes "v3 did not disturb v2" checkable by list slicing.
 
-### Decision 2: include `edit_memory`, and satisfy the report's condition by channel rather than by schema surgery
+### Decision 2: include `edit_memory`, and take the Claude-surface-first half of the condition
 
 The audit adjudicated all three commands as *include*, but attached a condition to `edit_memory`: prefer a Claude-surface Hosted rollout first, **or** admit only compact discriminated-`operation` forms, because of the recorded ChatGPT overloaded-schema friction failure of 2026-08-11.
 
-**Decision: include `edit_memory` unchanged, and take the Claude-surface-first half of the condition — render and commit the v3 candidate for the `claude` platform only.**
+**Decision: include `edit_memory` unchanged, and satisfy the condition by channel — render and commit the v3 candidate for the `claude` platform only.**
 
-Reasoning, in the order it actually settled the question:
+The schema half of the condition is *not* available to us, and an earlier draft of this document was wrong to claim it. `edit_memory`'s top-level property count is small — five: `path`, `why`, `operation`, `validate_only`, `response_detail` — but that count hides the payload. Measured from `tests/fixtures/mcp_tool_schemas.json`, `edit_memory`'s full `inputSchema` is **9,274 characters**, the widest in the addition set and 85% wider than `record_memory` (5,002), against `replace_memory` at 7,433 and `plan_memory` at 3,096. Its `operation` `oneOf` alone is 8,524 characters across seven variants. Whatever "compact" means for an action-schema cache, a tool that is simultaneously the narrowest at the top level and the largest overall cannot be argued to be compact on the strength of the first fact. So the discriminated-`operation` form is a genuine readability improvement for the model, and it is *not* evidence about ChatGPT ingestion cost.
 
-1. *The schema half of the condition is already satisfied, and measurement says so.* `edit_memory`'s public discovery schema is already the compact discriminated-`operation` form. Measured from `tests/fixtures/mcp_tool_schemas.json`, its `inputSchema` has exactly five top-level properties — `path`, `why`, `operation`, `validate_only`, `response_detail` — with the seven edit kinds behind the discriminated `operation` object, and the legacy flat keyword arguments deliberately excluded from public discovery (that narrowing was the point of the `clear-agent-facing-friction` change). So no new schema work is owed; the form the condition asks for is the form that ships.
+That leaves the channel half, which is defensible on its own terms and is what this change takes. The 2026-08-11 record establishes that a changed action surface needs its own post-deploy ChatGPT refresh and its own acceptance run, and that reconnecting OAuth is not such a refresh. Emitting a third OpenAI package alongside the widening would create exactly that obligation while nothing in this change discharges it.
 
-2. *`edit_memory` is not the overloaded one — and the actual widest tool is already accepted on ChatGPT.* Top-level property counts on the same fixture: `edit_memory` 5, `plan_memory` 30, `record_memory` 31, `replace_memory` 36. `record_memory` — 31 flat top-level properties — is precisely the tool the 2026-08-11 attestation records as *successfully invoked* in a fresh ChatGPT conversation once the app-side action cache invalidated. Treating `edit_memory` as the ChatGPT risk while `record_memory` already ships would invert the evidence. If flat width is the hazard, `replace_memory` is the exposure, not `edit_memory`.
+So v3 ships `plugins/hosted/generated/candidates/hosted-alpha-agent-v3/claude*` and no `openai*` artifacts.
 
-3. *So the residual risk is the channel, not the tool.* What the 2026-08-11 record actually establishes is that a changed action surface needs its own post-deploy ChatGPT refresh and its own acceptance run, and that reconnecting OAuth is not such a refresh. That is a rollout obligation, not a membership argument. Honouring it means not quietly emitting a third OpenAI package alongside the widening.
+Two honest qualifications about how strong that control is:
 
-Consequently v3 ships `plugins/hosted/generated/candidates/hosted-alpha-agent-v3/claude*` and no `openai*` artifacts. The v3 promotion records for both platforms stay `pending`, and `promote(candidate=v3, platform="openai")` fails closed on the missing generated lock rather than on a special case. Extending v3 to the OpenAI channel is a separate change with its own acceptance evidence.
+- It is **deferred and tripwired, not fail-closed.** `render(platform="all", candidate=v3)` produces a complete, valid OpenAI package today; nothing in the code refuses it. And `promote(candidate=v3, platform="openai")` fails for the ordinary reason that no generated lock exists — identically to `promote(candidate=v3, platform="claude")`, with no OpenAI-specific behaviour. What actually holds the line is the committed absence of those artifacts plus `test_v3_ships_no_openai_package_until_a_chatgpt_refresh_is_accepted`, which fails CI the moment they appear. That is a real tripwire and worth having, but it is a review gate, not an enforcement mechanism.
+- Extending v3 to the OpenAI channel is a separate change with its own acceptance evidence, and should probably also carry a measured answer to whether a 9 KB `oneOf` survives the ChatGPT action cache.
 
 A rejected alternative: shipping `edit_memory` on v3 in a further-narrowed "hosted-only" schema variant. Rejected because it would fork a tool's discovery schema by surface, which is exactly the drift `hosted-gateway-contract`'s "Forwarded commands preserve the registry contract" requirement exists to prevent — the gateway must forward registry-identical names, schemas, and read/write metadata.
+
+### Decision 2a: the protection v1 got from absence has to become a real control
+
+**This supersedes a requirement in another change, and the mechanism that hid the conflict is worth naming.**
+
+`openspec/changes/add-hosted-agent-surface-profile/specs/hosted-agent-surface/spec.md` — the change that created `hosted-alpha-agent-v1` — contains the requirement *"Hosted Alpha Agent Profile Is Explicit And Least Privilege"*, whose third scenario reads:
+
+> **WHEN** an agent requests `edit_memory` or `replace_memory`, including with a path under `_Schema`
+> **THEN** the command is absent from the profile and rejected before invocation or lifecycle admission
+> **AND** governed semantic-unit mutation remains available through `observe_memory`
+
+That protection was provided *entirely by profile absence*. v3 removes the absence, so it removes the protection.
+
+`openspec validate --strict` could not see the conflict, and this is a structural gap rather than bad luck: `hosted-agent-surface` has **no entry under `openspec/specs/`**. It exists only inside the never-archived `add-hosted-agent-surface-profile` change, so there is no main-spec requirement for a `## MODIFIED Requirements` delta to target and no cross-change conflict detection to trip. A reviewer reading only the validated artifacts would not have found it. The same is true of `command-surface`'s v2 profile requirement, which lives in the equally unarchived `make-records-first-class-and-recoverable`.
+
+**Decision: re-establish the control in code, at the hosted mutation boundary, and state it normatively in this change's `hosted-agent-surface` delta.**
+
+Verified by probe through the real hosted forwarding route before the fix — trusted-context auth, argument coercion, profile resolution, lifecycle admission, real command leaf — both writes committed:
+
+```
+POST /private/exomem/v1/agent/hosted-alpha-agent-v3/command/edit_memory
+  path=Knowledge Base/_Schema/SKILL.md                  -> 200 {"mutated": true}
+  path=Knowledge Base/_Schema/references/page-types.md  -> 200 {"mutated": true}
+```
+
+`_Schema/references/frontmatter.md` and `page-types.md` are what `schema.py` loads as *the* frontmatter and page-type contract, so this was an unguarded write primitive over the tenant's own governing doctrine — on the tier with the least out-of-band supervision, where a prompt-injected `capture_source` is a sufficient delivery vector.
+
+**`_Governance` needed the same treatment, and now has it.** Probed separately: `edit_memory` against `Knowledge Base/_Governance/README.md` also committed. `is_governance_path` guards *reads* (`get`, `fetch`, `overview`, the governance tool) and nothing guards writes. Both trees are covered.
+
+**`observe_memory` did not need it.** The v1 requirement's claim that governed mutation "remains available through `observe_memory`" holds: probed against `_Schema/SKILL.md` it refuses with `OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE`, because the tree contains no writable compiled page. That is why the guard covers only the commands v3 adds.
+
+**Why the hosted mutation boundary and not the write leaf.** A single-user local vault legitimately customises its own `_Schema` — that is the documented way to adapt page types and frontmatter — so a blanket refusal at the leaf would break the local product to fix a hosted problem. The property being enforced is *"this surface does not get this authority"*, not *"this operation is unsafe"*, and the hosted command route is the layer that already knows the active surface profile, already refuses `transfer_artifact` and `adopt_vault`, and already gates `record_memory` lifecycle actions. The guard sits with them: after coercion, before lifecycle admission and before the leaf, which is also the disposition the v1 requirement asked for ("rejected before invocation or lifecycle admission").
+
+**Bypass resistance.** Matching is per path *segment* and case-folded, which is what survives the usual evasions: `..` traversal, a `./` prefix, doubled or backslash separators, trailing separators, nested paths, and absolute paths resolved against the vault root all still leave `_Schema` or `_Governance` as a segment. A path that merely traverses *out* of a protected tree is refused too; over-refusing an exotic path costs a caller nothing.
+
+**Fail-closed for the next widening.** The hole existed because nobody had to classify a profile's write surface. `assert_profile_mutations_are_classified` now runs at route registration and refuses to serve a profile with a mutating command that appears in neither the guarded-path map nor the explicitly target-constrained set, so a future v4 cannot reopen this by silence.
+
+**Residual, stated rather than hidden.** The legacy full private command route (`private-command-router`) still exposes the whole registry and is not covered by this guard. That is the pre-existing control-plane trust boundary, reached with the private service credential rather than by a tenant's agent, and this change neither widens nor narrows it. `record_memory`'s and `connect_memory`'s caller-chosen `manifest_path` / `path` arguments were not probed against the protected trees; they are unchanged v1/v2 surface and are listed as target-constrained on that basis, which is a weaker claim than the one proven for `observe_memory`. Both deserve a follow-up.
 
 ### Decision 3: `replace_memory` is safe on Hosted because the guardrail is in the leaf, not the surface
 
@@ -69,6 +108,8 @@ One qualification worth stating plainly: `relation_review.py` guards *supersessi
 `hosted_plugins.py` gains `CANDIDATE_PROFILES` (candidate -> profile) and `RECORDS_CANDIDATES` (candidates that expose `record_memory` and therefore pin `minimum_records_reader_version: 2` and bind selection cases). Every `candidate == LIFECYCLE_CANDIDATE` site that meant "this candidate carries the records lifecycle" becomes `candidate in RECORDS_CANDIDATES`, and `_selection_cases` / `_validate_records_acceptance` take the candidate instead of assuming v2 — so v3 is held to *at least* v2's acceptance bar rather than silently falling through to the weaker default-candidate path.
 
 v3 carries its own byte-identical copies of `selection-cases.json` and the `exomem-records` skill rather than reaching into v2's directory. Candidate packages must be self-contained and immutable: v2's `skills_sha256` and `selection_cases_sha256` are pinned in its committed lock, and a shared file would let a v3 edit silently invalidate a v2 release identity.
+
+**Those selection cases do not cover what v3 adds, and that is a promotion gate.** `selection-cases.json` is a *Records* selection matrix: `_selection_cases` hard-requires exactly four cases over one axis — append versus proposal, per client — and `_validate_records_acceptance` binds that exact matrix into the live acceptance verifier. The schema cannot express the discrimination v3 actually introduces, which is the confusable write trio: when should an agent `remember` a new page, `edit_memory` an existing one, and `replace_memory` a superseded one? Nothing in this change produces evidence that a model routes that trio correctly. Extending the matrix would mean changing the shape of a released acceptance contract and its verifier, which is out of scope for an unpromotable candidate. **v3 must not be promoted until a write-verb selection matrix exists and passes**, and that is recorded here rather than left to be discovered at promotion time.
 
 ### Decision 5: the supersession teaching lives in a v3-only skill
 

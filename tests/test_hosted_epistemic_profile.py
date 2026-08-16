@@ -8,6 +8,7 @@ an already-published profile, or move the full local tool surface.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -141,33 +142,6 @@ def test_epistemic_commands_are_registry_identical_between_profiles_and_local_su
         assert entries[name]["mcp_tool"]["description"] == fixture[name]["description"]
 
 
-def test_edit_memory_keeps_the_compact_discriminated_operation_form() -> None:
-    """The condition attached to including `edit_memory` is already satisfied.
-
-    Its public discovery schema advertises the discriminated `operation` object,
-    not the deprecated flat keyword arguments -- and it is by far the most
-    compact of the three additions at the top level.
-    """
-
-    fixture = json.loads(MCP_SCHEMA_FIXTURE.read_text(encoding="utf-8"))
-    schema = fixture["edit_memory"]["inputSchema"]
-
-    assert set(schema["properties"]) == {
-        "path",
-        "why",
-        "operation",
-        "validate_only",
-        "response_detail",
-    }
-    assert schema["required"] == ["path", "why", "operation"]
-    widths = {
-        name: len(fixture[name]["inputSchema"]["properties"])
-        for name in (*EPISTEMIC_ADDITIONS, "record_memory")
-    }
-    # `record_memory` already ships on the ChatGPT Personal Plugin at this width.
-    assert widths["edit_memory"] < widths["record_memory"]
-
-
 def test_hosted_v3_candidate_is_declared_and_self_contained() -> None:
     definition = hosted_plugins.load_definition(
         REPO_ROOT, candidate=hosted_plugins.EPISTEMIC_CANDIDATE
@@ -268,6 +242,16 @@ def test_public_input_gate_exempts_only_the_documented_continuation_field(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((REPO_ROOT / "plugins/hosted/skills" / name / "SKILL.md").read_bytes())
 
+    real_transition_token = (
+        base64.urlsafe_b64encode(
+            json.dumps(
+                {"after_hash": "a" * 64, "path": "Knowledge Base/Notes/private-project.md"}
+            ).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
+
     leaky = root / "plugins/hosted/skills/exomem/SKILL.md"
     original = leaky.read_bytes()
     for credential in (
@@ -275,11 +259,20 @@ def test_public_input_gate_exempts_only_the_documented_continuation_field(
         "access_token: abc123",
         "operator_secret=abc123",
         "my_password = abc123",
+        "x_transition_token=abc123",
+        "transition_token_secret=abc123",
+        # A *real* transition token is unsigned base64url JSON carrying a
+        # vault-relative page path in cleartext. Base64 slips past the
+        # `vault_path` alternations, so this rule is the only thing stopping it.
+        f"transition_token={real_transition_token}",
+        "transition_token=returned",
     ):
         leaky.write_bytes(original + f"\n{credential}\n".encode())
         with pytest.raises(ValueError, match="unsafe"):
             hosted_plugins.validate_hosted_public_inputs(root, include_generated=False)
-    leaky.write_bytes(original + b"\nEcho back `transition_token=<returned value>`.\n")
+    leaky.write_bytes(
+        original + b"\nEcho back `transition_token=<returned transition_token>`.\n"
+    )
     hosted_plugins.validate_hosted_public_inputs(root, include_generated=False)
 
 

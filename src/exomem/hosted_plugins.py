@@ -72,15 +72,13 @@ SKILL_NAMES = (
     "exomem-review",
 )
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
-# Names the prose scanners must still recognize as *callable* so an undeclared
-# mention is caught. This is a recognition vocabulary, not an exclusion policy:
-# `edit_memory` and `replace_memory` are members of `hosted-alpha-agent-v3`, and
-# per-profile availability is decided by `validate_skill_text` against the
-# resolved profile, never by membership here.
-_LEGACY_OR_EXCLUDED_TOOLS = frozenset(
+# Callable names the prose scanners must recognize but that no product command
+# registry entry contributes: legacy primitives and hand-registered aliases. It
+# is a recognition vocabulary so an undeclared mention in a skill is caught --
+# never an availability policy. Per-profile availability is decided by
+# `validate_skill_text` against the resolved profile.
+_ADDITIONAL_CALLABLE_NAMES = frozenset(
     {
-        "edit_memory",
-        "replace_memory",
         "transfer_artifact",
         "process_media",
         "adopt_vault",
@@ -108,7 +106,7 @@ _CANONICAL_CALLABLES = frozenset(
     | set(commands.PRODUCT_PUBLIC_NAMES)
     | {route for command in commands.COMMANDS for route in command.routes}
     | {action for command in commands.COMMANDS for action in command.product_actions}
-    | _LEGACY_OR_EXCLUDED_TOOLS
+    | _ADDITIONAL_CALLABLE_NAMES
 )
 _RAW_PRIVATE_IDENTITY_FIELDS = frozenset(
     {
@@ -516,19 +514,24 @@ def validate_hosted_public_inputs(
                 if (path.is_file() or path.is_symlink())
                 and (include_generated or "generated" not in path.parts)
             )
-    # `transition_token` is a documented governance continuation value, not a
-    # credential: the server returns it from a validate pass and the caller
-    # echoes it back unchanged, and a mismatched one is rejected rather than
-    # trusted. It appears verbatim inside `edit_memory`'s canonical MCP
-    # description, which the generated compatibility descriptor copies wholesale
-    # -- so the credential-assignment heuristic below would otherwise fail every
-    # candidate whose profile exposes `edit_memory`, and the only "fix" would be
-    # editing a canonical tool description and moving the registered external
-    # connector fingerprint. The exemption is by exact identifier, anchored on
-    # both sides, so `API_TOKEN=`, bare `token:`, and `secret=` still fail.
+    # `edit_memory`'s canonical MCP description documents the literal
+    # `transition_token=<returned transition_token>`, and the generated
+    # compatibility descriptor copies that description wholesale -- so the
+    # credential-assignment heuristic below fails every candidate whose profile
+    # exposes `edit_memory`. The description is registry-canonical; editing it
+    # would move the registered external connector fingerprint.
+    #
+    # The exemption is therefore scoped to the *placeholder*, not the
+    # identifier. A real transition token is base64url-encoded JSON that carries
+    # a vault-relative page path in cleartext, and base64 already slips past the
+    # `vault_path` alternations -- so this rule is the only thing standing
+    # between such a value and a public artifact. Exempting the identifier alone
+    # would have let a real one through. `API_TOKEN=`, bare `token:`,
+    # `x_transition_token=`, and `transition_token=<a real value>` all still
+    # fail closed.
     forbidden = re.compile(
         r"(?i)(\[todo:|\$\{[^}]+\}|exomem_vault_path|localhost|127\.0\.0\.1|"
-        r"file://|(?<![A-Za-z0-9_])(?!transition_token\b)"
+        r"file://|(?<![A-Za-z0-9_])(?!transition_token\s*=\s*<returned\b)"
         r"[A-Z0-9_]*(?:token|secret|password)\s*[:=]|"
         r"\btenant[_-]?id\b|\bvault[_-]?path\b|"
         r"\breviewer[_-]?(?:email|identity)\b|\binvite[_-]?(?:url|link|token)\b|"
@@ -2424,7 +2427,11 @@ def _validate_records_acceptance(
         deployment_sha256=expectation["deployment_sha256"],
         package="exomem",
         release_version=lock["plugin_version"],
-        profile=candidate,
+        # Resolve rather than assume. Candidate and profile are the same string
+        # for every candidate registered today, but this is a security-relevant
+        # acceptance binding and the indirection exists precisely so the two can
+        # diverge without silently binding evidence to the wrong profile.
+        profile=_candidate_profile(candidate),
         minimum_records_reader_version=2,
         surface_digest=compatibility["schema_contract_sha256"],
         vault_purpose=expectation["vault_purpose"],
