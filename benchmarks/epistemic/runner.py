@@ -184,6 +184,7 @@ def evaluate_scenario(
                     raise _binding_error("current snapshot timestamp precedes the external edit")
 
             context = AssertionContext(
+                family=scenario.family_id,
                 snapshot=reached_snapshots[-1],
                 prior=reached_snapshots[-2] if len(reached_snapshots) > 1 else None,
                 subject=expectation.subject,

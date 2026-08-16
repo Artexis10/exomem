@@ -1,0 +1,18 @@
+{
+  "affected_sections": [
+    "§1 Scenario families",
+    "§2 Assertion registry",
+    "§3 scope extension (no new members)",
+    "§4 Acceptance predicates",
+    "§7 Amendments"
+  ],
+  "amended_on": "2026-08-16",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "025da49d60e4959a1e4899c9f0f11280e083fdf0c545aa6c70bdabef00d41f6e",
+  "effective_policy": "Applies only after founder acknowledgment; until then f20-f26 cannot support comparative runs, scores or claims. The f20/f21/f25 budget constants ship PROVISIONAL because the three-annotator calibration study is blocked on a founder decision about staffing and the small-cohort fallback; re-dating the §7 entry with the medians is the act that freezes them.",
+  "parent_contract_sha256": "92ee986b10fa5676ad68ed48d9e0389d15d4cfa702c0ff68873d5789e40b785c",
+  "rationale": "Add the deterministic no-nudge families f20-f26 with their nine assertions, headed by the anti-vacuity meta-predicate signal_absence_checked_across_all_surfaces, and the maintenance_pass/triage_decision/apply_restructure/configure scenario operations, through the governed post-ratification amendment path. Contracts-first: these measurement contracts file before the detectors, consumers and carriers they assess. Adds no catastrophic assertions; extends the scope of the existing no_retired_state_served_as_current to the continuation packet, stated explicitly in §7. f20-f22 positives are declared expected-red on the current runtime as falsification targets. RE-MINTED before acknowledgment, over amended-document identity 9c90555a84e7c32cea94545c357aa0602a95a847b7454366bde1b12874ece7cc: a zero-context review found the anti-vacuity meta-predicate scanned only promotion-class signals, so f22's twin was blind to the contradiction-class false positives its own family is about, and f23's dismissal predicate was blind to a dismissed fingerprint re-raised under any other class. §1's f22 row, §4's meta-predicate text and §7's anti-vacuity paragraph now record the declared, widen-only signal-class vocabulary; §1's f20 row and §7's behaviour paragraph record the structural commitments (categories, anchors, disjoint link neighbourhoods) the corpus previously claimed without carrying; §7's expected-red paragraph records that the f26 carrier declares only what a captured response evidenced. Re-minted rather than superseded because this receipt has never been acknowledged: the parent identity is unchanged and no founder decision was taken against the earlier bytes.",
+  "schema_version": 1,
+  "sequence": 2
+}

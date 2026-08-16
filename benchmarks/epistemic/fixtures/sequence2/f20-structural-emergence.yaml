@@ -1,0 +1,87 @@
+# f20 structural_emergence.
+#
+# Withheld until the sequence-2 acknowledgment lands, so this file lives outside
+# the flat fixtures/ directory the loader smoke tests glob: every scenario there
+# must either load or be named red-, and a withheld family is neither. The
+# subject and twin ids are opaque on purpose — the corpus generator asserts that
+# no cluster-name token reaches an assertion parameter, which is what binds this
+# family to structure rather than to fixture wording.
+#
+# Only maintenance_pass intervenes between ingest and the asserted snapshot: the
+# loader refuses this scenario outright if a topical agent_turn appears, because
+# a prompted surfacing would measure nothing the family claims.
+scenario_id: f20-structural-emergence
+family_id: f20
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1-accumulate
+    ops:
+      - op: ingest_source
+        ref: f20-writes-batch-1
+      - op: maintenance_pass
+        ref: sweep-1
+      - op: ingest_source
+        ref: f20-writes-batch-2
+      - op: maintenance_pass
+        ref: sweep-2
+      - op: snapshot
+        ref: s1
+  - phase_id: p2-budget
+    ops:
+      - op: ingest_source
+        ref: f20-writes-batch-3
+      - op: maintenance_pass
+        ref: sweep-3
+      - op: snapshot
+        ref: s2
+    expect:
+      - assert: structural_signal_surfaced_within_budget
+        subject: f20-subject
+      - assert: signal_absence_checked_across_all_surfaces
+        subject: f20-twin-bounded
+      - assert: signal_absence_checked_across_all_surfaces
+        subject: f20-twin-tangent
+      - assert: signal_absence_checked_across_all_surfaces
+        subject: f20-twin-hub
+      - assert: signal_absence_checked_across_all_surfaces
+        subject: f20-twin-log
+fairness:
+  why_neutral: >-
+    A page that has quietly become five subjects costs its reader on every
+    later lookup, and only the system that watched it accumulate can say so
+    unprompted. The harm is independent of how any product names or stores
+    structure, and the twins carry identical unit counts and lengths so that
+    raw magnitude cannot be the discriminator.
+  public_coverage_subtraction: >-
+    No public suite measures unprompted structural surfacing; this scenario
+    reports state invariants only and contributes no answer-accuracy number.
+  mechanisms:
+    - provider_role: subject
+      mechanism: promotion-class proposal in the documented review or proposal queue
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:41
+    - provider_role: comparator-a
+      mechanism: documented structural-suggestion query over the accumulating note
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:41
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: corpus.ingest
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: corpus source ingestion
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:16
+      reason: The same neutral corpus source is ingested for this fixture row.
+      competitor_surface: documented write/ingest endpoint
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, structural_signal_surfaced_within_budget and
+    signal_absence_checked_across_all_surfaces.

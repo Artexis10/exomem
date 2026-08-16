@@ -22,6 +22,9 @@ ACKNOWLEDGED_REVISION = "46b000e878a60dda9d4fa215c0212ade78e4eede"
 #: Families the sequence-1 amendment introduced.  Withheld until 2026-08-15;
 #: released by the founder acknowledgment recorded in the receipt.
 AMENDED_FAMILIES = ("f15", "f16", "f17", "f18", "f19")
+#: Sequence 2 (no-nudge). Registered by the same §7 path and withheld by the
+#: same receipt gate, because its acknowledgment has not landed.
+SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
 DATASET = {
     "id": "fixture",
     "variant": "mini",
@@ -532,15 +535,20 @@ def test_real_loop_closure_receipt_records_the_founder_acknowledgment() -> None:
     across the transition.
     """
 
-    from protocol.contracts import AmendmentReceipt
+    from protocol.contracts import AmendmentReceipt, working_amendment_receipts
 
     receipt = AmendmentReceipt.model_validate_json(LOOP_CLOSURE_RECEIPT.read_bytes())
     assert receipt.parent_contract_sha256 == (
         "21aa5a8815038b82358336798b10afd8d3ffbd9739c8da597955bd14d8d962e3"
     )
-    assert receipt.contract_sha256 == hashlib.sha256(
-        (ROOT / receipt.contract_path).read_bytes()
-    ).hexdigest()
+    # Sequence 1's digest binds the document *as it stood at sequence 1*, which
+    # stopped being the working bytes the moment sequence 2 amended it. The
+    # binding that still has to hold is the chain link: the next receipt's parent
+    # digest is this receipt's contract digest, and nothing may edit the document
+    # between them without a receipt of its own.
+    chain = working_amendment_receipts(ROOT)
+    assert chain[0].contract_sha256 == receipt.contract_sha256
+    assert chain[1].parent_contract_sha256 == receipt.contract_sha256
     assert receipt.ratifier == FOUNDER
     assert receipt.acknowledged_on == "2026-08-15"
     assert receipt.catastrophic_set_decision == "accept"
@@ -579,11 +587,21 @@ def test_real_working_chain_folds_after_acknowledgment() -> None:
     disturb the contract identity.
     """
 
-    from protocol.contracts import AmendmentReceipt, validate_working_preregistration
+    from protocol.contracts import (
+        AmendmentReceipt,
+        validate_working_preregistration,
+        working_amendment_receipts,
+    )
 
     receipt = AmendmentReceipt.model_validate_json(LOOP_CLOSURE_RECEIPT.read_bytes())
     assert receipt.acknowledgment_status == "acknowledged"
-    assert validate_working_preregistration(ROOT) == receipt.contract_sha256
+    # The fold culminates in the *last* receipt's document, which is sequence 2's
+    # once it exists. Acknowledgment still touches nothing the fold depends on:
+    # sequence 2 is pending and folds exactly the same way, which is the property
+    # this test was written to hold.
+    chain = working_amendment_receipts(ROOT)
+    assert validate_working_preregistration(ROOT) == chain[-1].contract_sha256
+    assert chain[-1].acknowledgment_status == "pending"
 
 
 def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
@@ -601,24 +619,42 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
 
     identity = derive_preregistration_identity(ROOT)
 
-    assert len(identity.amendments) == 1
+    # Pinned exactly, not loosened to an inequality: a chain that silently grew
+    # a third link would otherwise satisfy every assertion below while nobody
+    # had adjudicated the new one.
+    assert len(identity.amendments) == 2
     amendment = identity.amendments[0]
     assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
     assert amendment.contract.repository_revision == ACKNOWLEDGED_REVISION
     assert amendment.contract.repository_revision != amendment.receipt.introduction_revision
-    assert identity.effective.sha256 == amendment.contract.sha256
-    assert identity.effective.repository_revision == ACKNOWLEDGED_REVISION
-    assert identity.pending_amendments == ()
-    assert identity.withheld_family_ids == frozenset()
+    assert amendment.sequence not in {a.sequence for a in identity.pending_amendments}
+
+    # Sequence 2 is the *pending* half of the same chain, and its presence is
+    # what proves the two shapes derive side by side: an acknowledged amendment
+    # pins its amended revision from the founder, while a pending one has that
+    # revision reconstructed from its unique introduction commit.
+    pending = identity.amendments[-1]
+    assert pending.sequence == 2
+    assert pending.acknowledgment_status == "pending"
+    assert pending.introduced_family_ids == SEQUENCE_TWO_FAMILIES
+    assert pending.contract.repository_revision == pending.receipt.introduction_revision
+    assert identity.effective.sha256 == pending.contract.sha256
+    assert identity.pending_amendments == (pending,)
+    assert identity.withheld_family_ids == frozenset(SEQUENCE_TWO_FAMILIES)
 
 
-def test_acknowledged_amendment_withholds_nothing() -> None:
+def test_the_acknowledged_amendment_releases_its_own_families() -> None:
     """The gate that refused f15-f19 now lets every one of them through.
 
     This is the whole observable effect of the acknowledgment at the contract
     layer: the same call, on the same families, that raised
-    ``AmendmentAcknowledgmentPendingError`` before 2026-08-15 now returns.
+    ``AmendmentAcknowledgmentPendingError`` before 2026-08-15 now returns. It
+    withholds nothing *of sequence 1*; sequence 2 is a separate, still-pending
+    receipt and is refused by
+    :func:`test_the_loader_gate_releases_sequence_one_and_withholds_sequence_two`
+    below, so the old name for this test — ``withholds_nothing`` — became a claim
+    it never made.
     """
 
     from protocol.contracts import (
@@ -638,9 +674,11 @@ def test_acknowledged_amendment_withholds_nothing() -> None:
 def test_the_pending_refusal_is_still_armed_for_a_future_amendment() -> None:
     """Release is a property of *this* receipt, not a retired mechanism.
 
-    Sequence 1 is acknowledged, so nothing real is withheld.  The refusal that
-    withheld it must still fire for the next unacknowledged amendment, which is
-    asserted here against a synthetic identity rather than the real one.
+    Sequence 1 is acknowledged, so its own families are no longer withheld.  The
+    refusal that withheld them must still fire for an unacknowledged amendment —
+    it does, for the real sequence 2 — and it must keep firing for whatever comes
+    after, which is asserted here against a synthetic identity so the property
+    does not depend on there happening to be a pending receipt in the tree.
     """
 
     from protocol.contracts import (
@@ -700,7 +738,12 @@ def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
         manifest.preregistration_identity.amendments[0].acknowledgment_status
         == "acknowledged"
     )
-    assert manifest.preregistration_identity.withheld_family_ids == frozenset()
+    # Sequence 2's pending status rides on the same manifest. A reader can tell
+    # which families backed this run and which were withheld from it without
+    # reading any other artifact, which is the whole reason the field exists.
+    assert manifest.preregistration_identity.withheld_family_ids == frozenset(
+        SEQUENCE_TWO_FAMILIES
+    )
     assert manifest.preregistration_lineage is not None
 
 
@@ -840,13 +883,15 @@ def test_acknowledged_amendment_lets_an_amended_family_scenario_load() -> None:
         assert scenario.family_id == family_id
 
 
-def test_the_loader_gate_reports_nothing_withheld() -> None:
+def test_the_loader_gate_releases_sequence_one_and_withholds_sequence_two() -> None:
     """The loader's own view of release, asserted directly at the gate.
 
     ``epistemic.amendments`` answers "is amendment N acknowledged?" from the
     working receipt bytes without Git, which is the cheap path the loader takes
-    per scenario.  It must now agree with the Git-derived identity that nothing
-    is withheld.
+    per scenario.  Sequence 1 is acknowledged, so f15-f19 pass the gate; sequence
+    2 is pending, so f20-f26 are refused by the very same call.  Holding both
+    facts in one test is the point: release is a property of each receipt, not a
+    switch that was flipped once and left on.
     """
 
     from epistemic.amendments import (
@@ -854,11 +899,18 @@ def test_the_loader_gate_reports_nothing_withheld() -> None:
         reset_cache,
         withheld_family_ids,
     )
+    from protocol.contracts import AmendmentAcknowledgmentPendingError
 
     reset_cache()
-    assert withheld_family_ids(ROOT) == frozenset()
+    assert withheld_family_ids(ROOT) == frozenset(SEQUENCE_TWO_FAMILIES)
     for family_id in AMENDED_FAMILIES:
         require_family_released(family_id, repo_root=ROOT)
+    for family_id in SEQUENCE_TWO_FAMILIES:
+        with pytest.raises(
+            AmendmentAcknowledgmentPendingError,
+            match=rf"amendment sequence 2 .*pending.*{family_id}",
+        ):
+            require_family_released(family_id, repo_root=ROOT)
 
 
 def test_ratified_base_families_still_load() -> None:

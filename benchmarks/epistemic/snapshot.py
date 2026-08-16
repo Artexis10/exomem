@@ -99,6 +99,19 @@ DECLARABLE_FIELDS: tuple[str, ...] = (
     "prediction",
     "verdict",
     "plan_linkage",
+    # Added by the 2026-08 no-nudge amendment (§7) for families f20-f26. Same
+    # reasoning as the sequence-1 additions above: each names a capability the
+    # amended families are *about*, so a product with no such concept declares
+    # it once and is scored ``not_applicable`` rather than failing an invariant
+    # it never claimed. ``signal`` is the autonomous-surfacing capability
+    # (promotion-class, entity-candidate, contradiction and merge-class signals
+    # alike); ``due_state_counters`` is the delivery-carrier counters block;
+    # ``continuation_packet`` is the fresh-session reconstruction artifact; and
+    # ``dismissal`` is the durable triage decision f23 measures.
+    "signal",
+    "due_state_counters",
+    "continuation_packet",
+    "dismissal",
 )
 
 _DECLARATION_STATUS_RE = re.compile(

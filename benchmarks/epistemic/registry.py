@@ -1,15 +1,17 @@
 """The frozen assertion registry.
 
-The 24 names below are pre-registered in ``PREREGISTRATION.md`` §2 — eighteen
-committed before any competitor was run by this programme, and six added by the
-2026-08 loop-closure amendment through the governed §7 path. The registry is a
-closed set on purpose: a scenario that names anything else fails to load, which
-is what stops the suite from growing an assertion to fit a result it wanted.
+The 33 names below are pre-registered in ``PREREGISTRATION.md`` §2 — eighteen
+committed before any competitor was run by this programme, six added by the
+2026-08 loop-closure amendment, and nine added by the 2026-08 no-nudge
+amendment, both through the governed §7 path. The registry is a closed set on
+purpose: a scenario that names anything else fails to load, which is what stops
+the suite from growing an assertion to fit a result it wanted.
 
-Registration is not release. The families the amendment introduced stay
+Registration is not release. The families each amendment introduced stay
 withheld from comparative runs until its receipt is acknowledged; that gate
 lives in :mod:`epistemic.amendments` and fires at the same load-time choke
-point this registry does.
+point this registry does. Sequence 1 is acknowledged; sequence 2 is not, so
+f20-f26 are registered and withheld at once.
 
 ``PREREGISTERED_ASSERTIONS`` mirrors §2 in code so the mapping can be checked
 without file I/O at import time; ``tests/test_epistemic_registry.py`` parses the
@@ -59,6 +61,40 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     "support_collapse_inspectable",
     "refuted_retrievable_at_full_standing",
     "loop_journey_state_coherent",
+    # Added by the 2026-08 no-nudge amendment (§7), sequence 2.
+    # ``signal_absence_checked_across_all_surfaces`` is deliberately FIRST: it is
+    # the anti-vacuity meta-predicate every quiet assertion in f20-f26 composes,
+    # and registering it ahead of the families that depend on it keeps the
+    # reading order of §2 the same as the dependency order in code.
+    "signal_absence_checked_across_all_surfaces",
+    "structural_signal_surfaced_within_budget",
+    "entity_candidate_surfaced_from_recurrence",
+    "contradiction_surfaced_unprompted",
+    "dismissal_respected_across_passes",
+    "counter_emission_not_repeated_per_write",
+    "continuation_packet_reconstructs_session",
+    "restructure_signal_cleared_by_state_change",
+    "due_state_block_present_in_carrier",
+)
+
+#: Quiet assertions: every one composes
+#: :func:`~epistemic.assertions.signal_absence_checked_across_all_surfaces`, so
+#: a negative control can never pass by relocating a nag to an unchecked surface
+#: or by projecting nothing at all.
+#:
+#: Membership is not a matter of remembering to edit this literal. Each
+#: predicate is marked with ``@claims_absence`` where it is defined, and
+#: ``tests/test_epistemic_no_nudge_families.py`` asserts this set equals exactly
+#: the marked ones *and* that every member propagates the meta-predicate when it
+#: is made to refuse. The literal is kept because the rest of the registry is
+#: hand-mirrored for the same reason — no import-time introspection of the
+#: assertion module's decorators is needed to read what the governance says.
+COMPOSES_ABSENCE_META: frozenset[str] = frozenset(
+    {
+        "signal_absence_checked_across_all_surfaces",
+        "dismissal_respected_across_passes",
+        "restructure_signal_cleared_by_state_change",
+    }
 )
 
 
@@ -86,6 +122,14 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f17", "derivation_collapse"),
     ("f18", "negative_result_retention"),
     ("f19", "loop_composite"),
+    # Added by the 2026-08 no-nudge amendment (§7), sequence 2.
+    ("f20", "structural_emergence"),
+    ("f21", "entity_emergence"),
+    ("f22", "unsolicited_contradiction"),
+    ("f23", "dismissal_respect"),
+    ("f24", "fresh_session_reconstruction"),
+    ("f25", "restructure_lifecycle"),
+    ("f26", "hookless_episode_carrier"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
@@ -110,6 +154,18 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         "f17": 1,
         "f18": 1,
         "f19": 1,
+        # Sequence 2 (no-nudge). Pending founder acknowledgment, so every one of
+        # these is withheld from comparative runs, scores and claims — which is
+        # the entire observable difference between being registered and being
+        # released, and the reason f20-f22 being expected-red is a falsification
+        # target rather than a CI failure.
+        "f20": 2,
+        "f21": 2,
+        "f22": 2,
+        "f23": 2,
+        "f24": 2,
+        "f25": 2,
+        "f26": 2,
     }
 )
 
@@ -122,6 +178,25 @@ REQUIRES_ITEM_PAIR: frozenset[str] = frozenset(
         "contradiction_visible",
         "contradiction_not_flattened",
         "decision_distinguishable_from_hypothesis",
+        # f22 surfaces a *pair* — the invalidated conclusion and the evidence
+        # that invalidates it — so a scenario that names only one of them would
+        # be asserting something weaker than the family claims.
+        "contradiction_surfaced_unprompted",
+    }
+)
+
+#: Assertions that are meaningless without a named subject. A quiet assertion in
+#: particular proves silence *about something*; letting it run subject-less would
+#: turn "no signal names this twin" into "no signal exists", which is a different
+#: and far weaker claim that an empty snapshot would satisfy.
+REQUIRES_SUBJECT: frozenset[str] = frozenset(
+    {
+        "signal_absence_checked_across_all_surfaces",
+        "structural_signal_surfaced_within_budget",
+        "entity_candidate_surfaced_from_recurrence",
+        "contradiction_surfaced_unprompted",
+        "dismissal_respected_across_passes",
+        "restructure_signal_cleared_by_state_change",
     }
 )
 
@@ -140,6 +215,10 @@ REQUIRES_SNAPSHOT_PAIR: frozenset[str] = frozenset(
         # trajectory that took one snapshot cannot support either.
         "divergence_surfaced_without_mutation",
         "loop_journey_state_coherent",
+        # f23 compares a recorded dismissal against a later maintenance pass:
+        # "the fingerprint did not come back" is a statement about a transition,
+        # and a single snapshot cannot support it.
+        "dismissal_respected_across_passes",
     }
 )
 
