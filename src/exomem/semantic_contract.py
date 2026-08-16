@@ -121,6 +121,8 @@ def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bo
         return vault.is_graph_reset_runtime_dir_name(name)
     if name.startswith(".graph-rebuild-"):
         return vault.is_graph_rebuild_runtime_file_name(name)
+    if name.startswith(".lexical.sqlite.rebuild-"):
+        return vault.is_lexical_rebuild_runtime_file_name(name)
     return False
 
 
