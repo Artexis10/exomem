@@ -25,6 +25,10 @@
 - [x] 4.3 Add the protected-tree guard at the hosted command boundary, before lifecycle admission and before the leaf, scoped to hosted surface profiles.
 - [x] 4.4 Add `assert_profile_mutations_are_classified` at route registration so a later widening cannot reopen the hole by silence, with a test proving an unclassified mutation refuses to serve.
 - [x] 4.5 State the replacement control as a normative requirement and document the superseded v1 requirement plus the validation gap that hid the conflict.
+- [x] 4.6 Close the leading-separator bypass: make every path interpretation cumulative rather than exclusive, never fail open on a parse or resolution error, and pin the absolute-shaped shapes against all three guarded commands asserting the 403.
+- [x] 4.7 Resolve relative targets against the vault root as well, so a link into a protected tree is refused even when no segment names one, with a red-first test for the symlink shape.
+- [x] 4.8 Prove `TARGET_CONSTRAINED_MUTATIONS` per member instead of claiming it, deriving each member's path arguments from the generated tool-schema fixture.
+- [x] 4.9 Encode the guarded-set membership rule as `v3 - v2` and record that `plan_memory`'s guard is defence in depth over its own `_require_profile_layer` constraint.
 
 ## 5. Close The Value-Blind Credential Exemption
 
@@ -41,6 +45,6 @@
 ## 7. Recorded Follow-ups (not in this change)
 
 - [ ] 7.1 Add a write-verb selection matrix disambiguating `remember` / `edit_memory` / `replace_memory`; v3 must not be promoted before it passes.
-- [ ] 7.2 Probe `record_memory` and `connect_memory` caller-supplied path arguments against the protected trees and either prove them constrained or extend the guard.
+- [ ] 7.2 Extend the protected-tree guard to the legacy full private command route, or record that route's trust boundary as a deliberate exclusion in a spec of its own.
 - [ ] 7.3 Add a CI render/check step for the v3 candidate, matching the v2 step in the release workflow.
 - [ ] 7.4 Measure whether `edit_memory`'s 9 KB `operation` `oneOf` survives the ChatGPT action cache before extending v3 to the OpenAI channel.

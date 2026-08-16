@@ -24,11 +24,15 @@ The system SHALL define the immutable profile `hosted-alpha-agent-v3` in the can
 
 ### Requirement: Hosted Agents Cannot Rewrite Governed Schema Or Policy
 
-A Hosted surface profile that exposes a broad page-mutation command SHALL refuse any invocation whose caller-supplied write target names the governed schema tree (`_Schema`) or the policy tree (`_Governance`). The refusal MUST happen at the hosted command boundary, before lifecycle admission and before the command leaf, and MUST return a stable machine-readable error. Path matching MUST be per path segment and case-insensitive, so a differently cased segment, a `..` traversal, a `.` prefix, a doubled or backslash separator, a trailing separator, a nested path, or an absolute path resolving inside the vault is refused identically.
+A Hosted surface profile that exposes a broad page-mutation command SHALL refuse any invocation whose caller-supplied write target names the governed schema tree (`_Schema`) or the policy tree (`_Governance`). The refusal MUST happen at the hosted command boundary, before lifecycle admission and before the command leaf, and MUST return a stable machine-readable error.
+
+Path matching MUST be per path segment and case-insensitive, so a differently cased segment, a `..` traversal, a `.` prefix, a doubled or backslash separator, a trailing separator, or a nested path is refused identically. Matching MUST consider every interpretation of the argument the write leaf could take, and MUST refuse if *any* interpretation names a protected tree. In particular an absolute-*shaped* target — one beginning with any number of `/` or `\` separators — MUST be refused whether or not it resolves inside the vault, and whether or not it resolves at all: the write leaf treats a rooted-looking target as vault-relative, so a reading that dismisses it as "outside the vault, therefore not ours" is a bypass. Matching MUST additionally resolve the target against the vault root — for relative targets as well as absolute-shaped ones — so a target that reaches a protected tree through a link, without naming it in any segment, is refused. The guard MUST NOT fail open: a parse, resolution, or filesystem error while evaluating one interpretation MUST NOT suppress the others, and an argument the guard cannot interpret MUST be refused rather than allowed.
 
 This requirement replaces the protection that `hosted-alpha-agent-v1` obtained from *not exposing* `edit_memory` or `replace_memory`, recorded in that profile's own requirement as "the command is absent from the profile and rejected before invocation or lifecycle admission" for a path under `_Schema`. Profile absence SHALL NOT be relied upon as the control once a profile exposes those commands.
 
 The guard SHALL be scoped to Hosted surface profiles. Local, CLI, and MCP surfaces on a single-user vault MUST retain the ability to customise that vault's own `_Schema`, and reads of either tree MUST remain unaffected.
+
+Every mutating command a Hosted profile exposes MUST be classified either as guarded or as constrained by its own command leaf, and the cell MUST refuse to serve a profile with an unclassified mutation. Recording a command as leaf-constrained SHALL NOT be a way to wave it through: each such command MUST be shown either to expose no caller-supplied path argument, or to leave a protected-tree target unchanged through its own leaf without the guard firing.
 
 #### Scenario: A hosted agent tries to rewrite the schema tree
 
@@ -43,8 +47,19 @@ The guard SHALL be scoped to Hosted surface profiles. Local, CLI, and MCP surfac
 
 #### Scenario: The refusal is probed for an escape
 
-- **WHEN** the target is expressed with a differently cased tree segment, a `..` traversal, a leading `./`, doubled or backslash separators, a trailing separator, a deeper nested path, or an absolute path that resolves inside the vault
+- **WHEN** the target is expressed with a differently cased tree segment, a `..` traversal, a leading `./`, doubled or backslash separators, a trailing separator, or a deeper nested path
 - **THEN** every form is refused with the same stable error
+
+#### Scenario: The target reaches a protected tree without naming it
+
+- **WHEN** the target is a relative path that traverses a link into `_Schema` or `_Governance`, so no segment of the text is a protected tree name
+- **THEN** it is refused with the same stable error, because the target is also resolved against the vault root
+
+#### Scenario: The target is absolute-shaped
+
+- **WHEN** the target begins with one or more `/` or `\` separators — whether it resolves inside the vault, outside it, or nowhere at all
+- **THEN** it is refused with the same stable error, because the write leaf would read it as vault-relative
+- **AND** a failure to parse or resolve any one interpretation does not cause the guard to allow the invocation
 
 #### Scenario: Ordinary governed pages and reads are unaffected
 
@@ -56,6 +71,12 @@ The guard SHALL be scoped to Hosted surface profiles. Local, CLI, and MCP surfac
 
 - **WHEN** a Hosted profile exposes a mutating command that is neither covered by the protected-tree guard nor recorded as constrained by its own command leaf
 - **THEN** the cell refuses to serve that profile rather than exposing an unguarded write primitive
+
+#### Scenario: A leaf-constrained classification is checked rather than trusted
+
+- **WHEN** a mutating command is recorded as constrained by its own command leaf
+- **THEN** it either exposes no caller-supplied path argument at all, or a protected-tree target passed to it is refused by that leaf with the protected tree left byte-identical
+- **AND** the refusal does not come from the protected-tree guard, which would mean the classification was wrong
 
 ### Requirement: A Widened Profile Is Additive And Never Mutates A Published Profile
 

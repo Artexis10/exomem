@@ -9,7 +9,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -169,8 +169,20 @@ def _mcp_tool_contract(
 PROTECTED_TREE_DIRNAMES: frozenset[str] = frozenset({"_Schema", "_Governance"})
 
 #: Caller-supplied write-target arguments, per command, that the guard inspects.
-#: Only commands introduced by a widened profile appear here, so no already
-#: published profile changes behaviour.
+#:
+#: The membership rule is deliberate and mechanical: this set is exactly the
+#: commands the widening *newly* exposes (v3 minus v2). Already-published
+#: surface is left classified as it was, so no shipped profile changes
+#: behaviour. That rule, not the parameter name, is why `plan_memory`'s
+#: `manifest_path` is guarded while `record_memory`'s identically-named,
+#: identically-constrained `manifest_path` is not -- see
+#: `test_guarded_set_is_exactly_what_the_widening_newly_exposes`.
+#:
+#: For `plan_memory` the guard is therefore defence in depth rather than the
+#: only control: `structured_collections._require_profile_layer` already pins a
+#: planning manifest under `Knowledge Base/Planning/`, so a protected tree is
+#: unreachable through it either way. For `edit_memory` and `replace_memory`
+#: the guard *is* the control.
 PROTECTED_TREE_PATH_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "edit_memory": ("path",),
     "replace_memory": ("old_path",),
@@ -178,13 +190,22 @@ PROTECTED_TREE_PATH_ARGUMENTS: dict[str, tuple[str, ...]] = {
 }
 
 #: Mutating commands that do not need the guard because their own leaf refuses a
-#: protected-tree target. `observe_memory` is the proven case: it rejects a
-#: `_Schema` document with `OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE` because
-#: the tree holds no writable compiled page. The rest carry no caller-chosen
-#: page write target at all. Membership here is asserted, not assumed --
-#: `assert_profile_mutations_are_classified` refuses to serve a profile whose
-#: mutating commands are not all accounted for in one list or the other, so a
-#: later widening cannot reopen this hole by silence.
+#: protected-tree target. Four of them (`remember`, `capture_source`,
+#: `preserve_evidence`, `triage_memory`) carry no caller-chosen path argument at
+#: all; placement is policy-owned. The three that do take one are constrained by
+#: their own leaves: `observe_memory` rejects a `_Schema` document with
+#: `OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE` because the tree holds no
+#: writable compiled page, `record_memory` is pinned under
+#: `Knowledge Base/Records/` by `_require_profile_layer`, and
+#: `connect_memory` reads its `path` to decide what to write elsewhere.
+#:
+#: Membership is not self-certifying, so two separate checks back it.
+#: `assert_profile_mutations_are_classified` runs at route registration and
+#: refuses to serve a profile whose mutating commands are not all accounted for
+#: in one list or the other, so a later widening cannot reopen this hole by
+#: silence -- but that only proves every command is *named*, not that the claim
+#: about it is true. `test_target_constrained_mutations_are_actually_constrained`
+#: proves the claim per member, structurally or behaviourally.
 TARGET_CONSTRAINED_MUTATIONS: frozenset[str] = frozenset(
     {
         "remember",
@@ -198,6 +219,11 @@ TARGET_CONSTRAINED_MUTATIONS: frozenset[str] = frozenset(
 )
 
 
+def _has_protected_segment(parts: Iterable[str]) -> bool:
+    folded = {name.casefold() for name in PROTECTED_TREE_DIRNAMES}
+    return any(part.casefold() in folded for part in parts)
+
+
 def _names_a_protected_tree(value: object, *, vault_root: Path | None) -> bool:
     """Return whether `value` names a path that touches a protected subtree.
 
@@ -207,27 +233,64 @@ def _names_a_protected_tree(value: object, *, vault_root: Path | None) -> bool:
     own name as a segment. A path that merely traverses *out* of a protected
     tree is refused too; over-refusing an exotic path costs a caller nothing
     and under-refusing one costs the tenant its doctrine.
+
+    Every interpretation of the argument is evaluated and *any* hit refuses.
+    The literal-segment reading runs first and unconditionally, because the
+    guard and the write leaf do not agree on what "absolute" means: a leading
+    separator makes `Path.is_absolute()` true here, while `edit_memory`'s
+    resolver treats a rooted-looking path as vault-relative, strips the
+    separator, and writes the real file. An earlier version branched on
+    `is_absolute()` and returned False when the path would not resolve under
+    the vault root, so `/Knowledge Base/_Schema/SKILL.md` -- one character away
+    from a refused path -- committed a write. A guard's unknown case must be
+    "refuse", never "allow", and no arm below can overturn a literal hit: a
+    resolution failure `continue`s to the next reading instead of answering.
     """
 
     raw = str(value or "").strip()
     if not raw:
         return False
     text = raw.replace("\\", "/")
-    candidate = Path(text)
-    parts: tuple[str, ...]
-    if candidate.is_absolute():
-        if vault_root is None:
-            return False
-        try:
-            parts = candidate.resolve().relative_to(Path(vault_root).resolve()).parts
-        except (ValueError, OSError):
-            # Absolute and outside this vault: vault confinement rejects it,
-            # and it is not this guard's question to answer.
-            return False
-    else:
-        parts = PurePosixPath(text).parts
-    folded = {name.casefold() for name in PROTECTED_TREE_DIRNAMES}
-    return any(part.casefold() in folded for part in parts)
+
+    # Interpretation 1: exactly as written. Leading separators, doubled
+    # separators and `..` do not remove a segment, so this is what catches the
+    # leading-separator shape the leaf normalises away.
+    if _has_protected_segment(PurePosixPath(text).parts):
+        return True
+
+    # Interpretation 2: leading separators stripped, which is how the write
+    # leaf itself reads a rooted-looking path. Redundant with the first reading
+    # for every shape seen so far, and kept explicit so a future change to
+    # either normaliser cannot quietly leave only one of them covered.
+    stripped = text.lstrip("/")
+    if stripped != text and _has_protected_segment(PurePosixPath(stripped).parts):
+        return True
+
+    # Interpretation 3: a real filesystem path resolved against this cell's
+    # vault root. This is the only reading that catches a link, or a `..` chain
+    # that lands inside a protected tree without ever naming it. Relative text
+    # is resolved too, not just absolute-shaped text, because a relative path
+    # traverses a link just as easily. Everything is joined to the vault root
+    # rather than the process CWD, so the answer does not depend on where the
+    # cell happens to be running; an absolute path is additionally read at face
+    # value, which is how a link *outside* the vault pointing in is caught. A
+    # failure here adds nothing and subtracts nothing: the readings above have
+    # already returned, and each attempt continues past its own error.
+    if vault_root is not None:
+        root = Path(vault_root)
+        candidate = Path(text)
+        attempts = [root / stripped]
+        if candidate.is_absolute():
+            attempts.append(candidate)
+        for attempt in attempts:
+            try:
+                resolved = attempt.resolve().relative_to(root.resolve())
+            except (ValueError, OSError):
+                continue
+            if _has_protected_segment(resolved.parts):
+                return True
+
+    return False
 
 
 def protected_tree_argument(
