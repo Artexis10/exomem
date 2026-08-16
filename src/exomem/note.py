@@ -283,6 +283,7 @@ def _build_write_feedback(
     source_warnings: list[str],
     backrefs_planned: int,
     suggestions_count: int,
+    suggestions_requested: bool,
 ) -> dict:
     registry = relation_registry.load_registry(vault_root)
     document = semantic_units.parse_semantic_units(
@@ -374,6 +375,19 @@ def _build_write_feedback(
     if not next_actions:
         next_actions.append("no immediate structural follow-up")
 
+    # `related_pages: 0` is ambiguous on its own once the pass is default-off —
+    # it cannot separate "ran, found nothing" from "never ran". Say which, and
+    # name the route back, so a default write is never silently less useful.
+    suggestions_feedback: dict[str, object] = {
+        "related_pages": suggestions_count,
+        "computed": suggestions_requested,
+    }
+    if not suggestions_requested:
+        suggestions_feedback["route"] = {
+            "tool": "remember",
+            "args": {"suggestions": True},
+        }
+
     relation_feedback: dict[str, object] = {
         "typed_note": typed_note_relations,
         "typed_block": typed_block_relations,
@@ -415,9 +429,7 @@ def _build_write_feedback(
             "unresolved": unresolved,
         },
         "relations": relation_feedback,
-        "suggestions": {
-            "related_pages": suggestions_count,
-        },
+        "suggestions": suggestions_feedback,
         "next_actions": next_actions,
     }
 
@@ -451,7 +463,7 @@ def _legacy_note(
     published: str | None = None,
     host: str | None = None,
     editor: str | None = None,
-    suggestions: bool = True,
+    suggestions: bool = False,
     today: dt.date | None = None,
     project_category: str | None = None,
     _planned_writes: list[PlannedWrite] | None = None,
@@ -702,6 +714,7 @@ def _legacy_note(
         source_warnings=source_warnings,
         backrefs_planned=0,
         suggestions_count=len(corpus_suggestions),
+        suggestions_requested=suggestions,
     )
     writes: list[PlannedWrite] = []
     if project_registration_write is not None:
@@ -1533,7 +1546,7 @@ def note(
     bridge_of: list[str] | None = None,
     bridge_scope: str | None = None,
     bridge_review: str | None = None,
-    suggestions: bool = True,
+    suggestions: bool = False,
     today: dt.date | None = None,
     project_category: str | None = None,
     validate_only: bool = False,
@@ -1861,11 +1874,16 @@ def note(
     corpus_suggestions: list[dict] = []
     duplicate_warnings: list[str] = []
     contradiction_warnings: list[str] = []
-    # suggestions=False gates ONLY the related-links query below; the near-dup
-    # /contradiction sweep is a dedupe guardrail and stays on in every mode
-    # (locked by tests/test_note_suggestions_knob.py). Its latency lives inside
-    # the widened edge budget; `note write timings ... advisory_ms` makes it
-    # attributable when it grows.
+    # `suggestions` gates ONLY the related-links query below, and is OFF by
+    # default (#576). That query is one whole hybrid find() over the corpus,
+    # issued here — post-commit — where the write has just moved every
+    # freshness token find's cache keys on, so it is cold by construction; it
+    # measured 26 s of a 33 s advisory span at ~3k pages, and its product is
+    # not even projected into the default response_detail="compact" reply.
+    # The near-dup/contradiction sweep is a dedupe guardrail and stays on in
+    # every mode (locked by tests/test_note_suggestions_knob.py). Its latency
+    # lives inside the widened edge budget; `note write timings ...
+    # advisory_ms` keeps both attributable when they grow.
     if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         try:
             if suggestions:
@@ -1926,6 +1944,7 @@ def note(
         source_warnings=source_warnings,
         backrefs_planned=backrefs_planned,
         suggestions_count=len(corpus_suggestions),
+        suggestions_requested=suggestions,
     )
     return NoteResult(
         destination,

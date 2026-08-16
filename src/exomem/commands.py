@@ -2933,7 +2933,7 @@ def op_note(
     bridge_of: list[str] | None = None,
     bridge_scope: str | None = None,
     bridge_review: str | None = None,
-    suggestions: bool = True,
+    suggestions: bool = False,
     project_category: str | None = None,
     validate_only: bool = False,
     draft_id: str | None = None,
@@ -3024,12 +3024,18 @@ def op_note(
         bridge_scope: Descriptive lowercase scope slug for a bridge draft.
         bridge_review: ISO date when an approved bridge should be reviewed again.
 
-        suggestions: When true (default), the result carries a `suggestions`
-            block: existing pages this note should probably link to, ranked
-            by the retrieval stack. Set false for a faster write when you
-            already know the note's links; the near-duplicate/overlap
-            warnings stay ON either way (dedupe is a guardrail, not a
-            suggestion). For important drafts, call
+        suggestions: Off by default. When true, the result carries a
+            `suggestions` block: existing pages this note should probably link
+            to, ranked by the retrieval stack. It costs one whole retrieval
+            pass over the corpus, runs after the commit (so its caches are
+            cold by construction — the write just moved every freshness token
+            they key on), and is not projected into the default
+            `response_detail="compact"` response, so an interactive write no
+            longer pays it unasked. Ask for it with `suggestions=true`.
+            `write_feedback.suggestions.computed` reports which happened, so an
+            empty block is never mistaken for "no related pages". The
+            near-duplicate/overlap warnings stay ON either way (dedupe is a
+            guardrail, not a suggestion). For important drafts, call
             `connect_memory(operation="suggest-links")`, use
             `operation="suggest-relations"` when direction matters, and write
             accepted note-level edges under `## Relations`.
@@ -4157,7 +4163,7 @@ def op_remember(
     bridge_of: list[str] | None = None,
     bridge_scope: str | None = None,
     bridge_review: str | None = None,
-    suggestions: bool = True,
+    suggestions: bool = False,
     project_category: str | None = None,
     validate_only: bool = False,
     draft_id: str | None = None,
@@ -4210,7 +4216,13 @@ def op_remember(
             cross-domain bridge; requires bridge_scope and bridge_review.
         bridge_scope: Descriptive lowercase scope slug for a bridge draft.
         bridge_review: ISO date when an approved bridge should be reviewed again.
-        suggestions: Include link suggestions in the result.
+        suggestions: Off by default. Set `suggestions=true` to also get a
+            `suggestions` block of existing pages this note should probably
+            link to (read it under `response_detail='full'`). It costs one
+            whole retrieval pass over the corpus on the write path, so a
+            plain write no longer pays it. Near-duplicate and overlap
+            warnings are a dedupe guardrail and stay on either way;
+            `write_feedback.suggestions.computed` says which happened.
         project_category: Category for a new project key.
         validate_only: Validate and return an immutable creation draft without writing.
         draft_id: Draft identity returned by validate_only.

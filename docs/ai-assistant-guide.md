@@ -166,7 +166,9 @@ Agent behavior:
 
 1. Search or read the named sources.
 2. Draft a compiled conclusion that links back to the sources.
-3. Use `remember` with link suggestions enabled so the new note connects to prior work.
+3. Use `remember(suggestions=true)` so the new note connects to prior work. Link
+   suggestions are off by default — they cost a whole retrieval pass on the
+   write path — so this call has to ask for them.
 
 ### Review stale knowledge
 

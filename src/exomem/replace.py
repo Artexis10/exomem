@@ -457,7 +457,7 @@ def replace(
     bridge_of: list[str] | None = None,
     bridge_scope: str | None = None,
     bridge_review: str | None = None,
-    suggestions: bool = True,
+    suggestions: bool = False,
     project_category: str | None = None,
     reason: str | None = None,
     today: dt.date | None = None,
