@@ -220,6 +220,19 @@ class PreregistrationLineage(StrictModel):
             effective_sha256=identity.effective.sha256,
         )
 
+    @classmethod
+    def for_manifest(cls, identity: PreregistrationIdentity) -> PreregistrationLineage | None:
+        """The lineage a manifest must carry for `identity`, if any.
+
+        `RunManifest` requires lineage exactly when the identity is amended, and
+        refuses it as base-only otherwise. Every manifest author therefore has
+        to re-derive the same condition, and a lane that gets it wrong does not
+        write a wrong manifest — it writes none, mid-run. Owning the condition
+        here means a new construction site inherits the rule instead of being
+        told it separately.
+        """
+        return cls.from_identity(identity) if identity.amendments else None
+
 
 class RunManifest(StrictModel):
     protocol_version: Literal[PROTOCOL_VERSION] = PROTOCOL_VERSION
