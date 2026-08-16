@@ -1035,6 +1035,19 @@ def render_markdown_item_update(
         if span is None:
             replacements.append((len(yaml_text), len(yaml_text), rendered + newline))
         else:
+            # Block-style original values (dict/list-with-nested-items, or a
+            # literal/folded scalar) end their compose span *after* their own
+            # trailing newline -- unlike flow-style and plain scalars, whose
+            # span stops at the last content byte. `serialize_frontmatter`
+            # never emits a trailing newline of its own (it rstrip()s block
+            # dumps for the end-of-document caller), so replacing a
+            # newline-swallowing span with `rendered` as-is would glue this
+            # field directly onto whatever splices in immediately after it --
+            # another key's span replacement, an appended new field, or the
+            # closing `---` fence. Reproduce that swallowed newline so the
+            # splice always lands on its own line.
+            if yaml_text[span[0] : span[1]].endswith(newline) and not rendered.endswith(newline):
+                rendered += newline
             replacements.append((*span, rendered))
     updated_yaml = yaml_text
     for start, end, rendered in sorted(replacements, reverse=True):
@@ -1049,7 +1062,26 @@ def render_markdown_item_update(
     )
     close_end = close_start + len(closing.group(0))
     suffix = text[close_end:] if body is None else newline + body
-    return bom + text[: opening.end()] + updated_yaml + audit_line + text[close_start:close_end] + suffix
+    rebuilt = text[: opening.end()] + updated_yaml + audit_line + text[close_start:close_end] + suffix
+    # Post-write self-check: a splice bug that glues a field into whatever
+    # follows it must fail loudly here, not persist an unreadable page for a
+    # later reader to trip over. Re-parse against the same BOM-free `text`
+    # this function has spliced throughout (parse_frontmatter does not strip
+    # a BOM itself -- it would misreport a BOM-carrying, otherwise-valid
+    # result as having no frontmatter at all).
+    try:
+        _self_check_fm, _self_check_body, self_check_marker = vault.parse_frontmatter(
+            rebuilt, strict=True
+        )
+    except vault.FrontmatterError as error:
+        raise collections.CollectionError(
+            "INVALID_RECORD_ITEM", "spliced item frontmatter failed the post-write self-check"
+        ) from error
+    if self_check_marker is None:
+        raise collections.CollectionError(
+            "INVALID_RECORD_ITEM", "spliced item frontmatter failed the post-write self-check"
+        )
+    return bom + rebuilt
 
 
 def render_manifest_audit_head(
