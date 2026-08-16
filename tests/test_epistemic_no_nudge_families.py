@@ -684,6 +684,15 @@ def _detail_pair(flags: list[str]) -> tuple[str, str]:
     raise AssertionError(f"no response-detail flag among {flags}")
 
 
+def test_unreadable_help_refuses_rather_than_passing_the_argv_check_vacuously() -> None:
+    """An empty required-option set would make every argv check pass for free."""
+
+    from epistemic.journeys import f26_carrier
+
+    with pytest.raises(f26_carrier.JourneyStepFailed, match="no usage line"):
+        f26_carrier._required_options_from_usage("some unexpected help format\n")
+
+
 def test_the_journey_runs_against_the_installed_envelope(tmp_path: Path) -> None:
     """F5: the whole point is that this executes. So it executes.
 

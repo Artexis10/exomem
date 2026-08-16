@@ -268,6 +268,14 @@ def _required_options_from_usage(help_text: str) -> frozenset[str]:
         if not line.startswith(" "):
             break
         usage.append(line)
+    if not usage:
+        # Returning an empty set here would make every argv-completeness check
+        # pass vacuously the day the help format changes, which is the failure
+        # this function exists to catch.
+        raise JourneyStepFailed(
+            "the envelope's help output carries no usage line; required options "
+            "cannot be read, so argv completeness cannot be checked"
+        )
     flattened = " ".join(usage)
     depth = 0
     kept: list[str] = []
