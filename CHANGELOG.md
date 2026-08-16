@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.52.3](https://github.com/Artexis10/exomem/compare/v0.52.2...v0.52.3) (2026-08-16)
+
+
+### Bug Fixes
+
+* **embeddings:** refuse catch-up unless the change log covers the whole delta ([#567](https://github.com/Artexis10/exomem/issues/567)) ([777eff1](https://github.com/Artexis10/exomem/commit/777eff14cd57bef724f4baa39251e73b11509959))
+* **governance:** classify governed refusals in the mutation journal ([#564](https://github.com/Artexis10/exomem/issues/564)) ([65e529c](https://github.com/Artexis10/exomem/commit/65e529c467dba41a0c9a5c301e49414e857e7c10))
+* **graph:** classify the Class B stabilization exhaustion so the publication-refusal memo arms ([#575](https://github.com/Artexis10/exomem/issues/575)) ([65ad65a](https://github.com/Artexis10/exomem/commit/65ad65a7b6f1bac8febc51ab6594dbd03343d29b))
+* **lexstore:** reap abandoned lexical rebuild temporaries ([#563](https://github.com/Artexis10/exomem/issues/563)) ([efdd0e5](https://github.com/Artexis10/exomem/commit/efdd0e54e0fbe167bf123da20799a3d922eace20))
+* **memory:** preserve the newline when splicing a block-valued frontmatter field ([#562](https://github.com/Artexis10/exomem/issues/562)) ([73c72cc](https://github.com/Artexis10/exomem/commit/73c72cc108c4a9673f3a10141ba8db16c463ec0f))
+* **ops:** resolve the log directory outside the wheel venv ([#569](https://github.com/Artexis10/exomem/issues/569)) ([2f13afb](https://github.com/Artexis10/exomem/commit/2f13afb13fb76a0000997bcebe1c422fe14739b9))
+
 ## [0.52.2](https://github.com/Artexis10/exomem/compare/v0.52.1...v0.52.2) (2026-08-15)
 
 
