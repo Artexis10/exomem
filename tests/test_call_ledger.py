@@ -11,12 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from exomem import call_ledger, command_surface
+from exomem import call_ledger, command_surface, guards
 from exomem import server as server_module
 
 
@@ -162,6 +163,88 @@ def test_an_unstructured_error_keeps_its_class_name() -> None:
     assert (
         server_module._leading_error_code(RuntimeError("no colon here")) == "RuntimeError"
     )
+
+
+# -------------------------------------------------------------------- latency
+
+
+def test_a_row_carries_both_the_leaf_and_the_caller_s_wall_clock(
+    ledger_dir: Path,
+) -> None:
+    """`duration_ms` is the leaf; `total_ms` is what the caller waited.
+
+    Keeping both is the point: `duration_ms` is what the prose trace and
+    `exomem_tool_duration_ms` have always reported, so redefining it would
+    silently change a live metric -- but on its own it cannot explain a call
+    that was slow *before* the leaf.
+    """
+
+    async def call_next(_context):
+        time.sleep(0.05)
+        return {"ok": True}
+
+    _drive("ask_memory", {"query": "q"}, call_next)
+
+    row = _rows(ledger_dir)[0]
+    assert row["duration_ms"] >= 50
+    assert row["total_ms"] >= row["duration_ms"]
+
+
+def test_time_spent_before_the_leaf_is_visible(ledger_dir: Path, monkeypatch) -> None:
+    """The gap between the two clocks is the diagnostic: it says the cost was
+    in admission, not in the work. A guard that got slow would otherwise be
+    invisible, because the leaf clock does not start until the guard is done."""
+    real_guard = guards.guard_text_content
+
+    def slow_guard(content, **kwargs):
+        time.sleep(0.05)
+        return real_guard(content, **kwargs)
+
+    monkeypatch.setattr(guards, "guard_text_content", slow_guard)
+
+    _drive("remember", {"content": "a short note"}, _ok)
+
+    row = _rows(ledger_dir)[0]
+    assert row["outcome"] == "ok"
+    assert row["duration_ms"] < 25, "the leaf itself was fast"
+    assert row["total_ms"] >= 50, "the pre-leaf cost has to show up somewhere"
+
+
+def test_a_refusal_still_reports_how_long_the_caller_waited(ledger_dir: Path) -> None:
+    """A refused call is exactly the one whose latency you want: "it was locked
+    for 41 seconds and then refused" is the sentence the ledger has to support."""
+
+    async def call_next(_context):
+        time.sleep(0.05)
+        command_surface._log_tool_failure(
+            tool="remember",
+            request_id=command_surface.mcp_request_id(),
+            code="MUTATION_BUSY",
+            duration_ms=50.0,
+            message="another mutation holds the lock",
+        )
+        return {"ok": False, "error": {"code": "MUTATION_BUSY"}}
+
+    _drive("remember", {"title": "x"}, call_next)
+
+    row = _rows(ledger_dir)[0]
+    assert row["outcome"] == "refused"
+    assert row["error_code"] == "MUTATION_BUSY"
+    assert row["total_ms"] >= 50
+
+
+def test_the_request_size_is_recorded_so_a_slow_call_is_interpretable(
+    ledger_dir: Path,
+) -> None:
+    _drive("remember", {"content": "x" * 5_000}, _ok)
+    big = _rows(ledger_dir)[0]["request_bytes"]
+
+    call_ledger.reset_chain_cache()
+    (ledger_dir / "ledger.jsonl").unlink()
+    _drive("remember", {"content": "x"}, _ok)
+    small = _rows(ledger_dir)[0]["request_bytes"]
+
+    assert big > 5_000 > small
 
 
 # ------------------------------------------------------------- who is calling

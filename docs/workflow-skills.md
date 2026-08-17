@@ -21,7 +21,8 @@ agent is doing right now.
 
 - `exomem-continue` - resume prior project or session context.
 - `exomem-capture` - save a durable conclusion without dumping transcripts.
-- `exomem-ingest` - preserve an external artifact, then compile what matters.
+- `exomem-ingest` - preserve an external artifact under the `source_kind` and
+  `domain` it actually belongs to, then compile what matters.
 - `exomem-research` - gather sources and save attributed findings.
 - `exomem-reflect` - extract decisions, failures, patterns, open questions, and next actions.
 - `exomem-curate` - improve links and compiled-note quality safely.

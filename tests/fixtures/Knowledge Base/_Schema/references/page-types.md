@@ -5,10 +5,10 @@ convention, and content shape. See `frontmatter.md` for the YAML spec per type.
 
 ## source
 
-**Location:** `Sources/Articles/`, `Sources/Sessions/`, or `Sources/Books/` (also `Sources/Papers/`, `Sources/Videos/`, `Sources/Other/`)
+**Location:** `Sources/<Kind>/` — a projection of `source_type`, with `domain` adding one level below it, e.g. `Sources/Articles/`, `Sources/Reports/Travel/`, `Sources/Other/`
 **Naming:** `YYYY-MM-DD-<slug>.md` (e.g., `2026-05-09-retrieval-patterns.md`)
 **Mutability:** Append-only. Never edit after creation.
-**Required frontmatter:** `type: source`, `source_type`, `captured`, `url` (if applicable), `tags`, `ingested_into` (initially empty list, updated when compiled into notes).
+**Required frontmatter:** `type: source`, `source_type`, `captured`, `url` (if applicable), `tags`, `ingested_into` (initially empty list, updated when compiled into notes). `domain` and `projects` are optional.
 
 **Content shape:**
 

@@ -1890,7 +1890,25 @@ def _simple_capture_main(argv: list[str]) -> int:
         default="source",
     )
     parser.add_argument("--title", help="source title (required for --as source)")
-    parser.add_argument("--source-type", default="other", help="source type for --as source")
+    # No default. Defaulting to the fallback here taught every CLI capture to
+    # file clearly classifiable material as unclassified; absent means
+    # unclassified, which the product resolves, rather than a claim.
+    parser.add_argument(
+        "--source-type", help="what the artifact IS; open vocabulary, use the label you mean"
+    )
+    parser.add_argument(
+        "--source-kind", help="preferred name for the same axis as --source-type"
+    )
+    parser.add_argument(
+        "--domain", help="what the artifact is ABOUT, independent of its kind"
+    )
+    parser.add_argument(
+        "--project",
+        dest="projects",
+        action="append",
+        default=None,
+        help="project key this source serves (repeatable)",
+    )
     parser.add_argument("--url", help="source URL")
     parser.add_argument(
         "--tag",
@@ -1914,11 +1932,16 @@ def _simple_capture_main(argv: list[str]) -> int:
             "capture_source",
             "--content",
             args.content,
-            "--source-type",
-            args.source_type,
             "--title",
             args.title,
         ]
+        if args.source_type:
+            core.extend(["--source-type", args.source_type])
+        if args.source_kind:
+            core.extend(["--source-kind", args.source_kind])
+        if args.domain:
+            core.extend(["--domain", args.domain])
+        _append_repeated(core, "--projects", args.projects)
         if args.url:
             core.extend(["--url", args.url])
         _append_repeated(core, "--tags", args.tags)

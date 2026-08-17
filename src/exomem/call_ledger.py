@@ -177,6 +177,7 @@ def build_row(
     tool: str,
     outcome: str,
     duration_ms: float | None,
+    total_ms: float | None = None,
     error_code: str | None = None,
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
@@ -209,7 +210,17 @@ def build_row(
         "target_paths": targets,
         "outcome": outcome,
         "error_code": _clip(error_code) if error_code else None,
+        # Two clocks, deliberately. `duration_ms` is the leaf -- the number the
+        # prose trace and `exomem_tool_duration_ms` have always reported.
+        # `total_ms` is the wall clock the caller actually waited, guard and
+        # argument normalization included. When they diverge, the gap *is* the
+        # finding: it says the cost was in admission, not in the work.
         "duration_ms": duration_ms,
+        "total_ms": total_ms if total_ms is not None else duration_ms,
+        # The size of what was sent, so a slow call is interpretable rather than
+        # merely slow. Recorded from the already-computed argument shape, which
+        # is why it costs nothing and still leaks nothing.
+        "request_bytes": sum(int(shape["len"]) for shape in args.values()),
         "truncated": bool(args_truncated or targets_truncated),
     }
     row["row_hash"] = row_hash(row)
@@ -311,6 +322,7 @@ def record_call(
     tool: str,
     outcome: str,
     duration_ms: float | None,
+    total_ms: float | None = None,
     error_code: str | None = None,
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
@@ -343,6 +355,7 @@ def record_call(
                 tool=tool,
                 outcome=outcome,
                 duration_ms=duration_ms,
+                total_ms=total_ms,
                 error_code=error_code,
                 arguments=arguments,
                 caller_principal_hash=caller_principal_hash,

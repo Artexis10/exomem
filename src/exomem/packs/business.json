@@ -47,6 +47,18 @@
       "example": "What risks are open for this account?"
     }
   ],
+  "suggested_source_kinds": [
+    "correspondence",
+    "contract-legal-document",
+    "invoice-receipt",
+    "research-report",
+    "session"
+  ],
+  "suggested_domains": [
+    "business",
+    "finance",
+    "legal"
+  ],
   "primitives": [
     "source",
     "entity",

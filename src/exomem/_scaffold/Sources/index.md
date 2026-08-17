@@ -2,6 +2,10 @@
 
 Raw, immutable inputs. Append-only. Never edited after capture.
 
+Each folder below is a projection of a captured source's `source_type`, with its
+`domain` adding one level underneath. The vocabulary is open, so new categories
+appear here as they are used — see `_Schema/source-taxonomy.yaml`.
+
 ## By type
 
 - [[Knowledge Base/Sources/Articles/|Articles]] — captured web/PDF content (0)

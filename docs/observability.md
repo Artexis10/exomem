@@ -88,7 +88,16 @@ it with `exomem logs verify`.
 `schema_version`, `sequence`, `prev_hash`, `row_hash`, `ts_utc`, `request_id`,
 `session_id`, `client_name`, `client_version`, `transport`,
 `caller_principal_hash`, `tool`, `arg_names`, `args`, `target_paths`, `outcome`,
-`error_code`, `duration_ms`, `truncated`.
+`error_code`, `duration_ms`, `total_ms`, `request_bytes`, `truncated`.
+
+- **Latency, on every call — read, write, success, refusal.** `duration_ms` is
+  the tool leaf, the number the prose trace and `exomem_tool_duration_ms` have
+  always reported. `total_ms` is the wall clock the caller actually waited,
+  including the content guard and argument normalization, which run *before*
+  the leaf clock starts. When the two diverge the gap is itself the finding: it
+  says the cost was in admission, not in the work. `request_bytes` is the total
+  serialized argument size, so a slow call is interpretable rather than merely
+  slow.
 
 - **`outcome`** is `ok`, `refused`, or `error`. `refused` is a governance
   refusal — the tool wrapper returns an error *envelope* rather than raising, so

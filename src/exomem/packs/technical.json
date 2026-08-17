@@ -47,6 +47,18 @@
       "example": "What failed in the last deployment?"
     }
   ],
+  "suggested_source_kinds": [
+    "article",
+    "paper",
+    "manual-documentation",
+    "session",
+    "dataset-export"
+  ],
+  "suggested_domains": [
+    "software",
+    "equipment",
+    "research"
+  ],
   "primitives": [
     "source",
     "decision",

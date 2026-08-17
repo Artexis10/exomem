@@ -127,3 +127,11 @@ storage-specific tool. Packs may recommend folders, fields, templates, views,
 and review rhythms, but those recommendations never fork core behavior or make a
 taxonomy mandatory. Machine-readable collection blueprints and pack activation
 remain deferred.
+
+Each pack also carries `suggested_source_kinds` and `suggested_domains`. These
+are **discovery hints only** — they make plausible labels visible to an agent
+that has just selected a pack. They are not a permitted set, not a second
+ontology, and not a precondition for using a label: because both axes are open,
+a kind or domain no pack mentions is captured and registered just the same. The
+vault's `_Schema/source-taxonomy.yaml` registry stays the single authority for
+what a label means and where it is filed.

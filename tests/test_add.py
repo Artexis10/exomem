@@ -131,7 +131,30 @@ def test_add_filename_collision_appends_suffix(
     assert r3.path.endswith("2026-05-18-conflict-session-3.md")
 
 
-def test_add_rejects_invalid_source_type(
+def test_add_accepts_an_unfamiliar_but_meaningful_source_type(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """An unseen kind is not an error — it is the open vocabulary working.
+
+    This assertion is the inverse of the one it replaces. The old contract
+    refused anything outside a six-token markdown table, which is what forced
+    clearly classifiable material into `Sources/Other`.
+    """
+    result = add_module.add(
+        vault,
+        source_schema,
+        content="Observations from three site visits.",
+        source_type="field-notebook",
+        title="Hedgerow establishment notes",
+        today=TODAY,
+    )
+    assert result.path == (
+        "Knowledge Base/Sources/Field Notebook/"
+        "2026-05-18-hedgerow-establishment-notes.md"
+    )
+
+
+def test_add_rejects_a_source_type_that_cannot_become_a_safe_key(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     with pytest.raises(add_module.AddError) as exc:
@@ -139,11 +162,12 @@ def test_add_rejects_invalid_source_type(
             vault,
             source_schema,
             content="x",
-            source_type="bogus",
+            source_type="..",
             title="t",
             today=TODAY,
         )
     assert exc.value.code == "INVALID_SOURCE"
+    assert exc.value.missing == ["source_type"]
 
 
 def test_add_rejects_article_without_url(

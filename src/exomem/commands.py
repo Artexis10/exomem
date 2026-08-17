@@ -254,6 +254,66 @@ def _compact_action_pack_guidance(catalogue: dict) -> dict:
     return catalogue
 
 
+def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
+    """Teach the two open source-classification axes and this vault's vocabulary.
+
+    The live vocabulary belongs here rather than in the `capture_source` schema.
+    Bootstrap is already per-vault and stays on this machine, whereas a tool
+    description is serialized to the connected model provider and committed to
+    the repository whenever its fixture is regenerated. The published schema
+    therefore states the contract; this states the current set.
+
+    Compact carries only the contract. The known-vocabulary lists cost more than
+    the whole rest of this block and are discovery convenience, not correctness:
+    the contract already says the listed set is not the permitted one, so an
+    agent that never sees the lists still classifies correctly.
+    """
+    from . import source_taxonomy as source_taxonomy_module
+
+    taxonomy = source_taxonomy_module.load_taxonomy(vault_root)
+    projection: dict = {
+        "contract": (
+            "source_kind is what the artifact IS; domain is what it is ABOUT; "
+            "projects is what work it serves. Kind and domain are open: any "
+            "lowercase slug is accepted, so name what you mean even if unfamiliar."
+        ),
+        "fallback_rule": (
+            f"{source_taxonomy_module.FALLBACK_KIND!r} means the kind could not be "
+            "determined, never that no familiar label matched."
+        ),
+    }
+    if profile != "compact":
+        projection["recall"] = (
+            "ask_memory(source_kinds=, domains=, projects=), alone or combined."
+        )
+        projection["source_kinds_known"] = sorted(taxonomy.kinds)
+        projection["domains_known"] = sorted(taxonomy.domains)
+        projection["exhaustive"] = False
+        projection["tags_rule"] = (
+            "Tags stay secondary labels. Do not use them to carry kind, domain, or "
+            "project, which have their own arguments and their own recall filters."
+        )
+        projection["path_rule"] = (
+            "The location Sources/<Kind>/[<Domain>/] is a deterministic projection of "
+            "this metadata, not the model itself. A captured source keeps its path so "
+            "provenance references stay valid; classification applies to new captures."
+        )
+        projection["registry"] = (
+            source_taxonomy_module.registry_path(vault_root)
+            .relative_to(vault_root)
+            .as_posix()
+        )
+        projection["source_kinds"] = [
+            taxonomy.kinds[key].as_dict() for key in sorted(taxonomy.kinds)
+        ]
+        projection["domains"] = [
+            taxonomy.domains[key].as_dict() for key in sorted(taxonomy.domains)
+        ]
+        if taxonomy.findings:
+            projection["findings"] = list(taxonomy.findings)
+    return projection
+
+
 def op_bootstrap(
     vault_root: Path,
     profile: str = "compact",
@@ -301,6 +361,7 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
     simple_actions = simple_action_catalog(
         selected_packs, available_tools=active_product_names
     )
@@ -550,7 +611,7 @@ def op_bootstrap(
         ),
     }
     payload: dict = {
-        "contract_version": "2026-08-16.1",
+        "contract_version": "2026-08-17.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -620,6 +681,7 @@ def op_bootstrap(
                 "into typed tools; they do not create folders, migrate files, or bypass governance."
             ),
         },
+        "source_taxonomy": source_taxonomy_projection,
         "entity_registry": {
             "types": [
                 {
@@ -715,8 +777,8 @@ def op_bootstrap(
             "post_write": {
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
                 "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
-                "structure_suggestion": "advisory signal on a compiled write that recurring durable material on that page now sits outside its declared scope; present in the default committed response with kind, strength (strong|moderate), reasons, off_scope_units, and cluster_terms",
-                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy",
+                "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': captures keep landing in the 'other' fallback within one domain, so a real kind probably exists",
+                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, offer to classify that pattern on future captures; captured sources stay put.",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
             },
@@ -1024,6 +1086,8 @@ def op_find(
     exclude_file_types: list[str] | None = None,
     categories: list[str] | None = None,
     kinds: list[str] | None = None,
+    source_kinds: list[str] | None = None,
+    domains: list[str] | None = None,
     relations: list[str] | None = None,
     relation_of: str | None = None,
     relation_direction: str = "any",
@@ -1068,6 +1132,10 @@ def op_find(
         exclude_file_types: Drop these kinds from results (same vocabulary).
         categories: Semantic-unit category shortcuts, such as config or rule.
         kinds: Semantic-unit kind shortcuts, such as decision or claim.
+        source_kinds: Source-kind filters — what the artifact IS. Open
+            vocabulary, so any registered or previously used key is valid.
+        domains: Subject-domain filters — what the artifact is ABOUT.
+            Independent of source_kinds and equally open.
         relations: Typed-relation filter — recall pages participating in a typed
             edge of these relations (e.g. supports, contradicts, supersedes).
             OR'd within the list; extension relations roll up to their core
@@ -1298,6 +1366,8 @@ def op_find(
         exclude_file_types=exclude_file_types,
         categories=categories,
         kinds=kinds,
+        source_kinds=source_kinds,
+        domains=domains,
         relations=relations,
         relation_of=relation_of,
         relation_direction=relation_direction,
@@ -1881,50 +1951,100 @@ def op_suggest_relations(
         limit=limit,
     )
 
+def _resolve_source_kind_argument(
+    source_type: str | None, source_kind: str | None
+) -> str:
+    """Collapse the two names for the source-kind axis into one value.
+
+    `source_kind` is the preferred name and `source_type` the original; they are
+    the same axis, so a conflict between them cannot be resolved by preferring
+    one. Refusing is the only honest answer — silently ignoring an explicit
+    argument is worse than a visible error. Neither supplied means unclassified,
+    which resolves to the low-confidence fallback.
+    """
+    supplied_type = (source_type or "").strip()
+    supplied_kind = (source_kind or "").strip()
+    if supplied_type and supplied_kind:
+        from . import source_taxonomy
+
+        try:
+            if source_taxonomy.normalize(
+                supplied_type, axis="source_kind"
+            ) != source_taxonomy.normalize(supplied_kind, axis="source_kind"):
+                raise ValueError(
+                    f"INVALID_SOURCE: source_type {supplied_type!r} and "
+                    f"source_kind {supplied_kind!r} name the same axis with "
+                    f"different values. Supply only one."
+                )
+        except source_taxonomy.TaxonomyError as exc:
+            raise ValueError(f"INVALID_SOURCE: {exc}") from exc
+    return supplied_kind or supplied_type or source_taxonomy_fallback()
+
+
+def source_taxonomy_fallback() -> str:
+    from .source_taxonomy import FALLBACK_KIND
+
+    return FALLBACK_KIND
+
+
 def op_add(
     vault_root: Path,
     source_schema: object,  # SourceSchema; injected + stripped, so kept import-free here
     content: str,
-    source_type: str,
     title: str,
+    source_type: str | None = None,
     slug: str | None = None,
     url: str | None = None,
     tags: list[str] | None = None,
     why_captured: str | None = None,
+    source_kind: str | None = None,
+    domain: str | None = None,
+    projects: list[str] | None = None,
 ) -> dict:
     """Capture raw content as an immutable source page in the Knowledge Base.
 
-    Writes a frontmatter-compliant page to Sources/<Type>/YYYY-MM-DD-<slug>.md
+    Writes a frontmatter-compliant page to Sources/<Kind>/[<Domain>/]YYYY-MM-DD-<slug>.md
     and updates Sources/index.md, the top-level index.md (Recent activity
     + Counts), and log.md. Per SKILL.md rule 7.
 
     Args:
         content: Full text body to capture (markdown / plain text). For
             files or binaries, use the /upload endpoint instead.
-        source_type: One of article, session, book, paper, video, other.
         title: Unicode display title stored in frontmatter and the H1.
+        source_type: What the artifact IS. Same axis as source_kind; supply
+            either. Open vocabulary, not a closed set.
         slug: Optional lowercase ASCII kebab-case filename component.
-        url: Required when source_type is article, paper, or video.
+        url: Required for kinds that declare it, such as article, paper, video.
         tags: Lowercase dash-separated; the server normalizes case/spacing.
         why_captured: One short paragraph on why this is worth keeping.
             Rendered as a leading blockquote in the source body, between
             the `# Source: ...` header and the `## Capture` section.
+        source_kind: What the artifact IS, as a lowercase slug. Preferred name
+            for the same axis as source_type; supplying both with different
+            values is refused.
+        domain: What the artifact is ABOUT, as a lowercase slug. Independent of
+            source_kind and equally extensible.
+        projects: Project keys this source serves. Never affects where it is
+            stored; one source may serve several projects.
 
     Returns:
         {path, warnings}. On schema violation, raises a structured error
         with code=INVALID_SOURCE, the missing fields, and the reason.
     """
     try:
+        resolved_kind = _resolve_source_kind_argument(source_type, source_kind)
         result = add_module.add(
             vault_root,
             source_schema,
             content=content,
-            source_type=source_type,
+            source_type=resolved_kind,
             title=title,
             slug=slug,
             url=url,
             tags=tags,
             why_captured=why_captured,
+            domain=domain,
+            projects=projects,
         )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -4042,6 +4162,8 @@ def op_ask_memory(
     exclude_file_types: list[str] | None = None,
     categories: list[str] | None = None,
     kinds: list[str] | None = None,
+    source_kinds: list[str] | None = None,
+    domains: list[str] | None = None,
     relations: list[str] | None = None,
     relation_of: str | None = None,
     relation_direction: str = "any",
@@ -4082,6 +4204,10 @@ def op_ask_memory(
         exclude_file_types: Optional artifact kinds to exclude.
         categories: Semantic-unit category shortcuts, such as config or rule.
         kinds: Semantic-unit kind shortcuts, such as decision or claim.
+        source_kinds: Source-kind filters — what the artifact IS. Open
+            vocabulary, so any registered or previously used key is valid.
+        domains: Subject-domain filters — what the artifact is ABOUT.
+            Independent of source_kinds and equally open.
         relations: Typed-relation filter — recall pages participating in a typed
             edge of these relations (e.g. supports, contradicts, supersedes),
             OR'd within the list, extensions rolling up to their core parent.
@@ -4123,6 +4249,8 @@ def op_ask_memory(
         exclude_file_types=exclude_file_types,
         categories=categories,
         kinds=kinds,
+        source_kinds=source_kinds,
+        domains=domains,
         relations=relations,
         relation_of=relation_of,
         relation_direction=relation_direction,
@@ -4711,12 +4839,15 @@ def op_capture_source(
     content: str,
     title: str,
     slug: str | None = None,
-    source_type: str = "other",
+    source_type: str | None = None,
     url: str | None = None,
     tags: list[str] | None = None,
     why_captured: str | None = None,
     compile_guidance: bool = False,
     suggested_title: str | None = None,
+    source_kind: str | None = None,
+    domain: str | None = None,
+    projects: list[str] | None = None,
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
@@ -4724,16 +4855,32 @@ def op_capture_source(
     returns a proposal for a future compiled note, without silently converting
     raw provenance into a conclusion.
 
+    Classification is optional and never a precondition for preserving material,
+    but it is what makes a source findable and coherently filed. Two independent
+    axes describe it: what the artifact IS (`source_kind`) and what it is ABOUT
+    (`domain`). Both are open vocabularies.
+
     Args:
         content: Raw source text.
         title: Source title.
         slug: Optional lowercase ASCII kebab-case filename component.
-        source_type: article, session, book, paper, video, or other.
-        url: Required for article, paper, or video sources.
-        tags: Lowercase tags.
+        source_type: What the artifact IS. Same axis as source_kind; supply
+            either one. Open vocabulary, not a closed set.
+        url: Required for kinds that declare it, such as article, paper, video.
+        tags: Lowercase tags. Secondary labels only — do not use them to carry
+            source kind, domain, or project, which have their own arguments.
         why_captured: Short reason this source matters.
         compile_guidance: Return a compilation proposal for the captured source.
         suggested_title: Optional title hint for the compilation proposal.
+        source_kind: What the artifact IS, as a lowercase slug. Preferred name
+            for the same axis as source_type; supplying both with different
+            values is refused. Name the kind you actually mean even when it is
+            unfamiliar; use 'other' only when the kind genuinely cannot be
+            determined, never because no listed label matches.
+        domain: What the artifact is ABOUT, as a lowercase slug, independent of
+            source_kind and equally extensible.
+        projects: Project keys this source serves. Never affects where it is
+            stored; one source may serve several projects.
     """
     source = op_add(
         vault_root,
@@ -4745,6 +4892,9 @@ def op_capture_source(
         url=url,
         tags=tags,
         why_captured=why_captured,
+        source_kind=source_kind,
+        domain=domain,
+        projects=projects,
     )
     out: dict = {"source": source}
     if compile_guidance:
@@ -6725,8 +6875,14 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         ],
     },
     "capture": {
-        "intent": "Capture raw material or proof-bearing text without turning it into a conclusion.",
-        "route": {"tool": "capture_source", "args": {"source_type": "other"}},
+        "intent": (
+            "Capture raw material or proof-bearing text without turning it into a "
+            "conclusion. Pass source_kind, domain and projects; see source_taxonomy."
+        ),
+        # No source_kind is published here on purpose. Naming the fallback as
+        # the route's default argument taught every agent to file clearly
+        # classifiable material as unclassified.
+        "route": {"tool": "capture_source", "args": {}},
         "evidence_route": {"tool": "preserve_evidence", "args": {}},
         "safety": "additive write; Sources and Evidence preserve originals/provenance",
         "advanced": ["transfer_artifact", "compile_source"],

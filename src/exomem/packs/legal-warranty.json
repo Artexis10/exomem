@@ -45,6 +45,17 @@
       "example": "Show the evidence for the landlord dispute."
     }
   ],
+  "suggested_source_kinds": [
+    "invoice-receipt",
+    "contract-legal-document",
+    "official-guidance",
+    "correspondence"
+  ],
+  "suggested_domains": [
+    "legal",
+    "finance",
+    "equipment"
+  ],
   "primitives": [
     "source",
     "evidence",

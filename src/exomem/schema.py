@@ -2,27 +2,30 @@
 
 The schema lives at `<vault>/Knowledge Base/_Schema/`. Two docs matter for the
 MCP's scope:
-- `references/frontmatter.md` — required source-page fields + source_type enum.
+- `references/frontmatter.md` — required source-page fields.
 - `references/page-types.md` — source location + naming convention.
 
 Both are markdown with embedded tables. Parsing is conservative: we extract the
 narrow facts we need; if either doc changes shape and parsing fails, we raise
 loudly at startup so exomem never silently drifts from the canonical schema.
+
+What this module deliberately no longer owns is the **source-kind vocabulary**.
+It used to scrape a closed enum out of one markdown table row, using a token
+pattern that could not express a hyphen — so a multi-word kind such as
+`research-report` was unrepresentable, and every clearly classifiable artifact
+that lacked a listed label was forced into `other`. The vocabulary now lives in
+`source_taxonomy`, where it is open, normalizable, and vault-extensible. This
+module keeps the parts a markdown table can honestly define: which fields are
+required, and where sources live.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .kbdir import kb_dirname
-
-SOURCE_TYPE_FIELD_PATTERN = re.compile(
-    r"\|\s*`source_type`\s*\|\s*yes\s*\|\s*(.+?)\s*\|", re.IGNORECASE
-)
-# Matches each `<enum>` inside the source_type cell, e.g. "`article`, `session`, ...".
-ENUM_TOKEN_PATTERN = re.compile(r"`([a-z]+)`")
 
 # Required fields appear in the source frontmatter section as "| <field> | yes |".
 REQUIRED_FIELD_ROW_PATTERN = re.compile(
@@ -34,11 +37,13 @@ REQUIRED_FIELD_ROW_PATTERN = re.compile(
 class SourceSchema:
     """The narrow slice of schema exomem's `add` tool needs to enforce."""
 
-    source_types: tuple[str, ...]
     required_fields: tuple[str, ...]
-    conditional_url_types: tuple[str, ...]
-    location_pattern: str  # e.g. "Sources/<type>/"
+    location_pattern: str  # e.g. "Sources/<kind>/[<domain>/]"
     naming_pattern: str  # e.g. "YYYY-MM-DD-<slug>.md"
+    #: Retained for callers that report the shipped defaults. This is a
+    #: non-exhaustive sample of the open vocabulary, never a whitelist —
+    #: `validate_source` does not consult it.
+    source_types: tuple[str, ...] = field(default_factory=tuple)
 
 
 class SchemaParseError(RuntimeError):
@@ -71,17 +76,6 @@ def load_source_schema(vault_path: Path) -> SourceSchema:
             f"Couldn't find '### source' section in {frontmatter_doc}"
         )
 
-    enum_match = SOURCE_TYPE_FIELD_PATTERN.search(source_section)
-    if not enum_match:
-        raise SchemaParseError(
-            f"Couldn't extract source_type enum row from {frontmatter_doc}"
-        )
-    enum_values = tuple(ENUM_TOKEN_PATTERN.findall(enum_match.group(1)))
-    if not enum_values:
-        raise SchemaParseError(
-            f"source_type enum row in {frontmatter_doc} had no `<enum>` tokens"
-        )
-
     required = tuple(REQUIRED_FIELD_ROW_PATTERN.findall(source_section))
     if "source_type" not in required:
         raise SchemaParseError(
@@ -101,27 +95,23 @@ def load_source_schema(vault_path: Path) -> SourceSchema:
             f"Missing Location: or Naming: line in {page_types_doc} '## source' section"
         )
 
-    # The frontmatter spec says url is "conditional" — required for some source_types.
-    # The wording in the spec is "required for articles, videos, papers" (plural).
-    # We map to singular enum keys.
-    url_row_match = re.search(r"\|\s*`url`\s*\|\s*conditional\s*\|\s*(.+?)\s*\|", source_section, re.IGNORECASE)
-    if url_row_match:
-        url_note = url_row_match.group(1).lower()
-        conditional = tuple(
-            token
-            for token in ("article", "video", "paper")
-            if f"{token}s" in url_note or token in url_note
-        )
-    else:
-        conditional = ()
-
+    # URL conditionality used to be scraped from prose and hard-coded to three
+    # tokens, which reserved the property to three built-ins. It is now a
+    # per-kind `requires_url` flag in the source-taxonomy registry, so a
+    # user-defined kind can declare it too.
     return SourceSchema(
-        source_types=enum_values,
         required_fields=required,
-        conditional_url_types=conditional,
         location_pattern=location,
         naming_pattern=naming,
+        source_types=_default_kind_sample(),
     )
+
+
+def _default_kind_sample() -> tuple[str, ...]:
+    """The shipped source kinds, as a non-exhaustive sample for reporting."""
+    from .source_taxonomy import builtin_kinds
+
+    return tuple(sorted(builtin_kinds()))
 
 
 def _slice_section(text: str, heading: str, next_heading_prefix: str) -> str | None:
@@ -165,8 +155,16 @@ def validate_source(
     source_type: str,
     title: str,
     url: str | None,
+    requires_url: bool = False,
 ) -> ValidationError | None:
-    """Return a structured error if the proposed `add` call would violate schema."""
+    """Return a structured error if the proposed `add` call would violate schema.
+
+    `source_type` is expected to be an already-resolved canonical key. This
+    function deliberately does **not** check it against a permitted set: the
+    vocabulary is open, and safety is established by `source_taxonomy.normalize`
+    before the value arrives here. `requires_url` is the resolved kind's own
+    declared requirement rather than a property of three hard-coded labels.
+    """
     missing: list[str] = []
     reasons: list[str] = []
 
@@ -176,20 +174,9 @@ def validate_source(
     if not title or not title.strip():
         missing.append("title")
         reasons.append("title is empty")
-    if source_type not in schema.source_types:
-        return ValidationError(
-            code="INVALID_SOURCE",
-            missing=("source_type",),
-            reason=(
-                f"source_type {source_type!r} is not in the schema enum "
-                f"{list(schema.source_types)}"
-            ),
-        )
-    if source_type in schema.conditional_url_types and not url:
+    if requires_url and not url:
         missing.append("url")
-        reasons.append(
-            f"url is required for source_type={source_type} per frontmatter spec"
-        )
+        reasons.append(f"url is required for source_type={source_type}")
 
     if missing:
         return ValidationError(

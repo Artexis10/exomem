@@ -57,7 +57,7 @@ def _snapshot() -> EpistemicStateSnapshot:
             FieldDeclaration(
                 field="cites",
                 status="declared",
-                evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:53",
+                evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:59",
             ),
         ),
         projector=PROJECTOR,

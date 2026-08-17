@@ -127,7 +127,9 @@ hashing sorts keys (Decision 8).
 | `target_paths` | string[] | vault-relative path(s) the call targets, structural |
 | `outcome` | enum | `"ok"` \| `"refused"` \| `"error"` |
 | `error_code` | string \| null | `OpError.code` when refused; exception type when error |
-| `duration_ms` | number | `round((perf_counter()-t0)*1000, 2)`, as the tracer already computes |
+| `duration_ms` | number | the **leaf** call, as the tracer already computes it |
+| `total_ms` | number | the **caller's** wall clock: the whole middleware span, guard and argument normalization included |
+| `request_bytes` | int | total serialized size of the arguments, summed from the shape already computed |
 | `truncated` | bool | true when a bounded field was truncated to keep the row atomic |
 
 ### 3. Where the file lives — outside the vault, outside the lease

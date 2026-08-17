@@ -15,6 +15,9 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
 2. Preserve the raw source first with `capture_source`, `preserve_evidence`, `preserve_artifacts` for file handles, or fallback `transfer_artifact`.
+   Pass `source_kind` and `domain` on a `capture_source` call — both are open
+   vocabularies, so name the label that fits even if it is unfamiliar, and keep
+   `other` for material you genuinely cannot classify.
 3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `ask_memory`.
 4. If the source is worth distilling, use `compile_source` for planning and `remember` for the compiled note — passing the path preserved in step 2 as `sources:`. That is what links the note back to the raw artifact and marks the source processed; omit it and the source stays in the unprocessed backlog forever.
 5. Link related prior notes with `connect_memory(operation="suggest-links")`.

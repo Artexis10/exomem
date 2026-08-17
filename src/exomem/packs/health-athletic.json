@@ -45,6 +45,17 @@
       "example": "What changed after the new protocol?"
     }
   ],
+  "suggested_source_kinds": [
+    "paper",
+    "official-guidance",
+    "dataset-export",
+    "research-report"
+  ],
+  "suggested_domains": [
+    "health",
+    "food",
+    "research"
+  ],
   "primitives": [
     "source",
     "record",

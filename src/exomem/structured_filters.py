@@ -56,6 +56,8 @@ _KNOWN_STRING_FIELDS = frozenset(
         "page.status",
         "page.type",
         "page.file_type",
+        "page.source_kind",
+        "page.domain",
         "unit.category",
         "unit.category_key",
         "unit.kind",
@@ -78,6 +80,12 @@ _PAGE_FIELDS = frozenset(
         "page.speakers",
         "page.file_type",
         "page.updated",
+        # The two open source-classification axes. First-class rather than only
+        # reachable through `page.frontmatter:/...` because they are a primary
+        # way to find a source; page predicates are evaluated in memory over the
+        # parsed page either way, so this costs no table, column, or reindex.
+        "page.source_kind",
+        "page.domain",
     }
 )
 _UNIT_FIELDS = frozenset(
@@ -137,6 +145,8 @@ class FilterShortcuts:
     exclude_file_types: tuple[str, ...] = ()
     categories: tuple[str, ...] = ()
     kinds: tuple[str, ...] = ()
+    source_kinds: tuple[str, ...] = ()
+    domains: tuple[str, ...] = ()
     updated_after: str | None = None
     updated_before: str | None = None
     recency_days: int | None = None
@@ -246,6 +256,8 @@ def compile_filter(
                 "exclude_file_types": active_shortcuts.exclude_file_types,
                 "categories": active_shortcuts.categories,
                 "kinds": active_shortcuts.kinds,
+                "source_kinds": active_shortcuts.source_kinds,
+                "domains": active_shortcuts.domains,
                 "updated_after": active_shortcuts.updated_after,
                 "updated_before": active_shortcuts.updated_before,
                 "recency_days": active_shortcuts.recency_days,
@@ -623,6 +635,11 @@ def page_view(page: Any) -> dict[str, Any]:
         ("type", "type"),
         ("tags", "tags"),
         ("speakers", "speakers"),
+        # `source_type` is the durable frontmatter name for the source-kind
+        # axis; `page.source_kind` is what a caller filters on. One field, two
+        # names — never two competing fields.
+        ("source_type", "source_kind"),
+        ("domain", "domain"),
     ):
         if source_key in frontmatter:
             out[target_key] = frontmatter[source_key]
@@ -1179,6 +1196,8 @@ def _compile_shortcuts(shortcuts: FilterShortcuts, *, state: _ParseState) -> lis
         ("exclude_file_types", "page.file_type", shortcuts.exclude_file_types, True),
         ("categories", "unit.category", shortcuts.categories, False),
         ("kinds", "unit.kind", shortcuts.kinds, False),
+        ("source_kinds", "page.source_kind", shortcuts.source_kinds, False),
+        ("domains", "page.domain", shortcuts.domains, False),
     )
     for shortcut_name, field_name, raw_values, negate in axes:
         if not raw_values:

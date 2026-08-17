@@ -14,7 +14,10 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 
 ## Workflow
 1. Decide whether the material is raw evidence or a compiled conclusion.
-2. Use `capture_source` for raw captured text or source material.
+2. Use `capture_source` for raw captured text or source material. Classify it on
+   two open axes when you can: `source_kind` (what it is) and `domain` (what it
+   is about), plus `projects` for the work it serves. Use `other` only when the
+   kind genuinely cannot be determined, never because no familiar label matches.
 3. Use `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
 4. Use `remember` for distilled conclusions: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
 5. Run `connect_memory(operation="suggest-links")` before writing compiled notes;

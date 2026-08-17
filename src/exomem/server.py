@@ -85,6 +85,14 @@ class CallTraceMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         from .command_surface import mcp_request_context, mcp_request_id, pop_tool_failure
 
+        # The wall clock the *caller* experiences: everything this middleware
+        # does, not just the leaf. `duration_ms` below measures the leaf alone
+        # (it is what the prose trace and `exomem_tool_duration_ms` have always
+        # reported, and changing that would silently redefine a live metric), so
+        # a slow guard or a slow `edit_memory` normalization would sit entirely
+        # outside it. The ledger carries both, and the gap between them is
+        # itself the diagnostic.
+        call_started = time.perf_counter()
         tool_name = _extract_tool_name(context.message)
         request_id = mcp_request_id()
         with mcp_request_context(request_id) as call_token:
@@ -105,6 +113,7 @@ class CallTraceMiddleware(Middleware):
                         tool=tool_name,
                         outcome="refused",
                         duration_ms=round((time.perf_counter() - guard_started) * 1000, 2),
+                        total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                         error_code=_leading_error_code(translation_error),
                         arguments=_extract_tool_args(context.message),
                     )
@@ -150,6 +159,7 @@ class CallTraceMiddleware(Middleware):
                         tool=tool_name,
                         outcome="refused",
                         duration_ms=round((time.perf_counter() - guard_started) * 1000, 2),
+                        total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                         error_code=_leading_error_code(guard_error),
                         arguments=args,
                     )
@@ -200,6 +210,7 @@ class CallTraceMiddleware(Middleware):
                     tool=tool_name,
                     outcome="refused" if failure is not None else "ok",
                     duration_ms=dur,
+                    total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                     error_code=failure.get("code") if failure is not None else None,
                     arguments=ledger_args,
                 )
@@ -217,6 +228,7 @@ class CallTraceMiddleware(Middleware):
                     tool=tool_name,
                     outcome="error",
                     duration_ms=dur,
+                    total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                     error_code=type(exc).__name__,
                     arguments=ledger_args,
                 )
@@ -243,6 +255,7 @@ def _record_ledger_row(
     tool: str,
     outcome: str,
     duration_ms: float,
+    total_ms: float,
     error_code: str | None,
     arguments: dict,
 ) -> None:
@@ -257,6 +270,7 @@ def _record_ledger_row(
             tool=tool,
             outcome=outcome,
             duration_ms=duration_ms,
+            total_ms=total_ms,
             error_code=error_code,
             arguments=arguments,
             caller_principal_hash=mcp_retry_scope(),

@@ -1,0 +1,41 @@
+# Source-taxonomy vocabulary for captured sources.
+#
+# Two independent axes: `source_kinds` is what an artifact IS, `domains`
+# is what it is ABOUT. Both are OPEN — any slug-shaped key is accepted and
+# auto-registers here on first use. Exomem ships useful defaults in code; this
+# file records what your vault added, and lets you override how any key is
+# displayed or where it is filed.
+#
+# Per entry: label (display), path_label (the Sources/ directory segment),
+# description, aliases, status (active|deprecated), replaced_by, requires_url.
+#
+# You rarely need to touch this. Capture with the label you actually mean and
+# Exomem writes the entry for you. Edit it when you want a nicer display name, a
+# different folder, or to retire a key:
+#
+#   source_kinds:
+#     research-report:
+#       path_label: Investigations    # file them under Sources/Investigations/
+#     field-notebook:
+#       label: Field notebook
+#       aliases: [fieldnotes]
+#     memo:
+#       status: deprecated
+#       replaced_by: correspondence
+#
+#   domains:
+#     project-alpha-ops:
+#       label: Project Alpha operations
+#
+# Shipped kinds include article, session, book, paper, video, research-report,
+# official-guidance, correspondence, invoice-receipt, contract-legal-document,
+# dataset-export, manual-documentation, webpage-snapshot, and other. Shipped
+# domains include travel, health, finance, legal, equipment, software,
+# photography, media, food, research, and business. Neither list is the
+# permitted set — they are defaults.
+#
+# `other` is a low-confidence fallback. It means "the kind could not be
+# determined", never "there is no label for this".
+schema_version: 1
+source_kinds: {}
+domains: {}
