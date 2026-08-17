@@ -387,10 +387,40 @@ def edit(
 # ---------------- path resolution ----------------
 
 
+def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
+    """The vault-relative page the caller addressed, iff it exists on disk under
+    the vault root but outside ``Knowledge Base/`` — else ``None``.
+
+    Lets `_resolve` tell "you addressed a real page outside the governed root"
+    apart from "no such page". It leaks nothing the read side would not already
+    surface: it only confirms a vault-relative path `get_page` itself resolves,
+    and never a path that escapes the vault. Extension handling mirrors
+    `_resolve` so the two agree on what "the same page" means.
+    """
+    if given.startswith(kb_prefix()):
+        return None  # caller explicitly addressed KB/ — a genuine miss stays one
+    rel = given if given.endswith(".md") else given + ".md"
+    candidate = vault_root / rel
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(vault_root.resolve())  # must stay inside the vault
+    except (ValueError, OSError):
+        return None
+    try:
+        resolved.relative_to(kb_root(vault_root).resolve())
+        return None  # already under the governed root — not this case
+    except ValueError:
+        pass
+    # `resolved` has followed symlinks and been confirmed under vault_root
+    # above, so stat the real target rather than the lexical candidate.
+    return rel if resolved.is_file() else None
+
+
 def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     if not path or not path.strip():
         raise EditError(code="INVALID_PATH", missing=["path"], reason="path is empty")
-    rel = path.strip().replace("\\", "/").lstrip("/")
+    given = path.strip().replace("\\", "/").lstrip("/")
+    rel = given
     if not rel.startswith(kb_prefix()):
         rel = kb_prefix() + rel
     if not rel.endswith(".md"):
@@ -406,6 +436,26 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
             reason=f"path escapes {kb_prefix()}: {e}",
         ) from None
     if not candidate.exists():
+        # The read side (`get_page`) accepts a vault-relative path and will read
+        # a page living OUTSIDE the governed Knowledge Base/ root. Governed edits
+        # re-root every bare path under Knowledge Base/, so a caller re-using
+        # such a path here gets a re-rooted candidate that does not exist. A
+        # plain NOT_FOUND would then name a path the caller never gave and
+        # assert the page is missing when it demonstrably exists — a typo and an
+        # outside-the-root refusal become indistinguishable (issue #599). Detect
+        # that case and refuse honestly; the governance model is intentional, so
+        # we still don't write outside the root.
+        outside = _existing_page_outside_kb(vault_root, given)
+        if outside is not None:
+            raise EditError(
+                code="OUTSIDE_GOVERNED_ROOT",
+                missing=["path"],
+                reason=(
+                    f"page exists at {outside} but is outside {kb_prefix()}"
+                    f" — exomem only edits governed content under {kb_prefix()};"
+                    " move it under the governed root or address it there"
+                ),
+            )
         raise EditError(
             code="NOT_FOUND",
             missing=["path"],
