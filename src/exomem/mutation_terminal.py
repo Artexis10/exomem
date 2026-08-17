@@ -331,19 +331,28 @@ _STRUCTURE_STRENGTHS = frozenset({"strong", "moderate"})
 _MAX_STRUCTURE_REASONS = 8
 _MAX_STRUCTURE_TERMS = 6
 _MAX_STRUCTURE_TOKEN_CHARS = 64
+#: Advisory kind emitted by the capture path. Its payload names the domain the
+#: fallback captures share, not the off-scope units a compiled write reports.
+_SOURCE_CLASSIFICATION_KIND = "source_classification_debt"
 
 
 def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
-    """Lift one advisory structural suggestion out of a compiled-write leaf.
+    """Lift one advisory structural suggestion out of a write leaf.
 
-    Compiled creations carry it under `creation`, compiled edits under `semantic`.
-    The shape is re-validated here rather than trusted, so a malformed or oversized
-    advisory is dropped instead of widening the wire contract.
+    Compiled creations carry it under `creation`, compiled edits under `semantic`,
+    and a source capture carries it under `source`. The shape is re-validated
+    here rather than trusted, so a malformed or oversized advisory is dropped
+    instead of widening the wire contract.
+
+    Each advisory kind declares the payload it is allowed to carry. Adding a kind
+    therefore extends these bounds rather than bypassing them — the alternative,
+    passing an unvalidated body through, is how an advisory channel turns into an
+    arbitrary one.
     """
     if not isinstance(leaf, Mapping):
         return None
-    for container_key in ("creation", "semantic"):
-        container = leaf.get(container_key)
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
         if not isinstance(container, Mapping):
             continue
         value = container.get("structure_suggestion")
@@ -352,25 +361,30 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
         kind = value.get("kind")
         strength = value.get("strength")
         reasons = value.get("reasons")
-        terms = value.get("cluster_terms")
-        units = value.get("off_scope_units")
         if not isinstance(kind, str) or not kind or len(kind) > _MAX_STRUCTURE_TOKEN_CHARS:
             continue
         if strength not in _STRUCTURE_STRENGTHS:
             continue
-        if type(units) is not int or units < 0:
-            continue
         if not _bounded_tokens(reasons, _MAX_STRUCTURE_REASONS):
+            continue
+        common = {"kind": kind, "strength": strength, "reasons": list(reasons)}
+        if kind == _SOURCE_CLASSIFICATION_KIND:
+            domain = value.get("domain")
+            captures = value.get("fallback_captures")
+            if not isinstance(domain, str) or not 0 < len(domain) <= (
+                _MAX_STRUCTURE_TOKEN_CHARS
+            ):
+                continue
+            if type(captures) is not int or captures < 0:
+                continue
+            return {**common, "domain": domain, "fallback_captures": captures}
+        terms = value.get("cluster_terms")
+        units = value.get("off_scope_units")
+        if type(units) is not int or units < 0:
             continue
         if not _bounded_tokens(terms, _MAX_STRUCTURE_TERMS):
             continue
-        return {
-            "kind": kind,
-            "strength": strength,
-            "reasons": list(reasons),
-            "off_scope_units": units,
-            "cluster_terms": list(terms),
-        }
+        return {**common, "off_scope_units": units, "cluster_terms": list(terms)}
     return None
 
 

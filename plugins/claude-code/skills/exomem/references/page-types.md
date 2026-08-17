@@ -11,10 +11,10 @@ governed rich kind is the alternative when richer semantics are intended.
 
 ## source
 
-**Location:** `Sources/Articles/`, `Sources/Sessions/`, or `Sources/Books/` (also `Sources/Papers/`, `Sources/Videos/`, `Sources/Other/`)
+**Location:** `Sources/<Kind>/` — the directory is a *projection* of `source_type`, with `domain` adding one level below it when present, e.g. `Sources/Articles/`, `Sources/Papers/`, `Sources/Reports/Travel/`, `Sources/Invoices/Equipment/`, `Sources/Other/`. The semantic metadata is authoritative; the folder is derived from it and is never deeper than `Sources/<Kind>/<Domain>/`.
 **Naming:** `YYYY-MM-DD-<slug>.md` (e.g., `2026-05-09-retrieval-patterns.md`)
-**Mutability:** Append-only. Never edit after creation.
-**Required frontmatter:** `type: source`, `source_type`, `captured`, `url` (if applicable), `tags`, `ingested_into` (initially empty list, updated when compiled into notes).
+**Mutability:** Append-only. Never edit after creation. A source stays at the path it was captured at, so provenance references stay valid; new classification rules apply to new captures only.
+**Required frontmatter:** `type: source`, `source_type`, `captured`, `url` (if applicable), `tags`, `ingested_into` (initially empty list, updated when compiled into notes). `domain` and `projects` are optional.
 
 **Content shape:**
 
@@ -22,6 +22,8 @@ governed rich kind is the alternative when richer semantics are intended.
 ---
 type: source
 source_type: article
+domain: software
+projects: [project-alpha]
 captured: 2026-05-09
 url: https://example.com/retrieval-patterns
 tags: [retrieval, knowledge-base]

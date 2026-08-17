@@ -45,6 +45,19 @@
       "example": "Find the documents for the trip."
     }
   ],
+  "suggested_source_kinds": [
+    "invoice-receipt",
+    "official-guidance",
+    "correspondence",
+    "manual-documentation",
+    "research-report"
+  ],
+  "suggested_domains": [
+    "travel",
+    "finance",
+    "equipment",
+    "health"
+  ],
   "primitives": [
     "source",
     "record",

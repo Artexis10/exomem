@@ -39,6 +39,8 @@ PACK_REQUIRED_FIELDS: frozenset[str] = frozenset(
         "default_block_types",
         "suggested_folders",
         "suggested_workflows",
+        "suggested_source_kinds",
+        "suggested_domains",
         "primitives",
         "actions",
         "examples",
@@ -114,6 +116,11 @@ class KnowledgePack:
     default_block_types: tuple[str, ...]
     suggested_folders: tuple[str, ...]
     suggested_workflows: tuple[dict[str, str], ...]
+    #: Source-classification labels this pack makes discoverable. Advisory
+    #: discovery hints only — they resolve against the one source-taxonomy
+    #: vocabulary, and selecting a pack creates and reserves nothing.
+    suggested_source_kinds: tuple[str, ...]
+    suggested_domains: tuple[str, ...]
     primitives: tuple[str, ...]
     actions: tuple[str, ...]
     examples: tuple[str, ...]
@@ -245,6 +252,30 @@ def validate_pack_dict(raw: dict[str, Any]) -> KnowledgePack:
             f"unsupported default_entity_types value(s): {bad_entity_types}",
         )
 
+    def _taxonomy_tuple(field: str) -> tuple[str, ...]:
+        """Validate suggested labels as canonical taxonomy keys.
+
+        A pack may name a label Exomem does not ship — the vocabulary is open —
+        but it may not name one that could never become a canonical key, because
+        an unusable suggestion is only ever noise.
+        """
+        from .source_taxonomy import TaxonomyError, normalize
+
+        values = _string_tuple(field)
+        for value in values:
+            try:
+                if normalize(value, axis=field) != value:
+                    raise PackValidationError(
+                        "INVALID_TAXONOMY_LABEL",
+                        f"{field!r} entry {value!r} is not already a canonical key",
+                    )
+            except TaxonomyError as exc:
+                raise PackValidationError("INVALID_TAXONOMY_LABEL", str(exc)) from exc
+        return values
+
+    suggested_source_kinds = _taxonomy_tuple("suggested_source_kinds")
+    suggested_domains = _taxonomy_tuple("suggested_domains")
+
     return KnowledgePack(
         id=_nonempty_string("id"),
         name=_nonempty_string("name"),
@@ -257,6 +288,8 @@ def validate_pack_dict(raw: dict[str, Any]) -> KnowledgePack:
         default_entity_types=default_entity_types,
         default_block_types=_string_tuple("default_block_types"),
         suggested_folders=_string_tuple("suggested_folders"),
+        suggested_source_kinds=suggested_source_kinds,
+        suggested_domains=suggested_domains,
         suggested_workflows=_workflow_tuple("suggested_workflows"),
         primitives=primitives,
         actions=actions,
@@ -359,6 +392,8 @@ def _pack_summaries(pack_ids: tuple[str, ...]) -> list[dict]:
             "agent_instructions": pack.agent_instructions,
             "default_entity_types": list(pack.default_entity_types),
             "suggested_workflows": list(pack.suggested_workflows),
+            "suggested_source_kinds": list(pack.suggested_source_kinds),
+            "suggested_domains": list(pack.suggested_domains),
             "actions": list(pack.actions),
         }
         for pack in (_PACK_BY_ID[pack_id] for pack_id in pack_ids)

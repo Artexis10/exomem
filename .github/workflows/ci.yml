@@ -313,6 +313,7 @@ jobs:
           src/exomem/structure_promotion.py
           src/exomem/traversal_profiles.py
           src/exomem/epistemic_graph.py
+          src/exomem/source_taxonomy.py
           scripts/e2e_product_loop.py
           scripts/e2e_http_server.py
           scripts/smoke-media-pipeline.py
@@ -322,6 +323,7 @@ jobs:
           tests/test_relation_registry.py
           tests/test_structure_promotion.py
           tests/test_traversal_profiles.py
+          tests/test_source_taxonomy.py
           --select E,F,I,B,UP,BLE
       - name: Targeted contract type check
         run: >-
@@ -334,6 +336,7 @@ jobs:
           src/exomem/structure_promotion.py
           src/exomem/traversal_profiles.py
           src/exomem/epistemic_graph.py
+          src/exomem/source_taxonomy.py
 
   gate:
     name: required CI gate
