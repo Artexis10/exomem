@@ -3221,6 +3221,7 @@ class EpistemicGraphIndex:
             published = self._mark_incremental_available(
                 before,
                 checkpoint=checkpoint,
+                graph_checkpoint=self._drained_graph_checkpoint(batch),
                 source_versions=indexed_versions,
             )
         return {
@@ -3228,6 +3229,45 @@ class EpistemicGraphIndex:
             "published": published,
             "indexed": tuple(sorted(indexed_versions)),
         }
+
+    def _drained_graph_checkpoint(
+        self, batch: list[Path]
+    ) -> graph_sync.GraphSyncCheckpoint | None:
+        """The committed generation this pass may acknowledge, if it covered it.
+
+        Repairing the pages is only half of convergence. Until the graph_sync
+        acknowledgement moves, every reader still sees a stale epoch, the
+        sidecar stays unavailable, and the next dispatch schedules the
+        whole-vault rebuild regardless -- which would leave the queue as pure
+        overhead beside the expensive path rather than a replacement for it.
+
+        Acknowledging is also the only irreversible claim this path makes, so
+        the bar is coverage of the *whole* committed path set, not of whatever
+        subset this drain happened to dequeue. A `limit`-truncated batch, or a
+        batch left over from an older generation, covers nothing and
+        acknowledges nothing; the later drain that does cover it acknowledges
+        then. `scope == "full"` never qualifies -- that marker exists precisely
+        because the change was too large to enumerate, so no path list can
+        prove it converged.
+
+        Coverage is membership in the *processed* batch rather than in the
+        indexed set: a deletion named by the checkpoint is processed by
+        removing its rows and has no source bytes to index, so an
+        indexed-set test would stall every generation containing one forever.
+        That the indexed pages did not move under the pass is a separate
+        proof, carried by `source_versions`.
+        """
+        committed = graph_sync.read_checkpoint(self.vault_root)
+        if committed is None or committed.scope != "paths":
+            return None
+        processed = {
+            rel
+            for path in batch
+            if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+        }
+        required = {rel for rel, _content_hash in committed.paths}
+        required.update(committed.created_paths)
+        return committed if required <= processed else None
 
     def delete_paths(self, rel_paths: list[str]) -> int:
         with self._mutation_coordinator.hold(

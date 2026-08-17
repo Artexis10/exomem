@@ -503,3 +503,33 @@ def test_an_ordinary_edit_does_not_pay_for_topology_repair(
     index_sync.drain_deferred_work(vault)
 
     assert scans == [], "a plain edit triggered the corpus scan reserved for topology changes"
+
+
+def test_a_drain_retires_the_generation_it_converged(vault: Path) -> None:
+    """Converging the content is only half the job; the epoch has to learn it.
+
+    The graph_sync acknowledgement is what tells every later reader that the
+    committed generation is covered. A drain that repairs the pages but leaves
+    the acknowledgement behind converges nothing that anybody can observe: the
+    epoch stays stale, `available()` stays false, and the next dispatch takes
+    the whole-vault rebuild anyway. The queue would then be pure overhead --
+    the expensive path still runs, and now there is a second store to keep.
+    """
+    write = vault / PAGE_C
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(write, _page("C", "C cites [[queue-a]]."))],
+        vault_root=vault,
+        post_commit_fanout=False,
+    )
+    _seed_live_freshness(vault)
+    required = graph_sync.read_checkpoint(vault)
+    assert required is not None
+    assert deferred_index.snapshot_graph(vault), "the write left no graph debt to drain"
+
+    index_sync.drain_deferred_work(vault)
+
+    assert graph_sync.status(vault) == {
+        "state": "current",
+        "generation": required.generation,
+    }
+    assert EpistemicGraphIndex(vault).available()

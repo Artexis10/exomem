@@ -78,8 +78,16 @@ _GRAPH_QUIESCE_TIMEOUT_SECONDS = 30.0
 
 
 def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -> None:
-    """Join every graph rebuild still running, and say so if one will not stop."""
-    deadline = time.monotonic() + timeout
+    """Join every graph rebuild still running, and say so if one will not stop.
+
+    The clock is read only once there is something to wait for. This is autouse
+    teardown, so it runs after *every* test, and a test is entitled to replace
+    `time.monotonic` with a scripted sequence of its own -- one does. Charging
+    the empty case a clock read exhausted that sequence and failed the test in
+    teardown with `generator raised StopIteration`, from a fixture that had
+    nothing to drain.
+    """
+    deadline: float | None = None
     while True:
         alive = [
             thread
@@ -88,6 +96,8 @@ def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS
         ]
         if not alive:
             return
+        if deadline is None:
+            deadline = time.monotonic() + timeout
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeError(

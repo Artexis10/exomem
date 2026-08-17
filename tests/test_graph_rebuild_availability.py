@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import freshness, graph_sync, runtime_readiness
+from exomem import deferred_index, freshness, graph_sync, runtime_readiness
 from exomem import mutation_lock as mutation_lock_module
 from exomem import reconcile as reconcile_module
 from exomem import vault as vault_module
@@ -961,9 +961,17 @@ def test_immediate_checkpoint_successor_refreshes_without_full_rebuild(
     assert graph_sync.status(tmp_path)["state"] == "current"
 
 
-def test_failed_incremental_proof_registers_off_boundary_work_without_rebuilding(
+def test_failed_incremental_proof_queues_the_affected_paths_without_rebuilding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A failed proof records its debt durably, and records it proportionally.
+
+    The guarantee here has always been two-sided: never rebuild the vault under
+    writer authority, and never drop the work. `converge-graph-incrementally`
+    changes only *where* the second half is recorded. A whole-vault rebuild
+    registration used to be the receipt; the durable dirty-path queue is now,
+    and it names the affected paths instead of standing in for all of them.
+    """
     from exomem.epistemic_graph import EpistemicGraphIndex
 
     note = tmp_path / "Knowledge Base/Notes/Insights/deferred.md"
@@ -991,7 +999,10 @@ def test_failed_incremental_proof_registers_off_boundary_work_without_rebuilding
 
     assert report["deferred"] == 1
     assert rebuilds == 0
-    assert registrations == [required]
+    assert registrations == []
+    assert [receipt.rel_path for receipt in deferred_index.snapshot_graph(tmp_path)] == [
+        note.relative_to(tmp_path).as_posix()
+    ]
 
 
 def test_no_checkpoint_or_paths_skips_graph_fanout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

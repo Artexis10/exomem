@@ -2521,8 +2521,14 @@ def drain_active_rebuilds(timeout: float = _EXIT_DRAIN_SECONDS) -> bool:
     So the boundary is process lifetime, not the write path. Returns whether
     everything drained, so a caller can say so rather than exit silently on a
     rebuild it abandoned.
+    Reads the clock only once it has something to wait for. That is not a
+    micro-optimization: this runs from an autouse teardown fixture on every test
+    in the suite, and a test is entitled to replace `time.monotonic` with a
+    scripted sequence for its own purposes. Charging the empty case a clock read
+    made one such test fail in teardown with `generator raised StopIteration`,
+    from a fixture that had nothing to drain.
     """
-    deadline = time.monotonic() + timeout
+    deadline: float | None = None
     while True:
         alive = [
             thread
@@ -2531,6 +2537,8 @@ def drain_active_rebuilds(timeout: float = _EXIT_DRAIN_SECONDS) -> bool:
         ]
         if not alive:
             return True
+        if deadline is None:
+            deadline = time.monotonic() + timeout
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False

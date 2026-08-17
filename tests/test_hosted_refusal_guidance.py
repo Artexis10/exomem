@@ -15,13 +15,13 @@ guarantee holds while an expected refusal becomes actionable.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
+
+from temporary_vault import temporary_vault
 
 from exomem import commands, find, schema, semantic_authoring, server_hosted
 from exomem.cli_ops import error_dict
 from exomem.init import init_vault
-from temporary_vault import temporary_vault
 
 
 def _error_block(code: str) -> dict:

@@ -32,6 +32,7 @@ def test_format_result_identifies_the_publication_operation_and_scale_ratio() ->
             "trials": 5,
             "request": {"median_ms": 32_000.0, "p95_ms": 33_000.0},
             "publication_hold": {"median_ms": 12.0, "p95_ms": 15.0},
+            "drain": {"median_ms": 200.0, "p95_ms": 250.0},
         },
         hold_ratio=1.25,
     )
@@ -39,6 +40,10 @@ def test_format_result_identifies_the_publication_operation_and_scale_ratio() ->
     assert "FINAL canonical publication hold" in output
     assert "operation=epistemic_graph_publish_rebuild" in output
     assert "2000/500 hold median ratio=1.25x" in output
+    # The comparison this change exists to make: whole-vault rebuild against
+    # proportional drain, same size, same box, same run.
+    assert "drain median/p95=200.0/250.0ms" in output
+    assert "160.0x cheaper" in output
 
 
 def test_publication_hold_rejects_timing_from_any_other_operation() -> None:

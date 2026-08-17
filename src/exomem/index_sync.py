@@ -760,8 +760,24 @@ def _drain_graph_work(
     The full-rebuild marker is checked first and drains the whole queue with it:
     a batch too large to enumerate is the one case where re-walking the vault is
     cheaper than the list of what changed.
+
+    `limit` bounds this queue rather than being split with the others. Sharing
+    one budget would mean either starving graph work behind full and semantic
+    work -- and graph latency is the one a reader feels -- or reshuffling the
+    tuned split between those two. The overshoot is one queue's share per tick,
+    bounded and small; the alternative is a queue that never drains on a busy
+    vault.
+
+    An incoherent graph epoch refuses the whole branch. Per-path repair is
+    repair *against a lineage*, so applying it to one whose lineage cannot be
+    classified would write plausible rows into an untrustworthy sidecar. The
+    work stays queued and a rebuild recovers it.
     """
-    from . import epistemic_graph
+    from . import epistemic_graph, graph_sync
+
+    if graph_sync.classify_epoch(vault_root).kind not in {"legacy", "coherent"}:
+        log.warning("deferred graph drain skipped; graph epoch is not coherent")
+        return 0
 
     pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
     receipts = deferred_index.snapshot_graph(
@@ -790,9 +806,14 @@ def _drain_graph_work(
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
         report = {}
     if report.get("requires_rebuild"):
-        deferred_index.mark_graph_full_rebuild(
-            vault_root, generation=_graph_marker_generation(vault_root)
-        )
+        # Deliberately not escalated to a rebuild marker. Every condition that
+        # produces this is transient -- no sidecar yet, no live recall registry,
+        # no resolver -- and raising a marker would convert a moment's
+        # unreadiness into a guaranteed whole-vault pass, which is the cost this
+        # change exists to stop paying. The work stays queued; the next drain
+        # retries, and the paths that genuinely require a rebuild reach one
+        # through the checkpoint's own full-scope marker.
+        log.info("deferred graph drain deferred; vault not ready for incremental repair")
         return 0
     covered = set(report.get("indexed", ()))
     if covered:
@@ -817,14 +838,6 @@ def _drain_graph_work(
             log.warning("deferred graph receipt incomplete; work remains queued")
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
     return processed
-
-
-def _graph_marker_generation(vault_root: Path) -> int:
-    """The generation a rebuild marker should carry when a drain escalates."""
-    from . import graph_sync
-
-    checkpoint = graph_sync.read_checkpoint(vault_root)
-    return 0 if checkpoint is None else int(checkpoint.generation)
 
 
 def drain_deferred_work(
