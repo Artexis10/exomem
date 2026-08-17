@@ -43,6 +43,16 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
             "EXOMEM_DISABLE_FILE_WATCHER": "1",
             "EXOMEM_DISABLE_MODE_WATCH": "1",
             "EXOMEM_CONFIG_PATH": str(home / "exomem-config.json"),
+            # Logs are the one piece of process state `resolve_log_dir()` puts
+            # somewhere machine-global rather than under HOME (#569), so
+            # isolating HOME is not enough: an installed server started here
+            # opens the same `exomem.log` as any exomem service already running
+            # on this machine, and on Windows the second opener gets EACCES and
+            # the whole run dies at `initialize` with "Connection closed". CI
+            # never sees it because nothing else is running there; a developer
+            # box running the service sees it every time. Isolate the log root
+            # for the same reason the vault and config are isolated.
+            "EXOMEM_LOG_DIR": str(home / "logs"),
             "PYTHONUTF8": "1",
         }
     )
@@ -1512,17 +1522,29 @@ async def _stdio_session(
                     await _records_restart_session(client, state, timeout)
                 await _manual_records_session(client, state, timeout)
                 await _planning_restart_session(client, state, timeout)
-                from exomem import epistemic_graph
-
                 graph_status = reconcile.get("graph_status")
-                graph_available = epistemic_graph.EpistemicGraphIndex(
-                    Path(env["EXOMEM_VAULT_PATH"])
-                ).available()
-                if graph_status not in {"current", "refreshed"} or not graph_available:
+                if graph_status not in {"current", "refreshed"}:
                     raise RuntimeError(
                         "deleted graph sidecar was not rebuilt after restart: "
-                        f"status={graph_status!r}, available={graph_available!r}"
+                        f"status={graph_status!r}"
                     )
+                # `reconcile` above is captured well before this point, and the
+                # records/manual/planning sessions in between write repeatedly.
+                # Availability is vault-global, so every one of those clears it
+                # until the rebuild republishes -- and rebuilds no longer finish
+                # inside the write that caused them. So `reconcile`'s own
+                # availability flag says nothing by the time we read it here: it
+                # describes the graph as of the reconcile, several writes ago.
+                # What reconcile is responsible for is rebuilding the deleted
+                # sidecar, and `graph_status` above proves that unconditionally.
+                # That the *later* writes also converge is a separate claim, and
+                # the only honest way to assert it is to poll the server that is
+                # doing the rebuilding.
+                await _await_graph_convergence(
+                    client,
+                    relation_ref=state["relation_ref"],
+                    timeout=timeout,
+                )
     return state
 
 
