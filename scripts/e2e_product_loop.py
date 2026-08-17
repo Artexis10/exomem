@@ -1634,9 +1634,31 @@ def _http_json(
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, json.loads(response.read().decode("utf-8"))
+            return response.status, _decode_json(response.read(), url=url, status=response.status)
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read().decode("utf-8"))
+        return exc.code, _decode_json(exc.read(), url=url, status=exc.code)
+
+
+def _decode_json(raw: bytes, *, url: str, status: int) -> dict[str, Any]:
+    """Parse a response body, reporting the body itself when it is not JSON.
+
+    A bare `JSONDecodeError` here says only "column 1 char 0" and throws the
+    server's actual complaint away -- which is the half of the failure worth
+    reading, and it is not recoverable afterwards because the harness tears its
+    temporary vault, home and logs down on the way out.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"{_redacted_url(url)} returned {status} with a non-JSON body: {text[:2000]!r}"
+        ) from error
+
+
+def _redacted_url(url: str) -> str:
+    """Drop any query string so a token in one cannot reach the failure output."""
+    return url.split("?", 1)[0]
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
