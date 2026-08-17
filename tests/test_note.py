@@ -152,7 +152,7 @@ def test_note_feedback_surfaces_unregistered_relation_promotion_route(
     )
 
 
-def test_note_feedback_surfaces_relation_debt_without_blocking_write(vault: Path) -> None:
+def test_draft_page_is_exempt_from_relation_debt_feedback(vault: Path) -> None:
     result = note_module.note(
         vault,
         content="## Finding\n\nA durable but currently isolated conclusion.\n",
@@ -162,8 +162,10 @@ def test_note_feedback_surfaces_relation_debt_without_blocking_write(vault: Path
         today=TODAY,
     )
 
-    assert result.write_feedback["relations"]["relation_debt"] is True
-    assert any("suggest-relations" in action for action in result.write_feedback["next_actions"])
+    assert result.write_feedback["relations"]["relation_debt"] is False
+    assert not any(
+        "suggest-relations" in action for action in result.write_feedback["next_actions"]
+    )
 
 
 def test_note_direct_leaf_canonicalizes_reviewed_none_hyphen_alias(vault: Path) -> None:
