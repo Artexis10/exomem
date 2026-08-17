@@ -700,11 +700,11 @@ def op_bootstrap(
             },
             "preflight": {
                 "connect_memory": "standard read-only suggest-links/suggest-relations check before a compiled note write",
-                "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page",
+                "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page; a write advisory carries a review ref and fingerprint so an exact dismissed or unexpired snoozed signal stays quiet until the counterpart changes or the written page changes the detected signal class",
             },
             "post_write": {
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
-                "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
+                "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
                 "structure_suggestion": "advisory signal on a compiled write that recurring durable material on that page now sits outside its declared scope; present in the default committed response with kind, strength (strong|moderate), reasons, off_scope_units, and cluster_terms",
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
@@ -5260,6 +5260,15 @@ def op_triage_memory(
         expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
             the write and asks the caller to refresh.
     """
+    if corpus_aware_module.is_write_advisory_ref(ref):
+        return corpus_aware_module.triage_write_advisory(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
     if adoption_proposals_module.is_adoption_ref(ref):
         _refuse_pairless_stance(ref, action)
         return adoption_proposals_module.triage(

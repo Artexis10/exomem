@@ -238,8 +238,9 @@ def test_detect_contradictions_inverted_band_disabled(vault, monkeypatch) -> Non
 
 
 def test_note_surfaces_overlap_warning(vault, _no_embed_writes, monkeypatch) -> None:
+    candidate_path = _seed_md(vault, "Notes/Insights/x.md", type_="insight")
     cand = corpus_aware.DupCandidate(
-        path="Knowledge Base/Notes/Insights/x", title="X", cosine=0.86
+        path=candidate_path, title="X", cosine=0.86
     )
     monkeypatch.setattr(corpus_aware, "detect_duplicates", lambda *a, **k: [])
     monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [cand])
@@ -257,8 +258,9 @@ def test_note_surfaces_overlap_warning(vault, _no_embed_writes, monkeypatch) -> 
 def test_add_surfaces_overlap_warning(
     vault, source_schema, _no_embed_writes, monkeypatch
 ) -> None:
+    candidate_path = _seed_md(vault, "Notes/Insights/x.md", type_="insight")
     cand = corpus_aware.DupCandidate(
-        path="Knowledge Base/Notes/Insights/x", title="X", cosine=0.86
+        path=candidate_path, title="X", cosine=0.86
     )
     monkeypatch.setattr(corpus_aware, "detect_duplicates", lambda *a, **k: [])
     monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [cand])
@@ -268,11 +270,59 @@ def test_add_surfaces_overlap_warning(
     assert any("overlaps active note" in w for w in res.warnings), res.warnings
 
 
+def test_add_path_composes_declared_rival_filter(
+    vault, source_schema, _no_embed_writes, monkeypatch
+) -> None:
+    candidate_path = _seed_md(vault, "Sources/Other/rival.md", type_="source")
+    candidate = corpus_aware.DupCandidate(
+        path=candidate_path, title="Rival", cosine=0.96
+    )
+    monkeypatch.setattr(corpus_aware, "detect_duplicates", lambda *a, **k: [candidate])
+    monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "exomem.contradiction_stance.DeclaredPairFilter",
+        lambda *args, **kwargs: lambda _path: True,
+    )
+
+    result = add_module.add(
+        vault,
+        source_schema,
+        content="Intentional rival source.",
+        source_type="other",
+        title="New Rival Capture",
+    )
+
+    assert not any("near-duplicate" in warning for warning in result.warnings)
+
+
+def test_add_commits_when_post_commit_advisory_emission_fails(
+    vault, source_schema, _no_embed_writes, monkeypatch
+) -> None:
+    monkeypatch.setattr(corpus_aware, "detect_duplicates", lambda *a, **k: [])
+    monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [])
+    monkeypatch.setattr(
+        corpus_aware,
+        "emit_write_advisory_groups",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("broken state")),
+    )
+
+    result = add_module.add(
+        vault,
+        source_schema,
+        content="Committed even without advisory state.",
+        source_type="other",
+        title="Fail-open Capture",
+    )
+
+    assert (vault / result.path).is_file()
+
+
 def test_edit_body_change_surfaces_overlap(vault, _no_embed_writes, monkeypatch) -> None:
     target = _seed_md(vault, "Notes/Insights/editable.md", type_="insight")
     find_module.clear_cache()
+    candidate_path = _seed_md(vault, "Notes/Insights/x.md", type_="insight")
     cand = corpus_aware.DupCandidate(
-        path="Knowledge Base/Notes/Insights/x", title="X", cosine=0.86
+        path=candidate_path, title="X", cosine=0.86
     )
     monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [cand])
     res = edit_module.edit(vault, path=target, why="refine", new_body="Rewritten claim.")
