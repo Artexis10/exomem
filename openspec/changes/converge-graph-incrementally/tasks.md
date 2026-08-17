@@ -126,6 +126,22 @@ time. Reachable today on every path that already rebuilds off the write path.
   cover the graph branch; add no new scheduler.
 - [x] 5.7 Extend the rebuild-hold repro script to measure per-path drain latency
   alongside whole-rebuild latency, so the improvement is measured rather than asserted.
+  Measured, same run and same box, 5 trials, one changed page:
+
+  | vault | full rebuild median/p95 | drain median/p95 | ratio |
+  | --- | --- | --- | --- |
+  | 500 pages | 7838.4 / 8165.9 ms | 693.7 / 778.4 ms | 11.3x |
+  | 2000 pages | 30650.8 / 32009.7 ms | 2473.5 / 2584.6 ms | 12.4x |
+
+  The final canonical publication hold is 10.4 ms at 500 pages and 20.3 ms at 2000
+  (1.95x for 4x the vault), so the boundary this change publishes through is not the
+  cost. Read the two columns together rather than the ratio alone: the rebuild scales
+  3.9x for a 4x larger vault, which is the O(vault) claim confirmed — but **the drain
+  scales 3.6x as well.** Repairing a single page is 12x cheaper and still very nearly
+  linear in vault size, so this phase bought a large constant factor, not the
+  O(changed) repair the proposal describes. The work is proportional; the proof
+  wrapped around it is not, and that is measurement pointing directly at 7.1 rather
+  than a reason to declare Phase 2 finished.
 - [x] 5.8 Have a drain acknowledge the committed generation it converged. Repairing the
   pages is only half of convergence: until the graph sync acknowledgement moves, the
   epoch stays stale, the sidecar stays unavailable, and the next dispatch takes the
