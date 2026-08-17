@@ -119,6 +119,13 @@ if (-not (Test-VenvInterpreter)) {
 
 Invoke-DoctorGate -Profile $Profile
 
+# Captured before the stop so the verification below can prove the interpreter
+# actually reloaded. A version comparison cannot: /health reports distribution
+# metadata read from disk, so it serves a new version the moment the wheel
+# changes, restart or no restart.
+$workerBefore = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+if ($workerBefore) { Write-Host "Worker process before restart: pid $workerBefore" }
+
 Write-Host "Stopping $ServiceName..."
 sc.exe stop $ServiceName | Out-Null
 Wait-ServiceState -Name $ServiceName -Target 'Stopped'
@@ -136,7 +143,11 @@ if ($Force) {
 # only this session while the previous session's diagnostics are still
 # recoverable from logs\archive\. Also prune NSSM's uncapped service.out/err
 # rotation pile.
-$logDir = Join-Path (Split-Path -Parent $PSScriptRoot) "logs"
+$logDir = Get-ExomemLogDir -PythonPath $VenvPy
+if (-not $logDir) {
+    $logDir = Join-Path (Split-Path -Parent $PSScriptRoot) "logs"
+    Write-Warning "Could not resolve the app log directory from the service interpreter; falling back to $logDir. Archiving and the tail below may target a directory nothing writes to."
+}
 $logPath = Join-Path $logDir "exomem.log"
 Backup-ExomemAppLog -LogPath $logPath -ArchiveDir (Join-Path $logDir "archive") -Keep 10
 Limit-ExomemServiceLogPile -LogDir $logDir -Keep 20
@@ -145,6 +156,16 @@ Write-Host "Starting $ServiceName..."
 sc.exe start $ServiceName | Out-Null
 Wait-ServiceState -Name $ServiceName -Target 'Running'
 Write-Host "  running."
+
+# `Running` is NSSM's state, not the worker's: the Python child is spawned just
+# after, so poll for it rather than reading once and concluding it is absent.
+$workerAfter = 0
+foreach ($attempt in 1..25) {
+    Start-Sleep -Milliseconds 400
+    $workerAfter = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+    if ($workerAfter -and $workerAfter -ne $workerBefore) { break }
+}
+Assert-ExomemServiceRestarted -Before $workerBefore -After $workerAfter -ServiceName $ServiceName
 
 # Give the app a beat to write its startup banner.
 Start-Sleep -Seconds 2

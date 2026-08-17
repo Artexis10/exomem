@@ -595,3 +595,139 @@ function Assert-ExomemVisibleCliVersions {
         Write-Host "Verified $executable -> exomem $($identity.version)"
     }
 }
+
+function Get-ExomemServiceWorkerPid {
+    <#
+    .SYNOPSIS
+      Return the pid of the interpreter the service actually runs, or 0.
+    .DESCRIPTION
+      NSSM is the service process; the Python worker is its child, and the child
+      is what holds loaded code. Returns 0 rather than throwing whenever the
+      service is stopped, the platform is not Windows, or CIM is unavailable, so
+      callers can treat 0 as "no baseline" instead of handling an exception.
+    #>
+    param([string]$ServiceName = "exomem")
+
+    if ($env:OS -ne "Windows_NT") { return 0 }
+    try {
+        $service = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
+    } catch {
+        return 0
+    }
+    if (-not $service -or -not $service.ProcessId) { return 0 }
+    try {
+        $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($service.ProcessId)" -ErrorAction Stop |
+            Select-Object -First 1
+    } catch {
+        return 0
+    }
+    if (-not $child) { return 0 }
+    return [int]$child.ProcessId
+}
+
+function Assert-ExomemServiceRestarted {
+    <#
+    .SYNOPSIS
+      Fail when a deploy reports success without the worker process changing.
+    .DESCRIPTION
+      `/health` reports `importlib.metadata.version("exomem")`, read from disk at
+      request time with no relation to the code the running interpreter loaded.
+      So when `uv pip install` swapped the wheel under a live process, /health
+      served the new version while the interpreter still ran the old one -- and
+      worse, a mixed-version process, because modules imported lazily after the
+      swap came from the new wheel.
+
+      That makes every version-vs-version gate blind by construction: both
+      `install-info --json` and `/health` read the same distribution metadata, so
+      comparing them compares disk with disk. The worker's process identity is
+      the only observable that separates "restarted onto the new code" from
+      "still running the old code".
+
+      A pid of 0 means "not observed". An unknown baseline degrades to a warning,
+      because refusing a deploy for lack of a baseline would strand any box where
+      the probe is unavailable; a *known* baseline that did not change is fatal.
+    #>
+    param(
+        [int]$Before = 0,
+        [int]$After = 0,
+        [string]$ServiceName = "exomem"
+    )
+
+    if (-not $After) {
+        throw "Service '$ServiceName' has no running worker process after the restart. Nothing is serving the deployed version; check logs\service.err.log."
+    }
+    if (-not $Before) {
+        Write-Warning "No pre-restart worker pid was observed, so this run can only assert that a worker is running now (pid $After), not that it restarted onto the new code."
+        return
+    }
+    if ($After -eq $Before) {
+        throw "Service '$ServiceName' is still running the same worker process (pid $After) that was live before the upgrade. The wheel on disk changed but the interpreter did not reload it, so /health now reports the new version from disk metadata while the process serves the old code. Restart the service and re-verify."
+    }
+    Write-Host "Worker process restarted: pid $Before -> $After"
+}
+
+function Get-ExomemLogDir {
+    <#
+    .SYNOPSIS
+      Return the log directory the app actually writes to, or $null.
+    .DESCRIPTION
+      Ask `logging_config.resolve_log_dir()` rather than deriving a second
+      constant here. #569 moved logs off `<repo>/logs` for wheel installs, and a
+      script that kept its own copy of the old path pruned and tailed a directory
+      nothing writes to -- reporting "No log file at ..." while the service
+      logged normally somewhere else.
+
+      Resolution runs in this process, so it sees this process's EXOMEM_LOG_DIR.
+      That matches the service whenever the variable is unset in both (the common
+      case) or set identically; it is the same assumption the doctor check makes.
+    #>
+    param([string]$PythonPath)
+
+    if (-not $PythonPath -or -not (Test-Path $PythonPath)) { return $null }
+    $out = & $PythonPath -c "from exomem.logging_config import resolve_log_dir; print(resolve_log_dir())" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $dir = ($out | Select-Object -First 1)
+    if (-not $dir) { return $null }
+    return $dir.Trim()
+}
+
+function Test-ExomemAcceleratedTorch {
+    <#
+    .SYNOPSIS
+      True when the torch installed in an interpreter is an accelerator build.
+    .DESCRIPTION
+      Read the local version tag from distribution metadata, never by importing
+      torch: the probe must stay fast and must not fail on a broken ML stack.
+      Default PyPI wheels carry no local tag, which on Windows means CPU-only.
+
+      This exists because the deploy accelerator gate read `.accelerated` off
+      `install-info --json`, which has never emitted that key. The property was
+      always $null, `[bool]$null` is $false, and the guard documented as "a hard
+      failure by default" could not fire at all. `/health` does expose it, but
+      only while the service is up -- and the gate has to run mid-deploy, so it
+      cannot depend on that.
+    #>
+    param([string]$PythonPath)
+
+    $version = Get-ExomemTorchVersion -PythonPath $PythonPath
+    if (-not $version) { return $false }
+    foreach ($tag in @("+cu", "+rocm", "+xpu")) {
+        if ($version.Contains($tag)) { return $true }
+    }
+    return $false
+}
+
+function Get-ExomemTorchVersion {
+    <#
+    .SYNOPSIS
+      Return the torch version string from distribution metadata, or $null.
+    #>
+    param([string]$PythonPath)
+
+    if (-not $PythonPath -or -not (Test-Path $PythonPath)) { return $null }
+    $out = & $PythonPath -c "import importlib.metadata as m; print(m.version('torch'))" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $version = ($out | Select-Object -First 1)
+    if (-not $version) { return $null }
+    return $version.Trim()
+}

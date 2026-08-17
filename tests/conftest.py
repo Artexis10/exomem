@@ -27,6 +27,22 @@ _BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
 if _BENCHMARKS_DIR.is_dir() and str(_BENCHMARKS_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCHMARKS_DIR))
 
+# POSIX-only by construction. These modules reach `fcntl` or `os.O_DIRECTORY`
+# at *import* scope -- `exomem.hosted_restore` and `benchmarks/protocol/custody.py`
+# -- so on Windows they abort collection with ImportError rather than skipping,
+# and a single unimportable module interrupts the entire run. Declaring them
+# here rather than passing `--ignore` on the command line keeps `pytest` one
+# command on every platform, for CI and for a developer on Windows alike.
+collect_ignore: list[str] = []
+if os.name == "nt":
+    collect_ignore += [
+        "test_dataset_identity_case_count.py",  # -> lme.runner -> protocol.custody
+        "test_hosted_restore_candidate.py",  # -> exomem.hosted_restore -> fcntl
+        "test_lme_reader_gate.py",  # -> lme.runner -> protocol.custody
+        "test_lme_runner.py",  # -> lme.runner -> protocol.custody
+        "test_protocol_custody.py",  # imports fcntl directly
+    ]
+
 
 @pytest.fixture(autouse=True)
 def _process_env_isolation():
