@@ -56,6 +56,12 @@ CLAUDE_CIMD_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata"
 CLAUDE_CIMD_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 SCOPES = "exomem.read exomem.write offline_access"
 
+#: ChatGPT identifies each connector with its own client-metadata document, so
+#: unlike claude.ai there is no single stable client id to hardcode. The redirect
+#: is not hardcoded either — it is read from that document, because the digest
+#: must be computed from what the connector will actually present.
+CHATGPT_CIMD_CLIENT_ID = "https://chatgpt.com/oauth/{connector_id}/client.json"
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Surface 3xx instead of following it.
@@ -101,6 +107,66 @@ def client_config_sha256(
     }
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(b"exomem-oauth-client-config:v1\0" + body).hexdigest()
+
+
+def chatgpt_cimd_identity(
+    connector: str, redirect_override: list[str] | None = None
+) -> tuple[str, list[str]]:
+    """Resolve a ChatGPT connector to the exact client id and redirects it presents.
+
+    Takes a bare connector id or a full `client.json` URL and returns the pair the
+    sibling stage must be built from.
+
+    This exists because of a trap that cost a whole evidence window on 2026-08-16.
+    The OpenAI sibling used to be registered as a `pinned` client on a loopback
+    redirect, on the reasoning that ChatGPT publishes no client-metadata document.
+    It does — one per connector. The reviewer sign-in predicate joins
+    `stage.oauth_client_config_sha256 = client.oauth_client_config_sha256`, so a
+    stage carrying a pinned loopback digest can never be matched by the real
+    connector, and evidence signed against it can never import. The failure only
+    surfaces in the browser, after the ≤30 minute authority is already spent.
+
+    The redirects are read from the live document rather than hardcoded: the digest
+    has to be computed over what the connector will actually send, and a guessed
+    redirect would rebuild exactly the mismatch this function exists to prevent.
+    """
+    client_id = (
+        connector
+        if connector.startswith("https://")
+        else CHATGPT_CIMD_CLIENT_ID.format(connector_id=connector)
+    )
+    if redirect_override:
+        return client_id, redirect_override
+    # The control plane fetches this document from Vercel's edge; this script runs
+    # from wherever the operator is, and the publisher's bot protection may answer
+    # a residential address with 403 where it answers the server with 200. A
+    # failure here must not cost the window, hence --openai-redirect.
+    request = urllib.request.Request(
+        client_id,
+        headers={"accept": "application/json", "user-agent": "exomem-reviewer-bootstrap/1"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            document = json.loads(response.read(1_048_576).decode())
+    except (urllib.error.URLError, ValueError) as error:
+        raise SystemExit(
+            f"could not read the ChatGPT connector document at {client_id}: {error}\n"
+            "If the connector does not exist yet, create it in ChatGPT first.\n"
+            "If it exists and this is a 403, the publisher is refusing this network\n"
+            "rather than the server: open the URL in a browser, read `redirect_uris`,\n"
+            "and pass them with --openai-redirect (repeatable)."
+        ) from error
+    redirects = document.get("redirect_uris")
+    if not isinstance(redirects, list) or not all(
+        isinstance(uri, str) and uri.startswith("https://") for uri in redirects
+    ):
+        raise SystemExit(f"connector document at {client_id} has no https redirect_uris")
+    if document.get("client_id") not in (None, client_id):
+        raise SystemExit(
+            f"connector document at {client_id} names a different client_id "
+            f"{document.get('client_id')!r}; the digest would not match"
+        )
+    return client_id, redirects
 
 
 def pkce_pair() -> tuple[str, str]:
@@ -319,7 +385,14 @@ def prepare(cp: ControlPlane, candidate_id: str, email: str, locks: dict) -> dic
     return context
 
 
-def run(cp: ControlPlane, context: dict, token: str, locks: dict) -> None:
+def run(
+    cp: ControlPlane,
+    context: dict,
+    token: str,
+    locks: dict,
+    openai_connector: str,
+    openai_redirect_override: list[str] | None = None,
+) -> None:
     """Authority through both canary credentials, with no waiting in between."""
     resource = f"{cp.base_url}/api/exomem/mcp/v1"
 
@@ -420,8 +493,16 @@ def run(cp: ControlPlane, context: dict, token: str, locks: dict) -> None:
     # Both platforms in this one pass: promote-cohort needs a claudeArtifactId AND
     # an openaiArtifactId, and each canary credential is welded to this bootstrap's
     # own assignment/generation, so a second pass later cannot supply the other one.
-    # OpenAI registers `pinned` on a loopback redirect: there is no published
-    # ChatGPT client-metadata-document URL to admit by CIMD.
+    #
+    # Both siblings are CIMD, built from the identity the real client presents.
+    # OpenAI used to be registered `pinned` on a loopback redirect here, on the
+    # belief that ChatGPT publishes no client-metadata document. It publishes one
+    # per connector, and the pinned digest could never be matched by the connector
+    # that has to produce the evidence — see `chatgpt_cimd_identity`.
+    sibling_stage_ids: dict[str, str] = {}
+    openai_client_id, openai_redirects = chatgpt_cimd_identity(
+        openai_connector, openai_redirect_override
+    )
     siblings = (
         (
             "claude",
@@ -434,9 +515,9 @@ def run(cp: ControlPlane, context: dict, token: str, locks: dict) -> None:
         ),
         (
             "openai",
-            "pinned",
-            f"exomem-reviewer-openai-{uuid.uuid4()}",
-            [LOOPBACK_REDIRECT],
+            "cimd",
+            openai_client_id,
+            openai_redirects,
             locks["openai_package"],
             locks["openai_archive"],
             locks["openai_registered_app"],
@@ -468,7 +549,16 @@ def run(cp: ControlPlane, context: dict, token: str, locks: dict) -> None:
             },
         )
         if status != 200:
-            raise SystemExit(f"{platform} sibling stage failed: {status} {stage}")
+            collision = (
+                "\nA bare 500 here is almost always the one-staged-release-per-"
+                f"candidate-and-platform\ncollision: a {platform} stage already exists "
+                "for this candidate, left by an earlier\nattempt. It is not a server "
+                "fault and retrying will not clear it — the old stage\nmust be failed "
+                "off with `fail-stage` before this run can proceed."
+                if status == 500
+                else ""
+            )
+            raise SystemExit(f"{platform} sibling stage failed: {status} {stage}{collision}")
 
         status, sibling = cp.call(
             "POST",
@@ -518,9 +608,28 @@ def run(cp: ControlPlane, context: dict, token: str, locks: dict) -> None:
             f"  {platform} canary credential issued "
             f"(username/password saved to run-canary-{platform}.response.json, mode 600)"
         )
+        sibling_stage_ids[platform] = stage["stage"]["id"]
 
     print("\n  Bootstrap complete. The cell provisions in the background; poll the")
     print("  owner status view for CELL_READY before the clean-client evidence run.")
+
+    # The evidence must be signed against these sibling stages, never the bootstrap
+    # stage in bootstrap-context.json. The two look alike, and passing the wrong one
+    # does not fail at `observe` — it produces a signed artifact that `import` rejects
+    # afterwards, by which time the authority and both human sessions are spent.
+    # Printing the exact commands is what stops the right id being retyped as the
+    # wrong one across a context boundary.
+    (cp.state_dir / "sibling-stage-ids.json").write_text(json.dumps(sibling_stage_ids, indent=2))
+    print("\n  Sibling stage ids (NOT the bootstrap stage) — also in sibling-stage-ids.json:")
+    for platform, stage_id in sibling_stage_ids.items():
+        print(f"    {platform:<7} {stage_id}")
+    print("\n  After each clean-client run, observe against that platform's sibling:")
+    for platform, stage_id in sibling_stage_ids.items():
+        print(
+            f"    scripts/promotion_evidence.py observe --platform {platform} \\\n"
+            f"      --stage-id {stage_id} --results <results.json> \\\n"
+            f"      --state-dir {cp.state_dir}"
+        )
 
 
 def load_locks(repo: Path) -> dict:
@@ -554,6 +663,12 @@ def main() -> int:
     parser.add_argument("--repo", default=".", type=Path)
     parser.add_argument("--email", help="reviewer alias, required for prepare")
     parser.add_argument("--token", help="emailed invite token, required for run")
+    parser.add_argument(
+        "--openai-connector",
+        help="ChatGPT connector id, or the full client.json URL, required for run. "
+        "Create the connector in ChatGPT first: the OpenAI sibling stage is built "
+        "from the identity that connector actually presents.",
+    )
     args = parser.parse_args()
 
     base_url = os.environ.get("EXOMEM_PUBLIC_BASE_URL")
@@ -593,9 +708,17 @@ def main() -> int:
     if not args.token:
         print("--token is required for run", file=sys.stderr)
         return 2
+    if not args.openai_connector:
+        print(
+            "--openai-connector is required for run. Create the ChatGPT connector\n"
+            "first and pass its id; the OpenAI sibling stage must carry the digest\n"
+            "that connector presents, or the evidence can never be imported.",
+            file=sys.stderr,
+        )
+        return 2
     context = json.loads((args.state_dir / "bootstrap-context.json").read_text())
     print("run:")
-    run(cp, context, args.token, locks)
+    run(cp, context, args.token, locks, args.openai_connector, args.openai_redirect)
     return 0
 
 
