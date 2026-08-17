@@ -126,22 +126,30 @@ time. Reachable today on every path that already rebuilds off the write path.
   cover the graph branch; add no new scheduler.
 - [x] 5.7 Extend the rebuild-hold repro script to measure per-path drain latency
   alongside whole-rebuild latency, so the improvement is measured rather than asserted.
-  Measured, same run and same box, 5 trials, one changed page:
+  Measured, same run and same box, 5 trials, one changed page, production fanout:
 
   | vault | full rebuild median/p95 | drain median/p95 | ratio |
   | --- | --- | --- | --- |
-  | 500 pages | 7838.4 / 8165.9 ms | 693.7 / 778.4 ms | 11.3x |
-  | 2000 pages | 30650.8 / 32009.7 ms | 2473.5 / 2584.6 ms | 12.4x |
+  | 500 pages | 10341.7 / 10455.5 ms | 122.2 / 128.9 ms | 84.6x |
+  | 2000 pages | 39574.3 / 39815.6 ms | 187.3 / 196.4 ms | 211.3x |
 
-  The final canonical publication hold is 10.4 ms at 500 pages and 20.3 ms at 2000
-  (1.95x for 4x the vault), so the boundary this change publishes through is not the
-  cost. Read the two columns together rather than the ratio alone: the rebuild scales
-  3.9x for a 4x larger vault, which is the O(vault) claim confirmed — but **the drain
-  scales 3.6x as well.** Repairing a single page is 12x cheaper and still very nearly
-  linear in vault size, so this phase bought a large constant factor, not the
-  O(changed) repair the proposal describes. The work is proportional; the proof
-  wrapped around it is not, and that is measurement pointing directly at 7.1 rather
-  than a reason to declare Phase 2 finished.
+  The rebuild scales 3.8x for a 4x larger vault — the O(vault) claim confirmed — while
+  the drain scales 1.5x, so the advantage *widens* with vault size rather than holding
+  at a constant factor. That widening is the signature the proposal predicted: repair
+  proportional to the change against repair proportional to the vault. The final
+  canonical publication hold is 16.4 ms at 500 pages and 12.2 ms at 2000, so the
+  boundary this change publishes through is not the cost either.
+
+  **A first run of this measurement reported the drain scaling 3.6x, and that was the
+  harness, not the system.** It re-seeded freshness wholesale between trials with
+  `freshness.seed`. Production rides incremental freshness events, which let
+  `on_resolver_files_changed` patch the recall resolver in place; a wholesale re-seed
+  makes `recall_delta_since` incomplete, so that patch *evicts* the resolver instead
+  and every drain re-walks the vault — `recall_resolver_snapshot` was 85% of drain
+  time under profiling, scaling exactly with page count. Driving the real post-commit
+  fanout instead moved the 2000-page drain from 2473 ms to 187 ms. Any future
+  measurement of this path must use the production fanout; hand-seeding freshness
+  silently measures a cold cache the product never has.
 - [x] 5.8 Have a drain acknowledge the committed generation it converged. Repairing the
   pages is only half of convergence: until the graph sync acknowledgement moves, the
   epoch stays stale, the sidecar stays unavailable, and the next dispatch takes the
@@ -218,6 +226,13 @@ time. Reachable today on every path that already rebuilds off the write path.
   not optional here — a vault-global optimistic proof gets *less* likely to hold as the
   vault and write rate grow, so a single-writer run would prove nothing about the failure
   this change addresses.
+  Two harness corrections were needed before its numbers meant anything, both the same
+  mistake in different clothes: measuring a path production does not take. It first
+  called the graph dispatch directly, where a standalone caller joins its rebuild to
+  completion by design, reporting 28 s writes; driving `writer_lease.LeaseManager`
+  instead gave ~302 ms and `graph_sync=pending`. It then re-seeded freshness per write,
+  which evicts the recall resolver — see 5.7. It now commits through the real
+  post-commit fanout and seeds only at setup.
 - [ ] 6.2 Graph drift stays at zero across a sustained concurrent-write run.
   Measured by `audit(categories=["graph_drift"])` after the writers stop and the queue
   quiesces, so drift is audited against the Markdown rather than asserted by construction
@@ -240,10 +255,19 @@ time. Reachable today on every path that already rebuilds off the write path.
 
 Do not start this phase speculatively. It is gated on 7.1 answering yes.
 
-- [ ] 7.1 After Phase 2, re-measure whether the vault-global content-freshness equality
+- [x] 7.1 After Phase 2, re-measure whether the vault-global content-freshness equality
   in the read snapshot is still the binding constraint on availability. If drains are
   cheap and the incremental publication proof usually succeeds, availability recovers on
   its own and the rest of this phase is unnecessary — record the measurement and stop.
+  **Measured: it is not the binding constraint, so stop.** On the production fanout a
+  one-page drain costs 122 ms at 500 pages and 187 ms at 2000 (5.7) — 1.5x for a 4x
+  vault, against the rebuild's 3.8x — so the advantage widens with vault size instead
+  of settling at a constant factor. Profiling a drain put 85% of its time in
+  `recall_resolver_snapshot`, not in the availability fence, and that cost disappears
+  once the recall resolver is patched incrementally the way a real write patches it.
+  7.2–7.4 stay unopened: relaxing an access-safety-grade fence, and retiring the
+  classification and refusal-memo machinery, are not changes to make against a
+  constraint that measurement says is not binding.
 - [ ] 7.2 If still binding: replace only the content-freshness term with a check against
   the durable dirty set, readable cross-process so a cold reader can evaluate it. Leave
   the recall-policy-version and access-fingerprint terms fail-closed and all-or-nothing —

@@ -98,7 +98,21 @@ def _seed_live_freshness(vault_root: Path, imports: dict[str, Any]) -> None:
 
 
 class _Writer(threading.Thread):
-    """One writer committing real batches and dispatching real graph work."""
+    """One writer, driven through the lease manager a real request uses.
+
+    Going through `LeaseManager.invoke` rather than calling the graph dispatch
+    directly is the whole validity of this measurement. A *direct* library
+    caller deliberately joins its rebuild to completion
+    (`_join_registered_standalone`) because its contract is a converged graph
+    and it has no response envelope to carry a pending outcome. Only a caller
+    inside a mutation request takes the non-blocking policy this change is
+    about, so measuring the direct path would report ~28 s writes and prove
+    nothing -- that is the standalone contract working, not the write path
+    failing.
+
+    The recorded outcome is the terminal's `graph_sync`, because that is what a
+    caller actually sees.
+    """
 
     def __init__(
         self, vault_root: Path, pages: list[Path], stop: threading.Event, imports: dict[str, Any]
@@ -113,27 +127,44 @@ class _Writer(threading.Thread):
         self.errors: list[str] = []
 
     def run(self) -> None:
+        from types import SimpleNamespace
+
+        from exomem.writer_lease import LeaseConfig, LeaseManager, mark_active_mutation_committed
+
         vault = self.imports["vault"]
-        epistemic_graph = self.imports["epistemic_graph"]
+        manager = LeaseManager(LeaseConfig(state_dir=self.vault_root.parent / "state"))
         revision = 0
         while not self.stop.is_set():
             page = self.pages[revision % len(self.pages)]
             revision += 1
+            body = page.read_text(encoding="utf-8") + f"\nRevision {revision}.\n"
+
+            def leaf(root: Path, _page: Path = page, _body: str = body, **_kwargs: Any) -> dict:
+                # The real post-commit fanout, and deliberately no wholesale
+                # `freshness.seed` between writes. Production rides incremental
+                # freshness events, which let the fanout patch the recall
+                # resolver in place; re-seeding wholesale makes the delta
+                # incomplete, so that patch evicts instead and every later drain
+                # re-walks the vault. Seeding per write measures the harness.
+                vault.batch_atomic_write(
+                    [vault.PlannedWrite(_page, _body)],
+                    vault_root=root,
+                    post_commit_fanout=True,
+                )
+                mark_active_mutation_committed()
+                return {"status": "committed", "mutated": True, "dispatch": "fanout"}
+
+            command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
             started = time.perf_counter()
             try:
-                vault.batch_atomic_write(
-                    [
-                        vault.PlannedWrite(
-                            page,
-                            page.read_text(encoding="utf-8") + f"\nRevision {revision}.\n",
-                        )
-                    ],
-                    vault_root=self.vault_root,
-                    post_commit_fanout=False,
+                terminal = manager.invoke(command, (self.vault_root,), {})
+                reported = (
+                    terminal.get("graph_sync", "absent")
+                    if isinstance(terminal, dict)
+                    else "absent"
                 )
-                _seed_live_freshness(self.vault_root, self.imports)
-                result = epistemic_graph.upsert_after_write(self.vault_root, [page])
-                outcome = f"{result.outcome}:{result.code}"
+                dispatch = terminal.get("dispatch", "?") if isinstance(terminal, dict) else "?"
+                outcome = f"graph_sync={reported} via {dispatch}"
             except Exception as error:  # noqa: BLE001 - a writer failure is a finding
                 outcome = f"error:{type(error).__name__}"
                 self.errors.append(f"{type(error).__name__}: {error}")

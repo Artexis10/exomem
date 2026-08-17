@@ -193,10 +193,19 @@ def _measure_drain(
     The sidecar is deliberately *not* deleted here. A missing sidecar is one of
     the cases that still earns a full rebuild, so deleting it would measure the
     rebuild again under a different name.
+
+    The write runs the real post-commit fanout, and freshness is **not** re-seeded
+    wholesale between trials. That distinction is the whole measurement. Production
+    rides incremental freshness events, which let `on_resolver_files_changed` patch
+    the recall resolver in place; a wholesale `freshness.seed` makes
+    `recall_delta_since` incomplete, so that patch *evicts* the resolver instead,
+    and every drain then re-walks the vault. Measuring that way reported a drain
+    scaling linearly with vault size -- an artifact of the harness, not the system.
     """
     deferred_index = imports["deferred_index"]
     index_sync = imports["index_sync"]
     epistemic_graph = imports["epistemic_graph"]
+    vault = imports["vault"]
 
     graph = epistemic_graph.EpistemicGraphIndex(vault_root)
     if not graph.available():
@@ -204,8 +213,16 @@ def _measure_drain(
 
     samples: list[float] = []
     rel = target.resolve().relative_to(vault_root.resolve()).as_posix()
-    for _ in range(trials):
-        advance_checkpoint(vault_root, target, imports)
+    for trial in range(trials):
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    target, target.read_text(encoding="utf-8") + f"\nDrain revision {trial}.\n"
+                )
+            ],
+            vault_root=vault_root,
+            post_commit_fanout=True,
+        )
         deferred_index.add_graph(vault_root, [rel])
         started = time.perf_counter()
         index_sync.drain_deferred_work(vault_root)
