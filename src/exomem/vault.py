@@ -2060,9 +2060,39 @@ _DERIVED_INDEX_NAMES = frozenset(
 )
 
 
+#: The deferred-index queue database, which lives beside canonical content for
+#: the same reason the graph sidecar does. It earns its own set rather than
+#: joining `_DERIVED_INDEX_NAMES` because that one is bound to `graph_sync`'s
+#: reset manifest, and this one is bound to `deferred_index.store_path`.
+#:
+#: The graph dirty-path enqueue (`converge-graph-incrementally`) writes this
+#: database *before* the canonical batch commits, so that a crash between the
+#: markdown and the enqueue cannot lose the dirty set. That ordering is
+#: deliberate -- over-enqueueing costs a redundant re-index, under-enqueueing
+#: is unrecoverable without the whole-vault rebuild being removed -- and it
+#: puts the file's creation and journalling inside the guarded window. Counting
+#: it made the first write to a fresh vault invalidate its own census and fail
+#: as `STALE_RECORD: canonical record changed before commit`, with nothing
+#: concurrent involved.
+#:
+#: Same narrowness rule as above: a dirty-path queue is exomem's own
+#: bookkeeping and never canonical content, so excluding it removes no
+#: guarantee. Two writers racing to append their own debt is precisely the
+#: monotone behaviour the queue exists to provide, not a canonical conflict.
+_DEFERRED_INDEX_BASENAME = ".deferred-index.sqlite"
+_DEFERRED_INDEX_NAMES = frozenset(
+    {_DEFERRED_INDEX_BASENAME}
+    | {f"{_DEFERRED_INDEX_BASENAME}-{suffix}" for suffix in ("journal", "wal", "shm")}
+)
+
+
 def _is_derived_index_artifact(name: str) -> bool:
     """Whether a directory entry is derived-index residue, not canonical content."""
-    return name in _DERIVED_INDEX_NAMES or name.startswith(_DERIVED_INDEX_PREFIXES)
+    return (
+        name in _DERIVED_INDEX_NAMES
+        or name in _DEFERRED_INDEX_NAMES
+        or name.startswith(_DERIVED_INDEX_PREFIXES)
+    )
 
 
 _BATCH_RESIDUE_PREFIX = ".exomem-batch-"

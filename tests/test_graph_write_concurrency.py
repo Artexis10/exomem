@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import graph_sync
+from exomem import deferred_index, graph_sync
 from exomem import vault as vault_module
 
 
@@ -96,6 +96,48 @@ def test_a_rebuilds_residue_does_not_move_the_census(tmp_path: Path, name: str) 
         residue.write_bytes(b"derived")
 
     assert _census(guarded) == before
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".deferred-index.sqlite",
+        ".deferred-index.sqlite-journal",
+        ".deferred-index.sqlite-wal",
+        ".deferred-index.sqlite-shm",
+    ],
+)
+def test_the_dirty_path_queues_database_does_not_move_the_census(
+    tmp_path: Path, name: str
+) -> None:
+    """The graph enqueue runs *inside* the guarded window, by design.
+
+    `converge-graph-incrementally` records a batch's graph debt before that
+    batch commits, so a crash between the markdown and the enqueue cannot lose
+    the dirty set. The ordering is load-bearing, and it means a derived SQLite
+    file is created and journalled while the census is open. Counting it made
+    the first write to a fresh vault fail as `STALE_RECORD: canonical record
+    changed before commit` -- the write invalidating itself, with nothing
+    concurrent involved at all.
+    """
+    guarded = tmp_path / "Knowledge Base"
+    guarded.mkdir()
+    (guarded / "page.md").write_text("body\n", encoding="utf-8")
+
+    before = _census(guarded)
+    (guarded / name).write_bytes(b"derived")
+
+    assert _census(guarded) == before
+
+
+def test_the_census_exclusion_tracks_the_deferred_indexs_own_database_name() -> None:
+    """Bind the literal, for the reason the graph_sync names are bound.
+
+    `vault` cannot import `deferred_index` at module scope without a cycle, so
+    it spells the basename. A rename there would otherwise leave this copy
+    stale and quietly start counting the queue again.
+    """
+    assert deferred_index.store_path(Path("vault")).name == vault_module._DEFERRED_INDEX_BASENAME
 
 
 @pytest.mark.parametrize("name", [".graph-sync.json", ".graph-sync-floor.json"])
