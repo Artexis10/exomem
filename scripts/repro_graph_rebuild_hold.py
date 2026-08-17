@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_SIZES = (500, 2_000)
 DEFAULT_TRIALS = 5
 PUBLICATION_OPERATION = "epistemic_graph_publish_rebuild"
@@ -61,11 +60,22 @@ def _imports(repo_root: Path) -> dict[str, Any]:
     sys.path.insert(0, str(repo_root / "scripts"))
     from synth_vault import gen_dense_vault
 
-    from exomem import epistemic_graph, find, freshness, graph_sync, mutation_lock, vault
+    from exomem import (
+        deferred_index,
+        epistemic_graph,
+        find,
+        freshness,
+        graph_sync,
+        index_sync,
+        mutation_lock,
+        vault,
+    )
     from exomem.kbdir import kb_dirname
     from exomem.vault import walk_vault_md
 
     return {
+        "deferred_index": deferred_index,
+        "index_sync": index_sync,
         "epistemic_graph": epistemic_graph,
         "find": find,
         "freshness": freshness,
@@ -151,20 +161,63 @@ def measure(vault_root: Path, size: int, trials: int, imports: dict[str, Any]) -
         if not sidecar.exists() or not graph.available():
             raise RuntimeError("full rebuild did not republish a current graph sidecar")
 
+    drain_samples = _measure_drain(vault_root, target, trials, imports)
+
     return {
         "pages": size,
         "trials": trials,
         "request": summarize(request_samples),
         "publication_hold": summarize(hold_samples),
+        "drain": summarize(drain_samples),
     }
+
+
+def _measure_drain(
+    vault_root: Path, target: Path, trials: int, imports: dict[str, Any]
+) -> list[float]:
+    """Time repairing one changed page through the durable queue.
+
+    The number this whole change is for. `request` above is what an ordinary
+    write used to cost whenever the incremental path bailed out: a whole-vault
+    rebuild. This is what the same repair costs once it is proportional to the
+    change -- same vault size, same box, same run. Reporting them together is
+    the point; a ratio taken across two runs on two machines would prove
+    nothing.
+
+    The sidecar is deliberately *not* deleted here. A missing sidecar is one of
+    the cases that still earns a full rebuild, so deleting it would measure the
+    rebuild again under a different name.
+    """
+    deferred_index = imports["deferred_index"]
+    index_sync = imports["index_sync"]
+    epistemic_graph = imports["epistemic_graph"]
+
+    graph = epistemic_graph.EpistemicGraphIndex(vault_root)
+    if not graph.available():
+        graph.rebuild_all()
+
+    samples: list[float] = []
+    rel = target.resolve().relative_to(vault_root.resolve()).as_posix()
+    for _ in range(trials):
+        advance_checkpoint(vault_root, target, imports)
+        deferred_index.add_graph(vault_root, [rel])
+        started = time.perf_counter()
+        index_sync.drain_deferred_work(vault_root)
+        samples.append((time.perf_counter() - started) * 1_000.0)
+        if deferred_index.list_graph_paths(vault_root):
+            raise RuntimeError("drain left queued graph work behind")
+    return samples
 
 
 def format_result(result: dict[str, Any], *, hold_ratio: float | None = None) -> str:
     request = result["request"]
     hold = result["publication_hold"]
+    drain = result["drain"]
     line = (
         f"pages={result['pages']:<6} trials={result['trials']} "
         f"request median/p95={request['median_ms']:.1f}/{request['p95_ms']:.1f}ms  "
+        f"drain median/p95={drain['median_ms']:.1f}/{drain['p95_ms']:.1f}ms "
+        f"({request['median_ms'] / max(drain['median_ms'], 0.001):.1f}x cheaper)  "
         f"FINAL canonical publication hold median/p95="
         f"{hold['median_ms']:.1f}/{hold['p95_ms']:.1f}ms "
         f"operation={PUBLICATION_OPERATION}"

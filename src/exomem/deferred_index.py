@@ -17,6 +17,26 @@ from .kbdir import kb_dirname
 
 _SEMANTIC_ISOLATION_CURSOR_KEY = "semantic_isolation_cursors:v1"
 _SEMANTIC_UPSERTS_GENERATION_KEY = "semantic_upserts_generation"
+_GRAPH_UPSERTS_GENERATION_KEY = "graph_upserts_generation"
+_GRAPH_FULL_REBUILD_KEY = "graph_full_rebuild_generation"
+
+#: The queues this store carries, and the tables behind them.  The graph queue
+#: is the newest and the reason the mapping exists: it reuses the semantic
+#: queue's shape verbatim rather than introducing a parallel store, so the
+#: crash-safety, receipt-CAS and poison-isolation properties are the ones
+#: already in production rather than a second implementation of them.
+_QUEUE_TABLES = {
+    "semantic": "semantic_upserts",
+    "full": "full_upserts",
+    "graph": "graph_upserts",
+}
+
+#: A rotated receipt has to sort strictly *behind* untouched work, and
+#: `time.time()` on Windows is coarse enough that a rotation within the same
+#: tick as the insert leaves the poisoned path first in the queue -- pinning
+#: exactly the work rotation exists to unpin.  Rotation therefore takes the
+#: later of the wall clock and one epsilon past the queue's current maximum.
+_ROTATION_EPSILON_SECONDS = 1e-6
 
 
 def store_path(vault_root: Path) -> Path:
@@ -85,6 +105,24 @@ def _connect(
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_upserts (
+            rel_path TEXT PRIMARY KEY,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    for event in ("INSERT", "UPDATE", "DELETE"):
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS graph_upserts_generation_{event.lower()} "
+            f"AFTER {event} ON graph_upserts BEGIN "
+            "INSERT INTO maintenance_state(key, value) VALUES "
+            f"('{_GRAPH_UPSERTS_GENERATION_KEY}', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1; END"
+        )
     columns = {
         str(row[1]) for row in conn.execute("PRAGMA table_info(semantic_upserts)")
     }
@@ -322,6 +360,18 @@ def add_full_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredRe
 def _add_full_receipts(
     vault_root: Path, rel_paths: list[str]
 ) -> tuple[list[DeferredReceipt], int]:
+    return _add_plain_receipts(vault_root, rel_paths, table="full_upserts")
+
+
+def _add_plain_receipts(
+    vault_root: Path, rel_paths: list[str], *, table: str
+) -> tuple[list[DeferredReceipt], int]:
+    """Queue paths in an admission-free queue and return exact revisions.
+
+    "Plain" is the distinction from the semantic queue, which additionally
+    consults recall admission per path. The full and graph queues do not: what
+    they may index is decided upstream, at the seam that produced the paths.
+    """
     rels = sorted(
         {
             rel
@@ -340,20 +390,20 @@ def _add_full_receipts(
         try:
             for rel in rels:
                 row = conn.execute(
-                    "SELECT revision FROM full_upserts WHERE rel_path = ?", (rel,)
+                    f"SELECT revision FROM {table} WHERE rel_path = ?", (rel,)
                 ).fetchone()
                 if row is None:
                     revision = 1
                     added += 1
                     conn.execute(
-                        "INSERT INTO full_upserts"
+                        f"INSERT INTO {table}"
                         "(rel_path, created_at, updated_at, revision) VALUES (?, ?, ?, ?)",
                         (rel, now, now, revision),
                     )
                 else:
                     revision = int(row[0]) + 1
                     conn.execute(
-                        "UPDATE full_upserts SET updated_at = ?, revision = ? "
+                        f"UPDATE {table} SET updated_at = ?, revision = ? "
                         "WHERE rel_path = ?",
                         (now, revision, rel),
                     )
@@ -363,6 +413,106 @@ def _add_full_receipts(
             raise
         conn.commit()
         return receipts, added
+    finally:
+        conn.close()
+
+
+def add_graph(vault_root: Path, rel_paths: list[str]) -> int:
+    """Durably queue pages whose epistemic-graph projection needs re-deriving."""
+    _receipts, added = _add_plain_receipts(vault_root, rel_paths, table="graph_upserts")
+    return added
+
+
+def add_graph_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredReceipt]:
+    """Queue graph work and return its exact transaction-local revisions."""
+    receipts, _added = _add_plain_receipts(
+        vault_root, rel_paths, table="graph_upserts"
+    )
+    return receipts
+
+
+def enqueue_graph_checkpoint(vault_root: Path, checkpoint: Any) -> int:
+    """Record one canonical batch's graph debt from the checkpoint it already writes.
+
+    The checkpoint has always carried exactly which pages changed and which were
+    created, per generation, crash-safely. Until now the graph threw that away
+    and re-walked the vault. This is the seam that keeps it.
+
+    A full-scope batch -- one over the checkpoint's path limit, which therefore
+    carries no path list at all -- records a rebuild marker instead. A queue of
+    "every page" is not a queue.
+    """
+    if getattr(checkpoint, "scope", "paths") == "full":
+        mark_graph_full_rebuild(vault_root, generation=int(checkpoint.generation))
+        return 0
+    rels = [rel for rel, _content_hash in checkpoint.paths]
+    rels.extend(checkpoint.created_paths)
+    return add_graph(vault_root, rels)
+
+
+def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
+    """Record that a whole-vault rebuild is owed, at or after this generation."""
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = "
+                "CASE WHEN CAST(excluded.value AS INTEGER) > CAST(value AS INTEGER) "
+                "THEN excluded.value ELSE value END",
+                (_GRAPH_FULL_REBUILD_KEY, str(int(generation))),
+            )
+    finally:
+        conn.close()
+
+
+def graph_full_rebuild_pending(vault_root: Path) -> int | None:
+    """The generation a whole-vault rebuild is owed for, or None."""
+    if not store_path(vault_root).exists():
+        return None
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            row = conn.execute(
+                "SELECT value FROM maintenance_state WHERE key = ?",
+                (_GRAPH_FULL_REBUILD_KEY,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return None
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def clear_graph_full_rebuild(vault_root: Path, *, generation: int | None = None) -> bool:
+    """Retire the rebuild marker, but only if nothing newer arrived meanwhile.
+
+    Compare-and-swap for the same reason receipts are: a rebuild that started
+    against generation N must not erase a marker a later batch raised to N+1
+    while it ran.
+    """
+    if not store_path(vault_root).exists():
+        return False
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            if generation is None:
+                changed = conn.execute(
+                    "DELETE FROM maintenance_state WHERE key = ?",
+                    (_GRAPH_FULL_REBUILD_KEY,),
+                ).rowcount
+            else:
+                changed = conn.execute(
+                    "DELETE FROM maintenance_state WHERE key = ? "
+                    "AND CAST(value AS INTEGER) <= ?",
+                    (_GRAPH_FULL_REBUILD_KEY, int(generation)),
+                ).rowcount
+        return bool(changed)
     finally:
         conn.close()
 
@@ -461,15 +611,61 @@ def snapshot_full(
     limit: int | None = None,
     paths: set[str] | None = None,
 ) -> list[DeferredReceipt]:
+    return _snapshot_plain(vault_root, table="full_upserts", limit=limit, paths=paths)
+
+
+def snapshot_graph(
+    vault_root: Path,
+    *,
+    limit: int | None = None,
+    paths: set[str] | None = None,
+) -> list[DeferredReceipt]:
+    """Queued graph work, oldest first, with corrupt legacy rows purged."""
+    return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
+
+
+def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]:
+    return [receipt.rel_path for receipt in snapshot_graph(vault_root, limit=limit)]
+
+
+def clear_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
+    return _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
+
+
+def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
+    return _clear(vault_root, table="graph_upserts", rel_paths=rel_paths)
+
+
+def rotate_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
+    return rotate_receipts(vault_root, receipts, queue="graph")
+
+
+def graph_status(vault_root: Path | None) -> dict[str, Any]:
+    result = _status(vault_root, table="graph_upserts")
+    return {
+        **result,
+        "full_rebuild_pending": (
+            graph_full_rebuild_pending(vault_root) if vault_root is not None else None
+        ),
+    }
+
+
+def _snapshot_plain(
+    vault_root: Path,
+    *,
+    table: str,
+    limit: int | None = None,
+    paths: set[str] | None = None,
+) -> list[DeferredReceipt]:
     path = store_path(vault_root)
     if not path.exists():
         return []
     conn = _connect(vault_root, create=False)
     try:
-        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(full_upserts)")}
+        columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
         revision = "revision" if "revision" in columns else "1 AS revision"
         sql = (
-            f"SELECT rel_path, {revision} FROM full_upserts "
+            f"SELECT rel_path, {revision} FROM {table} "
         )
         params: list[Any] = []
         if paths is not None:
@@ -505,7 +701,7 @@ def snapshot_full(
         if _safe_markdown_rel_path(receipt.rel_path) is None
     ]
     if corrupt:
-        _purge_corrupt_paths(vault_root, "full_upserts", corrupt)
+        _purge_corrupt_paths(vault_root, table, corrupt)
     return valid
 
 
@@ -528,6 +724,12 @@ def clear_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
 
 
 def clear_full_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
+    return _clear_plain_receipts(vault_root, receipts, table="full_upserts")
+
+
+def _clear_plain_receipts(
+    vault_root: Path, receipts: list[DeferredReceipt], *, table: str
+) -> int:
     if not receipts or not store_path(vault_root).exists():
         return 0
     conn = _connect(vault_root, create=True)
@@ -535,7 +737,7 @@ def clear_full_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> in
         with conn:
             changed = sum(
                 conn.execute(
-                    "DELETE FROM full_upserts WHERE rel_path = ? AND revision = ?",
+                    f"DELETE FROM {table} WHERE rel_path = ? AND revision = ?",
                     (receipt.rel_path, receipt.revision),
                 ).rowcount
                 for receipt in receipts
@@ -549,21 +751,28 @@ def rotate_receipts(
     vault_root: Path,
     receipts: list[DeferredReceipt],
     *,
-    full: bool = False,
+    queue: str = "semantic",
 ) -> int:
     """Move failed receipt revisions behind untouched work without changing CAS identity."""
     if not receipts or not store_path(vault_root).exists():
         return 0
-    table = "full_upserts" if full else "semantic_upserts"
-    now = time.time()
+    table = _QUEUE_TABLES[queue]
     conn = _connect(vault_root, create=True)
     try:
         with conn:
+            # Strictly behind, not merely re-stamped: on a coarse clock the
+            # wall-clock value can equal the insert's, which leaves the poisoned
+            # receipt sorting first and pins the queue it was rotated to unpin.
+            newest = conn.execute(f"SELECT MAX(updated_at) FROM {table}").fetchone()[0]
+            behind = max(
+                time.time(),
+                float(newest) + _ROTATION_EPSILON_SECONDS if newest is not None else 0.0,
+            )
             changed = sum(
                 conn.execute(
                     f"UPDATE {table} SET updated_at = ? "
                     "WHERE rel_path = ? AND revision = ?",
-                    (now, receipt.rel_path, receipt.revision),
+                    (behind, receipt.rel_path, receipt.revision),
                 ).rowcount
                 for receipt in receipts
             )
@@ -623,7 +832,7 @@ def _purge_corrupt_paths(
     connection_path: Path | None = None,
 ) -> int:
     """Delete exact unsafe legacy rows without turning them into filesystem paths."""
-    if table not in {"semantic_upserts", "full_upserts"} or not paths:
+    if table not in set(_QUEUE_TABLES.values()) or not paths:
         return 0
     conn = _connect(vault_root, create=True, connection_path=connection_path)
     try:

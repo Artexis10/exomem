@@ -182,6 +182,47 @@ test that needs the graph to be *current* asserts that for itself by joining the
 explicitly. Weakening the affected assertions to accept `completed` or `pending` was
 rejected: that would hide exactly the regression this change is meant to make visible.
 
+## The forward reference, and why a per-path drain is not enough on its own
+
+Found by the full-rebuild equivalence test, which is the only reason to write that test: a
+drain that re-indexes exactly the queued paths produces a graph **missing edges** a full
+rebuild has. Write page A linking `[[C]]` before C exists, drain; create C, drain. The
+rebuild has `A links_to C`; the drain does not, and never will.
+
+The cause is that an unresolved wikilink produces *no edge at all* —
+`_body_wikilink_paths` drops any link `normalize_wikilink` returns a warning for. The link
+is not recorded as unresolved; it is not recorded. Nothing about later indexing the
+*target* repairs the *source*, because nothing points from one to the other. A full rebuild
+gets this right for free by re-deriving every page once the corpus is complete, and that is
+precisely the property a proportional repair gives up.
+
+The existing incremental path already handles this via `_resolver_affected_sources`: on a
+topology change it re-reads every indexed source from disk and re-normalises its links
+under the old and new resolvers — an O(vault) *read* scan that the incremental path already
+pays today. The drain answers the same question, split by what each direction costs:
+
+- A page that **vanished** leaves its inbound edges behind, and every such edge names its
+  own source. One indexed query on `dst_key` answers it.
+- A page that **appeared** leaves no trace at all, because the links that should point at
+  it were never written down. Only the bodies know, so this scans them.
+
+Both run only when a drain actually changes topology. An ordinary edit — the overwhelming
+majority of writes, and the entire livelock case — touches neither.
+
+**This is the part of basic-memory's design exomem genuinely lacks.** Their `Relation`
+carries a nullable `to_id` beside a NOT NULL `to_name`, so an unresolved link is an ordinary
+row and resolving it later is an indexed lookup rather than a corpus scan. The earlier
+reading — that exomem already has the structural equivalent because `graph_edges.dst_key`
+is a path string rather than a foreign key — was half right: the column *can* hold an
+unresolved target, but nothing ever writes one.
+
+Adopting it is deliberately **not** in Phase 2. It is a schema change plus a change to what
+reads *render* for an unresolved target: `_placeholder_node` already synthesizes a
+`kind: "unresolved"` node for a `dst_key` with no row, so persisting unresolved edges would
+start surfacing placeholder nodes in `connect_memory` output. That is a user-visible
+contract change, and it should be made on measurement rather than on the way past. It
+belongs with Phase 3, whose whole premise is re-measuring before relaxing anything.
+
 ## Alternatives considered
 
 **Tune the join bound.** This was the previous attempt. Rejected: the constant is

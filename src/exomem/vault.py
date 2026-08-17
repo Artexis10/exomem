@@ -3260,6 +3260,32 @@ def _remove_empty_created_dirs(created_dirs: list[Path]) -> None:
             pass
 
 
+def _enqueue_graph_debt(vault_root: Path, checkpoint_write: PlannedWrite) -> None:
+    """Record this batch's graph debt durably, *before* the batch commits.
+
+    The ordering is the whole argument. Enqueue-then-write can leave a path
+    queued whose content never changed, and re-indexing an unchanged path writes
+    nothing -- the cost is one wasted read. Write-then-enqueue can leave the
+    markdown committed with no record that the graph owes it anything, and the
+    only repair for an unknown dirty set is the whole-vault rebuild this change
+    exists to retire. The failures are not comparable, so the safe order is not
+    a preference.
+
+    Best-effort by construction: a deferred queue that could refuse a canonical
+    write would be a worse availability risk than the drift it prevents. A lost
+    enqueue costs a reconcile; a refused write costs the user their edit.
+    """
+    from . import deferred_index, graph_sync
+
+    checkpoint = graph_sync.GraphSyncCheckpoint.parse(checkpoint_write.content)
+    if checkpoint is None:  # pragma: no cover - graph_sync renders its own token
+        return
+    try:
+        deferred_index.enqueue_graph_checkpoint(vault_root, checkpoint)
+    except Exception:  # noqa: BLE001 - never fail a canonical write on derived bookkeeping
+        log.warning("graph dirty-path enqueue failed; reconcile will repair", exc_info=True)
+
+
 def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
@@ -3354,6 +3380,7 @@ def _batch_atomic_write_locked(
             graph_floor_path = floor_write.path
             if not defer_graph_completion:
                 graph_checkpoint_path = checkpoint_write.path
+            _enqueue_graph_debt(Path(vault_root), checkpoint_write)
         elif defer_graph_completion:
             raise ValueError("defer_graph_completion requires graph-relevant writes")
     destinations: set[str] = set()

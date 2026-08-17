@@ -158,13 +158,13 @@ def test_the_enqueue_precedes_the_commit_so_a_crash_cut_cannot_lose_it(
     """
     deferred_index.clear_graph(vault)
     order: list[str] = []
-    real_add = deferred_index.add_graph_receipts
+    real_enqueue = deferred_index.enqueue_graph_checkpoint
 
-    def record_add(root: Path, rel_paths: list[str]) -> Any:
+    def record_enqueue(root: Path, checkpoint: Any) -> int:
         order.append("enqueue")
-        return real_add(root, rel_paths)
+        return real_enqueue(root, checkpoint)
 
-    monkeypatch.setattr(deferred_index, "add_graph_receipts", record_add)
+    monkeypatch.setattr(deferred_index, "enqueue_graph_checkpoint", record_enqueue)
 
     class Crash(RuntimeError):
         pass
@@ -258,22 +258,24 @@ def test_a_drain_does_not_empty_the_node_and_edge_tables(
 ) -> None:
     """The whole point is that repair is scoped; a `DELETE FROM` is not scoped."""
     executed: list[str] = []
-    real_execute = sqlite3.Connection.execute
+    real_connect = EpistemicGraphIndex._connect
 
-    def record(conn: sqlite3.Connection, sql: str, *args: Any) -> Any:
-        executed.append(sql)
-        return real_execute(conn, sql, *args)
+    def tracing_connect(self: Any) -> sqlite3.Connection:
+        conn = real_connect(self)
+        conn.set_trace_callback(executed.append)
+        return conn
 
     (vault / PAGE_A).write_text(_page("A", "A is revised."), encoding="utf-8")
     _seed_live_freshness(vault)
     deferred_index.add_graph_receipts(vault, [PAGE_A])
 
-    monkeypatch.setattr(sqlite3.Connection, "execute", record)
+    monkeypatch.setattr(EpistemicGraphIndex, "_connect", tracing_connect)
     try:
         index_sync.drain_deferred_work(vault)
     finally:
         monkeypatch.undo()
 
+    assert executed, "the drain never opened the graph sidecar"
     unscoped = [
         sql
         for sql in executed
@@ -449,3 +451,55 @@ def test_a_missing_sidecar_still_rebuilds_the_whole_vault(vault: Path) -> None:
     index.rebuild_all()
 
     assert _graph_contents(vault)["nodes"], "the whole-vault rebuild stopped working"
+
+
+def test_a_page_written_before_its_link_target_still_gains_the_edge(vault: Path) -> None:
+    """The forward reference: the defect the equivalence test actually found.
+
+    An unresolved wikilink produces no edge at all -- `_body_wikilink_paths`
+    drops it -- so a page written before its target exists has a hole, and
+    indexing the *target* later cannot repair the *source*. A full rebuild never
+    notices because it re-derives everything once the corpus is complete. Named
+    on its own so a regression reads as "forward references broke" rather than
+    "some graph contents differ".
+    """
+    (vault / PAGE_A).write_text(_page("A", "A points at [[queue-c]]."), encoding="utf-8")
+    _seed_live_freshness(vault)
+    deferred_index.add_graph_receipts(vault, [PAGE_A])
+    index_sync.drain_deferred_work(vault)
+
+    (vault / PAGE_C).write_text(_page("C", "C exists now."), encoding="utf-8")
+    _seed_live_freshness(vault)
+    deferred_index.add_graph_receipts(vault, [PAGE_C])
+    index_sync.drain_deferred_work(vault)
+
+    edges = {
+        (row[1], row[2])
+        for row in _graph_contents(vault)["edges"]
+    }
+    assert (f"file:{PAGE_A}", f"file:{PAGE_C}") in edges
+
+
+def test_an_ordinary_edit_does_not_pay_for_topology_repair(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repairing forward references costs a corpus scan; ordinary edits must not.
+
+    If this ever fires on a plain body edit, every write pays the O(vault) read
+    the whole change exists to stop paying.
+    """
+    scans: list[Any] = []
+    real_scan = EpistemicGraphIndex._sources_linking_to
+
+    def record(self: Any, targets: set[str], **kwargs: Any) -> set[str]:
+        scans.append(targets)
+        return real_scan(self, targets, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_sources_linking_to", record)
+
+    (vault / PAGE_A).write_text(_page("A", "A says something else."), encoding="utf-8")
+    _seed_live_freshness(vault)
+    deferred_index.add_graph_receipts(vault, [PAGE_A])
+    index_sync.drain_deferred_work(vault)
+
+    assert scans == [], "a plain edit triggered the corpus scan reserved for topology changes"

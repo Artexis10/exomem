@@ -64,40 +64,50 @@ time. Reachable today on every path that already rebuilds off the write path.
 
 ## 4. Phase 2 — red-first durable dirty queue
 
-- [ ] 4.1 Add failing tests for a `graph_upserts` queue: enqueue is durable in the same
+- [x] 4.1 Add failing tests for a `graph_upserts` queue: enqueue is durable in the same
   step as the checkpoint write; a crash cut after markdown and before any drain still
   leaves the paths queued; a full-scope batch enqueues a rebuild marker rather than an
   unbounded path list; a repeatedly-failing path is rotated into isolation without
   stalling the rest.
-- [ ] 4.2 Add failing tests for full-rebuild equivalence: the same change sequence
+- [x] 4.2 Add failing tests for full-rebuild equivalence: the same change sequence
   applied through queued drains and through a full rebuild yields identical nodes, edges,
-  and parent references.
-- [ ] 4.3 Add failing tests for monotonicity: a write landing during a drain is enqueued
+  and parent references. This is the test that earned its keep: it found the forward
+  reference (a link written before its target exists produces no edge at all, and
+  indexing the target later cannot repair the source).
+- [x] 4.3 Add failing tests for monotonicity: a write landing during a drain is enqueued
   and repaired by the next drain, and the in-progress drain's completed work is not
   discarded.
-- [ ] 4.4 Add a failing test that an ordinary incremental bail-out performs no
+- [x] 4.4 Add a failing test that an ordinary incremental bail-out performs no
   whole-vault walk, and that each genuinely-required case (no sidecar, schema or registry
-  version change, full scope, lineage reset, explicit reconcile) still does.
+  version change, full scope, lineage reset, explicit reconcile) still does. The
+  defer/rebuild split is a declared table parsed back out of the module by `ast`, so a
+  renamed, added or removed bail-out reason fails the suite rather than picking a side
+  silently.
 
 ## 5. Phase 2 — implementation
 
-- [ ] 5.1 Add the `graph_upserts` table to the deferred index, reusing the existing
+- [x] 5.1 Add the `graph_upserts` table to the deferred index, reusing the existing
   generic add/snapshot/receipt/rotate machinery and generation triggers verbatim. No
-  parallel store.
-- [ ] 5.2 Enqueue the checkpoint's changed and created paths at the durable checkpoint
-  seam, inside the same canonical batch step as the checkpoint write.
-- [ ] 5.3 Convert the incremental refresh path's bail-out sites from whole-vault rebuild
+  parallel store. Rotation now sorts a poisoned receipt strictly behind the queue's
+  maximum rather than re-stamping it with a coarse wall clock, which on Windows could
+  leave it first and pin exactly the work rotation exists to unpin.
+- [x] 5.2 Enqueue the checkpoint's changed and created paths at the durable checkpoint
+  seam, inside the same canonical batch step as the checkpoint write — specifically
+  *before* the markdown replace, because over-enqueueing costs a no-op re-index and
+  under-enqueueing costs a whole-vault rebuild.
+- [x] 5.3 Convert the incremental refresh path's bail-out sites from whole-vault rebuild
   to enqueue-and-defer, using the affected set the function already computes — its delta
   paths plus the resolver-affected sources it folds in.
-- [ ] 5.4 Reserve the whole-vault rebuild for the cases that require it, and confirm by
+- [x] 5.4 Reserve the whole-vault rebuild for the cases that require it, and confirm by
   test that each of those cases still reaches it.
-- [ ] 5.5 Add a graph branch to the deferred drain that re-indexes queued paths through
+- [x] 5.5 Add a graph branch to the deferred drain that re-indexes queued paths through
   the existing per-path primitive and publishes through the existing incremental
   availability marker. No table deletion. Follow the module's existing
-  optimistic-batch-then-isolate shape.
-- [ ] 5.6 Confirm the existing drain call sites — watcher, CLI, server entry point —
+  optimistic-batch-then-isolate shape. A drain that changes topology also repairs the
+  pages whose edges change as a result; an ordinary edit pays nothing for that.
+- [x] 5.6 Confirm the existing drain call sites — watcher, CLI, server entry point —
   cover the graph branch; add no new scheduler.
-- [ ] 5.7 Extend the rebuild-hold repro script to measure per-path drain latency
+- [x] 5.7 Extend the rebuild-hold repro script to measure per-path drain latency
   alongside whole-rebuild latency, so the improvement is measured rather than asserted.
 
 ## 6. Phase 2 verification

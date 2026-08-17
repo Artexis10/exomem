@@ -26,6 +26,7 @@ from typing import Any
 
 from . import (
     access,
+    deferred_index,
     freshness,
     graph_sync,
     memory_refs,
@@ -63,6 +64,48 @@ REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 # single pass — while a supersession that survives it is not transient, so
 # re-running the rebuild cannot be what fixes it.
 REBUILD_SUPERSESSION_RETRIES = 1
+
+#: Every bail-out reason `_refresh_paths_locked` can emit, and which repair it
+#: earns. This is the one place the judgement lives; `tests/
+#: test_graph_deferred_queue.py` parses the reasons back out of this module and
+#: fails if a site appears, moves or is renamed without the table following.
+#:
+#: `"defer"` means the incremental pass could not *prove* its result, but the
+#: scope of the damage is known: the affected paths go on the durable graph
+#: queue and a drain repairs them. Every reason on this side is a race -- a
+#: concurrent writer moved a durable token between two reads -- and a race is
+#: exactly what a retry budget cannot win here, because each whole-vault attempt
+#: widens the window that loses it. That feedback loop, not any single gate, is
+#: what made seven fixes inside it fail to converge.
+#:
+#: `"rebuild"` means the scope is *unknown*, not merely unproven: the sidecar
+#: could not be read, or the delta that says what changed is itself incomplete,
+#: so an external edit could be missing from any bounded set we could enqueue.
+#: Deferring there would quietly leave the rest of the graph stale, which is a
+#: worse failure than the cost being removed. These stay whole-vault, and the
+#: value of writing them down is that they stay few.
+_FALLBACK_DISPOSITIONS = {
+    "path_outside_vault": "defer",
+    "path_unreadable": "defer",
+    "durable_checkpoint_moved": "defer",
+    "checkpoint_paths_mismatch": "defer",
+    "checkpoint_created_paths_mismatch": "defer",
+    "acknowledgement_is_not_the_predecessor": "defer",
+    "delta_target_moved": "defer",
+    "caller_path_outside_delta": "defer",
+    "topology_proof_moved": "defer",
+    "incremental_marker_refused": "defer",
+    "unreachable": "defer",
+    "checkpoint_scope_is_not_paths": "rebuild",
+    "graph_snapshot_unavailable": "rebuild",
+    "recall_checkpoint_absent_or_registry_not_live": "rebuild",
+    "recall_delta_incomplete": "rebuild",
+    "stored_resolver_entries_unreadable": "rebuild",
+    "resolver_snapshot_unavailable": "rebuild",
+    "topology_snapshot_unavailable": "rebuild",
+    "stored_topology_unreadable": "rebuild",
+    "stored_topology_fingerprint_mismatch": "rebuild",
+}
 
 #: #576. `REBUILD_STABILIZATION_ATTEMPTS` is the attempt *floor*, not the
 #: ceiling: two passes cannot converge against a corpus that is still being
@@ -2655,6 +2698,41 @@ class EpistemicGraphIndex:
         created_paths: Iterable[Path] = (),
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
     ) -> dict[str, int]:
+        # The affected set, widened as the pass learns more. It starts as what
+        # the caller named, which is already the checkpoint's changed and
+        # created paths, and grows to the recall delta and the resolver-affected
+        # sources once those are computed. A bail-out enqueues whatever is known
+        # at the point it fires; earlier bail-outs know less, and knowing less
+        # is not the same as knowing nothing.
+        deferred_scope: set[str] = {
+            rel
+            for candidate in (*paths, *created_paths)
+            if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
+        }
+
+        def defer(reason: str) -> dict[str, int] | None:
+            """Queue the affected paths; return a terminal report, or None to rebuild.
+
+            None means "enqueued, but this caller's contract is a converged
+            graph" -- the standalone library path, which has no checkpoint and no
+            envelope to carry a pending outcome. It still gets the enqueue, so a
+            rebuild that then fails leaves durable work behind instead of
+            nothing.
+            """
+            try:
+                deferred_index.add_graph(self.vault_root, sorted(deferred_scope))
+            except Exception:  # noqa: BLE001 - a queue failure must not lose the rebuild
+                log.warning(
+                    "graph deferral enqueue failed reason=%s; falling back to rebuild",
+                    reason,
+                    exc_info=True,
+                )
+                return None
+            if graph_checkpoint is None:
+                return None
+            self._mark_unavailable()
+            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+
         def fallback(reason: str) -> dict[str, int]:
             # #576 F3. The single most-wanted number in the incident, and the
             # one nothing logged: which gate sent essentially every write down
@@ -2669,6 +2747,10 @@ class EpistemicGraphIndex:
                 freshness.external_pending(self.vault_root),
                 graph_checkpoint.checkpoint_sha256 if graph_checkpoint is not None else None,
             )
+            if _FALLBACK_DISPOSITIONS[reason] == "defer":
+                deferred = defer(reason)
+                if deferred is not None:
+                    return deferred
             if graph_checkpoint is None:
                 return {
                     "indexed_files": 0,
@@ -2818,6 +2900,11 @@ class EpistemicGraphIndex:
             resolver_fingerprint = _resolver_topology_fingerprint(resolver)
 
         delta_paths = set(delta.changed | delta.deleted)
+        deferred_scope.update(
+            rel
+            for candidate in delta_paths
+            if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
+        )
         # Caller paths outside the exact retained suffix mean publication was
         # skipped, failed, or this is a duplicate callback whose global safety
         # cannot be proved path-locally. Rebuild from disk instead of blessing
@@ -2870,6 +2957,7 @@ class EpistemicGraphIndex:
             resolver_versions = resolver_version_result
             affected, topology_versions = affected_result
             refresh_paths.update(str(self.vault_root / rel) for rel in affected)
+            deferred_scope.update(affected)
 
         pass_started = False
         stable = False
@@ -2968,6 +3056,178 @@ class EpistemicGraphIndex:
         finally:
             conn.close()
         return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
+
+    def _topology_affected_sources(
+        self,
+        conn: sqlite3.Connection,
+        rels: set[str],
+        *,
+        resolver: vault_module.WikilinkResolver,
+    ) -> set[str]:
+        """Pages whose own edges change because these pages appeared or vanished.
+
+        A wikilink that does not resolve produces no edge at all -- it is dropped
+        in `_body_wikilink_paths`, not recorded as unresolved. So a page written
+        before its target exists has a missing edge, and nothing about
+        re-indexing the *target* later repairs the *source*. That is the forward
+        reference the full rebuild gets right for free, by re-deriving every page
+        once the corpus is complete, and the one thing a naive per-path drain
+        silently gets wrong.
+
+        The two directions cost very differently, so they are answered
+        differently:
+
+        - A page that *vanished* leaves its inbound edges behind, and those edges
+          name their own source. One indexed query answers it.
+        - A page that *appeared* has no such trace, because the links that should
+          point at it were never written down. Only the bodies know, so this
+          scans them.
+
+        The scan is what a persisted unresolved edge -- basic-memory's nullable
+        `to_id` beside a NOT NULL `to_name` -- would turn into an index lookup.
+        That is a real improvement and a real schema change, including to what
+        reads render for an unresolved target, so it is a measured Phase 3
+        candidate rather than something smuggled in here. It only runs when a
+        drain actually changes topology, which ordinary edits do not.
+        """
+        appeared: set[str] = set()
+        vanished: set[str] = set()
+        for rel in rels:
+            indexed = (
+                conn.execute(
+                    "SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", (rel,)
+                ).fetchone()
+                is not None
+            )
+            exists = (self.vault_root / rel).exists()
+            if exists and not indexed:
+                appeared.add(rel)
+            elif indexed and not exists:
+                vanished.add(rel)
+
+        affected: set[str] = set()
+        for rel in vanished:
+            affected.update(
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT DISTINCT source_path FROM graph_edges WHERE dst_key = ?",
+                    (_file_key(rel),),
+                )
+            )
+        if appeared:
+            affected.update(self._sources_linking_to(appeared, resolver=resolver))
+        return affected - rels
+
+    def _sources_linking_to(
+        self, targets: set[str], *, resolver: vault_module.WikilinkResolver
+    ) -> set[str]:
+        """Pages whose body wikilinks now resolve to one of `targets`."""
+        found: set[str] = set()
+        for path in vault_module.walk_vault_md(self.vault_root):
+            rel = _vault_rel(self.vault_root, path)
+            if rel is None or rel in targets:
+                continue
+            try:
+                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for match in vault_module.find_body_wikilinks(raw):
+                try:
+                    canonical, warning = vault_module.normalize_wikilink(
+                        match.group(1).strip(),
+                        self.vault_root,
+                        resolver=resolver,
+                        strict=False,
+                    )
+                except Exception:  # noqa: BLE001 - a malformed link resolves to nothing
+                    continue
+                if warning is None and _with_md(canonical) in targets:
+                    found.add(rel)
+                    break
+        return found
+
+    def drain_paths(self, paths: list[Path]) -> dict[str, Any]:
+        """Re-derive the graph for exactly these paths and republish availability.
+
+        The proportional counterpart to `rebuild_all`, and the reason the durable
+        queue is worth having: work is O(changed), so the window a concurrent
+        writer can invalidate shrinks by orders of magnitude instead of growing
+        with the vault.
+
+        Every identity it samples is the event-maintained one. Using
+        `_recall_projection_identity` here -- the direct-disk walk the full
+        rebuild uses -- would reintroduce an O(vault) cost per drain and give
+        back the whole improvement while still looking incremental. Membership
+        and resolver source versions are deliberately not proved either: both
+        are whole-vault, and what actually needs proving is that the pages this
+        pass indexed did not move under it, which `indexed_versions` says
+        exactly.
+
+        Publication is allowed to fail. The indexing is already durable in the
+        sidecar, so a refused marker costs a later republish, not the work; and
+        a write that landed mid-drain has enqueued its own receipt at a new
+        revision, which this drain's compare-and-swap clear cannot retire.
+        """
+        report: dict[str, Any] = {
+            "indexed_files": 0,
+            "nodes": 0,
+            "edges": 0,
+            "published": False,
+            "indexed": (),
+        }
+        if not paths:
+            return report
+        if not graph_enabled():
+            return {**report, "disabled": 1}
+        if not self.path.exists():
+            # An absent sidecar is not a dirty-path problem: there is nothing to
+            # repair incrementally, and indexing a handful of pages into a fresh
+            # database would publish a graph that is missing every other page.
+            return {**report, "requires_rebuild": 1}
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_drain_paths", holder_kind="graph"
+        ):
+            if not freshness.recall_is_live(self.vault_root, "vault"):
+                return {**report, "requires_rebuild": 1}
+            checkpoint = freshness.recall_checkpoint(self.vault_root, "vault")
+            before = _incremental_projection_identity(self.vault_root)
+            # Not `recall_resolver_snapshot_at_checkpoint`: that variant refuses
+            # a cache miss on purpose, because the *incremental refresh* path
+            # needs the pre-delta topology to prove bounded edge repair. A drain
+            # proves nothing about edges it did not touch -- it re-derives each
+            # queued page against the current corpus, which is what a resolver
+            # built from the current projection is. The identity check inside
+            # keeps a stale cached resolver from being reused.
+            resolver = find_module.recall_resolver_snapshot(self.vault_root)
+            if resolver is None:
+                return {**report, "requires_rebuild": 1}
+            queued_rels = {
+                rel
+                for path in paths
+                if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+            }
+            probe = self._connect()
+            try:
+                affected = self._topology_affected_sources(
+                    probe, queued_rels, resolver=resolver
+                )
+            finally:
+                probe.close()
+            batch = sorted({*paths, *(self.vault_root / rel for rel in affected)})
+            indexed_versions: dict[str, GraphSourceSignature] = {}
+            pass_report = self._refresh_paths_pass(
+                batch, resolver=resolver, indexed_versions=indexed_versions
+            )
+            published = self._mark_incremental_available(
+                before,
+                checkpoint=checkpoint,
+                source_versions=indexed_versions,
+            )
+        return {
+            **pass_report,
+            "published": published,
+            "indexed": tuple(sorted(indexed_versions)),
+        }
 
     def delete_paths(self, rel_paths: list[str]) -> int:
         with self._mutation_coordinator.hold(

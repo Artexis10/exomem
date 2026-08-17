@@ -181,6 +181,24 @@ A drain SHALL re-index queued paths through the existing per-path indexing primi
 and publish through the existing incremental availability marker. It SHALL NOT delete
 the node, edge, or parent-reference tables.
 
+A drain whose queued paths change link topology SHALL also repair the pages whose own
+edges change as a result. A link to a page that does not yet exist produces no edge at
+all, so re-indexing the target later cannot repair the source; the sources have to be
+found and re-indexed. A drain over paths that change no topology SHALL NOT perform that
+search.
+
+#### Scenario: A page written before its link target still gains the edge
+
+- **WHEN** a page linking to `C` is drained before `C` exists, and `C` is created and
+  drained afterwards
+- **THEN** the graph contains the edge from that page to `C`
+- **AND** it is the same edge a full rebuild of the resulting vault produces
+
+#### Scenario: An ordinary edit does not pay for topology repair
+
+- **WHEN** every queued path in a drain is already in the graph and still on disk
+- **THEN** no search for affected sources is performed
+
 #### Scenario: An ordinary bail-out costs O(changed), not O(vault)
 
 - **WHEN** the incremental refresh path bails out on an ordinary write
