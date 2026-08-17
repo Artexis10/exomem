@@ -65,6 +65,16 @@ REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 # re-running the rebuild cannot be what fixes it.
 REBUILD_SUPERSESSION_RETRIES = 1
 
+
+class _DrainPublicationMoved(Exception):
+    """A drain's publication proof failed at commit time; roll the pass back.
+
+    Deliberately internal and deliberately not an `OpError`: nothing is wrong,
+    the vault simply moved while the drain worked. The queue still holds the
+    work, so the next drain repairs it against the projection that moved.
+    """
+
+
 #: Every bail-out reason `_refresh_paths_locked` can emit, and which repair it
 #: earns. This is the one place the judgement lives; `tests/
 #: test_graph_deferred_queue.py` parses the reasons back out of this module and
@@ -3216,15 +3226,51 @@ class EpistemicGraphIndex:
                 probe.close()
             batch = sorted({*paths, *(self.vault_root / rel for rel in affected)})
             indexed_versions: dict[str, GraphSourceSignature] = {}
-            pass_report = self._refresh_paths_pass(
-                batch, resolver=resolver, indexed_versions=indexed_versions
-            )
-            published = self._mark_incremental_available(
-                before,
-                checkpoint=checkpoint,
-                graph_checkpoint=self._drained_graph_checkpoint(batch),
-                source_versions=indexed_versions,
-            )
+            published = False
+
+            def publish_drain(conn: sqlite3.Connection) -> None:
+                # Same seam, and for the same reason, as the incremental
+                # refresh path's own publication: the acknowledgement is
+                # written in the transaction that writes the rows it describes,
+                # having re-proved the projection did not move under the pass.
+                #
+                # Publishing afterwards through a second connection tears the
+                # two apart, and an acknowledgement that lands against a moved
+                # projection is exactly what the lineage check refuses --
+                # `GRAPH_SYNC_LINEAGE_CONFLICT`, raised at the *next* write
+                # rather than here.
+                nonlocal published
+                if not (
+                    _incremental_projection_identity(self.vault_root) == before
+                    and self._source_versions_current(indexed_versions)
+                    and freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
+                ):
+                    raise _DrainPublicationMoved
+                self._publish_available_marker_in_transaction(
+                    conn,
+                    before,
+                    checkpoint=checkpoint,
+                    # Read at commit time, not before the pass: the coverage
+                    # claim has to be about the generation that is committed
+                    # now, not the one that was committed when the drain
+                    # started.
+                    graph_checkpoint=self._drained_graph_checkpoint(batch),
+                )
+                published = True
+
+            try:
+                pass_report = self._refresh_paths_pass(
+                    batch,
+                    resolver=resolver,
+                    indexed_versions=indexed_versions,
+                    before_commit=publish_drain,
+                )
+            except _DrainPublicationMoved:
+                # The pass rolled back with it, so nothing is half-applied and
+                # no receipt is cleared. The queue still holds this work and
+                # the next drain repairs it against the projection that moved.
+                log.info("deferred graph drain did not publish; projection moved under the pass")
+                return {**report, "moved": 1}
         return {
             **pass_report,
             "published": published,

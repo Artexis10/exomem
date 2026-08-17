@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -2373,9 +2375,31 @@ def _installed_lease(args: argparse.Namespace) -> int:
     return 0
 
 
+@contextlib.contextmanager
+def _e2e_workdir(*, keep: bool):
+    """The harness's scratch root, optionally retained for a post-mortem.
+
+    Everything this run can be diagnosed from -- the server log, the vault it
+    built, the home it isolated -- lives in here and is deleted on the way out,
+    including when the run fails. For a deterministic failure that costs a
+    re-run; for an intermittent one it can cost many, and it is why an
+    `Internal Server Error` from the triage lane had to be chased by rerunning
+    until it reproduced rather than by reading the traceback it had already
+    written down.
+    """
+    path = tempfile.mkdtemp(prefix="exomem-product-e2e-")
+    try:
+        yield path
+    finally:
+        if keep:
+            print(f"product-e2e: kept working directory {path}")
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def _orchestrate(args: argparse.Namespace) -> int:
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="exomem-product-e2e-") as tmp_raw:
+    with _e2e_workdir(keep=args.keep_work) as tmp_raw:
         tmp = Path(tmp_raw)
         home = tmp / "home"
         work = tmp / "work"
@@ -2483,6 +2507,11 @@ def main() -> int:
     mode.add_argument("--installed-stdio", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--installed-http", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--installed-lease", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--keep-work",
+        action="store_true",
+        help="retain the scratch root (vault, home, logs) instead of deleting it on exit",
+    )
     parser.add_argument("--budget-seconds", type=float, default=300.0)
     parser.add_argument("--request-timeout", type=float, default=20.0)
     parser.add_argument("--executable", default="")
