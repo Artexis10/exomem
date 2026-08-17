@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.54.1](https://github.com/Artexis10/exomem/compare/v0.54.0...v0.54.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **graph:** stop interactive writes waiting on a full-corpus rebuild ([#591](https://github.com/Artexis10/exomem/issues/591)) ([d320357](https://github.com/Artexis10/exomem/commit/d3203575d71047337a0c2636803156254fe9f4c4))
+* **hosted:** give a fresh cell ownership of the scaffold provisioning wrote for it ([#603](https://github.com/Artexis10/exomem/issues/603)) ([74d2000](https://github.com/Artexis10/exomem/commit/74d2000b3c23a90a1c829f56a243440378e43dfd))
+
 ## [0.54.0](https://github.com/Artexis10/exomem/compare/v0.53.0...v0.54.0) (2026-08-17)
 
 
