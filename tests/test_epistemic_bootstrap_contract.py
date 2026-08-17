@@ -285,3 +285,71 @@ def test_reading_the_contract_exposes_no_vault_content(vault: Path) -> None:
 
     assert str(vault) not in contract
     assert ".md" not in contract
+
+
+# ------------------------------------------------------- executed-method outcomes
+
+
+#: Every carrier that teaches capture. Different clients read different ones -- a
+#: hosted client sees only the payload, a web client only the pasted block, a
+#: skill-capable client the scaffold -- so a class present in one and missing from
+#: another is a client that silently behaves differently.
+def _capture_carriers(vault: Path) -> dict[str, str]:
+    from exomem import prominence
+
+    repo = Path(__file__).resolve().parents[1]
+    return {
+        "bootstrap_payload": json.dumps(_contract(vault)),
+        "prominence_balanced": prominence.CONTRACTS["balanced"].capture,
+        "prominence_maximal": prominence.CONTRACTS["maximal"].capture,
+        "scaffold_skill": (
+            repo / "src/exomem/_scaffold/_Schema/SKILL.md"
+        ).read_text(encoding="utf-8"),
+        "pasted_instructions": (repo / "docs/prominence.md").read_text(encoding="utf-8"),
+    }
+
+
+def test_every_capture_carrier_covers_an_executed_method(vault: Path) -> None:
+    """The cooking miss: a method that ran and produced a reported result.
+
+    It is not a decision, not a solved problem, not a diagnosed failure, not a
+    pattern page, and not a fact about a recurring entity -- so the enumeration
+    every carrier used excluded it, and the agent obeyed the list it was given.
+    Any carrier that loses this class reintroduces the defect for its own clients.
+    """
+    for name, text in _capture_carriers(vault).items():
+        lowered = text.lower()
+        assert "method" in lowered, name
+        assert any(
+            phrase in lowered
+            for phrase in ("carried out", "actually ran", "actually carried", "was run")
+        ), f"{name} does not say the method was actually executed"
+        assert any(
+            phrase in lowered
+            for phrase in ("turned out", "how it went", "reports the result", "result")
+        ), f"{name} does not say the outcome is reported"
+
+
+def test_the_contract_routes_the_outcome_rather_than_dumping_it(vault: Path) -> None:
+    """One page type absorbing every outcome would be its own defect."""
+    guidance = _contract(vault)["capture_the_outcome"].lower()
+
+    assert "experiment" in guidance
+    assert "failure" in guidance
+    assert "unwritten" in guidance, "an episode with nothing reusable must stay unwritten"
+
+
+def test_the_contract_says_being_asked_afterwards_is_the_failure(vault: Path) -> None:
+    """Without this the guidance reads as permission rather than obligation."""
+    assert "failure" in _contract(vault)["capture_the_outcome"].lower()
+    assert "asked" in _contract(vault)["capture_the_outcome"].lower()
+
+
+def test_levels_that_never_self_capture_are_untouched(vault: Path) -> None:
+    """Broadening what counts as durable must not make a quiet level write."""
+    from exomem import prominence
+
+    for level in ("off", "light"):
+        capture = prominence.CONTRACTS[level].capture.lower()
+        assert "method" not in capture
+        assert "ask" in capture, level
