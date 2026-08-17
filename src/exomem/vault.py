@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1482,24 +1482,14 @@ class _BatchWorkspace:
         identity = artifact.identity
         if os.name == "nt":  # pragma: no cover - Windows does not replace open CRT files
             artifact.close()
-        for attempt in range(_REPLACE_SHARING_ATTEMPTS):
-            try:
-                self._replace_once(artifact, final)
-                break
-            except PermissionError as error:
-                if (
-                    os.name != "nt"
-                    or getattr(error, "winerror", None) not in _WINDOWS_SHARING_ERRORS
-                    or attempt == _REPLACE_SHARING_ATTEMPTS - 1
-                ):
-                    raise
-                time.sleep(_REPLACE_SHARING_SLEEP_SECONDS)
-                # Re-pin the workspace directory on every attempt so waiting out
-                # a reader never widens the window this guard covers. The
-                # artifact itself is already closed on Windows and its identity
-                # was proved immediately above, and the mutation boundary is
-                # held throughout, so no other governed writer can intervene.
-                self.recheck()
+        # Re-pin the workspace directory on every attempt so waiting out a reader
+        # never widens the window this guard covers. The artifact itself is
+        # already closed on Windows and its identity was proved immediately
+        # above, and the mutation boundary is held throughout, so no other
+        # governed writer can intervene.
+        replace_tolerating_transient_sharing(
+            lambda: self._replace_once(artifact, final), recheck=self.recheck
+        )
         artifact.close()
         self.artifacts.pop(artifact.name)
         return identity
@@ -1927,9 +1917,52 @@ def _recheck_rollback_directory_guards(
 #: short enough that a genuinely pinned file still fails inside the request
 #: rather than hanging it. POSIX never enters the loop -- `rename(2)` over an
 #: open file is always permitted -- so this costs nothing there.
+#:
+#: Measured headroom, against a reader re-opening the same page in a tight loop
+#: with no pause -- far more hostile than any real rebuild, which reads a page
+#: once and moves on: 200 consecutive replacements all succeeded, 96 needed at
+#: least one retry, and the worst needed 8 of the 20 attempts.
 _WINDOWS_SHARING_ERRORS = frozenset({5, 32})
 _REPLACE_SHARING_ATTEMPTS = 20
 _REPLACE_SHARING_SLEEP_SECONDS = 0.01
+
+
+def replace_tolerating_transient_sharing(
+    replace_once: Callable[[], None], *, recheck: Callable[[], None] = lambda: None
+) -> int:
+    """Perform a replacement, waiting out a transient Windows sharing refusal.
+
+    Returns the zero-based attempt that succeeded, so a caller (or a test) can
+    see how much of the budget a workload actually consumes rather than only
+    whether it fit.
+
+    `recheck` runs after every failed attempt. Waiting necessarily widens the
+    interval between proving a precondition and acting on it, so a caller that
+    holds a guarded precondition MUST re-prove it here rather than replace
+    against one established before the wait.
+
+    Note that this and `read_bytes_without_pinning` are a **pair**, not two
+    independent accommodations, and neither is sufficient alone. Without the
+    non-pinning read, a rebuild sweeping the corpus dies the moment it opens a
+    page a writer has marked delete-pending. With it, the reader survives -- but
+    FILE_SHARE_DELETE is precisely what lets a replacement mark the target
+    delete-pending while that handle lives, so a re-opening reader makes the
+    *writer* fail more often, not less. Only the retry closes that second gap.
+    """
+    for attempt in range(_REPLACE_SHARING_ATTEMPTS):
+        try:
+            replace_once()
+            return attempt
+        except PermissionError as error:
+            if (
+                os.name != "nt"
+                or getattr(error, "winerror", None) not in _WINDOWS_SHARING_ERRORS
+                or attempt == _REPLACE_SHARING_ATTEMPTS - 1
+            ):
+                raise
+            time.sleep(_REPLACE_SHARING_SLEEP_SECONDS)
+            recheck()
+    raise AssertionError("unreachable: the final attempt re-raises")  # pragma: no cover
 
 
 def read_bytes_without_pinning(path: Path) -> bytes:
