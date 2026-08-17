@@ -17,8 +17,8 @@ import sqlite3
 import threading
 import time
 import weakref
-from collections.abc import Iterable
-from contextlib import nullcontext
+from collections.abc import Iterable, Iterator
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -663,6 +663,40 @@ def _unregistered_temporary_groups(live: Path) -> dict[str, list[Path]]:
             continue
         groups.setdefault(base, []).append(candidate)
     return groups
+
+
+@contextmanager
+def _sampling_boundary(coordinator: Any) -> Iterator[None]:
+    """Hold the canonical boundary for a read if it can be had; proceed if not.
+
+    Sampling the publication epoch under the canonical boundary is what stops a
+    rebuild seeing a batch's interior -- a generation floor installed without its
+    checkpoint, which classifies as an incoherent lineage and refuses a rebuild
+    that had nothing wrong with it.
+
+    But it is an optimization for *coherence*, not an authorization: the sample
+    reads two small artifacts and grants nothing. Requiring the boundary would
+    therefore hand a rebuild two failure modes it did not previously have -- an
+    unopenable lock and a busy writer -- and the first of those broke the
+    standing contract that a rebuild refused for lock reasons raises
+    `GRAPH_SYNC_REBUILD_LOCK_UNAVAILABLE` and leaves the current graph intact.
+
+    So when the boundary is unavailable, sample without it. That is exactly the
+    behaviour every release before this one had, and the incoherence retry at
+    the call site still covers the torn read it leaves possible.
+    """
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(
+                coordinator.hold(
+                    operation="epistemic_graph_sample_epoch", holder_kind="graph"
+                )
+            )
+        except OpError:
+            # Unopenable lock or a busy writer. Either way the sample proceeds;
+            # only the coherence guarantee is lost, and only for this attempt.
+            pass
+        yield
 
 
 def _reap_preserved_temporaries(
@@ -1331,9 +1365,14 @@ class EpistemicGraphIndex:
                 # artifacts -- the same shape and cost as the coalesce hold it
                 # supersedes -- and it cannot deadlock, because the write path
                 # no longer waits on this thread in either direction.
-                with self._canonical_mutation_coordinator().hold(
-                    operation="epistemic_graph_sample_epoch", holder_kind="graph"
-                ):
+                #
+                # The hold is an *optimization for coherence*, not a
+                # precondition: it removes a torn read, it does not authorize
+                # anything. So a boundary that cannot be taken must not turn a
+                # rebuild into a new class of failure it never had before this
+                # change -- sampling unheld is exactly the previous behaviour,
+                # and the incoherence retry below still covers the torn read.
+                with _sampling_boundary(self._canonical_mutation_coordinator()):
                     epoch = graph_sync.publication_epoch(self.vault_root)
                     required = epoch.checkpoint
                     prior_acknowledgement = (
