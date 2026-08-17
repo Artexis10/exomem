@@ -1891,6 +1891,43 @@ def _recheck_rollback_directory_guards(
             guard.recheck(vault_root, allowed_changes=allowed_changes)
 
 
+#: Derived-index operational artifacts that live beside canonical content in a
+#: vault directory. A graph rebuild creates, replaces and removes these for its
+#: whole run; none of it is a change to the canonical namespace this census
+#: exists to pin.
+#:
+#: Counting them made an unrelated canonical write fail purely because a rebuild
+#: happened to be in flight — `PATH_GUARD_CHANGED: guarded directory census
+#: changed`, surfaced to the caller as `STALE_RECORD`, and on Windows also as
+#: `WinError 32` when the open sidecar refuses replacement. Nothing hit it while
+#: every write joined its own rebuild and the two could never overlap: the join
+#: was hiding a genuine conflict between the rebuild and concurrent writes
+#: (#576). It is the same reasoning as `_BATCH_RESIDUE_PREFIX` directly below —
+#: exomem's own operational residue is not canonical content.
+#:
+#: Deliberately narrow. `.graph-sync.json` and `.graph-sync-floor.json` stay
+#: censused: those are written by the canonical batch itself, so a change to
+#: them under a write is exactly what this guard must still refuse.
+#:
+#: Literals rather than an import, to avoid a `vault` <-> `graph_sync` cycle;
+#: `test_graph_artifacts_are_excluded_from_the_canonical_census` binds them to
+#: their definitions in `graph_sync` so the two cannot drift apart.
+_DERIVED_INDEX_PREFIXES = (".graph-rebuild-", ".graph-reset-")
+_DERIVED_INDEX_NAMES = frozenset(
+    {
+        ".graph.sqlite",
+        ".graph.sqlite-journal",
+        ".graph.sqlite-wal",
+        ".graph.sqlite-shm",
+    }
+)
+
+
+def _is_derived_index_artifact(name: str) -> bool:
+    """Whether a directory entry is derived-index residue, not canonical content."""
+    return name in _DERIVED_INDEX_NAMES or name.startswith(_DERIVED_INDEX_PREFIXES)
+
+
 _BATCH_RESIDUE_PREFIX = ".exomem-batch-"
 _BATCH_RESIDUE_NAME = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$", re.ASCII)
 _BATCH_RESIDUE_CHILD = re.compile(
@@ -2132,7 +2169,7 @@ def _bounded_directory_entries(
         ordinary_names: list[str] = []
         for entry in iterator:
             name = entry.name
-            if name in ignored_names:
+            if name in ignored_names or _is_derived_index_artifact(name):
                 continue
             if name.startswith(_BATCH_RESIDUE_PREFIX):
                 residue_names.append(name)
