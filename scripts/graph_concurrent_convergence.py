@@ -115,24 +115,42 @@ class _Writer(threading.Thread):
     """
 
     def __init__(
-        self, vault_root: Path, pages: list[Path], stop: threading.Event, imports: dict[str, Any]
+        self,
+        vault_root: Path,
+        pages: list[Path],
+        stop: threading.Event,
+        imports: dict[str, Any],
+        warmup: int = 2,
     ) -> None:
         super().__init__(daemon=True, name="convergence-writer")
         self.vault_root = vault_root
         self.pages = pages
         self.stop = stop
         self.imports = imports
+        #: Writes to discard before recording. The first write after setup pays
+        #: cold corpus, resolver, and page-cache costs that a long-lived server
+        #: pays once at startup and never again, so counting it as a blocked
+        #: write measures process start rather than graph repair.
+        self.warmup = max(warmup, 0)
         self.latencies: list[float] = []
         self.outcomes: dict[str, int] = {}
         self.errors: list[str] = []
+        self.warmup_latencies: list[float] = []
 
     def run(self) -> None:
         from types import SimpleNamespace
 
-        from exomem.writer_lease import LeaseConfig, LeaseManager, mark_active_mutation_committed
+        from exomem.writer_lease import get_manager, mark_active_mutation_committed
 
         vault = self.imports["vault"]
-        manager = LeaseManager(LeaseConfig(state_dir=self.vault_root.parent / "state"))
+        # `get_manager()`, not a fresh LeaseManager with its own state dir. The
+        # drainer runs outside any mutation request, so `active_manager()` gives
+        # it nothing and its graph index falls back to the *default* manager's
+        # coordinator. A writer on a private state dir therefore shares no
+        # mutation lock with the drain, and the two collide on `.graph.sqlite`
+        # with `database is locked` -- a harness artifact that looks exactly
+        # like a concurrency defect in the product.
+        manager = get_manager()
         revision = 0
         while not self.stop.is_set():
             page = self.pages[revision % len(self.pages)]
@@ -168,7 +186,11 @@ class _Writer(threading.Thread):
             except Exception as error:  # noqa: BLE001 - a writer failure is a finding
                 outcome = f"error:{type(error).__name__}"
                 self.errors.append(f"{type(error).__name__}: {error}")
-            self.latencies.append((time.perf_counter() - started) * 1_000.0)
+            elapsed_ms = (time.perf_counter() - started) * 1_000.0
+            if revision <= self.warmup:
+                self.warmup_latencies.append(elapsed_ms)
+                continue
+            self.latencies.append(elapsed_ms)
             self.outcomes[outcome] = self.outcomes.get(outcome, 0) + 1
 
 
@@ -271,6 +293,7 @@ def run(
         "writers": max(writers, 1),
         "elapsed_seconds": round(elapsed, 1),
         "writes": len(latencies),
+        "warmup_writes": sum(len(thread.warmup_latencies) for thread in writer_threads),
         "drains": drainer.drains,
         "outcomes": outcomes,
         "write_ms": {
@@ -316,7 +339,7 @@ def format_report(report: dict[str, Any]) -> str:
     return (
         f"pages={report['pages']} writers={report['writers']} "
         f"elapsed={report['elapsed_seconds']}s writes={report['writes']} "
-        f"drains={report['drains']}\n"
+        f"(+{report['warmup_writes']} warmup) drains={report['drains']}\n"
         f"  write ms median/p95/max={write['median']}/{write['p95']}/{write['max']} "
         f"blocking={report['blocking_writes']}\n"
         f"  outcomes: {outcomes or '(none)'}\n"
