@@ -158,15 +158,27 @@ def _direct_mutation_boundary(
     )
 
 
-def _queued_graph_repair(vault_root: Path) -> Any:
-    """The committed checkpoint whose repair is queued for a drain, or None.
+def _durable_graph_outcome(vault_root: Path) -> Any:
+    """The terminal graph fragment provable from durable state alone, or None.
 
     A repair the durable queue owns has no registration to observe, so the
-    terminal proves the same fact from durable state instead: the sidecar has
-    not acknowledged the committed generation, and work is still queued against
-    it. Both terms are needed -- an unacknowledged checkpoint with an empty queue
-    is a rebuild's business, and a queue holding later work says nothing about
-    whether *this* generation converged.
+    terminal proves what it can from what is on disk. Two facts are provable and
+    they are *different answers*:
+
+    * the sidecar acknowledges the committed generation -- the graph is current
+      for this write, which is exactly the `completed` this field has always
+      meant;
+    * it does not, and work is still queued against it -- `pending`.
+
+    Reporting nothing for the first is what a queue-only probe does, and it grows
+    **more** wrong as the drain gets healthier: a write whose repair landed before
+    its response was shaped then says nothing about the graph at all, and a caller
+    cannot tell a converged graph from an unreported one. Measured at 16 of 43
+    writes in one 400-page run once the drain stopped being refused.
+
+    Both terms still matter for `pending`: an unacknowledged checkpoint with an
+    empty queue is a rebuild's business, and a queue holding later work says
+    nothing about whether *this* generation converged.
 
     Never raises. This runs while shaping a terminal for canonical bytes that are
     already durable; a probe that failed loudly here would turn a successful
@@ -180,10 +192,12 @@ def _queued_graph_repair(vault_root: Path) -> Any:
             return None
         acknowledged = graph_sync.acknowledged_checkpoint(vault_root)
         if acknowledged is not None and acknowledged.covers(committed):
-            return None
-        return committed if deferred_index.list_graph_paths(vault_root) else None
+            return {"graph_sync": "completed"}
+        if deferred_index.list_graph_paths(vault_root):
+            return graph_sync.committed_graph_queued(committed)
+        return None
     except Exception:  # noqa: BLE001 - a report must not fail a durable write
-        logger.warning("queued graph repair probe failed", exc_info=True)
+        logger.warning("durable graph outcome probe failed", exc_info=True)
         return None
 
 
@@ -2552,11 +2566,9 @@ class LeaseManager:
                     root, state_root=self.config.state_dir
                 )
                 if required is None and not has_reconcile_handoff:
-                    queued = _queued_graph_repair(root)
-                    if queued is not None:
-                        return with_graph_outcome(
-                            terminal_result, graph_sync.committed_graph_queued(queued)
-                        )
+                    durable = _durable_graph_outcome(root)
+                    if durable is not None:
+                        return with_graph_outcome(terminal_result, durable)
                     return terminal_result
                 if required is not None:
                     # An interactive write takes a derived-graph outcome only if

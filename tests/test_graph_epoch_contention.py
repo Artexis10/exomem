@@ -175,6 +175,53 @@ def test_a_permanently_busy_epoch_raises_retry_not_reconcile(
     assert not isinstance(raised.value, graph_sync.GraphEpochIncoherent)
 
 
+def test_a_durably_queued_repair_counts_as_a_provisioned_handoff(tmp_path: Path) -> None:
+    """The queue is a handoff. Asking only about a flight fails the healthy path.
+
+    `post_commit_batch_fanout` refuses to return a committed batch whose
+    checkpoint nothing will answer. Its only notion of "will answer" was an
+    in-process rebuild flight registered against the exact checkpoint -- which
+    is precisely what a write no longer creates once repair is queued and
+    drained off the write path. Measured cost: one write per run reporting
+    `graph_sync: failed` / `GRAPH_SYNC_HANDOFF_MISSING` and telling the caller
+    to reconcile, against a graph that converged with zero drift.
+    """
+    from exomem import deferred_index
+
+    root = _kb(tmp_path)
+    required = _install_epoch(root, floor=3, checkpoint=3)
+    assert graph_sync.repair_is_provisioned(root, required) is False
+    deferred_index.add_graph(root, [path for path, _digest in required.paths])
+    assert graph_sync.repair_is_provisioned(root, required) is True
+
+
+def test_a_pending_full_rebuild_marker_also_provisions_the_handoff(tmp_path: Path) -> None:
+    """A batch too large to enumerate queues a marker instead of paths."""
+    from exomem import deferred_index
+
+    root = _kb(tmp_path)
+    required = _install_epoch(root, floor=3, checkpoint=3)
+    deferred_index.mark_graph_full_rebuild(root, generation=required.generation)
+    assert graph_sync.repair_is_provisioned(root, required) is True
+
+
+def test_an_unqueued_unregistered_checkpoint_is_still_a_missing_handoff(
+    tmp_path: Path,
+) -> None:
+    """The guard must keep failing the case it exists for.
+
+    Markdown committed, checkpoint unacknowledged, nothing registered and
+    nothing queued: no one will ever repair the graph for this write, and that
+    has to stay loud.
+    """
+    from exomem import deferred_index
+
+    root = _kb(tmp_path)
+    required = _install_epoch(root, floor=3, checkpoint=3)
+    deferred_index.add_graph(root, ["Knowledge Base/Notes/somebody-else.md"])
+    assert graph_sync.repair_is_provisioned(root, required) is False
+
+
 def test_the_drain_re_reads_a_mid_batch_epoch_under_the_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

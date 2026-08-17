@@ -2763,6 +2763,48 @@ def registered_checkpoint(
     return item[1] if item is not None else None
 
 
+def repair_is_provisioned(
+    vault_root: Path,
+    required: GraphSyncCheckpoint,
+    *,
+    state_root: Path | None = None,
+) -> bool:
+    """Will something converge the graph to `required`, or has it already?
+
+    A committed batch may not leave an unacknowledged checkpoint with nothing
+    arranged to answer it. Before repair moved off the write path there was
+    exactly one way to arrange it -- an in-process rebuild flight registered
+    against this exact checkpoint -- so the fanout's handoff check asked only
+    about that. Repair is now queued durably and drained later, which means a
+    write that queues *correctly* registers no flight at all, and the old
+    question answers "no handoff" for the healthiest path there is.
+
+    Three things count, and they are the three that exist:
+
+    * a registered flight for this exact checkpoint;
+    * a durable queue entry -- this checkpoint's own paths, or a full-rebuild
+      marker that subsumes them;
+    * an acknowledgement that already covers it, for when a drain got there
+      between the commit and this check.
+
+    Absence of all three is still a real defect and still fails the batch: it
+    means the markdown landed and nothing will ever repair the graph for it.
+    """
+    if registered_checkpoint(vault_root, state_root=state_root) == required:
+        return True
+    acknowledged = acknowledged_checkpoint(vault_root)
+    if acknowledged is not None and acknowledged.covers(required):
+        return True
+    from . import deferred_index
+
+    if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
+        return True
+    queued = set(deferred_index.list_graph_paths(vault_root))
+    if not queued:
+        return False
+    return all(path in queued for path, _digest in required.paths)
+
+
 def temporary_sidecar_path(live: Path, checkpoint: GraphSyncCheckpoint) -> Path:
     # The checkpoint digest identifies the intended publication, not one
     # process. A per-attempt nonce prevents two replicas from sharing a temp
