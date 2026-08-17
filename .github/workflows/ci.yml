@@ -79,6 +79,63 @@ jobs:
         if: matrix.shard == 1
         run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
 
+  cross-platform:
+    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/2)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    # Advisory while it earns its keep. Every other job here runs on
+    # ubuntu-latest, so a whole class of defect has only ever been caught by
+    # hand: on Windows an open file handle refuses `os.replace` outright
+    # (CPython opens without FILE_SHARE_DELETE), and four such defects were
+    # found manually against this suite -- none of them able to fail on Linux.
+    # Starting non-blocking lets the lane report the truth about Windows and
+    # macOS without gating merges on failures nobody has triaged yet. Promote to
+    # required once it is green across a few merges: an advisory lane that stays
+    # advisory forever is just noise.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        # Two shards, not the Linux lane's four. This lane exists to expose
+        # platform behaviour, not to be the fastest path to a result.
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # No bubblewrap step: process isolation is Linux-only and the suite skips
+      # what it cannot run. No Bun step either -- if a test turns out to need
+      # it, that dependency is itself a finding this lane exists to surface.
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - name: Run tests (lean — BM25/keyword, server media extraction off)
+        env:
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python -m pytest -q
+          --splits=2
+          --group=${{ matrix.shard }}
+          --splitting-algorithm=least_duration
+          --durations-path=.test_durations.json
+          --session-timeout=2700
+          --durations=50
+          --durations-min=1
+          --junitxml=test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml
+      - name: Upload cross-platform test timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossplat-${{ matrix.os }}-shard-${{ matrix.shard }}-junit
+          path: test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml
+          if-no-files-found: warn
+
   tui:
     name: terminal UI (textual, headless + snapshots)
     runs-on: ubuntu-latest
