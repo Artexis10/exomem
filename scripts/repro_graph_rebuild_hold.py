@@ -9,6 +9,7 @@ publication boundary as the only measured lock hold.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import statistics
 import sys
@@ -149,6 +150,11 @@ def measure(vault_root: Path, size: int, trials: int, imports: dict[str, Any]) -
     sidecar = epistemic_graph.sidecar_path(vault_root)
     for _ in range(trials):
         advance_checkpoint(vault_root, target, imports)
+        # The previous trial's rebuild is a daemon thread, and on Windows a
+        # reader still holding the sidecar refuses the unlink outright. Join it
+        # before removing the file it is reading; the measurement below starts
+        # after this and is unaffected by it.
+        imports["graph_sync"].drain_active_rebuilds()
         sidecar.unlink(missing_ok=True)
         if sidecar.exists():
             raise RuntimeError("could not remove derived graph sidecar")
@@ -227,6 +233,27 @@ def format_result(result: dict[str, Any], *, hold_ratio: float | None = None) ->
     return line
 
 
+@contextlib.contextmanager
+def _quiesced(imports: dict[str, Any]):
+    """Let no graph rebuild outlive the vault it was building against.
+
+    A rebuild runs on a daemon thread. One still holding `.graph.sqlite` when
+    the temporary root is removed fails cleanup with WinError 32 -- raised
+    *after* every measurement is taken, so a working benchmark is reported as a
+    crashed one and the numbers it printed scroll past unread. Nested inside the
+    temporary directory so this unwinds first, which is the whole point.
+    """
+    try:
+        yield
+    finally:
+        if not imports["graph_sync"].drain_active_rebuilds():
+            print(
+                "repro-graph-rebuild-hold: a graph rebuild did not finish before "
+                "teardown; the measurements stand, cleanup may not",
+                flush=True,
+            )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repo_root", type=Path)
@@ -238,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
 
     imports = _imports(args.repo_root.resolve())
     results: list[dict[str, Any]] = []
-    with tempfile.TemporaryDirectory(prefix="graph-rebuild-hold-") as temp:
+    with tempfile.TemporaryDirectory(prefix="graph-rebuild-hold-") as temp, _quiesced(imports):
         root = Path(temp)
         for size in args.sizes:
             vault_root = root / f"vault-{size}"
