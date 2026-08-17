@@ -70,6 +70,39 @@ restate it.
 - **WHEN** the live acceptance script validates a response whose graph is converging
 - **THEN** it accepts `pending` as a valid outcome rather than rejecting the response
 
+### Requirement: A process does not exit with a graph rebuild in flight
+
+Taking the rebuild off the write path SHALL NOT mean a process may end while one
+is running. A rebuild runs on a daemon thread, which is correct for a long-lived
+server and incorrect for a one-shot invocation that exits as soon as its command
+returns — there, the write would report `pending` and nothing would ever make it
+true.
+
+A command-line invocation SHALL therefore drain in-flight graph rebuilds before
+exiting, on **every** exit path, including those that return before the main
+dispatch. The drain SHALL be bounded: a rebuild that will not finish SHALL NOT
+hold the process open indefinitely, and SHALL be reported to the operator with
+the repair that applies, rather than passed over in silence. The canonical bytes
+and the checkpoint are durable either way, so an abandoned rebuild costs a
+reconcile, never a write.
+
+#### Scenario: A one-shot invocation waits for the rebuild its write started
+
+- **WHEN** a command-line write commits and its graph rebuild is still running
+- **THEN** the process drains that rebuild before exiting
+
+#### Scenario: Every exit path drains
+
+- **WHEN** a command-line invocation returns through an early exit that precedes
+  the main dispatch
+- **THEN** in-flight graph rebuilds are still drained
+
+#### Scenario: A wedged rebuild is surrendered and reported
+
+- **WHEN** an in-flight rebuild does not finish within the drain bound
+- **THEN** the process exits anyway
+- **AND** it reports that the change is committed and names reconcile as the repair
+
 ### Requirement: Graph-backed reads converge without being asked
 
 Because a write no longer waits for its own rebuild, a reader issuing a

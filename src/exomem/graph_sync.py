@@ -2490,6 +2490,54 @@ def wait_for_registered(
     return None if item is None else item[0].wait(timeout)
 
 
+#: The one thread name every graph rebuild runs under, in both the registered
+#: path (`GraphRebuildCoordinator.ensure_started`) and the warming path
+#: (`epistemic_graph.schedule_background_rebuild`).
+GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
+
+#: A rebuild over a realistic vault is seconds; a whole-vault pass over a large
+#: one has been measured in the low minutes. Long enough that a healthy rebuild
+#: always finishes, short enough that a wedged one cannot hold a shell prompt
+#: open indefinitely -- at which point the checkpoint is still durable and the
+#: next run or a reconcile repairs it.
+_EXIT_DRAIN_SECONDS = 300.0
+
+
+def drain_active_rebuilds(timeout: float = _EXIT_DRAIN_SECONDS) -> bool:
+    """Let in-flight graph rebuilds finish before this process ends.
+
+    Taking the rebuild off the *write* path is correct: a request should not pay
+    for a whole-vault build. Letting the *process* exit with that build still
+    running is not, and the two are easy to conflate.
+
+    A rebuild runs on a daemon thread, which is right for the long-lived server
+    -- the request returns, the rebuild lands moments later, and a reader that
+    polls sees it converge. It is wrong for a one-shot CLI process, which exits
+    as soon as the command returns and takes the daemon with it. The write would
+    report `pending` and nothing would ever make it true: every `exomem`
+    invocation would leave the graph a little further behind, and only an
+    explicit reconcile would catch up.
+
+    So the boundary is process lifetime, not the write path. Returns whether
+    everything drained, so a caller can say so rather than exit silently on a
+    rebuild it abandoned.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == GRAPH_REBUILD_THREAD_NAME and thread.is_alive()
+        ]
+        if not alive:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        for thread in alive:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
 def await_active_rebuild(
     vault_root: Path,
     *,

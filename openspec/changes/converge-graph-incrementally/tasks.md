@@ -31,10 +31,20 @@ time. Reachable today on every path that already rebuilds off the write path.
 - [x] 2.3 Retry a replacement refused by a transient sharing violation for a bounded
   interval, re-evaluating the precondition on each attempt rather than replacing against
   a stale one.
-- [x] 2.4 Sample the publication epoch under the canonical mutation hold so a rebuild
-  observes a batch from outside and never from within.
+- [x] 2.4 Stop a rebuild classifying a batch's interior as an incoherent lineage.
+  Coalesce through the canonical boundary only to *re-read* a sample that came back
+  torn, never on every attempt: acquiring the boundary is what waits the batch out,
+  and holding it unconditionally charges each attempt a lock acquisition whose
+  holder-metadata write is observable to anything counting replacements.
 - [x] 2.5 Drain active graph rebuilds at test teardown, failing rather than leaking one.
   Keep it a quiesce, not a convergence helper.
+- [x] 2.6 Drain in-flight graph rebuilds before a command-line process exits, on
+  every exit path including the early returns. A rebuild is a daemon thread: right
+  for the long-lived server, wrong for a one-shot invocation that would otherwise
+  take it down and leave `pending` permanently true. Bound the drain and report a
+  rebuild it had to abandon.
+- [x] 2.7 Make the product E2E wait for convergence rather than assume the write
+  performed it, and keep that a real gate rather than a tolerance.
 
 ## 3. Phase 1 verification
 
@@ -43,10 +53,14 @@ time. Reachable today on every path that already rebuilds off the write path.
   not pass.
 - [x] 3.2 Full suite diffed against an `origin/main` baseline worktree on the same box:
   no new failures.
-- [ ] 3.3 Run the live acceptance script explicitly — it is not in CI — and confirm it
-  accepts `pending`.
-- [ ] 3.4 Grep every consumer of the graph sync seam, the join helper, the off-boundary
-  rebuild entry point, and the terminal `graph_sync` field before finishing the phase.
+- [x] 3.3 Confirm the live-acceptance vocabulary accepts `pending` and still rejects
+  an unknown value. The script itself needs a deployed endpoint and deployment digests,
+  so it stays a deploy-time gate; its validator was exercised directly.
+- [x] 3.4 Grep every consumer of the graph sync seam, the join helper, the off-boundary
+  rebuild entry point, and the terminal `graph_sync` field. This found a `vault.py`
+  comment claiming a test bound its copied artifact names back to `graph_sync` when no
+  such test existed; writing it is what surfaced that the non-pinning read and the
+  replacement retry are a pair.
 
 ## 4. Phase 2 — red-first durable dirty queue
 

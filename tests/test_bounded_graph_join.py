@@ -517,3 +517,81 @@ def test_a_genuinely_broken_projection_still_fails_the_way_it_does_today(
     assert freshness.external_pending(vault) is True
     assert epistemic_graph.publication_refusal_active(vault) is False
     assert freshness.mark_external_pending(epoch_probe) == clock_before + 2
+
+
+# ---------------------------------------------------------------------------
+# Process lifetime, as distinct from the write path
+# ---------------------------------------------------------------------------
+#
+# Taking the rebuild off the write path is correct; letting a *process* exit
+# with that rebuild still running is not, and the two are easy to conflate. A
+# daemon thread is right for the long-lived server and wrong for a one-shot CLI
+# invocation, which would otherwise report `pending` on every write and never
+# make any of them true.
+
+
+def test_draining_returns_immediately_when_no_rebuild_is_running() -> None:
+    assert graph_sync.drain_active_rebuilds(timeout=0.0) is True
+
+
+def test_draining_waits_for_a_running_rebuild() -> None:
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _rebuild() -> None:
+        release.wait(timeout=10)
+        finished.set()
+
+    thread = threading.Thread(
+        target=_rebuild, name=graph_sync.GRAPH_REBUILD_THREAD_NAME, daemon=True
+    )
+    thread.start()
+    try:
+        assert graph_sync.drain_active_rebuilds(timeout=0.05) is False, (
+            "a still-running rebuild must not be reported as drained"
+        )
+        release.set()
+        assert graph_sync.drain_active_rebuilds(timeout=10.0) is True
+        assert finished.is_set() is True
+    finally:
+        release.set()
+        thread.join(timeout=10)
+
+
+def test_draining_surrenders_rather_than_holding_the_process_open() -> None:
+    """A wedged rebuild must not hold a shell prompt open indefinitely."""
+    release = threading.Event()
+    thread = threading.Thread(
+        target=lambda: release.wait(timeout=30),
+        name=graph_sync.GRAPH_REBUILD_THREAD_NAME,
+        daemon=True,
+    )
+    thread.start()
+    try:
+        started = time.monotonic()
+        assert graph_sync.drain_active_rebuilds(timeout=0.2) is False
+        assert time.monotonic() - started < 5.0, "the drain must be bounded"
+    finally:
+        release.set()
+        thread.join(timeout=30)
+
+
+def test_the_cli_drains_before_it_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The seam is wired, not merely available.
+
+    `main()` returning while a rebuild is in flight is the whole defect; a
+    version of this that only tested `drain_active_rebuilds` in isolation would
+    pass with the call site missing.
+    """
+    from exomem import __main__ as cli
+
+    drained: list[bool] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "drain_active_rebuilds",
+        lambda *_args, **_kwargs: (drained.append(True), True)[1],
+    )
+
+    cli.main(["--version", "--json"])
+
+    assert drained == [True], "the CLI exited without draining in-flight rebuilds"
