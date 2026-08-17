@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1465,12 +1465,7 @@ class _BatchWorkspace:
                 os.close(descriptor)
             raise
 
-    def replace_artifact(self, artifact: _WorkspaceArtifact, final: Path) -> PathIdentity:
-        self.recheck()
-        artifact.recheck()
-        identity = artifact.identity
-        if os.name == "nt":  # pragma: no cover - Windows does not replace open CRT files
-            artifact.close()
+    def _replace_once(self, artifact: _WorkspaceArtifact, final: Path) -> None:
         if os.replace in getattr(os, "supports_dir_fd", set()):
             os.replace(
                 artifact.name,
@@ -1480,6 +1475,21 @@ class _BatchWorkspace:
             )
         else:  # pragma: no cover - Windows fallback
             os.replace(artifact.path, final)
+
+    def replace_artifact(self, artifact: _WorkspaceArtifact, final: Path) -> PathIdentity:
+        self.recheck()
+        artifact.recheck()
+        identity = artifact.identity
+        if os.name == "nt":  # pragma: no cover - Windows does not replace open CRT files
+            artifact.close()
+        # Re-pin the workspace directory on every attempt so waiting out a reader
+        # never widens the window this guard covers. The artifact itself is
+        # already closed on Windows and its identity was proved immediately
+        # above, and the mutation boundary is held throughout, so no other
+        # governed writer can intervene.
+        replace_tolerating_transient_sharing(
+            lambda: self._replace_once(artifact, final), recheck=self.recheck
+        )
         artifact.close()
         self.artifacts.pop(artifact.name)
         return identity
@@ -1891,6 +1901,200 @@ def _recheck_rollback_directory_guards(
             guard.recheck(vault_root, allowed_changes=allowed_changes)
 
 
+#: Windows refuses `os.replace` onto a target another handle holds open without
+#: FILE_SHARE_DELETE (ERROR_SHARING_VIOLATION, 32) and reports
+#: ERROR_ACCESS_DENIED (5) for a target already marked delete-pending. Both are
+#: *transient by nature*: the holder is a reader that closes microseconds later.
+#:
+#: exomem's own derived-index readers no longer pin canonical pages -- see
+#: `read_bytes_without_pinning` -- but this writer cannot assume it is the only
+#: process on a user's vault. Obsidian, OneDrive, a backup agent and an
+#: antivirus scanner all open Markdown files, and on Windows any one of them
+#: turns an ordinary governed write into RECORD_PUBLICATION_FAILED. Waiting out
+#: a transient reader is the correct platform accommodation, not a workaround.
+#:
+#: ~200 ms of total patience: long enough that no realistic reader outlives it,
+#: short enough that a genuinely pinned file still fails inside the request
+#: rather than hanging it. POSIX never enters the loop -- `rename(2)` over an
+#: open file is always permitted -- so this costs nothing there.
+#:
+#: Measured headroom, against a reader re-opening the same page in a tight loop
+#: with no pause -- far more hostile than any real rebuild, which reads a page
+#: once and moves on: 200 consecutive replacements all succeeded, 96 needed at
+#: least one retry, and the worst needed 8 of the 20 attempts.
+_WINDOWS_SHARING_ERRORS = frozenset({5, 32})
+_REPLACE_SHARING_ATTEMPTS = 20
+_REPLACE_SHARING_SLEEP_SECONDS = 0.01
+
+
+def replace_tolerating_transient_sharing(
+    replace_once: Callable[[], None], *, recheck: Callable[[], None] = lambda: None
+) -> int:
+    """Perform a replacement, waiting out a transient Windows sharing refusal.
+
+    Returns the zero-based attempt that succeeded, so a caller (or a test) can
+    see how much of the budget a workload actually consumes rather than only
+    whether it fit.
+
+    `recheck` runs after every failed attempt. Waiting necessarily widens the
+    interval between proving a precondition and acting on it, so a caller that
+    holds a guarded precondition MUST re-prove it here rather than replace
+    against one established before the wait.
+
+    Note that this and `read_bytes_without_pinning` are a **pair**, not two
+    independent accommodations, and neither is sufficient alone. Without the
+    non-pinning read, a rebuild sweeping the corpus dies the moment it opens a
+    page a writer has marked delete-pending. With it, the reader survives -- but
+    FILE_SHARE_DELETE is precisely what lets a replacement mark the target
+    delete-pending while that handle lives, so a re-opening reader makes the
+    *writer* fail more often, not less. Only the retry closes that second gap.
+    """
+    for attempt in range(_REPLACE_SHARING_ATTEMPTS):
+        try:
+            replace_once()
+            return attempt
+        except PermissionError as error:
+            if (
+                os.name != "nt"
+                or getattr(error, "winerror", None) not in _WINDOWS_SHARING_ERRORS
+                or attempt == _REPLACE_SHARING_ATTEMPTS - 1
+            ):
+                raise
+            time.sleep(_REPLACE_SHARING_SLEEP_SECONDS)
+            recheck()
+    raise AssertionError("unreachable: the final attempt re-raises")  # pragma: no cover
+
+
+def read_bytes_without_pinning(path: Path) -> bytes:
+    """Read a canonical file without blocking a concurrent replacement of it.
+
+    Python's Windows `open()` requests FILE_SHARE_READ | FILE_SHARE_WRITE and
+    omits FILE_SHARE_DELETE, so for as long as the file is open an `os.replace`
+    onto it is refused with WinError 32. That is the right trade for a
+    *canonical* reader, which has verified a path and must pin what it verified.
+
+    It is the wrong trade for a **derived-index** reader. A graph or embedding
+    rebuild is building a cache from canonical bytes; it already re-proves the
+    source versions it read (`_source_versions_current`) and treats a page that
+    moved under it as a reason to discard the pass. Pinning buys it nothing, and
+    costs it this: a rebuild sweeping the corpus makes every concurrent write to
+    a page it happens to be reading fail, which surfaced as WinError 32 on
+    `log.md` and `_collection.md` the moment writes stopped joining their
+    rebuild (#576).
+
+    POSIX has no equivalent restriction -- `rename(2)` over an open file is
+    always permitted -- so there this is exactly `path.read_bytes()`.
+    """
+    if os.name != "nt":
+        return path.read_bytes()
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # SHARE_READ | SHARE_WRITE | SHARE_DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080,  # FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        error = ctypes.get_last_error()
+        # Preserve the exception types every caller of `read_bytes()` already
+        # handles; a derived-index reader treats a vanished page as absent, not
+        # as an unclassified OS failure.
+        if error in {2, 3}:
+            raise FileNotFoundError(error, "no such file", str(path))
+        raise ctypes.WinError(error)
+    import msvcrt
+
+    # `open_osfhandle` transfers ownership: closing the descriptor closes the
+    # handle, so there is no path here that leaks it.
+    descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    with os.fdopen(descriptor, "rb") as stream:
+        return stream.read()
+
+
+#: Derived-index operational artifacts that live beside canonical content in a
+#: vault directory. A graph rebuild creates, replaces and removes these for its
+#: whole run; none of it is a change to the canonical namespace this census
+#: exists to pin.
+#:
+#: Counting them made an unrelated canonical write fail purely because a rebuild
+#: happened to be in flight — `PATH_GUARD_CHANGED: guarded directory census
+#: changed`, surfaced to the caller as `STALE_RECORD`, and on Windows also as
+#: `WinError 32` when the open sidecar refuses replacement. Nothing hit it while
+#: every write joined its own rebuild and the two could never overlap: the join
+#: was hiding a genuine conflict between the rebuild and concurrent writes
+#: (#576). It is the same reasoning as `_BATCH_RESIDUE_PREFIX` directly below —
+#: exomem's own operational residue is not canonical content.
+#:
+#: Deliberately narrow. `.graph-sync.json` and `.graph-sync-floor.json` stay
+#: censused: those are written by the canonical batch itself, so a change to
+#: them under a write is exactly what this guard must still refuse.
+#:
+#: Literals rather than an import, to avoid a `vault` <-> `graph_sync` cycle;
+#: `test_graph_artifacts_are_excluded_from_the_canonical_census` binds them to
+#: their definitions in `graph_sync` so the two cannot drift apart.
+_DERIVED_INDEX_PREFIXES = (".graph-rebuild-", ".graph-reset-")
+_DERIVED_INDEX_NAMES = frozenset(
+    {
+        ".graph.sqlite",
+        ".graph.sqlite-journal",
+        ".graph.sqlite-wal",
+        ".graph.sqlite-shm",
+    }
+)
+
+
+#: The deferred-index queue database, which lives beside canonical content for
+#: the same reason the graph sidecar does. It earns its own set rather than
+#: joining `_DERIVED_INDEX_NAMES` because that one is bound to `graph_sync`'s
+#: reset manifest, and this one is bound to `deferred_index.store_path`.
+#:
+#: The graph dirty-path enqueue (`converge-graph-incrementally`) writes this
+#: database *before* the canonical batch commits, so that a crash between the
+#: markdown and the enqueue cannot lose the dirty set. That ordering is
+#: deliberate -- over-enqueueing costs a redundant re-index, under-enqueueing
+#: is unrecoverable without the whole-vault rebuild being removed -- and it
+#: puts the file's creation and journalling inside the guarded window. Counting
+#: it made the first write to a fresh vault invalidate its own census and fail
+#: as `STALE_RECORD: canonical record changed before commit`, with nothing
+#: concurrent involved.
+#:
+#: Same narrowness rule as above: a dirty-path queue is exomem's own
+#: bookkeeping and never canonical content, so excluding it removes no
+#: guarantee. Two writers racing to append their own debt is precisely the
+#: monotone behaviour the queue exists to provide, not a canonical conflict.
+_DEFERRED_INDEX_BASENAME = ".deferred-index.sqlite"
+_DEFERRED_INDEX_NAMES = frozenset(
+    {_DEFERRED_INDEX_BASENAME}
+    | {f"{_DEFERRED_INDEX_BASENAME}-{suffix}" for suffix in ("journal", "wal", "shm")}
+)
+
+
+def _is_derived_index_artifact(name: str) -> bool:
+    """Whether a directory entry is derived-index residue, not canonical content."""
+    return (
+        name in _DERIVED_INDEX_NAMES
+        or name in _DEFERRED_INDEX_NAMES
+        or name.startswith(_DERIVED_INDEX_PREFIXES)
+    )
+
+
 _BATCH_RESIDUE_PREFIX = ".exomem-batch-"
 _BATCH_RESIDUE_NAME = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$", re.ASCII)
 _BATCH_RESIDUE_CHILD = re.compile(
@@ -2132,7 +2336,7 @@ def _bounded_directory_entries(
         ordinary_names: list[str] = []
         for entry in iterator:
             name = entry.name
-            if name in ignored_names:
+            if name in ignored_names or _is_derived_index_artifact(name):
                 continue
             if name.startswith(_BATCH_RESIDUE_PREFIX):
                 residue_names.append(name)
@@ -3086,6 +3290,32 @@ def _remove_empty_created_dirs(created_dirs: list[Path]) -> None:
             pass
 
 
+def _enqueue_graph_debt(vault_root: Path, checkpoint_write: PlannedWrite) -> None:
+    """Record this batch's graph debt durably, *before* the batch commits.
+
+    The ordering is the whole argument. Enqueue-then-write can leave a path
+    queued whose content never changed, and re-indexing an unchanged path writes
+    nothing -- the cost is one wasted read. Write-then-enqueue can leave the
+    markdown committed with no record that the graph owes it anything, and the
+    only repair for an unknown dirty set is the whole-vault rebuild this change
+    exists to retire. The failures are not comparable, so the safe order is not
+    a preference.
+
+    Best-effort by construction: a deferred queue that could refuse a canonical
+    write would be a worse availability risk than the drift it prevents. A lost
+    enqueue costs a reconcile; a refused write costs the user their edit.
+    """
+    from . import deferred_index, graph_sync
+
+    checkpoint = graph_sync.GraphSyncCheckpoint.parse(checkpoint_write.content)
+    if checkpoint is None:  # pragma: no cover - graph_sync renders its own token
+        return
+    try:
+        deferred_index.enqueue_graph_checkpoint(vault_root, checkpoint)
+    except Exception:  # noqa: BLE001 - never fail a canonical write on derived bookkeeping
+        log.warning("graph dirty-path enqueue failed; reconcile will repair", exc_info=True)
+
+
 def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
@@ -3154,6 +3384,7 @@ def _batch_atomic_write_locked(
     writes = list(caller_writes)
     graph_checkpoint_path: Path | None = None
     graph_floor_path: Path | None = None
+    graph_debt_checkpoint: PlannedWrite | None = None
     deferred_checkpoint: GraphSyncCheckpoint | None = None
     deferred_predecessor: GraphSyncCheckpoint | None = None
     if vault_root is not None:
@@ -3180,6 +3411,7 @@ def _batch_atomic_write_locked(
             graph_floor_path = floor_write.path
             if not defer_graph_completion:
                 graph_checkpoint_path = checkpoint_write.path
+            graph_debt_checkpoint = checkpoint_write
         elif defer_graph_completion:
             raise ValueError("defer_graph_completion requires graph-relevant writes")
     destinations: set[str] = set()
@@ -3269,6 +3501,24 @@ def _batch_atomic_write_locked(
         if write.create_only and os.path.lexists(write.path):
             _remove_empty_created_dirs(created_dirs)
             raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
+
+    # Record the graph debt here: after the guards have taken custody of the
+    # namespace and created whatever parents they recorded as missing, and
+    # still strictly before any canonical byte is replaced.
+    #
+    # Earlier is wrong even though the debt is known earlier. Opening the queue
+    # database creates `Knowledge Base/` when it does not exist, and a batch
+    # that is creating that directory has already captured it as a *missing*
+    # parent it will create itself, in order. Creating it first fails the
+    # guard's own recheck with `missing guard ancestor appeared`, surfaced to
+    # the caller as `STALE_SEMANTIC_WRITE` -- a write invalidated by its own
+    # bookkeeping, on every first write into a new directory.
+    #
+    # Later is also wrong: after the replace, a crash cut between the markdown
+    # and the enqueue loses the dirty set, which is the whole property the
+    # pre-commit ordering buys.
+    if graph_debt_checkpoint is not None:
+        _enqueue_graph_debt(Path(vault_root), graph_debt_checkpoint)
 
     workspace_by_parent: dict[Path, _BatchWorkspace] = {}
     staged: list[tuple[Path, _BatchWorkspace, _WorkspaceArtifact]] = []

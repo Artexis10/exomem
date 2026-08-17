@@ -717,6 +717,69 @@ def test_acknowledgement_requires_the_full_checkpoint_meta_proof(tmp_path: Path)
     assert graph_sync.status(tmp_path)["state"] == "current"
 
 
+@pytest.mark.parametrize(
+    "read_acknowledgement",
+    [
+        graph_sync.acknowledgement_state,
+        graph_sync._malformed_acknowledgement_generation,
+    ],
+    ids=["acknowledgement_state", "malformed_generation_hint"],
+)
+def test_acknowledgement_readers_close_the_sidecar_they_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_acknowledgement: object,
+) -> None:
+    """A read handle that outlives its reader refuses the next publication.
+
+    `with sqlite3.connect(...)` commits the open transaction and leaves the
+    connection itself open -- the context manager is a transaction scope, not a
+    close. Every acknowledgement read therefore added one more live handle to
+    `.graph.sqlite`, and both readers sit on the graph read path through
+    `classify_epoch` / `status` / `_open_read_snapshot`. That is an unbounded
+    handle leak in a long-lived server, and on Windows it is the sharing
+    violation that makes the publication `os.replace` fail with WinError 32 --
+    the failure class the reader-cycling publication hold exists to avoid.
+    """
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="0123456789abcdef01234567",
+        paths=(),
+        created_paths=(),
+        scope="full",
+    )
+    sidecar = tmp_path / "Knowledge Base/.graph.sqlite"
+    sidecar.parent.mkdir(parents=True)
+    setup = sqlite3.connect(sidecar)
+    with setup:
+        setup.execute("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        setup.executemany(
+            "INSERT INTO graph_meta(key, value) VALUES (?, ?)",
+            (
+                ("graph_sync_generation", "1"),
+                ("graph_sync_digest", checkpoint.checkpoint_sha256),
+                ("graph_sync_checkpoint", checkpoint.render()),
+            ),
+        )
+    setup.close()
+
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def recording_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        conn = real_connect(*args, **kwargs)  # type: ignore[arg-type]
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    read_acknowledgement(tmp_path)  # type: ignore[operator]
+
+    assert opened, "the acknowledgement reader never opened the sidecar"
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+
 def test_status_and_public_graph_availability_agree_on_missing_checkpoint_meta(
     tmp_path: Path,
 ) -> None:

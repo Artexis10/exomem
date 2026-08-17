@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from canonical_snapshot import canonical_bytes
 
 from exomem import (
     activation_manifest,
@@ -39,11 +40,13 @@ def _compact_content(title: str = "Semantic fixture") -> str:
 
 
 def _tree_bytes(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
+    """The vault's canonical bytes, ignoring an in-flight rebuild's residue.
+
+    See `canonical_snapshot`: a graph rebuild no longer finishes before the
+    write returns, so its scratch sidecars can be present while these
+    "mutated nothing" assertions run.
+    """
+    return canonical_bytes(root)
 
 
 def test_typed_create_validate_only_reports_missing_unit_without_mutation(

@@ -2164,6 +2164,24 @@ def initialize_hosted_cell_v2(
                 _write_v2_marker(stage, "vault", binding)
                 init_module.init_vault(stage)
                 _sync_tree(stage)
+            # The chown above lands on the staging directory alone, and at that
+            # point the directory is empty. `init_vault` then writes the entire
+            # scaffold as whoever runs provisioning — root — so every
+            # scaffolded directory was left root-owned at mode 755 inside a
+            # root the runtime does own. The cell runs as `runtime_uid`, which
+            # makes the whole Knowledge Base readable and traversable but not
+            # writable: reads and `bootstrap` answered normally while every
+            # write failed, and the tenant reported itself healthy having never
+            # stored anything.
+            #
+            # This sits outside the `else` deliberately. A run that died between
+            # `init_vault` and the publish leaves a staging root that the branch
+            # above accepts as complete, and converging only on the branch that
+            # created it would publish that one unconverged. Convergence is
+            # idempotent — an already-owner-only tree reconverges to itself — so
+            # the retry costs a walk and nothing else.
+            if os.geteuid() == 0:
+                _converge_tree_ownership(_preflight_migration_tree(stage, limits), binding)
             if binding.vault_root.exists():
                 binding.vault_root.rmdir()
             os.replace(stage, binding.vault_root)

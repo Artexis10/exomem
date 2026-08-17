@@ -152,13 +152,19 @@ def test_full_receipt_drain_skips_all_receipts_when_vault_recovery_fails(
         lambda _root, paths: dispatches.append(paths),
     )
 
-    assert index_sync.drain_deferred_work(vault, limit=2) == 0
+    # The subject is the *full* queue, and `snapshot_full` below says so
+    # exactly. The drain's aggregate return counts every queue it serves, and
+    # since the graph queue joined it (converge-graph-incrementally) a nonzero
+    # total can mean "graph paths repaired", which is unrelated to whether this
+    # vault's full receipts survived a failed recovery. `dispatches == []` is
+    # the assertion that no full work was replayed.
+    index_sync.drain_deferred_work(vault, limit=2)
     assert len(rebuild_attempts) == 1
     assert dispatches == []
     assert deferred_index.snapshot_full(vault) == admitted
     assert graph_sync.status(vault)["state"] == "recovery_required"
 
-    assert index_sync.drain_deferred_work(vault, limit=2) == 0
+    index_sync.drain_deferred_work(vault, limit=2)
     assert len(rebuild_attempts) == 2
     assert dispatches == []
     assert deferred_index.snapshot_full(vault) == admitted

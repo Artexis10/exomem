@@ -1305,7 +1305,19 @@ def test_clean_batch_cleanup_preserves_sharing_error_path_attributes(
             vault_root=tmp_path,
         )
 
-    assert raised.value is captured[0]
+    # A sharing violation is waited out for a bounded interval before it is
+    # surfaced, so what reaches the caller is the *final* attempt's error. That
+    # the budget is exhausted and then surrendered -- rather than retried
+    # forever -- is the load-bearing half: a permanently pinned file must still
+    # fail inside the request rather than hang it.
+    #
+    # POSIX permits `rename(2)` over an open file, so there is nothing to wait
+    # out and the retry deliberately never engages there. Asserting the exact
+    # count on each platform is what keeps that a stated property rather than
+    # an accident.
+    expected_attempts = vault_module._REPLACE_SHARING_ATTEMPTS if os.name == "nt" else 1
+    assert len(captured) == expected_attempts
+    assert raised.value is captured[-1]
     assert raised.value.filename2 == str(target)
     assert media_jobs.is_guarded_sidecar_sharing_violation(raised.value, target)
     assert target.read_bytes() == b"old"

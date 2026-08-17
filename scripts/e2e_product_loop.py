@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -43,6 +45,16 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
             "EXOMEM_DISABLE_FILE_WATCHER": "1",
             "EXOMEM_DISABLE_MODE_WATCH": "1",
             "EXOMEM_CONFIG_PATH": str(home / "exomem-config.json"),
+            # Logs are the one piece of process state `resolve_log_dir()` puts
+            # somewhere machine-global rather than under HOME (#569), so
+            # isolating HOME is not enough: an installed server started here
+            # opens the same `exomem.log` as any exomem service already running
+            # on this machine, and on Windows the second opener gets EACCES and
+            # the whole run dies at `initialize` with "Connection closed". CI
+            # never sees it because nothing else is running there; a developer
+            # box running the service sees it every time. Isolate the log root
+            # for the same reason the vault and config are isolated.
+            "EXOMEM_LOG_DIR": str(home / "logs"),
             "PYTHONUTF8": "1",
         }
     )
@@ -386,12 +398,68 @@ async def _call_maintenance(
     return _maintenance_diagnostics(result, operation=name)
 
 
+#: How long the graph may take to converge after a write before the product is
+#: considered broken. A write no longer waits for its own graph rebuild, so the
+#: sidecar genuinely is unavailable for a moment afterwards -- that is designed
+#: behaviour, not a defect. What must still hold is that it converges without
+#: anyone asking it to, so this stays a real gate: generous enough that a
+#: healthy rebuild over the E2E's small vault always fits, short enough that a
+#: graph which never converges fails the run instead of hanging it.
+_GRAPH_CONVERGENCE_SECONDS = 120.0
+_GRAPH_POLL_SECONDS = 0.5
+
+
+async def _await_graph_convergence(
+    client,
+    *,
+    relation_ref: str,
+    timeout: float,
+) -> None:
+    """Poll a relation context until its graph is published, or fail saying so.
+
+    Before the graph came off the write path, the write's own join meant the
+    sidecar was always published by the time the next request arrived. It is not
+    anymore, so a client reading graph-backed context immediately after a write
+    can legitimately observe `available: False` with the rebuild still running.
+    Polling is what a real client does; asserting the old timing would be
+    asserting a guarantee the design deliberately gave up.
+
+    Deliberately still an assertion, not a tolerance: if the graph never
+    converges, this fails. Only the *synchronous* guarantee was given up.
+    """
+    deadline = time.monotonic() + _GRAPH_CONVERGENCE_SECONDS
+    while True:
+        context = await _call(
+            client,
+            "connect_memory",
+            {
+                "operation": "context",
+                "path": relation_ref,
+                "depth": 1,
+                "traversal_profile": "epistemic",
+            },
+            timeout,
+        )
+        graph = context.get("graph")
+        if isinstance(graph, dict) and graph.get("available") is True:
+            return
+        if time.monotonic() >= deadline:
+            reason = graph.get("reason") if isinstance(graph, dict) else "no graph in response"
+            raise RuntimeError(
+                f"graph did not converge within {_GRAPH_CONVERGENCE_SECONDS:.0f}s of "
+                f"the write that changed it ({reason!r}) -- a rebuild that never "
+                f"lands is exactly what this waits for: {context!r}"
+            )
+        await asyncio.sleep(_GRAPH_POLL_SECONDS)
+
+
 async def _assert_relation_contexts(
     client,
     *,
     relation_ref: str,
     timeout: float,
 ) -> None:
+    await _await_graph_convergence(client, relation_ref=relation_ref, timeout=timeout)
     expected = {
         "epistemic": ("science.replicates", "supports"),
         "provenance": ("records.traces_to", "derived_from"),
@@ -1456,17 +1524,29 @@ async def _stdio_session(
                     await _records_restart_session(client, state, timeout)
                 await _manual_records_session(client, state, timeout)
                 await _planning_restart_session(client, state, timeout)
-                from exomem import epistemic_graph
-
                 graph_status = reconcile.get("graph_status")
-                graph_available = epistemic_graph.EpistemicGraphIndex(
-                    Path(env["EXOMEM_VAULT_PATH"])
-                ).available()
-                if graph_status not in {"current", "refreshed"} or not graph_available:
+                if graph_status not in {"current", "refreshed"}:
                     raise RuntimeError(
                         "deleted graph sidecar was not rebuilt after restart: "
-                        f"status={graph_status!r}, available={graph_available!r}"
+                        f"status={graph_status!r}"
                     )
+                # `reconcile` above is captured well before this point, and the
+                # records/manual/planning sessions in between write repeatedly.
+                # Availability is vault-global, so every one of those clears it
+                # until the rebuild republishes -- and rebuilds no longer finish
+                # inside the write that caused them. So `reconcile`'s own
+                # availability flag says nothing by the time we read it here: it
+                # describes the graph as of the reconcile, several writes ago.
+                # What reconcile is responsible for is rebuilding the deleted
+                # sidecar, and `graph_status` above proves that unconditionally.
+                # That the *later* writes also converge is a separate claim, and
+                # the only honest way to assert it is to poll the server that is
+                # doing the rebuilding.
+                await _await_graph_convergence(
+                    client,
+                    relation_ref=state["relation_ref"],
+                    timeout=timeout,
+                )
     return state
 
 
@@ -1556,9 +1636,31 @@ def _http_json(
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, json.loads(response.read().decode("utf-8"))
+            return response.status, _decode_json(response.read(), url=url, status=response.status)
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read().decode("utf-8"))
+        return exc.code, _decode_json(exc.read(), url=url, status=exc.code)
+
+
+def _decode_json(raw: bytes, *, url: str, status: int) -> dict[str, Any]:
+    """Parse a response body, reporting the body itself when it is not JSON.
+
+    A bare `JSONDecodeError` here says only "column 1 char 0" and throws the
+    server's actual complaint away -- which is the half of the failure worth
+    reading, and it is not recoverable afterwards because the harness tears its
+    temporary vault, home and logs down on the way out.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"{_redacted_url(url)} returned {status} with a non-JSON body: {text[:2000]!r}"
+        ) from error
+
+
+def _redacted_url(url: str) -> str:
+    """Drop any query string so a token in one cannot reach the failure output."""
+    return url.split("?", 1)[0]
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -2273,9 +2375,31 @@ def _installed_lease(args: argparse.Namespace) -> int:
     return 0
 
 
+@contextlib.contextmanager
+def _e2e_workdir(*, keep: bool):
+    """The harness's scratch root, optionally retained for a post-mortem.
+
+    Everything this run can be diagnosed from -- the server log, the vault it
+    built, the home it isolated -- lives in here and is deleted on the way out,
+    including when the run fails. For a deterministic failure that costs a
+    re-run; for an intermittent one it can cost many, and it is why an
+    `Internal Server Error` from the triage lane had to be chased by rerunning
+    until it reproduced rather than by reading the traceback it had already
+    written down.
+    """
+    path = tempfile.mkdtemp(prefix="exomem-product-e2e-")
+    try:
+        yield path
+    finally:
+        if keep:
+            print(f"product-e2e: kept working directory {path}")
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def _orchestrate(args: argparse.Namespace) -> int:
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="exomem-product-e2e-") as tmp_raw:
+    with _e2e_workdir(keep=args.keep_work) as tmp_raw:
         tmp = Path(tmp_raw)
         home = tmp / "home"
         work = tmp / "work"
@@ -2383,6 +2507,11 @@ def main() -> int:
     mode.add_argument("--installed-stdio", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--installed-http", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--installed-lease", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--keep-work",
+        action="store_true",
+        help="retain the scratch root (vault, home, logs) instead of deleting it on exit",
+    )
     parser.add_argument("--budget-seconds", type=float, default=300.0)
     parser.add_argument("--request-timeout", type=float, default=20.0)
     parser.add_argument("--executable", default="")
