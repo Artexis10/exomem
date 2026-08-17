@@ -45,6 +45,23 @@ time. Reachable today on every path that already rebuilds off the write path.
   rebuild it had to abandon.
 - [x] 2.7 Make the product E2E wait for convergence rather than assume the write
   performed it, and keep that a real gate rather than a tolerance.
+- [x] 2.8 Apply 2.2 and 2.3 to review state as well. A reader that pins the file and a
+  replace with no tolerance for a transient sharing refusal is the same conflict as the
+  graph sidecar's, and it escaped the triage command as an unhandled `PermissionError`,
+  reaching the client as a bare `500` with no JSON body. The defect predates this change;
+  taking the rebuild off the write path moved when reads and writes overlap, and it began
+  failing about three product-E2E runs in four on Windows while remaining invisible on
+  Linux, whose sharing semantics cannot produce it.
+- [x] 2.9 Have the E2E retain its scratch root on request. Everything a failure can be
+  diagnosed from — server log, vault, isolated home — lived only there and was deleted on
+  the way out, including on failure, so an intermittent defect had to be chased by
+  re-running until it reproduced rather than by reading the traceback it had already
+  written down. Report a response body that is not JSON, too, rather than only the decode
+  error.
+- [x] 2.10 Join explicitly at the assertion sites 1.7 missed. A site that asserts *which
+  boundary* an off-boundary rebuild used, rather than asserting graph state, still relies
+  on the rebuild winning a race against the daemon thread it runs on — it passed every
+  local run and lost on a loaded CI shard.
 
 ## 3. Phase 1 verification
 
@@ -122,6 +139,28 @@ time. Reachable today on every path that already rebuilds off the write path.
   file's creation inside the guarded window — so the first write to a fresh vault
   invalidated its own census and failed as `STALE_RECORD`, with nothing concurrent
   involved at all. Bind the excluded name to its definition, as 2.1's names are bound.
+- [x] 5.11 Bound the enqueue on both sides, not just the early one. Opening the queue
+  database creates the knowledge-base directory when it is absent, and a batch creating
+  that directory has already captured it as a *missing parent* it will create itself, in
+  order — so enqueueing before the guards take custody fails the batch's own recheck and
+  surfaces as `STALE_SEMANTIC_WRITE`, a write invalidated by its own bookkeeping. Enqueue
+  after the guards create those parents and still strictly before any canonical byte is
+  replaced; both bounds are load-bearing.
+- [x] 5.12 Tolerate a store that predates this queue. Every deployed vault already has a
+  deferred-index database with no graph table, and the readers run before any writer
+  through a read-only connection where the table cannot be created. Absent reads as
+  empty; the next writable open migrates the store.
+- [x] 5.13 Publish a drain's acknowledgement in the transaction that writes the rows it
+  describes, through the same before-commit seam the incremental refresh path uses, after
+  re-proving the projection did not move under the pass. Writing it afterwards through a
+  second connection tears the two apart, and an acknowledgement landing against a moved
+  projection is what the lineage check refuses — reported at the *next* write rather than
+  at the drain that caused it. A refused proof rolls the pass back, clears no receipt, and
+  leaves the work queued.
+- [x] 5.14 Keep each reported queue count describing the queue its neighbour describes.
+  The drain's return counts every queue it serves, so a surface reporting one queue's
+  refresh must measure that queue rather than the aggregate, or the pair it is reported
+  beside stops adding up for a reason no reader of that response can see.
 - [ ] 5.10 Stop the dispatch layer re-scheduling the whole-vault rebuild that 5.3
   removed. A defer-classified bail-out returns `deferred`, but the layer above reads an
   unregistered, unacknowledged checkpoint as a missing rebuild and registers one — so
