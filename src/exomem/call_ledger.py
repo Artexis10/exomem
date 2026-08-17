@@ -288,14 +288,21 @@ def append_row(row: dict[str, Any], *, path: Path | None = None) -> None:
     rather than as silence.
     """
     target = path or ledger_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
     payload = canonical_json(row) + b"\n"
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_APPEND)
+    except FileNotFoundError:
+        # First row of a fresh ledger. Creating the directory and forcing the
+        # mode here, rather than on every append, keeps the steady-state cost of
+        # a row at one open/write/close -- this sits in every call's critical
+        # section, so a redundant `mkdir` and `chmod` per row is not free.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        _restrict(target)
     try:
         os.write(fd, payload)
     finally:
         os.close(fd)
-    _restrict(target)
 
 
 def record_call(

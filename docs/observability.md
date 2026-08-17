@@ -128,9 +128,10 @@ row, and exits non-zero listing every break. The anchor is what catches a
 dropped *oldest* segment: without it, nothing precedes the first surviving row
 to contradict it and the chain merely appears to start later than it did.
 
-The append does not fsync — the budget is microseconds and it sits in every
-call's critical section. Rows lost to a hard crash show up as a `sequence` gap,
-which is exactly the visibility that makes the trade safe.
+The append does not fsync. It sits in every call's critical section and costs a
+median 0.35 ms / p99 0.72 ms per row (Windows, 4 KB argument) — ~0.05 % of a
+write, ~3 % of a read. Rows lost to a hard crash show up as a `sequence` gap,
+which is exactly the visibility that makes the unsynced append safe.
 
 ### Rotation
 

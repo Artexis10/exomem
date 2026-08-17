@@ -108,8 +108,9 @@
 - [x] 9.1 The CI leak test: drive calls with a unique sentinel in arguments and assert the
       sentinel and a credential-shaped value appear nowhere in the ledger file or its archives;
       assert the restrictive file mode where the platform has one.
-- [x] 9.2 Assert the append does not fsync on the hot path — the budget is microseconds, and
-      rows lost to a hard crash stay detectable as a later `sequence` gap.
+- [x] 9.2 Assert the append does not fsync on the hot path, and measure the per-row cost:
+      median 0.35 ms, p99 0.72 ms (Windows, 4 KB argument). Rows lost to a hard crash stay
+      detectable as a later `sequence` gap.
 - [x] 9.3 Run `ruff check`, the scaffold leak check, and strict OpenSpec validation; run the full
       suite with embeddings disabled and record totals against the base commit.
 

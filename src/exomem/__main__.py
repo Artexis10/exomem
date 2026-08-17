@@ -1202,8 +1202,9 @@ def _trace_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem trace",
         description=(
-            "Join the server log, queries/writes/reads.jsonl, and mutations.jsonl "
-            "for one request id into a single time-ordered report."
+            "Join the server log, the call ledger, queries/writes/reads.jsonl, "
+            "and mutations.jsonl for one request id into a single time-ordered "
+            "report."
         ),
     )
     parser.add_argument("request_id", help="the x-exomem-request-id to trace")

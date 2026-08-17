@@ -201,11 +201,23 @@ Mirror `log.md` (`src/exomem/vault.py:4451-4508`), not a logging handler:
 
 Production reads are 10–13 ms; CI gates cap total at `CEIL_TOTAL_MS = 5000`
 (`tests/test_latency_gate.py`) and the semantic-write median at `VALIDATE_MEDIAN_MS = 500`
-(`scripts/semantic_write_latency.py`). A ledger row costs a handful of sha256 hashes over small
-argument blobs plus one `os.write` — microseconds, well under 1 ms. **No fsync on the hot
-path.** A hard crash may lose the last buffered rows; that loss is *detectable* as a `sequence`
-gap, and the ledger is diagnostic, not a durability-critical store, so buffered append is the
-correct trade.
+(`scripts/semantic_write_latency.py`). A ledger row costs a few sha256 hashes over the argument
+blobs plus one open/write/close.
+
+**Measured** (Windows, 2 000 rows, a ~4 KB `content` argument): median **0.35 ms**, p95 0.50 ms,
+p99 0.72 ms, max 5.2 ms. That is ~0.05 % of a 650 ms write and ~3 % of a 12 ms read — under the
+1 ms budget, though not the "microseconds" this design first assumed; on Windows the per-row
+`open`/`close` syscall pair dominates the hashing.
+
+Holding the descriptor open across appends would remove that pair, and is deliberately not done:
+rotation's `os.replace` fails on Windows while a handle is open (`WinError 32`) — the same trap
+that rules out `RotatingFileHandler` — so a cached fd would have to be invalidated on rotation,
+on a path change, and on external deletion. That is three new failure modes bought with 0.3 ms
+on a diagnostic sink.
+
+**No fsync on the hot path.** A hard crash may lose the last rows; that loss is *detectable* as
+a `sequence` gap, and the ledger is diagnostic, not a durability-critical store, so the
+unsynced append is the correct trade.
 
 ### 8. Per-row hash chain, not per-document
 

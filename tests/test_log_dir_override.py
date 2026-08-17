@@ -24,7 +24,7 @@ Contract:
   through the same helper at each write, not a value frozen at import time.
 - `query_log.current_log_dir()` and `audit._RELEVANCE_LOGS_DIR` must agree
   with `logging_config.resolve_log_dir()` with `EXOMEM_LOG_DIR` unset — all
-  seven log files (three `exomem*.log`, `mutations.jsonl`, and
+  eight log files (three `exomem*.log`, `mutations.jsonl`, `ledger.jsonl`, and
   `queries.jsonl`/`writes.jsonl`/`reads.jsonl`) stay co-located rather than
   three of them being computed independently and drifting.
 """
@@ -244,6 +244,35 @@ def test_audit_relevance_logs_dir_agrees_with_resolve_log_dir_when_unset(
     finally:
         monkeypatch.undo()
         importlib.reload(audit)
+
+
+def test_call_ledger_dir_agrees_with_resolve_log_dir_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ledger is the eighth file that must land in the one log directory.
+
+    It resolves per call rather than freezing a constant at import, so it needs
+    no reload — but it needs the same agreement assertion, because a ledger that
+    drifted somewhere else would be invisible to `exomem trace` and to doctor
+    exactly like `queries.jsonl` was.
+    """
+    from exomem import call_ledger
+
+    monkeypatch.delenv("EXOMEM_LOG_DIR", raising=False)
+    monkeypatch.delenv("EXOMEM_CALL_LEDGER_DIR", raising=False)
+    assert call_ledger.ledger_dir() == logging_config.resolve_log_dir()
+    assert call_ledger.archive_dir().parent == logging_config.resolve_log_dir()
+
+
+def test_call_ledger_follows_the_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import call_ledger
+
+    override = tmp_path / "override"
+    monkeypatch.delenv("EXOMEM_CALL_LEDGER_DIR", raising=False)
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(override))
+    assert call_ledger.ledger_path() == override / "ledger.jsonl"
 
 
 # The two agreement tests above hold in THIS process's checkout environment
