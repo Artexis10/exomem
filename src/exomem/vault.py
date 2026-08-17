@@ -3170,8 +3170,11 @@ def post_commit_batch_fanout(
         # A graph-relevant epoch is a canonical promise, not a best-effort
         # side effect.  The graph leaf returns an exact result, but keep this
         # final boundary check here so a future fanout branch cannot return a
-        # committed batch with an unacknowledged checkpoint and no joinable
-        # handle.
+        # committed batch with an unacknowledged checkpoint and nothing
+        # arranged to converge it.  What counts as "arranged" is
+        # `graph_sync.repair_is_provisioned`: a registered flight was the only
+        # answer before repair moved off the write path, and asking only about
+        # that failed the write whose repair was correctly queued instead.
         graph = next(
             (
                 item
@@ -3191,7 +3194,9 @@ def post_commit_batch_fanout(
                 )
                 or (
                     graph.outcome in {"registered", "deferred", "failed"}
-                    and graph_sync.registered_checkpoint(vault_root) != required
+                    and not graph_sync.repair_is_provisioned(
+                        vault_root, required, outcome=graph.outcome
+                    )
                 )
             )
             if handoff_missing:

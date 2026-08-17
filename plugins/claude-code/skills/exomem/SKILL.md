@@ -86,8 +86,9 @@ what I searched," never "it doesn't exist" — an empty `ask_memory` result mean
 yet*, which is a reason to consider capturing, not to disengage.
 
 **Stepping-stone capture (write) — then report.** When the conversation reaches
-a **stepping-stone** — a durable conclusion lands or a durable recurring entity
-accumulates reusable facts, history, or relations — capture it:
+a **stepping-stone** — a durable conclusion lands, a durable recurring entity
+accumulates reusable facts, history, or relations, or **a method was actually
+carried out and the user reports how it went** — capture it:
 
 - Capture whether or not the KB already holds the topic. A durable conclusion on
   brand-new ground is first-class: it becomes the first page on that topic, which
@@ -108,12 +109,23 @@ accumulates reusable facts, history, or relations — capture it:
 - The guardrails that remain are the ones that matter: dedupe (prefer
   **edit_memory**/**replace_memory** over a parallel page; surface a near-duplicate warning when
   it fires) and clean links.
+- A carried-out method is a landing like any other, and it is the one most often
+  missed, because it arrives as ordinary conversation rather than as a
+  conclusion. It qualifies when all four hold: a concrete method was actually
+  executed; the user reports the result; the result is clearly good, bad, or
+  diagnostically informative; and the method or the lesson is reusable later.
+  Route by what it yielded — a proven method to its own how-to page, a
+  parameter comparison to an **experiment**, a diagnosed failure mode to a
+  **failure** note. A one-off with nothing reusable stays unwritten.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
 
 Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved
 questions, or incidental names without durable reusable context. Capture at the
 landing, not during the flight.
+
+Do not wait to be asked. "Did you save that?" arriving after a result already
+landed is the failure, not the prompt.
 
 ## Agent write loop
 
@@ -594,6 +606,7 @@ reference for the canonical operation leaves that product commands route to.
 **Implicit (no explicit ask) — proactive engagement:**
 - topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **ask_memory** first, fold the hits into the answer
 - a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**remember**, then report the path
+- a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
 
 When you say something oblique like "interesting, save it," default to
 **capture_source** and ask whether to compile only if there is a durable

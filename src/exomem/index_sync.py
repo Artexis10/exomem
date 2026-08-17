@@ -771,13 +771,11 @@ def _drain_graph_work(
     An incoherent graph epoch refuses the whole branch. Per-path repair is
     repair *against a lineage*, so applying it to one whose lineage cannot be
     classified would write plausible rows into an untrustworthy sidecar. The
-    work stays queued and a rebuild recovers it.
+    work stays queued and a rebuild recovers it. That judgement is delegated to
+    `epoch_admits_incremental_repair`, which re-reads under the canonical
+    boundary rather than condemning a lineage on one sample taken mid-batch.
     """
-    from . import epistemic_graph, graph_sync
-
-    if graph_sync.classify_epoch(vault_root).kind not in {"legacy", "coherent"}:
-        log.warning("deferred graph drain skipped; graph epoch is not coherent")
-        return 0
+    from . import epistemic_graph
 
     pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
     receipts = deferred_index.snapshot_graph(
@@ -787,6 +785,11 @@ def _drain_graph_work(
         return 0
 
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    if not index.epoch_admits_incremental_repair():
+        # Not a warning: under a live writer the ordinary cause is a batch
+        # mid-flight, which the next tick clears. The work stays queued.
+        log.info("deferred graph drain skipped; graph epoch is not settled")
+        return 0
     if pending_generation is not None:
         try:
             index.rebuild_all()

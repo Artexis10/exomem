@@ -538,6 +538,16 @@ def op_bootstrap(
             "or in the assistant's own short-term memory, nothing can ever check it. "
             "Skip passing speculation; capture what the user would want held to."
         ),
+        "capture_the_outcome": (
+            "When a concrete method was actually carried out and the user reports the "
+            "result, capture it then: the method, any adjustment, and how it turned "
+            "out. This holds whether it worked, failed, or only bounded a parameter, "
+            "and it is the stepping stone most often missed, because it arrives as "
+            "ordinary conversation rather than as a stated conclusion. Route a proven "
+            "method to its own page, a comparison to an experiment, a diagnosed "
+            "failure mode to a failure note; leave a one-off with nothing reusable "
+            "unwritten. Being asked 'did you save that?' afterwards is the failure."
+        ),
     }
     payload: dict = {
         "contract_version": "2026-08-16.1",
