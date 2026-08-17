@@ -307,6 +307,24 @@ def preflight(cp: ControlPlane, candidate_id: str) -> bool:
     return bool(ok)
 
 
+def _stage_collision_hint(status: int, platform: str) -> str:
+    """Explain the one bare 500 `create-stage` produces.
+
+    Only one staged release may exist per candidate and platform, and a leftover
+    from an abandoned attempt collides with a plain 500 carrying no reason. It has
+    cost several misdiagnoses, always mid-window: retrying cannot clear it, and the
+    leftover has to be failed off first.
+    """
+    if status != 500:
+        return ""
+    return (
+        f"\n\nA bare 500 here is almost always the one-staged-release-per-candidate-"
+        f"and-platform\ncollision: a {platform} stage already exists for this candidate, "
+        "left by an earlier\nattempt. It is not a server fault and retrying will not "
+        "clear it — fail the old\nstage off with the `fail-stage` control first."
+    )
+
+
 def prepare(cp: ControlPlane, candidate_id: str, email: str, locks: dict) -> dict:
     """Create stage, pinned client and invite. Spends nothing irreversible."""
     client_id = f"exomem-reviewer-bootstrap-{uuid.uuid4()}"
@@ -337,7 +355,9 @@ def prepare(cp: ControlPlane, candidate_id: str, email: str, locks: dict) -> dic
         },
     )
     if status != 200:
-        raise SystemExit(f"create-stage failed: {status} {stage}")
+        raise SystemExit(
+            f"create-stage failed: {status} {stage}{_stage_collision_hint(status, 'claude')}"
+        )
     stage_id = stage["stage"]["id"]
 
     status, client = cp.call(
@@ -549,16 +569,10 @@ def run(
             },
         )
         if status != 200:
-            collision = (
-                "\nA bare 500 here is almost always the one-staged-release-per-"
-                f"candidate-and-platform\ncollision: a {platform} stage already exists "
-                "for this candidate, left by an earlier\nattempt. It is not a server "
-                "fault and retrying will not clear it — the old stage\nmust be failed "
-                "off with `fail-stage` before this run can proceed."
-                if status == 500
-                else ""
+            raise SystemExit(
+                f"{platform} sibling stage failed: {status} {stage}"
+                f"{_stage_collision_hint(status, platform)}"
             )
-            raise SystemExit(f"{platform} sibling stage failed: {status} {stage}{collision}")
 
         status, sibling = cp.call(
             "POST",
