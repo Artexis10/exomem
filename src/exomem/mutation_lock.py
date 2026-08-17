@@ -765,6 +765,16 @@ def _prepare_windows_private_directory(path: Path) -> None:
     A process sets permissions only on the exact entry its own ``mkdir``
     created.  A concurrent loser waits briefly for that creator to finish its
     DACL write, then validates without repairing the observed entry.
+
+    Missing *ancestors* are created first, without a private DACL.  That is not
+    a relaxation: the POSIX branch this mirrors passes ``parents=True``, and
+    ``Path.mkdir`` applies its ``mode`` only to the leaf there too, so the
+    ancestors are ordinary directories on both platforms and the privacy
+    guarantee sits on ``target`` alone.  Without this, a Windows profile whose
+    ``~/.cache`` does not exist -- which is every fresh Windows profile, since
+    ``.cache`` is an XDG convention Windows does not create -- cannot construct
+    the idempotency store at all, and the server dies at startup with
+    ``WinError 3``.  No CI lane runs on Windows, so nothing else would catch it.
     """
     target = Path(path).expanduser().absolute()
     created = False
@@ -772,6 +782,7 @@ def _prepare_windows_private_directory(path: Path) -> None:
     try:
         directory = _acquire_secure_directory(target, create=False)
     except FileNotFoundError:
+        target.parent.mkdir(parents=True, exist_ok=True)
         try:
             target.mkdir(mode=0o700)
         except FileExistsError:

@@ -473,7 +473,10 @@ def test_lease_graph_wait_does_not_finalize_a_degraded_governed_delete(
     )
     assert calls == [1]
     assert result["status"] == "committed"
-    assert result["graph_sync"] == "completed"
+    # The write no longer waits on derived graph work (#576/#588), so it reports
+    # `pending`; the graph's own outcome is asserted after joining the flight.
+    assert result["graph_sync"] == "pending"
+    graph_sync.await_active_rebuild(tmp_path, state_root=tmp_path / "state")
     assert any("remains tombstoned until reconcile" in warning for warning in result["diagnostics"]["warnings"])
     assert len(tombstones) == 1
     assert lifecycle._read_json(tmp_path, tombstones[0])["state"] == "pending"

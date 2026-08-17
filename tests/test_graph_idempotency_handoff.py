@@ -636,6 +636,11 @@ def test_post_fanout_cleanup_failure_finishes_graph_before_exact_failure_replay(
     with pytest.raises(ValueError) as replay:
         manager.invoke(command, (vault,), {}, idempotency_key="cleanup-after-fanout")
 
+    # The registered work is no longer joined by the write (#576/#588). Joining
+    # it explicitly is what actually proves this test's subject -- that a
+    # post-fanout cleanup error cannot *strand* the work -- instead of relying
+    # on a blocking side effect of the write path to have finished it.
+    graph_sync.await_active_rebuild(vault, state_root=tmp_path / "state")
     assert graph_sync.status(vault)["state"] == "current"
     assert replay.value.as_public_dict() == first.value.as_public_dict()
     assert calls == 1
@@ -898,12 +903,33 @@ def test_lease_manager_preserves_real_wait_path_graph_failure_code(
     replay = manager.invoke(command, (vault,), {}, idempotency_key=f"wait-{failure_kind}")
 
     assert result["status"] == "committed"
-    assert result["graph_sync"] == "failed"
-    assert result["graph_sync_code"] == expected_code
-    assert result["graph_sync_remediation"] == expected_remediation
-    assert sentinel not in str(result)
+    # The write no longer waits for the builder (#576/#588): the rebuild runs on
+    # its own daemon thread, so at response time the honest outcome is `pending`.
+    assert result["graph_sync"] == "pending"
     assert replay == result
     assert calls == 1
+
+    # The three properties this test defends are unchanged; they are now
+    # asserted where they are produced rather than after two layers of
+    # projection. `committed_graph_failure` reads `.code`/`.remediation`
+    # straight off this exception, and the private builder path must not reach
+    # a caller through either.
+    with pytest.raises(graph_sync.GraphRebuildRegistrationError) as raised:
+        graph_sync.await_active_rebuild(vault, state_root=tmp_path / "state")
+    assert raised.value.code == expected_code
+    assert raised.value.remediation == expected_remediation
+    # The *exception* legitimately carries the builder's own message, private
+    # path and all -- that is what makes it diagnosable in a log. The no-leak
+    # contract is about what reaches a caller, which is the projection below,
+    # and it holds because `committed_graph_failure` reads only `.code` and
+    # `.remediation` and never the message.
+    assert sentinel not in str(
+        graph_sync.committed_graph_failure(
+            graph_sync.read_checkpoint(vault),
+            code=raised.value.code,
+            remediation=raised.value.remediation,
+        )
+    )
 
 
 def test_lease_manager_preserves_graph_thread_start_failure(

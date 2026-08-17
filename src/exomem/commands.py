@@ -2004,13 +2004,17 @@ def op_attention(
 ) -> dict:
     """Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only.
 
-    Composes the four measurement-only epistemic queues into a single list,
-    ranked by Reciprocal Rank Fusion over each queue's own ordering — a note
-    flagged by more than one queue rises to the top:
-    - `stale_review`: active conclusions that are old AND rarely surfaced in
-      `find` AND low inbound-degree (possibly stale — still true?).
+    Composes the six default measurement-only epistemic queues into a single
+    list, ranked by Reciprocal Rank Fusion over each queue's own ordering — a
+    note flagged by more than one queue rises to the top:
+    - `bridge_review`: an approved release bridge whose review date has come due
+      or whose approved dependencies have drifted (does this still hold?).
+    - `prediction_window`: a semantic unit whose authored `check_by` date has
+      passed with no `verdict` and no resolving relation (what came of this?).
     - `corpus_contradictions`: pairs of active conclusions whose embeddings sit
       close enough to restate, refine, or contradict (do they conflict?).
+    - `stale_review`: active conclusions that are old AND rarely surfaced in
+      `find` AND low inbound-degree (possibly stale — still true?).
     - `unprocessed_source`: sources captured but never compiled (nothing
       distilled from them yet).
     - `relation_debt`: active compiled pages with no outbound Markdown
@@ -2027,8 +2031,10 @@ def op_attention(
     drift, etc.).
 
     Args:
-        categories: Optional subset of {corpus_contradictions, stale_review,
-            unprocessed_source, relation_debt}. Omit to include all four.
+        categories: Optional subset of the six default queues above. Omit to
+            include all six. Also accepts the opt-in categories that are
+            registered but not default: `unfinished_experiments` and the typed
+            semantic categories.
         limit: Max items to surface (default 25; 0 or negative = uncapped,
             surface all). Lower-priority items beyond the cap are summarized in
             a "N more not shown" note, never dropped silently.
@@ -4881,7 +4887,7 @@ def op_process_media(
     def _drain_index_refresh(paths: list[Path] | list[str] | None = None) -> tuple[int, int]:
         current = index_sync.deferred_work_status(vault_root)["full_upserts"]
         selected = current["paths"] if paths is None else paths
-        refreshed = index_sync.drain_deferred_work(
+        index_sync.drain_deferred_work(
             vault_root,
             limit=media_jobs.STATUS_JOB_LIMIT,
             paths=selected,
@@ -4889,6 +4895,13 @@ def op_process_media(
         remaining = index_sync.deferred_work_status(vault_root)["full_upserts"][
             "count"
         ]
+        # Measure the queue the neighbouring field measures. The drain's return
+        # counts what it processed across *every* queue it serves, and the
+        # graph dirty-path queue joined them (converge-graph-incrementally), so
+        # using it here would report a refreshed count and a remaining count
+        # drawn from different queues -- a pair that stops adding up for a
+        # reason no reader of this response can see.
+        refreshed = max(0, int(current["count"]) - remaining)
         return refreshed, remaining
 
     if operation == "status":

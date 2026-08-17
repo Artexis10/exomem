@@ -1,0 +1,76 @@
+name: cross-platform
+
+# Deliberately its own workflow rather than a job in ci.yml.
+#
+# `ci.yml` holds an invariant worth keeping: one required gate needs *every* job
+# in that file, enforced by `test_ci_reliability_contract.py`, so no job can be
+# silently un-gated. A lane nobody has triaged yet does not belong inside that
+# invariant, and weakening the gate to carve out an exception would trade a
+# clear rule for a flag. A separate workflow is structurally advisory instead of
+# advisory by annotation -- it is visibly not the required gate.
+#
+# Why it exists: every job in ci.yml runs on ubuntu-latest, which leaves a whole
+# class of defect to be caught by hand. On Windows CPython opens files without
+# FILE_SHARE_DELETE, so any handle left open refuses `os.replace` and `unlink`
+# with WinError 32 -- a failure mode Linux does not have. Four such defects were
+# found manually against this suite before this lane existed.
+#
+# Promote to a required gate once it is green across a few merges. An advisory
+# lane that stays advisory forever is just noise.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: cross-platform-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  suite:
+    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/2)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        # Two shards, not the Linux lane's four. This lane exists to expose
+        # platform behaviour, not to be the fastest path to a result.
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # No bubblewrap step: process isolation is Linux-only and the suite skips
+      # what it cannot run. No Bun step either -- if a test turns out to need it,
+      # that dependency is itself a finding this lane exists to surface.
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - name: Run tests (lean — BM25/keyword, server media extraction off)
+        env:
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python -m pytest -q
+          --splits=2
+          --group=${{ matrix.shard }}
+          --splitting-algorithm=least_duration
+          --durations-path=.test_durations.json
+          --session-timeout=2700
+          --durations=50
+          --durations-min=1
+          --junitxml=test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml
+      - name: Upload cross-platform test timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossplat-${{ matrix.os }}-shard-${{ matrix.shard }}-junit
+          path: test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml
+          if-no-files-found: warn

@@ -2504,7 +2504,13 @@ def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
         "upsert_after_write",
         lambda *_a, **_kw: _verified_media_fanout_report(vault, sidecar),
     )
-    assert index_sync.drain_deferred_work(vault) == 1
+    # The drain's aggregate counts every queue it serves, and the graph
+    # dirty-path queue joined them (converge-graph-incrementally) -- this same
+    # write filled that one too. So the total is no longer a proxy for "the full
+    # receipt drained", which is what this test is actually about;
+    # `full_status` below asserts that directly, and `calls` asserts the
+    # transcript was not re-extracted to get there.
+    index_sync.drain_deferred_work(vault)
     assert deferred_index.full_status(vault)["count"] == 0
     assert calls == 1
 

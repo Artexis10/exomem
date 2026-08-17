@@ -17,8 +17,8 @@ import sqlite3
 import threading
 import time
 import weakref
-from collections.abc import Iterable
-from contextlib import nullcontext
+from collections.abc import Iterable, Iterator
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -26,6 +26,7 @@ from typing import Any
 
 from . import (
     access,
+    deferred_index,
     freshness,
     graph_sync,
     memory_refs,
@@ -63,6 +64,78 @@ REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 # single pass — while a supersession that survives it is not transient, so
 # re-running the rebuild cannot be what fixes it.
 REBUILD_SUPERSESSION_RETRIES = 1
+
+
+class _DrainPublicationMoved(Exception):
+    """A drain's publication proof failed at commit time; roll the pass back.
+
+    Deliberately internal and deliberately not an `OpError`: nothing is wrong,
+    the vault simply moved while the drain worked. The queue still holds the
+    work, so the next drain repairs it against the projection that moved.
+    """
+
+
+#: Every bail-out reason `_refresh_paths_locked` can emit, and which repair it
+#: earns. This is the one place the judgement lives; `tests/
+#: test_graph_deferred_queue.py` parses the reasons back out of this module and
+#: fails if a site appears, moves or is renamed without the table following.
+#:
+#: `"defer"` means the incremental pass could not *prove* its result, but the
+#: scope of the damage is known: the affected paths go on the durable graph
+#: queue and a drain repairs them. Every reason on this side is a race -- a
+#: concurrent writer moved a durable token between two reads -- and a race is
+#: exactly what a retry budget cannot win here, because each whole-vault attempt
+#: widens the window that loses it. That feedback loop, not any single gate, is
+#: what made seven fixes inside it fail to converge.
+#:
+#: `"rebuild"` means the scope is *unknown*, not merely unproven: the sidecar
+#: could not be read, or the delta that says what changed is itself incomplete,
+#: so an external edit could be missing from any bounded set we could enqueue.
+#: Deferring there would quietly leave the rest of the graph stale, which is a
+#: worse failure than the cost being removed. These stay whole-vault, and the
+#: value of writing them down is that they stay few.
+_FALLBACK_DISPOSITIONS = {
+    "path_outside_vault": "defer",
+    "path_unreadable": "defer",
+    "durable_checkpoint_moved": "defer",
+    "checkpoint_paths_mismatch": "defer",
+    "checkpoint_created_paths_mismatch": "defer",
+    "acknowledgement_is_not_the_predecessor": "defer",
+    "delta_target_moved": "defer",
+    "caller_path_outside_delta": "defer",
+    "topology_proof_moved": "defer",
+    "incremental_marker_refused": "defer",
+    "unreachable": "defer",
+    "checkpoint_scope_is_not_paths": "rebuild",
+    "graph_snapshot_unavailable": "rebuild",
+    "recall_checkpoint_absent_or_registry_not_live": "rebuild",
+    "recall_delta_incomplete": "rebuild",
+    "stored_resolver_entries_unreadable": "rebuild",
+    "resolver_snapshot_unavailable": "rebuild",
+    "topology_snapshot_unavailable": "rebuild",
+    "stored_topology_unreadable": "rebuild",
+    "stored_topology_fingerprint_mismatch": "rebuild",
+}
+
+#: #576. `REBUILD_STABILIZATION_ATTEMPTS` is the attempt *floor*, not the
+#: ceiling: two passes cannot converge against a corpus that is still being
+#: written to, and failing is precisely what strands the availability marker so
+#: the next write falls back into another full rebuild -- a loop that feeds
+#: itself. An attempt invalidated by a moving projection may therefore re-target
+#: the newer baseline instead of exhausting.
+#:
+#: The re-target is bounded by BOTH a wall-clock deadline and an attempt
+#: ceiling, because neither alone is a bound here. An attempt ceiling is not one
+#: when a full-corpus pass costs 20-175 s (8 passes would be ~23 min); a
+#: deadline alone is not one when a pass is cheap enough to spin. 120 s keeps
+#: the worst case (deadline plus the one pass already in flight when it
+#: expires) at or below today's two full passes at production scale, so this
+#: never costs more wall time than the code it replaces -- it only spends it
+#: better. Hitting either bound raises `GraphProjectionMoved` exactly as today:
+#: same Class C type, same admitted cause, and the single
+#: `mark_external_pending` in the `finally` below is untouched.
+REBUILD_STABILIZATION_DEADLINE_SECONDS = 120.0
+REBUILD_STABILIZATION_MAX_ATTEMPTS = 8
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
 _RESOLVER_TOPOLOGY_KEY = "recall_resolver_topology"
@@ -645,6 +718,40 @@ def _unregistered_temporary_groups(live: Path) -> dict[str, list[Path]]:
     return groups
 
 
+@contextmanager
+def _sampling_boundary(coordinator: Any) -> Iterator[None]:
+    """Hold the canonical boundary for a read if it can be had; proceed if not.
+
+    Sampling the publication epoch under the canonical boundary is what stops a
+    rebuild seeing a batch's interior -- a generation floor installed without its
+    checkpoint, which classifies as an incoherent lineage and refuses a rebuild
+    that had nothing wrong with it.
+
+    But it is an optimization for *coherence*, not an authorization: the sample
+    reads two small artifacts and grants nothing. Requiring the boundary would
+    therefore hand a rebuild two failure modes it did not previously have -- an
+    unopenable lock and a busy writer -- and the first of those broke the
+    standing contract that a rebuild refused for lock reasons raises
+    `GRAPH_SYNC_REBUILD_LOCK_UNAVAILABLE` and leaves the current graph intact.
+
+    So when the boundary is unavailable, sample without it. That is exactly the
+    behaviour every release before this one had, and the incoherence retry at
+    the call site still covers the torn read it leaves possible.
+    """
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(
+                coordinator.hold(
+                    operation="epistemic_graph_coalesce_epoch", holder_kind="graph"
+                )
+            )
+        except OpError:
+            # Unopenable lock or a busy writer. Either way the sample proceeds;
+            # only the coherence guarantee is lost, and only for this attempt.
+            pass
+        yield
+
+
 def _reap_preserved_temporaries(
     live: Path,
     vault_root: Path,
@@ -746,6 +853,27 @@ def _recall_projection_identity(
     """
     policy_version, access_fingerprint = recall_policy.recall_policy_identity(vault_root)
     return disk_freshness, policy_version, access_fingerprint
+
+
+def _may_restabilize(attempts: int, *, retarget: bool, started: float) -> bool:
+    """Whether `_rebuild_all_locked` may run another stabilization attempt (#576).
+
+    Three rules, in order:
+
+    * below `REBUILD_STABILIZATION_ATTEMPTS` this is unconditionally True, so a
+      bound can never buy fewer attempts than the code it replaced;
+    * above it, only an attempt invalidated by a *moving projection* earns
+      another one -- a Class B publication refusal is not made truer by
+      repetition (#566);
+    * and that extension stops at whichever of the attempt ceiling and the
+      elapsed deadline comes first, so continuous writes cannot turn the
+      re-target into an unbounded restart loop.
+    """
+    if attempts < REBUILD_STABILIZATION_ATTEMPTS:
+        return True
+    if not retarget or attempts >= REBUILD_STABILIZATION_MAX_ATTEMPTS:
+        return False
+    return (time.monotonic() - started) < REBUILD_STABILIZATION_DEADLINE_SECONDS
 
 
 def _incremental_projection_identity(
@@ -1246,6 +1374,44 @@ class EpistemicGraphIndex:
         except Exception:  # noqa: BLE001 - an incomplete cold proof fails closed
             return False
 
+    def _read_publication_epoch(self) -> tuple[Any, Any, Any]:
+        epoch = graph_sync.publication_epoch(self.vault_root)
+        required = epoch.checkpoint
+        prior_acknowledgement = (
+            self._live_acknowledged_checkpoint() if required is None else None
+        )
+        return epoch, required, prior_acknowledgement
+
+    def _sample_publication_epoch(self) -> tuple[Any, Any, Any]:
+        """Read the publication epoch, re-reading under the boundary if torn.
+
+        A canonical batch installs its generation floor before its checkpoint,
+        so a sample taken mid-batch sees a floor whose checkpoint has not landed
+        and classifies the lineage as incoherent. Once writes stopped joining
+        their rebuild (#576), a rebuild runs alongside writes as a matter of
+        course, and retrying straight back into that window can exhaust the
+        attempt budget and raise GRAPH_SYNC_LINEAGE_CONFLICT out of a rebuild
+        that had nothing wrong with it.
+
+        Holding the boundary for *every* sample would close the window, but it
+        charges each attempt a lock acquisition and its holder-metadata write to
+        prevent a torn read that is the exception -- and that write is
+        observable: it perturbed several rollback tests that count replacements
+        globally, because the graph is not supposed to be writing anything at
+        this point.
+
+        Taking the boundary only on the re-read closes the same window, because
+        *acquiring* it is what waits the batch out: the second read happens on
+        the far side of the batch rather than inside it. The common path pays
+        nothing.
+        """
+        try:
+            return self._read_publication_epoch()
+        except graph_sync.GraphEpochIncoherent:
+            pass
+        with _sampling_boundary(self._canonical_mutation_coordinator()):
+            return self._read_publication_epoch()
+
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
@@ -1273,22 +1439,14 @@ class EpistemicGraphIndex:
                 self._reconcile_recall_publication()
                 continue
             try:
-                epoch = graph_sync.publication_epoch(self.vault_root)
+                epoch, required, prior_acknowledgement = self._sample_publication_epoch()
             except graph_sync.GraphEpochIncoherent as error:
+                # Incoherent even after coalescing through the boundary: a
+                # genuinely broken lineage rather than a writer mid-batch.
+                # Retrying is what this loop did before and still does.
                 epoch_error = error
-                # A canonical batch installs floor before checkpoint. Coalesce
-                # once through the same boundary so a writer already in that
-                # window can finish before the next bounded epoch sample.
-                with self._canonical_mutation_coordinator().hold(
-                    operation="epistemic_graph_coalesce_epoch", holder_kind="graph"
-                ):
-                    pass
                 continue
             epoch_error = None
-            required = epoch.checkpoint
-            prior_acknowledgement = (
-                self._live_acknowledged_checkpoint() if required is None else None
-            )
             temporary = graph_sync.temporary_sidecar_path(
                 live,
                 required
@@ -1438,6 +1596,11 @@ class EpistemicGraphIndex:
                             note_publication_refusal(self.vault_root)
                             raise
                         clear_publication_refusal(self.vault_root)
+                        log.info(
+                            "graph rebuild published publication_attempts=%s generation=%s",
+                            attempts,
+                            required.generation if required is not None else None,
+                        )
                         return report
                     finally:
                         _release_publication_hold(publication_hold)
@@ -1467,6 +1630,9 @@ class EpistemicGraphIndex:
         # exception type already carries that classification; only the memo is
         # new, so the next cycle does not re-pay the same doomed rebuild.
         note_publication_refusal(self.vault_root)
+        log.info(
+            "graph rebuild publication exhausted publication_attempts=%s", attempts
+        )
         raise graph_sync.GraphRebuildRegistrationError(
             "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
             # "run reconcile" is an internal registry name that matches neither
@@ -1752,8 +1918,19 @@ class EpistemicGraphIndex:
         # cause belonging to the branch it takes.
         moved_cause = "no stabilization attempt completed"
         publication_cause = "no stabilization attempt completed"
+        # #576. Whether the *last* attempt was invalidated by a moving
+        # projection, which is the only condition worth re-targeting: the
+        # newer baseline is sampled fresh at the top of every attempt, so an
+        # attempt that lost a race to a concurrent write can win the next one.
+        # Class B (the marker would not publish) is deliberately excluded --
+        # retrying it just re-pays a doomed pass, which is #566's finding.
+        retarget = False
+        attempts = 0
+        started = time.monotonic()
         try:
-            for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
+            while _may_restabilize(attempts, retarget=retarget, started=started):
+                attempts += 1
+                retarget = False
                 before_disk = _disk_vault_freshness(self.vault_root)
                 before = _recall_projection_identity(self.vault_root, disk_freshness=before_disk)
                 resolver = find_module.recall_resolver_snapshot(
@@ -1772,6 +1949,7 @@ class EpistemicGraphIndex:
                     # Class C, first admitted cause.
                     self._mark_unavailable()
                     projection_moved = True
+                    retarget = True
                     moved_cause = "the supplied freshness identity did not name the resolver bytes"
                     find_module.unload_ram_caches()
                     continue
@@ -1824,6 +2002,7 @@ class EpistemicGraphIndex:
                         # The projection moved between writing the availability
                         # marker and confirming it: Class C, second cause.
                         projection_moved = True
+                        retarget = True
                         moved_cause = (
                             "the recall projection moved after the availability "
                             "marker was written"
@@ -1867,19 +2046,28 @@ class EpistemicGraphIndex:
                     # resolver source versions changed across the pass: Class C,
                     # second admitted cause.
                     projection_moved = True
+                    retarget = True
                     if after_identity != before:
                         moved_cause = "the recall projection identity moved across the pass"
                     elif after_membership != resolver_membership:
                         moved_cause = "the recall membership moved across the pass"
                     else:
                         moved_cause = "the resolver source versions moved across the pass"
-            attempts = (
+            exhausted = (
                 "epistemic graph rebuild did not stabilize after "
-                f"{REBUILD_STABILIZATION_ATTEMPTS} attempts"
+                f"{attempts} attempts in {time.monotonic() - started:.1f}s"
+            )
+            log.info(
+                "graph rebuild stabilization exhausted attempts=%s elapsed_ms=%.1f "
+                "class=%s cause=%s",
+                attempts,
+                (time.monotonic() - started) * 1000.0,
+                "C" if projection_moved else "B",
+                moved_cause if projection_moved else publication_cause,
             )
             if projection_moved:
                 raise GraphProjectionMoved(
-                    f"{attempts} (Class C, projection moved): {moved_cause}"
+                    f"{exhausted} (Class C, projection moved): {moved_cause}"
                 )
             # Class B by elimination: this pass proved nothing stale and still
             # could not publish, which is precisely what
@@ -1892,7 +2080,7 @@ class EpistemicGraphIndex:
             # a full doomed rebuild indefinitely, and left the registry
             # permanently cool for every later write to pay.
             raise GraphPublicationUnavailable(
-                f"{attempts} (Class B, publication failure): {publication_cause}"
+                f"{exhausted} (Class B, publication failure): {publication_cause}"
             )
         finally:
             if pass_started and not stable:
@@ -2187,7 +2375,7 @@ class EpistemicGraphIndex:
             if not recall_policy.is_recall_candidate(self.vault_root, path):
                 return False
             try:
-                raw = path.read_bytes().decode("utf-8")
+                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
                 current = _source_signature(path, raw)
             except (OSError, UnicodeDecodeError):
                 return False
@@ -2252,7 +2440,7 @@ class EpistemicGraphIndex:
         for rel in sorted(expected_membership):
             path = self.vault_root / rel
             try:
-                raw_bytes = path.read_bytes()
+                raw_bytes = vault_module.read_bytes_without_pinning(path)
                 raw = raw_bytes.decode("utf-8")
                 source_signature = _source_signature(path, raw)
                 source_mtime = path.stat().st_mtime
@@ -2420,7 +2608,7 @@ class EpistemicGraphIndex:
         for rel in sorted(indexed_paths - changed_rels):
             path = self.vault_root / rel
             try:
-                raw = path.read_bytes().decode("utf-8")
+                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
                 scanned_versions[rel] = _source_signature(path, raw)
             except (OSError, UnicodeDecodeError):
                 return None
@@ -2520,7 +2708,65 @@ class EpistemicGraphIndex:
         created_paths: Iterable[Path] = (),
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
     ) -> dict[str, int]:
-        def fallback() -> dict[str, int]:
+        # The affected set, widened as the pass learns more. It starts as what
+        # the caller named, which is already the checkpoint's changed and
+        # created paths, and grows to the recall delta and the resolver-affected
+        # sources once those are computed. A bail-out enqueues whatever is known
+        # at the point it fires; earlier bail-outs know less, and knowing less
+        # is not the same as knowing nothing.
+        deferred_scope: set[str] = {
+            rel
+            for candidate in (*paths, *created_paths)
+            if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
+        }
+
+        def defer(reason: str) -> dict[str, int] | None:
+            """Queue the affected paths; return a terminal report, or None to rebuild.
+
+            None means "enqueued, but this caller's contract is a converged
+            graph" -- the standalone library path, which has no checkpoint and no
+            envelope to carry a pending outcome. It still gets the enqueue, so a
+            rebuild that then fails leaves durable work behind instead of
+            nothing.
+            """
+            try:
+                deferred_index.add_graph(self.vault_root, sorted(deferred_scope))
+            except Exception:  # noqa: BLE001 - a queue failure must not lose the rebuild
+                log.warning(
+                    "graph deferral enqueue failed reason=%s; falling back to rebuild",
+                    reason,
+                    exc_info=True,
+                )
+                return None
+            if graph_checkpoint is None:
+                return None
+            self._mark_unavailable()
+            # `queued` is what separates this from `fallback()`'s own deferral
+            # below, which registers a whole-vault rebuild and reports
+            # `deferred` all the same. Only an enqueue that actually succeeded
+            # may tell the dispatch layer the queue owns this repair; without
+            # the distinction that layer reads an unregistered, unacknowledged
+            # checkpoint as a missing rebuild and schedules the vault anyway.
+            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
+
+        def fallback(reason: str) -> dict[str, int]:
+            # #576 F3. The single most-wanted number in the incident, and the
+            # one nothing logged: which gate sent essentially every write down
+            # the full-rebuild path. Without it the join-rate flip -- 0-7% of
+            # writes joining a rebuild, then 83-100% -- could not be attributed
+            # from the service log at all, and two published analyses of this
+            # incident named the wrong mechanism before one measured it.
+            log.info(
+                "graph incremental refresh fell back reason=%s external_pending=%s "
+                "graph_checkpoint=%s",
+                reason,
+                freshness.external_pending(self.vault_root),
+                graph_checkpoint.checkpoint_sha256 if graph_checkpoint is not None else None,
+            )
+            if _FALLBACK_DISPOSITIONS[reason] == "defer":
+                deferred = defer(reason)
+                if deferred is not None:
+                    return deferred
             if graph_checkpoint is None:
                 return {
                     "indexed_files": 0,
@@ -2543,28 +2789,38 @@ class EpistemicGraphIndex:
             for path in paths:
                 rel = _vault_rel(self.vault_root, path)
                 if rel is None:
-                    return fallback()
+                    return fallback("path_outside_vault")
                 try:
                     expected_paths.append(
-                        (rel, vault_module.content_hash(path.read_bytes().decode("utf-8")))
+                        (
+                            rel,
+                            vault_module.content_hash(
+                                vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                            ),
+                        )
                     )
                 except (OSError, UnicodeDecodeError):
-                    return fallback()
+                    return fallback("path_unreadable")
             expected_created = sorted(
                 rel
                 for path in created_paths
                 if (rel := _vault_rel(self.vault_root, Path(path))) is not None
             )
-            if (
-                durable_checkpoint != graph_checkpoint
-                or graph_checkpoint.scope != "paths"
-                or graph_checkpoint.paths != tuple(sorted(expected_paths))
-                or graph_checkpoint.created_paths != tuple(expected_created)
-            ):
-                return fallback()
+            # Named individually rather than as one disjunction: these are the
+            # four candidate gates the incident could not choose between, and a
+            # single "receipt binding mismatch" line would have left the same
+            # question open.
+            if durable_checkpoint != graph_checkpoint:
+                return fallback("durable_checkpoint_moved")
+            if graph_checkpoint.scope != "paths":
+                return fallback("checkpoint_scope_is_not_paths")
+            if graph_checkpoint.paths != tuple(sorted(expected_paths)):
+                return fallback("checkpoint_paths_mismatch")
+            if graph_checkpoint.created_paths != tuple(expected_created):
+                return fallback("checkpoint_created_paths_mismatch")
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
-            return fallback()
+            return fallback("graph_snapshot_unavailable")
         if graph_checkpoint is not None:
             graph_values = dict(
                 snapshot.execute(
@@ -2582,16 +2838,16 @@ class EpistemicGraphIndex:
                 and acknowledged.generation == predecessor
             ):
                 snapshot.close()
-                return fallback()
+                return fallback("acknowledgement_is_not_the_predecessor")
         stored_checkpoint = self._stored_recall_checkpoint(snapshot)
         if stored_checkpoint is None or not freshness.recall_is_live(self.vault_root, "vault"):
             snapshot.close()
-            return fallback()
+            return fallback("recall_checkpoint_absent_or_registry_not_live")
         delta = freshness.recall_delta_since(self.vault_root, "vault", stored_checkpoint)
         if not delta.complete:
             snapshot.close()
             self._mark_unavailable()
-            return fallback()
+            return fallback("recall_delta_incomplete")
         checkpoint = delta.to
         before = (
             checkpoint.triple,
@@ -2601,7 +2857,7 @@ class EpistemicGraphIndex:
         if not self._delta_target_still_current(delta):
             snapshot.close()
             self._mark_unavailable()
-            return fallback()
+            return fallback("delta_target_moved")
         created_rels = {
             rel
             for path in created_paths
@@ -2611,7 +2867,7 @@ class EpistemicGraphIndex:
         if stored_entries is None:
             snapshot.close()
             self._mark_unavailable()
-            return fallback()
+            return fallback("stored_resolver_entries_unreadable")
         snapshot.close()
         resolver = find_module.recall_resolver_snapshot_at_checkpoint(
             self.vault_root,
@@ -2619,7 +2875,7 @@ class EpistemicGraphIndex:
         )
         if resolver is None:
             self._mark_unavailable()
-            return fallback()
+            return fallback("resolver_snapshot_unavailable")
         topology_changed = any(
             (
                 rel.removesuffix(".md") in resolver.full_paths,
@@ -2635,7 +2891,7 @@ class EpistemicGraphIndex:
         if topology_changed:
             topology_snapshot = self._open_read_snapshot(require_current_projection=False)
             if topology_snapshot is None:
-                return fallback()
+                return fallback("topology_snapshot_unavailable")
             full_topology = self._stored_full_resolver_topology(
                 topology_snapshot,
                 set(stored_entries),
@@ -2643,7 +2899,7 @@ class EpistemicGraphIndex:
             topology_snapshot.close()
             if full_topology is None:
                 self._mark_unavailable()
-                return fallback()
+                return fallback("stored_topology_unreadable")
             indexed_sources, linked_sources, stored_resolver_fingerprint = full_topology
             old_resolver = resolver.fork()
             old_resolver.on_entries_changed(
@@ -2656,17 +2912,22 @@ class EpistemicGraphIndex:
             )
             if _resolver_topology_fingerprint(old_resolver) != stored_resolver_fingerprint:
                 self._mark_unavailable()
-                return fallback()
+                return fallback("stored_topology_fingerprint_mismatch")
             resolver_fingerprint = _resolver_topology_fingerprint(resolver)
 
         delta_paths = set(delta.changed | delta.deleted)
+        deferred_scope.update(
+            rel
+            for candidate in delta_paths
+            if (rel := _vault_rel(self.vault_root, Path(candidate))) is not None
+        )
         # Caller paths outside the exact retained suffix mean publication was
         # skipped, failed, or this is a duplicate callback whose global safety
         # cannot be proved path-locally. Rebuild from disk instead of blessing
         # the event checkpoint.
         if any(str(path) not in delta_paths for path in paths):
             self._mark_unavailable()
-            return fallback()
+            return fallback("caller_path_outside_delta")
 
         refresh_paths = set(delta_paths)
         topology_versions: dict[str, GraphSourceSignature] = {}
@@ -2708,10 +2969,11 @@ class EpistemicGraphIndex:
                 if resolver_version_result is None:
                     find_module.unload_ram_caches()
                 self._mark_unavailable()
-                return fallback()
+                return fallback("topology_proof_moved")
             resolver_versions = resolver_version_result
             affected, topology_versions = affected_result
             refresh_paths.update(str(self.vault_root / rel) for rel in affected)
+            deferred_scope.update(affected)
 
         pass_started = False
         stable = False
@@ -2766,7 +3028,7 @@ class EpistemicGraphIndex:
                 ):
                     stable = True
                     return report
-                rebuilt = fallback()
+                rebuilt = fallback("incremental_marker_refused")
                 stable = True
                 return rebuilt
             stable = True
@@ -2774,7 +3036,7 @@ class EpistemicGraphIndex:
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
-        return fallback()
+        return fallback("unreachable")
 
     def _refresh_paths_pass(
         self,
@@ -2810,6 +3072,255 @@ class EpistemicGraphIndex:
         finally:
             conn.close()
         return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
+
+    def _topology_affected_sources(
+        self,
+        conn: sqlite3.Connection,
+        rels: set[str],
+        *,
+        resolver: vault_module.WikilinkResolver,
+    ) -> set[str]:
+        """Pages whose own edges change because these pages appeared or vanished.
+
+        A wikilink that does not resolve produces no edge at all -- it is dropped
+        in `_body_wikilink_paths`, not recorded as unresolved. So a page written
+        before its target exists has a missing edge, and nothing about
+        re-indexing the *target* later repairs the *source*. That is the forward
+        reference the full rebuild gets right for free, by re-deriving every page
+        once the corpus is complete, and the one thing a naive per-path drain
+        silently gets wrong.
+
+        The two directions cost very differently, so they are answered
+        differently:
+
+        - A page that *vanished* leaves its inbound edges behind, and those edges
+          name their own source. One indexed query answers it.
+        - A page that *appeared* has no such trace, because the links that should
+          point at it were never written down. Only the bodies know, so this
+          scans them.
+
+        Persisting the unresolved edge instead -- storing the link's target
+        *name* even when no target id exists yet -- would turn this scan into an
+        index lookup. That is a real improvement and a real schema change,
+        including to what a read renders for a target that does not exist, so it
+        is a measured Phase 3 candidate rather than something smuggled in here.
+        The scan only runs when a drain actually changes topology, which
+        ordinary edits do not.
+        """
+        appeared: set[str] = set()
+        vanished: set[str] = set()
+        for rel in rels:
+            indexed = (
+                conn.execute(
+                    "SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", (rel,)
+                ).fetchone()
+                is not None
+            )
+            exists = (self.vault_root / rel).exists()
+            if exists and not indexed:
+                appeared.add(rel)
+            elif indexed and not exists:
+                vanished.add(rel)
+
+        affected: set[str] = set()
+        for rel in vanished:
+            affected.update(
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT DISTINCT source_path FROM graph_edges WHERE dst_key = ?",
+                    (_file_key(rel),),
+                )
+            )
+        if appeared:
+            affected.update(self._sources_linking_to(appeared, resolver=resolver))
+        return affected - rels
+
+    def _sources_linking_to(
+        self, targets: set[str], *, resolver: vault_module.WikilinkResolver
+    ) -> set[str]:
+        """Pages whose body wikilinks now resolve to one of `targets`."""
+        found: set[str] = set()
+        for path in vault_module.walk_vault_md(self.vault_root):
+            rel = _vault_rel(self.vault_root, path)
+            if rel is None or rel in targets:
+                continue
+            try:
+                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for match in vault_module.find_body_wikilinks(raw):
+                try:
+                    canonical, warning = vault_module.normalize_wikilink(
+                        match.group(1).strip(),
+                        self.vault_root,
+                        resolver=resolver,
+                        strict=False,
+                    )
+                except Exception:  # noqa: BLE001 - a malformed link resolves to nothing
+                    continue
+                if warning is None and _with_md(canonical) in targets:
+                    found.add(rel)
+                    break
+        return found
+
+    def drain_paths(self, paths: list[Path]) -> dict[str, Any]:
+        """Re-derive the graph for exactly these paths and republish availability.
+
+        The proportional counterpart to `rebuild_all`, and the reason the durable
+        queue is worth having: work is O(changed), so the window a concurrent
+        writer can invalidate shrinks by orders of magnitude instead of growing
+        with the vault.
+
+        Every identity it samples is the event-maintained one. Using
+        `_recall_projection_identity` here -- the direct-disk walk the full
+        rebuild uses -- would reintroduce an O(vault) cost per drain and give
+        back the whole improvement while still looking incremental. Membership
+        and resolver source versions are deliberately not proved either: both
+        are whole-vault, and what actually needs proving is that the pages this
+        pass indexed did not move under it, which `indexed_versions` says
+        exactly.
+
+        Publication is allowed to fail. The indexing is already durable in the
+        sidecar, so a refused marker costs a later republish, not the work; and
+        a write that landed mid-drain has enqueued its own receipt at a new
+        revision, which this drain's compare-and-swap clear cannot retire.
+        """
+        report: dict[str, Any] = {
+            "indexed_files": 0,
+            "nodes": 0,
+            "edges": 0,
+            "published": False,
+            "indexed": (),
+        }
+        if not paths:
+            return report
+        if not graph_enabled():
+            return {**report, "disabled": 1}
+        if not self.path.exists():
+            # An absent sidecar is not a dirty-path problem: there is nothing to
+            # repair incrementally, and indexing a handful of pages into a fresh
+            # database would publish a graph that is missing every other page.
+            return {**report, "requires_rebuild": 1}
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_drain_paths", holder_kind="graph"
+        ):
+            if not freshness.recall_is_live(self.vault_root, "vault"):
+                return {**report, "requires_rebuild": 1}
+            checkpoint = freshness.recall_checkpoint(self.vault_root, "vault")
+            before = _incremental_projection_identity(self.vault_root)
+            # Not `recall_resolver_snapshot_at_checkpoint`: that variant refuses
+            # a cache miss on purpose, because the *incremental refresh* path
+            # needs the pre-delta topology to prove bounded edge repair. A drain
+            # proves nothing about edges it did not touch -- it re-derives each
+            # queued page against the current corpus, which is what a resolver
+            # built from the current projection is. The identity check inside
+            # keeps a stale cached resolver from being reused.
+            resolver = find_module.recall_resolver_snapshot(self.vault_root)
+            if resolver is None:
+                return {**report, "requires_rebuild": 1}
+            queued_rels = {
+                rel
+                for path in paths
+                if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+            }
+            probe = self._connect()
+            try:
+                affected = self._topology_affected_sources(
+                    probe, queued_rels, resolver=resolver
+                )
+            finally:
+                probe.close()
+            batch = sorted({*paths, *(self.vault_root / rel for rel in affected)})
+            indexed_versions: dict[str, GraphSourceSignature] = {}
+            published = False
+
+            def publish_drain(conn: sqlite3.Connection) -> None:
+                # Same seam, and for the same reason, as the incremental
+                # refresh path's own publication: the acknowledgement is
+                # written in the transaction that writes the rows it describes,
+                # having re-proved the projection did not move under the pass.
+                #
+                # Publishing afterwards through a second connection tears the
+                # two apart, and an acknowledgement that lands against a moved
+                # projection is exactly what the lineage check refuses --
+                # `GRAPH_SYNC_LINEAGE_CONFLICT`, raised at the *next* write
+                # rather than here.
+                nonlocal published
+                if not (
+                    _incremental_projection_identity(self.vault_root) == before
+                    and self._source_versions_current(indexed_versions)
+                    and freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
+                ):
+                    raise _DrainPublicationMoved
+                self._publish_available_marker_in_transaction(
+                    conn,
+                    before,
+                    checkpoint=checkpoint,
+                    # Read at commit time, not before the pass: the coverage
+                    # claim has to be about the generation that is committed
+                    # now, not the one that was committed when the drain
+                    # started.
+                    graph_checkpoint=self._drained_graph_checkpoint(batch),
+                )
+                published = True
+
+            try:
+                pass_report = self._refresh_paths_pass(
+                    batch,
+                    resolver=resolver,
+                    indexed_versions=indexed_versions,
+                    before_commit=publish_drain,
+                )
+            except _DrainPublicationMoved:
+                # The pass rolled back with it, so nothing is half-applied and
+                # no receipt is cleared. The queue still holds this work and
+                # the next drain repairs it against the projection that moved.
+                log.info("deferred graph drain did not publish; projection moved under the pass")
+                return {**report, "moved": 1}
+        return {
+            **pass_report,
+            "published": published,
+            "indexed": tuple(sorted(indexed_versions)),
+        }
+
+    def _drained_graph_checkpoint(
+        self, batch: list[Path]
+    ) -> graph_sync.GraphSyncCheckpoint | None:
+        """The committed generation this pass may acknowledge, if it covered it.
+
+        Repairing the pages is only half of convergence. Until the graph_sync
+        acknowledgement moves, every reader still sees a stale epoch, the
+        sidecar stays unavailable, and the next dispatch schedules the
+        whole-vault rebuild regardless -- which would leave the queue as pure
+        overhead beside the expensive path rather than a replacement for it.
+
+        Acknowledging is also the only irreversible claim this path makes, so
+        the bar is coverage of the *whole* committed path set, not of whatever
+        subset this drain happened to dequeue. A `limit`-truncated batch, or a
+        batch left over from an older generation, covers nothing and
+        acknowledges nothing; the later drain that does cover it acknowledges
+        then. `scope == "full"` never qualifies -- that marker exists precisely
+        because the change was too large to enumerate, so no path list can
+        prove it converged.
+
+        Coverage is membership in the *processed* batch rather than in the
+        indexed set: a deletion named by the checkpoint is processed by
+        removing its rows and has no source bytes to index, so an
+        indexed-set test would stall every generation containing one forever.
+        That the indexed pages did not move under the pass is a separate
+        proof, carried by `source_versions`.
+        """
+        committed = graph_sync.read_checkpoint(self.vault_root)
+        if committed is None or committed.scope != "paths":
+            return None
+        processed = {
+            rel
+            for path in batch
+            if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+        }
+        required = {rel for rel, _content_hash in committed.paths}
+        required.update(committed.created_paths)
+        return committed if required <= processed else None
 
     def delete_paths(self, rel_paths: list[str]) -> int:
         with self._mutation_coordinator.hold(
@@ -2970,7 +3481,7 @@ class EpistemicGraphIndex:
             self._delete_path(conn, rel, commit=commit)
             return False
         try:
-            raw_bytes = path.read_bytes()
+            raw_bytes = vault_module.read_bytes_without_pinning(path)
             raw = raw_bytes.decode("utf-8")
             source_signature = _source_signature(path, raw)
         except (OSError, UnicodeDecodeError):
@@ -3009,7 +3520,7 @@ class EpistemicGraphIndex:
             # transaction: do not momentarily publish rows for bytes that are
             # now raw Records (or merely newer ordinary content).
             try:
-                current = path.read_bytes().decode("utf-8")
+                current = vault_module.read_bytes_without_pinning(path).decode("utf-8")
                 current_signature = _source_signature(path, current)
             except (OSError, UnicodeDecodeError):
                 self._delete_path(conn, rel, commit=commit)
@@ -3982,6 +4493,34 @@ def _registered_or_failure(
     return GraphDispatchResult("registered", "graph_rebuild_registered", checkpoint)
 
 
+def _caller_can_carry_pending(
+    vault_root: Path,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> bool:
+    """Whether this caller has a response envelope that can report `pending`.
+
+    Deferring repair to the queue is only honest for a caller that can *say* the
+    graph has not converged. A mutation request can: its terminal carries the
+    `graph_sync` field. A direct library caller cannot -- it returns a leaf
+    result with nowhere to put the outcome, and its contract has always been a
+    converged graph, which is why `_join_registered_standalone` joins the
+    rebuild to completion for exactly this case.
+
+    Deferring for a standalone caller does not merely under-report; it changes
+    what the next call in the same process observes. Ten governance and
+    deletion-lineage tests failed on that, because the operation after a delete
+    read a graph that used to be current by the time it ran.
+
+    Same predicate as `_join_registered_standalone`, deliberately: the caller
+    that joins is precisely the caller that must not defer.
+    """
+    from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
+
+    return active_mutation_request_id() is not None or active_direct_mutation_guard(
+        vault_root, state_root=mutation_coordinator.state_root
+    )
+
+
 def _join_registered_standalone(
     vault_root: Path,
     result: GraphDispatchResult,
@@ -4131,6 +4670,15 @@ def upsert_after_write(
                 else index.refresh_paths(written_paths, graph_checkpoint=required)
             )
             if report.get("deferred"):
+                if report.get("queued") and _caller_can_carry_pending(
+                    vault_root, mutation_coordinator
+                ):
+                    # The durable queue holds the affected paths and a drain
+                    # will converge them. Registering a whole-vault rebuild here
+                    # would run the expensive path on exactly the bail-outs this
+                    # change makes proportional, leaving the queue as overhead
+                    # beside it rather than a replacement for it.
+                    return GraphDispatchResult("deferred", "graph_repair_queued", required)
                 if graph_sync.registered_checkpoint(
                     vault_root, state_root=mutation_coordinator.state_root
                 ) == required:
@@ -4201,7 +4749,26 @@ def upsert_after_write(
 def _rebuild_outcome(
     index: EpistemicGraphIndex, checkpoint: graph_sync.GraphSyncCheckpoint
 ) -> graph_sync.GraphBuildOutcome:
-    index._rebuild_all_off_boundary()
+    # #576 F3. Elapsed wall time around the whole registered rebuild, on both
+    # the publishing and the failing path. Read alongside the publication- and
+    # stabilization-attempt counts the two loops inside it log, this is what
+    # separates "one slow pass" from "several retried passes" -- the
+    # distinction the incident needed and could not make.
+    started = time.monotonic()
+    try:
+        index._rebuild_all_off_boundary()
+    except BaseException:
+        log.info(
+            "graph rebuild finished outcome=failed elapsed_ms=%.1f generation=%s",
+            (time.monotonic() - started) * 1000.0,
+            checkpoint.generation,
+        )
+        raise
+    log.info(
+        "graph rebuild finished outcome=published elapsed_ms=%.1f generation=%s",
+        (time.monotonic() - started) * 1000.0,
+        checkpoint.generation,
+    )
     return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
 
@@ -4281,7 +4848,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     for md in find_module._walk_md(kb):
         try:
             rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
-            raw = md.read_bytes().decode("utf-8")
+            raw = vault_module.read_bytes_without_pinning(md).decode("utf-8")
         except (OSError, ValueError, UnicodeDecodeError):
             continue
         disk_paths.add(rel)
@@ -5120,7 +5687,7 @@ def _current_unit_parent_paths(
             )
             continue
         try:
-            source = path.read_text(encoding="utf-8")
+            source = vault_module.read_bytes_without_pinning(path).decode("utf-8")
         except FileNotFoundError:
             drift_counts["missing_parent"] = drift_counts.get("missing_parent", 0) + 1
             continue

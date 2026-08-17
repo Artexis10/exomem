@@ -10,6 +10,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from canonical_snapshot import canonical_bytes
 
 from exomem import adoption_proposals, adoption_run, commands, find, get_page, relation_review
 
@@ -34,12 +35,13 @@ def _snapshot_md(root: Path) -> dict[str, bytes]:
 
 
 def _snapshot_all(root: Path) -> dict[str, bytes]:
-    """Full-tree byte snapshot of EVERY file (pack assembly must write nothing)."""
-    return {
-        p.relative_to(root).as_posix(): p.read_bytes()
-        for p in root.rglob("*")
-        if p.is_file()
-    }
+    """Full-tree byte snapshot of every canonical file (assembly writes nothing).
+
+    Derived-index residue is excluded: a graph rebuild no longer finishes before
+    the write returns, so its scratch sidecars can be present here without any
+    of this code having written them. See `canonical_snapshot`.
+    """
+    return canonical_bytes(root)
 
 
 def _legacy_vault(root: Path) -> Path:
