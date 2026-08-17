@@ -2767,34 +2767,48 @@ def repair_is_provisioned(
     vault_root: Path,
     required: GraphSyncCheckpoint,
     *,
+    outcome: str,
     state_root: Path | None = None,
 ) -> bool:
-    """Will something converge the graph to `required`, or has it already?
+    """Does the fanout's own claim about this checkpoint actually hold?
 
     A committed batch may not leave an unacknowledged checkpoint with nothing
-    arranged to answer it. Before repair moved off the write path there was
-    exactly one way to arrange it -- an in-process rebuild flight registered
-    against this exact checkpoint -- so the fanout's handoff check asked only
-    about that. Repair is now queued durably and drained later, which means a
-    write that queues *correctly* registers no flight at all, and the old
-    question answers "no handoff" for the healthiest path there is.
+    arranged to answer it. What counts as "arranged" is not one thing, because
+    each outcome asserts a *different* mechanism, and the check has to test the
+    one that was claimed:
 
-    Three things count, and they are the three that exist:
+    * `registered` claims an in-process rebuild flight for this exact
+      checkpoint. Only a registration proves that.
+    * `deferred` claims the durable queue owns the repair, which is what a write
+      does now that repair happens off the write path. A registration is exactly
+      what it does *not* create, so demanding one failed the healthiest path
+      there is -- measured at one write per run reporting
+      `GRAPH_SYNC_HANDOFF_MISSING` against a graph that converged with zero
+      drift.
+    * `failed` claims the dispatch gave up, and the queue is then the only thing
+      left that can converge it.
 
-    * a registered flight for this exact checkpoint;
-    * a durable queue entry -- this checkpoint's own paths, or a full-rebuild
-      marker that subsumes them;
-    * an acknowledgement that already covers it, for when a drain got there
-      between the commit and this check.
+    Testing every outcome against the queue instead would be just as wrong in
+    the other direction, and silently: the canonical batch enqueues the
+    checkpoint's paths in the same durable step that writes the checkpoint, so a
+    queue entry always exists and a queue-only test can never fail. A branch
+    reporting a flight it never created would sail through
+    (`test_canonical_batch_repairs_a_missing_graph_handoff_handle` is the pin).
 
-    Absence of all three is still a real defect and still fails the batch: it
-    means the markdown landed and nothing will ever repair the graph for it.
+    An acknowledgement that already covers the checkpoint short-circuits all of
+    it -- a drain that landed between the commit and this check has made the
+    question moot however it was answered.
     """
-    if registered_checkpoint(vault_root, state_root=state_root) == required:
-        return True
     acknowledged = acknowledged_checkpoint(vault_root)
     if acknowledged is not None and acknowledged.covers(required):
         return True
+    if registered_checkpoint(vault_root, state_root=state_root) == required:
+        return True
+    if outcome == "registered":
+        # The claim was a flight, and there is none. Nothing else substitutes:
+        # the queue entry below is written by the batch itself and would say
+        # nothing about whether this branch did what it reported.
+        return False
     from . import deferred_index
 
     if deferred_index.graph_full_rebuild_pending(vault_root) is not None:

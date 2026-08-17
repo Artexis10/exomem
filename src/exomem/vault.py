@@ -3194,7 +3194,9 @@ def post_commit_batch_fanout(
                 )
                 or (
                     graph.outcome in {"registered", "deferred", "failed"}
-                    and not graph_sync.repair_is_provisioned(vault_root, required)
+                    and not graph_sync.repair_is_provisioned(
+                        vault_root, required, outcome=graph.outcome
+                    )
                 )
             )
             if handoff_missing:

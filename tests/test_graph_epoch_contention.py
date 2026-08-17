@@ -190,9 +190,29 @@ def test_a_durably_queued_repair_counts_as_a_provisioned_handoff(tmp_path: Path)
 
     root = _kb(tmp_path)
     required = _install_epoch(root, floor=3, checkpoint=3)
-    assert graph_sync.repair_is_provisioned(root, required) is False
+    assert graph_sync.repair_is_provisioned(root, required, outcome="deferred") is False
     deferred_index.add_graph(root, [path for path, _digest in required.paths])
-    assert graph_sync.repair_is_provisioned(root, required) is True
+    assert graph_sync.repair_is_provisioned(root, required, outcome="deferred") is True
+
+
+def test_a_queued_repair_never_excuses_a_flight_that_was_never_registered(
+    tmp_path: Path,
+) -> None:
+    """The queue must not launder a `registered` claim.
+
+    The canonical batch enqueues the checkpoint's paths in the same durable step
+    that writes the checkpoint, so a queue entry always exists. If every outcome
+    were tested against the queue, a fanout branch reporting a flight it never
+    created would pass a check that can never fail -- the guard would be
+    vacuous rather than relaxed.
+    """
+    from exomem import deferred_index
+
+    root = _kb(tmp_path)
+    required = _install_epoch(root, floor=3, checkpoint=3)
+    deferred_index.add_graph(root, [path for path, _digest in required.paths])
+    assert graph_sync.repair_is_provisioned(root, required, outcome="deferred") is True
+    assert graph_sync.repair_is_provisioned(root, required, outcome="registered") is False
 
 
 def test_a_pending_full_rebuild_marker_also_provisions_the_handoff(tmp_path: Path) -> None:
@@ -202,7 +222,7 @@ def test_a_pending_full_rebuild_marker_also_provisions_the_handoff(tmp_path: Pat
     root = _kb(tmp_path)
     required = _install_epoch(root, floor=3, checkpoint=3)
     deferred_index.mark_graph_full_rebuild(root, generation=required.generation)
-    assert graph_sync.repair_is_provisioned(root, required) is True
+    assert graph_sync.repair_is_provisioned(root, required, outcome="deferred") is True
 
 
 def test_an_unqueued_unregistered_checkpoint_is_still_a_missing_handoff(
@@ -219,7 +239,7 @@ def test_an_unqueued_unregistered_checkpoint_is_still_a_missing_handoff(
     root = _kb(tmp_path)
     required = _install_epoch(root, floor=3, checkpoint=3)
     deferred_index.add_graph(root, ["Knowledge Base/Notes/somebody-else.md"])
-    assert graph_sync.repair_is_provisioned(root, required) is False
+    assert graph_sync.repair_is_provisioned(root, required, outcome="deferred") is False
 
 
 def test_the_drain_re_reads_a_mid_batch_epoch_under_the_boundary(
