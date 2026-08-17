@@ -478,7 +478,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("observe", "sign", "import", "promote"))
     parser.add_argument("--state-dir", type=Path, required=True)
-    parser.add_argument("--repo", type=Path, default=Path("/home/hugoa/projects/exomem"))
+    # Defaults to the checkout this script is in. An absolute default would name
+    # one operator's machine, which `validate-public-artifacts.py` rejects in a
+    # public repository and which is wrong for anyone else anyway.
+    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--platform", choices=("claude", "openai"))
     parser.add_argument("--results", help="JSON of the seven observed operations")
     parser.add_argument("--outcome", default="bootstrap-outcome-final.json")
