@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import pathlib
 import tempfile
+import warnings
 
 import pytest
 
@@ -65,12 +66,34 @@ def _size(payload: dict) -> int:
     return len(json.dumps(payload))
 
 
+#: Headroom below which the ceiling stops being a budget and becomes a cliff.
+#: Warn rather than fail: the remaining bytes are still legitimately spendable,
+#: and turning "nearly full" into a failure would just be the ceiling moved down
+#: without the argument the ceiling's own docstring demands.
+HEADROOM_WARNING_BYTES = 512
+
+
 def test_compact_stays_under_its_byte_ceiling(payloads):
     size = _size(payloads["compact"])
     assert size <= COMPACT_BYTE_CEILING, (
         f"compact bootstrap is {size:,} bytes (~{size // 4:,} tokens), over the "
-        f"{COMPACT_BYTE_CEILING:,} ceiling"
+        f"{COMPACT_BYTE_CEILING:,} ceiling by {size - COMPACT_BYTE_CEILING:,}"
     )
+    headroom = COMPACT_BYTE_CEILING - size
+    if headroom < HEADROOM_WARNING_BYTES:
+        # The failure mode this catches is not the ceiling being wrong, it is
+        # the ceiling being reached *silently*. Compact grew to 70 bytes of
+        # headroom and nobody knew until an unrelated release PR went red two
+        # merges later, which is a bad place to first read the argument for why
+        # the number is what it is.
+        warnings.warn(
+            f"compact bootstrap is {size:,} bytes with only {headroom:,} bytes "
+            f"under the {COMPACT_BYTE_CEILING:,} ceiling. The next addition of "
+            "any size will trip it. Either trim compact, or raise the ceiling "
+            "with the reasoning the constant's docstring requires -- but decide "
+            "it deliberately rather than discovering it as a red CI run.",
+            stacklevel=2,
+        )
 
 
 def test_compact_is_materially_smaller_than_full(payloads):
