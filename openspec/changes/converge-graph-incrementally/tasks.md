@@ -211,7 +211,17 @@ time. Reachable today on every path that already rebuilds off the write path.
 
 - [ ] 6.1 The 1200-page-with-concurrent-writer lane reaches `completed`, not `pending`,
   with no write blocking. Record before and after.
+  No harness existed for this, which is why the exit criterion had gone unmeasured:
+  `scripts/graph_concurrent_convergence.py` now runs real batches through a live writer
+  against a synthetic vault while the queue drains beside it, and fails on any of the
+  three properties rather than reporting timings for a human to interpret. Concurrency is
+  not optional here — a vault-global optimistic proof gets *less* likely to hold as the
+  vault and write rate grow, so a single-writer run would prove nothing about the failure
+  this change addresses.
 - [ ] 6.2 Graph drift stays at zero across a sustained concurrent-write run.
+  Measured by `audit(categories=["graph_drift"])` after the writers stop and the queue
+  quiesces, so drift is audited against the Markdown rather than asserted by construction
+  from the same code path that produced it.
 - [ ] 6.3 Full suite green; latency gate still green.
 - [ ] 6.4 Live acceptance run explicitly; consumer grep repeated for the seams this
   phase touched.
