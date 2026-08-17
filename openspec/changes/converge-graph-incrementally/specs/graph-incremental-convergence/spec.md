@@ -70,6 +70,36 @@ restate it.
 - **WHEN** the live acceptance script validates a response whose graph is converging
 - **THEN** it accepts `pending` as a valid outcome rather than rejecting the response
 
+### Requirement: Graph-backed reads converge without being asked
+
+Because a write no longer waits for its own rebuild, a reader issuing a
+graph-backed request immediately after a write MAY observe the graph
+unavailable. That window is the designed cost of taking the rebuild off the
+write path, and it SHALL be reported honestly — an unavailable graph SHALL carry
+its reason, and the surrounding response SHALL still return the dimensions that
+do not depend on the graph.
+
+The graph SHALL then converge with no further request from the caller. No
+operation SHALL be required to make a committed write's graph land.
+
+The window SHALL be bounded by the repair actually needed. Until repair is
+proportional, that bound is a whole-vault rebuild; once it is, the bound is a
+per-path drain. This requirement is what makes that improvement observable
+rather than assumed.
+
+#### Scenario: A read straight after a write may see the graph still building
+
+- **WHEN** a client issues a graph-backed context request immediately after a
+  write that changed the graph
+- **THEN** the response may report the graph unavailable with a stated reason
+- **AND** the non-graph dimensions of that response are still returned
+
+#### Scenario: The graph converges with no further request
+
+- **WHEN** a write commits and no subsequent operation is invoked
+- **THEN** the graph becomes available on its own
+- **AND** a client that polls a graph-backed read observes it become available
+
 ### Requirement: The changed-path set is enqueued durably, never discarded
 
 When a canonical batch writes a graph sync checkpoint, the checkpoint's changed and

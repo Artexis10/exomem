@@ -386,12 +386,68 @@ async def _call_maintenance(
     return _maintenance_diagnostics(result, operation=name)
 
 
+#: How long the graph may take to converge after a write before the product is
+#: considered broken. A write no longer waits for its own graph rebuild, so the
+#: sidecar genuinely is unavailable for a moment afterwards -- that is designed
+#: behaviour, not a defect. What must still hold is that it converges without
+#: anyone asking it to, so this stays a real gate: generous enough that a
+#: healthy rebuild over the E2E's small vault always fits, short enough that a
+#: graph which never converges fails the run instead of hanging it.
+_GRAPH_CONVERGENCE_SECONDS = 120.0
+_GRAPH_POLL_SECONDS = 0.5
+
+
+async def _await_graph_convergence(
+    client,
+    *,
+    relation_ref: str,
+    timeout: float,
+) -> None:
+    """Poll a relation context until its graph is published, or fail saying so.
+
+    Before the graph came off the write path, the write's own join meant the
+    sidecar was always published by the time the next request arrived. It is not
+    anymore, so a client reading graph-backed context immediately after a write
+    can legitimately observe `available: False` with the rebuild still running.
+    Polling is what a real client does; asserting the old timing would be
+    asserting a guarantee the design deliberately gave up.
+
+    Deliberately still an assertion, not a tolerance: if the graph never
+    converges, this fails. Only the *synchronous* guarantee was given up.
+    """
+    deadline = time.monotonic() + _GRAPH_CONVERGENCE_SECONDS
+    while True:
+        context = await _call(
+            client,
+            "connect_memory",
+            {
+                "operation": "context",
+                "path": relation_ref,
+                "depth": 1,
+                "traversal_profile": "epistemic",
+            },
+            timeout,
+        )
+        graph = context.get("graph")
+        if isinstance(graph, dict) and graph.get("available") is True:
+            return
+        if time.monotonic() >= deadline:
+            reason = graph.get("reason") if isinstance(graph, dict) else "no graph in response"
+            raise RuntimeError(
+                f"graph did not converge within {_GRAPH_CONVERGENCE_SECONDS:.0f}s of "
+                f"the write that changed it ({reason!r}) -- a rebuild that never "
+                f"lands is exactly what this waits for: {context!r}"
+            )
+        await asyncio.sleep(_GRAPH_POLL_SECONDS)
+
+
 async def _assert_relation_contexts(
     client,
     *,
     relation_ref: str,
     timeout: float,
 ) -> None:
+    await _await_graph_convergence(client, relation_ref=relation_ref, timeout=timeout)
     expected = {
         "epistemic": ("science.replicates", "supports"),
         "provenance": ("records.traces_to", "derived_from"),
