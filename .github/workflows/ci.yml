@@ -168,6 +168,32 @@ jobs:
         # work when the corpus grows 4x.
         run: uv run --frozen python scripts/semantic_write_latency.py --check
 
+  graph-convergence:
+    name: graph convergence (concurrent writer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Graph converges under sustained concurrent writes
+        # The property eight PRs of graph work never had a gate for: with a
+        # writer running continuously, repair queued off the write path must
+        # still converge. Asserts the graph reaches `current`, the durable queue
+        # drains, and an audit finds zero drift against the Markdown -- drift
+        # audited rather than asserted by construction from the code that
+        # produced it.
+        #
+        # `--max-blocking` is deliberately omitted for now: a residual
+        # multi-second write under concurrency is known-open, and a gate that is
+        # red on arrival teaches people to ignore it. The count prints every
+        # run. Add `--max-blocking 0` once that residual is fixed.
+        run: >-
+          uv run --frozen python scripts/graph_concurrent_convergence.py .
+          --pages 400 --seconds 45 --drain-interval 0.5 --check
+
   onboarding:
     name: onboarding (wheel path)
     runs-on: ubuntu-latest
@@ -318,6 +344,7 @@ jobs:
       - retrieval-quality
       - retrieval-latency
       - semantic-write-latency
+      - graph-convergence
       - onboarding
       - docker
       - specs
