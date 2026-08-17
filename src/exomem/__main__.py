@@ -1228,30 +1228,41 @@ def _trace_main(argv: list[str]) -> int:
 
 
 def _logs_main(argv: list[str]) -> int:
+    from . import obs_cli
+
+    # One list, so the CLI's `choices` cannot drift from what
+    # `resolve_log_file` accepts.
+    choices = obs_cli.file_aliases()
     parser = argparse.ArgumentParser(
         prog="exomem logs",
-        description="Tail or grep the per-process JSONL log files.",
+        description="Tail, grep, or verify the per-process JSONL log files.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     tail = subcommands.add_parser("tail", help="print the last N lines of a log file")
-    tail.add_argument(
-        "--file", required=True,
-        choices=("server", "cli", "media", "queries", "writes", "reads", "mutations"),
-    )
+    tail.add_argument("--file", required=True, choices=choices)
     tail.add_argument("-n", "--lines", type=int, default=20)
     tail.add_argument("-f", "--follow", action="store_true", help="keep following new lines")
 
     grep = subcommands.add_parser("grep", help="print lines matching a pattern")
-    grep.add_argument(
-        "--file", required=True,
-        choices=("server", "cli", "media", "queries", "writes", "reads", "mutations"),
-    )
+    grep.add_argument("--file", required=True, choices=choices)
     grep.add_argument("pattern", help="regular expression to match")
+
+    subcommands.add_parser(
+        "verify",
+        help="check the call ledger's hash chain for dropped, reordered, or edited rows",
+    )
 
     args = parser.parse_args(argv)
 
-    from . import obs_cli
+    if args.command == "verify":
+        problems = obs_cli.verify_ledger()
+        if not problems:
+            print("call ledger intact: no dropped, reordered, or edited rows.")
+            return 0
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return 1
 
     path = obs_cli.resolve_log_file(args.file)
     if args.command == "tail":

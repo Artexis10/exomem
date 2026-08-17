@@ -86,37 +86,74 @@ class CallTraceMiddleware(Middleware):
         from .command_surface import mcp_request_context, mcp_request_id, pop_tool_failure
 
         tool_name = _extract_tool_name(context.message)
-        if tool_name == "edit_memory":
-            context = _translated_edit_context(context)
         request_id = mcp_request_id()
         with mcp_request_context(request_id) as call_token:
+            guard_started = time.perf_counter()
+            if tool_name == "edit_memory":
+                try:
+                    context = _translated_edit_context(context)
+                except Exception as translation_error:
+                    # `normalize_edit_surface_arguments` rejects a malformed
+                    # operation ahead of both the guard and `call_next`, so
+                    # without a row here an invalid `edit_memory` is a refusal
+                    # that leaves no durable record at all -- precisely the
+                    # "the write silently did not happen" gap the ledger
+                    # exists to close. Record what the client actually sent,
+                    # which is the untranslated message.
+                    _record_ledger_row(
+                        request_id=request_id,
+                        tool=tool_name,
+                        outcome="refused",
+                        duration_ms=round((time.perf_counter() - guard_started) * 1000, 2),
+                        error_code=_leading_error_code(translation_error),
+                        arguments=_extract_tool_args(context.message),
+                    )
+                    raise
             guarded_fields = _GUARDED_WRITE_FIELDS.get(tool_name)
             if guarded_fields:
                 args = _extract_tool_args(context.message)
-                for field in guarded_fields:
-                    guards.guard_text_content(args.get(field), tool=tool_name, field=field)
-                if tool_name == "edit_memory":
-                    operation = args.get("operation") or {}
-                    for field in ("new_body", "new_string"):
-                        guards.guard_text_content(
-                            operation.get(field), tool=tool_name, field=f"operation.{field}"
-                        )
-                    batch_items = operation.get("edits") or []
-                    for item in batch_items:
-                        normalized = multi_edit.normalize_edit_item(item)
-                        guards.guard_text_content(
-                            normalized.get("new_string"),
-                            tool=tool_name,
-                            field="operation.edits[].new_string",
-                        )
-                elif tool_name == "edit":
-                    for item in args.get("edits") or []:
-                        normalized = multi_edit.normalize_edit_item(item)
-                        guards.guard_text_content(
-                            normalized.get("new_string"),
-                            tool=tool_name,
-                            field="edits[].new_string",
-                        )
+                try:
+                    for field in guarded_fields:
+                        guards.guard_text_content(args.get(field), tool=tool_name, field=field)
+                    if tool_name == "edit_memory":
+                        operation = args.get("operation") or {}
+                        for field in ("new_body", "new_string"):
+                            guards.guard_text_content(
+                                operation.get(field), tool=tool_name, field=f"operation.{field}"
+                            )
+                        batch_items = operation.get("edits") or []
+                        for item in batch_items:
+                            normalized = multi_edit.normalize_edit_item(item)
+                            guards.guard_text_content(
+                                normalized.get("new_string"),
+                                tool=tool_name,
+                                field="operation.edits[].new_string",
+                            )
+                    elif tool_name == "edit":
+                        for item in args.get("edits") or []:
+                            normalized = multi_edit.normalize_edit_item(item)
+                            guards.guard_text_content(
+                                normalized.get("new_string"),
+                                tool=tool_name,
+                                field="edits[].new_string",
+                            )
+                except Exception as guard_error:
+                    # This pre-check rejects before `call_next`, so without a row
+                    # here the guarded call is the one kind that leaves *no*
+                    # ledger record at all -- and it is a governance refusal, so
+                    # it is `refused` with the guard's own code rather than an
+                    # `error`. `guard_text_content` encodes that code in its
+                    # message ("CODE: detail"), matching the tool→ValueError
+                    # convention.
+                    _record_ledger_row(
+                        request_id=request_id,
+                        tool=tool_name,
+                        outcome="refused",
+                        duration_ms=round((time.perf_counter() - guard_started) * 1000, 2),
+                        error_code=_leading_error_code(guard_error),
+                        arguments=args,
+                    )
+                    raise
 
             extras = (
                 _find_call_summary(context.message)
@@ -129,6 +166,9 @@ class CallTraceMiddleware(Middleware):
                 f"request_id={request_id}{extras}"
             )
             t0 = time.perf_counter()
+            # Read before `call_next` consumes or translates the message, so the
+            # ledger records the call that was actually made.
+            ledger_args = _extract_tool_args(context.message)
             try:
                 result = await call_next(context)
                 dur = round((time.perf_counter() - t0) * 1000, 2)
@@ -150,6 +190,19 @@ class CallTraceMiddleware(Middleware):
                         f"event={event_prefix}tool_success tool={tool_name} "
                         f"request_id={request_id} duration_ms={dur}{extras}"
                     )
+                # One row, at the one point where both the duration and the
+                # outcome are known. A refusal returns an envelope rather than
+                # raising, so inferring the outcome from control flow alone is
+                # what recorded refusals as successes; the breadcrumb above is
+                # the only thing that can tell them apart.
+                _record_ledger_row(
+                    request_id=request_id,
+                    tool=tool_name,
+                    outcome="refused" if failure is not None else "ok",
+                    duration_ms=dur,
+                    error_code=failure.get("code") if failure is not None else None,
+                    arguments=ledger_args,
+                )
                 return result
             except Exception as exc:
                 pop_tool_failure(call_token)
@@ -159,7 +212,61 @@ class CallTraceMiddleware(Middleware):
                     f"request_id={request_id} duration_ms={dur} "
                     f"err={type(exc).__name__}{extras}"
                 )
+                _record_ledger_row(
+                    request_id=request_id,
+                    tool=tool_name,
+                    outcome="error",
+                    duration_ms=dur,
+                    error_code=type(exc).__name__,
+                    arguments=ledger_args,
+                )
                 raise
+
+
+def _leading_error_code(error: BaseException) -> str:
+    """The `CODE:` prefix a leaf-contract error carries, else the class name.
+
+    Keeping the class name for anything unstructured is deliberate: a genuinely
+    unexpected exception has to stay visible as a bug rather than be laundered
+    into a plausible-looking refusal code.
+    """
+    head, separator, _rest = str(error).partition(":")
+    candidate = head.strip()
+    if separator and candidate and candidate.replace("_", "").isalnum() and candidate.isupper():
+        return candidate
+    return type(error).__name__
+
+
+def _record_ledger_row(
+    *,
+    request_id: str,
+    tool: str,
+    outcome: str,
+    duration_ms: float,
+    error_code: str | None,
+    arguments: dict,
+) -> None:
+    """Append one call-ledger row. Never raises into the call path."""
+    try:
+        from . import call_ledger
+        from .command_surface import mcp_caller_identity, mcp_retry_scope
+
+        identity = mcp_caller_identity()
+        call_ledger.record_call(
+            request_id=request_id,
+            tool=tool,
+            outcome=outcome,
+            duration_ms=duration_ms,
+            error_code=error_code,
+            arguments=arguments,
+            caller_principal_hash=mcp_retry_scope(),
+            client_name=identity.get("client_name"),
+            client_version=identity.get("client_version"),
+            transport=identity.get("transport"),
+            session_id=identity.get("session_id"),
+        )
+    except Exception:  # noqa: BLE001 - the ledger must never break a call
+        pass
 
 
 def _translated_edit_context(context: MiddlewareContext) -> MiddlewareContext:

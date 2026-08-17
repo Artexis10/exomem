@@ -29,11 +29,14 @@ directory independently.
 | `writes.jsonl`           | One record per note/add/replace write.                          |
 | `reads.jsonl`            | One record per `get()` read.                                     |
 | `mutations.jsonl`        | One record per mutation attempt (the mutation journal).          |
+| `ledger.jsonl`           | One record per **MCP tool call** — the call ledger (below).       |
+| `ledger-archive/`        | The call ledger's rotated segments, content-addressed.           |
 | `archive/exomem-*.log`   | Prior sessions' `exomem.log`, archived (not deleted) on restart.  |
 
 Each JSONL file rotates at a size cap (`EXOMEM_JSONL_MAX_MB`, default 64MB),
 keeping exactly one prior generation (`<file>.1`). `usage.py` and `exomem
-trace`/`exomem logs` read both the live file and that generation.
+trace`/`exomem logs` read both the live file and that generation. `ledger.jsonl`
+rotates differently — see below.
 `exomem.log`/`exomem-cli.log`/`exomem-media.log` use Python's standard
 `RotatingFileHandler` (`EXOMEM_LOG_MAX_MB` default 5MB, `EXOMEM_LOG_BACKUPS`
 default 5).
@@ -68,6 +71,95 @@ access log (`event=http_request`), the tool trace
 (`tool_start`/`tool_success`/`tool_failure`), `queries.jsonl`/`writes.jsonl`/
 `reads.jsonl` (additive `request_id` field), and `mutations.jsonl` all carry
 it, so one request id joins every source that touched that request.
+
+## The call ledger (`ledger.jsonl`)
+
+One durable, structured row per **MCP tool call** — read or write, success or
+refusal or error. It is the only source that covers every call: `queries.jsonl`,
+`writes.jsonl`, `reads.jsonl`, and `mutations.jsonl` each cover one family, so a
+tool that is none of those leaves no structured trace anywhere else. And it is
+the only one that records **which client called**.
+
+Read it with `exomem logs --file ledger`, join it with `exomem trace`, and check
+it with `exomem logs verify`.
+
+### What a row carries
+
+`schema_version`, `sequence`, `prev_hash`, `row_hash`, `ts_utc`, `request_id`,
+`session_id`, `client_name`, `client_version`, `transport`,
+`caller_principal_hash`, `tool`, `arg_names`, `args`, `target_paths`, `outcome`,
+`error_code`, `duration_ms`, `truncated`.
+
+- **`outcome`** is `ok`, `refused`, or `error`. `refused` is a governance
+  refusal — the tool wrapper returns an error *envelope* rather than raising, so
+  control flow alone cannot distinguish it from success; the ledger reads the
+  wrapper's per-call breadcrumb to tell them apart. `error` is an uncaught
+  exception. `error_code` is the refusal's `OpError.code`, or the exception
+  class.
+- **`client_name` / `client_version` / `transport` / `session_id`** come from
+  the MCP initialize handshake and are recorded **in the clear**: they identify
+  software, the same class of value as a `User-Agent`. This is what makes one
+  client's calls separable when several are connected to one vault at once. It
+  is client-declared, so treat it as a diagnostic hint, not an authorization
+  input. `caller_principal_hash` is the separate, hashed, authenticated
+  identity.
+- **`args`** is `{name: {len, sha256}}` and **never a value**. Note bodies,
+  query text, and credentials are reduced to a length and a hash by
+  construction, not by a downstream filter — `privacy_log`'s process-wide
+  redactor is gated on `EXOMEM_HOSTED_CELL` and is off for local installs.
+  Identical arguments hash identically on purpose: that is what answers "is this
+  client retrying the same call?".
+- **`target_paths`** records the page a call addresses, verbatim. A path is
+  structure, not content, and it is the first thing a forensic pass needs.
+
+### Integrity
+
+Rows carry a monotonic `sequence` and a `prev_hash`/`row_hash` chain (genesis =
+64 zeros), so a dropped, reordered, or edited row is detectable rather than
+silent. A process restart resumes the chain from the live file's last row —
+`sequence` never resets.
+
+```
+exomem logs verify
+```
+
+Walks the archive and the live file as one chain, **anchored** to the genesis
+row, and exits non-zero listing every break. The anchor is what catches a
+dropped *oldest* segment: without it, nothing precedes the first surviving row
+to contradict it and the chain merely appears to start later than it did.
+
+The append does not fsync — the budget is microseconds and it sits in every
+call's critical section. Rows lost to a hard crash show up as a `sequence` gap,
+which is exactly the visibility that makes the trade safe.
+
+### Rotation
+
+Unlike `queries.jsonl` and its siblings, the ledger keeps a bounded live file:
+past `EXOMEM_CALL_LEDGER_ROTATE_BYTES` (default 8MB) the oldest rows beyond
+`EXOMEM_CALL_LEDGER_KEEP_ROWS` (default 2000) move byte-exact into a
+content-addressed `ledger-archive/ledger-<hash>.jsonl`. `sequence` does not
+reset and the chain spans the boundary. Archive filenames are content-addressed,
+so they say nothing about age — every reader orders segments by the `sequence`
+the rows carry. Archives are not pruned automatically.
+
+### How it differs from the neighbours
+
+- `queries.jsonl` / `writes.jsonl` / `reads.jsonl` / `mutations.jsonl` each
+  record one *family* of call and carry no caller identity; the ledger records
+  every call and names the client.
+- The `exomem.calls` prose lines in `exomem.log` are evictable by volume —
+  including by the traceback storm that accompanies the incident whose calls you
+  need. The ledger is structured, chained, and bounded rather than evicted.
+- `.idempotency-<vault>.sqlite` is a **replay cache**, not a ledger:
+  mutations-only, keyed so a replay overwrites the row, and TTL-pruned.
+
+### Configuration
+
+`EXOMEM_DISABLE_CALL_LEDGER=1` turns it off. `EXOMEM_CALL_LEDGER_DIR` moves it
+off the log directory. `EXOMEM_CALL_LEDGER_ROTATE_BYTES` and
+`EXOMEM_CALL_LEDGER_KEEP_ROWS` size the live file. Every ledger operation
+soft-fails: a failure to build, hash, append, or rotate a row never raises into
+the call path and never changes a call's result.
 
 ## Metrics
 
@@ -104,16 +196,19 @@ exomem trace <request-id>
 exomem trace <request-id> --json
 ```
 
-Joins `exomem.log`, `queries.jsonl`, `writes.jsonl`, `reads.jsonl`, and
-`mutations.jsonl` for one request id into one time-ordered report. Best-effort:
-a missing or unparseable source is skipped, never raised.
+Joins `exomem.log`, `ledger.jsonl`, `queries.jsonl`, `writes.jsonl`,
+`reads.jsonl`, and `mutations.jsonl` for one request id into one time-ordered
+report. Best-effort: a missing or unparseable source is skipped, never raised.
 
 ```
 exomem logs tail --file server -n 50 [-f]
 exomem logs grep --file mutations 'MUTATION_BUSY'
+exomem logs grep --file ledger '"outcome":"refused"'
+exomem logs verify
 ```
 
-`--file` accepts `server | cli | media | queries | writes | reads | mutations`.
+`--file` accepts
+`cli | ledger | media | mutations | queries | reads | server | writes`.
 
 ## Doctor
 
@@ -127,4 +222,6 @@ the snapshot interval).
 See the "Observability" block in `env.example` for the full list
 (`EXOMEM_LOG_DIR`, `EXOMEM_LOG_LEVEL`, `EXOMEM_LOG_MAX_MB`,
 `EXOMEM_LOG_BACKUPS`, `EXOMEM_JSONL_MAX_MB`, `EXOMEM_METRICS_SNAPSHOT_SECONDS`,
-`EXOMEM_DISABLE_ACCESS_LOG`, `EXOMEM_DISABLE_METRICS`).
+`EXOMEM_DISABLE_ACCESS_LOG`, `EXOMEM_DISABLE_METRICS`,
+`EXOMEM_DISABLE_CALL_LEDGER`, `EXOMEM_CALL_LEDGER_DIR`,
+`EXOMEM_CALL_LEDGER_ROTATE_BYTES`, `EXOMEM_CALL_LEDGER_KEEP_ROWS`).
