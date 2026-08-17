@@ -533,3 +533,22 @@ def test_a_drain_retires_the_generation_it_converged(vault: Path) -> None:
         "generation": required.generation,
     }
     assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_queue_predating_the_graph_table_reads_as_empty(vault: Path) -> None:
+    """An existing vault upgrades into this feature; it does not start at it.
+
+    Every deployed vault already has a `.deferred-index.sqlite` carrying the
+    semantic and full queues, and none of them has a `graph_upserts` table until
+    something opens the store for writing. The readers run first -- a drain asks
+    what is queued before it queues anything -- and they open read-only, where
+    creating the table is not possible. Raising there turns an ordinary upgrade
+    into a hard failure on the first drain, which is how CI found it.
+    """
+    deferred_index.add_graph(vault, [PAGE_A])
+    with sqlite3.connect(deferred_index.store_path(vault)) as conn:
+        conn.execute("DROP TABLE graph_upserts")
+
+    assert deferred_index.snapshot_graph(vault) == []
+    assert deferred_index.list_graph_paths(vault) == []
+    assert deferred_index.graph_status(vault)["count"] == 0

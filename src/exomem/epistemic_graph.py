@@ -3083,12 +3083,13 @@ class EpistemicGraphIndex:
           point at it were never written down. Only the bodies know, so this
           scans them.
 
-        The scan is what a persisted unresolved edge -- basic-memory's nullable
-        `to_id` beside a NOT NULL `to_name` -- would turn into an index lookup.
-        That is a real improvement and a real schema change, including to what
-        reads render for an unresolved target, so it is a measured Phase 3
-        candidate rather than something smuggled in here. It only runs when a
-        drain actually changes topology, which ordinary edits do not.
+        Persisting the unresolved edge instead -- storing the link's target
+        *name* even when no target id exists yet -- would turn this scan into an
+        index lookup. That is a real improvement and a real schema change,
+        including to what a read renders for a target that does not exist, so it
+        is a measured Phase 3 candidate rather than something smuggled in here.
+        The scan only runs when a drain actually changes topology, which
+        ordinary edits do not.
         """
         appeared: set[str] = set()
         vanished: set[str] = set()

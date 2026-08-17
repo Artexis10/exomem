@@ -663,6 +663,13 @@ def _snapshot_plain(
     conn = _connect(vault_root, create=False)
     try:
         columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not columns:
+            # No such table: a store that predates this queue. Readers run
+            # before writers on an upgraded vault -- a drain asks what is
+            # queued before it queues anything -- and they open read-only,
+            # where the table cannot be created. Nothing is queued in a queue
+            # that does not exist yet; the next writable open migrates it.
+            return []
         revision = "revision" if "revision" in columns else "1 AS revision"
         sql = (
             f"SELECT rel_path, {revision} FROM {table} "
@@ -814,6 +821,8 @@ def _list_paths(
         return []
     conn = _connect(vault_root, create=False)
     try:
+        if not any(conn.execute(f"PRAGMA table_info({table})")):
+            return []  # Predates this queue; see `_snapshot_plain`.
         sql = f"SELECT rel_path FROM {table} ORDER BY rel_path"
         params: tuple[Any, ...] = ()
         if limit is not None:

@@ -3384,6 +3384,7 @@ def _batch_atomic_write_locked(
     writes = list(caller_writes)
     graph_checkpoint_path: Path | None = None
     graph_floor_path: Path | None = None
+    graph_debt_checkpoint: PlannedWrite | None = None
     deferred_checkpoint: GraphSyncCheckpoint | None = None
     deferred_predecessor: GraphSyncCheckpoint | None = None
     if vault_root is not None:
@@ -3410,7 +3411,7 @@ def _batch_atomic_write_locked(
             graph_floor_path = floor_write.path
             if not defer_graph_completion:
                 graph_checkpoint_path = checkpoint_write.path
-            _enqueue_graph_debt(Path(vault_root), checkpoint_write)
+            graph_debt_checkpoint = checkpoint_write
         elif defer_graph_completion:
             raise ValueError("defer_graph_completion requires graph-relevant writes")
     destinations: set[str] = set()
@@ -3500,6 +3501,24 @@ def _batch_atomic_write_locked(
         if write.create_only and os.path.lexists(write.path):
             _remove_empty_created_dirs(created_dirs)
             raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
+
+    # Record the graph debt here: after the guards have taken custody of the
+    # namespace and created whatever parents they recorded as missing, and
+    # still strictly before any canonical byte is replaced.
+    #
+    # Earlier is wrong even though the debt is known earlier. Opening the queue
+    # database creates `Knowledge Base/` when it does not exist, and a batch
+    # that is creating that directory has already captured it as a *missing*
+    # parent it will create itself, in order. Creating it first fails the
+    # guard's own recheck with `missing guard ancestor appeared`, surfaced to
+    # the caller as `STALE_SEMANTIC_WRITE` -- a write invalidated by its own
+    # bookkeeping, on every first write into a new directory.
+    #
+    # Later is also wrong: after the replace, a crash cut between the markdown
+    # and the enqueue loses the dirty set, which is the whole property the
+    # pre-commit ordering buys.
+    if graph_debt_checkpoint is not None:
+        _enqueue_graph_debt(Path(vault_root), graph_debt_checkpoint)
 
     workspace_by_parent: dict[Path, _BatchWorkspace] = {}
     staged: list[tuple[Path, _BatchWorkspace, _WorkspaceArtifact]] = []

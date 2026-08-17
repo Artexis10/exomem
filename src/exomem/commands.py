@@ -4881,7 +4881,7 @@ def op_process_media(
     def _drain_index_refresh(paths: list[Path] | list[str] | None = None) -> tuple[int, int]:
         current = index_sync.deferred_work_status(vault_root)["full_upserts"]
         selected = current["paths"] if paths is None else paths
-        refreshed = index_sync.drain_deferred_work(
+        index_sync.drain_deferred_work(
             vault_root,
             limit=media_jobs.STATUS_JOB_LIMIT,
             paths=selected,
@@ -4889,6 +4889,13 @@ def op_process_media(
         remaining = index_sync.deferred_work_status(vault_root)["full_upserts"][
             "count"
         ]
+        # Measure the queue the neighbouring field measures. The drain's return
+        # counts what it processed across *every* queue it serves, and the
+        # graph dirty-path queue joined them (converge-graph-incrementally), so
+        # using it here would report a refreshed count and a remaining count
+        # drawn from different queues -- a pair that stops adding up for a
+        # reason no reader of this response can see.
+        refreshed = max(0, int(current["count"]) - remaining)
         return refreshed, remaining
 
     if operation == "status":
