@@ -214,6 +214,17 @@ time. Reachable today on every path that already rebuilds off the write path.
   still queued against it — and reports `GRAPH_SYNC_REPAIR_QUEUED` rather than reusing
   `GRAPH_SYNC_REBUILD_IN_PROGRESS`, since nothing is rebuilding and an operator would go
   looking for a flight that does not exist. A failed enqueue still earns the rebuild.
+  **Only a caller that can report `pending` may defer.** The first attempt deferred for
+  every caller and broke ten governance and deletion-lineage tests — green on
+  `origin/main`, red on the branch, so not box noise. A direct library caller returns a
+  leaf result with nowhere to put a graph outcome, and its contract has always been a
+  converged graph; that is why `_join_registered_standalone` exists. Deferring for it does
+  not merely under-report, it changes what the next call in the same process observes:
+  the operation after a delete read a graph that used to be current by the time it ran.
+  The queued short-circuit now takes the same predicate as that join — a caller inside a
+  mutation request or direct-mutation guard — so the caller that joins is precisely the
+  caller that must not defer. Both halves are pinned by tests, the standalone half
+  explicitly as the regression guard.
 
 ## 6. Phase 2 verification
 

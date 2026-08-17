@@ -1058,6 +1058,7 @@ def test_a_queued_repair_is_not_rescheduled_as_a_whole_vault_rebuild(
     rebuild and reports `deferred` too. Only the enqueue that actually succeeded
     may claim the queue owns the work.
     """
+    from exomem import writer_lease
     from exomem.epistemic_graph import EpistemicGraphIndex, upsert_after_write
 
     note = tmp_path / "Knowledge Base/Notes/Insights/queued.md"
@@ -1087,11 +1088,62 @@ def test_a_queued_repair_is_not_rescheduled_as_a_whole_vault_rebuild(
             "queued": 1,
         },
     )
+    # Inside a mutation request, whose terminal can carry `pending`.
+    monkeypatch.setattr(writer_lease, "active_mutation_request_id", lambda: "request-1")
 
     result = upsert_after_write(tmp_path, [note])
 
     assert (result.outcome, result.code) == ("deferred", "graph_repair_queued")
     assert registrations == []
+
+
+def test_a_standalone_caller_still_gets_a_converged_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deferring is only honest for a caller that can report `pending`.
+
+    A direct library caller returns a leaf result with nowhere to put a graph
+    outcome, and its contract has always been a converged graph -- which is why
+    the standalone join exists. Deferring for it does not merely under-report:
+    it changes what the next call in the same process observes. Ten governance
+    and deletion-lineage tests failed on exactly that, because the operation
+    after a delete read a graph that used to be current by the time it ran.
+    """
+    from exomem.epistemic_graph import EpistemicGraphIndex, upsert_after_write
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/standalone.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Standalone\n", encoding="utf-8")
+    required = _checkpoint(1)
+    graph_sync._write_checkpoint(tmp_path, required)
+    registrations: list[graph_sync.GraphSyncCheckpoint] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "register_rebuild",
+        lambda _root, checkpoint, _builder, **_kwargs: registrations.append(checkpoint),
+    )
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_graph_sync_predecessor_available",
+        lambda _self, _checkpoint: True,
+    )
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "refresh_paths",
+        lambda _self, *_args, **_kwargs: {
+            "indexed_files": 0,
+            "nodes": 0,
+            "edges": 0,
+            "deferred": 1,
+            "queued": 1,
+        },
+    )
+
+    # No active mutation request: this is the standalone library path.
+    result = upsert_after_write(tmp_path, [note])
+
+    assert result.code != "graph_repair_queued"
+    assert registrations == [required]
 
 
 def test_no_checkpoint_or_paths_skips_graph_fanout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

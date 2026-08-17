@@ -291,6 +291,20 @@ the single failure the pending outcome exists to prevent.
 - **THEN** the terminal reports the graph as pending with a queued-repair code
 - **AND** the response is distinguishable from a write whose graph is current
 
+Only a caller that can report the pending outcome SHALL defer. A caller inside a mutation
+request has a terminal that carries the graph outcome; a direct library caller returns a
+leaf result with nowhere to put one, and its contract is a converged graph. Deferring for
+such a caller does not merely under-report — it changes what the next call in the same
+process observes, because the graph that used to be current by the time that call ran no
+longer is. The predicate SHALL be the same one that decides whether a caller joins a
+registered rebuild: the caller that joins is precisely the caller that must not defer.
+
+#### Scenario: A standalone caller still gets a converged graph
+
+- **WHEN** a direct library caller's incremental pass enqueues its affected paths
+- **THEN** the dispatch does not report the repair as queued
+- **AND** a rebuild is registered so the caller's contract of a converged graph holds
+
 #### Scenario: A failed enqueue still earns a rebuild
 
 - **WHEN** the queue write fails and the pass falls back to a whole-vault rebuild

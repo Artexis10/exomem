@@ -4493,6 +4493,34 @@ def _registered_or_failure(
     return GraphDispatchResult("registered", "graph_rebuild_registered", checkpoint)
 
 
+def _caller_can_carry_pending(
+    vault_root: Path,
+    mutation_coordinator: mutation_lock.VaultMutationCoordinator,
+) -> bool:
+    """Whether this caller has a response envelope that can report `pending`.
+
+    Deferring repair to the queue is only honest for a caller that can *say* the
+    graph has not converged. A mutation request can: its terminal carries the
+    `graph_sync` field. A direct library caller cannot -- it returns a leaf
+    result with nowhere to put the outcome, and its contract has always been a
+    converged graph, which is why `_join_registered_standalone` joins the
+    rebuild to completion for exactly this case.
+
+    Deferring for a standalone caller does not merely under-report; it changes
+    what the next call in the same process observes. Ten governance and
+    deletion-lineage tests failed on that, because the operation after a delete
+    read a graph that used to be current by the time it ran.
+
+    Same predicate as `_join_registered_standalone`, deliberately: the caller
+    that joins is precisely the caller that must not defer.
+    """
+    from .writer_lease import active_direct_mutation_guard, active_mutation_request_id
+
+    return active_mutation_request_id() is not None or active_direct_mutation_guard(
+        vault_root, state_root=mutation_coordinator.state_root
+    )
+
+
 def _join_registered_standalone(
     vault_root: Path,
     result: GraphDispatchResult,
@@ -4642,7 +4670,9 @@ def upsert_after_write(
                 else index.refresh_paths(written_paths, graph_checkpoint=required)
             )
             if report.get("deferred"):
-                if report.get("queued"):
+                if report.get("queued") and _caller_can_carry_pending(
+                    vault_root, mutation_coordinator
+                ):
                     # The durable queue holds the affected paths and a drain
                     # will converge them. Registering a whole-vault rebuild here
                     # would run the expensive path on exactly the bail-outs this
