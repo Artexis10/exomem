@@ -126,8 +126,16 @@ REQUIREMENT="exomem"
 [[ -n "$PACKAGE_VERSION" ]] && REQUIREMENT="$REQUIREMENT==$PACKAGE_VERSION"
 
 command -v uv >/dev/null 2>&1 || die "uv not found on PATH"
+
+# Resolve and SHOW the target before installing, so "installed:/repo:/target:"
+# makes a no-op visible at a glance instead of only in hindsight.
+TARGET="$(exomem_resolve_target_version "$VENV_PYTHON" "$REQUIREMENT" "$BEFORE" || echo "")"
+# A pin stays assertable even when the resolve could not run at all.
+[[ -z "$TARGET" && -n "$PACKAGE_VERSION" ]] && TARGET="$PACKAGE_VERSION"
+echo "  target:    ${TARGET:-unresolved}"
+
 echo "Installing $REQUIREMENT into the service venv..."
-uv pip install --upgrade --python "$VENV_PYTHON" "$REQUIREMENT"
+uv pip install --upgrade --refresh-package exomem --python "$VENV_PYTHON" "$REQUIREMENT"
 
 # No CUDA repair here, unlike the Windows path: PyPI's Linux torch wheels are
 # already CUDA-enabled, and macOS uses Metal/MPS. The Windows-only repair exists
@@ -135,6 +143,10 @@ uv pip install --upgrade --python "$VENV_PYTHON" "$REQUIREMENT"
 
 AFTER="$(exomem_installed_version "$VENV_PYTHON" || echo "")"
 echo "Installed version: ${BEFORE:-unknown} -> ${AFTER:-unknown}"
+# That line is the receipt, not the check. Reading it as the check is what let a
+# silent no-op deploy through on the Windows path (#578).
+exomem_assert_install_applied "$REQUIREMENT" "$BEFORE" "$AFTER" "$TARGET" \
+    || die "the service was NOT restarted."
 
 # --- Preflight against the venv the service actually runs -------------------------
 DOCTOR_ARGS=(-m exomem doctor --profile "$PROFILE")

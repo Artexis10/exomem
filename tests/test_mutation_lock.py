@@ -1106,3 +1106,27 @@ def test_sequential_holds_on_one_thread_reacquire_the_os_boundary(
         mutation_lock_module._release_os_lock(probe)
     finally:
         probe.close()
+
+
+def test_the_private_state_root_is_creatable_under_a_missing_ancestor(
+    tmp_path: Path,
+) -> None:
+    """A fresh profile has no `~/.cache`, and the store must still come up.
+
+    `LeaseConfig.state_dir` defaults to `~/.cache/exomem`, so on a profile that
+    has never had an XDG-style cache directory the store's parent chain is two
+    levels deep and neither level exists. The POSIX branch creates the chain
+    (`mkdir(parents=True)`); the Windows branch creates exactly one directory so
+    it can own that entry's DACL, and used to inherit `FileNotFoundError` from
+    the missing ancestor -- which surfaced as the whole server failing to start
+    with `WinError 3`. Nothing in CI runs on Windows, so this is the guard.
+    """
+    from exomem.writer_lease import IdempotencyStore
+
+    root = tmp_path / "home" / ".cache" / "exomem"
+    assert not root.parent.exists()
+
+    store = IdempotencyStore(root / "idempotency.sqlite")
+
+    assert root.is_dir()
+    assert store._runtime_state_error is None

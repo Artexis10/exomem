@@ -327,10 +327,16 @@ pwsh -File scripts/upgrade.ps1
 # Explicit policy: -CliSync auto|always|never (default: auto)
 ```
 
+Requires PowerShell 7+; Windows PowerShell 5.1 is refused up front rather than
+allowed to fail obscurely partway.
+
 The service runs a PyPI-backed venv that is **not** the repo checkout, so `git pull`
-never touches it. `upgrade.ps1` locates that venv from the NSSM registry, upgrades
-it, repairs the CUDA torch build, gates on `doctor`, restarts, and then asserts the
-**live** `/health` version matches what it just installed. It then records a
+never touches it. `upgrade.ps1` locates that venv from the NSSM registry, prints the
+`target:` version it resolved before touching anything, upgrades it, **fails if the
+venv did not actually end up on that target** (a `uv` that exits 0 having applied
+nothing is the failure this catches — #578), repairs the CUDA torch build, gates on
+`doctor`, restarts, and then asserts the **live** `/health` version matches what it
+just installed. It then records a
 non-secret managed-install manifest and, in the default `auto` mode, aligns an
 existing uv-managed `exomem`/`kb` command to that exact verified release. `auto`
 never installs a command that was absent; `always` may install it; `never` leaves

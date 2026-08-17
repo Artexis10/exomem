@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-from . import accel, embedding_backend, index_paths, recall_policy, vecstore
+from . import accel, embedding_backend, index_paths, model_cache, recall_policy, vecstore
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM, EmbeddingIndex
 from .vector_index_common import vec_gate as _vec_gate
@@ -245,7 +245,10 @@ def get_reranker():
 
         device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
         log.info("loading reranker %s on %s", RERANKER_NAME, device)
-        _RERANKER = CrossEncoder(RERANKER_NAME, device=device)
+        _RERANKER = model_cache.load_offline_first(
+            RERANKER_NAME,
+            lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
+        )
     RERANKER_GUARD.touch()
     return _RERANKER
 
@@ -301,7 +304,13 @@ def get_clip_model():
 
         device = _clip_device()
         log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
-        _CLIP_MODEL = _maybe_half(SentenceTransformer(CLIP_MODEL_NAME, device=device), device)
+        _CLIP_MODEL = _maybe_half(
+            model_cache.load_offline_first(
+                CLIP_MODEL_NAME,
+                lambda **kw: SentenceTransformer(CLIP_MODEL_NAME, device=device, **kw),
+            ),
+            device,
+        )
     CLIP_GUARD.touch()
     return _CLIP_MODEL
 
@@ -1061,15 +1070,13 @@ def upsert_after_write_status(
 ) -> EmbeddingSyncStatus:
     """Re-embed eligible files and return an observable bounded outcome."""
     global _IMPORT_FAILED
-    root = vault_root.resolve()
     md_paths: list[Path] = []
     rejected_paths: list[str] = []
     for path in written_paths:
         if not index_paths.is_embeddable_path(path):
             continue
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
+        rel = index_paths.rel_to_vault(vault_root, path)
+        if rel is None:
             continue
         # Admission is intentionally before defer/model/page-cache/content work.
         # A raw Record stays structured-only even when the vector backend is off.
@@ -1106,12 +1113,10 @@ def upsert_after_write_status(
 
         if readiness.should_defer("embeddings"):
             rels: list[str] = []
-            root = vault_root.resolve()
             for path in md_paths:
-                try:
-                    rels.append(path.resolve().relative_to(root).as_posix())
-                except (OSError, ValueError):
-                    continue
+                rel = index_paths.rel_to_vault(vault_root, path)
+                if rel is not None:
+                    rels.append(rel)
             try:
                 race_receipts = deferred_index.add_receipts(vault_root, rels)
             except (OSError, sqlite3.Error):

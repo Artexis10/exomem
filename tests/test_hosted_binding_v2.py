@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import __version__, hosted_runtime
+from exomem import __version__, hosted_runtime, init
 from exomem.hosted_runtime import (
     HOSTED_PROTOCOL_VERSION,
     HostedBindingV2,
@@ -448,3 +449,98 @@ def test_descriptor_migration_rejects_replacement_race_without_following_symlink
 
     assert error.value.code == "HOSTED_ROOT_UNSAFE_ENTRY"
     assert outside.read_text(encoding="utf-8") == "must remain untouched"
+
+
+def test_fresh_provisioning_converges_the_scaffold_it_wrote_as_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh cell must own every page it was given, not just its vault root.
+
+    Provisioning chowns the staging directory while it is still empty, and
+    `init_vault` then writes the whole Knowledge Base as whoever runs
+    provisioning. In production that is root, so the scaffold landed root-owned
+    at mode 755 inside a root the runtime did own. The cell runs as
+    `runtime_uid`: 755 grants it read and traverse but not write, so reads and
+    `bootstrap` answered normally while every single write failed, and the
+    tenant reported itself healthy having never stored anything.
+
+    Ownership itself is not observable here, because the test's `runtime_uid`
+    is the test user and a chown to yourself is a no-op. Convergence is
+    observable through the modes it normalizes: directories to owner-only
+    `rwx` and files to owner-only `rw`. Any group or other bit left anywhere
+    under the vault means the tree was published exactly as `init_vault`
+    wrote it.
+    """
+    monkeypatch.setattr(hosted_runtime.os, "geteuid", lambda: 0)
+    binding = _binding(tmp_path)
+
+    result = initialize_hosted_cell_v2(
+        binding,
+        expected_release=__version__,
+        expected_protocol=HOSTED_PROTOCOL_VERSION,
+        active_credential_version="credential-v1",
+        bootstrap_security=_bootstrap,
+    )
+    assert result.status in {"provisioned", "existing", "migrated"}
+    validate_hosted_binding_v2(binding, require_scaffold=True)
+
+    knowledge_base = binding.vault_root / "Knowledge Base"
+    assert knowledge_base.is_dir(), "the scaffold must exist to be worth converging"
+
+    shared = {}
+    for path in [binding.vault_root, *binding.vault_root.rglob("*")]:
+        mode = stat.S_IMODE(path.lstat().st_mode)
+        if mode & 0o077:
+            shared[str(path.relative_to(binding.vault_root))] = oct(mode)
+    assert shared == {}, f"vault entries still readable or worse beyond the owner: {shared}"
+
+    # The three directories every hosted write actually targets. Each one was
+    # `drwxr-xr-x root root` on the live alpha tenant.
+    for relative in ("Sources", "Evidence", "Notes/Insights"):
+        target = knowledge_base / relative
+        assert target.is_dir(), f"{relative} missing from the scaffold"
+        assert stat.S_IMODE(target.lstat().st_mode) == 0o700, f"{relative} is not owner-only"
+
+
+def test_resumed_staging_is_converged_before_it_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash between `init_vault` and publish must not ship an unowned tree.
+
+    The staging branch that finds an existing directory accepts it as complete
+    on the strength of its marker and scaffold, and never wrote the scaffold
+    itself. If convergence lived only on the branch that creates the stage,
+    this retry would publish exactly the tree that broke the alpha tenant.
+    """
+    monkeypatch.setattr(hosted_runtime.os, "geteuid", lambda: 0)
+    binding = _binding(tmp_path)
+
+    # Build the staging root the way a first attempt does, then stop, standing
+    # in for a process that died before it could publish.
+    stage = binding.vault_root.parent / (
+        f".{binding.vault_root.name}.hosted-v2-stage-"
+        f"{hashlib.sha256(binding.cell_id.encode()).hexdigest()[:12]}"
+    )
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    stage.mkdir(mode=0o700)
+    hosted_runtime._write_v2_marker(stage, "vault", binding)
+    init.init_vault(stage)
+    assert any(
+        stat.S_IMODE(path.lstat().st_mode) & 0o077 for path in stage.rglob("*")
+    ), "the staged scaffold should start group/other-readable, or this proves nothing"
+
+    initialize_hosted_cell_v2(
+        binding,
+        expected_release=__version__,
+        expected_protocol=HOSTED_PROTOCOL_VERSION,
+        active_credential_version="credential-v1",
+        bootstrap_security=_bootstrap,
+    )
+
+    validate_hosted_binding_v2(binding, require_scaffold=True)
+    leaked = {
+        str(path.relative_to(binding.vault_root)): oct(stat.S_IMODE(path.lstat().st_mode))
+        for path in binding.vault_root.rglob("*")
+        if stat.S_IMODE(path.lstat().st_mode) & 0o077
+    }
+    assert leaked == {}, f"resumed staging published unconverged entries: {leaked}"

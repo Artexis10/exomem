@@ -156,6 +156,69 @@ function Get-ExomemServiceEndpoint {
     return $result
 }
 
+function Assert-ExomemPowerShell7 {
+    <#
+    .SYNOPSIS
+      Refuse to run under Windows PowerShell 5.1, which cannot execute these scripts.
+    .DESCRIPTION
+      Not a style preference: the deploy path calls
+      `Invoke-WebRequest -SkipHttpErrorCheck`, which is PowerShell 7.0+ only. Under
+      5.1 the run used to die partway with a NativeCommandError on an ordinary `uv`
+      banner -- a message that named neither the shell nor the real requirement.
+    #>
+    param([string]$ScriptName)
+
+    if ($PSVersionTable.PSVersion.Major -ge 7) { return }
+    throw "$ScriptName requires PowerShell 7+ (pwsh); this is Windows PowerShell $($PSVersionTable.PSVersion). Re-run with: pwsh -File scripts/$ScriptName"
+}
+
+function Invoke-ExomemNative {
+    <#
+    .SYNOPSIS
+      Run a native command, return its exit code and captured output, and never let
+      its stderr masquerade as a failure.
+    .DESCRIPTION
+      `uv` writes its ENTIRE plan to stderr by design -- the "Using Python 3.13.11
+      environment at: ..." banner, "Resolved N packages", and the "+ exomem==X"
+      lines all arrive there and nothing arrives on stdout. So the streams have to
+      be merged with 2>&1 for the output to be logged at all.
+
+      The hazard is what that merge does under `$ErrorActionPreference = "Stop"`,
+      which every calling script sets: Windows PowerShell 5.1 raises a terminating
+      NativeCommandError on the FIRST merged stderr record, even when the command
+      exits 0. That turned an informational banner into an aborted deploy (#578).
+
+      Both preference assignments below are function-scoped -- PowerShell shadows
+      the caller's value for this frame only and restores it on return -- so the
+      calling script keeps "Stop" semantics everywhere else. $ErrorActionPreference
+      keeps a stderr line from being fatal; $PSNativeCommandUseErrorActionPreference
+      (7.3+; a harmless unused variable on 5.1) keeps a NONZERO EXIT from throwing
+      before the code can be returned, which is what leaves "uv failed" reportable
+      as something other than "uv did nothing".
+    #>
+    param(
+        [string[]]$CommandArgs,
+        [switch]$Quiet
+    )
+
+    $ErrorActionPreference = "Continue"
+    $PSNativeCommandUseErrorActionPreference = $false
+
+    # Without this, a missing executable leaves $LASTEXITCODE at whatever the
+    # previous command set -- readable as success.
+    if (-not (Get-Command $CommandArgs[0] -ErrorAction SilentlyContinue)) {
+        throw "Required command '$($CommandArgs[0])' was not found on PATH."
+    }
+
+    $merged = & $CommandArgs[0] @($CommandArgs[1..($CommandArgs.Count - 1)]) 2>&1
+    $code = $LASTEXITCODE
+    $lines = @(foreach ($item in $merged) {
+        if ($item -is [System.Management.Automation.ErrorRecord]) { $item.ToString() } else { [string]$item }
+    })
+    if (-not $Quiet) { foreach ($line in $lines) { Write-Host $line } }
+    return @{ ExitCode = $code; Lines = $lines }
+}
+
 function Invoke-LoggedNative {
     <#
     .SYNOPSIS
@@ -163,9 +226,7 @@ function Invoke-LoggedNative {
     #>
     param([string[]]$CommandArgs)
 
-    $out = & $CommandArgs[0] @($CommandArgs[1..($CommandArgs.Count - 1)]) 2>&1
-    foreach ($line in $out) { Write-Host $line }
-    return $LASTEXITCODE
+    return (Invoke-ExomemNative -CommandArgs $CommandArgs).ExitCode
 }
 
 function Get-ExomemPackageSpec {
@@ -188,10 +249,98 @@ function Get-ExomemPackageSpec {
     return "exomem$extras$pin"
 }
 
+function Get-ExomemInstallPlanVersion {
+    <#
+    .SYNOPSIS
+      Pull the exomem version out of a `uv pip install` plan, or $null.
+    .DESCRIPTION
+      uv prints its plan as " + exomem==0.52.3" / " - exomem==0.52.2" (extras are
+      normalised away, so the name is bare). It prints NO "+ exomem" line when it
+      would install nothing -- "Would make no changes" / "Audited N packages" --
+      which the caller reads as "the resolved target is what is already there".
+    #>
+    param([string[]]$Lines)
+
+    foreach ($line in $Lines) {
+        if ($line -match '^\s*\+\s*exomem==(\S+)\s*$') { return $Matches[1] }
+    }
+    return $null
+}
+
+function Resolve-ExomemTargetVersion {
+    <#
+    .SYNOPSIS
+      Return the concrete version an install of $PackageSpec would land, or $null.
+    .DESCRIPTION
+      `--dry-run` resolves without writing, so the operator can be told which
+      version the run is about to land BEFORE it lands, and the post-install
+      assertion has something concrete to compare against even when no
+      -PackageVersion was pinned.
+
+      `--refresh-package exomem` is load-bearing, not belt-and-braces: uv serves the
+      package index out of its HTTP cache, so an unpinned `--upgrade` can resolve to
+      a release that is no longer the latest and exit 0 having done nothing. A
+      deploy script must not inherit that, and a target read through a stale cache
+      would agree with the stale install and vouch for it.
+    #>
+    param(
+        [string]$Python,
+        [string]$PackageSpec,
+        [string]$Installed = ""
+    )
+
+    $result = Invoke-ExomemNative -Quiet -CommandArgs @(
+        "uv", "pip", "install", "--dry-run", "--upgrade",
+        "--refresh-package", "exomem", "--python", $Python, $PackageSpec
+    )
+    if ($result.ExitCode -ne 0) {
+        Write-Warning "Could not resolve the target version for $PackageSpec (uv --dry-run exited $($result.ExitCode)):"
+        foreach ($line in $result.Lines) { Write-Host "  uv: $line" }
+        return $null
+    }
+    $planned = Get-ExomemInstallPlanVersion -Lines $result.Lines
+    if ($planned) { return $planned }
+    # uv planned no change to exomem, so the resolved target is the installed one.
+    if ($Installed) { return $Installed }
+    return $null
+}
+
+function Assert-ExomemInstallApplied {
+    <#
+    .SYNOPSIS
+      Fail when an install reported success without changing what is installed.
+    .DESCRIPTION
+      #578: `uv` exited 0 having installed nothing, the script printed
+      "Installed version: 0.52.2 -> 0.52.2" as a REPORT, and the deploy continued.
+      The service restarted cleanly on the old build and every later observation
+      was attributed to a release that was never deployed. before/after were
+      already known; this turns the report into a gate.
+    #>
+    param(
+        [string]$PackageSpec,
+        [string]$Before = "",
+        [string]$After = "",
+        [string]$Target = ""
+    )
+
+    $was = if ($Before) { $Before } else { "not installed" }
+    if (-not $After) {
+        throw "Install of '$PackageSpec' reported success but no exomem version is importable from that interpreter (was: $was). Nothing was deployed."
+    }
+    if (-not $Target) {
+        Write-Warning "Target version unresolved, so this run can only assert that SOMETHING is installed ($After). Re-run with -PackageVersion <version> for a checked upgrade."
+        return
+    }
+    if ($After -ne $Target) {
+        throw "Install did not take: '$PackageSpec' resolved to $Target, but the interpreter still reports $After (was: $was). uv exited 0 without applying the change; re-run with -PackageVersion $Target, and check that uv is not resolving from a stale index cache."
+    }
+}
+
 function Install-ExomemPackage {
     <#
     .SYNOPSIS
-      Install/upgrade exomem into an existing interpreter. Throws on failure.
+      Install/upgrade exomem into an existing interpreter. Throws on failure, and
+      on a "success" that left the interpreter on the version it started on.
     #>
     param(
         [string]$Python,
@@ -200,9 +349,18 @@ function Install-ExomemPackage {
     )
 
     $pkg = Get-ExomemPackageSpec -Profile $Profile -PackageVersion $PackageVersion
+    $before = Get-ExomemInstalledVersion -PythonPath $Python
+    $target = Resolve-ExomemTargetVersion -Python $Python -PackageSpec $pkg -Installed $before
+    # A pin stays assertable even when the resolve could not run at all.
+    if (-not $target -and $PackageVersion) { $target = $PackageVersion }
+    Write-Host "  target:    $(if ($target) { $target } else { 'unresolved' })"
+
     Write-Host "Installing $pkg into $Python..."
-    $code = Invoke-LoggedNative @("uv", "pip", "install", "--upgrade", "--python", $Python, $pkg)
-    if ($code -ne 0) { throw "uv pip install failed for $pkg" }
+    $code = Invoke-LoggedNative @("uv", "pip", "install", "--upgrade", "--refresh-package", "exomem", "--python", $Python, $pkg)
+    if ($code -ne 0) { throw "uv pip install failed for $pkg (uv exit $code)" }
+
+    $after = Get-ExomemInstalledVersion -PythonPath $Python
+    Assert-ExomemInstallApplied -PackageSpec $pkg -Before $before -After $after -Target $target
 }
 
 function Repair-TorchCuda {
@@ -436,4 +594,140 @@ function Assert-ExomemVisibleCliVersions {
         }
         Write-Host "Verified $executable -> exomem $($identity.version)"
     }
+}
+
+function Get-ExomemServiceWorkerPid {
+    <#
+    .SYNOPSIS
+      Return the pid of the interpreter the service actually runs, or 0.
+    .DESCRIPTION
+      NSSM is the service process; the Python worker is its child, and the child
+      is what holds loaded code. Returns 0 rather than throwing whenever the
+      service is stopped, the platform is not Windows, or CIM is unavailable, so
+      callers can treat 0 as "no baseline" instead of handling an exception.
+    #>
+    param([string]$ServiceName = "exomem")
+
+    if ($env:OS -ne "Windows_NT") { return 0 }
+    try {
+        $service = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
+    } catch {
+        return 0
+    }
+    if (-not $service -or -not $service.ProcessId) { return 0 }
+    try {
+        $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($service.ProcessId)" -ErrorAction Stop |
+            Select-Object -First 1
+    } catch {
+        return 0
+    }
+    if (-not $child) { return 0 }
+    return [int]$child.ProcessId
+}
+
+function Assert-ExomemServiceRestarted {
+    <#
+    .SYNOPSIS
+      Fail when a deploy reports success without the worker process changing.
+    .DESCRIPTION
+      `/health` reports `importlib.metadata.version("exomem")`, read from disk at
+      request time with no relation to the code the running interpreter loaded.
+      So when `uv pip install` swapped the wheel under a live process, /health
+      served the new version while the interpreter still ran the old one -- and
+      worse, a mixed-version process, because modules imported lazily after the
+      swap came from the new wheel.
+
+      That makes every version-vs-version gate blind by construction: both
+      `install-info --json` and `/health` read the same distribution metadata, so
+      comparing them compares disk with disk. The worker's process identity is
+      the only observable that separates "restarted onto the new code" from
+      "still running the old code".
+
+      A pid of 0 means "not observed". An unknown baseline degrades to a warning,
+      because refusing a deploy for lack of a baseline would strand any box where
+      the probe is unavailable; a *known* baseline that did not change is fatal.
+    #>
+    param(
+        [int]$Before = 0,
+        [int]$After = 0,
+        [string]$ServiceName = "exomem"
+    )
+
+    if (-not $After) {
+        throw "Service '$ServiceName' has no running worker process after the restart. Nothing is serving the deployed version; check logs\service.err.log."
+    }
+    if (-not $Before) {
+        Write-Warning "No pre-restart worker pid was observed, so this run can only assert that a worker is running now (pid $After), not that it restarted onto the new code."
+        return
+    }
+    if ($After -eq $Before) {
+        throw "Service '$ServiceName' is still running the same worker process (pid $After) that was live before the upgrade. The wheel on disk changed but the interpreter did not reload it, so /health now reports the new version from disk metadata while the process serves the old code. Restart the service and re-verify."
+    }
+    Write-Host "Worker process restarted: pid $Before -> $After"
+}
+
+function Get-ExomemLogDir {
+    <#
+    .SYNOPSIS
+      Return the log directory the app actually writes to, or $null.
+    .DESCRIPTION
+      Ask `logging_config.resolve_log_dir()` rather than deriving a second
+      constant here. #569 moved logs off `<repo>/logs` for wheel installs, and a
+      script that kept its own copy of the old path pruned and tailed a directory
+      nothing writes to -- reporting "No log file at ..." while the service
+      logged normally somewhere else.
+
+      Resolution runs in this process, so it sees this process's EXOMEM_LOG_DIR.
+      That matches the service whenever the variable is unset in both (the common
+      case) or set identically; it is the same assumption the doctor check makes.
+    #>
+    param([string]$PythonPath)
+
+    if (-not $PythonPath -or -not (Test-Path $PythonPath)) { return $null }
+    $out = & $PythonPath -c "from exomem.logging_config import resolve_log_dir; print(resolve_log_dir())" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $dir = ($out | Select-Object -First 1)
+    if (-not $dir) { return $null }
+    return $dir.Trim()
+}
+
+function Test-ExomemAcceleratedTorch {
+    <#
+    .SYNOPSIS
+      True when the torch installed in an interpreter is an accelerator build.
+    .DESCRIPTION
+      Read the local version tag from distribution metadata, never by importing
+      torch: the probe must stay fast and must not fail on a broken ML stack.
+      Default PyPI wheels carry no local tag, which on Windows means CPU-only.
+
+      This exists because the deploy accelerator gate read `.accelerated` off
+      `install-info --json`, which has never emitted that key. The property was
+      always $null, `[bool]$null` is $false, and the guard documented as "a hard
+      failure by default" could not fire at all. `/health` does expose it, but
+      only while the service is up -- and the gate has to run mid-deploy, so it
+      cannot depend on that.
+    #>
+    param([string]$PythonPath)
+
+    $version = Get-ExomemTorchVersion -PythonPath $PythonPath
+    if (-not $version) { return $false }
+    foreach ($tag in @("+cu", "+rocm", "+xpu")) {
+        if ($version.Contains($tag)) { return $true }
+    }
+    return $false
+}
+
+function Get-ExomemTorchVersion {
+    <#
+    .SYNOPSIS
+      Return the torch version string from distribution metadata, or $null.
+    #>
+    param([string]$PythonPath)
+
+    if (-not $PythonPath -or -not (Test-Path $PythonPath)) { return $null }
+    $out = & $PythonPath -c "import importlib.metadata as m; print(m.version('torch'))" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $version = ($out | Select-Object -First 1)
+    if (-not $version) { return $null }
+    return $version.Trim()
 }

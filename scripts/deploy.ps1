@@ -29,6 +29,8 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
+. "$PSScriptRoot\_service-common.ps1"
+
 function Fail($msg) {
     Write-Host "DEPLOY FAILED: $msg" -ForegroundColor Red
     exit 1
@@ -57,16 +59,18 @@ function Get-Provenance {
     try { return $raw | ConvertFrom-Json } catch { return $null }
 }
 
+# The accelerator baseline comes from torch's own distribution metadata, not
+# from `install-info --json`. That payload has never carried `accelerated` or
+# `torch`: the property read $null, `[bool]$null` is $false, and so the gate at
+# step 3 -- documented as "a hard failure by default" -- could never fire. The
+# CUDA build surviving previous deploys was luck, not the guard working.
+$torchBefore = Get-ExomemTorchVersion -PythonPath $servicePython
+$accelBefore = Test-ExomemAcceleratedTorch -PythonPath $servicePython
+
 $before = Get-Provenance
 if ($before) {
-    $accelBefore = [bool]$before.accelerated
-    Write-Host "Currently deployed: $($before.version) ($($before.install_source)), torch $($before.torch)"
+    Write-Host "Currently deployed: $($before.version) ($($before.install_source)), torch $torchBefore"
 } else {
-    # A pre-provenance build cannot self-report; fall back to metadata so the
-    # accelerator comparison still has a baseline.
-    $accelBefore = $false
-    $torchBefore = & $servicePython -c "import importlib.metadata as m; print(m.version('torch'))" 2>$null
-    if ($torchBefore -and ($torchBefore -match '\+(cu|rocm|xpu)')) { $accelBefore = $true }
     Write-Host "Currently deployed: (pre-provenance build), torch $torchBefore"
 }
 
@@ -84,8 +88,9 @@ if ($LASTEXITCODE -ne 0) { Fail "uv pip install returned $LASTEXITCODE." }
 # The cu132 pin lives in the repo's [tool.uv.sources], which a PyPI-backed venv
 # cannot see, so an upgrade silently resolves the default CPU wheel on Windows.
 $after = Get-Provenance
-$accelAfter = if ($after) { [bool]$after.accelerated } else { $false }
-$torchAfter = if ($after) { $after.torch } else { "unknown" }
+$torchAfter = Get-ExomemTorchVersion -PythonPath $servicePython
+if (-not $torchAfter) { $torchAfter = "unknown" }
+$accelAfter = Test-ExomemAcceleratedTorch -PythonPath $servicePython
 
 if ($accelBefore -and -not $accelAfter) {
     Write-Host ""
@@ -113,6 +118,13 @@ if ($LASTEXITCODE -ne 0) { Fail "restart returned $LASTEXITCODE." }
 # --- 5. Verify the RUNNING process, not the installer ------------------------
 # An installer that succeeded only proves the venv changed. The deploy is not
 # done until the live process serves the requested version.
+#
+# This check is necessary but NOT sufficient, and used to be treated as both.
+# /health reports `importlib.metadata.version("exomem")`, read from disk per
+# request, so it starts answering with the new version as soon as the wheel is
+# replaced -- whether or not anything restarted. It caught a wrong version; it
+# could not catch a stale process. The proof that the interpreter reloaded is
+# the worker-pid change asserted inside restart.ps1, which step 4 just ran.
 Write-Host "`nVerifying deployed version at $HealthUrl ..." -ForegroundColor Cyan
 $observed = $null
 $source = $null

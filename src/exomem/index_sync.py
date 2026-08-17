@@ -745,6 +745,101 @@ def clear_deferred_work(
     return cleared
 
 
+def _drain_graph_work(
+    vault_root: Path, *, limit: int | None, requested: set[str] | None
+) -> int:
+    """Repair the epistemic graph proportionally to what the queue says changed.
+
+    Same shape as the full and semantic branches below -- optimistic batch, then
+    per-receipt replay so one unindexable page cannot pin the rest, then
+    rotation so a poisoned receipt sorts behind untouched work rather than
+    disappearing from it. Receipts clear by compare-and-swap on their exact
+    revision, which is what makes a write that lands mid-drain survive the drain
+    that did not cover it.
+
+    The full-rebuild marker is checked first and drains the whole queue with it:
+    a batch too large to enumerate is the one case where re-walking the vault is
+    cheaper than the list of what changed.
+
+    `limit` bounds this queue rather than being split with the others. Sharing
+    one budget would mean either starving graph work behind full and semantic
+    work -- and graph latency is the one a reader feels -- or reshuffling the
+    tuned split between those two. The overshoot is one queue's share per tick,
+    bounded and small; the alternative is a queue that never drains on a busy
+    vault.
+
+    An incoherent graph epoch refuses the whole branch. Per-path repair is
+    repair *against a lineage*, so applying it to one whose lineage cannot be
+    classified would write plausible rows into an untrustworthy sidecar. The
+    work stays queued and a rebuild recovers it.
+    """
+    from . import epistemic_graph, graph_sync
+
+    if graph_sync.classify_epoch(vault_root).kind not in {"legacy", "coherent"}:
+        log.warning("deferred graph drain skipped; graph epoch is not coherent")
+        return 0
+
+    pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
+    receipts = deferred_index.snapshot_graph(
+        vault_root, limit=limit, paths=requested
+    )
+    if pending_generation is None and not receipts:
+        return 0
+
+    index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    if pending_generation is not None:
+        try:
+            index.rebuild_all()
+        except Exception:  # noqa: BLE001 - durable work must survive a failed rebuild
+            log.warning("deferred graph rebuild failed; marker remains", exc_info=True)
+            return 0
+        deferred_index.clear_graph_full_rebuild(vault_root, generation=pending_generation)
+        # A whole-vault rebuild covers every path queued at snapshot time; a
+        # path enqueued after it started carries a newer revision and survives.
+        return 1 + deferred_index.clear_graph_receipts(vault_root, receipts)
+
+    processed = 0
+    batch = [vault_root / receipt.rel_path for receipt in receipts]
+    try:
+        report = index.drain_paths(batch)
+    except Exception:  # noqa: BLE001 - isolate below rather than lose the queue
+        log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
+        report = {}
+    if report.get("requires_rebuild"):
+        # Deliberately not escalated to a rebuild marker. Every condition that
+        # produces this is transient -- no sidecar yet, no live recall registry,
+        # no resolver -- and raising a marker would convert a moment's
+        # unreadiness into a guaranteed whole-vault pass, which is the cost this
+        # change exists to stop paying. The work stays queued; the next drain
+        # retries, and the paths that genuinely require a rebuild reach one
+        # through the checkpoint's own full-scope marker.
+        log.info("deferred graph drain deferred; vault not ready for incremental repair")
+        return 0
+    covered = set(report.get("indexed", ()))
+    if covered:
+        done = [receipt for receipt in receipts if receipt.rel_path in covered]
+        processed += deferred_index.clear_graph_receipts(vault_root, done)
+    stalled = [receipt for receipt in receipts if receipt.rel_path not in covered]
+    if not stalled:
+        return processed
+
+    for receipt in stalled:
+        try:
+            single = index.drain_paths([vault_root / receipt.rel_path])
+        except Exception:  # noqa: BLE001 - one poison page must not pin the queue
+            log.warning(
+                "deferred graph receipt failed; work remains queued", exc_info=True
+            )
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        if receipt.rel_path in set(single.get("indexed", ())):
+            processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
+        else:
+            log.warning("deferred graph receipt incomplete; work remains queued")
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+    return processed
+
+
 def drain_deferred_work(
     vault_root: Path,
     *,
@@ -789,7 +884,7 @@ def drain_deferred_work(
             full_receipts = full_receipts[:full_budget]
             semantic_receipts = semantic_receipts[:semantic_budget]
 
-    processed = 0
+    processed = _drain_graph_work(vault_root, limit=limit, requested=requested)
     if full_receipts:
         full_paths = [vault_root / receipt.rel_path for receipt in full_receipts]
         full_batch_completed = False
@@ -818,13 +913,13 @@ def drain_deferred_work(
                         "deferred full-index dispatch failed; work remains queued",
                         exc_info=True,
                     )
-                    deferred_index.rotate_receipts(vault_root, [receipt], full=True)
+                    deferred_index.rotate_receipts(vault_root, [receipt], queue="full")
                     continue
                 if not full_upsert_succeeded(
                     vault_root, [vault_root / receipt.rel_path], dispatched
                 ):
                     log.warning("deferred full-index dispatch incomplete; work remains queued")
-                    deferred_index.rotate_receipts(vault_root, [receipt], full=True)
+                    deferred_index.rotate_receipts(vault_root, [receipt], queue="full")
                     continue
                 processed += deferred_index.clear_full_receipts(vault_root, [receipt])
 

@@ -166,7 +166,10 @@ Agent behavior:
 
 1. Search or read the named sources.
 2. Draft a compiled conclusion that links back to the sources.
-3. Use `remember` with link suggestions enabled so the new note connects to prior work.
+3. Use `remember(suggestions=true, response_detail="full")` so the new note
+   connects to prior work. Link suggestions are off by default — they cost a
+   whole retrieval pass on the write path — so the call has to ask for them,
+   and the default compact response would not carry them even once computed.
 
 ### Review stale knowledge
 
@@ -442,7 +445,7 @@ Resource mode is separate from search knobs:
 | --- | --- |
 | `quiet` | Low-resource CPU mode; avoid warm-up and release models when idle |
 | `normal` | CPU-first default; keyword/BM25 recall is ready first |
-| `performance` | Explicit opt-in for GPU-capable steady-state work |
+| `performance` | Explicit opt-in for GPU-capable steady-state work; models preload at startup and stay resident, so no request pays a model load |
 
 Do not interpret a slow diagnostic search with rerank enabled as "Exomem is
 slow" without checking timings, resource mode, cache state, and whether a model

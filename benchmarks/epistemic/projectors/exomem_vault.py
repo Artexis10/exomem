@@ -29,6 +29,7 @@ silently dropped.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -204,7 +205,49 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
         status="declared",
         evidence="src/exomem/_scaffold/_Schema/SKILL.md:134",
     ),
+    # Added for the 2026-08 no-nudge amendment (§7, sequence 2). Three of these
+    # four are declared *unavailable* on purpose: the no-nudge surfaces do not
+    # exist in the product yet, and that is precisely why f20-f22 are filed as
+    # expected-red falsification targets. Declaring them observable to make a
+    # family go green would be the exact fraud the fairness contract exists to
+    # prevent; declaring them absent_by_design would be worse still, because
+    # exomem has not decided they should never exist.
+    FieldDeclaration(
+        field="signal",
+        status="available_via:review_queue_attention_mode",
+        evidence="docs/epistemic-inbox.md:32",
+    ),
+    FieldDeclaration(
+        field="dismissal",
+        status="available_via:review_state_file",
+        evidence="docs/epistemic-inbox.md:45",
+    ),
+    FieldDeclaration(
+        field="due_state_counters",
+        status="unavailable",
+        evidence="docs/product-gap-matrix.md:100",
+    ),
+    FieldDeclaration(
+        field="continuation_packet",
+        status="unavailable",
+        evidence="openspec/specs/agent-bootstrap-contract/spec.md:11",
+    ),
 )
+
+#: The documented triage store. Decisions live here, not in note frontmatter,
+#: so the dismissal projection reads it rather than inferring from pages.
+REVIEW_STATE_FILE = ".review-state.json"
+
+#: ``surface name -> (projection status, why)`` for the four surfaces a quiet
+#: assertion must prove absence on. Only ``review_queue`` has a file surface at
+#: all, and only when the triage store exists; the rest are computed
+#: server-side or do not exist, and saying so is what makes an unprojected
+#: surface an *error* rather than silence a product can be credited with.
+UNPROJECTABLE_SURFACES: Mapping[str, str] = {
+    "audit_findings": "governance receipts are not a file surface; see completeness notes",
+    "proposal_queue": "relation/compile proposals are computed server-side, not stored as files",
+    "due_state_counters": "no due-state counters block exists in the product",
+}
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -445,6 +488,8 @@ class VaultProjector(Projector):
                 )
 
         self._apply_revision_chains(items, successor_of)
+        for marker in self._project_surfaces():
+            items[marker.id] = marker
 
         return EpistemicStateSnapshot(
             provider="exomem",
@@ -464,6 +509,73 @@ class VaultProjector(Projector):
             ),
             completeness_notes=COMPLETENESS_NOTES,
         )
+
+    def _project_surfaces(self) -> tuple[StateItem, ...]:
+        """Project the four absence surfaces, and the triage store's dismissals.
+
+        The honest answer for three of the four is "cannot be projected from
+        files", and that answer is *load-bearing*: the anti-vacuity
+        meta-predicate turns an unprojected surface into an error, so a quiet
+        assertion evaluated against a real vault is blocked rather than passing.
+        A projector that quietly emitted ``complete`` here would manufacture
+        silence the vault never demonstrated.
+        """
+
+        projected: list[StateItem] = []
+        for surface, reason in sorted(UNPROJECTABLE_SURFACES.items()):
+            projected.append(
+                StateItem(
+                    id=f"surface-{surface}",
+                    kind="container",
+                    title=surface,
+                    text=reason,
+                    raw={"surface": surface, "projection": "unavailable", "reason": reason},
+                )
+            )
+
+        triage_path = self.vault_root / REVIEW_STATE_FILE
+        decisions: dict[str, Any] = {}
+        projection = "unavailable"
+        if triage_path.is_file():
+            try:
+                loaded = json.loads(triage_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                loaded = None
+            if isinstance(loaded, dict):
+                raw_decisions = loaded.get("decisions")
+                decisions = raw_decisions if isinstance(raw_decisions, dict) else {}
+                projection = "complete"
+        projected.append(
+            StateItem(
+                id="surface-review_queue",
+                kind="container",
+                title="review_queue",
+                text=f"{REVIEW_STATE_FILE} triage store",
+                raw={"surface": "review_queue", "projection": projection},
+            )
+        )
+        for target, decision in sorted(decisions.items()):
+            if not isinstance(decision, dict):
+                continue
+            state = str(decision.get("action") or decision.get("state") or "").strip()
+            fingerprint = str(decision.get("fingerprint") or "").strip()
+            if not state or not fingerprint:
+                continue
+            projected.append(
+                StateItem(
+                    id=f"dismissal-{target}",
+                    kind="container",
+                    title=target,
+                    text=str(decision.get("why") or ""),
+                    review_state=state,
+                    raw={
+                        "surface": "review_queue",
+                        "targets": target,
+                        "fingerprint": fingerprint,
+                    },
+                )
+            )
+        return tuple(projected)
 
     def declarations(self) -> tuple[FieldDeclaration, ...]:
         return FIELD_DECLARATIONS

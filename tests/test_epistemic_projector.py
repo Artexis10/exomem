@@ -32,14 +32,48 @@ def snapshot():
     return projector.project(phase="p1", taken_at="2026-02-01T00:00:00Z")
 
 
+def page_items(snapshot):
+    """Items projected from vault *pages*, excluding the surface markers.
+
+    Amendment sequence 2 added surface markers, which are statements about what
+    could and could not be projected rather than about any page. Keeping them
+    out of the page assertions is what lets both be asserted precisely.
+    """
+
+    return tuple(item for item in snapshot.items if "surface" not in item.raw)
+
+
 def test_projector_recovers_the_planted_item_set(snapshot) -> None:
-    assert {item.id for item in snapshot.items} == {
+    assert {item.id for item in page_items(snapshot)} == {
         SOURCE,
         NOTE_V1,
         NOTE_V2,
         INSIGHT_BOUNDED,
         INSIGHT_UNBOUNDED,
         OPEN_QUESTION,
+    }
+
+
+def test_projector_declares_the_no_nudge_surfaces_it_cannot_project(snapshot) -> None:
+    """The honest absence, asserted — because a quiet assertion depends on it.
+
+    Three of the four surfaces a quiet assertion must prove absence on have no
+    file representation, and this vault has no triage store either. Every one
+    must therefore project as ``unavailable``: if the projector ever reported
+    ``complete`` here, the anti-vacuity meta-predicate would start crediting
+    silence that nothing demonstrated.
+    """
+
+    projections = {
+        item.raw["surface"]: item.raw.get("projection")
+        for item in snapshot.items
+        if "surface" in item.raw and "projection" in item.raw
+    }
+    assert projections == {
+        "audit_findings": "unavailable",
+        "proposal_queue": "unavailable",
+        "due_state_counters": "unavailable",
+        "review_queue": "unavailable",
     }
 
 
@@ -105,11 +139,21 @@ def test_projector_recovers_review_state_and_uncertainty(snapshot) -> None:
 
 
 def test_projector_records_file_locators_without_absolute_paths(snapshot) -> None:
-    for item in snapshot.items:
+    for item in page_items(snapshot):
         assert item.locator_kind == "file"
         assert item.locator
         assert not item.locator.startswith("/")
         assert ":" not in item.locator.split("/")[0]
+
+
+def test_surface_markers_claim_no_file_locator(snapshot) -> None:
+    """A surface marker is not a page, and must not pretend to be one."""
+
+    markers = [item for item in snapshot.items if "surface" in item.raw]
+    assert markers
+    for marker in markers:
+        assert marker.locator is None
+        assert marker.locator_kind is None
 
 
 def test_projector_meta_publishes_real_line_count_and_endpoints(snapshot) -> None:

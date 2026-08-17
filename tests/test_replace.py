@@ -41,6 +41,20 @@ def _compact_content(title: str, *, body: str | None = None) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def _leaf(value: object) -> str:
+    """The bare name a replacement targets, whether or not it is descriptor-relative.
+
+    These injections mean "the Nth canonical staging replacement", so they must
+    match only the batch writer's own `stage-` artifacts. Matching any `.tmp`
+    also caught the mutation boundary's holder-metadata publish, which lives in
+    the runtime state root rather than the vault -- invisible until the graph
+    started coalescing through that boundary while a write was in flight, and
+    then the injected failure landed somewhere the test never meant to reach.
+    The rest of the suite already uses this narrower predicate.
+    """
+    return Path(os.fspath(value)).name
+
+
 def _make_insight(vault: Path, title: str) -> str:
     """Create a fresh insight via note() so the supersession chain has a real target."""
     kwargs = {
@@ -429,7 +443,7 @@ def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
 
     def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
         nonlocal replacements
-        if str(src).endswith(".tmp"):
+        if _leaf(src).startswith("stage-"):
             replacements += 1
             if replacements == 2:
                 raise OSError("injected supersession commit failure")
@@ -488,7 +502,7 @@ def test_replace_failure_does_not_leave_project_registration_or_folder(
 
     def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
         nonlocal replacements
-        if str(src).endswith(".tmp"):
+        if _leaf(src).startswith("stage-"):
             replacements += 1
             if replacements == 2:
                 raise OSError("injected project supersession failure")
@@ -582,7 +596,7 @@ def test_plural_project_registration_creates_folder_only_on_success(
 
     def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
         nonlocal replacements
-        if str(src).endswith(".tmp"):
+        if _leaf(src).startswith("stage-"):
             replacements += 1
             if replacements == 2:
                 raise OSError("injected plural project failure")

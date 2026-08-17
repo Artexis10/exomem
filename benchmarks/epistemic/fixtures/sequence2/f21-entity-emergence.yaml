@@ -1,0 +1,66 @@
+# f21 entity_emergence. Lowercase and non-Latin referents are both asserted, so
+# script bias is measured rather than hidden. The twin recurs in exactly as many
+# sources as each positive and differs only in carrying no reusable facts, which
+# is what stops a string-frequency mutant from passing both halves.
+scenario_id: f21-entity-emergence
+family_id: f21
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1-recurrence
+    ops:
+      - op: ingest_source
+        ref: f21-sources-batch-1
+      - op: maintenance_pass
+        ref: sweep-1
+      - op: ingest_source
+        ref: f21-sources-batch-2
+      - op: maintenance_pass
+        ref: sweep-2
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: entity_candidate_surfaced_from_recurrence
+        subject: f21-subject-lower
+      - assert: entity_candidate_surfaced_from_recurrence
+        subject: f21-subject-cyrillic
+      - assert: signal_absence_checked_across_all_surfaces
+        subject: f21-twin-incidental
+fairness:
+  why_neutral: >-
+    An identity a reader keeps re-describing across sources is one the system
+    could have offered to hold once. The harm of never noticing is independent
+    of how any product models entities, and the frequency-matched twin makes
+    occurrence counting an insufficient explanation for a pass.
+  public_coverage_subtraction: >-
+    No public suite measures unprompted entity recognition; this scenario
+    reports state invariants only.
+  mechanisms:
+    - provider_role: subject
+      mechanism: entity-candidate entry in the documented proposal queue
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:42
+    - provider_role: comparator-a
+      mechanism: documented proposed-entities surface resolving to contributing sources
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:42
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: corpus.ingest
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: corpus source ingestion
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:16
+      reason: The same neutral corpus source is ingested for this fixture row.
+      competitor_surface: documented write/ingest endpoint
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, entity_candidate_surfaced_from_recurrence and
+    signal_absence_checked_across_all_surfaces.

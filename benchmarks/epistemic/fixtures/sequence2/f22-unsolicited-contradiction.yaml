@@ -1,0 +1,68 @@
+# f22 unsolicited_contradiction. The concordant twin sits in the same similarity
+# band as the invalidating evidence — same seed, same length — so a detector
+# keyed on similarity alone surfaces both and fails the twin's quiet assertion.
+# Zero topical agent turns appear after ingest; the loader refuses the scenario
+# if one does, which is how unpromptedness is proven without a query log.
+scenario_id: f22-unsolicited-contradiction
+family_id: f22
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1-conclusions
+    ops:
+      - op: ingest_source
+        ref: f22-conclusions
+      - op: snapshot
+        ref: s1
+  - phase_id: p2-invalidating-evidence
+    ops:
+      - op: ingest_source
+        ref: f22-evidence
+      - op: maintenance_pass
+        ref: sweep-1
+      - op: snapshot
+        ref: s2
+    expect:
+      - assert: contradiction_surfaced_unprompted
+        subject: f22-conclusion
+        counterpart: f22-evidence-invalidating
+      - assert: signal_absence_checked_across_all_surfaces
+        subject: f22-twin-conclusion
+fairness:
+  why_neutral: >-
+    Acting on a conclusion that newly arrived evidence has invalidated is a
+    harm no retrieval quality offsets, and a reader who never asked cannot ask.
+    The concordant twin ensures a system is not credited for surfacing every
+    similar pair regardless of direction.
+  public_coverage_subtraction: >-
+    Conflict-resolution overlap in the public suites is answer-accuracy scored
+    there; this scenario reports state invariants only.
+  mechanisms:
+    - provider_role: subject
+      mechanism: typed contradiction entry naming both items in a documented queue
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:43
+    - provider_role: comparator-a
+      mechanism: documented review entry resolving to both items with a conflict marker
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:43
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: corpus.ingest
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: corpus source ingestion
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:16
+      reason: The same neutral corpus source is ingested for this fixture row.
+      competitor_surface: documented write/ingest endpoint
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, contradiction_surfaced_unprompted and
+    signal_absence_checked_across_all_surfaces.

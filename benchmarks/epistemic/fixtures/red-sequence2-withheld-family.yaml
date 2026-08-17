@@ -1,0 +1,46 @@
+# RED fixture: a sequence-2 family whose amendment receipt is still pending.
+#
+# f20 IS in the §1 family table — registration is not the thing being refused.
+# What refuses it is the amendment receipt: sequence 2 has no founder
+# acknowledgment, so `epistemic.amendments` withholds every family it
+# introduced at the loader's choke point. This fixture goes green by itself the
+# day the acknowledgment lands, which is exactly the transition sequence 1 went
+# through, and is why it is shipped rather than written as a mock.
+scenario_id: red-sequence2-withheld-family
+family_id: f20
+kind: corpus
+public_coverage: none
+phases:
+  - phase_id: p1-ingest
+    ops:
+      - op: ingest_source
+        ref: src-unit-01
+      - op: maintenance_pass
+        ref: sweep-1
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: structural_signal_surfaced_within_budget
+        subject: f20-subject
+fairness:
+  why_neutral: >-
+    A reader whose accumulating page never gets proposed for a split keeps
+    paying the cost of finding things in it. The harm is independent of how any
+    product stores or names structure.
+  public_coverage_subtraction: none
+  mechanisms:
+    - provider_role: subject
+      mechanism: promotion-class proposal in the documented review or proposal queue
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:41
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, structural_signal_surfaced_within_budget.

@@ -123,6 +123,27 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Wrapped so *every* exit drains, including the early returns above
+    # `_run_cli`. A graph rebuild no longer blocks the write that caused it, and
+    # it runs on a daemon thread. That is right for the long-lived server and
+    # wrong here: this process is about to exit and would take the rebuild with
+    # it, so a CLI write would report `pending` and nothing would ever make it
+    # true. The boundary is process lifetime, not the write path -- and a
+    # boundary that only some exits honour is not one.
+    try:
+        return _run_cli(argv)
+    finally:
+        from . import graph_sync
+
+        if not graph_sync.drain_active_rebuilds():
+            print(
+                "exomem: a graph rebuild did not finish before exit; the change is "
+                "committed and `exomem reconcile` will bring the graph up to date",
+                file=sys.stderr,
+            )
+
+
+def _run_cli(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw in (["--version"], ["--version", "--json"]):
         # Keep this before command-registry and optional capability imports.  A
@@ -769,6 +790,7 @@ def _mode_main(argv: list[str]) -> int:
             print(f"  retain_cpu_caches:       {policy['retain_cpu_caches']}")
             print(f"  defer_expensive_indexes: {policy['defer_expensive_indexes']}")
             print(f"  release_when_idle:       {policy['release_when_idle']}")
+            print(f"  reap_models_when_idle:   {policy['reap_models_when_idle']}")
             print(f"  bulk_gpu:                {policy['bulk_gpu']}")
             print(f"  config: {policy['config_path']}")
         return 0

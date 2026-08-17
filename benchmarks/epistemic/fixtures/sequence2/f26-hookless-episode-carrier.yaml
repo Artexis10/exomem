@@ -1,0 +1,71 @@
+# f26 hookless_episode_carrier. This family exists because f20-f25 do not test
+# the carrier: a runtime could satisfy every one of them while no signal ever
+# reached a thin client. The journey runs hookless, at compact response detail,
+# and asserts the due-state block in the responses it actually received.
+scenario_id: f26-hookless-episode-carrier
+family_id: f26
+kind: operational
+public_coverage: none
+phases:
+  - phase_id: p1-conversational-capture
+    ops:
+      - op: configure
+        ref: hookless-compact
+        detail: no retrieval hook; compact response detail
+      - op: agent_turn
+        ref: f26-conversation
+      - op: snapshot
+        ref: s1
+    expect:
+      - assert: due_state_block_present_in_carrier
+  - phase_id: p2-abrupt-end-and-fresh-session
+    ops:
+      - op: stop_engine
+        ref: abrupt-end
+      - op: start_engine
+        ref: session-start
+      - op: fresh_agent
+        ref: f26-fresh
+      - op: snapshot
+        ref: s2
+    expect:
+      - assert: due_state_block_present_in_carrier
+      - assert: continuation_packet_reconstructs_session
+fairness:
+  why_neutral: >-
+    A signal that exists in a queue nobody's client renders has not been
+    delivered. Asserting the block in the compact responses the journey
+    received measures the delivery path itself, which no end-state assertion
+    can substitute for, on the thinnest surface a user might have.
+  public_coverage_subtraction: >-
+    No public suite measures carrier delivery; this scenario reports state
+    invariants only.
+  mechanisms:
+    - provider_role: subject
+      mechanism: due-state block present in the captured compact mutation and recall responses
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:47
+    - provider_role: comparator-a
+      mechanism: documented compact-response schema including the block, plus conforming captures
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:47
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: carrier.compact
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: captured compact responses from the installed envelope
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:47
+      reason: Responses are captured from the documented CLI envelope, discovered first.
+      competitor_surface: documented client response envelope
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, due_state_block_present_in_carrier and
+    continuation_packet_reconstructs_session.

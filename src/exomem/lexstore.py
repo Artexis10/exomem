@@ -408,9 +408,19 @@ def _schedule_repair(vault_root: Path) -> None:
             with _REPAIRS_LOCK:
                 _REPAIRS_IN_FLIGHT.discard(key)
 
+    # Static name, deliberately — every other exomem thread name is a literal
+    # too. Thread names now reach the log through `JsonLinesFormatter`'s
+    # `thread` key, and `privacy_log._redact_for_hosted_cell` blanks a record's
+    # message/fields/content in place rather than rebuilding it from an
+    # allowlist, so anything encoded in a thread name survives hosted-cell
+    # redaction. In a hosted cell the vault root is `EXOMEM_VAULT_PATH`
+    # (`hosted_runtime.py`), whose basename is a tenant path component —
+    # interpolating it here would push a tenant identifier through a
+    # fail-closed boundary. The vault stays attributable from the logger name
+    # and the record's own fields.
     thread = threading.Thread(
         target=_run,
-        name=f"exomem-lexical-repair-{key.name}",
+        name="exomem-lexical-repair",
         daemon=True,
     )
     try:

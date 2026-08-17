@@ -842,7 +842,12 @@ def _validate_compact_graph_outcome(action: str, response: Mapping[str, Any]) ->
     present = set(response) & ({"graph_sync"} | graph_fields)
     if not present:
         return
-    if response.get("graph_sync") not in {"completed", "failed"}:
+    # `pending` is the fourth outcome (#576/#588): the canonical bytes are
+    # committed and the registered derived-graph rebuild has not converged yet.
+    # This script is not in CI, so a stale vocabulary here fails only when
+    # someone runs it against a real build -- exactly the gap that let the
+    # bounded write look like an acceptance regression.
+    if response.get("graph_sync") not in mutation_terminal.GRAPH_SYNC_OUTCOMES:
         raise RecordsEvidenceError(f"{action} graph outcome is invalid")
     if "graph_sync_code" in response:
         _string(response["graph_sync_code"], f"{action} graph code")

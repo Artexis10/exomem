@@ -94,6 +94,7 @@ from . import review_state as review_state_module
 from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
+from . import semantic_units as semantic_units_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import traversal_profiles as traversal_profiles_module
@@ -374,6 +375,10 @@ def op_bootstrap(
                 "planning": (
                     "intended future state, goals, priorities, commitments, and candidate work"
                 ),
+                "prediction": (
+                    "a checkable claim about a future observation, which is neither "
+                    "observed state nor intent to act; see epistemic_contract"
+                ),
             },
             "capture_examples": (
                 "Route durable measurements, completed sessions, transactions, maintenance "
@@ -447,8 +452,95 @@ def op_bootstrap(
             "contracts; repositories, git, tests, and code own software execution truth."
         ),
     }
+    # The doctrine every client tier has to receive. The shipped skill scaffold
+    # carries this at length but reaches only skill-capable surfaces, and this
+    # payload is the entire contract a hosted or generic MCP client ever sees. The
+    # commitments live here or half the client base never learns they exist.
+    #
+    # They deliberately name no command. `_filter_bootstrap_payload` deletes any
+    # string mentioning a command the active surface cannot call, so a commitment
+    # phrased as a tool call would vanish on exactly the reduced surfaces that most
+    # need to be told to supersede rather than overwrite. Routing already lives in
+    # `tool_defaults` and `authoring_contract.route_by_intent`; it is not repeated.
+    #
+    # The vocabulary is read from the modules that own it instead of retyped, so a
+    # new outcome or governed metadata key is taught the day it ships.
+    #
+    # Deferred extension point: per-vault due state ("N predictions past their check
+    # date", "N unfinished experiments") belongs here as one further, vault-derived
+    # key. It is blocked on the epistemic review and audit-category work defining
+    # "due" and "unfinished" exactly once. A predicate invented here would be the one
+    # users see, and would turn that work into a breaking change to a public contract
+    # rather than an addition to it. Nothing in this section has to move to make room.
+    epistemic_contract = {
+        "commitments": {
+            "preserve_the_record": (
+                "Captured raw material is append-only: never rewrite or delete a "
+                "captured source or preserved evidence. Correct the record by "
+                "capturing better material and superseding the conclusion built on "
+                "the worse."
+            ),
+            "supersede_never_overwrite": (
+                "When a durable conclusion changes, supersede it so the earlier view "
+                "stays readable and linked. Never overwrite what was believed; a "
+                "store that silently rewrites its own past cannot be audited."
+            ),
+            "state_the_expectation_first": (
+                "Write down what you expect before the answer arrives. A durable "
+                "expectation about a future observation is a prediction unit with a "
+                "check_by date; an expectation recorded afterwards proves nothing."
+            ),
+            "judge_categorically": (
+                "Close a claim with one word from the outcome vocabulary below. This "
+                "substrate keeps no numeric confidence, credence, or probability: a "
+                "verdict is lifecycle state, never a score."
+            ),
+            "keep_the_negative_result": (
+                "Refuted is not superseded. A refuted claim keeps active standing and "
+                "full rank, because a negative result is knowledge rather than "
+                "replaced knowledge. Record a real conflict as a typed contradicts "
+                "relation instead of quietly reconciling it away."
+            ),
+        },
+        "vocabulary": {
+            "outcomes": list(semantic_units_module.EPISTEMIC_OUTCOMES),
+            "governed_unit_metadata": list(
+                semantic_units_module.GOVERNED_UNIT_METADATA_KEYS
+            ),
+            "verdict": (
+                "The judgment: exactly one outcome word, shared with an experiment "
+                "page's outcome. A number, percentage, or hedge is rejected outright."
+            ),
+            "check_by": (
+                "One exact ISO calendar date (YYYY-MM-DD) naming the day to revisit "
+                "the claim. A due date, not an expiry: nothing is removed, decayed, or "
+                "downranked when it passes; it becomes findable as overdue."
+            ),
+            "metadata_form": (
+                "verdict and check_by are `- key: value` rows under a rich `## Heading` "
+                "unit; a compact `- [category] ...` observation carries no metadata. "
+                "Both survive an edit to the unit's wording, so fixing a typo never "
+                "costs a verdict."
+            ),
+            "kinds": {
+                "open_question": "a question this store has not answered yet",
+                "hypothesis": "a proposed explanation still under test",
+                "prediction": "a checkable claim about a future observation",
+            },
+            "relations": {
+                "contradicts": "edge to material conflicting with this claim",
+                "supersedes": "edge to the page whose current view this replaces",
+            },
+        },
+        "capture_nudge": (
+            "When the user states a durable expectation about a future observation, "
+            "capture it then as a prediction unit with a check_by date. Left in prose, "
+            "or in the assistant's own short-term memory, nothing can ever check it. "
+            "Skip passing speculation; capture what the user would want held to."
+        ),
+    }
     payload: dict = {
-        "contract_version": "2026-08-11.1",
+        "contract_version": "2026-08-16.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -489,6 +581,7 @@ def op_bootstrap(
         "records": records_contract,
         "semantic_authoring": semantic_authoring_projection,
         "planning": planning_contract,
+        "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
                 "Use as short-term or behavioural memory for user preferences, working "
@@ -556,7 +649,12 @@ def op_bootstrap(
                 "reason in the agent",
                 "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
                 "remember or replace_memory for page-level conclusions; observe_memory for one semantic unit; edit_memory for other small page corrections",
-                "read warnings/suggestions/write_feedback and follow up on unresolved links or duplicate warnings",
+                (
+                    "read the returned warnings and follow up on unresolved links "
+                    "or duplicate warnings; write_feedback needs "
+                    "response_detail='full', and suggestions additionally need "
+                    "remember(suggestions=true)"
+                ),
             ],
             "save_rule": (
                 "Save durable decisions, solved problems, diagnosed failures, "
@@ -582,7 +680,11 @@ def op_bootstrap(
                     "Dataview-style `supports:: [[...]]` fields are not relation syntax"
                 ),
                 "write with remember, observe_memory, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
-                "inspect warnings, suggestions, and write_feedback from the write result",
+                (
+                    "inspect the warnings on the write result; add "
+                    "response_detail='full' to see write_feedback, and "
+                    "remember(suggestions=true) as well to see suggestions"
+                ),
                 "apply any accepted links through edit_memory",
                 "report the written path",
             ],
@@ -615,6 +717,19 @@ def op_bootstrap(
                 "pattern": "Reusable solution with Problem, Solution, When to use, When not to use, and typed Relations.",
                 "experiment": "Primary protocol with Hypothesis, Protocol, Results, and Conclusion.",
                 "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and typed Relations.",
+                "question": (
+                    "Not a page type: an `## Open Question` block inside a compiled "
+                    "page naming what is unresolved and what would settle it."
+                ),
+                "hypothesis": (
+                    "Not a page type: a `## Hypothesis` block inside a compiled page "
+                    "stating the mechanism and what would falsify it."
+                ),
+                "prediction": (
+                    "Not a page type: a `## Prediction` block inside a compiled page "
+                    "with `- check_by: YYYY-MM-DD`, closed later with `- verdict: "
+                    "<outcome>`. Editing the wording preserves the verdict."
+                ),
             },
             "semantic_units": {
                 "contract": semantic_authoring_projection,
@@ -1889,13 +2004,17 @@ def op_attention(
 ) -> dict:
     """Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only.
 
-    Composes the four measurement-only epistemic queues into a single list,
-    ranked by Reciprocal Rank Fusion over each queue's own ordering — a note
-    flagged by more than one queue rises to the top:
-    - `stale_review`: active conclusions that are old AND rarely surfaced in
-      `find` AND low inbound-degree (possibly stale — still true?).
+    Composes the six default measurement-only epistemic queues into a single
+    list, ranked by Reciprocal Rank Fusion over each queue's own ordering — a
+    note flagged by more than one queue rises to the top:
+    - `bridge_review`: an approved release bridge whose review date has come due
+      or whose approved dependencies have drifted (does this still hold?).
+    - `prediction_window`: a semantic unit whose authored `check_by` date has
+      passed with no `verdict` and no resolving relation (what came of this?).
     - `corpus_contradictions`: pairs of active conclusions whose embeddings sit
       close enough to restate, refine, or contradict (do they conflict?).
+    - `stale_review`: active conclusions that are old AND rarely surfaced in
+      `find` AND low inbound-degree (possibly stale — still true?).
     - `unprocessed_source`: sources captured but never compiled (nothing
       distilled from them yet).
     - `relation_debt`: active compiled pages with no outbound Markdown
@@ -1912,8 +2031,10 @@ def op_attention(
     drift, etc.).
 
     Args:
-        categories: Optional subset of {corpus_contradictions, stale_review,
-            unprocessed_source, relation_debt}. Omit to include all four.
+        categories: Optional subset of the six default queues above. Omit to
+            include all six. Also accepts the opt-in categories that are
+            registered but not default: `unfinished_experiments` and the typed
+            semantic categories.
         limit: Max items to surface (default 25; 0 or negative = uncapped,
             surface all). Lower-priority items beyond the cap are summarized in
             a "N more not shown" note, never dropped silently.
@@ -2933,7 +3054,7 @@ def op_note(
     bridge_of: list[str] | None = None,
     bridge_scope: str | None = None,
     bridge_review: str | None = None,
-    suggestions: bool = True,
+    suggestions: bool = False,
     project_category: str | None = None,
     validate_only: bool = False,
     draft_id: str | None = None,
@@ -3024,12 +3145,18 @@ def op_note(
         bridge_scope: Descriptive lowercase scope slug for a bridge draft.
         bridge_review: ISO date when an approved bridge should be reviewed again.
 
-        suggestions: When true (default), the result carries a `suggestions`
-            block: existing pages this note should probably link to, ranked
-            by the retrieval stack. Set false for a faster write when you
-            already know the note's links; the near-duplicate/overlap
-            warnings stay ON either way (dedupe is a guardrail, not a
-            suggestion). For important drafts, call
+        suggestions: Off by default. When true, the result carries a
+            `suggestions` block: existing pages this note should probably link
+            to, ranked by the retrieval stack. It costs one whole retrieval
+            pass over the corpus, runs after the commit (so its caches are
+            cold by construction — the write just moved every freshness token
+            they key on), and is not projected into the default
+            `response_detail="compact"` response, so an interactive write no
+            longer pays it unasked. Ask for it with `suggestions=true`.
+            `write_feedback.suggestions.computed` reports which happened, so an
+            empty block is never mistaken for "no related pages". The
+            near-duplicate/overlap warnings stay ON either way (dedupe is a
+            guardrail, not a suggestion). For important drafts, call
             `connect_memory(operation="suggest-links")`, use
             `operation="suggest-relations"` when direction matters, and write
             accepted note-level edges under `## Relations`.
@@ -4157,7 +4284,7 @@ def op_remember(
     bridge_of: list[str] | None = None,
     bridge_scope: str | None = None,
     bridge_review: str | None = None,
-    suggestions: bool = True,
+    suggestions: bool = False,
     project_category: str | None = None,
     validate_only: bool = False,
     draft_id: str | None = None,
@@ -4210,7 +4337,13 @@ def op_remember(
             cross-domain bridge; requires bridge_scope and bridge_review.
         bridge_scope: Descriptive lowercase scope slug for a bridge draft.
         bridge_review: ISO date when an approved bridge should be reviewed again.
-        suggestions: Include link suggestions in the result.
+        suggestions: Off by default. Set `suggestions=true` to also get a
+            `suggestions` block of existing pages this note should probably
+            link to (read it under `response_detail='full'`). It costs one
+            whole retrieval pass over the corpus on the write path, so a
+            plain write no longer pays it. Near-duplicate and overlap
+            warnings are a dedupe guardrail and stay on either way;
+            `write_feedback.suggestions.computed` says which happened.
         project_category: Category for a new project key.
         validate_only: Validate and return an immutable creation draft without writing.
         draft_id: Draft identity returned by validate_only.
@@ -4754,7 +4887,7 @@ def op_process_media(
     def _drain_index_refresh(paths: list[Path] | list[str] | None = None) -> tuple[int, int]:
         current = index_sync.deferred_work_status(vault_root)["full_upserts"]
         selected = current["paths"] if paths is None else paths
-        refreshed = index_sync.drain_deferred_work(
+        index_sync.drain_deferred_work(
             vault_root,
             limit=media_jobs.STATUS_JOB_LIMIT,
             paths=selected,
@@ -4762,6 +4895,13 @@ def op_process_media(
         remaining = index_sync.deferred_work_status(vault_root)["full_upserts"][
             "count"
         ]
+        # Measure the queue the neighbouring field measures. The drain's return
+        # counts what it processed across *every* queue it serves, and the
+        # graph dirty-path queue joined them (converge-graph-incrementally), so
+        # using it here would report a refreshed count and a remaining count
+        # drawn from different queues -- a pair that stops adding up for a
+        # reason no reader of this response can see.
+        refreshed = max(0, int(current["count"]) - remaining)
         return refreshed, remaining
 
     if operation == "status":

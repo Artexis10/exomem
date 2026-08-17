@@ -279,6 +279,7 @@ def test_resolved_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
             "defer_expensive_indexes": True,
         },
         "release_when_idle": True,
+        "reap_models_when_idle": True,
         "bulk_gpu": False,
     }
 

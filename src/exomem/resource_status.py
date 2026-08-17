@@ -28,6 +28,17 @@ def _mode_source() -> str:
 
 
 def _model_residency() -> dict[str, Any]:
+    """Which model singletons are resident, next to what policy promised.
+
+    `module_loaded` answers "is `exomem.embeddings` imported", which is not the
+    same question as "is a model in memory" — reading it as the latter is what made
+    a preloading process look broken. The policy fields sit alongside so the gap
+    between promise and residency is visible here instead of in the log.
+    """
+    policy = {
+        "preload_policy": mode.preload_models(),
+        "reap_when_idle": mode.reap_models_when_idle(),
+    }
     embeddings = sys.modules.get("exomem.embeddings")
     if embeddings is None:
         return {
@@ -35,12 +46,14 @@ def _model_residency() -> dict[str, Any]:
             "embeddings": False,
             "reranker": False,
             "clip": False,
+            **policy,
         }
     return {
         "module_loaded": True,
         "embeddings": getattr(embeddings, "_MODEL", None) is not None,
         "reranker": getattr(embeddings, "_RERANKER", None) is not None,
         "clip": getattr(embeddings, "_CLIP_MODEL", None) is not None,
+        **policy,
     }
 
 

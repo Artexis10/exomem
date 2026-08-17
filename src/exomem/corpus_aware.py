@@ -568,10 +568,13 @@ def _best_cosine_per_file(
             return {}
         vecs = embeddings.embed_texts(chunks, is_query=False)
         idx = embeddings.get_embedding_index(vault_root)
-        root = vault_root.resolve()
         allowed_paths = {
-            path.relative_to(root).as_posix()
-            for path in index_paths.iter_index_markdown(vault_root)
+            rel
+            for rel in (
+                index_paths.rel_to_vault(vault_root, path)
+                for path in index_paths.iter_index_markdown(vault_root)
+            )
+            if rel is not None
         }
         best_per_file: dict[str, float] = {}
         for v in vecs:

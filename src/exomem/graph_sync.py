@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import hashlib
 import hmac
 import json
@@ -93,6 +94,27 @@ _RECEIPT_TERMINAL_STATES = frozenset({"committed", "rejected"})
 _RECEIPT_TERMINAL_STATUSES = frozenset({"committed", "replayed", "rejected"})
 MAX_GRAPH_REBUILD_WAITERS = 128
 MAX_GRAPH_REBUILD_ATTEMPTS = 4
+
+#: An interactive mutation polls a registered graph rebuild; it never waits.
+#:
+#: There is deliberately no tunable interval here. #588 tried one and it was
+#: over-constrained by construction: any bound has to be under `COMMIT_MEDIAN_MS
+#: = 750` or the median latency gate fails the moment the bound is reached, and
+#: simultaneously long enough for a small test-vault rebuild to converge or a
+#: dozen tests that expect `completed` get `pending`. A 2.0 s bound failed the
+#: first constraint (2091 ms / 2259 ms observed at 2k/8k pages); a 0.25 s bound
+#: failed the second (2 CI failures became 6). Those two constraints do not
+#: overlap reliably, which is the design saying the join does not belong on the
+#: write path at all.
+#:
+#: Polling is the honest resolution. The registered-rebuild join is only ever
+#: reached *after* the incremental refresh has already fallen back to a
+#: full-corpus rebuild, and a full-corpus pass costs 20-175 s -- so at the
+#: moment this seam is reached, waiting is never going to be cheap. Report the
+#: flight's outcome if it has already settled, otherwise report `pending` and
+#: let it converge behind the response. The contribution to commit latency is
+#: then provably zero rather than bounded by a number someone has to defend.
+_SETTLED_JOIN_TIMEOUT_SECONDS = 0.0
 
 #: `reconcile` is an internal registry name, not something a caller can run.
 #: The MCP surface is `maintain_memory(mode="reconcile")` and the CLI dispatches
@@ -997,7 +1019,13 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
     if not path.exists():
         return "absent", None
     try:
-        with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+        # `closing`, not the connection's own context manager: that one is a
+        # transaction scope and leaves the handle open. A leaked read handle
+        # here is what makes the next publication's `os.replace` fail on
+        # Windows, and this reader is on the graph read path.
+        with contextlib.closing(
+            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        ) as conn:
             limit_graph_metadata_read(conn)
             values = dict(
                 conn.execute(
@@ -1046,7 +1074,9 @@ def _malformed_acknowledgement_generation(vault_root: Path) -> int | None:
     if not path.exists():
         return None
     try:
-        with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+        with contextlib.closing(
+            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        ) as conn:  # `closing` for the reason given in `acknowledgement_state`.
             limit_graph_metadata_read(conn)
             row = conn.execute(
                 "SELECT value FROM graph_meta WHERE key = 'graph_sync_generation'"
@@ -2469,6 +2499,134 @@ def wait_for_registered(
     return None if item is None else item[0].wait(timeout)
 
 
+#: The one thread name every graph rebuild runs under, in both the registered
+#: path (`GraphRebuildCoordinator.ensure_started`) and the warming path
+#: (`epistemic_graph.schedule_background_rebuild`).
+GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
+
+#: A rebuild over a realistic vault is seconds; a whole-vault pass over a large
+#: one has been measured in the low minutes. Long enough that a healthy rebuild
+#: always finishes, short enough that a wedged one cannot hold a shell prompt
+#: open indefinitely -- at which point the checkpoint is still durable and the
+#: next run or a reconcile repairs it.
+_EXIT_DRAIN_SECONDS = 300.0
+
+
+def drain_active_rebuilds(timeout: float = _EXIT_DRAIN_SECONDS) -> bool:
+    """Let in-flight graph rebuilds finish before this process ends.
+
+    Taking the rebuild off the *write* path is correct: a request should not pay
+    for a whole-vault build. Letting the *process* exit with that build still
+    running is not, and the two are easy to conflate.
+
+    A rebuild runs on a daemon thread, which is right for the long-lived server
+    -- the request returns, the rebuild lands moments later, and a reader that
+    polls sees it converge. It is wrong for a one-shot CLI process, which exits
+    as soon as the command returns and takes the daemon with it. The write would
+    report `pending` and nothing would ever make it true: every `exomem`
+    invocation would leave the graph a little further behind, and only an
+    explicit reconcile would catch up.
+
+    So the boundary is process lifetime, not the write path. Returns whether
+    everything drained, so a caller can say so rather than exit silently on a
+    rebuild it abandoned.
+    Reads the clock only once it has something to wait for. That is not a
+    micro-optimization: this runs from an autouse teardown fixture on every test
+    in the suite, and a test is entitled to replace `time.monotonic` with a
+    scripted sequence for its own purposes. Charging the empty case a clock read
+    made one such test fail in teardown with `generator raised StopIteration`,
+    from a fixture that had nothing to drain.
+    """
+    deadline: float | None = None
+    while True:
+        alive = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == GRAPH_REBUILD_THREAD_NAME and thread.is_alive()
+        ]
+        if not alive:
+            return True
+        if deadline is None:
+            deadline = time.monotonic() + timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        for thread in alive:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+def await_active_rebuild(
+    vault_root: Path,
+    *,
+    state_root: Path | None = None,
+    timeout: float | None = None,
+) -> GraphBuildOutcome | None:
+    """Wait for this vault's in-flight rebuild to settle, outside the request seam.
+
+    `wait_for_registered` consumes a *per-request* registration: once an
+    interactive write has polled it and left (#576/#588), the registration is
+    gone even though the flight is still running on its own thread. A caller
+    that genuinely needs convergence — an operator drain, a test asserting the
+    graph's own outcome — has nothing left to join.
+
+    This joins the flight itself. Returns the outcome, re-raises the builder's
+    exact failure (so a real rebuild failure is never laundered into "nothing
+    happened"), or returns None when no flight is in progress.
+
+    It is deliberately NOT reachable from the write path: nothing in
+    `writer_lease` may call it, and `test_bounded_graph_join.py` enumerates the
+    join sites that could.
+    """
+    key = _registration_key(vault_root, state_root)
+    with _COORDINATORS_LOCK:
+        coordinator = _COORDINATORS.get(key)
+    if coordinator is None:
+        return None
+    with coordinator._condition:
+        required = coordinator._required
+        idle = not coordinator._running and coordinator._error is None
+    if required is None or (idle and coordinator._outcome is None):
+        return None
+    return coordinator._wait(required, timeout)
+
+
+def join_registered_if_settled(
+    vault_root: Path, *, state_root: Path | None = None
+) -> bool:
+    """Take a registered rebuild's outcome if it has one; never block for it.
+
+    The single seam every request-serving join goes through (#576/#588), rather
+    than a timeout threaded through each call site by hand. The first analysis
+    of this incident bounded one site and left an identical unbounded join in
+    `mutation_guard` that then produced the worst case measured -- a 300 s
+    single-unit append. One named helper makes the set greppable, and
+    `test_bounded_graph_join.py` fails on any new `wait_for_registered` caller
+    that is neither this helper nor a declared opt-out.
+
+    Returns True when the flight has already converged, and False when it is
+    still running -- in which case the canonical bytes are durable, the flight
+    keeps going on its own thread, and the caller owes its own caller an honest
+    "derived graph is still catching up". Every other failure still raises, so
+    a real rebuild failure is not laundered into "still pending".
+
+    `Condition.wait_for` with `timeout=0` evaluates its predicate exactly once
+    and returns, so this costs one lock acquisition and no scheduling.
+
+    Deliberately not the default of `wait_for_registered`: `reconcile`, whose
+    terminal exists to prove the graph is readable, must keep blocking, and a
+    default that silently changed under it would be the same class of bug.
+    """
+    try:
+        wait_for_registered(
+            vault_root,
+            _SETTLED_JOIN_TIMEOUT_SECONDS,
+            state_root=state_root,
+        )
+    except TimeoutError:
+        return False
+    return True
+
+
 def start_registered(vault_root: Path, *, state_root: Path | None = None) -> GraphRebuildStart | None:
     """Start captured work without joining it, for standalone post-commit fanout."""
     item = (_PENDING_WAITERS.get() or {}).get(_registration_key(vault_root, state_root))
@@ -3016,4 +3174,54 @@ def committed_graph_failure(
         "graph_sync_code": code,
         "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
         "graph_sync_remediation": remediation,
+    }
+
+
+def committed_graph_pending(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
+    """The canonical bytes committed; the derived graph has not converged yet.
+
+    A fourth outcome alongside absent/`completed`/`failed`, and the reason the
+    bounded join above is safe to take: a fast write that let a caller infer a
+    fresh derived graph would be worse than the slow one it replaces. `failed`
+    would be a different lie -- nothing failed, the registered rebuild is simply
+    still running and will publish behind this response.
+
+    Derived reads degrade rather than break while this is true: the graph lane
+    falls back to wikilink expansion, `graph_context` reports
+    `available: false`, and relation-filtered recall raises the existing typed
+    `RETRIEVAL_INDEX_WARMING` with its own retry hint. None of them block.
+    """
+    return {
+        "graph_sync": "pending",
+        "graph_sync_code": "GRAPH_SYNC_REBUILD_IN_PROGRESS",
+        "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
+        "graph_sync_remediation": (
+            "The write is durable. Derived graph relations are still rebuilding, so "
+            "relation-filtered recall may report warming and graph context may report "
+            f"available: false for a short time; re-read shortly, or {_RECONCILE_HINT}"
+        ),
+    }
+
+
+def committed_graph_queued(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
+    """The canonical bytes committed; the repair is queued, not running.
+
+    The same fourth outcome as `committed_graph_pending`, reached the other way.
+    There the derived graph is behind because a registered whole-vault rebuild
+    has not converged; here it is behind because the incremental pass could not
+    prove itself and enqueued the affected paths for a drain instead. The
+    distinction is worth a separate code rather than reusing
+    `GRAPH_SYNC_REBUILD_IN_PROGRESS`: nothing is rebuilding, so an operator
+    reading that code would go looking for a flight that does not exist, and the
+    two states converge on very different timescales.
+    """
+    return {
+        "graph_sync": "pending",
+        "graph_sync_code": "GRAPH_SYNC_REPAIR_QUEUED",
+        "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
+        "graph_sync_remediation": (
+            "The write is durable. Repair of the changed pages is queued and converges on "
+            "the next index drain, so relation-filtered recall may report warming and graph "
+            f"context may report available: false until then; re-read shortly, or {_RECONCILE_HINT}"
+        ),
     }

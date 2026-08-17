@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -119,14 +120,35 @@ def _utc_timestamp(record: logging.LogRecord) -> str:
     )
 
 
+def _thread_name(record: logging.LogRecord) -> str:
+    """The name of the thread that EMITTED `record`.
+
+    `record.threadName` is captured at record creation, on the emitting thread,
+    which is the only correct source here — a handler may format on a different
+    thread than the one that logged, so `threading.current_thread().name` read
+    at format time would misattribute every background line to the formatter's
+    thread. The fallback only covers `logging.logThreads = False`, where the
+    attribute is None, so the field is present on every record either way.
+    """
+    return getattr(record, "threadName", None) or threading.current_thread().name
+
+
 class JsonLinesFormatter(logging.Formatter):
-    """One JSON object per line; works for structured and plain records alike."""
+    """One JSON object per line; works for structured and plain records alike.
+
+    `thread` names the emitting thread on every record. Request threads and
+    background daemons (`exomem-graph-rebuild`, `exomem-lexical-repair`)
+    interleave in one file, and without it adjacency reads as causation — that
+    misled issue #576 twice, once into asserting a rebuild ran inside a request
+    when it runs on a daemon, and once into nearly mis-attributing a 63 s stall.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "ts": _utc_timestamp(record),
             "level": record.levelname,
             "logger": record.name,
+            "thread": _thread_name(record),
             "event": getattr(record, "event", None),
             "message": record.getMessage(),
         }
