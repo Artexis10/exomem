@@ -7,6 +7,7 @@ from pathlib import Path
 from record_fixtures import copy_x3_fixture
 
 from exomem import commands, mutation_terminal, record_formats, record_memory, records
+from exomem import graph_sync
 from exomem import hosted_gateway as gateway
 from exomem import structured_collections as collections
 from exomem.writer_lease import LeaseConfig, LeaseManager
@@ -185,7 +186,15 @@ def test_public_revise_keeps_the_closed_receipt_through_graph_handoff_and_replay
         )
     }
     assert mutation_terminal.valid_record_receipt(receipt)
-    assert first["graph_sync"] == "completed"
+    # The write no longer joins its own graph rebuild (#576/#588), so its
+    # terminal reports what was true at commit -- `pending` while the rebuild is
+    # still in flight, `completed` if it had already landed. Which of the two is
+    # a race, so asserting either here would be flaky. What is not a race, and
+    # is what "graph handoff" in this test's name actually means, is that the
+    # handoff converges: join the flight and require the graph to be current.
+    assert first["graph_sync"] != "failed"
+    graph_sync.await_active_rebuild(tmp_path, state_root=tmp_path / "state")
+    assert graph_sync.status(tmp_path)["state"] == "current"
     history_before_replay = records.agent_audit_history(tmp_path, current.path)
     lifecycle_event = history_before_replay["events"][0]
     assert {

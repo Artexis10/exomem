@@ -164,5 +164,11 @@ def test_constructor_failure_fallback_keeps_invoking_manager_boundary(
     )
 
     manager.invoke(command, (vault_root,), {})
+    # The fallback rebuild runs off-boundary on a daemon thread, and since the
+    # interactive join became check-only this command no longer waits for it.
+    # Asserting straight after `invoke` is a race the rebuild usually wins and
+    # sometimes does not -- it lost on a loaded CI shard while passing every
+    # local run. Join the flight explicitly; that is what this seam is for.
+    graph_sync.await_active_rebuild(vault_root, state_root=custom_state)
 
     assert observed_roots == [custom_state]

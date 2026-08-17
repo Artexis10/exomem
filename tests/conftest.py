@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ import pytest
 from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
 from exomem import find as find_module
+from exomem import graph_sync as graph_sync_module
 from exomem import schema as schema_module
 from exomem import semantic_contract as semantic_contract_module
 
@@ -62,6 +65,77 @@ def _reset_corpus_context_cache():
     yield
     semantic_contract_module.reset_corpus_context_cache()
     activation_manifest_module.reset_manifest_cache()
+
+
+#: The single thread name every graph rebuild runs under, in both the
+#: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
+#: and the warming path (`epistemic_graph.schedule_background_rebuild`).
+_GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
+#: Generous: a rebuild over a test vault is milliseconds. A pass that cannot
+#: finish in 30 s has not been slow, it has wedged, and that is worth failing on
+#: rather than leaving for whichever test inherits it.
+_GRAPH_QUIESCE_TIMEOUT_SECONDS = 30.0
+
+
+def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -> None:
+    """Join every graph rebuild still running, and say so if one will not stop.
+
+    The clock is read only once there is something to wait for. This is autouse
+    teardown, so it runs after *every* test, and a test is entitled to replace
+    `time.monotonic` with a scripted sequence of its own -- one does. Charging
+    the empty case a clock read exhausted that sequence and failed the test in
+    teardown with `generator raised StopIteration`, from a fixture that had
+    nothing to drain.
+    """
+    deadline: float | None = None
+    while True:
+        alive = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == _GRAPH_REBUILD_THREAD_NAME and thread.is_alive()
+        ]
+        if not alive:
+            return
+        if deadline is None:
+            deadline = time.monotonic() + timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"{len(alive)} graph rebuild thread(s) did not finish within "
+                f"{timeout:.0f}s; a wedged rebuild must not be inherited by the next test"
+            )
+        for thread in alive:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+@pytest.fixture(autouse=True)
+def _quiesce_graph_rebuilds():
+    """Let no graph rebuild outlive the test that started it.
+
+    Production runs one long-lived process against one vault. The suite runs
+    many vaults through one process, and since an interactive write stopped
+    joining its rebuild (#576) that rebuild is a daemon thread which outlives
+    the request -- and therefore, here, the test. It then keeps touching
+    process-global projections (`find.unload_ram_caches`, the shared resolver
+    and corpus-context caches) while the *next* test is already running against
+    a different vault. That is not a race the production shape has; it is an
+    artefact of the suite's process sharing.
+
+    Draining at teardown restores the isolation the write's join used to
+    provide by accident, without putting that wait back on the write path.
+    `graph_sync` coordinators are dropped afterwards so a suite of thousands of
+    vaults does not retain one coordinator per vault for the whole run.
+
+    Deliberately not a convergence helper: a test that needs the graph to be
+    current asserts that for itself with `graph_sync.await_active_rebuild`.
+    This fixture only guarantees that nothing is still running.
+    """
+    yield
+    try:
+        _drain_graph_rebuild_threads()
+    finally:
+        with graph_sync_module._COORDINATORS_LOCK:
+            graph_sync_module._COORDINATORS.clear()
 
 
 @pytest.fixture(autouse=True)

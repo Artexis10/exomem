@@ -20,7 +20,13 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 from synth_vault import gen_dense_vault  # noqa: E402
 
-from exomem import find, freshness, semantic_contract, semantic_writes  # noqa: E402
+from exomem import (  # noqa: E402
+    find,
+    freshness,
+    graph_sync,
+    semantic_contract,
+    semantic_writes,
+)
 from exomem.vault import walk_vault_md  # noqa: E402
 
 DEFAULT_SIZES = (2_000, 8_000)
@@ -315,17 +321,36 @@ def measure_all(
         roots = [root / f"vault-{size}" for size in sizes]
         for vault_root in roots:
             vault_root.mkdir(parents=True)
-        return [
-            measure(vault_root, size, samples)
-            for vault_root, size in zip(roots, sizes, strict=True)
-        ]
+        try:
+            return [
+                measure(vault_root, size, samples)
+                for vault_root, size in zip(roots, sizes, strict=True)
+            ]
+        finally:
+            graph_sync.drain_active_rebuilds()
     with tempfile.TemporaryDirectory(prefix="exomem-write-latency-") as temp:
         base = Path(temp)
         results: list[dict[str, float | int]] = []
-        for size in sizes:
-            vault_root = base / f"vault-{size}"
-            vault_root.mkdir()
-            results.append(measure(vault_root, size, samples))
+        try:
+            for size in sizes:
+                vault_root = base / f"vault-{size}"
+                vault_root.mkdir()
+                results.append(measure(vault_root, size, samples))
+        finally:
+            # A write stopped joining its own graph rebuild (#576), so a rebuild
+            # is routinely still running here -- writing into a tree
+            # `TemporaryDirectory` is about to remove. On POSIX that removal
+            # races the rebuild and fails with "Directory not empty", which is
+            # how this gate reported a *cleanup* crash as a latency failure and
+            # sent a real Class C livelock in the same run past unread. Same
+            # boundary rule the CLI and the suite already apply: nothing
+            # outlives the vault it was building against.
+            if not graph_sync.drain_active_rebuilds():
+                print(
+                    "semantic-write-latency: a graph rebuild did not finish "
+                    "before teardown; measurements above stand, cleanup may not",
+                    file=sys.stderr,
+                )
         return results
 
 

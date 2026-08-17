@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -15,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import freshness, graph_sync, runtime_readiness
+from exomem import deferred_index, freshness, graph_sync, runtime_readiness
 from exomem import mutation_lock as mutation_lock_module
 from exomem import reconcile as reconcile_module
 from exomem import vault as vault_module
@@ -961,9 +962,17 @@ def test_immediate_checkpoint_successor_refreshes_without_full_rebuild(
     assert graph_sync.status(tmp_path)["state"] == "current"
 
 
-def test_failed_incremental_proof_registers_off_boundary_work_without_rebuilding(
+def test_failed_incremental_proof_queues_the_affected_paths_without_rebuilding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A failed proof records its debt durably, and records it proportionally.
+
+    The guarantee here has always been two-sided: never rebuild the vault under
+    writer authority, and never drop the work. `converge-graph-incrementally`
+    changes only *where* the second half is recorded. A whole-vault rebuild
+    registration used to be the receipt; the durable dirty-path queue is now,
+    and it names the affected paths instead of standing in for all of them.
+    """
     from exomem.epistemic_graph import EpistemicGraphIndex
 
     note = tmp_path / "Knowledge Base/Notes/Insights/deferred.md"
@@ -991,6 +1000,149 @@ def test_failed_incremental_proof_registers_off_boundary_work_without_rebuilding
 
     assert report["deferred"] == 1
     assert rebuilds == 0
+    assert registrations == []
+    assert [receipt.rel_path for receipt in deferred_index.snapshot_graph(tmp_path)] == [
+        note.relative_to(tmp_path).as_posix()
+    ]
+
+
+def test_an_enqueue_that_failed_still_earns_a_whole_vault_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queue that could not take the work does not get to own it.
+
+    The dispatch skips the whole-vault rebuild only because the durable queue
+    holds the repair. If the enqueue raised, nothing holds it, and claiming
+    otherwise would drop the work entirely -- strictly worse than the expensive
+    path this change replaces. The rebuild is the correct answer here.
+    """
+    from exomem.epistemic_graph import EpistemicGraphIndex
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/unqueued.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Unqueued\n", encoding="utf-8")
+    index = EpistemicGraphIndex(tmp_path)
+    required = _checkpoint(1)
+    graph_sync._write_checkpoint(tmp_path, required)
+    registrations: list[graph_sync.GraphSyncCheckpoint] = []
+
+    def refuse(*_args, **_kwargs):
+        raise sqlite3.OperationalError("queue unavailable")
+
+    monkeypatch.setattr(deferred_index, "add_graph", refuse)
+    monkeypatch.setattr(
+        graph_sync,
+        "register_rebuild",
+        lambda _root, checkpoint, _builder, **_kwargs: registrations.append(checkpoint),
+    )
+
+    report = index._refresh_paths_locked([note], graph_checkpoint=required)
+
+    assert report["deferred"] == 1
+    assert not report.get("queued")
+    assert registrations == [required]
+
+
+def test_a_queued_repair_is_not_rescheduled_as_a_whole_vault_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The queue owns the repair, so the dispatch must not schedule the vault.
+
+    A defer-classified bail-out enqueues the affected paths and registers no
+    rebuild. The layer above read that -- an unregistered, unacknowledged
+    checkpoint -- as a *missing* rebuild and registered one, so the expensive
+    path still ran on exactly the bail-outs this change exists to make
+    proportional, now with a queue beside it rather than instead of it.
+
+    `deferred` alone cannot carry this decision: `fallback()` registers its own
+    rebuild and reports `deferred` too. Only the enqueue that actually succeeded
+    may claim the queue owns the work.
+    """
+    from exomem import writer_lease
+    from exomem.epistemic_graph import EpistemicGraphIndex, upsert_after_write
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/queued.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Queued\n", encoding="utf-8")
+    required = _checkpoint(1)
+    graph_sync._write_checkpoint(tmp_path, required)
+    registrations: list[graph_sync.GraphSyncCheckpoint] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "register_rebuild",
+        lambda _root, checkpoint, _builder, **_kwargs: registrations.append(checkpoint),
+    )
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_graph_sync_predecessor_available",
+        lambda _self, _checkpoint: True,
+    )
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "refresh_paths",
+        lambda _self, *_args, **_kwargs: {
+            "indexed_files": 0,
+            "nodes": 0,
+            "edges": 0,
+            "deferred": 1,
+            "queued": 1,
+        },
+    )
+    # Inside a mutation request, whose terminal can carry `pending`.
+    monkeypatch.setattr(writer_lease, "active_mutation_request_id", lambda: "request-1")
+
+    result = upsert_after_write(tmp_path, [note])
+
+    assert (result.outcome, result.code) == ("deferred", "graph_repair_queued")
+    assert registrations == []
+
+
+def test_a_standalone_caller_still_gets_a_converged_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deferring is only honest for a caller that can report `pending`.
+
+    A direct library caller returns a leaf result with nowhere to put a graph
+    outcome, and its contract has always been a converged graph -- which is why
+    the standalone join exists. Deferring for it does not merely under-report:
+    it changes what the next call in the same process observes. Ten governance
+    and deletion-lineage tests failed on exactly that, because the operation
+    after a delete read a graph that used to be current by the time it ran.
+    """
+    from exomem.epistemic_graph import EpistemicGraphIndex, upsert_after_write
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/standalone.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Standalone\n", encoding="utf-8")
+    required = _checkpoint(1)
+    graph_sync._write_checkpoint(tmp_path, required)
+    registrations: list[graph_sync.GraphSyncCheckpoint] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "register_rebuild",
+        lambda _root, checkpoint, _builder, **_kwargs: registrations.append(checkpoint),
+    )
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_graph_sync_predecessor_available",
+        lambda _self, _checkpoint: True,
+    )
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "refresh_paths",
+        lambda _self, *_args, **_kwargs: {
+            "indexed_files": 0,
+            "nodes": 0,
+            "edges": 0,
+            "deferred": 1,
+            "queued": 1,
+        },
+    )
+
+    # No active mutation request: this is the standalone library path.
+    result = upsert_after_write(tmp_path, [note])
+
+    assert result.code != "graph_repair_queued"
     assert registrations == [required]
 
 

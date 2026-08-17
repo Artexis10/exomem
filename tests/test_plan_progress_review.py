@@ -12,7 +12,6 @@ a score. Divergence is exact integers, and adjudication stays with the human.
 
 from __future__ import annotations
 
-import hashlib
 import re
 import shutil
 from collections.abc import Mapping
@@ -20,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from canonical_snapshot import canonical_digests
 
 RECORDS_ID = "49622075-9ff4-4660-9ab7-414854b5bca2"
 PLANNING_ID = "2db90f18-70df-4e41-986e-2d7d7db1caca"
@@ -405,11 +405,16 @@ def _seed_pinned_trio(root: Path) -> dict[str, str]:
 
 
 def _digest(root: Path) -> dict[str, str]:
-    return {
-        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(root.rglob("*"))
-        if path.is_file()
-    }
+    """Hash the vault's canonical bytes, ignoring derived-index residue.
+
+    A graph rebuild running behind the request creates and removes
+    `.graph-rebuild-<digest>.sqlite` and its SQLite companions inside the
+    vault. Those are not canonical bytes, and since a write stopped joining its
+    rebuild (#576) one can simply be in flight while this census runs -- so
+    counting them makes "the review changed nothing" fail for a reason that has
+    nothing to do with the review.
+    """
+    return canonical_digests(root)
 
 
 def _walk(payload: Any, key: Any = None) -> Any:

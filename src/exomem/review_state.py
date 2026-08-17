@@ -133,9 +133,17 @@ class ReviewStateStore:
     def load(self) -> dict[str, Any]:
         if not self.path.exists():
             return {"version": SCHEMA_VERSION, "records": {}}
+        from . import vault
+
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            # Not `read_text`: on Windows an ordinary open pins this file
+            # against replacement while it is held, so a status poll or a
+            # review-context read overlapping a triage write refused that write
+            # with WinError 32 and surfaced it as a bare 500. Review state is
+            # derived bookkeeping, not a canonical record whose exact bytes a
+            # reader has verified and must hold still.
+            payload = json.loads(vault.read_bytes_without_pinning(self.path).decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"REVIEW_STATE_INVALID: cannot read {self.path}: {exc}") from exc
         if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
             raise ValueError(
@@ -249,6 +257,8 @@ class ReviewStateStore:
         }
 
     def _write(self, payload: dict[str, Any]) -> None:
+        from . import vault
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(
             prefix=f".{STATE_FILENAME}.", suffix=".tmp", dir=self.path.parent
@@ -259,7 +269,13 @@ class ReviewStateStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp_name, self.path)
+            # A reader that has not yet let go is a wait, not a failure. Only
+            # readers can be concurrent here -- writes to review state run
+            # under the writer lease -- so there is no precondition that the
+            # wait could invalidate, and nothing to re-prove afterwards.
+            vault.replace_tolerating_transient_sharing(
+                lambda: os.replace(temp_name, self.path)
+            )
         except Exception:
             try:
                 os.unlink(temp_name)
