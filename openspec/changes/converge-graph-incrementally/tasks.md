@@ -215,6 +215,16 @@ time. Reachable today on every path that already rebuilds off the write path.
 - [ ] 6.3 Full suite green; latency gate still green.
 - [ ] 6.4 Live acceptance run explicitly; consumer grep repeated for the seams this
   phase touched.
+  Consumer grep done for the seams 5.10 moved: no production code branches on
+  `GRAPH_SYNC_REBUILD_IN_PROGRESS` (only the two tests asserting the rebuild path), no
+  doc, deploy manifest, or hosted plugin references the graph codes, and the generated
+  capabilities doc is current — this is a response contract, not a tool schema, so the
+  pinned surface digests do not move (confirmed, not assumed).
+  The acceptance script's graph vocabulary is now pinned by a CI test that drives the real
+  emitters, closing the gap that let a correct bounded write look like an acceptance
+  regression: a fourth outcome the server can emit but the validator rejects now fails in
+  CI rather than in an operator's hands. The live run itself still needs a deployed
+  endpoint and its deployment identity arguments, so it stays open here.
 
 ## 7. Phase 3 — availability fence, conditional on measurement
 

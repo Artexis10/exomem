@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from exomem import mutation_terminal
+from exomem import graph_sync, mutation_terminal
 
 _SCRIPT = Path(__file__).parents[1] / "scripts" / "records_live_acceptance.py"
 _SPEC = importlib.util.spec_from_file_location("records_live_acceptance", _SCRIPT)
@@ -20,6 +20,36 @@ _SPEC.loader.exec_module(live)
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+_GRAPH_CHECKPOINT = graph_sync.GraphSyncCheckpoint.create(
+    generation=1,
+    mutation_id="0123456789abcdef01234567",
+    paths=(),
+    created_paths=(),
+    scope="full",
+)
+
+
+@pytest.mark.parametrize(
+    "build_outcome",
+    [
+        graph_sync.committed_graph_pending,
+        graph_sync.committed_graph_queued,
+        graph_sync.committed_graph_failure,
+    ],
+    ids=["pending_rebuild", "pending_queued", "failed"],
+)
+def test_acceptance_accepts_every_graph_outcome_the_server_can_emit(build_outcome) -> None:
+    """This script is not in CI, so its graph vocabulary drifts silently.
+
+    An outcome the server emits and this validator rejects fails only when an
+    operator runs it against a real build -- which is exactly how a correct
+    bounded write once looked like an acceptance regression. Driving the real
+    emitters rather than restating their payloads here means a new outcome
+    cannot be added without this failing first.
+    """
+    live._validate_compact_graph_outcome("revise", build_outcome(_GRAPH_CHECKPOINT))
 
 
 def _hmac(value: str) -> str:
