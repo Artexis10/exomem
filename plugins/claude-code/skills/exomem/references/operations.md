@@ -244,13 +244,29 @@ None.
 
 ### Inputs to gather
 - The raw content (pasted text, URL, file reference, conversation excerpt)
-- Source type — usually inferable: pasted transcript → `Sessions/`; URL or article body → `Articles/`; book excerpt → `Books/`; academic paper → `Papers/`; a video transcript → `Videos/` with `url` set. Ask only if ambiguous.
+- **Source kind** (`source_kind`, also accepted as `source_type`) — what the
+  artifact *is*, usually inferable: pasted transcript → `session`; URL or article
+  body → `article`; book excerpt → `book`; academic paper → `paper`; video
+  transcript → `video` with `url` set; a compiled investigation → `research-report`;
+  a bill or order confirmation → `invoice-receipt`; an authority's published
+  guidance → `official-guidance`; a data dump → `dataset-export`. The vocabulary
+  is **open**: if the right label is not listed, use it anyway — Exomem registers
+  it. Ask only if genuinely ambiguous.
+- **Domain** (`domain`, optional) — what the artifact is *about*, on an axis
+  independent of kind: `travel`, `health`, `finance`, `equipment`, `software`, or
+  anything else the user's world actually contains. Equally open.
+- **Projects** (`projects`, optional) — the work this source serves. A source may
+  serve several, and this never changes where it is filed.
 - Display title, plus an optional explicit lowercase ASCII `slug` when the
   caller wants to control the portable filename
-- Optional: tags, why-captured one-liner
+- Optional: tags, why-captured one-liner. Tags are secondary labels — do not use
+  them to carry kind, domain, or project, which have their own arguments.
 
 ### Procedure
-1. Determine source type and target subfolder.
+1. Classify the kind and, when it is clear, the domain. The destination follows
+   deterministically as `Sources/<Kind>/[<Domain>/]` — do not choose a folder
+   directly. Fall back to `other` only when the kind genuinely cannot be
+   determined; `other` means low confidence, never a missing label.
 2. Generate filename: `YYYY-MM-DD-<slug>.md` where slug is dash-separated
    lowercase ASCII, ≤ 100 chars. An explicit `slug` controls only the filename;
    the Unicode display title is stored unchanged.
@@ -258,6 +274,11 @@ None.
 4. Body: `# <Title>` → `> brief description` → `## Capture` (raw content) → `## Why captured` (one or two sentences).
 5. Update `Sources/index.md` with a new line.
 6. Report path written and offer: "Compile a note from this?"
+7. If the result carries a `structure_suggestion` of kind
+   `source_classification_debt`, a run of material has been landing in the
+   catch-all. Surface a `strong` one in the user's own language and offer to
+   start filing that pattern under a real kind; use judgement on a `moderate`
+   one, and do not repeat the same advice within one conversation.
 
 ### Edge cases
 - **Duplicate URL.** If a source with the same URL already exists, surface it and ask whether to capture again or link to the existing one.
@@ -265,8 +286,10 @@ None.
 - **Sensitive content.** If the source contains anything that looks like credentials, API keys, or unrelated PII: refuse capture, surface the issue, ask for a cleaned re-paste.
 
 ### Writes performed
-- One new file in `Sources/<type>/`
+- One new file in `Sources/<Kind>/[<Domain>/]`
 - One updated `Sources/index.md`
+- `_Schema/source-taxonomy.yaml` and `_Schema/project-keys.yaml` gain an entry
+  when the capture introduced a new kind, domain, or project key
 
 ---
 

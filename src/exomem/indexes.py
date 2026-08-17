@@ -11,6 +11,7 @@ The caller batches them with the source file into a single atomic write.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ from .vault import (
     read_guarded_text,
     render_wikilinks_for_vault,
 )
+
+log = logging.getLogger(__name__)
 
 RECENT_ACTIVITY_CAP = 50
 
@@ -90,6 +93,7 @@ def compute_updates(
         counts=counts,
         date_iso=date_iso,
         rel_source_path=rel_source_path,
+        vault_root=vault_root,
     )
 
     top_index_new, trim_note = _update_top_index(
@@ -177,6 +181,7 @@ def _update_sources_index(
     counts: dict[str, int],
     date_iso: str,
     rel_source_path: str,
+    vault_root: Path | None = None,
 ) -> str:
     """Bump the By-type count row and prepend a Recent-captures bullet.
 
@@ -188,9 +193,39 @@ def _update_sources_index(
         folder_title=folder_title,
         folder_description=folder_description,
         counts=counts,
+        vault_root=vault_root,
     )
     text = _prepend_recent_capture(text, date_iso=date_iso, rel_source_path=rel_source_path)
     return text
+
+
+#: Descriptions for the folders that existed before the source taxonomy became
+#: an open vocabulary, kept verbatim so upgrading never rewrites an existing
+#: index row. Everything beyond these is described by the taxonomy registry, so
+#: a kind Exomem never shipped still gets a real description — this table is no
+#: longer a vocabulary, and nothing should be added to it.
+_LEGACY_FOLDER_DESCRIPTIONS: dict[str, str] = {
+    "Articles": "captured web/PDF content",
+    "Sessions": "pasted Claude/conversation transcripts",
+    "Books": "book notes/excerpts",
+    "Papers": "academic papers",
+    "Videos": "captured video transcripts/notes",
+    "Other": "miscellaneous captures",
+    "Imported": "copied legacy-vault material with provenance",
+}
+
+
+def _registry_descriptions(vault_root: Path | None) -> dict[str, str]:
+    """Registry-declared folder descriptions; never fails an index write."""
+    if vault_root is None:
+        return {}
+    try:
+        from .source_taxonomy import load_taxonomy
+
+        return load_taxonomy(vault_root).category_descriptions()
+    except Exception:  # noqa: BLE001 — a description is never worth a failed write
+        log.debug("source-taxonomy descriptions unavailable", exc_info=True)
+        return {}
 
 
 def _replace_by_type_section(
@@ -199,18 +234,12 @@ def _replace_by_type_section(
     folder_title: str,
     folder_description: str,
     counts: dict[str, int],
+    vault_root: Path | None = None,
 ) -> str:
     """Rewrite the entire By-type list from disk counts so we don't drift."""
     rows: list[str] = []
-    known_descriptions = {
-        "Articles": "captured web/PDF content",
-        "Sessions": "pasted Claude/conversation transcripts",
-        "Books": "book notes/excerpts",
-        "Papers": "academic papers",
-        "Videos": "captured video transcripts/notes",
-        "Other": "miscellaneous captures",
-        "Imported": "copied legacy-vault material with provenance",
-    }
+    known_descriptions = dict(_registry_descriptions(vault_root))
+    known_descriptions.update(_LEGACY_FOLDER_DESCRIPTIONS)
     if folder_title not in known_descriptions:
         known_descriptions[folder_title] = folder_description
 
@@ -697,8 +726,9 @@ def compute_subindex_writes(
             new = _replace_by_type_section(
                 base,
                 folder_title="Articles",
-                folder_description="captured web/PDF content",
+                folder_description=_LEGACY_FOLDER_DESCRIPTIONS["Articles"],
                 counts=sources_counts,
+                vault_root=vault_root,
             )
             new = render_wikilinks_for_vault(new, vault_root)
             if include_unchanged or new != base:

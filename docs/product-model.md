@@ -31,7 +31,7 @@ make a user choose.
 
 | Layer | Meaning |
 | --- | --- |
-| Sources | Externally received raw material. |
+| Sources | Externally received raw material, classified by an open `source_kind` and `domain`. |
 | Evidence | Proof-bearing artifacts for a case, claim, compliance need, warranty, dispute, or provenance-sensitive history. |
 | Notes | Compiled conclusions, decisions, research, insights, patterns, failures, experiments, and productions. |
 | Entities | Stable reusable identities: people, organisations, concepts, assets, libraries, and decisions. |
@@ -48,6 +48,28 @@ Planning may point to Records as observed evidence, but neither layer mirrors th
 other or infers progress, completion, medical conclusions, or personal judgment.
 
 See [Records](records.md) for the manual-first collection contract.
+
+### Source classification is metadata; the folder is a projection
+
+A captured source carries three independent axes. `source_kind` says what the
+artifact **is**, `domain` says what it is **about**, and `projects` says which
+work it serves. Kind and domain are **open vocabularies**: any slug-shaped label
+is accepted and registers itself in `_Schema/source-taxonomy.yaml` on first use,
+so a category nobody anticipated needs no release and no migration. `projects`
+is multi-valued, because one source often serves several pieces of work.
+
+The directory a source lands in is **derived** from the validated kind and
+domain — `Sources/<Kind>/[<Domain>/]` — not the other way round. The folder tree
+is a browsing projection of the metadata, never the ontology, and it is capped at
+two levels. Projects deliberately never appear in the path.
+
+`other` is the honest low-confidence fallback: it records that the kind could not
+be determined. It is not the place to put material whose kind is obvious but
+whose label happens to be unfamiliar. When captures keep landing in `other`
+inside one domain, Exomem surfaces an advisory `source_classification_debt`
+suggestion and leaves the decision to you; it never reorganises anything on its
+own. Classification applies at capture time only — sources captured before a
+label existed stay valid, readable, and retrievable exactly where they are.
 
 Compiled notes use visible typed Markdown for directional note-level edges:
 

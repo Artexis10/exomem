@@ -39,11 +39,17 @@ losslessly; the server never guesses a language, pronunciation, or translation.
 
 | Field | Required | Notes |
 |---|---|---|
-| `source_type` | yes | `article`, `session`, `book`, `paper`, `video`, `other` |
+| `source_type` | yes | what the artifact **is**, as a slug-shaped key registered in `_Schema/source-taxonomy.yaml`; unknown keys **auto-register on first use** (typo-guarded). An open set, not a closed enum — e.g. `article`, `session`, `book`, `paper`, `video`, `research-report`, `official-guidance`, `correspondence`, `invoice-receipt`, `dataset-export`, `other`. Also accepted as the argument name `source_kind` |
+| `domain` | optional | what the artifact is **about**, on an axis independent of `source_type`; same open, auto-registering vocabulary — e.g. `travel`, `health`, `finance`, `equipment`, `software` |
+| `projects` | optional | list of project keys this source serves; a source may serve several, and this never affects where it is filed |
 | `captured` | yes | ISO date — same as `created` for sources |
-| `url` | conditional | required for articles, videos, papers |
+| `url` | conditional | required for kinds whose registry entry sets `requires_url`, which ships true for `article`, `paper`, `video` |
 | `author` | optional | |
 | `ingested_into` | yes | list of wikilinks to compiled notes that cite this; starts as `[]` |
+
+`other` is a **low-confidence fallback**: use it when the kind genuinely cannot
+be determined, never because no listed label matches. Naming a kind Exomem has
+not seen before is normal and requires no setup.
 
 ### research-note
 

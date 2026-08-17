@@ -457,6 +457,36 @@
           "default": null,
           "description": "Semantic-unit kind shortcuts, such as decision or claim."
         },
+        "source_kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source-kind filters — what the artifact IS. Open vocabulary, so any registered or previously used key is valid."
+        },
+        "domains": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Subject-domain filters — what the artifact is ABOUT. Independent of source_kinds and equally open."
+        },
         "relations": {
           "anyOf": [
             {
@@ -676,7 +706,7 @@
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -701,9 +731,16 @@
           "description": "Optional lowercase ASCII kebab-case filename component."
         },
         "source_type": {
-          "default": "other",
-          "description": "article, session, book, paper, video, or other.",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the artifact IS. Same axis as source_kind; supply either one. Open vocabulary, not a closed set."
         },
         "url": {
           "anyOf": [
@@ -715,7 +752,7 @@
             }
           ],
           "default": null,
-          "description": "Required for article, paper, or video sources."
+          "description": "Required for kinds that declare it, such as article, paper, video."
         },
         "tags": {
           "anyOf": [
@@ -730,7 +767,7 @@
             }
           ],
           "default": null,
-          "description": "Lowercase tags."
+          "description": "Lowercase tags. Secondary labels only — do not use them to carry source kind, domain, or project, which have their own arguments."
         },
         "why_captured": {
           "anyOf": [
@@ -760,6 +797,45 @@
           ],
           "default": null,
           "description": "Optional title hint for the compilation proposal."
+        },
+        "source_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the artifact IS, as a lowercase slug. Preferred name for the same axis as source_type; supplying both with different values is refused. Name the kind you actually mean even when it is unfamiliar; use 'other' only when the kind genuinely cannot be determined, never because no listed label matches."
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the artifact is ABOUT, as a lowercase slug, independent of source_kind and equally extensible."
+        },
+        "projects": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Project keys this source serves. Never affects where it is stored; one source may serve several projects."
         },
         "response_detail": {
           "default": "compact",

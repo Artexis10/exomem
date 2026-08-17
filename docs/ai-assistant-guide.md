@@ -131,7 +131,16 @@ Agent behavior:
 
 1. Use `capture_source` for the raw article or excerpt.
 2. Keep the URL and capture rationale.
-3. Offer to compile a note only if there is a durable conclusion to extract.
+3. Classify on two independent open axes: `source_kind` is what the artifact
+   **is** (`research-report`, `invoice-receipt`, `field-notebook`), `domain` is
+   what it is **about** (`travel`, `marine-biology`). Neither is a closed list —
+   an unfamiliar but meaningful label is accepted and registers itself, so name
+   the label you actually mean instead of falling back. Add `projects` for the
+   work it serves; a source can serve several, and projects never affect where
+   it is stored.
+4. Reserve `other` for material whose kind you genuinely could not determine.
+   It means low confidence, not "no label exists for this".
+5. Offer to compile a note only if there is a durable conclusion to extract.
 
 For one observation or rich unit, use `observe_memory` rather than page-wide
 string editing. For reviewed creation, validate first and commit the unchanged

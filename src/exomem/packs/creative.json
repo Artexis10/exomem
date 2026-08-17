@@ -46,6 +46,18 @@
       "example": "Turn this draft into a production log."
     }
   ],
+  "suggested_source_kinds": [
+    "article",
+    "video",
+    "webpage-snapshot",
+    "session",
+    "book"
+  ],
+  "suggested_domains": [
+    "media",
+    "photography",
+    "research"
+  ],
   "primitives": [
     "source",
     "asset",

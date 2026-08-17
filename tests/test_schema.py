@@ -12,23 +12,44 @@ from exomem import schema
 
 
 def test_parses_real_schema_docs(source_schema: schema.SourceSchema) -> None:
-    assert "article" in source_schema.source_types
-    assert "session" in source_schema.source_types
-    assert "book" in source_schema.source_types
-    assert "paper" in source_schema.source_types
-    assert "video" in source_schema.source_types
-    assert "other" in source_schema.source_types
-
     assert "source_type" in source_schema.required_fields
     assert "captured" in source_schema.required_fields
 
-    # url is conditional on article/paper/video per the spec
-    assert "article" in source_schema.conditional_url_types
-    assert "video" in source_schema.conditional_url_types
-    assert "paper" in source_schema.conditional_url_types
-
     assert "Sources/" in source_schema.location_pattern
     assert "YYYY-MM-DD" in source_schema.naming_pattern
+
+
+def test_shipped_kinds_are_a_sample_not_a_whitelist(
+    source_schema: schema.SourceSchema,
+) -> None:
+    """`source_types` reports the shipped defaults; it no longer gates anything.
+
+    The vocabulary used to be scraped out of a markdown table with a token
+    pattern that could not express a hyphen, which is why a multi-word kind was
+    impossible and clearly classifiable material was forced into `other`. It now
+    comes from `source_taxonomy`, so the doc is documentation again.
+    """
+    for legacy in ("article", "session", "book", "paper", "video", "other"):
+        assert legacy in source_schema.source_types
+    # Kinds the old markdown scrape could not have represented at all.
+    assert "research-report" in source_schema.source_types
+    assert "invoice-receipt" in source_schema.source_types
+
+
+def test_validate_source_does_not_gate_the_kind_vocabulary(
+    source_schema: schema.SourceSchema,
+) -> None:
+    """A previously unseen kind is not a schema violation."""
+    assert (
+        schema.validate_source(
+            source_schema,
+            content="x",
+            source_type="field-notebook",
+            title="t",
+            url=None,
+        )
+        is None
+    )
 
 
 def test_raises_when_schema_doc_missing(tmp_path: Path) -> None:
@@ -50,33 +71,39 @@ def test_validate_source_accepts_valid_article(
     assert err is None
 
 
-def test_validate_source_rejects_unknown_type(
+def test_validate_source_rejects_missing_url_when_the_kind_requires_one(
     source_schema: schema.SourceSchema,
 ) -> None:
-    err = schema.validate_source(
-        source_schema,
-        content="x",
-        source_type="bogus",
-        title="t",
-        url=None,
-    )
-    assert err is not None
-    assert err.code == "INVALID_SOURCE"
-    assert "source_type" in err.missing
+    """URL conditionality is the resolved kind's own declared requirement.
 
-
-def test_validate_source_rejects_article_without_url(
-    source_schema: schema.SourceSchema,
-) -> None:
+    It used to be scraped from prose and hard-coded to three tokens, which
+    reserved the property to three built-ins.
+    """
     err = schema.validate_source(
         source_schema,
         content="x",
         source_type="article",
         title="t",
         url=None,
+        requires_url=True,
     )
     assert err is not None
     assert "url" in err.missing
+
+
+def test_validate_source_allows_missing_url_when_the_kind_does_not_require_one(
+    source_schema: schema.SourceSchema,
+) -> None:
+    assert (
+        schema.validate_source(
+            source_schema,
+            content="x",
+            source_type="correspondence",
+            title="t",
+            url=None,
+        )
+        is None
+    )
 
 
 def test_validate_source_rejects_empty_content(
