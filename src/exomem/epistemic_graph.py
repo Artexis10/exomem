@@ -1314,22 +1314,43 @@ class EpistemicGraphIndex:
                 self._reconcile_recall_publication()
                 continue
             try:
-                epoch = graph_sync.publication_epoch(self.vault_root)
+                # Sampled *under* the canonical boundary, not beside it (#576).
+                #
+                # A canonical batch installs the floor before the checkpoint, so
+                # a sample taken mid-batch sees a floor whose checkpoint has not
+                # landed and classifies the lineage as incoherent. The retry
+                # below already knew this -- it coalesces through this exact
+                # boundary and tries again -- but a retry only narrows the
+                # window, and once writes stopped joining their rebuild the
+                # window is open on essentially every write. Exhausting the
+                # attempts then raises GRAPH_SYNC_LINEAGE_CONFLICT out of a
+                # rebuild that had nothing wrong with it.
+                #
+                # Taking the boundary for the sample closes the window instead
+                # of narrowing it. It is O(1) bounded reads of two small
+                # artifacts -- the same shape and cost as the coalesce hold it
+                # supersedes -- and it cannot deadlock, because the write path
+                # no longer waits on this thread in either direction.
+                with self._canonical_mutation_coordinator().hold(
+                    operation="epistemic_graph_sample_epoch", holder_kind="graph"
+                ):
+                    epoch = graph_sync.publication_epoch(self.vault_root)
+                    required = epoch.checkpoint
+                    prior_acknowledgement = (
+                        self._live_acknowledged_checkpoint() if required is None else None
+                    )
             except graph_sync.GraphEpochIncoherent as error:
                 epoch_error = error
-                # A canonical batch installs floor before checkpoint. Coalesce
-                # once through the same boundary so a writer already in that
-                # window can finish before the next bounded epoch sample.
+                # Retained for the sample that is incoherent for a reason the
+                # boundary cannot settle -- a genuinely broken lineage rather
+                # than a writer mid-batch. Coalescing once and retrying keeps
+                # that case exactly as it was.
                 with self._canonical_mutation_coordinator().hold(
                     operation="epistemic_graph_coalesce_epoch", holder_kind="graph"
                 ):
                     pass
                 continue
             epoch_error = None
-            required = epoch.checkpoint
-            prior_acknowledgement = (
-                self._live_acknowledged_checkpoint() if required is None else None
-            )
             temporary = graph_sync.temporary_sidecar_path(
                 live,
                 required
@@ -2258,7 +2279,7 @@ class EpistemicGraphIndex:
             if not recall_policy.is_recall_candidate(self.vault_root, path):
                 return False
             try:
-                raw = path.read_bytes().decode("utf-8")
+                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
                 current = _source_signature(path, raw)
             except (OSError, UnicodeDecodeError):
                 return False
@@ -2323,7 +2344,7 @@ class EpistemicGraphIndex:
         for rel in sorted(expected_membership):
             path = self.vault_root / rel
             try:
-                raw_bytes = path.read_bytes()
+                raw_bytes = vault_module.read_bytes_without_pinning(path)
                 raw = raw_bytes.decode("utf-8")
                 source_signature = _source_signature(path, raw)
                 source_mtime = path.stat().st_mtime
@@ -2491,7 +2512,7 @@ class EpistemicGraphIndex:
         for rel in sorted(indexed_paths - changed_rels):
             path = self.vault_root / rel
             try:
-                raw = path.read_bytes().decode("utf-8")
+                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
                 scanned_versions[rel] = _source_signature(path, raw)
             except (OSError, UnicodeDecodeError):
                 return None
@@ -2630,7 +2651,12 @@ class EpistemicGraphIndex:
                     return fallback("path_outside_vault")
                 try:
                     expected_paths.append(
-                        (rel, vault_module.content_hash(path.read_bytes().decode("utf-8")))
+                        (
+                            rel,
+                            vault_module.content_hash(
+                                vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                            ),
+                        )
                     )
                 except (OSError, UnicodeDecodeError):
                     return fallback("path_unreadable")
@@ -3059,7 +3085,7 @@ class EpistemicGraphIndex:
             self._delete_path(conn, rel, commit=commit)
             return False
         try:
-            raw_bytes = path.read_bytes()
+            raw_bytes = vault_module.read_bytes_without_pinning(path)
             raw = raw_bytes.decode("utf-8")
             source_signature = _source_signature(path, raw)
         except (OSError, UnicodeDecodeError):
@@ -3098,7 +3124,7 @@ class EpistemicGraphIndex:
             # transaction: do not momentarily publish rows for bytes that are
             # now raw Records (or merely newer ordinary content).
             try:
-                current = path.read_bytes().decode("utf-8")
+                current = vault_module.read_bytes_without_pinning(path).decode("utf-8")
                 current_signature = _source_signature(path, current)
             except (OSError, UnicodeDecodeError):
                 self._delete_path(conn, rel, commit=commit)
@@ -4389,7 +4415,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     for md in find_module._walk_md(kb):
         try:
             rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
-            raw = md.read_bytes().decode("utf-8")
+            raw = vault_module.read_bytes_without_pinning(md).decode("utf-8")
         except (OSError, ValueError, UnicodeDecodeError):
             continue
         disk_paths.add(rel)
@@ -5228,7 +5254,7 @@ def _current_unit_parent_paths(
             )
             continue
         try:
-            source = path.read_text(encoding="utf-8")
+            source = vault_module.read_bytes_without_pinning(path).decode("utf-8")
         except FileNotFoundError:
             drift_counts["missing_parent"] = drift_counts.get("missing_parent", 0) + 1
             continue

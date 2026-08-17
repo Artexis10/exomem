@@ -1465,12 +1465,7 @@ class _BatchWorkspace:
                 os.close(descriptor)
             raise
 
-    def replace_artifact(self, artifact: _WorkspaceArtifact, final: Path) -> PathIdentity:
-        self.recheck()
-        artifact.recheck()
-        identity = artifact.identity
-        if os.name == "nt":  # pragma: no cover - Windows does not replace open CRT files
-            artifact.close()
+    def _replace_once(self, artifact: _WorkspaceArtifact, final: Path) -> None:
         if os.replace in getattr(os, "supports_dir_fd", set()):
             os.replace(
                 artifact.name,
@@ -1480,6 +1475,31 @@ class _BatchWorkspace:
             )
         else:  # pragma: no cover - Windows fallback
             os.replace(artifact.path, final)
+
+    def replace_artifact(self, artifact: _WorkspaceArtifact, final: Path) -> PathIdentity:
+        self.recheck()
+        artifact.recheck()
+        identity = artifact.identity
+        if os.name == "nt":  # pragma: no cover - Windows does not replace open CRT files
+            artifact.close()
+        for attempt in range(_REPLACE_SHARING_ATTEMPTS):
+            try:
+                self._replace_once(artifact, final)
+                break
+            except PermissionError as error:
+                if (
+                    os.name != "nt"
+                    or getattr(error, "winerror", None) not in _WINDOWS_SHARING_ERRORS
+                    or attempt == _REPLACE_SHARING_ATTEMPTS - 1
+                ):
+                    raise
+                time.sleep(_REPLACE_SHARING_SLEEP_SECONDS)
+                # Re-pin the workspace directory on every attempt so waiting out
+                # a reader never widens the window this guard covers. The
+                # artifact itself is already closed on Windows and its identity
+                # was proved immediately above, and the mutation boundary is
+                # held throughout, so no other governed writer can intervene.
+                self.recheck()
         artifact.close()
         self.artifacts.pop(artifact.name)
         return identity
@@ -1889,6 +1909,90 @@ def _recheck_rollback_directory_guards(
         guarded_directory = Path(vault_root) / guard.target
         if final_parent == os.path.abspath(guarded_directory):
             guard.recheck(vault_root, allowed_changes=allowed_changes)
+
+
+#: Windows refuses `os.replace` onto a target another handle holds open without
+#: FILE_SHARE_DELETE (ERROR_SHARING_VIOLATION, 32) and reports
+#: ERROR_ACCESS_DENIED (5) for a target already marked delete-pending. Both are
+#: *transient by nature*: the holder is a reader that closes microseconds later.
+#:
+#: exomem's own derived-index readers no longer pin canonical pages -- see
+#: `read_bytes_without_pinning` -- but this writer cannot assume it is the only
+#: process on a user's vault. Obsidian, OneDrive, a backup agent and an
+#: antivirus scanner all open Markdown files, and on Windows any one of them
+#: turns an ordinary governed write into RECORD_PUBLICATION_FAILED. Waiting out
+#: a transient reader is the correct platform accommodation, not a workaround.
+#:
+#: ~200 ms of total patience: long enough that no realistic reader outlives it,
+#: short enough that a genuinely pinned file still fails inside the request
+#: rather than hanging it. POSIX never enters the loop -- `rename(2)` over an
+#: open file is always permitted -- so this costs nothing there.
+_WINDOWS_SHARING_ERRORS = frozenset({5, 32})
+_REPLACE_SHARING_ATTEMPTS = 20
+_REPLACE_SHARING_SLEEP_SECONDS = 0.01
+
+
+def read_bytes_without_pinning(path: Path) -> bytes:
+    """Read a canonical file without blocking a concurrent replacement of it.
+
+    Python's Windows `open()` requests FILE_SHARE_READ | FILE_SHARE_WRITE and
+    omits FILE_SHARE_DELETE, so for as long as the file is open an `os.replace`
+    onto it is refused with WinError 32. That is the right trade for a
+    *canonical* reader, which has verified a path and must pin what it verified.
+
+    It is the wrong trade for a **derived-index** reader. A graph or embedding
+    rebuild is building a cache from canonical bytes; it already re-proves the
+    source versions it read (`_source_versions_current`) and treats a page that
+    moved under it as a reason to discard the pass. Pinning buys it nothing, and
+    costs it this: a rebuild sweeping the corpus makes every concurrent write to
+    a page it happens to be reading fail, which surfaced as WinError 32 on
+    `log.md` and `_collection.md` the moment writes stopped joining their
+    rebuild (#576).
+
+    POSIX has no equivalent restriction -- `rename(2)` over an open file is
+    always permitted -- so there this is exactly `path.read_bytes()`.
+    """
+    if os.name != "nt":
+        return path.read_bytes()
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # SHARE_READ | SHARE_WRITE | SHARE_DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080,  # FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        error = ctypes.get_last_error()
+        # Preserve the exception types every caller of `read_bytes()` already
+        # handles; a derived-index reader treats a vanished page as absent, not
+        # as an unclassified OS failure.
+        if error in {2, 3}:
+            raise FileNotFoundError(error, "no such file", str(path))
+        raise ctypes.WinError(error)
+    import msvcrt
+
+    # `open_osfhandle` transfers ownership: closing the descriptor closes the
+    # handle, so there is no path here that leaks it.
+    descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    with os.fdopen(descriptor, "rb") as stream:
+        return stream.read()
 
 
 #: Derived-index operational artifacts that live beside canonical content in a

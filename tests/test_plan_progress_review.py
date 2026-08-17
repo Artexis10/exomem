@@ -21,6 +21,8 @@ from typing import Any
 
 import pytest
 
+from exomem import vault as vault_module
+
 RECORDS_ID = "49622075-9ff4-4660-9ab7-414854b5bca2"
 PLANNING_ID = "2db90f18-70df-4e41-986e-2d7d7db1caca"
 RECORDS_REF = f"exomem://memory/{RECORDS_ID}"
@@ -405,10 +407,24 @@ def _seed_pinned_trio(root: Path) -> dict[str, str]:
 
 
 def _digest(root: Path) -> dict[str, str]:
+    """Hash the vault's canonical bytes, ignoring derived-index residue.
+
+    A graph rebuild running behind the request creates and removes
+    `.graph-rebuild-<digest>.sqlite` and its SQLite companions inside the
+    vault. Those are not canonical bytes, and since a write stopped joining its
+    rebuild (#576) one can simply be in flight while this census runs -- so
+    counting them makes "the review changed nothing" fail for a reason that has
+    nothing to do with the review.
+
+    Uses the same predicate as the canonical directory census in `vault.py`
+    rather than a second list of prefixes, so the two cannot disagree about
+    what counts as derived residue.
+    """
     return {
         path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(root.rglob("*"))
         if path.is_file()
+        and not any(vault_module._is_derived_index_artifact(part) for part in path.parts)
     }
 
 
