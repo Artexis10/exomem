@@ -21,6 +21,13 @@ RETAINED_CONTRACT_049 = (
     ROOT
     / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.49.0.json"
 )
+# 0.50.0 is the release the live alpha cell runs. It is retained so that cell
+# keeps passing admission while the runtime target moves to 0.54.1; without it
+# the expand phase would refuse the only tenant currently deployed.
+RETAINED_CONTRACT_050 = (
+    ROOT
+    / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.50.0.json"
+)
 FORWARD_CONTRACT = (
     ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/forward-contract.json"
 )
@@ -72,6 +79,7 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
     pair = json.loads(LOCK_PAIR.read_text(encoding="utf-8"))
     legacy_contract = json.loads(LEGACY_CONTRACT.read_text(encoding="utf-8"))
     retained_contract_049 = json.loads(RETAINED_CONTRACT_049.read_text(encoding="utf-8"))
+    retained_contract_050 = json.loads(RETAINED_CONTRACT_050.read_text(encoding="utf-8"))
     forward_contract = json.loads(FORWARD_CONTRACT.read_text(encoding="utf-8"))
     expected_contracts = {
         (legacy_contract["releaseVersion"], legacy_contract["protocolVersion"]): (
@@ -84,6 +92,13 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
         ): (
             retained_contract_049,
             RETAINED_CONTRACT_049,
+        ),
+        (
+            retained_contract_050["releaseVersion"],
+            retained_contract_050["protocolVersion"],
+        ): (
+            retained_contract_050,
+            RETAINED_CONTRACT_050,
         ),
     }
 
@@ -99,6 +114,9 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
         }
         assert set(unit_by_identity) == set(expected_contracts)
         assert ("0.49.0", "1") in unit_by_identity
+        # Named deliberately: this is the release the live cell runs, and
+        # dropping it from the catalog would fail its admission during expand.
+        assert ("0.50.0", "1") in unit_by_identity
         for identity, (expected_contract, evidence_path) in expected_contracts.items():
             unit = unit_by_identity[identity]
             assert evidence_path.read_bytes() == _canonical(expected_contract)
