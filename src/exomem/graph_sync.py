@@ -56,6 +56,13 @@ _FLOOR_READ_LIMIT = 8_192
 # anything longer belongs to the caller's own retry rather than to this read.
 _EPOCH_BUSY_ATTEMPTS = 3
 _EPOCH_BUSY_BACKOFF_SECONDS = 0.05
+# `sqlite3.connect` defaults to a five-second busy timeout, and the
+# acknowledgement read inherits it -- on the canonical write path. Three
+# attempts against a sidecar a drain was holding therefore cost a measured
+# 14.85 s of a 15.57 s write, all of it spent waiting for a handful of
+# metadata rows. Waiting seconds for them is never the right trade: this read
+# is small, it is retried, and a `busy` answer is now a survivable one.
+_ACK_READ_BUSY_TIMEOUT_SECONDS = 0.25
 _MUTATION_ID = re.compile(r"^[0-9a-f]{24}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -1052,7 +1059,11 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
         # here is what makes the next publication's `os.replace` fail on
         # Windows, and this reader is on the graph read path.
         with contextlib.closing(
-            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+            sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=_ACK_READ_BUSY_TIMEOUT_SECONDS,
+            )
         ) as conn:
             limit_graph_metadata_read(conn)
             values = dict(
@@ -1105,7 +1116,11 @@ def _malformed_acknowledgement_generation(vault_root: Path) -> int | None:
         return None
     try:
         with contextlib.closing(
-            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+            sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=_ACK_READ_BUSY_TIMEOUT_SECONDS,
+            )
         ) as conn:  # `closing` for the reason given in `acknowledgement_state`.
             limit_graph_metadata_read(conn)
             row = conn.execute(

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,29 @@ def test_a_locked_sidecar_reads_busy_rather_than_malformed(tmp_path: Path) -> No
         holder.close()
     assert status == "busy"
     assert acknowledgement is None
+
+
+def test_a_locked_sidecar_is_given_up_on_quickly(tmp_path: Path) -> None:
+    """The read must not inherit SQLite's five-second default busy timeout.
+
+    It is on the canonical write path and it is retried, so the default made
+    three attempts against a sidecar a drain was holding cost 14.85 s of a
+    15.57 s write -- all of it waiting for three metadata rows. A short wait is
+    only safe because `busy` is now survivable; the two changes belong
+    together.
+    """
+    root = _kb(tmp_path)
+    path = _sidecar_with_meta(root)
+    holder = sqlite3.connect(path, isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    started = time.perf_counter()
+    try:
+        assert graph_sync.acknowledgement_state(root)[0] == "busy"
+    finally:
+        elapsed = time.perf_counter() - started
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert elapsed < 2.0, f"one busy acknowledgement read waited {elapsed:.2f}s"
 
 
 def test_a_busy_acknowledgement_classifies_busy_not_unavailable(

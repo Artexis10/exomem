@@ -186,13 +186,15 @@ jobs:
         # audited rather than asserted by construction from the code that
         # produced it.
         #
-        # `--max-blocking` is deliberately omitted for now: a residual
-        # multi-second write under concurrency is known-open, and a gate that is
-        # red on arrival teaches people to ignore it. The count prints every
-        # run. Add `--max-blocking 0` once that residual is fixed.
+        # `--max-blocking 0` also asserts that no write parks, which is the
+        # whole claim of #591 -- an interactive write does not wait on graph
+        # repair. It is only gateable because the two defects this lane found
+        # are fixed: the same run measured a 15.6 s worst write before and
+        # 861 ms after, against a 5 s blocking threshold. Six times the margin,
+        # so red here is a regression rather than a slow runner.
         run: >-
           uv run --frozen python scripts/graph_concurrent_convergence.py .
-          --pages 400 --seconds 45 --drain-interval 0.5 --check
+          --pages 400 --seconds 45 --drain-interval 0.5 --check --max-blocking 0
 
   onboarding:
     name: onboarding (wheel path)
