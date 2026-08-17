@@ -399,8 +399,10 @@ def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
     and never a path that escapes the vault. Extension handling mirrors
     `_resolve` so the two agree on what "the same page" means.
     """
-    # Keep this question anchored to the caller's own text rather than routing
-    # it through kb_page_target(), whose job is to root bare paths inside the KB.
+    # The caller's own text, separators normalised but *not* re-rooted: this
+    # question is precisely "did they name something outside the governed
+    # root?", so it must not go through `kbdir.kb_page_relative_form`, whose
+    # whole job is to supply the prefix `_resolve` wants and this does not.
     given = given.strip().replace("\\", "/").lstrip("/")
     if given.startswith(kb_prefix()):
         return None  # caller explicitly addressed KB/ — a genuine miss stays one
