@@ -58,7 +58,23 @@ Each block is self-contained. Paste it into:
 - **ChatGPT** — Settings → Personalization → Custom instructions → *"Anything else
   ChatGPT should know?"* (each field caps around 1500 characters; these fit)
 
-Replace the connector name if you named yours something other than Exomem.
+Replace the connector name if you named yours something other than Exomem. Otherwise
+paste the block as it stands rather than writing your own shorter version of it.
+
+**Each item in the capture list is a separate switch, not an example of a general
+idea.** An assistant treats that list as the definition of what is worth saving, so
+dropping an item deletes that whole class of capture — silently. Nothing errors, no
+warning appears, and the symptom is only that some kind of thing never gets written,
+which is close to impossible to notice from inside a conversation. A shortened list
+has already cost a real user months of uncaptured hands-on results: it kept the four
+knowledge-work items and dropped the rest, so every method actually carried out fell
+through. If a level is nearly right, append a tuning line from the section below
+instead of trimming the block — that keeps the classes intact and changes only the
+threshold.
+
+Watch the recall and capture lines separately, too. A clause such as "stay quiet on
+chit-chat" belongs to recall; moved or generalised to capture, it suppresses exactly
+the casual-looking conversations where a real result tends to arrive.
 
 ### Maximal — recommended for web and hosted
 
