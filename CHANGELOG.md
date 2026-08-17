@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.54.0](https://github.com/Artexis10/exomem/compare/v0.53.0...v0.54.0) (2026-08-17)
+
+
+### Features
+
+* **hosted:** rescue the promotion harness and fix the OpenAI sibling identity ([#595](https://github.com/Artexis10/exomem/issues/595)) ([27c8912](https://github.com/Artexis10/exomem/commit/27c891289e496e98bdde13a0441e37b57f35c3d2))
+
+
+### Bug Fixes
+
+* **hosted:** carry remediation across the hosted refusal boundary ([#593](https://github.com/Artexis10/exomem/issues/593)) ([8c9d158](https://github.com/Artexis10/exomem/commit/8c9d158c0f15f4b19cea988d9bd3841b0bd6257a))
+
 ## [0.53.0](https://github.com/Artexis10/exomem/compare/v0.52.3...v0.53.0) (2026-08-16)
 
 
