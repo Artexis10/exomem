@@ -109,6 +109,29 @@ time. Reachable today on every path that already rebuilds off the write path.
   cover the graph branch; add no new scheduler.
 - [x] 5.7 Extend the rebuild-hold repro script to measure per-path drain latency
   alongside whole-rebuild latency, so the improvement is measured rather than asserted.
+- [x] 5.8 Have a drain acknowledge the committed generation it converged. Repairing the
+  pages is only half of convergence: until the graph sync acknowledgement moves, the
+  epoch stays stale, the sidecar stays unavailable, and the next dispatch takes the
+  whole-vault rebuild anyway — leaving the queue as overhead beside the expensive path
+  rather than a replacement for it. Acknowledge only on coverage of the checkpoint's
+  whole path set, since a truncated batch, an older generation's leftovers, and a
+  full-scope marker each prove nothing. Coverage is membership in the processed batch
+  rather than the indexed set, or every generation containing a deletion stalls forever.
+- [x] 5.9 Exclude the queue database from the canonical directory census. Enqueueing
+  before the commit is what makes a crash cut safe, and it also puts a derived SQLite
+  file's creation inside the guarded window — so the first write to a fresh vault
+  invalidated its own census and failed as `STALE_RECORD`, with nothing concurrent
+  involved at all. Bind the excluded name to its definition, as 2.1's names are bound.
+- [ ] 5.10 Stop the dispatch layer re-scheduling the whole-vault rebuild that 5.3
+  removed. A defer-classified bail-out returns `deferred`, but the layer above reads an
+  unregistered, unacknowledged checkpoint as a missing rebuild and registers one — so
+  the expensive path still runs on exactly the bail-outs this change exists to make
+  proportional, now with a queue beside it rather than instead of it. The queue owns the
+  repair, so the write's terminal must say `pending` (1.3) rather than report a
+  registration. `register_deferred` is not the seam: its handle carries a
+  scheduling-disabled error, not "queued for drain". Red-first, and do not let an
+  unregistered checkpoint fall through to `completed` — a write whose graph has not
+  converged must never be byte-identical to one whose graph is current.
 
 ## 6. Phase 2 verification
 

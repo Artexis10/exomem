@@ -222,15 +222,60 @@ search.
 - **THEN** the written path is enqueued and repaired by a subsequent drain
 - **AND** the in-progress drain's completed work is not discarded
 
+### Requirement: A drain retires the generation it converged
+
+Repairing the queued pages is only half of convergence. A drain SHALL acknowledge the
+committed graph sync checkpoint it converged, so that the epoch advances and readers
+observe a current graph. A drain that repairs pages without moving the acknowledgement
+converges nothing observable: the epoch stays stale, the sidecar stays unavailable, and
+the next dispatch takes the whole-vault rebuild regardless — which would leave the queue
+as overhead beside the expensive path rather than a replacement for it.
+
+Acknowledgement is the only irreversible claim in this path, so a drain SHALL
+acknowledge a checkpoint only when the pass processed that checkpoint's whole path set.
+A batch truncated by the drain limit, a batch left over from an earlier generation, and
+a full-scope marker SHALL each acknowledge nothing and leave the work queued for the
+drain that does cover it.
+
+Coverage SHALL be membership in the processed batch rather than in the indexed set. A
+deletion named by a checkpoint is processed by removing its rows and has no source bytes
+to index, so an indexed-set test would stall every generation containing one
+indefinitely. That the indexed pages did not move under the pass remains a separate
+proof.
+
+#### Scenario: A covering drain makes the epoch current
+
+- **WHEN** a drain processes every path named by the committed checkpoint
+- **THEN** the graph sync epoch reports the committed generation as current
+- **AND** the graph reports itself available
+
+#### Scenario: A partial drain acknowledges nothing
+
+- **WHEN** a drain processes only some of the paths the committed checkpoint names
+- **THEN** the epoch is not advanced to that generation
+- **AND** the remaining paths stay queued
+
 ### Requirement: A graph rebuild and a canonical write may run concurrently without either losing
 
 A graph rebuild in flight SHALL NOT cause a concurrent canonical write to refuse, and a
 concurrent canonical write SHALL NOT be blocked by a rebuild's reads.
 
 The canonical directory census SHALL exclude derived-index residue — the rebuild's
-scratch sidecars and their companions — using the same mechanism already applied to the
-batch writer's own workspace residue. Artifacts written by the canonical batch itself,
-including the graph sync and floor artifacts, SHALL remain censused.
+scratch sidecars and their companions, and the dirty-path queue's database and its
+journal companions — using the same mechanism already applied to the batch writer's own
+workspace residue. Artifacts written by the canonical batch itself, including the graph
+sync and floor artifacts, SHALL remain censused.
+
+Excluding the queue database is required by the enqueue ordering, not merely convenient
+alongside it: the enqueue is what makes a crash cut safe, so it must happen before the
+commit, which places the database's creation and journalling inside the guarded window.
+A census that counted it would make the first write to a fresh vault invalidate its own
+census, with nothing concurrent involved. Two writers appending their own graph debt is
+the monotone behaviour the queue exists to provide, not a canonical conflict.
+
+Each excluded name SHALL be bound by test to the definition it was copied from, so a
+rename at the definition cannot leave the census's copy stale and silently start
+counting operational bookkeeping as canonical content.
 
 A rebuild's page reads SHALL NOT take custody of the pages they read: on platforms whose
 default open mode denies concurrent deletion or replacement, rebuild reads SHALL open
@@ -249,6 +294,12 @@ generation floor installed without its checkpoint.
 - **WHEN** a canonical write takes its guarded directory census while a rebuild is
   creating, replacing, and removing its scratch sidecars in the same directory
 - **THEN** the census does not change from the rebuild's residue and the write commits
+
+#### Scenario: The first write to a fresh vault does not invalidate itself
+
+- **WHEN** a canonical write enqueues its graph debt and thereby creates the dirty-path
+  queue's database inside its own guarded directory census
+- **THEN** the census does not change and the write commits
 
 #### Scenario: A rebuild's reads do not block a replacement
 
