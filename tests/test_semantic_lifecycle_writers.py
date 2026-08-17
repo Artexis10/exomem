@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from canonical_snapshot import canonical_bytes
 
 from exomem import (
     activation_manifest,
@@ -2880,11 +2881,7 @@ def test_existing_coordinator_exact_committed_replay_is_mutation_free(
         operation="tier2_overwrite",
     )
     first = semantic_writes.commit_existing(tmp_path, preflight=preview)
-    before_replay = {
-        path.relative_to(tmp_path).as_posix(): path.read_bytes()
-        for path in tmp_path.rglob("*")
-        if path.is_file()
-    }
+    before_replay = canonical_bytes(tmp_path)
 
     replay_preview = semantic_writes.preflight_existing(
         tmp_path,
@@ -2894,11 +2891,7 @@ def test_existing_coordinator_exact_committed_replay_is_mutation_free(
         transition_token=first.transition_token,
     )
     replay = semantic_writes.commit_existing(tmp_path, preflight=replay_preview)
-    after_replay = {
-        path.relative_to(tmp_path).as_posix(): path.read_bytes()
-        for path in tmp_path.rglob("*")
-        if path.is_file()
-    }
+    after_replay = canonical_bytes(tmp_path)
 
     assert replay.mutated is False
     assert replay.lifecycle_state == "committed_replay"
@@ -3021,11 +3014,7 @@ def test_non_full_exact_committed_replay_needs_no_lifecycle_prepared_slot(
     assert first.applicability == "structural"
     if transition != "arbitrary":
         assert not relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
-    before_replay = {
-        path.relative_to(tmp_path).as_posix(): path.read_bytes()
-        for path in tmp_path.rglob("*")
-        if path.is_file()
-    }
+    before_replay = canonical_bytes(tmp_path)
 
     replay_preflight = semantic_writes.preflight_existing(
         tmp_path,
@@ -3035,11 +3024,7 @@ def test_non_full_exact_committed_replay_needs_no_lifecycle_prepared_slot(
         transition_token=first.transition_token,
     )
     replay = semantic_writes.commit_existing(tmp_path, preflight=replay_preflight)
-    after_replay = {
-        path.relative_to(tmp_path).as_posix(): path.read_bytes()
-        for path in tmp_path.rglob("*")
-        if path.is_file()
-    }
+    after_replay = canonical_bytes(tmp_path)
 
     assert replay.mutated is False
     assert replay.lifecycle_state == "committed_replay"

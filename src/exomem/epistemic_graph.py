@@ -689,7 +689,7 @@ def _sampling_boundary(coordinator: Any) -> Iterator[None]:
         try:
             stack.enter_context(
                 coordinator.hold(
-                    operation="epistemic_graph_sample_epoch", holder_kind="graph"
+                    operation="epistemic_graph_coalesce_epoch", holder_kind="graph"
                 )
             )
         except OpError:
@@ -1321,6 +1321,44 @@ class EpistemicGraphIndex:
         except Exception:  # noqa: BLE001 - an incomplete cold proof fails closed
             return False
 
+    def _read_publication_epoch(self) -> tuple[Any, Any, Any]:
+        epoch = graph_sync.publication_epoch(self.vault_root)
+        required = epoch.checkpoint
+        prior_acknowledgement = (
+            self._live_acknowledged_checkpoint() if required is None else None
+        )
+        return epoch, required, prior_acknowledgement
+
+    def _sample_publication_epoch(self) -> tuple[Any, Any, Any]:
+        """Read the publication epoch, re-reading under the boundary if torn.
+
+        A canonical batch installs its generation floor before its checkpoint,
+        so a sample taken mid-batch sees a floor whose checkpoint has not landed
+        and classifies the lineage as incoherent. Once writes stopped joining
+        their rebuild (#576), a rebuild runs alongside writes as a matter of
+        course, and retrying straight back into that window can exhaust the
+        attempt budget and raise GRAPH_SYNC_LINEAGE_CONFLICT out of a rebuild
+        that had nothing wrong with it.
+
+        Holding the boundary for *every* sample would close the window, but it
+        charges each attempt a lock acquisition and its holder-metadata write to
+        prevent a torn read that is the exception -- and that write is
+        observable: it perturbed several rollback tests that count replacements
+        globally, because the graph is not supposed to be writing anything at
+        this point.
+
+        Taking the boundary only on the re-read closes the same window, because
+        *acquiring* it is what waits the batch out: the second read happens on
+        the far side of the batch rather than inside it. The common path pays
+        nothing.
+        """
+        try:
+            return self._read_publication_epoch()
+        except graph_sync.GraphEpochIncoherent:
+            pass
+        with _sampling_boundary(self._canonical_mutation_coordinator()):
+            return self._read_publication_epoch()
+
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
@@ -1348,46 +1386,12 @@ class EpistemicGraphIndex:
                 self._reconcile_recall_publication()
                 continue
             try:
-                # Sampled *under* the canonical boundary, not beside it (#576).
-                #
-                # A canonical batch installs the floor before the checkpoint, so
-                # a sample taken mid-batch sees a floor whose checkpoint has not
-                # landed and classifies the lineage as incoherent. The retry
-                # below already knew this -- it coalesces through this exact
-                # boundary and tries again -- but a retry only narrows the
-                # window, and once writes stopped joining their rebuild the
-                # window is open on essentially every write. Exhausting the
-                # attempts then raises GRAPH_SYNC_LINEAGE_CONFLICT out of a
-                # rebuild that had nothing wrong with it.
-                #
-                # Taking the boundary for the sample closes the window instead
-                # of narrowing it. It is O(1) bounded reads of two small
-                # artifacts -- the same shape and cost as the coalesce hold it
-                # supersedes -- and it cannot deadlock, because the write path
-                # no longer waits on this thread in either direction.
-                #
-                # The hold is an *optimization for coherence*, not a
-                # precondition: it removes a torn read, it does not authorize
-                # anything. So a boundary that cannot be taken must not turn a
-                # rebuild into a new class of failure it never had before this
-                # change -- sampling unheld is exactly the previous behaviour,
-                # and the incoherence retry below still covers the torn read.
-                with _sampling_boundary(self._canonical_mutation_coordinator()):
-                    epoch = graph_sync.publication_epoch(self.vault_root)
-                    required = epoch.checkpoint
-                    prior_acknowledgement = (
-                        self._live_acknowledged_checkpoint() if required is None else None
-                    )
+                epoch, required, prior_acknowledgement = self._sample_publication_epoch()
             except graph_sync.GraphEpochIncoherent as error:
+                # Incoherent even after coalescing through the boundary: a
+                # genuinely broken lineage rather than a writer mid-batch.
+                # Retrying is what this loop did before and still does.
                 epoch_error = error
-                # Retained for the sample that is incoherent for a reason the
-                # boundary cannot settle -- a genuinely broken lineage rather
-                # than a writer mid-batch. Coalescing once and retrying keeps
-                # that case exactly as it was.
-                with self._canonical_mutation_coordinator().hold(
-                    operation="epistemic_graph_coalesce_epoch", holder_kind="graph"
-                ):
-                    pass
                 continue
             epoch_error = None
             temporary = graph_sync.temporary_sidecar_path(
