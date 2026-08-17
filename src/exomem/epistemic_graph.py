@@ -64,6 +64,12 @@ REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 # single pass — while a supersession that survives it is not transient, so
 # re-running the rebuild cannot be what fixes it.
 REBUILD_SUPERSESSION_RETRIES = 1
+# The epoch kinds a *per-path* repair may run against. `recoverable` is excluded
+# on purpose: it means the checkpoint is behind its floor, so the lineage does
+# not yet say what the paths should be repaired to. See
+# `EpistemicGraphIndex.epoch_admits_incremental_repair` for why observing it is
+# usually a sampling artifact rather than a lineage fault.
+REPAIRABLE_EPOCH_KINDS = frozenset({"legacy", "coherent"})
 
 
 class _DrainPublicationMoved(Exception):
@@ -1407,10 +1413,37 @@ class EpistemicGraphIndex:
         """
         try:
             return self._read_publication_epoch()
-        except graph_sync.GraphEpochIncoherent:
+        except (graph_sync.GraphEpochIncoherent, graph_sync.GraphEpochUnreadable):
             pass
+        # The boundary re-read answers the busy case for the same reason it
+        # answers the torn one: acquiring it waits out whoever is publishing.
         with _sampling_boundary(self._canonical_mutation_coordinator()):
             return self._read_publication_epoch()
+
+    def epoch_admits_incremental_repair(self) -> bool:
+        """Is the durable epoch settled enough to repair queued paths against it?
+
+        Per-path repair is repair *against a lineage*, so it must not run while
+        the lineage is ambiguous. But the commonest ambiguity under load is not
+        ambiguity at all. A canonical batch installs its generation floor before
+        its checkpoint, so a sample taken inside a batch sees a floor one
+        generation ahead of the checkpoint and classifies `recoverable`; with a
+        writer running, an unsynchronised sample is inside some batch most of
+        the time. The queue then stops draining exactly while it is filling --
+        the whole-vault stall this change exists to remove, reappearing one
+        layer down. A concurrent-write run measured the graph 11 generations
+        behind by the end of it, catching up only once writes stopped.
+
+        So take the same two-phase read `_sample_publication_epoch` takes:
+        sample, and if the answer is not usable, sample again holding the
+        canonical boundary, which waits the batch out instead of guessing at
+        its interior. Acquiring is best-effort, so a busy writer costs a
+        skipped tick rather than a blocked drain.
+        """
+        if graph_sync.classify_epoch(self.vault_root).kind in REPAIRABLE_EPOCH_KINDS:
+            return True
+        with _sampling_boundary(self._canonical_mutation_coordinator()):
+            return graph_sync.classify_epoch(self.vault_root).kind in REPAIRABLE_EPOCH_KINDS
 
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
@@ -1424,7 +1457,7 @@ class EpistemicGraphIndex:
         live = self.path
         attempts = 0
         superseded_retries = 0
-        epoch_error: graph_sync.GraphEpochIncoherent | None = None
+        epoch_error: graph_sync.GraphRebuildRegistrationError | None = None
         # Artifacts of an earlier failed publication belong to this projection
         # (contract R3). Collect them before adding another one, so repeated
         # refusal cannot grow the directory without bound. The reaper takes the
@@ -1440,10 +1473,16 @@ class EpistemicGraphIndex:
                 continue
             try:
                 epoch, required, prior_acknowledgement = self._sample_publication_epoch()
-            except graph_sync.GraphEpochIncoherent as error:
-                # Incoherent even after coalescing through the boundary: a
-                # genuinely broken lineage rather than a writer mid-batch.
-                # Retrying is what this loop did before and still does.
+            except (
+                graph_sync.GraphEpochIncoherent,
+                graph_sync.GraphEpochUnreadable,
+            ) as error:
+                # Still unusable after coalescing through the boundary: either a
+                # genuinely broken lineage, or a sidecar that stayed locked
+                # across it. Retrying is what this loop did before and still
+                # does; the two differ only in the code the caller ends up
+                # seeing, and `GRAPH_SYNC_EPOCH_BUSY` says retry rather than
+                # reconcile.
                 epoch_error = error
                 continue
             epoch_error = None
@@ -1854,7 +1893,7 @@ class EpistemicGraphIndex:
                 and access.publication_policy_snapshot(self.vault_root) == ticket.policy_snapshot
                 and self._temporary_identity(ticket.temporary) == ticket.temporary_identity
             )
-        except (OSError, graph_sync.GraphEpochIncoherent):
+        except (OSError, graph_sync.GraphEpochIncoherent, graph_sync.GraphEpochUnreadable):
             return False
 
     def _before_publish_replacement(self, temporary: Path, live: Path) -> str | None:
