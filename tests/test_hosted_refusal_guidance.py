@@ -15,13 +15,13 @@ guarantee holds while an expected refusal becomes actionable.
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 from exomem import commands, find, schema, semantic_authoring, server_hosted
 from exomem.cli_ops import error_dict
 from exomem.init import init_vault
+from temporary_vault import temporary_vault
 
 
 def _error_block(code: str) -> dict:
@@ -83,8 +83,7 @@ def test_authoring_remediation_is_derived_from_the_contract() -> None:
 
 def test_no_exception_text_reaches_the_response() -> None:
     """The seam takes a code and a static table — never a raised exception."""
-    with tempfile.TemporaryDirectory() as directory:
-        vault = Path(directory)
+    with temporary_vault() as vault:
         init_vault(vault)
         try:
             commands.op_remember(
@@ -115,8 +114,7 @@ def test_capture_lane_accepts_consecutive_ordinary_sentences() -> None:
         ("Renew the passport before March.", "Passport renewal"),
     ]
 
-    with tempfile.TemporaryDirectory() as directory:
-        vault = Path(directory)
+    with temporary_vault() as vault:
         init_vault(vault)
         source_schema = schema.load_source_schema(vault)
 
@@ -140,8 +138,7 @@ def test_governed_lane_still_refuses_an_ungrounded_second_conclusion() -> None:
     """Proof the contract was not weakened to make capture work."""
     body = "## Observations\n\n- [fact] The office moved to Pier 9 #office ^office-pier9\n"
 
-    with tempfile.TemporaryDirectory() as directory:
-        vault = Path(directory)
+    with temporary_vault() as vault:
         init_vault(vault)
 
         commands.op_remember(vault, title="Note 1", content=body, note_type="insight")
