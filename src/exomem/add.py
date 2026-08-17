@@ -157,8 +157,8 @@ def add(
     # Corpus-aware near-duplicate check (best-effort; warns, never blocks — the
     # 57% unprocessed-source backlog implies real dupes). Skipped when embeddings
     # are disabled so the fast suite and existing add() tests are unaffected.
-    dup_warnings: list[str] = []
-    contradiction_warnings: list[str] = []
+    duplicate_candidates: list[corpus_aware.DupCandidate] = []
+    contradiction_candidates: list[corpus_aware.DupCandidate] = []
     if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         try:
             # One embedding pass: dups (vs other sources) + contradictions (vs
@@ -168,21 +168,14 @@ def add(
             cosines = corpus_aware._best_cosine_per_file(
                 vault_root, title=title, body=content
             )
-            dup_warnings = [
-                corpus_aware.dup_warning(c)
-                for c in corpus_aware.detect_duplicates(
-                    vault_root, title=title, body=content,
-                    self_path=None, types_filter=["source"],
-                    precomputed=cosines,
-                )
-            ]
-            contradiction_warnings = [
-                corpus_aware.overlap_warning(c)
-                for c in corpus_aware.detect_contradictions(
-                    vault_root, title=title, body=content,
-                    self_path=None, precomputed=cosines,
-                )
-            ]
+            duplicate_candidates = corpus_aware.detect_duplicates(
+                vault_root, title=title, body=content,
+                self_path=None, types_filter=["source"], precomputed=cosines,
+            )
+            contradiction_candidates = corpus_aware.detect_contradictions(
+                vault_root, title=title, body=content,
+                self_path=None, precomputed=cosines,
+            )
         except Exception as e:  # noqa: BLE001 — never break a capture
             log.debug("corpus-aware dup check failed (non-fatal): %s", e)
 
@@ -297,9 +290,10 @@ def add(
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
 
-    warnings: list[str] = (
-        list(slug_warnings) + list(dup_warnings) + list(contradiction_warnings)
-    )
+    warnings: list[str] = list(slug_warnings)
+    # Vocabulary notices are plain per-write warnings, not dismissible advisories:
+    # "registered 'field-notebook'" reports what the write did, so routing it
+    # through the suppression channel would let a dismissal hide a fact.
     warnings.extend(
         _vocabulary_warnings(kind, domain_resolution, taxonomy_plan, project_plan)
     )
@@ -312,6 +306,26 @@ def add(
         log.exception("partial write during add(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
+
+    try:
+        self_path = source_path.relative_to(vault_root).as_posix()
+        warnings.extend(
+            corpus_aware.emit_write_advisory_groups(
+                vault_root,
+                self_path=self_path,
+                groups=[
+                    ("near-duplicate", duplicate_candidates),
+                    *corpus_aware.detected_overlap_advisory_groups(
+                        contradiction_candidates
+                    ),
+                ],
+                # add() detects before its new source path exists, so only this
+                # path needs the post-commit competing-pair composition.
+                apply_declared_pair_filter=True,
+            )
+        )
+    except Exception as error:  # noqa: BLE001 — advisories never break a capture
+        log.debug("write advisory emission failed (non-fatal): %s", error)
 
     return AddResult(
         path=source_path.relative_to(vault_root).as_posix(),

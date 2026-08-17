@@ -847,6 +847,11 @@ class CreationPreflight:
     creation_validation: relation_review.CreationDraftValidation | None
     semantic_state: semantic_contract.SemanticPageState
     census_token: tuple | None = None
+    #: The corpus this preflight already built. Retained, not rebuilt, so advisory
+    #: post-write analysis can see what else the vault holds without new I/O. It is
+    #: the *before* corpus and so excludes the page being created, which is correct:
+    #: a page is never its own destination.
+    corpus: semantic_contract.SemanticCorpusContext | None = None
 
     @property
     def draft_hash(self) -> str | None:
@@ -2100,17 +2105,24 @@ def _revalidate_existing_preflight(
         )
 
 
-def _structure_suggestion(state: Any) -> dict[str, Any] | None:
+def _structure_suggestion(
+    state: Any,
+    corpus: semantic_contract.SemanticCorpusContext | None = None,
+) -> dict[str, Any] | None:
     """Measure structural divergence for a committed page. Advisory; never raises.
 
     Runs only after the guarded write has returned, over the page state the
     preflight already built, so it adds no I/O and holds no lock. A fault here
     costs the caller a suggestion, never the write.
+
+    `corpus` is the context this mutation already built; it lets a cluster whose
+    material now has its own pages resolve instead of re-firing forever. Passing
+    None is safe and simply skips resolution — suppression is never the fallback.
     """
     try:
         from . import structure_promotion
 
-        return structure_promotion.suggest_for_state(state)
+        return structure_promotion.suggest_for_state(state, corpus=corpus)
     except Exception:  # noqa: BLE001 — structural advice never breaks a commit
         log.debug("structural promotion analysis failed (non-fatal)", exc_info=True)
         return None
@@ -2136,7 +2148,7 @@ def commit_existing(
             auxiliary_writes=auxiliary_writes,
             timings=timings,
         )
-    suggestion = _structure_suggestion(preflight.after)
+    suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     if suggestion is None:
         return committed
     return replace(committed, structure_suggestion=suggestion)
@@ -3242,13 +3254,18 @@ def _evaluate_structural(
     semantic_contract.SemanticContractResult,
     semantic_contract.SemanticPageState,
     tuple | None,
+    semantic_contract.SemanticCorpusContext,
 ]:
-    """Returns ``(result, state, corpus_census)``.
+    """Returns ``(result, state, corpus_census, before_corpus)``.
 
     ``corpus_census`` is the exact census that validated the ``before`` corpus
     context this evaluation just built, for a preflight caller to thread
     straight into ``_capture_validity_stamp`` without paying for a second
     walk; see ``semantic_contract.build_corpus_context_with_census``.
+
+    ``before_corpus`` is that same context, returned rather than dropped so a
+    caller can retain it for advisory post-write analysis. It is the corpus as
+    it stood before this write, which is what a destination lookup wants.
     """
     registry = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
@@ -3284,6 +3301,7 @@ def _evaluate_structural(
         ),
         candidate,
         before_census,
+        before,
     )
 
 
@@ -3321,7 +3339,7 @@ def preflight_creation(
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
     entry_generation = _entry_commit_generation(root)
-    result, state, corpus_census = _evaluate_structural(
+    result, state, corpus_census, before_corpus = _evaluate_structural(
         root, destination=path, source=source, operation=operation
     )
     if semantic_contract.requires_semantic_unit(state):
@@ -3352,6 +3370,7 @@ def preflight_creation(
             validation,
             state,
             census_token,
+            before_corpus,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -3360,7 +3379,17 @@ def preflight_creation(
     )
     census_token = _capture_validity_stamp(root, entry_generation, corpus_census=corpus_census)
     return CreationPreflight(
-        applicability, path, source, draft_id, draft_token, False, result, None, state, census_token
+        applicability,
+        path,
+        source,
+        draft_id,
+        draft_token,
+        False,
+        result,
+        None,
+        state,
+        census_token,
+        before_corpus,
     )
 
 
@@ -3455,7 +3484,7 @@ def commit_creation(
         predecessor_path=predecessor_path,
         predecessor_content_hash=predecessor_content_hash,
     )
-    suggestion = _structure_suggestion(preflight.semantic_state)
+    suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     if suggestion is None:
         return committed
     return replace(committed, structure_suggestion=suggestion)
@@ -3546,7 +3575,7 @@ def _commit_creation(
             commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, _fresh_state, _fresh_census = _evaluate_structural(
+            contract_result, _fresh_state, _fresh_census, _fresh_corpus = _evaluate_structural(
                 root,
                 destination=preflight.destination,
                 source=preflight.source,

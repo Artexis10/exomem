@@ -562,7 +562,7 @@ def test_creation_commit_survives_a_stale_validity_stamp_at_boundary_entry(
 ) -> None:
     """`commit_creation`'s structural/non-semantic revalidation branch (taken
     whenever `validity_stamp_current` is False at boundary entry) calls
-    `_evaluate_structural` too, and must unpack its 3-tuple return the same
+    `_evaluate_structural` too, and must unpack its 4-tuple return the same
     way every other caller does. A commit-generation bump landing between
     preflight and commit -- exactly the boundary-entry staleness
     `_direct_write(bump=True)` already covers for

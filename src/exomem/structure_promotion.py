@@ -16,6 +16,17 @@ must reach enough mass to justify its own note, and the page must still hold its
 original subject. Raw length is never an input, because a long note about one thing
 is not structural debt.
 
+Acting on the advice resolves it. When the corpus already holds eligible compiled
+pages whose declared identity covers a cluster's vocabulary, that material has a home
+and the cluster is dropped from consideration. Nothing about an earlier suggestion is
+remembered to reach that outcome — no acceptance, no dismissal, no cooldown — so
+deleting the destinations brings the advice back. That is deliberate: a suggestion
+cleared by recording a dismissal is indistinguishable from one nobody ever acted on.
+
+Resolution reads only the corpus context the write already built, and it fails open.
+No corpus, or any fault while reading one, leaves the suggestion exactly as it would
+have been. Silence is never the fallback.
+
 Known approximation: recurrence is counted over durable units, not over write events.
 There is no cheap per-page record of which units a given mutation added, and units are
 what writes deposit, so the reason codes speak of units and claim nothing more.
@@ -46,6 +57,10 @@ CLUSTER_MIN_TERMS = 4
 MIN_RETAINED_UNITS = 3
 #: Above this overlap the group is a sub-topic of the declared subject, not a rival.
 MISMATCH_MAX_OVERLAP = 0.34
+#: A destination must own enough of a cluster to count as its home. One shared tag is
+#: an incidental collision — in any sizeable vault some page carries almost any single
+#: term — and letting single matches accumulate would scavenge real divergence quiet.
+MIN_DESTINATION_COVERAGE = 2
 #: Bound on the evidence returned to the caller.
 MAX_CLUSTER_TERMS = 6
 
@@ -104,6 +119,44 @@ class PageShape:
     projects: tuple[str, ...]
     basename: str
     unit_tags: tuple[tuple[str, ...], ...]
+    #: Vault-relative path, used only to keep the written page out of its own
+    #: destination set. Never reported.
+    path: str = ""
+
+
+def _declared_identity(state: Any) -> frozenset[str]:
+    """The vocabulary a page announces about itself, by the same rule as the subject.
+
+    Deliberately does not touch units: this runs over every candidate destination, and
+    the declared identity is what decides whether a page owns a subject.
+    """
+    frontmatter = getattr(state, "frontmatter", None) or {}
+    return (
+        _terms(_frontmatter_tags(frontmatter))
+        | _terms([getattr(state, "title", None) or ""])
+        | _terms(getattr(state, "projects", None) or ())
+    )
+
+
+def _routed_terms(
+    corpus: Any, *, exclude_path: str, cluster_terms: frozenset[str]
+) -> frozenset[str]:
+    """Cluster vocabulary that eligible compiled pages already declare as their subject.
+
+    Only pages the caller's own recall can reach are considered, so a page the caller
+    is not entitled to see cannot change what the caller is told. A destination has to
+    own `MIN_DESTINATION_COVERAGE` of the cluster before it counts, which is what stops
+    unrelated pages contributing one incidental tag each.
+    """
+    eligible = getattr(corpus, "eligible_compiled_paths", None) or frozenset()
+    routed: set[str] = set()
+    for path, state in getattr(corpus, "pages", {}).items():
+        if path == exclude_path or path not in eligible:
+            continue
+        covered = _declared_identity(state) & cluster_terms
+        if len(covered) >= MIN_DESTINATION_COVERAGE:
+            routed |= covered
+    return frozenset(routed)
 
 
 def _cluster(off_scope: Sequence[frozenset[str]]) -> tuple[list[int], frozenset[str]]:
@@ -159,8 +212,13 @@ def _cluster(off_scope: Sequence[frozenset[str]]) -> tuple[list[int], frozenset[
     return members, seeds
 
 
-def detect(shape: PageShape) -> dict[str, Any] | None:
-    """Decide whether `shape` has outgrown its declared scope. Pure; no I/O."""
+def detect(shape: PageShape, *, corpus: Any = None) -> dict[str, Any] | None:
+    """Decide whether `shape` has outgrown its declared scope. Pure; no I/O.
+
+    `corpus` is the context the mutation already built. Pass it and a cluster whose
+    vocabulary existing eligible pages already own is treated as routed; omit it and
+    the result is exactly what it would have been without resolution.
+    """
     if shape.page_type not in _compiled_types():
         return None
     if shape.basename.casefold() in NAVIGATION_BASENAMES:
@@ -197,6 +255,16 @@ def detect(shape: PageShape) -> dict[str, Any] | None:
     members, seeds = _cluster(off_scope)
     if not members:
         return None
+
+    # Resolution, evaluated only once a cluster has actually formed so the corpus pass
+    # is paid on the rare page that would otherwise speak, never on ordinary writes.
+    # Routed vocabulary is removed and the existing mass requirement below decides:
+    # one definition of "enough material to justify a child note", and a half-routed
+    # cluster still reports the half that has no home.
+    if corpus is not None:
+        seeds = seeds - _routed_terms(
+            corpus, exclude_path=shape.path, cluster_terms=seeds
+        )
 
     reasons = [REASON_RECURS]
     if len(members) >= CLUSTER_MIN_UNITS and len(seeds) >= CLUSTER_MIN_TERMS:
@@ -245,15 +313,18 @@ def shape_from_state(state: Any) -> PageShape:
         projects=tuple(state.projects or ()),
         basename=state.path.rsplit("/", 1)[-1],
         unit_tags=tuple(tuple(unit.tags) for unit in state.document.units),
+        path=state.path,
     )
 
 
-def suggest_for_state(state: Any) -> dict[str, Any] | None:
+def suggest_for_state(state: Any, *, corpus: Any = None) -> dict[str, Any] | None:
     """Detect over a page state the caller already holds."""
-    return detect(shape_from_state(state))
+    return detect(shape_from_state(state), corpus=corpus)
 
 
-def suggest_for_page(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
+def suggest_for_page(
+    vault_root: Path, rel_path: str, *, corpus: Any = None
+) -> dict[str, Any] | None:
     """Detect over a page on disk. For out-of-band callers; the write path uses state."""
     from . import semantic_units, vault
 
@@ -271,5 +342,7 @@ def suggest_for_page(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
             projects=tuple(str(item) for item in projects),
             basename=rel_path.rsplit("/", 1)[-1],
             unit_tags=tuple(tuple(unit.tags) for unit in document.units),
-        )
+            path=rel_path,
+        ),
+        corpus=corpus,
     )

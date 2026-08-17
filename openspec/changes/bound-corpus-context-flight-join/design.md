@@ -13,7 +13,7 @@ tens of seconds; the waiter has no budget of its own.
 
 ### Measured evidence
 
-From the deployed service's mutation log, 61 complete traces:
+From the service log directory, 61 complete mutation traces:
 
 | metric | value |
 |---|---|

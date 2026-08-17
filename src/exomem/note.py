@@ -37,6 +37,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import (
+    audit as audit_module,
+)
+from . import (
     corpus_aware,
     indexes,
     memory_refs,
@@ -277,6 +280,9 @@ def _build_write_feedback(
     *,
     vault_root: Path,
     note_type: str,
+    rel_path: str,
+    status: str | None,
+    tags: list[str],
     sources_norm: list[str],
     body_clean: str,
     body_warnings: list[str],
@@ -335,11 +341,19 @@ def _build_write_feedback(
     unregistered_labels = sorted(
         kind for kind in relation_kinds if registry.resolve(kind).status == "unregistered"
     )
-    relation_debt = not (
-        typed_note_relations
-        or typed_block_relations
-        or generic_targets
-        or sources_norm
+    relation_debt = (
+        audit_module.relation_debt_eligible(
+            vault_root,
+            page_type=note_type,
+            rel_path=rel_path,
+            status=status,
+            tags=tags,
+        )
+        and not (
+            typed_note_relations
+            or typed_block_relations
+            or generic_targets
+        )
     )
 
     unresolved = list(source_warnings) + list(body_warnings)
@@ -424,6 +438,7 @@ def _build_write_feedback(
         },
         "sources": {
             "cited": len(sources_norm),
+            "present": bool(sources_norm),
             "backrefs_planned": backrefs_planned,
             "required": note_type in SOURCES_REQUIRED_TYPES,
             "missing": note_type in SOURCES_REQUIRED_TYPES and not sources_norm,
@@ -630,8 +645,7 @@ def _legacy_note(
     # no 70MB matrix reload). Skipped entirely when embeddings are disabled, so
     # the fast test suite and existing note() tests see no behaviour change.
     corpus_suggestions: list[dict] = []
-    dup_warnings: list[str] = []
-    contradiction_warnings: list[str] = []
+    advisory_warnings: list[str] = []
     if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         try:
             existing_links: set[str] = set(sources_norm)
@@ -669,21 +683,24 @@ def _legacy_note(
                 # (SKILL rule: prefer edit/replace over a parallel page) and
                 # stays on in every mode.
                 cosines = _cosines()
-            dup_warnings = [
-                corpus_aware.dup_warning(c)
-                for c in corpus_aware.detect_duplicates(
-                    vault_root, title=title, body=body_clean,
-                    self_path=rel_note_no_ext, types_filter=[note_type],
-                    precomputed=cosines,
-                )
-            ]
-            contradiction_warnings = [
-                corpus_aware.overlap_warning(c)
-                for c in corpus_aware.detect_contradictions(
-                    vault_root, title=title, body=body_clean,
-                    self_path=rel_note_no_ext, precomputed=cosines,
-                )
-            ]
+            duplicate_candidates = corpus_aware.detect_duplicates(
+                vault_root, title=title, body=body_clean,
+                self_path=rel_note_no_ext, types_filter=[note_type],
+                precomputed=cosines,
+            )
+            overlap_candidates = corpus_aware.detect_contradictions(
+                vault_root, title=title, body=body_clean,
+                self_path=rel_note_no_ext, precomputed=cosines,
+            )
+            advisory_warnings = corpus_aware.emit_write_advisory_groups(
+                vault_root,
+                self_path=rel_note_no_ext,
+                groups=[
+                    ("near-duplicate", duplicate_candidates),
+                    *corpus_aware.detected_overlap_advisory_groups(overlap_candidates),
+                ],
+                apply_declared_pair_filter=True,
+            )
         except Exception as e:  # noqa: BLE001 — nudges never break a write
             log.debug("corpus-aware nudges failed (non-fatal): %s", e)
 
@@ -717,6 +734,9 @@ def _legacy_note(
     write_feedback = _build_write_feedback(
         vault_root=vault_root,
         note_type=note_type,
+        rel_path=note_path.relative_to(vault_root).as_posix(),
+        status=status,
+        tags=tags_clean,
         sources_norm=sources_norm,
         body_clean=body_clean,
         body_warnings=body_warnings,
@@ -734,8 +754,7 @@ def _legacy_note(
         + list(slug_warnings)
         + list(source_warnings)
         + list(body_warnings)
-        + list(dup_warnings)
-        + list(contradiction_warnings)
+        + list(advisory_warnings)
     )
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)
@@ -1881,8 +1900,7 @@ def note(
 
     advisory_started = time.perf_counter()
     corpus_suggestions: list[dict] = []
-    duplicate_warnings: list[str] = []
-    contradiction_warnings: list[str] = []
+    advisory_warnings: list[str] = []
     # `suggestions` gates ONLY the related-links query below, and is OFF by
     # default (#576). That query is one whole hybrid find() over the corpus,
     # issued here — post-commit — where the write has just moved every
@@ -1909,31 +1927,32 @@ def note(
                     if item.path != destination
                 ]
             cosines = corpus_aware._best_cosine_per_file(root, title=title, body=body_clean)
-            duplicate_warnings = [
-                corpus_aware.dup_warning(item)
-                for item in corpus_aware.detect_duplicates(
-                    root,
-                    title=title,
-                    body=body_clean,
-                    self_path=rel_note_no_ext,
-                    types_filter=[note_type],
-                    precomputed=cosines,
-                )
-            ]
-            contradiction_warnings = [
-                corpus_aware.overlap_warning(item)
-                for item in corpus_aware.detect_contradictions(
-                    root,
-                    title=title,
-                    body=body_clean,
-                    self_path=rel_note_no_ext,
-                    precomputed=cosines,
-                )
-            ]
+            duplicate_candidates = corpus_aware.detect_duplicates(
+                root,
+                title=title,
+                body=body_clean,
+                self_path=rel_note_no_ext,
+                types_filter=[note_type],
+                precomputed=cosines,
+            )
+            overlap_candidates = corpus_aware.detect_contradictions(
+                root,
+                title=title,
+                body=body_clean,
+                self_path=rel_note_no_ext,
+                precomputed=cosines,
+            )
+            advisory_warnings = corpus_aware.emit_write_advisory_groups(
+                root,
+                self_path=rel_note_no_ext,
+                groups=[
+                    ("near-duplicate", duplicate_candidates),
+                    *corpus_aware.detected_overlap_advisory_groups(overlap_candidates),
+                ],
+            )
         except Exception:  # noqa: BLE001 — optional suggestions are best-effort
             log.debug("corpus-aware nudges failed (non-fatal)", exc_info=True)
-    warnings.extend(duplicate_warnings)
-    warnings.extend(contradiction_warnings)
+    warnings.extend(advisory_warnings)
     log.info(
         "note write timings mode=commit note_type=%s preflight_ms=%.1f "
         "commit_ms=%.1f advisory_ms=%.1f total_ms=%.1f suggestions=%s",
@@ -1947,6 +1966,9 @@ def note(
     feedback = _build_write_feedback(
         vault_root=root,
         note_type=note_type,
+        rel_path=destination,
+        status=status,
+        tags=tags_clean,
         sources_norm=sources_norm,
         body_clean=body_clean,
         body_warnings=body_warnings,

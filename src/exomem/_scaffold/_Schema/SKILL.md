@@ -387,7 +387,11 @@ most 300 characters. `warnings_count` remains authoritative, so fewer entries
 than the count means the rest were trimmed; ask for `response_detail="full"` to
 see them all. An upload receipt reports its warnings as per-file rows under
 `files` instead, and a mutation recovered from a portable receipt reports the
-count alone because it retains no leaf content.
+count alone because it retains no leaf content. A corpus write advisory includes
+its review ref and complete 24-character signal fingerprint in its warning text;
+triage binds to that exact fingerprint (dismiss requires a reason), and a stale
+fingerprint simply lets the advisory re-emit when the counterpart changes or the
+written page changes the detected signal class.
 A compiled-note write may also carry `structure_suggestion`: an advisory
 `kind`, a `strength` of `strong` or `moderate`, deterministic `reasons`, the
 number of durable units in the group, and up to six recurring `cluster_terms`.
