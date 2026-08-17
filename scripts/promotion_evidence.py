@@ -196,9 +196,7 @@ def observe(args: argparse.Namespace) -> int:
     )
 
     counts = {
-        "identity_count": int(
-            one(substrate, f"select count(*) from users where id='{owner}'")
-        ),
+        "identity_count": int(one(substrate, f"select count(*) from users where id='{owner}'")),
         "tenant_count": int(
             one(
                 substrate,
@@ -241,10 +239,21 @@ def observe(args: argparse.Namespace) -> int:
     # loopback client's digest and fails the stage match at import.
     stage_id = args.stage_id
     if not stage_id:
-        raise SystemExit(
-            "--stage-id is required: pass the sibling stage for this platform, "
-            "not the bootstrap stage from bootstrap-context.json"
-        )
+        # `reviewer_bootstrap.py run` writes the two sibling ids here precisely so
+        # this does not have to be retyped. Reading them back is safer than any
+        # hand-carried value: the bootstrap stage id is also on disk, in
+        # bootstrap-context.json, and the two are indistinguishable by eye.
+        recorded = args.state_dir / "sibling-stage-ids.json"
+        if recorded.is_file():
+            stage_id = json.loads(recorded.read_text()).get(args.platform)
+        if not stage_id:
+            raise SystemExit(
+                f"--stage-id is required: pass the {args.platform} SIBLING stage, not the "
+                f"bootstrap stage from bootstrap-context.json.\n"
+                f"`run` records both siblings at {recorded}; if that file is missing, this "
+                "state directory is not from a completed run."
+            )
+        print(f"  using recorded {args.platform} sibling stage {stage_id[:8]}")
     config_sha = one(
         substrate,
         f"select oauth_client_config_sha256 from exomem_staged_client_releases where id='{stage_id}'",
@@ -261,7 +270,9 @@ def observe(args: argparse.Namespace) -> int:
             secret, "clean-client", args.platform, args.client_version, tenant
         ),
         "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-        "paired_run_hmac_sha256": attest(secret, "paired-run", tenant, assignment_id, str(generation)),
+        "paired_run_hmac_sha256": attest(
+            secret, "paired-run", tenant, assignment_id, str(generation)
+        ),
         "test_identity": TEST_IDENTITY,
         "exomem_identity_hmac_sha256": attest(secret, "exomem-identity", owner),
         "tenant_hmac_sha256": attest(secret, "tenant", tenant),
@@ -275,7 +286,9 @@ def observe(args: argparse.Namespace) -> int:
         "assignment_generation": generation,
         **counts,
         "result_sha256": hashlib.sha256(
-            canonical({"counts": counts, "operations": {k: results[k] for k in OPERATIONS}}).encode()
+            canonical(
+                {"counts": counts, "operations": {k: results[k] for k in OPERATIONS}}
+            ).encode()
         ).hexdigest(),
         "package_artifact_sha256": package["artifact_sha256"],
         "archive_sha256": archive["archive_sha256"],
@@ -338,9 +351,7 @@ def sign(args: argparse.Namespace) -> int:
 
 def call(path: str, body: dict, label: str, state: Path) -> tuple[int, dict]:
     base = os.environ["EXOMEM_PUBLIC_BASE_URL"].rstrip("/")
-    request = urllib.request.Request(
-        f"{base}{path}", data=json.dumps(body).encode(), method="POST"
-    )
+    request = urllib.request.Request(f"{base}{path}", data=json.dumps(body).encode(), method="POST")
     request.add_header("Content-Type", "application/json")
     request.add_header("Authorization", f"Bearer {os.environ['EXOMEM_ADMIN_TOKEN']}")
     try:
@@ -437,19 +448,28 @@ def promote(args: argparse.Namespace) -> int:
         print("  note: stored observation is stale (>5 min); promotion re-probes live")
     digest = row["routableSetDigest"]
     live = contracts.get("liveCohortCandidateId")
-    print(f"  candidate {candidate_id[:8]} routable={row.get('routableCellCount')} digest={digest[:16]}...")
+    print(
+        f"  candidate {candidate_id[:8]} routable={row.get('routableCellCount')} digest={digest[:16]}..."
+    )
     print(f"  expected live cohort: {live!r}")
 
     missing = [
         name
-        for name in ("artifact-claude.txt", "artifact-openai.txt", "evidence-claude.json", "evidence-openai.json")
+        for name in (
+            "artifact-claude.txt",
+            "artifact-openai.txt",
+            "evidence-claude.json",
+            "evidence-openai.json",
+        )
         if not (state / name).exists()
     ]
     if missing:
         if args.dry_run:
             print(f"  DRY RUN - digest path verified; still missing {missing}")
             return 0
-        raise SystemExit(f"cannot promote without both artifacts and both evidence records: {missing}")
+        raise SystemExit(
+            f"cannot promote without both artifacts and both evidence records: {missing}"
+        )
 
     claude_artifact = (state / "artifact-claude.txt").read_text().strip()
     openai_artifact = (state / "artifact-openai.txt").read_text().strip()
@@ -485,7 +505,11 @@ def main() -> int:
     parser.add_argument("--platform", choices=("claude", "openai"))
     parser.add_argument("--results", help="JSON of the seven observed operations")
     parser.add_argument("--outcome", default="bootstrap-outcome-final.json")
-    parser.add_argument("--stage-id", help="sibling stage; defaults to the bootstrap stage")
+    parser.add_argument(
+        "--stage-id",
+        help="platform SIBLING stage; read from the run's sibling-stage-ids.json when omitted. "
+        "Never the bootstrap stage — that one only fails at import.",
+    )
     parser.add_argument("--client-version", default="1.0.0")
     parser.add_argument("--install-url", default="https://substratesystems.io/exomem/setup")
     parser.add_argument(
