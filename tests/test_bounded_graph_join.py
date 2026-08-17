@@ -303,6 +303,44 @@ def test_a_write_that_leaves_before_convergence_says_the_graph_is_catching_up(
     assert compact["graph_sync_remediation"]
 
 
+def test_a_write_whose_repair_is_queued_says_the_graph_is_catching_up(
+    vault: Path,
+) -> None:
+    """A queued repair is pending too, and the terminal has to say so.
+
+    The `pending` path above is keyed on a *registered* rebuild. Once a
+    defer-classified bail-out stops registering one -- the whole point of
+    repairing through the durable queue instead -- that key is absent, and
+    without a second signal the response becomes byte-identical to a write whose
+    graph is current. A write that has not converged claiming it has is the one
+    thing the fourth outcome exists to prevent, so the terminal proves the same
+    fact from durable state instead: a committed checkpoint that the sidecar has
+    not acknowledged, with work still queued against it.
+    """
+    from exomem import deferred_index
+    from exomem.writer_lease import LeaseConfig, LeaseManager, mark_active_mutation_committed
+
+    required = _checkpoint(1)
+    state_dir = vault / "state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+
+    def leaf(root: Path, **_kwargs: Any) -> dict[str, Any]:
+        (root / PAGE_A).write_text(_page("A", "A now claims something else."), encoding="utf-8")
+        mark_active_mutation_committed()
+        graph_sync._write_checkpoint(root, required)
+        deferred_index.add_graph(root, [PAGE_A])
+        return {"status": "committed", "mutated": True}
+
+    command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
+    compact = manager.invoke(command, (vault,), {})
+
+    assert compact["graph_sync"] == "pending"
+    assert compact["graph_sync_code"] == "GRAPH_SYNC_REPAIR_QUEUED"
+    assert compact["graph_sync_checkpoint"] == required.checkpoint_sha256
+    assert isinstance(compact["graph_sync_remediation"], str)
+    assert compact["graph_sync_remediation"]
+
+
 def test_a_settled_outcome_is_reported_rather_than_downgraded_to_pending(
     vault: Path,
 ) -> None:

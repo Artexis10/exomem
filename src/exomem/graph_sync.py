@@ -3201,3 +3201,27 @@ def committed_graph_pending(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
             f"available: false for a short time; re-read shortly, or {_RECONCILE_HINT}"
         ),
     }
+
+
+def committed_graph_queued(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
+    """The canonical bytes committed; the repair is queued, not running.
+
+    The same fourth outcome as `committed_graph_pending`, reached the other way.
+    There the derived graph is behind because a registered whole-vault rebuild
+    has not converged; here it is behind because the incremental pass could not
+    prove itself and enqueued the affected paths for a drain instead. The
+    distinction is worth a separate code rather than reusing
+    `GRAPH_SYNC_REBUILD_IN_PROGRESS`: nothing is rebuilding, so an operator
+    reading that code would go looking for a flight that does not exist, and the
+    two states converge on very different timescales.
+    """
+    return {
+        "graph_sync": "pending",
+        "graph_sync_code": "GRAPH_SYNC_REPAIR_QUEUED",
+        "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
+        "graph_sync_remediation": (
+            "The write is durable. Repair of the changed pages is queued and converges on "
+            "the next index drain, so relation-filtered recall may report warming and graph "
+            f"context may report available: false until then; re-read shortly, or {_RECONCILE_HINT}"
+        ),
+    }

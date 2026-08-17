@@ -186,7 +186,7 @@ time. Reachable today on every path that already rebuilds off the write path.
   publication hold exists to avoid, arriving from a reader the hold cannot see because it
   was never registered. Found by instrumenting the benchmark that could not delete its own
   sidecar, not by a test.
-- [ ] 5.10 Stop the dispatch layer re-scheduling the whole-vault rebuild that 5.3
+- [x] 5.10 Stop the dispatch layer re-scheduling the whole-vault rebuild that 5.3
   removed. A defer-classified bail-out returns `deferred`, but the layer above reads an
   unregistered, unacknowledged checkpoint as a missing rebuild and registers one — so
   the expensive path still runs on exactly the bail-outs this change exists to make
@@ -196,6 +196,16 @@ time. Reachable today on every path that already rebuilds off the write path.
   scheduling-disabled error, not "queued for drain". Red-first, and do not let an
   unregistered checkpoint fall through to `completed` — a write whose graph has not
   converged must never be byte-identical to one whose graph is current.
+  Closed in two halves, because either alone is a defect. The deferral report now marks
+  the enqueue that actually succeeded (`fallback()` registers its own rebuild and reports
+  a deferral too, so the deferral alone cannot carry the decision), and the dispatch
+  returns `deferred` / `graph_repair_queued` for it instead of registering. The terminal's
+  `pending` path was keyed on a *registered* rebuild, so removing the registration would
+  have made a queued write byte-identical to a converged one; it now proves the same fact
+  from durable state — a committed checkpoint the sidecar has not acknowledged, with work
+  still queued against it — and reports `GRAPH_SYNC_REPAIR_QUEUED` rather than reusing
+  `GRAPH_SYNC_REBUILD_IN_PROGRESS`, since nothing is rebuilding and an operator would go
+  looking for a flight that does not exist. A failed enqueue still earns the rebuild.
 
 ## 6. Phase 2 verification
 

@@ -255,6 +255,47 @@ proof.
 - **THEN** the epoch is not advanced to that generation
 - **AND** the remaining paths stay queued
 
+### Requirement: A queued repair is not rescheduled as a whole-vault rebuild
+
+When the incremental pass enqueues the affected paths, the durable queue owns that repair.
+The dispatch layer SHALL NOT then register a whole-vault rebuild for the same checkpoint.
+Registering one runs the expensive path on exactly the bail-outs this capability exists to
+make proportional, leaving the queue as overhead beside the whole-vault rebuild rather
+than a replacement for it.
+
+The distinction SHALL rest on an enqueue that actually succeeded, not on the deferral
+alone. A fallback that registers its own whole-vault rebuild also reports a deferral, and
+a queue write that failed falls back to a rebuild by design; in both cases the queue does
+not own the repair and the rebuild is correct.
+
+A write whose repair is queued SHALL report the graph as pending in its terminal, with a
+code distinct from a rebuild that is still running. Nothing is rebuilding, so an operator
+reading a rebuild-in-progress code would look for a flight that does not exist, and the
+two states converge on different timescales. The terminal SHALL prove this from durable
+state — a committed checkpoint the sidecar has not acknowledged, with work still queued
+against it — because a repair the queue owns has no registration to observe.
+
+A write that has not converged SHALL NOT be reported identically to one whose graph is
+current. Absent this outcome the response is byte-identical to a converged write, which is
+the single failure the pending outcome exists to prevent.
+
+#### Scenario: A queued repair schedules no rebuild
+
+- **WHEN** the incremental pass enqueues the affected paths for a committed checkpoint
+- **THEN** the dispatch reports the repair as queued
+- **AND** no whole-vault rebuild is registered for that checkpoint
+
+#### Scenario: A queued repair still reports pending
+
+- **WHEN** a write commits with its graph repair queued and no rebuild registered
+- **THEN** the terminal reports the graph as pending with a queued-repair code
+- **AND** the response is distinguishable from a write whose graph is current
+
+#### Scenario: A failed enqueue still earns a rebuild
+
+- **WHEN** the queue write fails and the pass falls back to a whole-vault rebuild
+- **THEN** the dispatch does not claim the repair is queued
+
 ### Requirement: A graph rebuild and a canonical write may run concurrently without either losing
 
 A graph rebuild in flight SHALL NOT cause a concurrent canonical write to refuse, and a

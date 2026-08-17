@@ -158,6 +158,35 @@ def _direct_mutation_boundary(
     )
 
 
+def _queued_graph_repair(vault_root: Path) -> Any:
+    """The committed checkpoint whose repair is queued for a drain, or None.
+
+    A repair the durable queue owns has no registration to observe, so the
+    terminal proves the same fact from durable state instead: the sidecar has
+    not acknowledged the committed generation, and work is still queued against
+    it. Both terms are needed -- an unacknowledged checkpoint with an empty queue
+    is a rebuild's business, and a queue holding later work says nothing about
+    whether *this* generation converged.
+
+    Never raises. This runs while shaping a terminal for canonical bytes that are
+    already durable; a probe that failed loudly here would turn a successful
+    write into an error report.
+    """
+    from . import deferred_index, graph_sync
+
+    try:
+        committed = graph_sync.read_checkpoint(vault_root)
+        if committed is None:
+            return None
+        acknowledged = graph_sync.acknowledged_checkpoint(vault_root)
+        if acknowledged is not None and acknowledged.covers(committed):
+            return None
+        return committed if deferred_index.list_graph_paths(vault_root) else None
+    except Exception:  # noqa: BLE001 - a report must not fail a durable write
+        logger.warning("queued graph repair probe failed", exc_info=True)
+        return None
+
+
 def _windows_library(ctypes_module: Any, name: str) -> Any:
     return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)
 
@@ -2523,6 +2552,11 @@ class LeaseManager:
                     root, state_root=self.config.state_dir
                 )
                 if required is None and not has_reconcile_handoff:
+                    queued = _queued_graph_repair(root)
+                    if queued is not None:
+                        return with_graph_outcome(
+                            terminal_result, graph_sync.committed_graph_queued(queued)
+                        )
                     return terminal_result
                 if required is not None:
                     # An interactive write takes a derived-graph outcome only if

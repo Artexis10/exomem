@@ -2741,7 +2741,13 @@ class EpistemicGraphIndex:
             if graph_checkpoint is None:
                 return None
             self._mark_unavailable()
-            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
+            # `queued` is what separates this from `fallback()`'s own deferral
+            # below, which registers a whole-vault rebuild and reports
+            # `deferred` all the same. Only an enqueue that actually succeeded
+            # may tell the dispatch layer the queue owns this repair; without
+            # the distinction that layer reads an unregistered, unacknowledged
+            # checkpoint as a missing rebuild and schedules the vault anyway.
+            return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1, "queued": 1}
 
         def fallback(reason: str) -> dict[str, int]:
             # #576 F3. The single most-wanted number in the incident, and the
@@ -4636,6 +4642,13 @@ def upsert_after_write(
                 else index.refresh_paths(written_paths, graph_checkpoint=required)
             )
             if report.get("deferred"):
+                if report.get("queued"):
+                    # The durable queue holds the affected paths and a drain
+                    # will converge them. Registering a whole-vault rebuild here
+                    # would run the expensive path on exactly the bail-outs this
+                    # change makes proportional, leaving the queue as overhead
+                    # beside it rather than a replacement for it.
+                    return GraphDispatchResult("deferred", "graph_repair_queued", required)
                 if graph_sync.registered_checkpoint(
                     vault_root, state_root=mutation_coordinator.state_root
                 ) == required:

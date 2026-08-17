@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -1003,6 +1004,94 @@ def test_failed_incremental_proof_queues_the_affected_paths_without_rebuilding(
     assert [receipt.rel_path for receipt in deferred_index.snapshot_graph(tmp_path)] == [
         note.relative_to(tmp_path).as_posix()
     ]
+
+
+def test_an_enqueue_that_failed_still_earns_a_whole_vault_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queue that could not take the work does not get to own it.
+
+    The dispatch skips the whole-vault rebuild only because the durable queue
+    holds the repair. If the enqueue raised, nothing holds it, and claiming
+    otherwise would drop the work entirely -- strictly worse than the expensive
+    path this change replaces. The rebuild is the correct answer here.
+    """
+    from exomem.epistemic_graph import EpistemicGraphIndex
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/unqueued.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Unqueued\n", encoding="utf-8")
+    index = EpistemicGraphIndex(tmp_path)
+    required = _checkpoint(1)
+    graph_sync._write_checkpoint(tmp_path, required)
+    registrations: list[graph_sync.GraphSyncCheckpoint] = []
+
+    def refuse(*_args, **_kwargs):
+        raise sqlite3.OperationalError("queue unavailable")
+
+    monkeypatch.setattr(deferred_index, "add_graph", refuse)
+    monkeypatch.setattr(
+        graph_sync,
+        "register_rebuild",
+        lambda _root, checkpoint, _builder, **_kwargs: registrations.append(checkpoint),
+    )
+
+    report = index._refresh_paths_locked([note], graph_checkpoint=required)
+
+    assert report["deferred"] == 1
+    assert not report.get("queued")
+    assert registrations == [required]
+
+
+def test_a_queued_repair_is_not_rescheduled_as_a_whole_vault_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The queue owns the repair, so the dispatch must not schedule the vault.
+
+    A defer-classified bail-out enqueues the affected paths and registers no
+    rebuild. The layer above read that -- an unregistered, unacknowledged
+    checkpoint -- as a *missing* rebuild and registered one, so the expensive
+    path still ran on exactly the bail-outs this change exists to make
+    proportional, now with a queue beside it rather than instead of it.
+
+    `deferred` alone cannot carry this decision: `fallback()` registers its own
+    rebuild and reports `deferred` too. Only the enqueue that actually succeeded
+    may claim the queue owns the work.
+    """
+    from exomem.epistemic_graph import EpistemicGraphIndex, upsert_after_write
+
+    note = tmp_path / "Knowledge Base/Notes/Insights/queued.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Queued\n", encoding="utf-8")
+    required = _checkpoint(1)
+    graph_sync._write_checkpoint(tmp_path, required)
+    registrations: list[graph_sync.GraphSyncCheckpoint] = []
+    monkeypatch.setattr(
+        graph_sync,
+        "register_rebuild",
+        lambda _root, checkpoint, _builder, **_kwargs: registrations.append(checkpoint),
+    )
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_graph_sync_predecessor_available",
+        lambda _self, _checkpoint: True,
+    )
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "refresh_paths",
+        lambda _self, *_args, **_kwargs: {
+            "indexed_files": 0,
+            "nodes": 0,
+            "edges": 0,
+            "deferred": 1,
+            "queued": 1,
+        },
+    )
+
+    result = upsert_after_write(tmp_path, [note])
+
+    assert (result.outcome, result.code) == ("deferred", "graph_repair_queued")
+    assert registrations == []
 
 
 def test_no_checkpoint_or_paths_skips_graph_fanout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
