@@ -13,7 +13,7 @@ tens of seconds; the waiter has no budget of its own.
 
 ### Measured evidence
 
-From `C:\ProgramData\exomem\logs`, 61 complete mutation traces:
+From the runtime mutation log directory, 61 complete mutation traces:
 
 | metric | value |
 |---|---|
