@@ -415,6 +415,203 @@ def test_advice_stops_once_the_material_is_routed_into_matching_scope(
 
 
 # --------------------------------------------------------------------------------
+# Resolution: acting on the advice must make it stop
+#
+# The control above covers restructure by *subtraction*. Real restructures are
+# additive -- durable units carry anchors, inbound relation targets and history, so
+# an agent that acts on the advice creates the destinations and leaves the origin
+# units where they are. These bind the case that actually happens.
+# --------------------------------------------------------------------------------
+
+
+class _StubPage:
+    """The three fields a destination is judged on. Units are deliberately absent."""
+
+    def __init__(self, title: str, tags: list[str], projects: tuple[str, ...] = ()) -> None:
+        self.title = title
+        self.projects = projects
+        self.frontmatter = {"tags": list(tags)}
+
+
+class _StubCorpus:
+    def __init__(self, pages: dict, eligible: set[str] | None = None) -> None:
+        self.pages = pages
+        self.eligible_compiled_paths = frozenset(pages if eligible is None else eligible)
+
+
+HOLDING_DIR = "Knowledge Base/Notes/Research/Holding"
+
+# The two destinations a reasonable split of this material produces. Between them
+# they declare the cluster's whole vocabulary; neither alone does.
+DESTINATION_PROPERTY = (
+    f"{HOLDING_DIR}/property-land-and-financing.md",
+    _StubPage(
+        "Rural holding property, land and financing",
+        ["smallholding", "property", "land", "countryside", "financing", "mortgage"],
+        ("holding",),
+    ),
+)
+DESTINATION_LIVESTOCK = (
+    f"{HOLDING_DIR}/livestock-husbandry-and-welfare.md",
+    _StubPage(
+        "Rural holding livestock husbandry and welfare",
+        ["livestock", "husbandry", "pasture", "animal-welfare", "dairy"],
+        ("holding",),
+    ),
+)
+
+
+def _diverged_shape(tmp_path: Path) -> structure_promotion.PageShape:
+    """The page at its loudest, as a shape the detector can be asked about directly."""
+    path = tmp_path / TRAVEL_PAGE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dict(_journey_states())["hospitality"], encoding="utf-8")
+    from exomem import semantic_units, vault
+
+    source = path.read_text(encoding="utf-8")
+    frontmatter, body, _ = vault.parse_frontmatter(source)
+    document = semantic_units.parse_semantic_units(body, path=TRAVEL_PAGE, validate=False)
+    return structure_promotion.PageShape(
+        page_type=frontmatter.get("type"),
+        title=str(frontmatter.get("title") or ""),
+        tags=tuple(structure_promotion._frontmatter_tags(frontmatter)),
+        projects=(str(frontmatter.get("project")),),
+        basename=TRAVEL_PAGE.rsplit("/", 1)[-1],
+        unit_tags=tuple(tuple(unit.tags) for unit in document.units),
+        path=TRAVEL_PAGE,
+    )
+
+
+def test_destinations_owning_the_material_resolve_the_suggestion(tmp_path: Path) -> None:
+    """The origin page keeps every unit it had, and still goes quiet."""
+    shape = _diverged_shape(tmp_path)
+    assert structure_promotion.detect(shape) is not None  # loud without them
+
+    corpus = _StubCorpus(dict([DESTINATION_PROPERTY, DESTINATION_LIVESTOCK]))
+    assert structure_promotion.detect(shape, corpus=corpus) is None
+
+
+def test_resolution_reverses_when_the_destinations_go_away(tmp_path: Path) -> None:
+    """Nothing was remembered, so removing the homes brings the advice back."""
+    shape = _diverged_shape(tmp_path)
+    full = _StubCorpus(dict([DESTINATION_PROPERTY, DESTINATION_LIVESTOCK]))
+    assert structure_promotion.detect(shape, corpus=full) is None
+
+    revived = structure_promotion.detect(shape, corpus=_StubCorpus({}))
+    assert revived == structure_promotion.detect(shape)
+    assert revived is not None
+    assert revived["strength"] == "strong"
+
+
+def test_incidental_single_term_pages_cannot_resolve_a_cluster(tmp_path: Path) -> None:
+    """In any sizeable vault some page carries almost any single term."""
+    shape = _diverged_shape(tmp_path)
+    scavengers = {
+        f"{HOLDING_DIR}/one.md": _StubPage("Boundary fencing", ["land"]),
+        f"{HOLDING_DIR}/two.md": _StubPage("Grazing rotation", ["pasture"]),
+        f"{HOLDING_DIR}/three.md": _StubPage("Winter housing", ["livestock"]),
+        f"{HOLDING_DIR}/four.md": _StubPage("Hedgerow survey", ["countryside"]),
+        f"{HOLDING_DIR}/five.md": _StubPage("Barn survey", ["property"]),
+    }
+    assert structure_promotion.detect(
+        shape, corpus=_StubCorpus(scavengers)
+    ) == structure_promotion.detect(shape)
+
+
+def test_a_partially_routed_cluster_still_reports_its_remainder(tmp_path: Path) -> None:
+    """Routing half the material is answered honestly, not with silence."""
+    shape = _diverged_shape(tmp_path)
+    corpus = _StubCorpus(dict([DESTINATION_LIVESTOCK]))
+
+    suggestion = structure_promotion.detect(shape, corpus=corpus)
+    assert suggestion is not None
+    # The livestock vocabulary has a home; the property side still does not.
+    assert not {"livestock", "husbandry", "pasture"} & set(suggestion["cluster_terms"])
+    assert {"land", "property"} & set(suggestion["cluster_terms"])
+
+
+def test_a_destination_outside_recall_eligibility_does_not_resolve(tmp_path: Path) -> None:
+    """A page the caller may not see cannot change what the caller is told."""
+    shape = _diverged_shape(tmp_path)
+    pages = dict([DESTINATION_PROPERTY, DESTINATION_LIVESTOCK])
+    hidden = _StubCorpus(pages, eligible=set())
+
+    assert structure_promotion.detect(shape, corpus=hidden) == structure_promotion.detect(shape)
+
+
+def test_a_page_is_never_its_own_destination(tmp_path: Path) -> None:
+    """Otherwise a diverged page's own tags could talk it out of its own advice."""
+    shape = _diverged_shape(tmp_path)
+    itself = _StubCorpus(
+        {
+            TRAVEL_PAGE: _StubPage(
+                "Seasonal fare portfolio and relocation scouting plan",
+                ["smallholding", "property", "land", "countryside", "livestock", "husbandry"],
+                ("travel",),
+            )
+        }
+    )
+    assert structure_promotion.detect(shape, corpus=itself) == structure_promotion.detect(shape)
+
+
+def test_an_absent_corpus_emits_rather_than_suppresses(tmp_path: Path) -> None:
+    """Suppression is never the fallback."""
+    shape = _diverged_shape(tmp_path)
+    assert structure_promotion.detect(shape, corpus=None) == structure_promotion.detect(shape)
+
+
+def test_the_origin_page_goes_quiet_through_a_real_write(tmp_path: Path) -> None:
+    """End to end: the corpus really reaches the detector from the write path."""
+    path = tmp_path / TRAVEL_PAGE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dict(_journey_states())["livestock"], encoding="utf-8")
+
+    def _observe() -> dict:
+        return writer_lease.invoke_command(
+            _command("observe_memory"),
+            tmp_path,
+            path=TRAVEL_PAGE,
+            operation="add",
+            category="business_option",
+            content="Part of the holding could carry accommodation and experience revenue.",
+            tags=["hospitality", "accommodation", "business", "smallholding"],
+        )
+
+    assert _observe()["structure_suggestion"]["strength"] == "strong"
+
+    # Act on the advice the way an agent actually does: create the destinations and
+    # leave the origin page's durable units exactly where they are.
+    for rel, title, tags in (
+        (
+            "property-land-and-financing.md",
+            "Rural holding property, land and financing",
+            ["smallholding", "property", "land", "countryside", "financing", "mortgage"],
+        ),
+        (
+            "livestock-husbandry-and-welfare.md",
+            "Rural holding livestock husbandry and welfare",
+            ["livestock", "husbandry", "pasture", "animal-welfare", "dairy"],
+        ),
+    ):
+        destination = tmp_path / HOLDING_DIR / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            _page(
+                page_id=f"00000000-0000-4000-8000-00000000{abs(hash(rel)) % 10**4:04d}",
+                title=title,
+                tags=tags,
+                body="## Observations\n\n"
+                + "\n".join(unit for _, stage in JOURNEY for unit in stage)
+                + "\n",
+                project="holding",
+            ),
+            encoding="utf-8",
+        )
+
+    assert "structure_suggestion" not in _observe()
+
+
+# --------------------------------------------------------------------------------
 # Contract guarantees
 # --------------------------------------------------------------------------------
 
