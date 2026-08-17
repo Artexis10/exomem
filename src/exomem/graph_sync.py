@@ -50,6 +50,12 @@ _RESET_MEMBERS = (
 _CHECKPOINT_READ_LIMIT = 3_200_000
 _RECEIPT_READ_LIMIT = 65_536
 _FLOOR_READ_LIMIT = 8_192
+# Re-reads of a *busy* epoch, not of a broken one. The sidecar reader already
+# waits out SQLite's own busy timeout, so reaching here means a publication is
+# genuinely mid-flight; a couple of short looks is enough to cross it, and
+# anything longer belongs to the caller's own retry rather than to this read.
+_EPOCH_BUSY_ATTEMPTS = 3
+_EPOCH_BUSY_BACKOFF_SECONDS = 0.05
 _MUTATION_ID = re.compile(r"^[0-9a-f]{24}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -1011,8 +1017,30 @@ def acknowledged_checkpoint(vault_root: Path) -> GraphBuildOutcome | None:
     return acknowledgement_state(vault_root)[1]
 
 
+def _is_sqlite_contention(error: BaseException) -> bool:
+    """Is this SQLite refusing *now*, rather than reporting a broken database?
+
+    `sqlite3.OperationalError` carries both, separated only by message text.
+    The distinction matters more here than almost anywhere else in the module:
+    every caller of `acknowledgement_state` treats a non-readable ack as a
+    broken lineage, and a broken lineage fails the write and refuses every
+    later repair until someone runs a reconcile. A busy sidecar must not buy
+    that verdict -- it is the expected state whenever a rebuild is publishing.
+    """
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    text = str(error).lower()
+    return "locked" in text or "busy" in text
+
+
 def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | None]:
-    """Return whether the live sidecar has no, valid, or malformed graph ack."""
+    """Return whether the live sidecar has no, valid, malformed, or busy graph ack.
+
+    `busy` is deliberately *not* `malformed`. Contention says nothing about the
+    lineage: the reader simply could not look. Folding the two together is what
+    made a concurrent write project `GRAPH_SYNC_LINEAGE_CONFLICT` and told the
+    caller to reconcile a graph that was perfectly intact.
+    """
     from .epistemic_graph import sidecar_path
 
     path = sidecar_path(vault_root)
@@ -1062,7 +1090,9 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
         ):
             return "malformed", None
         return "valid", GraphBuildOutcome.covering(checkpoint)
-    except (KeyError, OSError, sqlite3.Error, ValueError):
+    except (KeyError, OSError, sqlite3.Error, ValueError) as error:
+        if _is_sqlite_contention(error):
+            return "busy", None
         return "malformed", None
 
 
@@ -1130,6 +1160,35 @@ def classify_epoch(vault_root: Path) -> GraphEpochState:
     floor_status, floor = floor_state(vault_root)
     checkpoint_status, checkpoint = checkpoint_state(vault_root)
     acknowledgement_status, acknowledgement = acknowledgement_state(vault_root)
+    return _classify_epoch_states(
+        floor_status,
+        floor,
+        checkpoint_status,
+        checkpoint,
+        acknowledgement_status,
+        acknowledgement,
+    )
+
+
+def _classify_epoch_states(
+    floor_status: str,
+    floor: GraphSyncGenerationFloor | None,
+    checkpoint_status: str,
+    checkpoint: GraphSyncCheckpoint | None,
+    acknowledgement_status: str,
+    acknowledgement: GraphBuildOutcome | None,
+) -> GraphEpochState:
+    """Classify already-read states, so a caller can restate one of them.
+
+    Split out for `_admit_epoch_inputs`, which needs to ask what the lineage
+    would be if the acknowledgement it could not read were simply not there.
+    """
+    if acknowledgement_status == "busy":
+        # Not a lineage verdict at all: the sidecar was locked, so this read
+        # learned nothing about it. Every other kind here is a claim about
+        # history; `busy` is a claim about *now*, and the only correct response
+        # to it is to look again.
+        return GraphEpochState("busy", floor, checkpoint, None)
     if (
         floor_status == "absent"
         and checkpoint_status == "absent"
@@ -1178,12 +1237,18 @@ def publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
     acknowledgement. Any parse failure or contradictory lineage must be
     recovered before it can reach the sidecar replacement seam.
     """
-    for _attempt in range(2):
+    busy = False
+    for attempt in range(_EPOCH_BUSY_ATTEMPTS):
         epoch = classify_epoch(vault_root)
         if epoch.kind in {"legacy", "pre_floor", "coherent"}:
             return GraphPublicationEpoch(
                 epoch.floor, epoch.checkpoint, epoch.acknowledgement
             )
+        busy = epoch.kind == "busy"
+        if busy and attempt + 1 < _EPOCH_BUSY_ATTEMPTS:
+            time.sleep(_EPOCH_BUSY_BACKOFF_SECONDS)
+    if busy:
+        raise GraphEpochUnreadable()
     floor_status, floor = floor_state(vault_root)
     checkpoint_status, checkpoint = checkpoint_state(vault_root)
     acknowledgement_status, _acknowledgement = acknowledgement_state(vault_root)
@@ -1233,10 +1298,34 @@ def canonical_publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
 def _admit_epoch_inputs(
     vault_root: Path,
 ) -> GraphEpochState:
-    epoch = classify_epoch(vault_root)
+    for attempt in range(_EPOCH_BUSY_ATTEMPTS):
+        epoch = classify_epoch(vault_root)
+        if epoch.kind in {"legacy", "pre_floor", "coherent", "recoverable"}:
+            return epoch
+        if epoch.kind != "busy":
+            raise GraphEpochIncoherent("graph floor/checkpoint epoch is malformed or ambiguous")
+        if attempt + 1 < _EPOCH_BUSY_ATTEMPTS:
+            time.sleep(_EPOCH_BUSY_BACKOFF_SECONDS)
+    # This is the canonical write path, and it is the site the busy/malformed
+    # conflation hurt most: a locked sidecar failed the mutation outright with
+    # `GRAPH_SYNC_LINEAGE_CONFLICT` -- "your graph history is broken" for a
+    # sidecar someone else is writing this instant.
+    #
+    # Admission does not need the acknowledgement. Its only consumer is the
+    # `max(...)` in `next_checkpoint`, where the generation floor -- read from
+    # its own file, not from the locked sidecar -- already dominates it, since
+    # an acknowledgement covers a published checkpoint and every checkpoint
+    # installs a floor at its own generation. So classify as if the ack were
+    # absent, which is what "this reader has no acknowledgement" means, and
+    # keep the floor and checkpoint judgements exactly as strict as they were.
+    floor_status, floor = floor_state(vault_root)
+    checkpoint_status, checkpoint = checkpoint_state(vault_root)
+    epoch = _classify_epoch_states(
+        floor_status, floor, checkpoint_status, checkpoint, "absent", None
+    )
     if epoch.kind in {"legacy", "pre_floor", "coherent", "recoverable"}:
         return epoch
-    raise GraphEpochIncoherent("graph floor/checkpoint epoch is malformed or ambiguous")
+    raise GraphEpochUnreadable()
 
 
 def _epoch_writes_with_predecessor(
@@ -1679,6 +1768,23 @@ class GraphSidecarReplaceUnavailable(GraphRebuildRegistrationError):
         super().__init__(
             "GRAPH_SYNC_PLATFORM_SHARING_REFUSED",
             f"Release graph sidecar readers, then {_RECONCILE_HINT}",
+        )
+        self.args = (f"{_message}: {self.args[0]}",)
+
+
+class GraphEpochUnreadable(GraphRebuildRegistrationError):
+    """The epoch could not be read right now; its history is not in question.
+
+    Deliberately a sibling of `GraphEpochIncoherent` rather than a subclass.
+    Every `except GraphEpochIncoherent` in the tree means "this lineage is
+    broken" and reaches for a reconcile; inheriting would silently hand all of
+    them a case where nothing is broken and the answer is to look again.
+    """
+
+    def __init__(self, _message: str = "graph epoch is locked by a concurrent writer") -> None:
+        super().__init__(
+            "GRAPH_SYNC_EPOCH_BUSY",
+            f"Retry the same mutation identity, or {_RECONCILE_HINT}",
         )
         self.args = (f"{_message}: {self.args[0]}",)
 
