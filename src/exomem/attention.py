@@ -1,9 +1,10 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the five default measurement-only queues that `audit` already produces —
-`bridge_review`, `corpus_contradictions`, `stale_review`, `unprocessed_source`, and
-`relation_debt` — into a single ranked list while retaining opt-in registered semantic
-categories. The composition is pure measurement: each queue already emits its findings
+Composes the six default measurement-only queues that `audit` already produces —
+`bridge_review`, `prediction_window`, `corpus_contradictions`, `stale_review`,
+`unprocessed_source`, and `relation_debt` — into a single ranked list while retaining
+opt-in registered semantic and epistemic-lifecycle categories. The composition is pure
+measurement: each queue already emits its findings
 in intra-queue rank order, and this module fuses those ranks with Reciprocal Rank Fusion
 (the same `fusion` utility `find` uses) and dedups by anchor path. No note content is
 read, embedded, or compared here; nothing is mutated; `find` ordering is untouched. The
@@ -27,16 +28,34 @@ from . import review_state as review_state_module
 from .audit import AuditFinding
 
 # The default queues in deterministic tiebreak-preference order (highest first).
+#
+# The load-bearing rule is only about the top two: `bridge_review` and
+# `prediction_window` fire on DATES A HUMAN WROTE DOWN — a governance review date
+# and an epistemic check date — so an authored deadline outranks every queue that
+# infers its candidates. Ranking a guess above a promise would be the wrong way
+# round. `bridge_review` leads because its commitment is owed to another
+# audience, where a check date is owed to yourself.
+#
+# Below that line the order is HISTORICAL, not principled: `unprocessed_source`
+# and `relation_debt` are deterministic scans over authored state and are in that
+# sense less inferential than `corpus_contradictions` above them. Do not read a
+# gradient into it, and do not use one to justify inserting a queue mid-list.
 DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "bridge_review",
+    "prediction_window",
     "corpus_contradictions",
     "stale_review",
     "unprocessed_source",
     "relation_debt",
 )
+# Registered — selectable via `categories` — but deliberately NOT default,
+# because these read old fields that a long-lived vault can already hold a large
+# backlog of. See `audit.EPISTEMIC_REVIEW_CATEGORIES` for why their sibling
+# `prediction_window` sits in the default union above instead.
 ATTENTION_CATEGORIES: tuple[str, ...] = (
     *DEFAULT_ATTENTION_CATEGORIES,
     *audit_module.TYPED_SEMANTIC_CATEGORIES,
+    *audit_module.EPISTEMIC_REVIEW_CATEGORIES,
 )
 _SEVERITY_RANK: dict[str, int] = {"info": 0, "warn": 1, "error": 2}
 _SEVERITY_BY_RANK: dict[int, str] = {v: k for k, v in _SEVERITY_RANK.items()}
@@ -226,6 +245,40 @@ def _rank(
                 severity_by_path.get(anchor, 0), _SEVERITY_RANK.get(f.severity, 0)
             )
 
+    # Fold each path's UNPARTITIONED signals into that path's partitioned items.
+    #
+    # A partitioned finding anchors on `path\0partition` and shares no key with
+    # the same page's page-level findings, so without this the note takes TWO
+    # rows of the surface and its RRF votes never sum — breaking the additivity
+    # property that is the whole point of composing queues. That was latent
+    # while `bridge_review` was the only partitioned queue (it anchors on
+    # governance grant paths, which no page-level queue flags); `prediction_window`
+    # made it routine, because predictions live on exactly the insight and
+    # research-note pages `stale_review` and `relation_debt` already flag.
+    #
+    # Folding rather than dropping the partition keeps both properties: one row
+    # per note when it has one due prediction, and still N independently
+    # triageable rows when it has N — each carrying the page's context and its
+    # vote. `_apply_review_state` derives identity from the single partition on
+    # an item's reasons, and a folded page-level reason carries none, so review
+    # identities are unaffected.
+    partitioned_by_path: dict[str, list[str]] = {}
+    for anchor in scores:
+        base, separator, partition = anchor.partition("\0")
+        if separator and partition:
+            partitioned_by_path.setdefault(base, []).append(anchor)
+    for base, anchors in partitioned_by_path.items():
+        if base not in scores:
+            continue  # no page-level signal on this path — nothing to fold
+        base_score = scores.pop(base)
+        base_reasons = reasons_by_path.pop(base, [])
+        base_severity = severity_by_path.pop(base, 0)
+        display_path.pop(base, None)
+        for anchor in anchors:
+            scores[anchor] += base_score
+            reasons_by_path[anchor].extend(base_reasons)
+            severity_by_path[anchor] = max(severity_by_path[anchor], base_severity)
+
     # Order: score desc, then category preference of the item's best reason, then path.
     ordered = sorted(
         scores,
@@ -281,10 +334,12 @@ def attention(
     today=None,
     state: str = "open",
 ) -> AttentionReport:
-    """Compose the three epistemic queues into one ranked review surface. Read-only.
+    """Compose the selected epistemic queues into one ranked review surface. Read-only.
 
     Runs a single `audit` pass over the selected categories, then ranks/dedups via
     `_rank`. `today` is threaded through for deterministic ACT-R dormancy in tests.
+    Defaults to `DEFAULT_ATTENTION_CATEGORIES`; the opt-in registered categories
+    in `ATTENTION_CATEGORIES` are reachable only by naming them.
     """
     resolved = set(DEFAULT_ATTENTION_CATEGORIES) if not categories else set(categories)
     invalid = resolved - set(ATTENTION_CATEGORIES)
