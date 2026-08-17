@@ -17,6 +17,21 @@ that expiry, and `storeClientArtifact` requires the assignment still be active -
 so observe, sign, both imports and promote all have to land inside it. Rehearse
 against an existing tenant before opening a window.
 
+Resolve these FOUR environment variables before starting, not during the window.
+Two of them name nothing that is deployed under that name, and one is not
+reachable from a laptop by default:
+
+* `EXOMEM_HOSTED_PROMOTION_KEY_ID` / `EXOMEM_HOSTED_PROMOTION_SECRET` -- the
+  operator signing pair, and the server compares the key id exactly.
+* `SUBSTRATE_DATABASE_URL` -- substrate's own `DATABASE_URL`, the hosted Neon
+  DSN from its deployment environment. It is NOT whatever `DATABASE_URL` happens
+  to be exported locally; pointing this at another Postgres makes every count
+  query return 0 and the run aborts late rather than early.
+* `PROVISIONER_DATABASE_URL` -- the provisioner's `EXOMEM_PROVISIONER_DATABASE_URL`,
+  which lives inside the cluster. Reaching it needs a port-forward and a working
+  kubeconfig, so confirm you have both BEFORE the authority exists. Discovering
+  it mid-window costs the window.
+
     observe  --platform claude --results results-claude.json
     sign     --platform claude
     import   --platform claude
