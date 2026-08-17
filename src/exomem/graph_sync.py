@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import hashlib
 import hmac
 import json
@@ -1018,7 +1019,13 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
     if not path.exists():
         return "absent", None
     try:
-        with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+        # `closing`, not the connection's own context manager: that one is a
+        # transaction scope and leaves the handle open. A leaked read handle
+        # here is what makes the next publication's `os.replace` fail on
+        # Windows, and this reader is on the graph read path.
+        with contextlib.closing(
+            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        ) as conn:
             limit_graph_metadata_read(conn)
             values = dict(
                 conn.execute(
@@ -1067,7 +1074,9 @@ def _malformed_acknowledgement_generation(vault_root: Path) -> int | None:
     if not path.exists():
         return None
     try:
-        with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+        with contextlib.closing(
+            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        ) as conn:  # `closing` for the reason given in `acknowledgement_state`.
             limit_graph_metadata_read(conn)
             row = conn.execute(
                 "SELECT value FROM graph_meta WHERE key = 'graph_sync_generation'"

@@ -161,6 +161,15 @@ time. Reachable today on every path that already rebuilds off the write path.
   The drain's return counts every queue it serves, so a surface reporting one queue's
   refresh must measure that queue rather than the aggregate, or the pair it is reported
   beside stops adding up for a reason no reader of that response can see.
+- [x] 5.15 Close the sidecar each acknowledgement reader opens. A connection's own
+  context manager is a transaction scope, not a close, so `with sqlite3.connect(...)`
+  left one live read handle on `.graph.sqlite` per call — and both readers sit on the
+  graph read path through `classify_epoch` / `status` / the read snapshot. Unbounded
+  handle growth in a long-lived server, and on Windows the sharing violation that makes
+  the next publication's `os.replace` fail: the WinError 32 class the reader-cycling
+  publication hold exists to avoid, arriving from a reader the hold cannot see because it
+  was never registered. Found by instrumenting the benchmark that could not delete its own
+  sidecar, not by a test.
 - [ ] 5.10 Stop the dispatch layer re-scheduling the whole-vault rebuild that 5.3
   removed. A defer-classified bail-out returns `deferred`, but the layer above reads an
   unregistered, unacknowledged checkpoint as a missing rebuild and registers one — so
