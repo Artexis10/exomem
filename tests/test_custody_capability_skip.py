@@ -67,3 +67,47 @@ def test_the_capability_flag_matches_this_platform() -> None:
     assert PROC_FD_DIRECTORY_CUSTODY == (
         os.name == "posix" and Path("/proc/self/fd").is_dir()
     )
+
+
+def test_an_absent_posix_uid_api_is_recognised() -> None:
+    """A hosted cell checks its own effective uid; Windows has no such call."""
+    from conftest import _needs_an_absent_posix_api
+
+    assert _needs_an_absent_posix_api(
+        AttributeError("module 'os' has no attribute 'geteuid'")
+    )
+    assert _needs_an_absent_posix_api(
+        AttributeError("module 'os' has no attribute 'getuid'")
+    )
+    assert _needs_an_absent_posix_api(
+        AttributeError("<module 'os' (frozen)> has no attribute 'geteuid'")
+    )
+    assert _needs_an_absent_posix_api(ModuleNotFoundError("No module named 'fcntl'"))
+
+
+def test_an_ordinary_attribute_error_is_not_a_missing_platform_api() -> None:
+    """The narrowness is the point: a typo must not become a skip."""
+    from conftest import _needs_an_absent_posix_api
+
+    assert not _needs_an_absent_posix_api(
+        AttributeError("module 'os' has no attribute 'getcwdd'")
+    )
+    assert not _needs_an_absent_posix_api(
+        AttributeError("'HostedCell' object has no attribute 'geteuid_result'")
+    )
+    assert not _needs_an_absent_posix_api(ModuleNotFoundError("No module named 'numpy'"))
+    assert not _needs_an_absent_posix_api(RuntimeError("module 'os' has no attribute 'geteuid'"))
+    assert not _needs_an_absent_posix_api(None)
+
+
+def test_a_wrapped_posix_api_error_is_recognised() -> None:
+    """Hosted bootstrap wraps failures; the cause still names the platform gap."""
+    from conftest import _needs_an_absent_posix_api
+
+    try:
+        try:
+            raise AttributeError("module 'os' has no attribute 'geteuid'")
+        except AttributeError as exc:
+            raise RuntimeError("hosted runtime bootstrap failed") from exc
+    except RuntimeError as outer:
+        assert _needs_an_absent_posix_api(outer)
