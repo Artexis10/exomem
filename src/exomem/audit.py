@@ -753,6 +753,15 @@ def _proc_fd_directory() -> Path | None:
         return None
 
 
+def _names_pinned_inode(candidate: Path, pinned: os.stat_result) -> bool:
+    """True when *candidate* still names the same inode the descriptor holds."""
+    try:
+        named = os.stat(candidate, follow_symlinks=False)
+    except OSError:
+        return False
+    return (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino)
+
+
 def _pinned_descriptor_path(descriptor: int) -> Path | None:
     """Name the inode a descriptor holds, not the name it was opened under.
 
@@ -772,6 +781,15 @@ def _pinned_descriptor_path(descriptor: int) -> Path | None:
         return proc_fd / str(descriptor)
     if sys.platform != "darwin":
         return None
+    pinned = os.fstat(descriptor)
+    # macOS can address a file by identity through `volfs`, which is the
+    # closest equivalent to the procfs symlink: it names the inode, so a
+    # sidecar replaced behind this descriptor is still reached at the inode
+    # rather than at the name it no longer owns. Verified rather than trusted,
+    # because the volume may not publish it.
+    volfs = Path(f"/.vol/{pinned.st_dev}/{pinned.st_ino}")
+    if _names_pinned_inode(volfs, pinned):
+        return volfs
     import fcntl
 
     try:
@@ -781,7 +799,17 @@ def _pinned_descriptor_path(descriptor: int) -> Path | None:
     resolved = raw.split(b"\x00", 1)[0]
     if not resolved:
         return None
-    return Path(os.fsdecode(resolved))
+    candidate = Path(os.fsdecode(resolved))
+    # `F_GETPATH` answers from the vnode name cache, and a rename can leave
+    # that stale: after a sidecar is replaced behind this descriptor it may
+    # still report the old name, which now belongs to a *different* file. That
+    # swap is the exact attack pinning the inode exists to defeat, so the path
+    # is usable only while it still names the pinned inode. Where it does not,
+    # the caller degrades to the declared `unsupported` state -- macOS can hold
+    # the inode open but cannot re-open it by identity, so refusing is the only
+    # honest answer. The procfs branch above needs no such check: its magic
+    # symlink names the descriptor itself.
+    return candidate if _names_pinned_inode(candidate, pinned) else None
 
 
 def _sidecar_platform() -> Literal["posix", "windows", "unsupported"]:

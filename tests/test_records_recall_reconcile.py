@@ -673,6 +673,27 @@ def test_windows_binder_closes_partial_open_handles_in_reverse_order(
     assert closed == [4, 3, 2, 1]
 
 
+def _reaches_a_pinned_inode_after_rename(tmp_path: Path) -> bool:
+    """Whether this platform can still address an open file after it is renamed.
+
+    Linux does, through the procfs symlink that names the descriptor itself.
+    macOS does when the volume publishes `volfs`; when it does not, all that
+    is left is `F_GETPATH`, which answers from the vnode name cache and can
+    report the old name -- now belonging to a different file. The binding
+    verifies identity and refuses rather than repair the wrong database, so
+    the honest expectation below depends on which of those holds here. The
+    security claim does not: the swapped-in file is never touched either way.
+    """
+    probe = tmp_path / "pinned-inode-probe.bin"
+    probe.write_bytes(b"probe")
+    descriptor = os.open(probe, os.O_RDONLY)
+    try:
+        probe.rename(tmp_path / "pinned-inode-probe-moved.bin")
+        return audit_module._pinned_descriptor_path(descriptor) is not None
+    finally:
+        os.close(descriptor)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX no-follow descriptor binding")
 def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -715,7 +736,15 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
             ("../../corrupt.md",)
         ]
     with sqlite3.connect(moved) as conn:
-        assert conn.execute("SELECT file_path FROM chunks").fetchall() == []
+        rows = conn.execute("SELECT file_path FROM chunks").fetchall()
+    if _reaches_a_pinned_inode_after_rename(tmp_path):
+        # The repair followed the descriptor to the inode's new name.
+        assert rows == []
+    else:
+        # Fail-closed: the binding could not prove the path still named
+        # the pinned inode, so it repaired nothing rather than the
+        # attacker's file. The assertion above already proved that.
+        assert rows == [("../../corrupt.md",)]
 
 
 def test_corrupt_purge_refuses_without_a_bound_sidecar_descriptor(
@@ -779,7 +808,15 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
             ("../../corrupt.md",)
         ]
     with sqlite3.connect(moved) as conn:
-        assert conn.execute("SELECT file_path FROM claims").fetchall() == []
+        rows = conn.execute("SELECT file_path FROM claims").fetchall()
+    if _reaches_a_pinned_inode_after_rename(tmp_path):
+        # The repair followed the descriptor to the inode's new name.
+        assert rows == []
+    else:
+        # Fail-closed: the binding could not prove the path still named
+        # the pinned inode, so it repaired nothing rather than the
+        # attacker's file. The assertion above already proved that.
+        assert rows == [("../../corrupt.md",)]
 
 
 @pytest.mark.parametrize(
