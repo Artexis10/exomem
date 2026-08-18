@@ -23,6 +23,7 @@ from . import (
     access,
     activation,
     activation_manifest,
+    call_spans,
     freshness,
     memory_refs,
     memory_schema,
@@ -2169,6 +2170,7 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> N
     )
 
 
+@call_spans.timed("corpus_context.build")
 def build_corpus_context(
     vault_root: Path,
     *,
