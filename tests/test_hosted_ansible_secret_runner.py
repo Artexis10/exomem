@@ -7,9 +7,19 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import has_posix_executable_scripts
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "infra" / "scripts" / "ansible_with_sops.sh"
+
+# Every test here runs that shell script as a program. Windows has no shebang,
+# so `subprocess` reports `OSError: [WinError 193] %1 is not a valid Win32
+# application` before the runner's own refusals are ever reached. The runner is
+# Linux/macOS operator tooling; there is nothing here for Windows to check.
+pytestmark = pytest.mark.skipif(
+    not has_posix_executable_scripts(),
+    reason="the ansible runner is a shebang script, which is not a program here",
+)
 
 
 def _write_executable(path: Path, body: str) -> None:

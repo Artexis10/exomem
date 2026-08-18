@@ -15,6 +15,7 @@ from types import ModuleType
 
 import pytest
 import yaml
+from benchmark_capabilities import require_posix_executable_scripts
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -2776,6 +2777,9 @@ def test_network_probe_plan_contains_every_denied_boundary() -> None:
 def test_network_probe_executor_fails_if_any_denied_connection_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The probe executor runs `kubectl`; this stands one in with a shebang,
+    # which Windows cannot execute as a program.
+    require_posix_executable_scripts()
     module = _load("infra/scripts/network_policy_probes.py", "network_policy_executor_test")
     kubectl = tmp_path / "kubectl"
     calls = tmp_path / "calls.jsonl"
