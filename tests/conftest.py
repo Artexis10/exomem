@@ -11,6 +11,11 @@ from pathlib import Path
 
 import pytest
 
+from benchmark_capabilities import (
+    declares_absent_surface_timers,
+    has_posix_interval_timers,
+)
+
 from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
 from exomem import find as find_module
@@ -88,7 +93,7 @@ def _declares_custody_unsupported(error: BaseException | None) -> bool:
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
-    """Report an absent proc-fd custody capability as a skip, not a failure.
+    """Report a capability this platform does not have as a skip, not a failure.
 
     On macOS, 82 failures were one platform fact: the capability
     `protocol.custody` is built on does not exist there, and the module says so
@@ -102,21 +107,32 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     Windows is the opposite case: there the same files are blocked almost
     entirely, so ignoring them costs nearly nothing and buys a declaration.
 
-    Gated on the capability being absent, so this can never mask a regression
-    where it matters: on Linux the capability exists, and a `CustodyUnsupported`
-    there stays a failure and is meant to.
+    The broker branch is the same trade for a different capability.
+    `epistemic.broker` bounds every provider surface with `setitimer`/`SIGALRM`
+    and refuses up front where they are absent, and its 19 entry points share no
+    helper to gate -- so the refusal is matched where it surfaces. It is matched
+    through `__context__` as well, because `pytest.raises(..., match=...)`
+    re-raises as an `AssertionError` holding it: a test that expected one
+    contract error and met this one failed for the absent capability, not for
+    its own reason.
+
+    Every branch is gated on the capability actually being absent, so this can
+    never mask a regression where it matters: on Linux both capabilities exist,
+    and a `CustodyUnsupported` or a timer refusal there stays a failure and is
+    meant to.
     """
     report = (yield).get_result()
-    if PROC_FD_DIRECTORY_CUSTODY or report.when != "call" or report.outcome != "failed":
+    if report.when != "call" or report.outcome != "failed" or call.excinfo is None:
         return
-    if call.excinfo is None or not _declares_custody_unsupported(call.excinfo.value):
+    error = call.excinfo.value
+    if not PROC_FD_DIRECTORY_CUSTODY and _declares_custody_unsupported(error):
+        reason = "proc-fd directory custody is unavailable on this platform"
+    elif not has_posix_interval_timers() and declares_absent_surface_timers(error):
+        reason = "POSIX interval timers (setitimer/SIGALRM) are unavailable here"
+    else:
         return
     report.outcome = "skipped"
-    report.longrepr = (
-        str(item.path),
-        item.location[1] or 0,
-        "Skipped: proc-fd directory custody is unavailable on this platform",
-    )
+    report.longrepr = (str(item.path), item.location[1] or 0, f"Skipped: {reason}")
 
 
 @pytest.fixture(autouse=True)

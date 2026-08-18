@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import require_pinned_bun, require_posix_executable_scripts
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +74,9 @@ def _repin_head_and_tree(lockfile: Path, checkout: Path) -> None:
 
 
 def _fake_bun(tmp_path: Path, version: str = "1.3.14") -> Path:
+    # A shebang script standing in for the pinned toolchain, reached through a
+    # PATH this fixture also joins with ":". Neither survives Windows.
+    require_posix_executable_scripts()
     executable = tmp_path / "bun"
     executable.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
     executable.chmod(0o755)
@@ -338,6 +342,11 @@ def _registration_diff(checkout: Path) -> bytes:
 
 
 def _overlay_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    # These drive `materialize_checkout`, which verifies the real pinned Bun
+    # before `_fake_bun` is ever placed on PATH, and then verify through the
+    # shebang fixture. Both prerequisites, not one.
+    require_pinned_bun()
+    require_posix_executable_scripts()
     checkout = _overlay_checkout(tmp_path / "memorybench-fixture")
     basic = _basic_checkout(tmp_path / "basic-fixture")
     source_root = tmp_path / "source"
