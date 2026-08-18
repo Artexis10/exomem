@@ -72,6 +72,32 @@ def _event(
     return row
 
 
+def _prune_until_swept(*args, **kwargs) -> int:
+    """Drive `prune_expired` until it has swept the whole candidate space.
+
+    One call examines at most `MAX_PRUNE_ENUM_ENTRIES` entries and resumes from
+    a cursor persisted in the root lock. That bounded-work contract is
+    deliberate and is pinned by
+    `test_portable_catalog_cursor_is_bounded_persisted_and_fixed_size`: each
+    catalog record is 579 bytes, so sweeping the whole table in one call would
+    read a quarter of a megabyte inside a hook that runs on every write.
+
+    On POSIX the window enumerates real directory entries, so a test vault's
+    handful of them fit in the first call and a single `prune_expired` is the
+    whole sweep. The Windows root is instead a fixed 512-slot open-addressed
+    catalog, and an entry sits at whatever slot its name hashes to -- so the
+    same one call covers 16 mostly-empty slots and usually finds nothing. In
+    production the cursor carries across successive writes and the entry is
+    reached within a bounded number of them; a test asserting the *outcome*
+    has to do the same thing rather than assume one call sufficed.
+
+    Returns the total removed, so `== 1` still means exactly one directory
+    went away.
+    """
+    passes = -(-checkpoint.MAX_PRUNE_CATALOG_ENTRIES // checkpoint.MAX_PRUNE_ENUM_ENTRIES) + 1
+    return sum(checkpoint.prune_expired(*args, **kwargs) for _ in range(passes))
+
+
 @pytest.mark.parametrize("client", ["claude", "codex"])
 @pytest.mark.parametrize("camel", [False, True])
 def test_normalizes_pinned_precompact_envelopes(client: str, camel: bool) -> None:
@@ -1835,7 +1861,7 @@ def test_expired_state_is_tombstoned_and_pruned_with_both_lock_orders(
     checkpoint.write_checkpoint(old, home, observed_at_ns=100)
     checkpoint.write_checkpoint(current, home, observed_at_ns=200)
 
-    removed = checkpoint.prune_expired(
+    removed = _prune_until_swept(
         home,
         "codex",
         current_session="current",
@@ -1861,7 +1887,7 @@ def test_prune_refuses_copied_checkpoint_in_arbitrary_user_directory(tmp_path: P
     shutil.copytree(source, valuable)
     (valuable / "valuable.txt").write_text("do not delete", encoding="utf-8")
 
-    removed = checkpoint.prune_expired(
+    removed = _prune_until_swept(
         home,
         "codex",
         current_session="active",
@@ -3330,7 +3356,7 @@ def test_prune_removes_authorized_expired_interrupted_first_write(tmp_path: Path
 
     assert {item.name for item in state.iterdir()} == {".lock"}
     removed = sum(
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             "codex",
             current_session="other",
@@ -3357,7 +3383,7 @@ def test_prune_removes_stale_previous_behind_fresh_current(tmp_path: Path) -> No
     state = checkpoint.session_state_dir(home, "codex", "stale-history")
     assert checkpoint.load_checkpoint(state / "previous.json")["observed_at_ns"] == 101
 
-    removed = checkpoint.prune_expired(
+    removed = _prune_until_swept(
         home,
         "codex",
         current_session="other",
@@ -3466,7 +3492,7 @@ def test_prune_recovers_authorized_crash_tombstone_only(tmp_path: Path) -> None:
     # (2026-08-14, py3.11 shard 2/4) with `assert 0 == 1`.
     removed = 0
     for _ in range(20):
-        removed += checkpoint.prune_expired(
+        removed += _prune_until_swept(
             home,
             client,
             current_session="other",
@@ -3518,7 +3544,7 @@ def test_crash_tombstone_recovery_rotates_past_unauthorized_prefix(
         lookalikes.append(lookalike)
 
     removed = sum(
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             client,
             current_session="other",
@@ -3563,7 +3589,7 @@ def test_true_kill_between_session_directory_creation_and_manifest_is_prunable(
     assert state.is_dir()
 
     removed = sum(
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             "codex",
             current_session="other",
@@ -3634,7 +3660,7 @@ def test_true_kill_after_pending_temp_fsync_is_cleaned_boundedly(
                 observed_at_ns=200,
             )
         else:
-            checkpoint.prune_expired(
+            _prune_until_swept(
                 home,
                 "codex",
                 current_session="other",
@@ -3686,7 +3712,7 @@ def test_true_kill_after_pending_publish_before_directory_is_pruned(
     assert pending.is_file() and not state.exists()
 
     for _ in range(20):
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             "codex",
             current_session="other",
