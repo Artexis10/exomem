@@ -206,6 +206,16 @@ def test_manifest_marks_every_timing_non_publishable(tmp_path: Path) -> None:
 
 
 def test_schemas_match_exported_models(tmp_path: Path) -> None:
+    """The committed schemas must be exactly what the models export.
+
+    Compared per file, and reported as a location rather than as two byte
+    blobs. `assert fresh == committed` over the whole mapping states the same
+    contract, but a mismatch hands pytest a 557 KB value to diff, and
+    rendering that diff outran the 60s per-test timeout -- which
+    `timeout_method = "thread"` enforces by killing the process, so the shard
+    wrote no junit at all and every other test on it went unreported. A stale
+    schema should cost one line, not a lane's worth of reporting.
+    """
     from benchmarks.memorybench.traffic import export_json_schemas
 
     fresh = {path.name: path.read_bytes() for path in export_json_schemas(tmp_path)}
@@ -213,7 +223,26 @@ def test_schemas_match_exported_models(tmp_path: Path) -> None:
         path.name: path.read_bytes()
         for path in Path("benchmarks/memorybench/schema").glob("*.schema.json")
     }
-    assert fresh == committed
+
+    assert sorted(fresh) == sorted(committed), (
+        "exported and committed schema sets differ"
+    )
+
+    for name in sorted(fresh):
+        exported, stored = fresh[name], committed[name]
+        if exported == stored:
+            continue
+        offset = next(
+            (i for i, (a, b) in enumerate(zip(exported, stored)) if a != b),
+            min(len(exported), len(stored)),
+        )
+        pytest.fail(
+            f"{name} is stale -- regenerate it from the models.\n"
+            f"  exported {len(exported)} bytes, committed {len(stored)} bytes\n"
+            f"  first difference at byte {offset}\n"
+            f"  exported:  {exported[offset : offset + 60]!r}\n"
+            f"  committed: {stored[offset : offset + 60]!r}"
+        )
 
 
 def test_writer_refuses_existing_or_incomplete_output(tmp_path: Path) -> None:

@@ -515,9 +515,16 @@ def export_json_schemas(output_dir: Path) -> list[Path]:
     paths: list[Path] = []
     for name, model in SCHEMA_EXPORTS.items():
         path = output_dir / f"{name}.v1.schema.json"
-        path.write_text(
-            json.dumps(model.model_json_schema(), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        # `write_bytes`, not `write_text`: these schemas are committed
+        # artifacts, compared byte for byte against the tree by
+        # `test_schemas_match_exported_models`. `write_text` applies the
+        # platform's newline translation, so on Windows every one of the
+        # 19392 newlines here became CRLF and each schema differed from its
+        # own committed copy by nothing at all.
+        path.write_bytes(
+            (json.dumps(model.model_json_schema(), indent=2, sort_keys=True) + "\n").encode(
+                "utf-8"
+            )
         )
         paths.append(path)
     return paths
