@@ -3867,6 +3867,49 @@ def is_casing_only_rewrite(canonical: str, original: str) -> bool:
     return len(canonical) == len(original) and canonical.casefold() == original.casefold()
 
 
+def _respelled_against_disk(root: Path, relative: str) -> str | None:
+    """Re-spell each existing component of *relative* with its on-disk casing.
+
+    `Path.resolve()` reports the true casing on Windows, so this module got the
+    re-spell for free there and assumed every platform behaved that way. macOS
+    folds case exactly as NTFS does, but `realpath()` only resolves symlinks --
+    it hands back whatever spelling it was given -- so `canonical_vault_rel`
+    was an identity transform on the one other platform that needs it, and two
+    spellings of one page kept two identities.
+
+    Walks the components instead, taking each existing entry's real name. An
+    exact match always wins, so a genuinely case-sensitive volume is never
+    redirected to a differently-cased sibling. The first component that does
+    not exist ends the walk and the remainder is preserved verbatim, matching
+    the non-strict `resolve()` this supplements. Returns None if a directory
+    cannot be read, so the caller keeps its fail-open behaviour.
+    """
+    parts = tuple(part for part in relative.split("/") if part)
+    if not parts:
+        return None
+    current = root
+    spelled: list[str] = []
+    for index, part in enumerate(parts):
+        folded = part.casefold()
+        match: str | None = None
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.name == part:
+                        match = part
+                        break
+                    if match is None and entry.name.casefold() == folded:
+                        match = entry.name
+        except OSError:
+            return None
+        if match is None:
+            spelled.extend(parts[index:])
+            break
+        spelled.append(match)
+        current = current / match
+    return "/".join(spelled)
+
+
 def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     """Return `rel` re-spelled with the real on-disk casing under `vault_root`.
 
@@ -3901,11 +3944,19 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
         return rel
     if not canonical or canonical == ".":
         return rel
-    canonical = _canonical_kb_segment(canonical)
     # Compare against the slash-normalized caller form: `Path` accepts `\` and
     # a leading `/`, and `as_posix()` has already normalized those away, so
     # comparing raw would reject a legitimate re-spell over pure spelling noise.
     cleaned = str(rel).replace("\\", "/").lstrip("/")
+    if canonical == cleaned and os.name != "nt" and vault_casefolds(root):
+        # `resolve()` handed back the caller's own spelling. Either it was
+        # already correct or this platform does not re-spell at all; only a
+        # folding volume can tell those apart, and only there are the extra
+        # directory reads worth taking.
+        respelled = _respelled_against_disk(root, canonical)
+        if respelled:
+            canonical = respelled
+    canonical = _canonical_kb_segment(canonical)
     if not is_casing_only_rewrite(canonical, cleaned):
         return rel
     return canonical
@@ -3975,9 +4026,13 @@ def vault_casefolds(vault_root: Path) -> bool:
     `EXOMEM_CASEFOLD_PATHS=1|0` overrides the answer without probing — that is
     how Linux CI exercises the folding branch. Its reach is exactly this
     predicate: the case-folded identity *comparison* (whether two spellings
-    count as one owner). It does not disable path canonicalization —
-    `canonical_vault_rel` / `resolve_under_vault` re-spell to the on-disk casing
-    unconditionally, on every platform. Otherwise the filesystem is probed once
+    count as one owner), and the supplementary re-spell walk described below.
+    It does not disable path canonicalization — `canonical_vault_rel` /
+    `resolve_under_vault` still re-spell through `Path.resolve()` on every
+    platform. That is the whole re-spell on Windows, where `resolve()` reports
+    true casing; POSIX `realpath()` does not, so on a folding volume there
+    `canonical_vault_rel` walks the components itself, and this predicate is
+    what says the volume folds. Otherwise the filesystem is probed once
     per root; when nothing is probeable the platform default
     (`os.path.normcase`) decides.
     """

@@ -514,3 +514,54 @@ def test_edit_resolve_does_not_launder_a_symlink(tmp_path: Path) -> None:
 
     assert rel == requested
     assert rel.casefold() == requested.casefold()
+
+
+# --- the on-disk re-spell walk, exercised on every platform ----------------
+#
+# `canonical_vault_rel` only reaches this walk where `Path.resolve()` does not
+# report true casing, which is every platform except Windows. Testing the walk
+# directly keeps it covered on the host that cannot take that branch.
+
+
+def test_respell_walk_returns_the_on_disk_casing_of_every_component(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Knowledge Base" / "Notes").mkdir(parents=True)
+
+    respelled = vault._respelled_against_disk(tmp_path, "KNOWLEDGE BASE/notes/x.md")
+
+    # Both existing directories come back in their on-disk spelling; the
+    # not-yet-existing leaf is preserved verbatim, as non-strict resolve() does.
+    assert respelled == "Knowledge Base/Notes/x.md"
+
+
+def test_respell_walk_prefers_an_exact_match_over_a_differently_cased_sibling(
+    tmp_path: Path,
+) -> None:
+    """A case-sensitive volume must never be redirected to a sibling."""
+    (tmp_path / "Notes").mkdir()
+    try:
+        (tmp_path / "notes").mkdir()
+    except OSError:
+        pytest.skip("the volume backing tmp_path folds case - no distinct sibling")
+
+    assert vault._respelled_against_disk(tmp_path, "notes/x.md") == "notes/x.md"
+    assert vault._respelled_against_disk(tmp_path, "Notes/x.md") == "Notes/x.md"
+
+
+def test_respell_walk_stops_at_the_first_component_that_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Knowledge Base").mkdir()
+
+    respelled = vault._respelled_against_disk(tmp_path, "KNOWLEDGE BASE/absent/DEEP/x.md")
+
+    assert respelled == "Knowledge Base/absent/DEEP/x.md"
+
+
+def test_respell_walk_fails_open_when_a_directory_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """Fail-open matches `canonical_vault_rel`'s own contract."""
+    assert vault._respelled_against_disk(tmp_path / "absent-root", "a/b.md") is None
+    assert vault._respelled_against_disk(tmp_path, "") is None
