@@ -2375,6 +2375,51 @@ def _installed_lease(args: argparse.Namespace) -> int:
     return 0
 
 
+SERVER_LOG_TAIL_CHARS = 20_000
+
+
+def _publish_server_logs(root: Path) -> None:
+    """Rescue the server's own log before the scratch root is deleted.
+
+    The harness deletes everything it built, the failing server's log included,
+    so a red CI run arrives carrying the child's captured stderr and nothing
+    else: no fan-out warnings, no deferral reasons, no timings, no way to tell a
+    server that refused work from one that never got asked. That is the gap that
+    has made graph-convergence failures cost a rerun each to guess at.
+
+    Copy it where the workflow can upload it and print the tail inline, so the
+    log is on the failing run's own page rather than a rerun away. Best-effort
+    throughout: this runs while an exception is already propagating and must
+    never replace the real failure with one of its own.
+    """
+    source = root / "home" / "logs"
+    if not source.is_dir():
+        return
+    destination = REPO_ROOT / "test-results" / "e2e-logs"
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # noqa: BLE001 - diagnostics must not mask the failure
+        print(f"product-e2e: could not create {destination} ({exc})")
+        return
+    for log_file in sorted(source.rglob("*")):
+        if not log_file.is_file():
+            continue
+        relative = log_file.relative_to(source)
+        try:
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(log_file, target)
+            text = log_file.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:  # noqa: BLE001 - one unreadable log is not fatal
+            print(f"product-e2e: could not publish {relative} ({exc})")
+            continue
+        tail = text[-SERVER_LOG_TAIL_CHARS:]
+        elided = "" if len(tail) == len(text) else f" (last {len(tail)} of {len(text)} chars)"
+        print(f"--- product-e2e server log: {relative}{elided} ---", flush=True)
+        print(tail, flush=True)
+        print(f"--- end {relative} ---", flush=True)
+
+
 @contextlib.contextmanager
 def _e2e_workdir(*, keep: bool):
     """The harness's scratch root, optionally retained for a post-mortem.
@@ -2390,6 +2435,9 @@ def _e2e_workdir(*, keep: bool):
     path = tempfile.mkdtemp(prefix="exomem-product-e2e-")
     try:
         yield path
+    except BaseException:
+        _publish_server_logs(Path(path))
+        raise
     finally:
         if keep:
             print(f"product-e2e: kept working directory {path}")

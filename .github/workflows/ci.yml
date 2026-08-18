@@ -119,6 +119,15 @@ jobs:
           enable-cache: true
       - name: Governed lifecycle, restart persistence, and transport shutdown
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 240 --request-timeout 20
+      # The harness prints the tail inline; this keeps the whole log for the
+      # failures whose cause is older than the tail.
+      - name: Upload E2E server logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-e2e-server-logs
+          path: test-results/e2e-logs
+          if-no-files-found: ignore
 
   retrieval-quality:
     name: retrieval quality (golden gate, embeddings)

@@ -79,3 +79,6 @@ infra/provisioner/*.sqlite*
 .refs.sqlite
 .lexical.sqlite*
 snapshot_report.html
+
+# Test and E2E diagnostics written by CI jobs and local runs.
+test-results/
