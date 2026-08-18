@@ -83,3 +83,30 @@ def test_one_unreadable_field_never_costs_the_others_or_raises(
     assert "state=current" in fields
     assert "generation=1" in fields
     assert "scope=paths" in fields
+
+
+def test_a_failed_status_read_degrades_both_fields_it_feeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`state` and `generation` come from one read, so one failure marks both.
+
+    They are taken together deliberately -- describing the situation should not
+    cost two walks of the sidecars being described -- which makes it worth
+    pinning that the shared read degrades honestly rather than reporting a
+    generation it never obtained.
+    """
+    from exomem import deferred_index, graph_sync
+
+    def explode(_root: Path) -> object:
+        raise RuntimeError("sidecar unreadable")
+
+    monkeypatch.setattr(graph_sync, "status", explode)
+    monkeypatch.setattr(
+        graph_sync, "classify_epoch", lambda _root: type("E", (), {"kind": "coherent"})()
+    )
+    monkeypatch.setattr(deferred_index, "graph_status", lambda _root: {"count": 2})
+    monkeypatch.setattr(deferred_index, "graph_full_rebuild_pending", lambda _root: None)
+
+    fields = file_watcher._graph_incompleteness_fields(tmp_path)
+
+    assert fields == "epoch=coherent state=? generation=? queued=2 scope=paths"

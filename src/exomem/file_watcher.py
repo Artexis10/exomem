@@ -265,31 +265,31 @@ def _graph_incompleteness_fields(vault_root: Path) -> str:
     is queued, and whether that repair is whole-vault -- a changed scope the
     incremental path could not determine -- or a known path list.
 
-    Diagnostics must never be why a drain fails, so each field degrades to `?`
-    on its own rather than propagating.
+    Each read is taken once and each field degrades to `?` on its own.
+    Diagnostics must never be why a drain fails, and describing a situation
+    should not cost three walks of the sidecars it is describing.
     """
     from . import deferred_index, graph_sync
 
-    def read(name: str, produce: Callable[[], object]) -> str:
+    def read(produce: Callable[[], object]) -> object:
         try:
-            return f"{name}={produce()}"
+            return produce()
         except Exception:  # noqa: BLE001 - a missing field beats a failed drain
-            return f"{name}=?"
+            return "?"
 
-    return " ".join((
-        read("epoch", lambda: graph_sync.classify_epoch(vault_root).kind),
-        read("state", lambda: graph_sync.status(vault_root).get("state")),
-        read("generation", lambda: graph_sync.status(vault_root).get("generation")),
-        read("queued", lambda: deferred_index.graph_status(vault_root).get("count")),
-        read(
-            "scope",
-            lambda: (
-                "full"
-                if deferred_index.graph_full_rebuild_pending(vault_root) is not None
-                else "paths"
-            ),
+    status = read(lambda: graph_sync.status(vault_root))
+    fields = {
+        "epoch": read(lambda: graph_sync.classify_epoch(vault_root).kind),
+        "state": status.get("state") if isinstance(status, dict) else status,
+        "generation": status.get("generation") if isinstance(status, dict) else status,
+        "queued": read(lambda: deferred_index.graph_status(vault_root).get("count")),
+        "scope": read(
+            lambda: "full"
+            if deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            else "paths"
         ),
-    ))
+    }
+    return " ".join(f"{name}={value}" for name, value in fields.items())
 
 
 class FileWatcher:
