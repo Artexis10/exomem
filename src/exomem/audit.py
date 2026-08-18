@@ -70,8 +70,10 @@ import math
 import os
 import re
 import stat
+import sys
 from collections import deque
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -737,6 +739,51 @@ class _BoundSidecarRepair:
         return True
 
 
+_DARWIN_F_GETPATH = 50  # <sys/fcntl.h>
+_DARWIN_MAXPATHLEN = 1024
+
+
+@lru_cache(maxsize=1)
+def _proc_fd_directory() -> Path | None:
+    """The procfs descriptor directory, where the running kernel provides one."""
+    candidate = Path("/proc/self/fd")
+    try:
+        return candidate if candidate.is_dir() else None
+    except OSError:  # pragma: no cover - a hostile or absent /proc
+        return None
+
+
+def _pinned_descriptor_path(descriptor: int) -> Path | None:
+    """Name the inode a descriptor holds, not the name it was opened under.
+
+    Linux answers this with the magic symlink `/proc/self/fd/N`, and this
+    module used to assume every POSIX host had one. macOS has no procfs, so
+    the binding handed sqlite a path that could not exist: every bound census
+    read reported `sidecar_unreadable` and every exact-row repair quietly did
+    nothing, which made audit and reconcile repair inert on macOS rather than
+    unavailable. Darwin's `F_GETPATH` answers the same question -- it reports
+    where the pinned inode lives *now* -- so a sidecar replaced behind the
+    descriptor is still reached through the descriptor and not through the
+    name it no longer owns. Where neither exists the caller degrades to the
+    declared `unsupported` state instead of inventing a path.
+    """
+    proc_fd = _proc_fd_directory()
+    if proc_fd is not None:
+        return proc_fd / str(descriptor)
+    if sys.platform != "darwin":
+        return None
+    import fcntl
+
+    try:
+        raw = fcntl.fcntl(descriptor, _DARWIN_F_GETPATH, bytes(_DARWIN_MAXPATHLEN))
+    except (OSError, ValueError):
+        return None
+    resolved = raw.split(b"\x00", 1)[0]
+    if not resolved:
+        return None
+    return Path(os.fsdecode(resolved))
+
+
 def _sidecar_platform() -> Literal["posix", "windows", "unsupported"]:
     """Select the local no-follow binding primitive without mutating process state."""
     if os.name == "posix" and all(
@@ -831,8 +878,11 @@ def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidec
                 return "invalid", None
             checks.append((kb_fd, name, (info.st_dev, info.st_ino), False))
             signatures.append((name, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)))
+        pinned = _pinned_descriptor_path(leaf_fd)
+        if pinned is None:
+            return "unsupported", None
         bound = _BoundSidecarRepair(
-            tuple(fds), Path(f"/proc/self/fd/{leaf_fd}"), tuple(checks), tuple(signatures)
+            tuple(fds), pinned, tuple(checks), tuple(signatures)
         )
         return "regular", bound
     except FileNotFoundError:
