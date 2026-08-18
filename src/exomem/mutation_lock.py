@@ -574,6 +574,41 @@ def _windows_principal_spellings(sid: str) -> frozenset[str]:
     return frozenset(spellings)
 
 
+#: Every casefolded spelling of BUILTIN\Administrators, the group an account
+#: domain's RID 500 belongs to by construction.
+_WINDOWS_ADMINISTRATORS_SPELLINGS = frozenset({"ba", "s-1-5-32-544"})
+
+
+def _windows_owner_admits_current_user(owner: str | None, sid: str) -> bool:
+    r"""True when an `OW` ACE on an object owned by *owner* grants to *sid*.
+
+    The literal case is an owner spelled as the current user. The other case is
+    a policy default rather than an oddity: where "System objects: Default owner
+    for objects created by members of the Administrators group" names the group,
+    every directory an administrator creates is owned by
+    BUILTIN\Administrators, not by the account. GitHub's `windows-latest`
+    runners are configured that way, so a directory this module created itself
+    -- `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)`, the exact shape the
+    validator documents as correct -- read back as owned by `BA` and failed.
+
+    The built-in Administrator is a member of that group by construction, so an
+    `OW` ACE there does grant to us. It grants to the rest of the group too, and
+    that is not a widening: `BA` is already one of the three trustees private
+    runtime state permits, so this admits nobody the DACL did not already admit.
+
+    Deliberately not folded into `_windows_principal_spellings`. That set also
+    resolves *literal* ACE trustees, and adding `BA` to it would collapse a real
+    `BA` grant onto the user's slot -- losing the distinction between the two
+    principals the equality check depends on.
+    """
+    if owner is None:
+        return False
+    spelling = owner.casefold()
+    if spelling in _windows_principal_spellings(sid):
+        return True
+    return _windows_is_local_admin_sid(sid) and spelling in _WINDOWS_ADMINISTRATORS_SPELLINGS
+
+
 def _windows_private_dacl_trustees(sid: str) -> tuple[str, ...]:
     """Return the distinct SDDL trustees permitted for private runtime state."""
     if not re.fullmatch(r"S-1-[0-9-]+", sid):
@@ -793,9 +828,7 @@ def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> b
     # it, so a substituted grant lands in the same slot as a literal one.
     user_principal = trustees[0].casefold()
     owner = _windows_sddl_owner(sddl)
-    owner_is_current_user = (
-        owner is not None and owner.casefold() in _windows_principal_spellings(sid)
-    )
+    owner_is_current_user = _windows_owner_admits_current_user(owner, sid)
     observed: set[str] = set()
     for ace in aces:
         fields = ace.split(";")

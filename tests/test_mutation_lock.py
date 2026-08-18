@@ -1296,3 +1296,94 @@ def test_dacl_error_still_renders_without_a_descriptor() -> None:
     assert error.observed is None
     assert error.expected == ()
     assert "unsafe Windows DACL" in str(error)
+
+
+def test_owner_rights_counts_when_the_administrators_group_owns_the_entry() -> None:
+    """The second half of the same descriptor, and 38 more Windows failures.
+
+    `LA` fixed the *trustee* spelling; this is the *owner*. Where the policy
+    "System objects: Default owner for objects created by members of the
+    Administrators group" names the group -- which is how GitHub's
+    `windows-latest` runners are configured -- every directory an administrator
+    creates is owned by `BA`, not by the account. So the descriptor this module
+    writes itself came back as `O:BA` with an `OW` ACE, and `OW` was refused
+    because the owner was not spelled as the current user.
+
+    The built-in Administrator belongs to that group by construction, so the
+    ACE does grant to us.
+    """
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:BA{_OWNER_RIGHTS_DACL}", _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_administrators_owner_is_no_concession_to_an_ordinary_account() -> None:
+    """Membership is what carries the grant, and an ordinary user has none.
+
+    Were this unscoped, any account would accept an `OW` ACE on an entry owned
+    by Administrators -- inferring its own access from a group it may not be in.
+    """
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:BA{_OWNER_RIGHTS_DACL}", _USER_SID, directory=True
+    )
+
+
+def test_the_administrators_owner_concession_admits_no_new_principal() -> None:
+    """`BA` already holds full access here, so resolving `OW` to it widens nothing.
+
+    That is the whole justification: the concession cannot admit anyone the
+    descriptor did not already admit, because the group it names is one of the
+    three trustees private runtime state permits.
+    """
+    trustees = mutation_lock_module._windows_private_dacl_trustees(_LOCAL_ADMIN_SID)
+
+    assert "BA" in trustees
+
+
+def test_a_foreign_owner_is_still_refused_for_the_built_in_administrator() -> None:
+    """Being RID 500 does not make every owner ours."""
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:S-1-5-21-9-9-9-1001{_OWNER_RIGHTS_DACL}", _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_the_administrators_owner_does_not_relax_the_trustee_set() -> None:
+    """The owner decides what `OW` means, never who else may be granted."""
+    foreign = (
+        "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+        "(A;OICI;FA;;;S-1-5-21-9-9-9-1001)"
+    )
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        foreign, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_an_inherited_directory_dacl_is_still_refused() -> None:
+    """Protection is a separate requirement and this change does not touch it.
+
+    The other 12 of the 50 runner failures are this: a directory that already
+    existed, so it carries its parent's ACEs and no `P`. Whatever grants it
+    happens to name, an unprotected DACL can change under us when the parent's
+    does -- and this module validates a pre-existing entry rather than
+    repairing it.
+    """
+    inherited = "O:BAD:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)"
+
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        inherited, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_the_administrators_owner_is_not_a_trustee_spelling() -> None:
+    """`BA` resolves an owner, never a literal ACE trustee.
+
+    Folding it into the trustee spellings would collapse a real `BA` grant onto
+    the user's slot, and the descriptor below -- which names the user, SYSTEM
+    and Administrators exactly once each -- would read as a duplicate.
+    """
+    literal = (
+        f"O:BAD:P(A;OICI;FA;;;{_LOCAL_ADMIN_SID})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    )
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        literal, _LOCAL_ADMIN_SID, directory=True
+    )
