@@ -261,6 +261,25 @@ _CONTENT_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"(?<![A-Za-z0-9_.-])/(?:Users|home)/(?!<|\{\{)[^/\s<]+/"),
     ),
     ("absolute_local_path", re.compile(r"(?<![A-Za-z0-9_.-])/mnt/[a-z]/")),
+    (
+        # A Windows account SID identifies one machine and one account on it,
+        # exactly as an absolute home path does, and reached this repository the
+        # same way: pasted out of a live box while reproducing a bug. The path
+        # rules caught the paths from that session; nothing caught the SID.
+        #
+        # Scoped to the S-1-5-21 authority, which is the machine/domain-issued
+        # form. Well-known SIDs are not identifying and must keep working:
+        # S-1-5-18 (SYSTEM), S-1-5-32-544 (Administrators) and S-1-3-4 (OWNER
+        # RIGHTS) all appear legitimately in this codebase's DACL handling.
+        #
+        # The three sub-authorities of a real SID are 32-bit values, so
+        # requiring five digits each leaves an obvious, self-documenting escape
+        # for tests that need the shape and not the identity: S-1-5-21-1-2-3-1001
+        # cannot be mistaken for anyone's machine. That mirrors how the path
+        # rules exempt `example` and `<name>` rather than forbidding paths.
+        "windows_account_sid",
+        re.compile(r"(?<![0-9A-Za-z-])S-1-5-21(?:-[0-9]{5,10}){3}-[0-9]+(?![0-9])"),
+    ),
 )
 
 
