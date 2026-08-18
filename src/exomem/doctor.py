@@ -2354,11 +2354,26 @@ def _check_observability() -> DoctorCheck:
         details["log_dir_writable"] = False
         problems.append("log directory is not writable")
 
-    jsonl_names = ("queries.jsonl", "writes.jsonl", "reads.jsonl", "mutations.jsonl")
+    jsonl_names = (
+        "queries.jsonl",
+        "writes.jsonl",
+        "reads.jsonl",
+        "mutations.jsonl",
+        "ledger.jsonl",
+    )
     for name in jsonl_names:
         try:
             path = log_dir / name
-            details[f"{name}.rotated"] = (log_dir / f"{name}.1").exists()
+            if name == "ledger.jsonl":
+                # The ledger rotates into a content-addressed archive, not to a
+                # `.1` generation, so the usual probe would report `False`
+                # forever on a ledger that has rotated many times.
+                archive = log_dir / "ledger-archive"
+                details[f"{name}.rotated"] = archive.is_dir() and any(
+                    archive.glob("ledger-*.jsonl")
+                )
+            else:
+                details[f"{name}.rotated"] = (log_dir / f"{name}.1").exists()
             if not path.exists():
                 continue
             details[f"{name}.bytes"] = path.stat().st_size

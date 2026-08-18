@@ -20,17 +20,29 @@ _FILE_ALIASES: dict[str, str] = {
     "writes": "writes.jsonl",
     "reads": "reads.jsonl",
     "mutations": "mutations.jsonl",
+    "ledger": "ledger.jsonl",
 }
 
 # Every file `trace()` joins across, in the order they are read (the final
 # sort by timestamp is what actually orders the report).
+#
+# `ledger` is the only one of these that covers *every* tool call rather than
+# one family, so it is what makes a trace complete: a request whose tool is
+# neither a read, a query, nor a mutation used to join nothing but prose.
 _TRACE_FILES: tuple[str, ...] = (
     "server",
+    "ledger",
     "queries",
     "writes",
     "reads",
     "mutations",
 )
+
+
+def file_aliases() -> tuple[str, ...]:
+    """The `--file` aliases, sorted. One list, so the CLI's `choices` cannot
+    drift away from what `resolve_log_file` actually accepts."""
+    return tuple(sorted(_FILE_ALIASES))
 
 
 def resolve_log_file(name: str) -> Path:
@@ -45,8 +57,45 @@ def resolve_log_file(name: str) -> Path:
     return resolve_log_dir() / filename
 
 
+def _ledger_archive_generations() -> list[Path]:
+    """The call ledger's archived segments, oldest first.
+
+    The other logs rotate in place to `<name>.1`; the ledger moves its oldest
+    rows into a *content-addressed* archive, so filename order says nothing
+    about age. The rows carry the order, and the first row of each segment is
+    enough to place it -- which matters because a trace that only knew about
+    `.1` would silently stop at the live file's first row, the exact gap the
+    ledger exists to close.
+    """
+    from . import call_ledger
+
+    try:
+        archive = call_ledger.archive_dir()
+        if not archive.is_dir():
+            return []
+        placed: list[tuple[int, Path]] = []
+        for candidate in archive.glob("ledger-*.jsonl"):
+            try:
+                with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+                    first = handle.readline().strip()
+                sequence = int(json.loads(first)["sequence"]) if first else 0
+            except (OSError, ValueError, KeyError, TypeError):
+                sequence = 0
+            placed.append((sequence, candidate))
+        return [path for _sequence, path in sorted(placed, key=lambda item: item[0])]
+    except (OSError, ImportError):
+        return []
+
+
 def _iter_lines(path: Path, *, include_rotated: bool = True) -> list[str]:
-    candidates = [path.with_name(path.name + ".1"), path] if include_rotated else [path]
+    candidates = [path]
+    if include_rotated:
+        older = (
+            _ledger_archive_generations()
+            if path.name == _FILE_ALIASES["ledger"]
+            else [path.with_name(path.name + ".1")]
+        )
+        candidates = [*older, path]
     lines: list[str] = []
     for candidate in candidates:
         if not candidate.exists():
@@ -56,6 +105,19 @@ def _iter_lines(path: Path, *, include_rotated: bool = True) -> list[str]:
         except OSError:
             continue
     return lines
+
+
+def verify_ledger() -> list[str]:
+    """Every way the call ledger's hash chain fails to verify. Empty means intact.
+
+    Walks archive-then-live as one sequence, so a break at a rotation boundary
+    is reported rather than hidden by verifying each segment in isolation.
+    """
+    from . import call_ledger
+
+    return call_ledger.verify_lines(
+        _iter_lines(call_ledger.ledger_path()), anchored=True
+    )
 
 
 def tail_lines(path: Path, n: int = 20) -> list[str]:

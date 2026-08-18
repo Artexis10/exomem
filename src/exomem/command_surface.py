@@ -556,6 +556,62 @@ def mcp_request_id() -> str:
     return str(uuid.uuid4())
 
 
+def mcp_caller_identity() -> dict[str, str | None]:
+    """Who is calling: MCP client name/version, transport, and session.
+
+    The MCP initialize handshake carries `clientInfo`, so the server already
+    knows whether a call came from claude.ai, ChatGPT, Codex, or a local CLI --
+    and then discards it. Every existing journal is therefore one
+    undifferentiated stream across every connected client, which is exactly the
+    distinction an operator needs first when one client's calls are failing.
+
+    Deliberately *not* hashed, unlike `mcp_retry_scope`. A client's product name
+    and version identify software, not a person: it is the same class of value
+    as a `User-Agent`, and hashing it would destroy the only field that answers
+    "which client?" while protecting nothing. The per-principal identity stays
+    hashed and separate.
+
+    Never raises. Outside an MCP call every field is simply `None`.
+    """
+    identity: dict[str, str | None] = {
+        "client_name": None,
+        "client_version": None,
+        "transport": None,
+        "session_id": None,
+    }
+    try:
+        from fastmcp.server.dependencies import get_context, get_http_headers
+    except ImportError:
+        return identity
+    try:
+        context = get_context()
+    except (LookupError, RuntimeError):
+        return identity
+    try:
+        params = getattr(context.session, "client_params", None)
+        info = getattr(params, "clientInfo", None)
+        if info is not None:
+            identity["client_name"] = str(getattr(info, "name", "") or "") or None
+            identity["client_version"] = str(getattr(info, "version", "") or "") or None
+    except (AttributeError, LookupError, RuntimeError, ValueError):
+        pass
+    try:
+        identity["session_id"] = str(context.session_id)
+    except (AttributeError, LookupError, RuntimeError, ValueError):
+        pass
+    try:
+        # Headers exist only on the HTTP transports, so their presence *is* the
+        # transport signal; there is no separate flag to read.
+        headers = get_http_headers()
+        identity["transport"] = "http" if headers else "stdio"
+        agent = str(headers.get("user-agent", "") or "").strip()
+        if agent and not identity["client_name"]:
+            identity["client_name"] = agent
+    except (LookupError, RuntimeError):
+        identity["transport"] = identity["transport"] or "stdio"
+    return identity
+
+
 def peek_request_id() -> str | None:
     """Return the active MCP request id if one is bound, without minting.
 
