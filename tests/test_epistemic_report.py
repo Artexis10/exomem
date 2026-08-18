@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 from pathlib import Path
 
 import pytest
-
 from epistemic.assertions import AssertionContext
 from epistemic.snapshot import EpistemicStateSnapshot, FieldDeclaration, ProjectorMeta, StateItem
 
@@ -192,6 +192,10 @@ def test_failure_evidence_cannot_be_substituted_across_provider_or_variant(
     assert "INTEGRITY FAIL" not in rendered
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the fixture needs a filename Windows reserves",
+)
 def test_markdown_cells_and_catastrophic_artifact_paths_are_escaped(tmp_path: Path) -> None:
     from epistemic.report import render_epistemic_report
 
