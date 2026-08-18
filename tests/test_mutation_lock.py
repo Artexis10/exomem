@@ -278,9 +278,9 @@ _OWNER_RIGHTS_DACL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
 _USER_SID = "S-1-5-21-1-2-3-1001"
 
 
-#: The descriptor a GitHub Windows runner reads back for
-#: `C:\Users\runneradmin\.cache\exomem`, with the runner's real SID replaced by a
-#: synthetic one. `runneradmin` is its account domain's built-in Administrator
+#: The descriptor a GitHub Windows runner reads back for its own cache
+#: directory, with the runner's real SID replaced by a synthetic one. That
+#: runner's user is its account domain's built-in Administrator
 #: (RID 500), and SDDL renders that account as `LA` -- never as its SID. The
 #: grants are exactly the three this module writes; only the spelling differs.
 _LOCAL_ADMIN_DACL = "O:BAD:P(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
