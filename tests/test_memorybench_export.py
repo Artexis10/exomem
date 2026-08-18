@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+from benchmark_capabilities import require_pinned_bun, require_posix_file_modes
 from protocol.models import DatasetIdentity
 
 
@@ -160,6 +161,10 @@ def _materialize_native_runtime(memorybench_home: Path) -> None:
 
 
 def _plan(tmp_path: Path, *, fresh_runtime: bool = True) -> Path:
+    # `_secure_read(private=True)` proves 0600-and-owned. Windows cannot
+    # establish that: `chmod` only toggles the read-only bit and the file still
+    # reports 0o666, so a test blocks on its own fixture before its subject.
+    require_posix_file_modes()
     tmp_path.mkdir(parents=True, exist_ok=True)
     payload = _plan_payload(tmp_path, fresh_runtime=fresh_runtime)
     path = tmp_path / "plan.json"
@@ -173,6 +178,10 @@ def _fresh_plan(tmp_path: Path) -> Path:
 
 
 def _run(plan: Path, **kwargs: Any):
+    # `run_export` resolves the pinned Bun itself -- it is not one of the
+    # injectable dependencies -- so the toolchain has to actually be here.
+    require_posix_file_modes()
+    require_pinned_bun()
     from memorybench.export import run_export
 
     return run_export(plan, **kwargs)
@@ -504,7 +513,11 @@ def test_noncanonical_explicit_twenty_five_case_memorybench_plan_is_refused(tmp_
 def test_cli_has_strict_plan_only_surface_and_no_fixture_fault_switch(tmp_path: Path) -> None:
     from memorybench.export import main
 
-    plan = _plan(tmp_path)
+    # Argument parsing rejects these before the plan is ever opened, so this
+    # wants a path rather than a readable private plan -- and stays a real test
+    # everywhere, including where `_plan`'s 0600 precondition cannot be met.
+    plan = tmp_path / "plan.json"
+    plan.write_text("{}", encoding="utf-8")
     with pytest.raises(SystemExit):
         main(["--plan", str(plan), "--export-failure"])
     with pytest.raises(SystemExit):
@@ -863,6 +876,10 @@ def test_cleanup_discovery_unions_nonpending_checkpoint_and_validated_basic_evid
 ) -> None:
     import memorybench.export as export
     from protocol.models import MemoryBenchRunPlan
+    # `_secure_read(private=True)` proves 0600-and-owned. Windows cannot
+    # establish that: `chmod` only toggles the read-only bit and the file still
+    # reports 0o666, so a test blocks on its own fixture before its subject.
+    require_posix_file_modes()
 
     payload = _plan_payload(tmp_path)
     payload["provider"] = "basic-memory"
@@ -933,6 +950,10 @@ def test_cleanup_discovery_accepts_only_plan_bound_secure_exomem_descriptors(
 ) -> None:
     import memorybench.export as export
     from protocol.models import MemoryBenchRunPlan
+    # `_secure_read(private=True)` proves 0600-and-owned. Windows cannot
+    # establish that: `chmod` only toggles the read-only bit and the file still
+    # reports 0o666, so a test blocks on its own fixture before its subject.
+    require_posix_file_modes()
 
     plan = MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path))
     raw_tag = "descriptor-only-container"
