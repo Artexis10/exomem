@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,7 +79,19 @@ def move_file(
     allow_curated: bool = False,
     today: dt.date | None = None,
     promotion_reason: str | None = None,
+    content_transform: Callable[[str], str] | None = None,
+    extra_writes: tuple[PlannedWrite, ...] = (),
 ) -> MoveFileResult:
+    """Relocate a file, optionally rewriting wikilinks that point at it.
+
+    `content_transform` lets a caller that owns a *declared* content change —
+    today only source reclassification — supply the moved file's new bytes. It
+    runs after the self-wikilink pass, so the append-only refusal that pass
+    raises still fires first: the guard exists to stop an incidental link
+    rewrite mutating append-only bytes, not to stop a caller that has already
+    justified the change. `extra_writes` joins the same atomic batch so a
+    caller's own registry updates commit with the move or not at all.
+    """
     try:
         old_abs, old_rel = resolve_under_vault(
             vault_root, old_path, must_exist=True, must_be_file=True
@@ -242,6 +255,13 @@ def move_file(
             new_text, n_changed = _rewrite_wikilinks(text, old_rel, new_rel)
             if n_changed > 0:
                 append_tree = in_append_only_tree(rel)
+                # A generated index inside an append-only tree is not captured
+                # content: `add` rewrites `Sources/index.md` on every capture.
+                # Rule 2 protects the material, and refusing to repoint an index
+                # at a file this op just moved would leave the index dangling —
+                # the opposite of what the guard is for.
+                if rel.rsplit("/", 1)[-1] == "index.md":
+                    append_tree = None
                 if append_tree:
                     raise MoveFileError(
                         code="APPEND_ONLY",
@@ -281,6 +301,8 @@ def move_file(
                         )
                     files_touched.append(old_rel)
                     wikilinks_updated += source_changes
+            if content_transform is not None:
+                moved_source = content_transform(moved_source)
             destination_guard = PathGuard.capture(
                 vault_root, new_rel, leaf_policy="absent"
             )
@@ -293,6 +315,7 @@ def move_file(
                 source_guard=source_guard,
                 destination_guard=destination_guard,
                 rewrites=writes,
+                content_transform=content_transform,
             )
             semantic_states = {
                 item.after.path: semantic_index.from_semantic_page_state(item.after)
@@ -320,7 +343,12 @@ def move_file(
                         if moved_source != source
                         else []
                     )
-                    combined = [*lifecycle_writes, *destination_writes, *writes]
+                    combined = [
+                        *lifecycle_writes,
+                        *destination_writes,
+                        *writes,
+                        *extra_writes,
+                    ]
                     if combined:
                         batch_fanout_paths[:] = [write.path for write in combined]
                         batch_atomic_write(

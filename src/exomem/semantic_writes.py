@@ -2474,8 +2474,16 @@ def preflight_move(
     source_guard: vault.PathGuard,
     destination_guard: vault.PathGuard,
     rewrites: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    content_transform: Callable[[str], str] | None = None,
 ) -> MovePreflight:
-    """Evaluate a move and all exact inbound rewrites against one final corpus."""
+    """Evaluate a move and all exact inbound rewrites against one final corpus.
+
+    `content_transform` lets a caller declare a content change the move carries —
+    today only source reclassification, which rewrites classification frontmatter.
+    The binding stays exact rather than becoming permissive: the moved bytes must
+    equal the declared derivation, so an arbitrary edit still cannot ride along,
+    and a declared transform cannot be silently skipped either.
+    """
     root = Path(vault_root)
     rewrite_tuple = tuple(rewrites)
     if (
@@ -2490,10 +2498,15 @@ def preflight_move(
             "move guards do not bind the exact source and destination",
         )
     expected_moved_source, _ = rewrite_wikilinks_for_move(source, old_path, new_path)
-    if moved_source not in {source, expected_moved_source}:
+    permitted = {source, expected_moved_source}
+    if content_transform is not None:
+        permitted = {content_transform(candidate) for candidate in permitted}
+    if moved_source not in permitted:
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
-            "moved source is not an exact path-only rewrite",
+            "moved source is not an exact path-only rewrite"
+            if content_transform is None
+            else "moved source is not the exact declared derivation of the move",
         )
     for write in rewrite_tuple:
         if write.guard is None or write.guard.leaf_policy != "content":
