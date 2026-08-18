@@ -96,7 +96,17 @@ def test_compact_bootstrap_puts_record_route_before_semantic_authoring() -> None
     assert payload["front_door_actions"]["record"]["primary_tools"] == ["record_memory"]
     assert serialized.find(b'"record"') < 8192
     assert serialized.find(b'"record"') < serialized.find(b'"semantic_authoring"')
-    assert len(serialized) <= 57_344
+    # The compact payload's SIZE budget is not asserted here. It lives in
+    # `tests/test_bootstrap_compact_budget.py::COMPACT_BYTE_CEILING`, which owns
+    # the constraint and records why the number is what it is. This test's
+    # subject is placement -- that `record` is reachable early and ahead of
+    # `semantic_authoring` -- and the `< 8192` offsets above are what pin that.
+    #
+    # A duplicate ceiling used to sit on this line, undocumented and 656 bytes
+    # lower than the real one. The lower number silently became the gate, so
+    # growth that the owning test had deliberately pre-authorised failed here
+    # instead, in a test that says nothing about budgets and offers no rationale
+    # to weigh the failure against. One budget, in the file that explains it.
 
 
 def test_hosted_records_v2_is_additive_and_v1_remains_unchanged() -> None:
