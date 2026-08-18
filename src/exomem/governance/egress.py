@@ -2399,6 +2399,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
+        "reclassify": "mutation",
+        "propose-reclassification": "structure",
     },
     ("schema_memory", "operation"): {
         "infer": "save-conditional",

@@ -328,6 +328,7 @@ jobs:
           src/exomem/call_ledger.py
           src/exomem/call_spans.py
           src/exomem/source_taxonomy.py
+          src/exomem/reclassify_source.py
           scripts/e2e_product_loop.py
           scripts/e2e_http_server.py
           scripts/smoke-media-pipeline.py
@@ -340,6 +341,7 @@ jobs:
           tests/test_call_ledger.py
           tests/test_call_spans.py
           tests/test_source_taxonomy.py
+          tests/test_reclassify_source.py
           --select E,F,I,B,UP,BLE
       - name: Targeted contract type check
         run: >-
@@ -353,6 +355,7 @@ jobs:
           src/exomem/traversal_profiles.py
           src/exomem/epistemic_graph.py
           src/exomem/source_taxonomy.py
+          src/exomem/reclassify_source.py
 
   gate:
     name: required CI gate
