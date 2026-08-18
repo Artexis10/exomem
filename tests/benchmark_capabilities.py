@@ -69,6 +69,20 @@ def has_posix_executable_scripts() -> bool:
 
 
 @lru_cache(maxsize=1)
+def has_posix_host_paths() -> bool:
+    """True where a POSIX path is a valid *host* path.
+
+    Distinct from the guest paths a benchmark run uses inside its sandbox.
+    `protocol/models.py` validates several fields as absolute host paths with
+    `os.path`, correctly -- `run_export` opens them on the machine it runs on.
+    The committed schema-conformance fixtures fill those fields with `/owned/...`,
+    which is a real host path on Linux and not one on Windows, so it is the
+    fixture that is platform-bound rather than the validator.
+    """
+    return os.name == "posix"
+
+
+@lru_cache(maxsize=1)
 def has_pinned_bun() -> bool:
     """True when the exact pinned Bun is on PATH; version drift is not enough."""
     executable = shutil.which("bun")
@@ -119,6 +133,25 @@ def has_bwrap_sandbox() -> bool:
     return all(Path(path).exists() for path in _SANDBOX_RUNTIME)
 
 
+@lru_cache(maxsize=1)
+def has_trusted_system_git() -> bool:
+    """True where the harness's trust anchor can actually find Git.
+
+    `benchmarks/protocol` deliberately resolves Git through `os.defpath` rather
+    than `PATH`, so a user-controlled `PATH` cannot substitute the binary that
+    establishes contract identity. That anchor is a POSIX idea: `os.defpath` is
+    `:/bin:/usr/bin` there, while on Windows it names a drive-root `bin`
+    directory that does not exist, preceded by the current directory -- which
+    is the very thing the anchor exists to exclude. So the check finds nothing
+    on Windows even with Git installed in the usual Program Files location.
+
+    Giving Windows its own trusted location would mean inventing a trust policy
+    for a harness that also requires `bwrap`, and therefore cannot run there
+    regardless. Gate on the anchor working instead.
+    """
+    return shutil.which("git", path=os.defpath) is not None
+
+
 def require_posix_file_modes() -> None:
     if not has_posix_file_modes():
         pytest.skip("POSIX file mode and ownership bits are not an access-control fact here")
@@ -127,6 +160,16 @@ def require_posix_file_modes() -> None:
 def require_posix_executable_scripts() -> None:
     if not has_posix_executable_scripts():
         pytest.skip("a `#!/bin/sh` fixture is not an executable program here")
+
+
+def require_trusted_system_git() -> None:
+    if not has_trusted_system_git():
+        pytest.skip("no trusted system Git on os.defpath (the harness's trust anchor)")
+
+
+def require_posix_host_paths() -> None:
+    if not has_posix_host_paths():
+        pytest.skip("the committed fixture's POSIX host paths are not host paths here")
 
 
 def require_pinned_bun() -> None:
@@ -202,6 +245,29 @@ def declares_absent_sandbox(error: BaseException | None) -> bool:
             if _BROKER_SANDBOX_REFUSAL.search(str(error)):
                 return True
         if isinstance(error, AssertionError) and _BROKER_SANDBOX_REFUSAL.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+#: The contract harness's refusals for a Git it will not trust. Only the three
+#: that mean "the trust anchor found nothing usable" -- a digest mismatch or a
+#: malformed revision is a real finding and must stay a failure.
+_CONTRACT_GIT_REFUSAL = re.compile(
+    r"trusted Git executable (is unavailable|cannot be resolved"
+    r"|is not an executable file)"
+)
+
+
+def declares_absent_trusted_git(error: BaseException | None) -> bool:
+    """True when *error* is the contract harness failing to anchor on Git."""
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ in {"ContractIdentityError", "ManifestError"}:
+            if _CONTRACT_GIT_REFUSAL.search(str(error)):
+                return True
+        if isinstance(error, AssertionError) and _CONTRACT_GIT_REFUSAL.search(str(error)):
             return True
         error = error.__cause__ or error.__context__
     return False
