@@ -65,6 +65,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import call_spans
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -2417,6 +2418,7 @@ class LexicalStore:
         finally:
             conn.close()
 
+    @call_spans.timed("lexical.rebuild_atomic")
     def rebuild_atomic(self) -> bool:
         """Rebuild the catalog into a detached sibling sidecar, then publish it
         with a single atomic rename — never deleting or mutating the live sidecar

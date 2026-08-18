@@ -29,7 +29,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from . import deferred_index, semantic_index
+from . import call_spans, deferred_index, semantic_index
 
 log = logging.getLogger(__name__)
 
@@ -1078,6 +1078,7 @@ def _dispatch_upsert_components(
     return components
 
 
+@call_spans.timed("index.upsert_after_write")
 def upsert_after_write(
     vault_root: Path,
     written_paths: list[Path],
