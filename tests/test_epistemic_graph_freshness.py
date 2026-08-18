@@ -205,7 +205,13 @@ def test_spawned_mutator_commits_while_full_rebuild_is_running(
     child.start()
     try:
         assert attempting.wait(5.0)
-        assert completed.wait(0.5)
+        # The property is that the rebuild does not *block* the mutator, not
+        # that the commit is fast. A blocked mutator cannot finish at any
+        # budget: the rebuild holds until `release_rebuild`, which is only set
+        # in the `finally` below. So the budget just has to stay clear of the
+        # 8.0s at which the held rebuild gives up -- and 0.5s was measuring
+        # commit latency instead, which a loaded shared runner exceeds.
+        assert completed.wait(5.0)
     finally:
         release_rebuild.set()
         rebuild_thread.join(timeout=8.0)
