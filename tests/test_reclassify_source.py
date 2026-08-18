@@ -373,6 +373,83 @@ def test_an_undecidable_kind_is_reported_not_guessed(
     assert any("no kind is proposed" in item for item in proposal.kind_evidence)
 
 
+def test_a_caller_previews_the_correction_it_has_decided_on(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """The agent reads the source and decides; the preview is what it shows first.
+
+    Without this the read-only mode can only preview its own (usually empty)
+    proposal, so an agent that has judged the kind has no way to show the user
+    where the file lands before writing -- which makes propose-then-confirm
+    unusable for exactly the case it exists to serve.
+    """
+    captured = _capture(vault, source_schema, title="Airfare notes", domain="travel")
+    before = (vault / captured.path).read_text(encoding="utf-8")
+
+    proposal = rc.propose(vault, captured.path, source_kind="research-report")
+
+    assert proposal.proposed_kind == "research-report"
+    assert proposal.destination == f"{KB}/Sources/Reports/Travel/2026-08-18-airfare-notes.md"
+    assert proposal.relocation_required is True
+    assert "supplied by the caller" in proposal.kind_evidence
+    assert (vault / captured.path).read_text(encoding="utf-8") == before
+
+
+def test_a_previewed_domain_is_canonicalized_not_echoed(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    captured = _capture(vault, source_schema, title="Kelp survey", source_type="research-report")
+
+    proposal = rc.propose(vault, captured.path, domain="Marine Biology")
+
+    assert proposal.proposed_domain == "marine-biology"
+    assert proposal.destination is not None
+    assert proposal.destination.startswith(f"{KB}/Sources/Reports/Marine Biology/")
+
+
+def test_a_previewed_destination_is_never_an_escape_hatch(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """A hostile supplied value must not become a previewed path.
+
+    The taxonomy normalizes rather than refuses whenever a safe canonical key
+    survives, so the property to bind is the one that matters: whatever a caller
+    supplies, the destination it is shown stays inside the source tree at the
+    projection's fixed depth. Otherwise the preview is the place a traversal
+    reaches the user as an approved-looking suggestion.
+    """
+    captured = _capture(vault, source_schema, title="Loose item", domain="media")
+
+    for hostile in ("../../escape", "..", "/etc", "a\\b", "travel/reports"):
+        try:
+            proposal = rc.propose(vault, captured.path, source_kind=hostile)
+        except st.TaxonomyError:
+            continue  # refused outright is the other acceptable outcome
+        destination = proposal.destination
+        if destination is None:
+            continue
+        assert destination.startswith(f"{KB}/Sources/")
+        assert ".." not in destination.split("/")
+        assert destination.count("/") == 4
+        assert (vault / destination).resolve().is_relative_to((vault / KB).resolve())
+
+
+def test_the_preview_is_reachable_through_the_operation(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    from exomem import commands
+
+    captured = _capture(vault, source_schema, title="Airfare notes", domain="travel")
+    out = commands.op_manage_memory_file(
+        vault,
+        operation="propose-reclassification",
+        path=captured.path,
+        source_kind="research-report",
+    )
+    assert out["proposed_kind"] == "research-report"
+    assert out["relocation_required"] is True
+
+
 def test_a_proposal_reports_how_many_references_would_move(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
@@ -415,3 +492,78 @@ def test_a_registry_path_label_rename_migrates_nothing(
         reason="adopting the renamed folder", today=TODAY,
     )
     assert result.new_path.startswith(f"{KB}/Sources/Investigations/Travel/")
+
+
+# ---------------------------------------------------------------------------
+# The product surface
+# ---------------------------------------------------------------------------
+def test_the_correction_is_reachable_through_the_governed_file_operation(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """No 30th tool: the file-lifecycle operation already owns governed moves."""
+    from exomem import commands
+
+    captured = _capture(vault, source_schema, title="Airfare notes", domain="travel")
+    out = commands.op_manage_memory_file(
+        vault,
+        operation="reclassify",
+        path=captured.path,
+        source_kind="research-report",
+        reason="a written investigation",
+    )
+    assert out["source_type"] == "research-report"
+    assert out["path"].startswith(f"{KB}/Sources/Reports/Travel/")
+    assert out["relocated"] is True
+
+
+def test_the_proposal_is_reachable_and_writes_nothing(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    from exomem import commands
+
+    captured = _capture(vault, source_schema, title="Loose item", domain="media")
+    before = (vault / captured.path).read_text(encoding="utf-8")
+    out = commands.op_manage_memory_file(
+        vault, operation="propose-reclassification", path=captured.path
+    )
+    assert out["proposed_kind"] is None
+    assert (vault / captured.path).read_text(encoding="utf-8") == before
+
+
+def test_a_refusal_surfaces_its_code_through_the_operation(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    from exomem import commands
+
+    captured = _capture(vault, source_schema, title="Loose item", domain="media")
+    with pytest.raises(ValueError, match="REASON_REQUIRED"):
+        commands.op_manage_memory_file(
+            vault, operation="reclassify", path=captured.path,
+            source_kind="research-report",
+        )
+
+
+def test_an_unknown_operation_still_names_the_new_ones(vault: Path) -> None:
+    from exomem import commands
+
+    with pytest.raises(ValueError, match="reclassify"):
+        commands.op_manage_memory_file(vault, operation="nonsense")
+
+
+def test_both_operations_are_release_covered_selectors() -> None:
+    """A new `operation=` value is invisible to the leaf tests above.
+
+    Every other test here calls `op_manage_memory_file` directly, which is not
+    the path a client takes. The shared dispatcher classifies the invocation
+    first, and an unregistered selector is refused with `RECEIPT_OUTCOME_MISSING`
+    before the leaf ever runs -- so the operation can be fully implemented,
+    fully tested, and still unreachable from MCP, REST, hosted, and the CLI
+    alike. That is how this shipped broken once; this binds the registration.
+    """
+    from exomem.commands import invocation_is_read_only
+    from exomem.product_invoke import product_command
+
+    command = product_command("manage_memory_file")
+
+    assert invocation_is_read_only(command, {"operation": "propose-reclassification"}) is True
+    assert invocation_is_read_only(command, {"operation": "reclassify"}) is False

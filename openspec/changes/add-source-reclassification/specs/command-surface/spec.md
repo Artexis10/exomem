@@ -105,7 +105,9 @@ A reclassification SHALL be atomic: either the relocation, the metadata correcti
 
 The operation SHALL offer a read-only mode that reports the corrected classification, the location the source would move to, the number of references that would be rewritten, and the evidence supporting each proposed value, without writing anything.
 
-Evidence SHALL be limited to what is deterministically observable about the source: its current location, its recorded origin, its title, and its existing metadata. The operation SHALL NOT infer a classification through a model call, and SHALL report that it has no proposal rather than guessing when the observable evidence supports none.
+The read-only mode SHALL accept a caller-supplied kind and domain and preview that correction, so a caller that has read the source and decided can show the destination and affected-reference count before anything is written. Supplied values SHALL be resolved through the same rules the correction applies, so a value the correction would refuse is refused during the preview rather than after approval.
+
+When no values are supplied, evidence SHALL be limited to what is deterministically observable about the source: its current location, its recorded origin, its title, and its existing metadata. The operation SHALL NOT infer a classification through a model call, and SHALL report that it has no proposal rather than guessing when the observable evidence supports none.
 
 #### Scenario: A preview writes nothing
 
@@ -118,6 +120,19 @@ Evidence SHALL be limited to what is deterministically observable about the sour
 
 - **WHEN** a proposal is requested for a source whose current location already carries a domain segment
 - **THEN** the proposed domain is reported together with the observation that supports it
+
+#### Scenario: A caller previews the correction it has decided on
+
+- **WHEN** a preview is requested with a kind the caller has judged from reading the source
+- **THEN** the report names the destination that kind projects to
+- **AND** the report states that the value came from the caller rather than from observed evidence
+- **AND** the source is unchanged at its original location
+
+#### Scenario: A previewed value is canonicalized, not echoed
+
+- **WHEN** a preview is requested with a kind or domain in non-canonical form
+- **THEN** the reported value is its canonical form
+- **AND** the reported destination is the one that canonical value projects to
 
 #### Scenario: An undecidable source is reported, not guessed
 

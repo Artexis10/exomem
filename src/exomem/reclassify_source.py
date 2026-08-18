@@ -252,15 +252,29 @@ def _destination(vault_root: Path, rel: str, kind, domain) -> str:
     return "/".join((kb_dirname(), *segments, rel.rsplit("/", 1)[-1]))
 
 
-def propose(vault_root: Path, path: str) -> ReclassifyProposal:
+def propose(
+    vault_root: Path,
+    path: str,
+    *,
+    source_kind: str | None = None,
+    domain: str | None = None,
+) -> ReclassifyProposal:
     """Report what a correction would do, without writing anything.
 
-    Evidence is restricted to what is deterministically observable: the domain
-    segment already in the source's location, whether it records an origin URL,
-    and its existing metadata. That is usually enough to propose a domain and
+    With no values supplied this reports what the vault itself can observe: the
+    domain segment already in the source's location, whether it records an origin
+    URL, and its existing metadata. That is usually enough to propose a domain and
     rarely enough to propose a kind — and when it supports no kind this reports
     none rather than offering the fallback, which is the failure the open
     vocabulary exists to remove.
+
+    A caller that has already decided passes its own `source_kind`/`domain` and
+    gets that correction previewed instead: the destination it would project to
+    and how many references would move. Deciding what an artifact IS means reading
+    it, so this is the normal path — the agent judges, and the preview is what it
+    shows the user before anything is written. Supplied values are resolved
+    through the same taxonomy rules the correction itself applies, so a value that
+    would be refused is refused here rather than after the user has approved it.
     """
     vault_root = Path(vault_root)
     rel, absolute = _require_source(vault_root, path)
@@ -271,7 +285,10 @@ def propose(vault_root: Path, path: str) -> ReclassifyProposal:
     taxonomy = source_taxonomy.load_taxonomy(vault_root)
     proposed_domain: str | None = None
     domain_evidence: list[str] = []
-    if current_domain is None:
+    if domain is not None:
+        proposed_domain = taxonomy.resolve_domain(domain).key
+        domain_evidence.append("supplied by the caller")
+    elif current_domain is None:
         # `Sources/<Kind>/<Domain>/<file>.md` — the segment under the kind is a
         # domain the vault already asserted by filing the page there.
         parts = rel.split("/")
@@ -289,7 +306,10 @@ def propose(vault_root: Path, path: str) -> ReclassifyProposal:
 
     proposed_kind: str | None = None
     kind_evidence: list[str] = []
-    if current_kind == source_taxonomy.FALLBACK_KIND:
+    if source_kind is not None:
+        proposed_kind = taxonomy.resolve_kind(source_kind).key
+        kind_evidence.append("supplied by the caller")
+    elif current_kind == source_taxonomy.FALLBACK_KIND:
         # Deliberately no title or content heuristics. A kind guessed from a
         # filename reads as authoritative once approved, and a wrong kind is
         # exactly the debt this operation exists to clear.

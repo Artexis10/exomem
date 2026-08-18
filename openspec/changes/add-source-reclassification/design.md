@@ -62,6 +62,8 @@ When the evidence supports no kind, the operation says so. Presenting the fallba
 
 An agent may of course decide the kind by reading the source. That is a caller doing its job, and it stays outside the core, which is the same boundary the open taxonomy drew.
 
+So the read-only mode also previews a *supplied* classification, which is the path that actually gets used: the agent reads the source, judges the kind, and previews that judgement to show the user the destination and the affected-reference count before anything is written. Without it the mode can only preview its own proposal — usually empty, by the rule above — and propose-then-confirm is unusable for the case it exists to serve. Supplied values resolve through the same taxonomy rules the correction applies, so a value the write would refuse is refused during the preview, rather than after the user has approved it.
+
 ### Bulk is a loop, not a subsystem
 
 The backlog that motivated this change is one vault's fallback tree. Building a migration engine for it would be building for a one-time shape.
