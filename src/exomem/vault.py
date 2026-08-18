@@ -4322,7 +4322,11 @@ def parse_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any
         return {}, text, None
     fm_text = m.group(1)
     body = m.group(2)
-    if body.startswith("\n"):
+    # A CRLF page leaves the blank line after `---` at the head of the body,
+    # so stripping only LF made this contract silently platform-dependent.
+    if body.startswith("\r\n"):
+        body = body[2:]
+    elif body.startswith("\n"):
         body = body[1:]
     try:
         if strict:
@@ -5267,6 +5271,54 @@ def escape_wikilinks_for_log(text: str) -> str:
     return _LOG_WIKILINK_RE.sub(lambda m: f"`{m.group(1)}`", text)
 
 
+def document_newline(text: str) -> str:
+    """Report the line ending a document already uses, so edits match it.
+
+    Mixing endings inside one page breaks more than tidiness:
+    `prepend_log_entry` proves idempotency by asking whether the rendered
+    entry is already present, and an LF entry is never found in a CRLF log,
+    so a replayed write appends a duplicate instead of returning unchanged.
+    """
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def render_frontmatter_document(
+    fm_text: str, body: str, *, newline: str = "\n", blank_line: bool = False
+) -> str:
+    """Compose `---`-delimited frontmatter and body in one line ending.
+
+    Every rewrite path used to hardcode LF delimiters and hardcode LF when
+    appending a YAML key. A page a Windows editor had saved as CRLF then came
+    back with both endings mixed inside it, and the rewrite fired even when
+    the pass had nothing to change -- which is how `audit_fix` reported
+    spurious wikilink fixes for pages it was contractually leaving alone.
+
+    `body` is passed through byte-for-byte; only the delimiters and the
+    frontmatter block, which callers build themselves, are normalized.
+    """
+    block = fm_text.replace("\r\n", "\n").replace("\n", newline)
+    lead = newline if blank_line else ""
+    return f"---{newline}{block}{newline}---{newline}{lead}{body}"
+
+
+def _find_log_separator(log_text: str) -> tuple[int, str]:
+    """Locate the log's header separator whatever line endings the file carries.
+
+    exomem emits `log.md` with LF, but any Windows editor that rewrites the
+    file leaves CRLF behind, and the separator then carries a CR before each
+    LF. Both callers degrade silently when the lookup misses: `prepend_log_entry`
+    appends the entry at the bottom instead of below the header, and
+    `_plan_log_content` stops rotating and lets the log grow unbounded, which
+    puts every write back to O(log size). Return the separator that actually
+    matched so callers keep the file's own newlines.
+    """
+    for separator in ("\n---\n", "\r\n---\r\n"):
+        index = log_text.find(separator)
+        if index != -1:
+            return index, separator
+    return -1, "\n---\n"
+
+
 def prepend_log_entry(
     log_text: str,
     *,
@@ -5285,16 +5337,23 @@ def prepend_log_entry(
     title = rel_path_no_ext
     if title.startswith(kb_prefix()):
         title = title[len(kb_prefix()) :]
+    newline = document_newline(log_text)
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
+    new_entry = new_entry.replace("\r\n", "\n").replace("\n", newline)
     if new_entry in log_text:
         return log_text
     # Reuse the same separator the indexes module emits.
-    separator = "\n---\n"
-    sep_idx = log_text.find(separator)
+    sep_idx, separator = _find_log_separator(log_text)
     if sep_idx == -1:
-        return log_text.rstrip() + "\n\n" + new_entry + "\n"
+        return log_text.rstrip() + newline * 2 + new_entry + newline
     insertion_point = sep_idx + len(separator)
-    return log_text[:insertion_point] + "\n" + new_entry + "\n" + log_text[insertion_point:]
+    return (
+        log_text[:insertion_point]
+        + newline
+        + new_entry
+        + newline
+        + log_text[insertion_point:]
+    )
 
 
 # ---- log.md rotation (scale-proper activity log) ---------------------------
@@ -5348,8 +5407,7 @@ def _plan_log_content(
         existing_archive = False
 
     rotate = len(log_text.encode("utf-8")) > _log_rotate_bytes()
-    separator = "\n---\n"
-    sep_idx = log_text.find(separator)
+    sep_idx, separator = _find_log_separator(log_text)
     starts: list[int] = []
     if rotate and sep_idx != -1:
         head_end = sep_idx + len(separator)
@@ -5361,10 +5419,11 @@ def _plan_log_content(
         live_text = log_text[:head_end] + entries_text[:cut]
         tail = entries_text[cut:]
         moved = len(starts) - LOG_ROTATE_KEEP_ENTRIES
+        newline = document_newline(log_text)
         archive_text = (
-            f"# log.md archive segment ({token_hash})\n\n"
+            f"# log.md archive segment ({token_hash}){newline}{newline}"
             f"Rotated out of `{kb_prefix()}log.md` — {moved} entrie(s), newest "
-            f"first, byte-exact.\n{separator}{tail}"
+            f"first, byte-exact.{newline}{separator}{tail}"
         )
         if current_archive is not None and current_archive != archive_text:
             raise ValueError("LOG_ARCHIVE_COLLISION: deterministic archive already differs")

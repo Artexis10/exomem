@@ -11,18 +11,19 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import project_keys, semantic_writes, temporal
+from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     EXCLUDED_FIELD_CODE,
     PlannedWrite,
     VaultPathError,
     _format_yaml_line,
     content_hash,
+    document_newline,
     excluded_frontmatter_reason,
     governed_frontmatter_reason,
     in_append_only_tree,
@@ -30,12 +31,15 @@ from .vault import (
     kb_root,
     plan_log_writes,
     read_guarded_text,
+    render_frontmatter_document,
     resolve_under_vault,
 )
 
 log = logging.getLogger(__name__)
 
-_FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
+# One definition, shared with `vault`: these modules fold CRLF to LF before
+# matching, but a private copy is free to drift out of that agreement.
+_FM_PATTERN = _VAULT_FM_PATTERN
 
 
 @dataclass
@@ -198,7 +202,9 @@ def set_frontmatter_field(
     fm_text = _remove_yaml_key(fm_text, "updated")
     fm_text = fm_text.rstrip() + f"\nupdated: {date_iso}"
 
-    new_text = f"---\n{fm_text}\n---\n{body}"
+    new_text = render_frontmatter_document(
+        fm_text, body, newline=document_newline(text)
+    )
 
     project_plan = _plan_project_keys(vault_root, field, value)
     try:

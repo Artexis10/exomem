@@ -44,10 +44,12 @@ from . import find as find_module
 from .cli_ops import OpError
 from .kbdir import kb_prefix
 from .mutation_timings import MutationTimings, write_timings_enabled
+from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
     content_hash,
+    document_newline,
     escape_wikilinks_for_log,
     in_append_only_tree,
     is_casing_only_rewrite,
@@ -55,6 +57,7 @@ from .vault import (
     normalize_body_wikilinks,
     plan_log_writes,
     read_guarded_text,
+    render_frontmatter_document,
 )
 
 log = logging.getLogger(__name__)
@@ -607,10 +610,11 @@ def load_editable(
 
 def render_editable(editable: _Editable, body: str, fm_text: str) -> str:
     """Render a candidate with the page's existing frontmatter policy."""
-    body = body.rstrip() + "\n"
+    newline = document_newline(editable.original_text)
+    body = body.rstrip() + newline
     if not editable.has_frontmatter:
         return body
-    return f"---\n{fm_text}\n---\n{body}"
+    return render_frontmatter_document(fm_text, body, newline=newline)
 
 
 def apply_surgical_replace(
@@ -946,7 +950,9 @@ def _match_contexts(body: str, old_string: str, *, max_matches: int = 5) -> list
 # ---------------- frontmatter surgery ----------------
 
 
-_FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
+# One definition, shared with `vault`: these modules fold CRLF to LF before
+# matching, but a private copy is free to drift out of that agreement.
+_FM_PATTERN = _VAULT_FM_PATTERN
 
 
 def _set_or_append(fm_text: str, key: str, value: str) -> str:

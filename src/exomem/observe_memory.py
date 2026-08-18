@@ -802,14 +802,14 @@ def _rebuild_source(
         if _UPDATED_RE.search(fm_text)
         else fm_text.rstrip() + f"\nupdated: {date}"
     )
-    closing = original.find("\n---\n")
-    blank = (
-        "\n"
-        if closing >= 0 and original.startswith("\n", closing + len("\n---\n"))
-        else ""
+    newline = vault.document_newline(original)
+    blank_line = bool(
+        re.match(r"^---\r?\n.*?\r?\n---\r?\n\r?\n", original, re.DOTALL)
     )
-    final_body = body if body.endswith("\n") else body + "\n"
-    return f"---\n{updated}\n---\n{blank}{final_body}"
+    final_body = body if body.endswith(newline) else body + newline
+    return vault.render_frontmatter_document(
+        updated, final_body, newline=newline, blank_line=blank_line
+    )
 
 
 def _unit_by_anchor(document: Any, anchor: str | None) -> Any | None:
