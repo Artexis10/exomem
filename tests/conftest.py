@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import threading
@@ -93,11 +94,46 @@ def _declares_custody_unsupported(error: BaseException | None) -> bool:
     return False
 
 
+#: POSIX-only standard-library surfaces the hosted cell runtime is built on.
+#: A hosted cell is a Linux container: it checks its own effective uid before
+#: trusting a runtime path, and takes `fcntl` locks on its state. There is no
+#: Windows behaviour for those to differ from -- the API does not exist -- so a
+#: test that reaches one is describing Linux, not failing on Windows.
+_POSIX_ONLY_API = re.compile(
+    r"module 'os' has no attribute 'gete?uid'"
+    r"|<module 'os'[^>]*> has no attribute 'gete?uid'"
+    r"|No module named 'fcntl'"
+)
+
+
+def _needs_an_absent_posix_api(error: BaseException | None) -> bool:
+    """True when *error* is this platform simply not having a POSIX API.
+
+    Narrow by construction: only `AttributeError` for the uid calls and
+    `ModuleNotFoundError` for `fcntl` count, and only their exact messages. An
+    ordinary `AttributeError` from a typo or a renamed attribute does not match,
+    so this cannot quietly absorb a real defect into a skip.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, (AttributeError, ImportError)) and _POSIX_ONLY_API.search(
+            str(error)
+        ):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
-    """Report a capability this platform does not have as a skip, not a failure.
+    """Report a platform capability this host does not have as a skip.
 
-    On macOS, 82 failures were one platform fact: the capability
+    Four causes now, every one of them "this API does not exist here" rather
+    than "this code is wrong". They were reported as defects when the honest
+    report was that the platform cannot run the subsystem.
+
+    On macOS, 82 of them were one platform fact: the capability
     `protocol.custody` is built on does not exist there, and the module says so
     in the way it was designed to. A missing capability is what `skip` means.
 
@@ -136,6 +172,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     error = call.excinfo.value
     if not PROC_FD_DIRECTORY_CUSTODY and _declares_custody_unsupported(error):
         reason = "proc-fd directory custody is unavailable on this platform"
+    elif os.name == "nt" and _needs_an_absent_posix_api(error):
+        reason = "the hosted cell runtime's POSIX APIs do not exist on Windows"
     elif not has_posix_interval_timers() and declares_absent_surface_timers(error):
         reason = "POSIX interval timers (setitimer/SIGALRM) are unavailable here"
     elif not has_bwrap_sandbox() and declares_absent_sandbox(error):
