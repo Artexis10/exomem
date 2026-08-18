@@ -107,7 +107,7 @@ class HookHome:
 
 def install_env(base: Path, home: Path) -> dict[str, str]:
     """Env for the ``install-hook`` subprocess (isolated + this worktree's code)."""
-    return {
+    env = {
         "PATH": _BASE_PATH,
         "HOME": str(base),
         "EXOMEM_HOOK_HOME": str(home),
@@ -116,6 +116,29 @@ def install_env(base: Path, home: Path) -> dict[str, str]:
         "PYTHONPATH": str(SRC_DIR),
         "PYTHONUTF8": "1",
     }
+    if os.name == "nt":
+        # Windows resolves Winsock through `%SystemRoot%`, and `exomem.__main__`
+        # imports `asyncio`, whose Windows event loop pulls that in at import
+        # time. A replacement environment without it does not merely lose a
+        # convenience: the interpreter cannot start the program at all, exiting
+        # with `OSError [WinError 10106] The requested service provider could
+        # not be loaded or initialized` before any exomem code runs. Isolation
+        # is unaffected -- this names the OS install, not the user's state,
+        # which the entries above still redirect.
+        system_root = os.environ.get("SystemRoot")
+        if system_root:
+            env["SystemRoot"] = system_root
+        # `HOME` alone redirects the home directory on POSIX only. Windows
+        # resolves `Path.home()` through `USERPROFILE`, falling back to
+        # `HOMEDRIVE`+`HOMEPATH`, so without these the isolation is not merely
+        # incomplete -- `install_hook` computes a default hook directory from
+        # `Path.home()` at import scope, which raises "Could not determine home
+        # directory" and the subprocess dies before it can install anything.
+        env["USERPROFILE"] = str(base)
+        drive, tail = os.path.splitdrive(str(base))
+        env["HOMEDRIVE"] = drive
+        env["HOMEPATH"] = tail
+    return env
 
 
 def create_hook_home(
