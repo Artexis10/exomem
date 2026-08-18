@@ -252,6 +252,22 @@ def _destination(vault_root: Path, rel: str, kind, domain) -> str:
     return "/".join((kb_dirname(), *segments, rel.rsplit("/", 1)[-1]))
 
 
+def _introduction_warnings(plan: source_taxonomy.TaxonomyPlan) -> tuple[str, ...]:
+    """Say so when a correction introduces vocabulary the vault had not seen.
+
+    Same wording as capture (`add._vocabulary_warnings`), because a correction
+    that quietly registers a mistyped kind is the same failure as a capture that
+    does -- and the correction path is the one where a typo is *more* likely,
+    since the caller is naming a value it just decided on.
+    """
+    return tuple(
+        f"NEW_{introduction.axis.upper()}: registered {introduction.key!r} "
+        f"(files under Sources/{introduction.path_label}/). Edit "
+        f"_Schema/source-taxonomy.yaml to rename or relabel it."
+        for introduction in plan.introductions
+    )
+
+
 def propose(
     vault_root: Path,
     path: str,
@@ -444,5 +460,5 @@ def reclassify(
         reason=clean_reason,
         relocated=relocating,
         references_updated=references_updated,
-        warnings=tuple(plan.introductions),
+        warnings=_introduction_warnings(plan),
     )

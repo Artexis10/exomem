@@ -567,3 +567,47 @@ def test_both_operations_are_release_covered_selectors() -> None:
 
     assert invocation_is_read_only(command, {"operation": "propose-reclassification"}) is True
     assert invocation_is_read_only(command, {"operation": "reclassify"}) is False
+
+
+def test_a_correction_that_registers_new_vocabulary_says_so(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """A correction is where a typo is most likely, so registration must be visible.
+
+    The caller is naming a kind it just decided on, with no prior capture to
+    compare against. Registering it silently is how a mistyped kind becomes a
+    permanent category, so the correction reports it the same way capture does.
+    """
+    captured = _capture(vault, source_schema, title="Hedgerow notes", domain="media")
+
+    result = rc.reclassify(
+        vault,
+        path=captured.path,
+        source_kind="field-notebook",
+        reason="A running observational log is a field notebook.",
+        today=TODAY,
+    )
+
+    assert any(
+        warning.startswith("NEW_SOURCE_KIND: registered 'field-notebook'")
+        for warning in result.warnings
+    ), result.warnings
+    assert all(isinstance(warning, str) for warning in result.warnings)
+    assert result.as_dict()["warnings"] == list(result.warnings)
+
+
+def test_a_correction_into_known_vocabulary_stays_quiet(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    captured = _capture(vault, source_schema, title="Hedgerow notes", domain="media")
+
+    result = rc.reclassify(
+        vault,
+        path=captured.path,
+        source_kind="research-report",
+        reason="A written investigation.",
+        today=TODAY,
+    )
+
+    assert result.warnings == ()
+    assert "warnings" not in result.as_dict()
