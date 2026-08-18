@@ -185,6 +185,7 @@ def build_row(
     client_version: str | None = None,
     transport: str | None = None,
     session_id: str | None = None,
+    spans: list[dict[str, Any]] | None = None,
     timestamp: str | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
@@ -221,10 +222,50 @@ def build_row(
         # merely slow. Recorded from the already-computed argument shape, which
         # is why it costs nothing and still leaks nothing.
         "request_bytes": sum(int(shape["len"]) for shape in args.values()),
+        # Where the time went, aggregated per phase. Two boundary clocks can
+        # prove a call was slow and cannot say why: a live `edit_memory` showed
+        # total_ms=24,394 against boundary_hold_ms=3,348, which ruled out lock
+        # contention and left 21 seconds unattributed. These are the spans that
+        # would have named them. Empty for an uninstrumented path -- absence
+        # means "nothing reported", never "nothing happened".
+        "spans": _clip_spans(spans),
         "truncated": bool(args_truncated or targets_truncated),
     }
     row["row_hash"] = row_hash(row)
     return row
+
+
+#: Phases kept in one row. The producer already bounds distinct names per call;
+#: this is the independent bound, because the row is hash-chained and an
+#: unbounded field would let one pathological call dominate the ledger file.
+_MAX_SPANS = 32
+
+
+def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Normalize reported phases into a bounded, canonical shape.
+
+    Slowest first, so truncation drops what matters least. Rebuilt field by
+    field rather than passed through, because these rows are hashed: an
+    unexpected key from a future caller would otherwise change a row's identity
+    without any reader knowing what it meant.
+    """
+    if not spans:
+        return []
+    shaped: list[dict[str, Any]] = []
+    for entry in spans:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        try:
+            ms = round(float(entry.get("ms", 0.0)), 2)
+            count = int(entry.get("count", 1))
+        except (TypeError, ValueError):
+            continue
+        shaped.append({"name": _clip(name), "count": count, "ms": ms})
+    shaped.sort(key=lambda item: item["ms"], reverse=True)
+    return shaped[:_MAX_SPANS]
 
 
 def _read_chain_head(path: Path) -> tuple[int, str]:
@@ -330,6 +371,7 @@ def record_call(
     client_version: str | None = None,
     transport: str | None = None,
     session_id: str | None = None,
+    spans: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Append exactly one ledger row. Never raises into the call path.
 
@@ -363,6 +405,7 @@ def record_call(
                 client_version=client_version,
                 transport=transport,
                 session_id=session_id,
+                spans=spans,
             )
             append_row(row, path=path)
             _state.update(sequence=row["sequence"], prev_hash=row["row_hash"])

@@ -26,6 +26,7 @@ from typing import Any
 
 from . import (
     access,
+    call_spans,
     deferred_index,
     freshness,
     graph_sync,
@@ -2680,6 +2681,7 @@ class EpistemicGraphIndex:
                     break
         return affected, scanned_versions
 
+    @call_spans.timed("graph.refresh_paths")
     def refresh_paths(
         self,
         paths: list[Path],
