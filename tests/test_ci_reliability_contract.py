@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -114,20 +115,70 @@ def test_every_package_install_is_bounded_and_retried() -> None:
     assert not offenders, "unbounded package installs:\n  " + "\n  ".join(offenders)
 
 
-def test_the_bounded_install_helper_sets_request_timeouts_and_retries() -> None:
-    """The helper is the only thing standing between CI and an infinite fetch."""
+def test_the_bounded_install_helper_bounds_each_attempt_not_just_the_loop() -> None:
+    """The helper is the only thing standing between CI and an infinite fetch.
+
+    `Acquire::*::Timeout` alone is not that bound, and this is measured: with
+    those options set, a fetch still hung for the entire five minutes its caller
+    allowed. They govern individual socket operations, so a mirror that dribbles
+    or stalls off-socket never trips them.
+
+    The external `timeout` is what actually ends an attempt, and the retry loop
+    only means something because of it -- bound the loop instead of the attempt
+    and the first stall consumes every retry, which is the bug this file's first
+    version shipped. `timeout` must sit inside `sudo` so the kill reaches the
+    root-owned `apt-get`; kill `sudo` instead and the child survives holding the
+    dpkg lock, so the retry fails on the lock rather than reaching a mirror.
+    """
     helper = ROOT / "scripts/ci-apt-install.sh"
     assert helper.is_file()
     script = helper.read_text(encoding="utf-8")
 
-    # A per-request bound, so a silent stall cannot outlast one timeout.
+    assert "set -euo pipefail" in script
+    # The bound that actually works, ordered so root can signal root.
+    assert "sudo timeout --kill-after=10" in script
+    assert "sudo apt-get" not in script, (
+        "every apt-get must run under the bounded `sudo timeout ... apt-get` "
+        "form; a bare `sudo apt-get` is the unbounded fetch again"
+    )
+    # Retries, which only help once an attempt can end on its own.
+    assert 'CI_APT_ATTEMPTS:=3' in script
+    assert 'CI_APT_UPDATE_TIMEOUT_SECONDS:=' in script
+    assert 'CI_APT_INSTALL_TIMEOUT_SECONDS:=' in script
+    # Kept as a cheap inner bound; useful, just never sufficient.
+    assert "Acquire::Retries=3" in script
     assert "Acquire::http::Timeout=15" in script
     assert "Acquire::https::Timeout=15" in script
-    # ...and a retry, because a mirror that refuses outright is a different
-    # failure from one that stalls, and the per-request bound does not fix it.
-    assert "Acquire::Retries=3" in script
-    assert "for attempt in 1 2 3" in script
-    assert "set -euo pipefail" in script
+
+
+def test_the_install_helper_budget_fits_inside_its_caller_timeout() -> None:
+    """A step cap below the helper's worst case would cut retries off again."""
+    script = (ROOT / "scripts/ci-apt-install.sh").read_text(encoding="utf-8")
+
+    def _default(name: str) -> int:
+        match = re.search(rf'\$\{{{name}:=(\d+)\}}', script)
+        assert match, f"{name} has no default in the helper"
+        return int(match.group(1))
+
+    worst_case_seconds = (
+        _default("CI_APT_ATTEMPTS") * _default("CI_APT_UPDATE_TIMEOUT_SECONDS")
+        + _default("CI_APT_INSTALL_TIMEOUT_SECONDS")
+    )
+
+    workflow = _workflow()
+    step = next(
+        step
+        for step in workflow["jobs"]["test"]["steps"]
+        if step.get("name") == "Install process-isolation runtime"
+    )
+    cap_seconds = step["timeout-minutes"] * 60
+    assert cap_seconds > worst_case_seconds, (
+        f"the step cap is {cap_seconds}s but the helper can legitimately spend "
+        f"{worst_case_seconds}s, so a healthy retry would be killed as a stall"
+    )
+    assert cap_seconds < workflow["jobs"]["test"]["timeout-minutes"] * 60, (
+        "the step cap must stay under the job budget it exists to protect"
+    )
 
 
 def test_retrieval_gates_run_as_three_independent_jobs() -> None:

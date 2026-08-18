@@ -45,10 +45,11 @@ jobs:
         # asserts every dependency is `success`, and `cancelled` is not
         # `success` -- so a mirror outage fails the required check exactly like
         # a red test, and blocked the 0.55.0 release twice before anyone looked
-        # past the job name. The helper bounds and retries the fetch; this
-        # timeout is the outer backstop, at ~7x the slowest healthy run observed
-        # on the sibling shards (10s, 20s, 40s).
-        timeout-minutes: 5
+        # past the job name. The helper bounds each attempt and retries; this is
+        # the outer backstop only. It must exceed the helper's own worst case
+        # (3 x 45s of update, then 150s of install = 285s) with margin, and stay
+        # far under the 30-minute job budget it exists to protect.
+        timeout-minutes: 6
         run: |
           scripts/ci-apt-install.sh bubblewrap
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
