@@ -138,7 +138,26 @@ def policy_target(governance_root: Path, relative: str) -> Path:
 
 
 def fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    """Flush one directory entry so a completed rename survives a crash.
+
+    Windows has no CRT route to this. `os.open` on a directory raises
+    `PermissionError: [Errno 13]` there, so the POSIX idiom below did not
+    degrade on Windows -- it failed every call, and with it every governance
+    commit that reached `durable_json`. That is 76 of the 82 permission
+    failures on the `windows-latest` shard, and a product defect rather than
+    a test artifact: the governance layer could not commit on Windows at all.
+
+    `governance.lifecycle` and `governance.receipts` already flush a raw
+    directory handle through `mutation_lock`; this module, its `durable_json`,
+    `governance.recovery` and `governance.tool` all shared the unported copy.
+    Both branches raise `OSError` on failure, so the contract is unchanged.
+    """
+    if os.name == "nt":
+        from .. import mutation_lock
+
+        mutation_lock._windows_flush_directory(path)
+        return
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:
@@ -148,7 +167,7 @@ def fsync_directory(path: Path) -> None:
 def durable_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         handle.write("\n")
         handle.flush()
