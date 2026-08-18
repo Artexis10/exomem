@@ -377,8 +377,48 @@ class FileWatcher:
         return media, ups, del_rels, pending_epoch, access_policy
 
     def _flush(self) -> None:
-        """Dispatch the coalesced batch: publish freshness/inbound for every
-        changed path (vault-wide), and re-embed only the Knowledge Base subset."""
+        """Dispatch the coalesced batch, then settle whatever graph debt it left.
+
+        The drain runs in a `finally` and on every dispatch, including the three
+        paths that return early: graph debt is enqueued by the write itself, so
+        a batch with nothing left to dispatch here can still have left the graph
+        owing work.
+        """
+        try:
+            self._dispatch_coalesced_batch()
+        finally:
+            self._drain_graph_debt()
+
+    def _drain_graph_debt(self) -> None:
+        """Repair the graph within a debounce window of the write that dirtied it.
+
+        Deferred graph work used to drain only from `_reconcile_once`, which runs
+        on `reconcile_interval_seconds` -- 300s by default, 900s in quiet mode.
+        Until that tick fired, `graph_sync.status()` reported `recovery_required`
+        and readers got `graph sidecar unavailable`, so an ordinary write left the
+        graph unreadable for up to five minutes with the repair already queued,
+        already admissible, and nothing scheduled to run it. The product E2E
+        proved it: `state='recovery_required' epoch_kind='coherent'
+        external_pending=False graph_queue_depth=13`, held for the whole 120s the
+        loop waits -- a wait that could not succeed against a 300s cadence.
+
+        The dispatch thread is the right seam. It already runs off the write path
+        (so this does not undo taking the graph off it) and it already coalesces
+        bursts, so a batch of saves settles the graph once rather than per file.
+        The periodic reconcile stays as the cross-process backstop for debt this
+        process never observed.
+        """
+        try:
+            index_sync.drain_graph_work(
+                self._vault_root,
+                limit=self._watcher_policy().max_reconcile_embed_files,
+            )
+        except Exception:  # noqa: BLE001 - queued work stays retryable
+            log.exception("file watcher: deferred graph drain failed")
+
+    def _dispatch_coalesced_batch(self) -> None:
+        """Publish freshness/inbound for every changed path (vault-wide), and
+        re-embed only the Knowledge Base subset."""
         media, ups, del_rels, pending_epoch, access_policy = self._drain()
         if access_policy:
             self._reconcile_access_policy(pending_epoch)

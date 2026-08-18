@@ -595,6 +595,112 @@ def test_quiet_reconcile_passes_converge_a_corpus_scale_backlog(
     )
 
 
+def test_dispatch_drains_graph_debt_without_waiting_for_the_reconcile_tick(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write's graph debt must settle on the debounce window, not the 300s tick.
+
+    Deferred graph work used to drain only from `_reconcile_once`. Between one
+    tick and the next -- 300s by default, 900s quiet -- `graph_sync.status()`
+    reported `recovery_required` and readers got `graph sidecar unavailable`,
+    with the repair already queued and already admissible. The product E2E
+    showed exactly that: `epoch_kind='coherent'`, `external_pending=False`,
+    `graph_queue_depth=13`, unchanged across the 120s it waits.
+
+    The empty batch is the case that matters. `_flush` returns early when the
+    coalesced batch has nothing left to dispatch, and the debt is enqueued by
+    the write rather than by this batch, so a drain guarded behind that return
+    would still be waiting for the tick.
+    """
+    policy = mode.WatcherPolicy(0.5, 300.0, 32, 25, False)
+    watcher = file_watcher.FileWatcher(vault)
+    monkeypatch.setattr(watcher, "_watcher_policy", lambda: policy)
+    limits: list[int | None] = []
+    monkeypatch.setattr(
+        index_sync,
+        "drain_graph_work",
+        lambda _root, *, limit=None: limits.append(limit) or 0,
+    )
+
+    watcher._flush()
+
+    assert limits == [25]
+
+
+def test_dispatch_settles_graph_debt_even_when_the_batch_dispatch_raises(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed batch must not strand the graph in `recovery_required`.
+
+    The dispatch and the drain fail independently: whatever killed the batch
+    (a poison media file, a bad upsert) says nothing about whether the queued
+    per-path graph repair can land. Leaving it queued would hand back the same
+    five-minute unreadable window this drain exists to close.
+    """
+    policy = mode.WatcherPolicy(0.5, 300.0, 32, 25, False)
+    watcher = file_watcher.FileWatcher(vault)
+    monkeypatch.setattr(watcher, "_watcher_policy", lambda: policy)
+    drained: list[int | None] = []
+    monkeypatch.setattr(
+        index_sync,
+        "drain_graph_work",
+        lambda _root, *, limit=None: drained.append(limit) or 0,
+    )
+
+    def explode() -> None:
+        raise RuntimeError("batch dispatch failed")
+
+    monkeypatch.setattr(watcher, "_dispatch_coalesced_batch", explode)
+
+    with pytest.raises(RuntimeError, match="batch dispatch failed"):
+        watcher._flush()
+
+    assert drained == [25]
+
+
+def test_graph_drain_failure_never_kills_the_watcher_dispatch(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drain is best-effort; the queue is durable and the next flush retries."""
+    policy = mode.WatcherPolicy(0.5, 300.0, 32, 25, False)
+    watcher = file_watcher.FileWatcher(vault)
+    monkeypatch.setattr(watcher, "_watcher_policy", lambda: policy)
+
+    def explode(_root: Path, *, limit: int | None = None) -> int:
+        raise RuntimeError("graph drain failed")
+
+    monkeypatch.setattr(index_sync, "drain_graph_work", explode)
+
+    watcher._flush()
+
+
+def test_drain_graph_work_leaves_the_other_deferred_queues_alone(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dispatch-path drain must not replay embeddings on every write.
+
+    `drain_deferred_work` runs all three queues because the reconcile wants all
+    three. This seam fires within a debounce window instead, so it takes the
+    graph queue only -- the cheap repair must not start paying for the
+    expensive one.
+    """
+    seen: list[tuple[int | None, set[str] | None]] = []
+    monkeypatch.setattr(
+        index_sync,
+        "_drain_graph_work",
+        lambda _root, *, limit=None, requested=None: seen.append((limit, requested)) or 0,
+    )
+    replayed: list[Path] = []
+    monkeypatch.setattr(
+        index_sync, "replay_deferred_embedding", lambda *a, **kw: replayed.append(a)
+    )
+
+    index_sync.drain_graph_work(vault, limit=9)
+
+    assert seen == [(9, None)]
+    assert replayed == []
+
+
 def test_reconcile_drift_spends_budget_before_deferred_drain(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
