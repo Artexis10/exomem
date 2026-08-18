@@ -83,7 +83,12 @@ class CallTraceMiddleware(Middleware):
         self.hosted = hosted
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
-        from .command_surface import mcp_request_context, mcp_request_id, pop_tool_failure
+        from .command_surface import (
+            mcp_request_context,
+            mcp_request_id,
+            pop_call_spans,
+            pop_tool_failure,
+        )
 
         # The wall clock the *caller* experiences: everything this middleware
         # does, not just the leaf. `duration_ms` below measures the leaf alone
@@ -116,6 +121,7 @@ class CallTraceMiddleware(Middleware):
                         total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                         error_code=_leading_error_code(translation_error),
                         arguments=_extract_tool_args(context.message),
+                        spans=pop_call_spans(call_token),
                     )
                     raise
             guarded_fields = _GUARDED_WRITE_FIELDS.get(tool_name)
@@ -162,6 +168,7 @@ class CallTraceMiddleware(Middleware):
                         total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                         error_code=_leading_error_code(guard_error),
                         arguments=args,
+                        spans=pop_call_spans(call_token),
                     )
                     raise
 
@@ -213,6 +220,7 @@ class CallTraceMiddleware(Middleware):
                     total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                     error_code=failure.get("code") if failure is not None else None,
                     arguments=ledger_args,
+                    spans=pop_call_spans(call_token),
                 )
                 return result
             except Exception as exc:
@@ -231,6 +239,7 @@ class CallTraceMiddleware(Middleware):
                     total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                     error_code=type(exc).__name__,
                     arguments=ledger_args,
+                    spans=pop_call_spans(call_token),
                 )
                 raise
 
@@ -258,6 +267,7 @@ def _record_ledger_row(
     total_ms: float,
     error_code: str | None,
     arguments: dict,
+    spans: list[dict] | None = None,
 ) -> None:
     """Append one call-ledger row. Never raises into the call path."""
     try:
@@ -278,6 +288,7 @@ def _record_ledger_row(
             client_version=identity.get("client_version"),
             transport=identity.get("transport"),
             session_id=identity.get("session_id"),
+            spans=spans,
         )
     except Exception:  # noqa: BLE001 - the ledger must never break a call
         pass
