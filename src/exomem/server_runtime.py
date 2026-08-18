@@ -76,6 +76,7 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     _start_compute_runtime(vault_root)
     media_worker = _start_media_worker(vault_root)
     file_watcher = _start_file_watcher(vault_root)
+    _start_graph_drain(vault_root)
 
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     return ServerRuntime(
@@ -427,6 +428,26 @@ def _create_media_worker(vault_root: Path) -> Any | None:
         return media_worker_module.MediaWorker(vault_root)
     except Exception as exc:  # noqa: BLE001 - media must never deny the core service
         log.warning("media runtime unavailable; core service continuing: %s", exc)
+        return None
+
+
+def _start_graph_drain(vault_root: Path) -> Any | None:
+    """Start the drain that settles queued epistemic-graph repair.
+
+    Deliberately not folded into the file watcher, even though the watcher is
+    where the only existing drain call sites live. The watcher is optional -- it
+    no-ops without `watchdog` and is skipped entirely under
+    `EXOMEM_DISABLE_FILE_WATCHER` -- and graph convergence must not be optional
+    with it. Where the watcher was absent, nothing drained the queue at all and
+    the graph stayed `recovery_required` indefinitely with the repair already
+    queued and admissible.
+    """
+    from . import graph_drain
+
+    try:
+        return graph_drain.start(vault_root)
+    except Exception as exc:  # noqa: BLE001 - convergence must not break startup
+        log.warning("graph drain start failed: %s", exc)
         return None
 
 

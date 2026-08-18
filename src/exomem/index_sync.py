@@ -843,6 +843,18 @@ def _drain_graph_work(
     return processed
 
 
+def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:
+    """Drain queued epistemic-graph repair without touching the other queues.
+
+    `drain_deferred_work` runs all three queues because its callers -- the
+    periodic reconcile, `maintain`, the CLI -- want all three. The graph drain
+    daemon wants only this one: it fires within a second of the write that
+    queued the debt, and replaying embeddings that often is a different cost
+    decision from repairing the graph.
+    """
+    return _drain_graph_work(vault_root, limit=limit, requested=None)
+
+
 def drain_deferred_work(
     vault_root: Path,
     *,

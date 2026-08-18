@@ -417,9 +417,30 @@ def _add_plain_receipts(
         conn.close()
 
 
+def _note_graph_debt() -> None:
+    """Tell the drain daemon this process just queued graph repair.
+
+    Imported here rather than at module scope: `graph_drain` reaches back into
+    `index_sync`, which imports this module. Best-effort by design -- queueing
+    the work is the durable part, and a missed signal costs at worst the
+    daemon's idle poll rather than the repair itself.
+    """
+    try:
+        from . import graph_drain
+
+        graph_drain.note_graph_debt()
+    except Exception:  # noqa: BLE001 - never let signalling break an enqueue
+        # Silent on purpose: this module keeps no logger, and a missed signal is
+        # already covered by the daemon's idle poll. The enqueue itself, which
+        # is the part that must not be lost, has already committed.
+        pass
+
+
 def add_graph(vault_root: Path, rel_paths: list[str]) -> int:
     """Durably queue pages whose epistemic-graph projection needs re-deriving."""
     _receipts, added = _add_plain_receipts(vault_root, rel_paths, table="graph_upserts")
+    if added:
+        _note_graph_debt()
     return added
 
 
@@ -428,6 +449,8 @@ def add_graph_receipts(vault_root: Path, rel_paths: list[str]) -> list[DeferredR
     receipts, _added = _add_plain_receipts(
         vault_root, rel_paths, table="graph_upserts"
     )
+    if receipts:
+        _note_graph_debt()
     return receipts
 
 
@@ -464,6 +487,9 @@ def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
             )
     finally:
         conn.close()
+    # A whole-vault marker is graph debt too, and the one the drain most needs
+    # to hear about: it is raised exactly when the changed scope is unknown.
+    _note_graph_debt()
 
 
 def graph_full_rebuild_pending(vault_root: Path) -> int | None:
