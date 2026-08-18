@@ -567,13 +567,36 @@ def _windows_private_dacl_trustees(sid: str) -> tuple[str, ...]:
 
 
 class WindowsRuntimeDaclError(RuntimeError):
-    """Actionable fail-closed result for one unsafe idempotency runtime entry."""
+    """Actionable fail-closed result for one unsafe idempotency runtime entry.
 
-    def __init__(self, path: Path, remediation: str):
+    Carries the descriptor it rejected. Without that the failure is only
+    diagnosable on a machine you can log into: the message named a path and a
+    repair command but never what it actually observed, so a report from another
+    host -- a CI runner, a user -- could not be acted on, and the shape had to be
+    guessed at from whatever a local machine happened to produce. Guessing wrong
+    is cheap to do and expensive to discover.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        remediation: str,
+        *,
+        observed: str | None = None,
+        expected: tuple[str, ...] = (),
+    ):
         self.path = path
         self.remediation = remediation
+        self.observed = observed
+        self.expected = expected
+        detail = ""
+        if observed is not None:
+            detail = f"; observed {observed!r}"
+        if expected:
+            detail += f"; expected full-access trustees {', '.join(expected)}"
         super().__init__(
-            f"unsafe Windows DACL at {path}; run in elevated PowerShell: {remediation}"
+            f"unsafe Windows DACL at {path}{detail}; "
+            f"run in elevated PowerShell: {remediation}"
         )
 
 
@@ -795,6 +818,8 @@ def _validate_windows_runtime_entry(
             raise WindowsRuntimeDaclError(
                 path,
                 _windows_private_dacl_repair_command(path, sid, directory=directory),
+                observed=sddl,
+                expected=_windows_private_dacl_trustees(sid),
             )
     finally:
         if opened_here:
