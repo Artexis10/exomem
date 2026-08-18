@@ -2552,7 +2552,7 @@ def test_unacknowledged_checkpoint_requires_recovery_and_preserves_committed_ter
 def test_committed_derived_failure_is_idempotently_replayed(tmp_path: Path) -> None:
     from exomem.writer_lease import IdempotencyStore
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     required = _checkpoint(2)
     calls = 0
 
@@ -2580,7 +2580,7 @@ def test_canonical_handoff_is_non_owned_until_off_boundary_graph_work_completes(
 ) -> None:
     from exomem.writer_lease import IdempotencyStore
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite", wait_seconds=1)
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", wait_seconds=1)
     released_guard = threading.Event()
     release_graph = threading.Event()
     result: list[dict[str, object]] = []
@@ -2643,7 +2643,7 @@ def test_dead_graph_pending_owner_resumes_only_derived_graph_work(
     from exomem.writer_lease import IdempotencyStore
 
     monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     vault = tmp_path / "vault"
     checkpoint = _checkpoint(1)
     graph_sync._write_floor(vault, graph_sync.GraphSyncGenerationFloor.create(1))
@@ -2682,7 +2682,7 @@ def test_dead_graph_pending_owner_resumes_only_derived_graph_work(
 def test_dead_pending_without_an_exact_receipt_is_outcome_unknown(tmp_path: Path) -> None:
     from exomem.writer_lease import IdempotencyStore, OpError
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     with store._connect() as conn:
         conn.execute(
             "INSERT INTO mutations(key, digest, state, updated_at, owner) VALUES (?, ?, ?, ?, ?)",

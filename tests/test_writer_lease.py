@@ -226,7 +226,7 @@ class _FixedCiphertextProtector:
 
 def test_protected_attempt_secret_never_writes_plaintext_to_sqlite(tmp_path: Path) -> None:
     protector = _EnvelopeProtector()
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=protector)
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", secret_protector=protector)
     digest = "a" * 64
 
     assert store._claim_or_inspect("protected", digest, None) == ("owner", None)
@@ -291,7 +291,7 @@ def test_protected_attempt_secret_rejects_non_exact_envelopes(
     tmp_path: Path, stored: bytes
 ) -> None:
     protector = _EnvelopeProtector()
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=protector)
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", secret_protector=protector)
     attempt = writer_lease_module._ExecutionAttempt("a" * 24, "b" * 24, stored, None)
 
     assert store._unprotected_commit_secret("e" * 64, attempt) is None
@@ -302,7 +302,7 @@ def test_protected_attempt_secret_rejects_non_exact_envelopes(
 def test_malformed_or_legacy_protected_attempt_secret_fails_closed(
     tmp_path: Path, replacement: bytes
 ) -> None:
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=_EnvelopeProtector())
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", secret_protector=_EnvelopeProtector())
     digest = "b" * 64
     assert store._claim_or_inspect("protected", digest, None) == ("owner", None)
     attempt = store._attempts["protected"]
@@ -318,7 +318,7 @@ def test_malformed_or_legacy_protected_attempt_secret_fails_closed(
 
 def test_protected_attempt_secret_binds_the_attempt_identity(tmp_path: Path) -> None:
     protector = _EnvelopeProtector()
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=protector)
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", secret_protector=protector)
     digest = "c" * 64
     assert store._claim_or_inspect("one", digest, None) == ("owner", None)
     assert store._claim_or_inspect("two", digest, None) == ("owner", None)
@@ -349,7 +349,7 @@ def test_protection_failure_refuses_before_creating_an_execution_row(tmp_path: P
         def protect(self, _secret: bytes, _entropy: bytes) -> bytes:
             raise OSError("DPAPI unavailable")
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=BrokenProtector())
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", secret_protector=BrokenProtector())
 
     with pytest.raises(OpError) as error:
         store.run("unprotected", "d" * 64, lambda: pytest.fail("leaf ran"))
@@ -359,7 +359,7 @@ def test_protection_failure_refuses_before_creating_an_execution_row(tmp_path: P
 
 
 def test_legacy_raw_attempt_secret_never_heals_a_dead_execution(tmp_path: Path) -> None:
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite", secret_protector=_EnvelopeProtector())
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", secret_protector=_EnvelopeProtector())
     digest = "e" * 64
     with sqlite3.connect(store.path) as connection:
         connection.execute(
@@ -533,7 +533,7 @@ def test_lifecycle_idempotency_replay_keeps_committed_receipt_and_replays_termin
         "minimum_reader_version": 2,
     }
     terminal = committed_terminal(receipt, request_id="first", receipt_id="r", idempotency_key="same")
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     assert store.run("same", "digest", lambda: terminal) == terminal
     replay = store.run("same", "digest", lambda: pytest.fail("lifecycle leaf reran"))
     assert replay["status"] == "replayed" and replay["mutated"] is False
