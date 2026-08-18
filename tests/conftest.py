@@ -218,6 +218,29 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
 
 
 @pytest.fixture(autouse=True)
+def _stop_leaked_graph_drain():
+    """No test leaves the graph drain daemon running into the next one.
+
+    `server_runtime` starts it and nothing stops it, so any test that exercises
+    server startup leaks the thread for the rest of the session. It then keeps
+    polling a vault root whose `tmp_path` has been deleted, and it turns up in
+    every later thread dump -- including the one from the `windows-latest`
+    shard that hangs, where it was the first suspect precisely because it was
+    the only unexplained thread there.
+
+    The daemon is idle-waiting and almost certainly innocent, but a leaked
+    thread that outlives its vault has no business being a variable in someone
+    else's failure. This is the same hazard the rebuild threads already have on
+    record for crossing test boundaries.
+    """
+    yield
+    from exomem import graph_drain
+
+    graph_drain.stop()
+    graph_drain._DEBT.clear()
+
+
+@pytest.fixture(autouse=True)
 def _process_env_isolation():
     """Restore os.environ after every test.
 
