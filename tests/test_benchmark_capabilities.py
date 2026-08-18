@@ -97,3 +97,70 @@ def test_neither_matcher_loops_on_a_self_referential_cause() -> None:
 def test_no_error_at_all_is_not_a_refusal() -> None:
     assert declares_absent_sandbox(None) is False
     assert declares_absent_surface_timers(None) is False
+
+
+class ContractIdentityError(ValueError):
+    """Stands in for `protocol.contracts.ContractIdentityError`."""
+
+
+GIT_ANCHOR_REFUSALS = (
+    "trusted Git executable is unavailable",
+    "trusted Git executable cannot be resolved",
+    "trusted Git executable is not an executable file",
+)
+
+GIT_REAL_FINDINGS = (
+    "ratification contract digest differs from Git bytes",
+    "amendment contract digest differs from Git bytes",
+    "receipt history contains a duplicate Git revision",
+    "receipt history contains an invalid Git revision",
+    "contract_revision must be a full 40-hex Git revision",
+)
+
+
+@pytest.mark.parametrize("message", GIT_ANCHOR_REFUSALS)
+def test_every_way_the_git_trust_anchor_can_come_up_empty_is_recognised(message: str) -> None:
+    from benchmark_capabilities import declares_absent_trusted_git
+
+    assert declares_absent_trusted_git(ContractIdentityError(message))
+
+
+@pytest.mark.parametrize("message", GIT_REAL_FINDINGS)
+def test_a_git_identity_finding_is_never_turned_into_a_skip(message: str) -> None:
+    """The anchor being absent is a platform fact; a digest that differs is a bug.
+
+    `ContractIdentityError` carries both, so the matcher has to separate them --
+    otherwise the skip that hides an unavailable Git would also hide a contract
+    whose bytes do not match their pin.
+    """
+    from benchmark_capabilities import declares_absent_trusted_git
+
+    assert not declares_absent_trusted_git(ContractIdentityError(message))
+
+
+def test_the_git_anchor_is_not_confused_with_the_other_capabilities() -> None:
+    from benchmark_capabilities import (
+        declares_absent_sandbox,
+        declares_absent_surface_timers,
+        declares_absent_trusted_git,
+    )
+
+    for message in GIT_ANCHOR_REFUSALS:
+        error = ContractIdentityError(message)
+        assert not declares_absent_sandbox(error)
+        assert not declares_absent_surface_timers(error)
+    for message in SANDBOX_REFUSALS + TIMER_REFUSALS:
+        assert not declares_absent_trusted_git(BrokerContractError(message))
+
+
+def test_the_git_anchor_matches_through_a_wrapping_manifest_error() -> None:
+    """`protocol.manifest` re-raises the refusal with its own prefix and type."""
+    from benchmark_capabilities import declares_absent_trusted_git
+
+    class ManifestError(ValueError):
+        pass
+
+    wrapped = ManifestError(
+        "pre-registration identity refused: trusted Git executable is unavailable"
+    )
+    assert declares_absent_trusted_git(wrapped)
