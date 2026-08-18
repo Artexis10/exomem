@@ -35,6 +35,7 @@ import shutil
 import signal
 import subprocess
 from functools import lru_cache
+from pathlib import Path
 
 import pytest
 
@@ -92,10 +93,30 @@ def has_posix_interval_timers() -> bool:
     return all(hasattr(signal, name) for name in _TIMER_PRIMITIVES)
 
 
+#: What `epistemic.broker` pins its sandbox to. Not merely "Linux": these are
+#: Debian/Ubuntu x86-64 paths, hardcoded, and the broker refuses rather than
+#: substitute -- it verifies `bwrap` *is* the trusted binary, then binds this
+#: exact runtime into the namespace. Duplicated here rather than imported so a
+#: skip decision never depends on importing the harness it is gating.
+_SANDBOX_RUNTIME = (
+    "/usr/bin/bwrap",
+    "/usr/bin/python3.12",
+    "/usr/lib/python3.12",
+    "/lib/x86_64-linux-gnu",
+    "/lib64/ld-linux-x86-64.so.2",
+)
+
+
 @lru_cache(maxsize=1)
-def has_bwrap() -> bool:
-    """True when a bubblewrap sandbox can be spawned at all."""
-    return shutil.which("bwrap") is not None
+def has_bwrap_sandbox() -> bool:
+    """True when the exact sandbox the broker binds is present.
+
+    `shutil.which("bwrap")` alone is not enough: the broker resolves it against
+    `/usr/bin/bwrap` specifically and binds a pinned interpreter, stdlib, libc
+    and loader beside it. Any one of them missing is a refusal, so all of them
+    are the capability.
+    """
+    return all(Path(path).exists() for path in _SANDBOX_RUNTIME)
 
 
 def require_posix_file_modes() -> None:
@@ -118,9 +139,9 @@ def require_posix_interval_timers() -> None:
         pytest.skip("POSIX interval timers (setitimer/SIGALRM) are unavailable here")
 
 
-def require_bwrap() -> None:
-    if not has_bwrap():
-        pytest.skip("the bubblewrap sandbox is unavailable here")
+def require_bwrap_sandbox() -> None:
+    if not has_bwrap_sandbox():
+        pytest.skip("the pinned bubblewrap sandbox runtime is unavailable here")
 
 
 #: The broker's own words for the capability it needs. It says this deliberately
@@ -149,6 +170,38 @@ def declares_absent_surface_timers(error: BaseException | None) -> bool:
             if _BROKER_TIMER_REFUSAL.search(str(error)):
                 return True
         if isinstance(error, AssertionError) and _BROKER_TIMER_REFUSAL.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+#: The broker's five distinct refusals for a sandbox it cannot build -- an
+#: absent `bwrap`, one that is not the trusted binary, one it cannot stat or
+#: that is group/world writable, and a pinned system runtime that is not there.
+#: Each is a deliberate fail-closed declaration, which is what makes matching
+#: the sentence safe.
+_BROKER_SANDBOX_REFUSAL = re.compile(
+    r"bwrap sandbox (is unavailable|executable (cannot be verified"
+    r"|is not the trusted system binary|is group/world writable))"
+    r"|sandbox system runtime or bound worker bytes are unavailable"
+)
+
+
+def declares_absent_sandbox(error: BaseException | None) -> bool:
+    """True when *error* is the broker refusing to build its pinned sandbox.
+
+    Walks the chain for the same reason `declares_absent_surface_timers` does:
+    `pytest.raises(..., match=...)` re-raises as an `AssertionError` carrying
+    the refusal, and a test that met this refusal instead of its own failed for
+    the absent capability rather than for its subject.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ in {"BrokerContractError", "BrokerSurfaceTimeout"}:
+            if _BROKER_SANDBOX_REFUSAL.search(str(error)):
+                return True
+        if isinstance(error, AssertionError) and _BROKER_SANDBOX_REFUSAL.search(str(error)):
             return True
         error = error.__cause__ or error.__context__
     return False
