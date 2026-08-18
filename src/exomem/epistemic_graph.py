@@ -462,6 +462,58 @@ def clear_publication_refusal(vault_root: Path) -> None:
         _PUBLICATION_REFUSALS.pop(_publication_memo_key(vault_root), None)
 
 
+def recover_suspended_graph(vault_root: Path) -> bool:
+    """Repair a persisted graph barrier left by a crash or a failed fan-out.
+
+    A rebuild that stops is terminal: `graph_sync` records the error, clears
+    `_running` and returns, so the barrier it leaves behind *is* the retry
+    signal and something has to act on it. This is that action, lifted out of
+    `file_watcher` so more than one scheduler can own it -- the watcher's
+    periodic reconcile is 300s and optional, which left the barrier standing
+    indefinitely wherever the watcher was absent.
+
+    Returns True when the graph is available afterwards. Never raises: a failed
+    recovery re-suspends reads so the barrier survives as a signal for the next
+    attempt, which is the whole point of it being persisted.
+    """
+    from . import find as find_module
+    from . import freshness
+    from . import vault as vault_module
+
+    if freshness.external_pending(vault_root):
+        return False
+    if not graph_enabled() or not sidecar_path(vault_root).exists():
+        return False
+    graph = EpistemicGraphIndex(vault_root)
+    if not graph.reads_suspended():
+        return False
+    if publication_refusal_active(vault_root):
+        # Contract R2: a publication already proven doomed for this exact
+        # checkpoint must not be re-attempted at full rebuild cost on every
+        # cycle. The barrier this repairs is itself the fence, so deferring
+        # costs nothing but the delay.
+        return False
+    try:
+        find_module.evict_resolver_caches(vault_root)
+        vault_module.evict_inbound_index(vault_root)
+        graph.withdraw_availability()
+        if freshness.external_pending(vault_root):
+            return False
+        graph.rebuild_all()
+        if not graph.available():
+            raise GraphPublicationUnavailable(
+                "recovered graph did not publish an available marker"
+            )
+    except Exception:  # noqa: BLE001 - persisted barrier remains a retry signal
+        try:
+            graph.suspend_reads()
+        except Exception:  # noqa: BLE001 - the unavailable marker still fails closed
+            pass
+        log.exception("persisted graph barrier recovery failed")
+        return False
+    return True
+
+
 def publication_refusal_active(vault_root: Path) -> bool:
     """Whether the same publication was refused recently enough to skip a retry."""
     key = _publication_memo_key(vault_root)
