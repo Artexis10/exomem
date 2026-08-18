@@ -219,6 +219,63 @@ def test_repository_text_rejects_drive_root_and_unc_paths_with_redacted_findings
     assert all(set(item.as_dict()) == {"rule", "file", "line"} for item in report.findings)
 
 
+def test_repository_text_rejects_a_machine_account_sid_with_a_redacted_finding(
+    tmp_path: Path,
+) -> None:
+    """A Windows account SID identifies a machine and an account on it.
+
+    It reached this repository the way the absolute paths did: pasted out of a
+    live box while reproducing a bug. The path rules caught the paths from that
+    session and nothing caught the SID, so it shipped in a test file until a
+    reviewer happened to recognise the shape.
+
+    Redacted like every other finding -- a report that must quote the identifier
+    in order to describe it has moved the leak rather than closed it.
+    """
+    repository = tmp_path / "synthetic-checkout"
+    repository.mkdir()
+    sid = "S-1-5-21-" + "896069015-2321608379-4234408933" + "-1001"
+    tracked = repository / "tests" / "sid.py"
+    tracked.parent.mkdir()
+    tracked.write_text('OWNER = "' + sid + '"' + "\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(["git", "add", "tests/sid.py"], cwd=repository, check=True)
+
+    report = scan_repository_inputs(repository)
+    rendered = " ".join(str(item) for item in report.findings)
+
+    assert [(item.rule, item.file, item.line) for item in report.findings] == [
+        ("windows_account_sid", "tests/sid.py", 1),
+    ]
+    assert sid not in rendered
+    assert "896069015" not in rendered
+
+
+def test_account_sid_rule_admits_well_known_and_obviously_synthetic_sids(
+    tmp_path: Path,
+) -> None:
+    """The rule must not fire on the SIDs this codebase legitimately handles.
+
+    SYSTEM, Administrators and OWNER RIGHTS are fixed well-known values naming
+    no one, and `mutation_lock`'s DACL handling mentions all three. A test that
+    needs the *shape* of an account SID gets the same kind of documented escape
+    the path rules give `example` and `<name>`: sub-authorities too small to be
+    a real 32-bit value cannot identify a machine.
+    """
+    artifact = tmp_path / "sids.md"
+    artifact.write_text(
+        "system: S-1-5-18" "\n"
+        "administrators: S-1-5-32-544" "\n"
+        "owner-rights: S-1-3-4" "\n"
+        "synthetic-account: S-1-5-21-1-2-3-1001" "\n",
+        encoding="utf-8",
+    )
+
+    findings = scan_artifact(artifact, label="docs/sids.md")
+
+    assert findings == ()
+
+
 def test_windows_absolute_path_rule_retains_explicit_placeholder_exemptions(
     tmp_path: Path,
 ) -> None:
