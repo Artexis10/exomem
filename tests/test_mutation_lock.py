@@ -272,7 +272,10 @@ def test_windows_private_dacl_deduplicates_local_system_principal() -> None:
 #: and the user's own grant spelled `OW` (OWNER RIGHTS) rather than as a literal
 #: SID. Refusing it failed closed on a directory that was already private.
 _OWNER_RIGHTS_DACL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
-_USER_SID = "S-1-5-21-896069015-2321608379-4234408933-1001"
+#: Deliberately tiny sub-authorities. A real Windows account SID carries
+#: 32-bit values and identifies one specific machine and account, which is
+#: not something a public repository should carry.
+_USER_SID = "S-1-5-21-1-2-3-1001"
 
 
 def test_owner_rights_counts_as_the_users_grant_when_the_user_owns_the_entry() -> None:
@@ -1223,7 +1226,7 @@ def test_dacl_error_reports_what_it_observed_not_just_that_it_refused() -> None:
     the report itself into the evidence.
     """
     error = mutation_lock_module.WindowsRuntimeDaclError(
-        Path(r"C:\Users\someone\.cache\exomem"),
+        Path(r"C:\Users\example\.cache\exomem"),
         "icacls.exe ...",
         observed="D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;WD)",
         expected=("S-1-5-21-1-2-3-1001", "SY", "BA"),
@@ -1239,7 +1242,7 @@ def test_dacl_error_reports_what_it_observed_not_just_that_it_refused() -> None:
 def test_dacl_error_still_renders_without_a_descriptor() -> None:
     """The two new fields are optional; older call sites must not break."""
     error = mutation_lock_module.WindowsRuntimeDaclError(
-        Path(r"C:\tmp\x"), "icacls.exe ..."
+        Path(r"C:\example\x"), "icacls.exe ..."
     )
 
     assert error.observed is None
