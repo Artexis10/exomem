@@ -756,7 +756,13 @@ def compile_prospective(
                 continue
             target = root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            # `write_bytes`, matching the carried-over files six lines above
+            # and the live commit's `_durable_bytes(..., content.encode())`.
+            # This tree exists to predict the fingerprint the live tree will
+            # have after the commit, and `_content_fingerprint` hashes raw
+            # bytes -- so a text-mode write made the prediction wrong on
+            # Windows for exactly the documents being proposed.
+            target.write_bytes(content.encode("utf-8"))
         files = _iter_policy_files(root)
         findings, scopes, rules, grants, release_grants = _compile(root, files)
         fingerprint = _content_fingerprint(root, files)
