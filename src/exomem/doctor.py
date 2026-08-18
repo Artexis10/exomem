@@ -66,11 +66,19 @@ HA_AUTH_ENV_KEYS = (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: How a user actually rebuilds vectors from a shell. `reconcile` and `audit_fix`
+#: How a user actually reconciles from a shell. `reconcile` and `audit_fix`
 #: are internal registry names, not CLI surface — the CLI dispatches on the
 #: PRODUCT_PUBLIC_NAMES, where this operation is `maintain_memory --mode
 #: reconcile` (or the `maintain` alias). Remediation strings named the internal
 #: ops, so every one of them fell through to the server argument parser.
+#:
+#: The `--reconcile` is not decoration, and the name here understates the reach:
+#: this is also how the derived graph is recovered and how orphaned rebuild
+#: temporaries are reclaimed. Bare `exomem maintain` is the read-only audit. It
+#: parses, runs, and exits 0 without repairing anything, which is the worse of
+#: the two failure modes — an operator who follows it sees success and concludes
+#: the diagnosis was wrong. Every remediation that asks for repair routes
+#: through this constant so no site can drift back to the audit.
 _REBUILD_VECTORS_CMD = "exomem maintain --reconcile"
 
 #: Absolute deferred-queue FAIL threshold (total semantic_upserts + full_upserts
@@ -837,8 +845,15 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     (every matching name, regardless of age) and `stale_count`/`stale_bytes`
     (age-gated, the population thresholds actually act on), plus
     `stale_age_seconds`. Reclaiming a stale file requires the service stopped
-    and no rebuild in flight, so remediation names `exomem maintain` run
+    and no rebuild in flight, so remediation names `_REBUILD_VECTORS_CMD` run
     out-of-process (it reads the vault from EXOMEM_VAULT_PATH, not `--vault`).
+    That command must be the reconciling one: the sweeper that actually unlinks
+    these files (`graph_sync.sweep_abandoned_temporaries`) has exactly one
+    caller, inside `reconcile.reconcile()` and gated on `not dry_run`. Plain
+    `exomem maintain` runs the read-only audit, so naming it told an operator
+    to run something that exits 0 having reclaimed nothing -- a worse failure
+    than naming no command at all, because success is indistinguishable from
+    the remedy not applying.
     """
     from . import vault as vault_module
 
@@ -931,10 +946,10 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
     remediation = (
-        "Stop the exomem service, then run `exomem maintain` out-of-process "
-        "(it reads the vault from EXOMEM_VAULT_PATH, not --vault) to reclaim "
-        "orphaned rebuild temporaries — reclaim is only safe once no rebuild is "
-        "in flight."
+        f"Stop the exomem service, then run `{_REBUILD_VECTORS_CMD}` "
+        "out-of-process (it reads the vault from EXOMEM_VAULT_PATH, not "
+        "--vault) to reclaim orphaned rebuild temporaries — reclaim is only "
+        "safe once no rebuild is in flight."
     )
     summary = (
         f"graph={graph_stats['stale_count']}/{graph_stats['count']}, "
