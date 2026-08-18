@@ -140,10 +140,10 @@ def has_trusted_system_git() -> bool:
     `benchmarks/protocol` deliberately resolves Git through `os.defpath` rather
     than `PATH`, so a user-controlled `PATH` cannot substitute the binary that
     establishes contract identity. That anchor is a POSIX idea: `os.defpath` is
-    `:/bin:/usr/bin` there, and `.;C:\bin` on Windows -- a directory that does
-    not exist, preceded by the current directory, which is the very thing the
-    anchor exists to exclude. So the check finds nothing on Windows even with
-    Git installed at `C:\Program Files\Git`.
+    `:/bin:/usr/bin` there, while on Windows it names a drive-root `bin`
+    directory that does not exist, preceded by the current directory -- which
+    is the very thing the anchor exists to exclude. So the check finds nothing
+    on Windows even with Git installed in the usual Program Files location.
 
     Giving Windows its own trusted location would mean inventing a trust policy
     for a harness that also requires `bwrap`, and therefore cannot run there

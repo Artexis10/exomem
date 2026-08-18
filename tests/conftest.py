@@ -178,10 +178,10 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     The Git branch is the same trade again. `benchmarks/protocol` resolves Git
     through `os.defpath` rather than `PATH`, so a user-controlled `PATH` cannot
     substitute the binary that establishes contract identity -- but `os.defpath`
-    is `.;C:\bin` on Windows, a directory that does not exist behind the very
-    current-directory entry the anchor exists to exclude. Only the three
-    refusals meaning "the anchor found nothing usable" are matched; a digest
-    mismatch stays a failure, because that is a real finding.
+    on Windows names a drive-root `bin` directory that does not exist, behind
+    the very current-directory entry the anchor exists to exclude. Only the
+    three refusals meaning "the anchor found nothing usable" are matched; a
+    digest mismatch stays a failure, because that is a real finding.
 
     Every branch is gated on the capability actually being absent, so this can
     never mask a regression where it matters: on Linux CI all of them exist --
