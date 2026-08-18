@@ -33,6 +33,16 @@ if _BENCHMARKS_DIR.is_dir() and str(_BENCHMARKS_DIR) not in sys.path:
 # and a single unimportable module interrupts the entire run. Declaring them
 # here rather than passing `--ignore` on the command line keeps `pytest` one
 # command on every platform, for CI and for a developer on Windows alike.
+#: `benchmarks/protocol/custody.py` is a *Linux* capability, not merely POSIX
+#: code. It builds directory custody on proc-fd magic symlinks: `capability_path`
+#: is `/proc/self/fd/<n>`, and both the module and its callers path-walk through
+#: it -- `capability_path / "child"`, `.iterdir()`, `symlink_to`. macOS has no
+#: `/proc`, and its `/dev/fd/<n>` is not a substitute: fdesc resolves the fd
+#: itself but supports no directory lookup, so `/dev/fd/<n>/child` cannot
+#: resolve. The module already says this itself by raising `CustodyUnsupported`
+#: rather than degrading into a weaker guarantee.
+PROC_FD_DIRECTORY_CUSTODY = os.name == "posix" and Path("/proc/self/fd").is_dir()
+
 collect_ignore: list[str] = []
 if os.name == "nt":
     collect_ignore += [
@@ -41,7 +51,72 @@ if os.name == "nt":
         "test_lme_reader_gate.py",  # -> lme.runner -> protocol.custody
         "test_lme_runner.py",  # -> lme.runner -> protocol.custody
         "test_protocol_custody.py",  # imports fcntl directly
+        # Same subsystem, same reason, and the list was simply incomplete: these
+        # import `protocol.custody` inside the test body rather than at module
+        # scope, so collection succeeded and they failed one by one at run time
+        # instead of being declared unsupported here. On Windows the custody
+        # capability blocks them almost entirely -- 17/17, 8/8, 3/3, 1/1, 11/11
+        # and 75 of 83 -- so ignoring the file costs a handful of cases in a
+        # subsystem this platform cannot run, which is the trade the entries
+        # above already make.
+        "test_lme_basic_memory_direct.py",
+        "test_lme_cli_provider_choices.py",
+        "test_lme_direct_lifecycle.py",
+        "test_lme_hybrid_rag.py",
+        "test_lme_providers.py",
+        "test_lme_runner_protocol.py",
+        "test_protocol_manifest_trace.py",
     ]
+
+
+def _declares_custody_unsupported(error: BaseException | None) -> bool:
+    """True when *error* is the custody module refusing an absent capability.
+
+    Matched by qualified name rather than by importing `protocol.custody`: on
+    Windows that import is itself one of the things that fails, and a hook that
+    needs the module in order to decide whether the module is usable is no hook
+    at all.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ == "CustodyUnsupported":
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
+    """Report an absent proc-fd custody capability as a skip, not a failure.
+
+    On macOS, 82 failures were one platform fact: the capability
+    `protocol.custody` is built on does not exist there, and the module says so
+    in the way it was designed to. A missing capability is what `skip` means.
+
+    Deliberately *not* `collect_ignore` here, which is why macOS is handled
+    differently from Windows above. These modules are only *partly* custody
+    -dependent on macOS -- it collects 162 tests from `test_lme_direct_lifecycle`
+    and only 50 of them need proc-fd -- so ignoring whole files to silence the
+    minority would drop 100+ tests that pass and genuinely cover this platform.
+    Windows is the opposite case: there the same files are blocked almost
+    entirely, so ignoring them costs nearly nothing and buys a declaration.
+
+    Gated on the capability being absent, so this can never mask a regression
+    where it matters: on Linux the capability exists, and a `CustodyUnsupported`
+    there stays a failure and is meant to.
+    """
+    report = (yield).get_result()
+    if PROC_FD_DIRECTORY_CUSTODY or report.when != "call" or report.outcome != "failed":
+        return
+    if call.excinfo is None or not _declares_custody_unsupported(call.excinfo.value):
+        return
+    report.outcome = "skipped"
+    report.longrepr = (
+        str(item.path),
+        item.location[1] or 0,
+        "Skipped: proc-fd directory custody is unavailable on this platform",
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -41,7 +41,12 @@ class PublishedFile:
 
 _DIRECTORY_FLAGS = (
     os.O_RDONLY
-    | os.O_DIRECTORY
+    # Guarded like every other flag here. Unguarded it raised `AttributeError`
+    # at *import* on Windows, so callers got a missing-attribute crash instead
+    # of this module's own `CustodyUnsupported` -- an absent capability
+    # reported as a bug in `os`. The refusal is in `prove_supported`, which is
+    # where it belongs and where it can say what is missing.
+    | getattr(os, "O_DIRECTORY", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
     | getattr(os, "O_CLOEXEC", 0)
