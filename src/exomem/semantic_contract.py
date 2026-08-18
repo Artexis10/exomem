@@ -1376,8 +1376,34 @@ def _corpus_census(root: Path) -> tuple | None:
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
-            info = child.stat(follow_symlinks=False)
-            if child.is_symlink() or vault._is_reparse(info):
+            # Alias refusal comes first and applies to EVERY entry, as it does
+            # in `_build_identity_census`: an aliased subtree can hide or
+            # duplicate pages whatever its name looks like, so filtering by
+            # suffix ahead of this check would open a hole. Both answers come
+            # from the listing, not from a stat.
+            if child.is_symlink():
+                raise _CensusUnsafe
+            is_directory = child.is_dir(follow_symlinks=False)
+            # Filter BEFORE the stat -- the fix #528 made to
+            # `_build_identity_census` and never carried across to here. The KB
+            # root also holds SQLite's transient sidecars (`-wal`, `-shm`) for
+            # every index family, created and dropped as connections open and
+            # close. They are not census input, so statting them bought nothing
+            # and cost a race: one vanishing between the listing and the stat
+            # raised `FileNotFoundError`, which the handler below turns into a
+            # `None` census -- an uncached whole-corpus build on the write path,
+            # for a reason unrelated to anything that changed (#561).
+            if not is_directory and path.suffix.casefold() != ".md":
+                continue
+            try:
+                info = child.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                # A page deleted mid-walk is simply not in this snapshot; the
+                # census is a snapshot, not a lock, and change detection belongs
+                # to the freshness machinery. Every other OSError still fails
+                # closed through the caller.
+                continue
+            if vault._is_reparse(info):
                 raise _CensusUnsafe
             if stat.S_ISDIR(info.st_mode):
                 strict_walk(path)
@@ -1402,7 +1428,13 @@ def _corpus_census(root: Path) -> tuple | None:
                 and path.suffix.lower() == ".md"
                 and ".sync-conflict-" not in child.name
             ):
-                info = child.stat()
+                try:
+                    info = child.stat()
+                except FileNotFoundError:
+                    # Same race, same answer as the strict walk above: a page
+                    # that vanished between the listing and the stat is not in
+                    # this snapshot.
+                    continue
                 entries.add(
                     (path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns)
                 )
@@ -1431,7 +1463,15 @@ def _corpus_census(root: Path) -> tuple | None:
                 entries.add((marker, "absent", -1, -1))
             else:
                 entries.add((marker, "cfg", info.st_size, info.st_mtime_ns))
-    except (_CensusUnsafe, OSError, ValueError):
+    except _CensusUnsafe:
+        # A deliberate refusal: the tree holds an alias or a nonregular page.
+        log.debug("corpus census refused an unsafe tree at %s", root)
+        return None
+    except (OSError, ValueError):
+        # Anything else -- and the two used to be indistinguishable in
+        # production, so a vanished sidecar and a genuine refusal looked the
+        # same from the outside (#561).
+        log.debug("corpus census could not read %s", root, exc_info=True)
         return None
     return tuple(sorted(entries))
 
