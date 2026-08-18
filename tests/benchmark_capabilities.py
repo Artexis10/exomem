@@ -134,6 +134,21 @@ def has_bwrap_sandbox() -> bool:
 
 
 @lru_cache(maxsize=1)
+def has_posix_directory_fd_traversal() -> bool:
+    """True where the harness can walk a path with directory descriptors.
+
+    `benchmarks/epistemic` reads evidence and receipts by opening each path
+    component relative to the previous descriptor, so no symlink can redirect
+    the walk between the check and the read. That is `openat`, and Windows has
+    no equivalent -- `os.supports_dir_fd` is empty there, not merely missing a
+    flag. The product's own no-follow traversal lives in `exomem.mutation_lock`
+    and does have a native Windows implementation; this is the benchmark
+    harness, which deliberately depends on nothing but the standard library.
+    """
+    return os.open in os.supports_dir_fd
+
+
+@lru_cache(maxsize=1)
 def has_trusted_system_git() -> bool:
     """True where the harness's trust anchor can actually find Git.
 
@@ -230,6 +245,22 @@ _BROKER_SANDBOX_REFUSAL = re.compile(
 )
 
 
+def declares_absent_directory_fd(error: BaseException | None) -> bool:
+    """True when *error* is the epistemic harness declaring `openat` absent.
+
+    Matched on the declaration, never on a bare `PermissionError`: a raw
+    permission failure on a directory is exactly what a genuinely broken ACL
+    looks like, and this repository has real ones on record.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if _DIRECTORY_FD_REFUSAL.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 def declares_absent_sandbox(error: BaseException | None) -> bool:
     """True when *error* is the broker refusing to build its pinned sandbox.
 
@@ -253,6 +284,9 @@ def declares_absent_sandbox(error: BaseException | None) -> bool:
 #: The contract harness's refusals for a Git it will not trust. Only the three
 #: that mean "the trust anchor found nothing usable" -- a digest mismatch or a
 #: malformed revision is a real finding and must stay a failure.
+_DIRECTORY_FD_REFUSAL = re.compile(
+    r"no-follow directory traversal requires POSIX directory descriptors"
+)
 _CONTRACT_GIT_REFUSAL = re.compile(
     r"trusted Git executable (is unavailable|cannot be resolved"
     r"|is not an executable file)"

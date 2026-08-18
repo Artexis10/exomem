@@ -11,12 +11,13 @@ import time
 from pathlib import Path
 
 import pytest
-
 from benchmark_capabilities import (
+    declares_absent_directory_fd,
     declares_absent_sandbox,
     declares_absent_surface_timers,
     declares_absent_trusted_git,
     has_bwrap_sandbox,
+    has_posix_directory_fd_traversal,
     has_posix_interval_timers,
     has_trusted_system_git,
 )
@@ -208,6 +209,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
         reason = "the pinned bubblewrap sandbox runtime is unavailable here"
     elif not has_trusted_system_git() and declares_absent_trusted_git(error):
         reason = "os.defpath names no trusted system Git on this platform"
+    elif not has_posix_directory_fd_traversal() and declares_absent_directory_fd(error):
+        reason = "POSIX directory descriptors (openat) do not exist on this platform"
     else:
         return
     report.outcome = "skipped"

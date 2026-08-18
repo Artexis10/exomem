@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
+import os
 
-from benchmark_capabilities import declares_absent_sandbox, declares_absent_surface_timers
+import pytest
+from benchmark_capabilities import (
+    declares_absent_directory_fd,
+    declares_absent_sandbox,
+    declares_absent_surface_timers,
+    has_posix_directory_fd_traversal,
+)
 
 
 class BrokerContractError(ValueError):
@@ -164,3 +170,41 @@ def test_the_git_anchor_matches_through_a_wrapping_manifest_error() -> None:
         "pre-registration identity refused: trusted Git executable is unavailable"
     )
     assert declares_absent_trusted_git(wrapped)
+
+
+DIRECTORY_FD_REFUSAL = "no-follow directory traversal requires POSIX directory descriptors"
+
+
+def test_the_directory_fd_capability_is_exactly_what_the_platform_reports() -> None:
+    """The gate must follow `os.supports_dir_fd`, not a guess about the OS.
+
+    On Linux this is True, so the skip branch is unreachable there and cannot
+    quietly hide an epistemic-harness regression on the platform that runs it.
+    """
+    assert has_posix_directory_fd_traversal() == (os.open in os.supports_dir_fd)
+
+
+def test_the_directory_fd_refusal_is_recognised_through_a_cause_chain() -> None:
+    declared = ValueError(DIRECTORY_FD_REFUSAL)
+    assert declares_absent_directory_fd(declared)
+    try:
+        raise AssertionError("re-raised by pytest.raises(match=...)") from declared
+    except AssertionError as wrapped:
+        assert declares_absent_directory_fd(wrapped)
+
+
+def test_a_bare_permission_error_is_never_read_as_an_absent_capability() -> None:
+    """The reason this matcher keys on a declaration and not on the OS error.
+
+    A raw `PermissionError` on a directory is precisely what a genuinely broken
+    ACL looks like, and this repository has real ones on record. Matching it
+    would convert those defects into skips.
+    """
+    assert not declares_absent_directory_fd(PermissionError(13, "Permission denied"))
+    assert not declares_absent_directory_fd(OSError(22, "Invalid argument"))
+
+
+def test_the_directory_fd_capability_is_not_confused_with_the_others() -> None:
+    declared = ValueError(DIRECTORY_FD_REFUSAL)
+    assert not declares_absent_sandbox(declared)
+    assert not declares_absent_surface_timers(declared)

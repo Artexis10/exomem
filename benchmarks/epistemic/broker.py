@@ -30,7 +30,6 @@ from pydantic import Field, field_validator
 from .schema import PrivilegedEndpointMatrixEntry
 from .snapshot import StrictModel
 
-
 _SHA256 = r"^[0-9a-f]{64}$"
 _BROKER_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "epistemic_broker_active", default=False
@@ -950,6 +949,17 @@ class ProviderBroker:
 
 
 def _read_no_follow(root: Path, relative: str) -> bytes:
+    # `dir_fd` is the whole mechanism here: each component is opened
+    # relative to the previous descriptor so no symlink can redirect the
+    # walk between checks. Windows supports no directory descriptors at all
+    # (`os.supports_dir_fd` is empty), so the flags degrade to a plain
+    # directory open that Windows then refuses outright. Declare that rather
+    # than surface it as a bare PermissionError, which reads like a broken
+    # ACL and would hide real permission defects behind it.
+    if os.open not in os.supports_dir_fd:
+        raise BrokerContractError(
+            "no-follow directory traversal requires POSIX directory descriptors"
+        )
     parts = PurePosixPath(_canonical_path(relative)).parts
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
