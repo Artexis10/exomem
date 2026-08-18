@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.55.0](https://github.com/Artexis10/exomem/compare/v0.54.1...v0.55.0) (2026-08-18)
+
+
+### Features
+
+* **hosted:** promote the deployment lock to 0.54.1 and admit 0.50.0 as legacy ([#611](https://github.com/Artexis10/exomem/issues/611)) ([f626e63](https://github.com/Artexis10/exomem/commit/f626e63243e6870391fbfc1b3278f8f04aae0c21))
+* **memory:** count an executed method's outcome as a stepping stone ([#607](https://github.com/Artexis10/exomem/issues/607)) ([ce48260](https://github.com/Artexis10/exomem/commit/ce482601e4cbb5ef2c7766999b87f405c2148c08))
+* **observability:** record every MCP call in a hash-chained ledger ([#614](https://github.com/Artexis10/exomem/issues/614)) ([abc97d3](https://github.com/Artexis10/exomem/commit/abc97d35893531fc69314490b1796820c14d8b97))
+* **sources:** open the source taxonomy and derive the path from it ([#608](https://github.com/Artexis10/exomem/issues/608)) ([fd25d9e](https://github.com/Artexis10/exomem/commit/fd25d9e0dbbafb4c96ac900c6c12ebe10081a00a))
+* **write-path:** suppress dismissed write advisories by fingerprint ([#585](https://github.com/Artexis10/exomem/issues/585)) ([42b9526](https://github.com/Artexis10/exomem/commit/42b95263f2f48d5c278e46bc18a2dad456d020f3))
+
+
+### Bug Fixes
+
+* **bootstrap:** keep one compact byte budget, in the file that explains it ([#615](https://github.com/Artexis10/exomem/issues/615)) ([e39b254](https://github.com/Artexis10/exomem/commit/e39b2548397e73df140df197f61d8b354725eb08))
+* **openspec:** drop the absolute local path that reddened package build ([#609](https://github.com/Artexis10/exomem/issues/609)) ([b0e2812](https://github.com/Artexis10/exomem/commit/b0e281228bd506b88da4ed7252b501690b5022b8))
+* **write-path:** let a structural suggestion resolve when its material gets a home ([#606](https://github.com/Artexis10/exomem/issues/606)) ([97c3ab3](https://github.com/Artexis10/exomem/commit/97c3ab388845897dca37e1330681eb8957b40639))
+
 ## [0.54.1](https://github.com/Artexis10/exomem/compare/v0.54.0...v0.54.1) (2026-08-17)
 
 
