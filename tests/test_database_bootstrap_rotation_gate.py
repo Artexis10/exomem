@@ -5,11 +5,13 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import require_posix_file_modes
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "infra/scripts/database_bootstrap_rotation_gate.py"
@@ -48,8 +50,21 @@ def _run(
     version: str = "credential-v2",
     boundary_ns: int,
 ) -> subprocess.CompletedProcess[str]:
+    # The gate under test refuses a receipt whose `st_uid != os.getuid()` or
+    # whose `S_IMODE` is not private. Windows has neither as an access-control
+    # fact -- `os.getuid` does not exist there at all -- so the script exits 1
+    # on `AttributeError` before reaching any of its own logic. Four of these
+    # tests assert only "non-zero", "not in {0, 124}", or "== job_status" with
+    # job_status 1, so that crash read as a pass. A crash must not stand in for
+    # a refusal.
+    require_posix_file_modes()
     return subprocess.run(
         [
+            # `sys.executable`, not the script path: this is a Python program,
+            # and only POSIX consults its shebang. Invoking it directly gave
+            # Windows `OSError: [WinError 193] %1 is not a valid Win32
+            # application` -- the gate was never exercised there at all.
+            sys.executable,
             str(SCRIPT),
             "--receipt",
             str(receipt),
