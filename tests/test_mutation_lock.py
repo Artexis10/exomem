@@ -267,6 +267,87 @@ def test_windows_private_dacl_deduplicates_local_system_principal() -> None:
     )
 
 
+#: The DACL Windows actually writes for an entry created beneath a user's
+#: temporary directory: protected, three full-access ACEs, no broad trustee --
+#: and the user's own grant spelled `OW` (OWNER RIGHTS) rather than as a literal
+#: SID. Refusing it failed closed on a directory that was already private.
+_OWNER_RIGHTS_DACL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+_USER_SID = "S-1-5-21-896069015-2321608379-4234408933-1001"
+
+
+def test_owner_rights_counts_as_the_users_grant_when_the_user_owns_the_entry() -> None:
+    """`OW` is a spelling of the owner, so ownership decides what it admits."""
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:{_USER_SID}{_OWNER_RIGHTS_DACL}", _USER_SID, directory=True
+    )
+
+
+def test_owner_rights_is_rejected_when_somebody_else_owns_the_entry() -> None:
+    """The concession is ownership-scoped or it is a hole.
+
+    Accepting `OW` unconditionally would admit full access for whoever happens
+    to own the entry -- the one case this validator exists to catch.
+    """
+    stranger = "S-1-5-21-9999-8888-7777-1001"
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:{stranger}{_OWNER_RIGHTS_DACL}", _USER_SID, directory=True
+    )
+
+
+def test_owner_rights_is_rejected_when_the_descriptor_carries_no_owner() -> None:
+    """No owner, no way to resolve `OW` -- so fail closed rather than assume."""
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        _OWNER_RIGHTS_DACL, _USER_SID, directory=True
+    )
+
+
+def test_owner_rights_does_not_let_a_principal_be_granted_twice() -> None:
+    """`OW` beside a literal grant to the same owner is one principal, named twice.
+
+    Resolving `OW` before the duplicate check is what keeps that rule meaningful;
+    checking the raw trustee would see two distinct strings and wave it through.
+    """
+    doubled = (
+        f"O:{_USER_SID}D:P(A;OICI;FA;;;{_USER_SID})"
+        "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+    )
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        doubled, _USER_SID, directory=True
+    )
+
+
+def test_owner_rights_does_not_excuse_a_broad_trustee() -> None:
+    """Everything else the validator rejected, it still rejects."""
+    with_everyone = f"O:{_USER_SID}{_OWNER_RIGHTS_DACL}(A;OICI;FA;;;WD)"
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        with_everyone, _USER_SID, directory=True
+    )
+    unprotected = f"O:{_USER_SID}D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        unprotected, _USER_SID, directory=True
+    )
+
+
+def test_an_owner_bearing_descriptor_still_accepts_the_dacl_this_module_writes() -> None:
+    """The literal-SID form is the one we write; prefixing an owner cannot break it."""
+    sddl = mutation_lock_module._windows_private_dacl_sddl(_USER_SID)
+
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:{_USER_SID}{sddl}", _USER_SID, directory=True
+    )
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        sddl, _USER_SID, directory=True
+    )
+
+
+def test_sddl_owner_is_read_for_both_raw_sids_and_two_letter_aliases() -> None:
+    """Windows picks the spelling, so both have to parse back to the same answer."""
+    owner = mutation_lock_module._windows_sddl_owner
+    assert owner(f"O:{_USER_SID}{_OWNER_RIGHTS_DACL}") == _USER_SID
+    assert owner(f"O:BA{_OWNER_RIGHTS_DACL}") == "BA"
+    assert owner(_OWNER_RIGHTS_DACL) is None
+
+
 def _process_hold(
     state_root: str,
     vault_root: str,
