@@ -431,6 +431,14 @@ def _server_side_graph_state() -> str:
         from exomem import graph_sync
 
         facts.append(f"graph_sync.status={graph_sync.status(root)!r}")
+        # The status string is lossy in exactly the place that matters.
+        # `recovery_required` is three different epoch kinds collapsed into one
+        # word -- `pre_floor`, an unacknowledged `coherent`, and a
+        # checkpointless `recoverable` -- and only `coherent` is in
+        # `REPAIRABLE_EPOCH_KINDS`. So the status alone cannot say whether
+        # queued paths are blocked from draining or merely waiting their turn,
+        # which is the whole question when the queue is non-empty.
+        facts.append(f"epoch_kind={graph_sync.classify_epoch(root).kind!r}")
     except Exception as error:  # noqa: BLE001 - diagnostics never fail the run
         facts.append(f"graph_sync.status unavailable ({error!r})")
     try:
