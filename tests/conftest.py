@@ -110,6 +110,43 @@ def _declares_custody_unsupported(error: BaseException | None) -> bool:
     return False
 
 
+#: `custody.py` says this exact sentence when it finds no procfs. It reaches a
+#: test as text rather than as a raised error in the `assert <exception> is
+#: <expected>` cases, where the refusal is the *value* being compared, so the
+#: qualified-name walk above cannot see it.
+_CUSTODY_PROC_FD_DECLARATION = re.compile(
+    r"POSIX proc-fd directory capabilities are unavailable"
+)
+
+
+def _needs_an_absent_procfs(error: BaseException | None) -> bool:
+    """True when *error* is a custody test reaching `/proc` on a host without one.
+
+    Several of these tests read `/proc/self/fd` or a `/proc/<pid>/fd/<n>/...`
+    capability path directly rather than through `custody.py`, so they never
+    reach the module's own declaration -- and the lifecycle runner wraps what
+    it caught in `LifecycleRunError`, which buries it further. In both shapes
+    the original `FileNotFoundError` survives on the cause chain and names the
+    path it could not find.
+
+    A missing file under `/proc` on a host with no procfs is not ambiguous: the
+    file is absent because the filesystem that would supply it was never
+    mounted. Gated by the caller on that being the case, so on Linux -- where
+    `ci.yml` runs and procfs exists -- a missing `/proc` entry stays a failure.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, OSError):
+            filename = getattr(error, "filename", None)
+            if isinstance(filename, str) and filename.startswith("/proc/"):
+                return True
+        if _CUSTODY_PROC_FD_DECLARATION.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 #: POSIX-only standard-library surfaces the hosted cell runtime is built on.
 #: A hosted cell is a Linux container: it checks its own effective uid before
 #: trusting a runtime path, and takes `fcntl` locks on its state. There is no
@@ -199,7 +236,9 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     if call.excinfo is None:
         return
     error = call.excinfo.value
-    if not PROC_FD_DIRECTORY_CUSTODY and _declares_custody_unsupported(error):
+    if not PROC_FD_DIRECTORY_CUSTODY and (
+        _declares_custody_unsupported(error) or _needs_an_absent_procfs(error)
+    ):
         reason = "proc-fd directory custody is unavailable on this platform"
     elif os.name == "nt" and _needs_an_absent_posix_api(error):
         reason = "the hosted cell runtime's POSIX APIs do not exist on Windows"
