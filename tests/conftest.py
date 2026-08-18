@@ -18,6 +18,7 @@ from benchmark_capabilities import (
     declares_absent_trusted_git,
     has_bwrap_sandbox,
     has_posix_directory_fd_traversal,
+    has_posix_file_modes,
     has_posix_interval_timers,
     has_trusted_system_git,
 )
@@ -178,6 +179,52 @@ def _needs_an_absent_posix_api(error: BaseException | None) -> bool:
     return False
 
 
+#: The hosted cell proves its state is private with POSIX ownership and mode
+#: bits -- `st_uid`/`st_gid` against the runtime owner, `0o700` on the state
+#: root, `0o600` on the security database, and a `mkdir(mode=0o700)` to create
+#: it. Windows has none of that as an access-control fact: it reports no owner
+#: ids and synthesizes a mode, so a directory reads `0o777` and a file `0o666`
+#: whatever `chmod` was asked for. Every one of these refusals is that check
+#: reading a placeholder and correctly declining to vouch for it.
+#:
+#: The DACL refusal belongs to the same fact from the other side. Because the
+#: bare `mkdir` above leaves an ordinary inherited DACL on Windows, the
+#: idempotency runtime under the same state root -- which does have a native
+#: Windows implementation, and requires a *protected* DACL it created itself --
+#: refuses the directory the cell just made. The two only disagree on Windows;
+#: on Linux `prepare_windows_private_state_root` is a no-op and
+#: `mkdir(mode=0o700)` is genuinely private, so there is nothing to reconcile
+#: for the platform this component is deployed on. A hosted cell is a Linux
+#: container, which is the same reason `test_hosted_restore_candidate.py` is
+#: ignored outright here.
+_HOSTED_POSIX_OWNERSHIP_REFUSAL = (
+    "HostedSecurityStateInvalid",
+    "HostedSecurityUnavailable",
+    "HostedRuntimeTempUnavailable",
+    "WindowsRuntimeDaclError",
+)
+_HOSTED_TEMP_REFUSAL = re.compile(r"hosted runtime temp is unavailable")
+
+
+def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
+    """True when *error* is the hosted cell declining to trust a synthesized mode.
+
+    Matched by the refusal types the cell raises for exactly this, never on a
+    bare `OSError`, and gated by the caller on the platform genuinely lacking
+    POSIX file modes -- so on Linux CI, where the cell actually runs, every one
+    of these stays a failure.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ in _HOSTED_POSIX_OWNERSHIP_REFUSAL:
+            return True
+        if _HOSTED_TEMP_REFUSAL.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     """Report a platform capability this host does not have as a skip.
@@ -242,6 +289,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
         reason = "proc-fd directory custody is unavailable on this platform"
     elif os.name == "nt" and _needs_an_absent_posix_api(error):
         reason = "the hosted cell runtime's POSIX APIs do not exist on Windows"
+    elif not has_posix_file_modes() and _needs_posix_ownership_semantics(error):
+        reason = "the hosted cell proves state privacy with POSIX ownership this platform lacks"
     elif not has_posix_interval_timers() and declares_absent_surface_timers(error):
         reason = "POSIX interval timers (setitimer/SIGALRM) are unavailable here"
     elif not has_bwrap_sandbox() and declares_absent_sandbox(error):

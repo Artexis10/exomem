@@ -163,3 +163,45 @@ def test_the_declaration_compared_as_a_value_is_recognised() -> None:
         AssertionError(f"assert {refusal!r} is BaseException('control')")
     )
     assert not _needs_an_absent_procfs(AssertionError("assert 1 == 2"))
+
+
+class HostedRuntimeTempUnavailable(Exception):
+    """Same name as the hosted cell's, deliberately not the same class."""
+
+
+class HostedSecurityStateInvalid(Exception):
+    pass
+
+
+def test_hosted_posix_ownership_refusals_are_recognised() -> None:
+    from conftest import _needs_posix_ownership_semantics
+
+    assert _needs_posix_ownership_semantics(HostedRuntimeTempUnavailable())
+    assert _needs_posix_ownership_semantics(HostedSecurityStateInvalid())
+
+
+def test_a_wrapped_hosted_ownership_refusal_is_recognised() -> None:
+    """`server_hosted` re-raises the temp refusal as a gateway error."""
+    from conftest import _needs_posix_ownership_semantics
+
+    try:
+        try:
+            raise HostedRuntimeTempUnavailable()
+        except HostedRuntimeTempUnavailable as exc:
+            raise RuntimeError(
+                "HOSTED_TRANSFER_UNAVAILABLE: hosted runtime temp is unavailable"
+            ) from exc
+    except RuntimeError as outer:
+        assert _needs_posix_ownership_semantics(outer)
+
+
+def test_an_unrelated_hosted_failure_is_still_a_failure() -> None:
+    """The gate must not absorb ordinary hosted defects into skips."""
+    from conftest import _needs_posix_ownership_semantics
+
+    assert not _needs_posix_ownership_semantics(AssertionError("assert 200 == 403"))
+    assert not _needs_posix_ownership_semantics(OSError("permission denied"))
+    assert not _needs_posix_ownership_semantics(
+        RuntimeError("HOSTED_TRANSFER_DENIED: policy refused the download")
+    )
+    assert not _needs_posix_ownership_semantics(None)
