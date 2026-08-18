@@ -92,7 +92,7 @@ def test_canonical_result_is_handed_off_before_derived_wait(tmp_path: Path) -> N
     """The graph wait cannot retain execution ownership of the leaf."""
     from exomem.writer_lease import IdempotencyStore
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     canonical_guard_released = threading.Event()
     allow_graph_completion = threading.Event()
     results: list[object] = []
@@ -138,7 +138,7 @@ def test_exact_receipt_recovers_same_process_canonical_persistence_failure(
     from exomem.writer_lease import IdempotencyStore, OpError
 
     root = tmp_path / "vault"
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     digest = "d" * 64
     calls = 0
     original = store._persist_canonically_committed
@@ -980,8 +980,8 @@ def test_live_attempt_wins_over_exact_receipt_until_it_exits(tmp_path: Path) -> 
 
     root = tmp_path / "vault"
     digest = "e" * 64
-    owner = IdempotencyStore(tmp_path / "idempotency.sqlite")
-    observer = IdempotencyStore(tmp_path / "idempotency.sqlite", wait_seconds=0)
+    owner = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+    observer = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", wait_seconds=0)
     assert owner._claim_or_inspect("live", digest, None) == ("owner", None)
     attempt = owner._attempts["live"]
     _receipt(root, digest=digest, attempt=attempt)
@@ -1006,7 +1006,7 @@ def test_legacy_graph_pending_migrates_only_with_an_exact_coherent_checkpoint(
 
     from exomem.writer_lease import IdempotencyStore
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     vault = tmp_path / "vault"
     checkpoint = _legacy_graph_pending_checkpoint(vault)
     with store._connect() as conn:
@@ -1061,7 +1061,7 @@ def test_legacy_graph_pending_without_a_strict_checkpoint_binding_fails_closed(
 
     from exomem.writer_lease import IdempotencyStore, OpError
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     vault = tmp_path / "vault"
     _legacy_graph_pending_checkpoint(vault, generation=generation, mutation_id=mutation_id)
     with store._connect() as conn:
@@ -1092,7 +1092,7 @@ def test_legacy_graph_pending_checkpoint_mismatch_never_replays_the_leaf(
 
     from exomem.writer_lease import IdempotencyStore, OpError
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     vault = tmp_path / "vault"
     current = _legacy_graph_pending_checkpoint(vault, generation=2, mutation_id="2" * 24)
     if kind == "stale":
@@ -1135,7 +1135,7 @@ def test_legacy_graph_pending_checkpoint_mismatch_never_replays_the_leaf(
 def test_corrupt_legacy_graph_pending_pickle_fails_closed_before_resume(tmp_path: Path) -> None:
     from exomem.writer_lease import IdempotencyStore, OpError
 
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     vault = tmp_path / "vault"
     _legacy_graph_pending_checkpoint(vault)
     with store._connect() as conn:
@@ -1208,7 +1208,7 @@ def test_v1_receipt_is_advisory_and_a_copied_v2_receipt_cannot_authorize_without
 
     root = tmp_path / "vault"
     digest = "a" * 64
-    store = IdempotencyStore(tmp_path / "idempotency.sqlite")
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
     assert store._claim_or_inspect("copied", digest, None) == ("owner", None)
     local_attempt = store._attempts["copied"]
     copied = graph_sync.GraphCommitReceipt.create(
@@ -1237,7 +1237,7 @@ def test_v1_receipt_is_advisory_and_a_copied_v2_receipt_cannot_authorize_without
     ) is False
 
     store._release_attempt("copied", local_attempt)
-    observer = IdempotencyStore(tmp_path / "idempotency.sqlite", wait_seconds=0)
+    observer = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite", wait_seconds=0)
     with pytest.raises(OpError) as blocked:
         observer.run(
             "copied",
@@ -1255,7 +1255,7 @@ def test_v1_receipt_is_advisory_and_a_copied_v2_receipt_cannot_authorize_without
         )
     assert blocked.value.code == "MUTATION_OUTCOME_UNKNOWN"
 
-    empty_store = IdempotencyStore(tmp_path / "fresh-idempotency.sqlite")
+    empty_store = IdempotencyStore(tmp_path / "state" / "fresh-idempotency.sqlite")
     leaf_calls: list[str] = []
     evidence_calls: list[str] = []
     assert empty_store.run(

@@ -1912,10 +1912,16 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
+        "reclassify": "mutation",
+        "propose-reclassification": "structure",
     }
     manage = product["manage_memory_file"]
     assert commands.invocation_is_read_only(manage, {"operation": "list"})
     assert commands.invocation_is_read_only(manage, {"operation": "trash-list"})
+    assert commands.invocation_is_read_only(
+        manage, {"operation": "propose-reclassification"}
+    )
+    assert not commands.invocation_is_read_only(manage, {"operation": "reclassify"})
     assert commands.invocation_is_read_only(
         manage, {"operation": "create", "validate_only": True}
     )
