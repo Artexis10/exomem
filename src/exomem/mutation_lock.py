@@ -1282,7 +1282,15 @@ def _windows_create_child_directory_handle(parent: _SecureDirectory, name: str) 
 
     value = ctypes.create_unicode_buffer(name)
     encoded_len = len(name.encode("utf-16-le"))
-    unicode_name = _UnicodeString(encoded_len, encoded_len + 2, value)
+    # `create_unicode_buffer` returns a `c_wchar_Array`, and `buffer` is declared
+    # `LPWSTR`; ctypes does not convert one to the other in a structure
+    # initialiser, it raises `TypeError: incompatible types, c_wchar_Array_N
+    # instance instead of c_wchar_p instance`. So this call has never reached
+    # `NtCreateFile` on Windows. `value` stays referenced for the duration of
+    # the call, which is what keeps the cast pointer valid.
+    unicode_name = _UnicodeString(
+        encoded_len, encoded_len + 2, ctypes.cast(value, wintypes.LPWSTR)
+    )
     attributes = _ObjectAttributes(
         ctypes.sizeof(_ObjectAttributes), parent.windows_handle, ctypes.pointer(unicode_name), 0x40, None, None
     )
