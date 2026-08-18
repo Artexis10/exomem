@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from exomem import doctor as doctor_module
+from exomem import vault
 from exomem.__main__ import main
 
 
@@ -879,6 +880,67 @@ def test_rebuild_remediations_name_a_command_the_cli_actually_dispatches() -> No
     source = Path(doctor_module.__file__).read_text(encoding="utf-8")
     assert "kb reconcile" not in source
     assert "kb audit_fix" not in source
+
+
+def test_orphan_remediation_names_the_command_that_actually_reclaims(
+    tmp_path: Path,
+) -> None:
+    """The orphan fix pointed at the audit, which cannot unlink anything.
+
+    `graph_sync.sweep_abandoned_temporaries` is the only thing that removes
+    these files, and it has exactly one caller: inside `reconcile.reconcile()`,
+    gated on `not dry_run`. Bare `exomem maintain` is the read-only audit, so an
+    operator who followed the old text watched it exit 0, saw nothing reclaimed,
+    and had no reason to suspect the command rather than the diagnosis. A remedy
+    that reports success while doing nothing is worse than naming no remedy.
+
+    Asserted through the check itself rather than by reading the source: what
+    matters is the string an operator is handed, not how it gets assembled.
+    """
+    kb = tmp_path / doctor_module.kb_dirname()
+    kb.mkdir(parents=True)
+    stale = time.time() - (vault.REBUILD_TEMP_STALE_AGE_SECONDS + 600)
+    # FAIL takes either count or bytes. The live incident tripped it on bytes
+    # (one 131 MB file); tripping it on count here buys the same tier without
+    # writing 50 MB to disk in a unit test.
+    for index in range(doctor_module._REBUILD_TEMP_ORPHAN_FAIL_COUNT + 1):
+        orphan = kb / f".lexical.sqlite.rebuild-{index:032x}.tmp"
+        orphan.write_bytes(b"x" * 4096)
+        os.utime(orphan, (stale, stale))
+
+    check = doctor_module._check_rebuild_temp_orphans(tmp_path)
+
+    assert check.status == "fail", check.message
+    assert check.remediation is not None
+    assert doctor_module._REBUILD_VECTORS_CMD in check.remediation
+    assert "--reconcile" in check.remediation
+    # Order matters as much as the verb: reclaiming under a live rebuild would
+    # delete a temporary that is still being written.
+    assert "Stop the exomem service" in check.remediation
+
+
+def test_a_fresh_rebuild_temporary_is_not_reported_as_an_orphan(
+    tmp_path: Path,
+) -> None:
+    """Otherwise the remediation would create the orphan it claims to clean up.
+
+    A live rebuild's temporary is identical by name to an abandoned one and can
+    legitimately be large, so only mtime separates them. If a fresh one tripped
+    the check, an operator following the remediation would stop the service
+    mid-rebuild and delete a file that was still being written.
+    """
+    kb = tmp_path / doctor_module.kb_dirname()
+    kb.mkdir(parents=True)
+    (kb / ".lexical.sqlite.rebuild-29cf190343754d70ac4bdf2e40358384.tmp").write_bytes(
+        b"x" * 4096
+    )
+
+    check = doctor_module._check_rebuild_temp_orphans(tmp_path)
+
+    assert check.status == "pass", check.message
+    assert check.details is not None
+    assert check.details["count"] == 1
+    assert check.details["stale_count"] == 0
 
 
 def test_warm_exits_zero_when_only_the_withheld_torch_models_are_unavailable(
