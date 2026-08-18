@@ -550,9 +550,28 @@ def _windows_sddl_owner(sddl: str) -> str | None:
     return match.group(1) if match else None
 
 
+#: SDDL renders the local domain's built-in Administrator -- the RID 500 account
+#: -- as `LA`, never as its SID. The alias is machine-relative, so unlike `SY`
+#: and `BA` it cannot live in `_WINDOWS_SID_ALIASES`; it has to be derived from
+#: the current SID. A host whose current user *is* that account therefore reads
+#: its own grants back under a spelling the raw-SID comparison cannot match.
+_WINDOWS_LOCAL_ADMIN_PREFIX = "S-1-5-21-"
+_WINDOWS_LOCAL_ADMIN_SUFFIX = "-500"
+
+
+def _windows_is_local_admin_sid(sid: str) -> bool:
+    """True when *sid* is an account domain's built-in Administrator (RID 500)."""
+    return sid.startswith(_WINDOWS_LOCAL_ADMIN_PREFIX) and sid.endswith(
+        _WINDOWS_LOCAL_ADMIN_SUFFIX
+    )
+
+
 def _windows_principal_spellings(sid: str) -> frozenset[str]:
     """Every casefolded spelling that denotes *sid* in an SDDL string."""
-    return frozenset({sid.casefold(), _WINDOWS_SID_ALIASES.get(sid, sid).casefold()})
+    spellings = {sid.casefold(), _WINDOWS_SID_ALIASES.get(sid, sid).casefold()}
+    if _windows_is_local_admin_sid(sid):
+        spellings.add("la")
+    return frozenset(spellings)
 
 
 def _windows_private_dacl_trustees(sid: str) -> tuple[str, ...]:
@@ -791,6 +810,15 @@ def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> b
             # cannot show that this ACE admits us rather than somebody else.
             if not owner_is_current_user:
                 return False
+            principal = user_principal
+        elif principal in _windows_principal_spellings(sid):
+            # An alias for the current user, most often `LA`. Unlike `OW` this
+            # needs no owner check: `LA` names one fixed account, and it is only
+            # a spelling of *us* when that account is the current user -- which
+            # is what put it in the spelling set. Folding it onto the canonical
+            # principal keeps the duplicate rule below meaningful, so `LA`
+            # alongside a literal grant to the same account is still one
+            # principal named twice.
             principal = user_principal
         # Resolving `OW` before this check keeps the duplicate rule meaningful:
         # `OW` alongside a literal grant to the same owner is one principal

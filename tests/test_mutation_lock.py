@@ -278,6 +278,54 @@ _OWNER_RIGHTS_DACL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
 _USER_SID = "S-1-5-21-1-2-3-1001"
 
 
+#: The descriptor a GitHub Windows runner reads back for
+#: `C:\Users\runneradmin\.cache\exomem`, with the runner's real SID replaced by a
+#: synthetic one. `runneradmin` is its account domain's built-in Administrator
+#: (RID 500), and SDDL renders that account as `LA` -- never as its SID. The
+#: grants are exactly the three this module writes; only the spelling differs.
+_LOCAL_ADMIN_DACL = "O:BAD:P(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+#: RID 500 with the same deliberately tiny sub-authorities as `_USER_SID`.
+_LOCAL_ADMIN_SID = "S-1-5-21-1-2-3-500"
+
+
+def test_local_admin_alias_counts_as_the_users_grant_when_the_user_is_rid_500() -> None:
+    """The validator must not reject a DACL it wrote itself.
+
+    This exact descriptor cost 1725 failures -- 72% of the whole Windows lane --
+    because every runner user is RID 500, so every private directory this module
+    created read back with its own grant spelled `LA` and failed closed with no
+    repair path. The instrumentation added earlier in this PR is what produced
+    the string; it was never guessable from a developer box, where the current
+    user is not the built-in Administrator and the SID is written literally.
+    """
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        _LOCAL_ADMIN_DACL, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_local_admin_alias_is_rejected_for_any_other_account() -> None:
+    """`LA` is a spelling of *us* only when we are the account it names.
+
+    Accepting it for an ordinary user would admit full access for a different
+    principal entirely -- the built-in Administrator -- which is the class of
+    hole this validator exists to catch.
+    """
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        _LOCAL_ADMIN_DACL, _USER_SID, directory=True
+    )
+
+
+def test_local_admin_alias_alongside_a_literal_grant_is_still_a_duplicate() -> None:
+    """Resolving the alias before the duplicate check keeps that check honest."""
+    doubled = (
+        f"O:BAD:P(A;OICI;FA;;;LA)(A;OICI;FA;;;{_LOCAL_ADMIN_SID})"
+        "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    )
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        doubled, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
 def test_owner_rights_counts_as_the_users_grant_when_the_user_owns_the_entry() -> None:
     """`OW` is a spelling of the owner, so ownership decides what it admits."""
     assert mutation_lock_module._windows_private_dacl_is_valid(
