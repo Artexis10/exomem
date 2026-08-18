@@ -52,6 +52,15 @@ jobs:
       # that dependency is itself a finding this lane exists to surface.
       - name: Verify lockfile is current
         run: uv lock --check
+      # The latency gate is dropped here for two reasons. It asserts *scaling*,
+      # which a shared runner cannot measure meaningfully, and this lane exists
+      # to expose platform behaviour rather than performance -- it already has
+      # its own dedicated job. More importantly it was destructive: building a
+      # dense vault takes longer than the 60s per-test timeout on a Windows
+      # runner, and `timeout_method = "thread"` kills the whole process, so the
+      # shard wrote no junit at all. One slow perf test cost the entire shard's
+      # evidence, which is how a Windows lane came back with half its results
+      # missing and no indication that anything was absent.
       - name: Run tests (lean — BM25/keyword, server media extraction off)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
@@ -59,6 +68,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           uv run --frozen --python 3.13 python -m pytest -q
+          --ignore=tests/test_latency_gate.py
           --splits=2
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
