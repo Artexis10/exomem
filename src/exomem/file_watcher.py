@@ -34,7 +34,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from . import freshness, index_sync, media_processing, mode, semantic_writes
@@ -253,6 +253,43 @@ def _import_watchdog():
     from watchdog.observers import Observer
 
     return Observer, FileSystemEventHandler
+
+
+def _graph_incompleteness_fields(vault_root: Path) -> str:
+    """The state that explains an unclassified fan-out incompleteness.
+
+    Root-causing one of these meant reading the graph's own sidecars after the
+    fact and inferring what the watcher had seen. These are the fields that
+    inference reconstructed every time, so the event carries them instead: the
+    epoch the graph is in, the state and generation it reports, how much repair
+    is queued, and whether that repair is whole-vault -- a changed scope the
+    incremental path could not determine -- or a known path list.
+
+    Each read is taken once and each field degrades to `?` on its own.
+    Diagnostics must never be why a drain fails, and describing a situation
+    should not cost three walks of the sidecars it is describing.
+    """
+    from . import deferred_index, graph_sync
+
+    def read(produce: Callable[[], object]) -> object:
+        try:
+            return produce()
+        except Exception:  # noqa: BLE001 - a missing field beats a failed drain
+            return "?"
+
+    status = read(lambda: graph_sync.status(vault_root))
+    fields = {
+        "epoch": read(lambda: graph_sync.classify_epoch(vault_root).kind),
+        "state": status.get("state") if isinstance(status, dict) else status,
+        "generation": status.get("generation") if isinstance(status, dict) else status,
+        "queued": read(lambda: deferred_index.graph_status(vault_root).get("count")),
+        "scope": read(
+            lambda: "full"
+            if deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            else "paths"
+        ),
+    }
+    return " ".join(f"{name}={value}" for name, value in fields.items())
 
 
 class FileWatcher:
@@ -985,9 +1022,15 @@ class FileWatcher:
                         "by its barrier and vault freshness is untouched"
                     )
                 else:
+                    # Neither a refusal nor a disabled scheduler: the fan-out ran
+                    # and the graph is still not current, for a reason this
+                    # branch cannot name. That is the branch a diagnosis
+                    # actually lands on, so it carries the state instead of
+                    # asserting the outcome.
                     freshness.mark_external_pending(self._vault_root)
                     log.warning(
-                        "file watcher: graph fan-out incomplete; periodic recovery re-armed"
+                        "file watcher: graph fan-out incomplete; periodic recovery re-armed %s",
+                        _graph_incompleteness_fields(self._vault_root),
                     )
         return admitted_semantic
 
