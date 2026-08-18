@@ -12,6 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from benchmark_capabilities import (
+    declares_absent_sandbox,
+    declares_absent_surface_timers,
+    has_bwrap_sandbox,
+    has_posix_interval_timers,
+)
+
 from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
 from exomem import find as find_module
@@ -122,11 +129,11 @@ def _needs_an_absent_posix_api(error: BaseException | None) -> bool:
 def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     """Report a platform capability this host does not have as a skip.
 
-    Two causes, both of them "this API does not exist here" rather than "this
-    code is wrong". 82 macOS and 72 Windows failures were reported as defects
-    when the honest report was that the platform cannot run the subsystem.
+    Four causes now, every one of them "this API does not exist here" rather
+    than "this code is wrong". They were reported as defects when the honest
+    report was that the platform cannot run the subsystem.
 
-    On macOS, 82 failures were one platform fact: the capability
+    On macOS, 82 of them were one platform fact: the capability
     `protocol.custody` is built on does not exist there, and the module says so
     in the way it was designed to. A missing capability is what `skip` means.
 
@@ -138,9 +145,26 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     Windows is the opposite case: there the same files are blocked almost
     entirely, so ignoring them costs nearly nothing and buys a declaration.
 
-    Gated on the capability being absent, so this can never mask a regression
-    where it matters: on Linux the capability exists, and a `CustodyUnsupported`
-    there stays a failure and is meant to.
+    The two broker branches are the same trade for different capabilities, and
+    they are separate because the platforms differ: Windows has neither, but
+    macOS has POSIX interval timers and no `bwrap` at all. The sandbox is not
+    merely "Linux" either -- the broker pins `/usr/bin/bwrap` and binds
+    `/usr/bin/python3.12`, `/lib/x86_64-linux-gnu` and
+    `/lib64/ld-linux-x86-64.so.2` into the namespace, so the capability is that
+    exact Debian x86-64 runtime.
+    `epistemic.broker` bounds every provider surface with `setitimer`/`SIGALRM`,
+    isolates it with that sandbox, and refuses up front where either is absent.
+    Its entry points share no helper to gate, so each refusal is matched where it
+    surfaces -- through `__context__` as well, because `pytest.raises(...,
+    match=...)` re-raises as an `AssertionError` holding it: a test that expected
+    one contract error and met a refusal instead failed for the absent
+    capability, not for its own reason.
+
+    Every branch is gated on the capability actually being absent, so this can
+    never mask a regression where it matters: on Linux CI all three capabilities
+    exist -- `ci.yml` provisions `bwrap` and checks it runs -- so a
+    `CustodyUnsupported`, a timer refusal or a sandbox refusal there stays a
+    failure and is meant to.
     """
     report = (yield).get_result()
     if report.when != "call" or report.outcome != "failed" or call.excinfo is None:
@@ -150,6 +174,10 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
         reason = "proc-fd directory custody is unavailable on this platform"
     elif os.name == "nt" and _needs_an_absent_posix_api(error):
         reason = "the hosted cell runtime's POSIX APIs do not exist on Windows"
+    elif not has_posix_interval_timers() and declares_absent_surface_timers(error):
+        reason = "POSIX interval timers (setitimer/SIGALRM) are unavailable here"
+    elif not has_bwrap_sandbox() and declares_absent_sandbox(error):
+        reason = "the pinned bubblewrap sandbox runtime is unavailable here"
     else:
         return
     report.outcome = "skipped"

@@ -19,6 +19,17 @@ def _stop_the_daemon():
     graph_drain._DEBT.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_standing_barrier(monkeypatch: pytest.MonkeyPatch):
+    """Default to a graph with no stopped rebuild to repair.
+
+    `_pending` is the union of queued receipts and a persisted barrier, so a
+    test about the queue has to say the barrier is absent or it is quietly
+    testing both.
+    """
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: False)
+
+
 def _wait_for(predicate, timeout: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -47,7 +58,7 @@ def test_a_queued_write_is_drained_without_waiting_for_the_reconcile_tick(
         return 1
 
     monkeypatch.setattr(index_sync, "drain_graph_work", drain)
-    monkeypatch.setattr(graph_drain, "_pending", lambda _root: not drained.is_set())
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: not drained.is_set())
     monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.01)
 
     graph_drain.start(tmp_path)
@@ -69,7 +80,7 @@ def test_the_debt_signal_wakes_a_sleeping_drain(
     monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.01)
     pending = threading.Event()
     drained = threading.Event()
-    monkeypatch.setattr(graph_drain, "_pending", lambda _root: pending.is_set())
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: pending.is_set())
 
     def drain(_root: Path, *, limit: int | None = None) -> int:
         pending.clear()
@@ -100,7 +111,7 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
     monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
     monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.01)
     monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.05)
-    monkeypatch.setattr(graph_drain, "_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
     attempts: list[float] = []
 
     def drain(_root: Path, *, limit: int | None = None) -> int:
@@ -126,7 +137,7 @@ def test_a_failing_drain_never_kills_the_daemon(
     monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
     monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.01)
     monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.05)
-    monkeypatch.setattr(graph_drain, "_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
     attempts: list[int] = []
 
     def explode(_root: Path, *, limit: int | None = None) -> int:
@@ -150,7 +161,7 @@ def test_an_unreadable_queue_is_not_pending_and_does_not_raise(
 
     monkeypatch.setattr(deferred_index, "graph_full_rebuild_pending", explode)
 
-    assert graph_drain._pending(tmp_path) is False
+    assert graph_drain._queue_pending(tmp_path) is False
 
 
 def test_a_whole_vault_marker_counts_as_pending(
@@ -164,7 +175,7 @@ def test_a_whole_vault_marker_counts_as_pending(
     monkeypatch.setattr(deferred_index, "graph_full_rebuild_pending", lambda _root: 7)
     monkeypatch.setattr(deferred_index, "graph_status", lambda _root: {"count": 0})
 
-    assert graph_drain._pending(tmp_path) is True
+    assert graph_drain._queue_pending(tmp_path) is True
 
 
 def test_start_is_idempotent_and_stop_ends_the_thread(tmp_path: Path) -> None:
@@ -201,3 +212,136 @@ def test_a_whole_vault_marker_signals_the_drain(tmp_path: Path) -> None:
     deferred_index.mark_graph_full_rebuild(tmp_path, generation=3)
 
     assert graph_drain._DEBT.is_set()
+
+
+def test_a_stopped_rebuild_is_re_armed_without_the_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half of convergence the queue cannot express.
+
+    A rebuild that stops is terminal -- `graph_sync` records the error, clears
+    `_running` and returns -- so its debt lives in a persisted barrier, not in
+    `graph_upserts`. A product E2E run showed the cost: the queue settled four
+    times in seven seconds, the rebuild stopped at +7.3s, and the server then
+    answered readiness polls for the remaining 120s without ever attempting
+    another. The only lane that would have retried is the watcher's 300s
+    reconcile, which that run disables outright.
+    """
+    from exomem import epistemic_graph
+
+    barrier = threading.Event()
+    barrier.set()
+    recovered = threading.Event()
+
+    def recover(_root: Path) -> bool:
+        barrier.clear()
+        recovered.set()
+        return True
+
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: barrier.is_set())
+    monkeypatch.setattr(epistemic_graph, "recover_suspended_graph", recover)
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.01)
+
+    graph_drain.start(tmp_path)
+
+    assert recovered.wait(timeout=5.0), "the stopped rebuild was never re-armed"
+
+
+def test_a_barrier_alone_is_enough_to_count_as_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty queue is not the same as a converged graph."""
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: True)
+
+    assert graph_drain._pending(tmp_path) is True
+
+
+def test_a_rebuild_that_cannot_publish_backs_off_like_a_queue_that_cannot_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Folding the barrier into `_pending` is what buys this.
+
+    Recovery is a *whole-vault* rebuild. Retrying one every idle poll would cost
+    far more than the queue thrash the backoff was written for, so a barrier
+    that will not clear has to be as bounded as a queue that will not drain.
+    """
+    from exomem import epistemic_graph
+
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: True)
+    attempts: list[float] = []
+
+    def never_recovers(_root: Path) -> bool:
+        attempts.append(time.monotonic())
+        return False
+
+    monkeypatch.setattr(epistemic_graph, "recover_suspended_graph", never_recovers)
+
+    graph_drain.start(tmp_path)
+    assert _wait_for(lambda: len(attempts) >= 4, timeout=5.0)
+    graph_drain.stop()
+
+    gaps = [b - a for a, b in zip(attempts, attempts[1:], strict=False)]
+    assert gaps, "expected repeated attempts"
+    assert max(gaps) <= 1.0, f"backoff exceeded its ceiling: {gaps}"
+
+
+def test_a_raising_recovery_never_kills_the_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The barrier is persisted, so it survives to be retried -- the thread must too."""
+    from exomem import epistemic_graph
+
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: True)
+    attempts: list[int] = []
+
+    def explode(_root: Path) -> bool:
+        attempts.append(1)
+        raise RuntimeError("recovery exploded")
+
+    monkeypatch.setattr(epistemic_graph, "recover_suspended_graph", explode)
+
+    thread = graph_drain.start(tmp_path)
+    assert _wait_for(lambda: len(attempts) >= 3, timeout=5.0)
+    assert thread is not None and thread.is_alive()
+
+
+def test_the_queue_is_drained_before_a_barrier_is_repaired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Order matters: the proportional repair may clear the expensive one.
+
+    Draining queued paths can publish the incremental marker the barrier was
+    waiting on, which is cheaper than the whole-vault rebuild recovery runs.
+    """
+    from exomem import epistemic_graph, index_sync
+
+    order: list[str] = []
+    queued = threading.Event()
+    queued.set()
+
+    def drain(_root: Path, *, limit: int | None = None) -> int:
+        order.append("drain")
+        queued.clear()
+        return 1
+
+    def recover(_root: Path) -> bool:
+        order.append("recover")
+        return True
+
+    monkeypatch.setattr(index_sync, "drain_graph_work", drain)
+    monkeypatch.setattr(epistemic_graph, "recover_suspended_graph", recover)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: queued.is_set())
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: True)
+
+    assert graph_drain._work_once(tmp_path) == 2
+    assert order == ["drain", "recover"]

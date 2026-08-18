@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import require_posix_interval_timers
 from pydantic import ValidationError
 
 
@@ -393,13 +394,29 @@ def test_bwrap_absence_or_namespace_spawn_failure_is_pre_provider_and_fail_close
 @pytest.mark.parametrize(
     "raw",
     [
-        b'{"protocol":"epistemic-driver-ipc.v1","protocol":"confused","type":"complete"}\n',
-        b'{"protocol":"epistemic-driver-ipc.v1","type":"complete","result":NaN}\n',
-        b'{not-json}\n',
-        b'{"protocol":"wrong","type":"complete","result":null}\n',
-        b'{"protocol":"epistemic-driver-ipc.v1","type":"unknown","result":null}\n',
-        (b'[' * 40) + b'0' + (b']' * 40) + b'\n',
-        b'x' * (64 * 1024 + 1),
+        pytest.param(
+            b'{"protocol":"epistemic-driver-ipc.v1","protocol":"confused","type":"complete"}\n',
+            id="duplicate-key",
+        ),
+        pytest.param(
+            b'{"protocol":"epistemic-driver-ipc.v1","type":"complete","result":NaN}\n',
+            id="nan-result",
+        ),
+        pytest.param(b'{not-json}\n', id="not-json"),
+        pytest.param(
+            b'{"protocol":"wrong","type":"complete","result":null}\n',
+            id="wrong-protocol",
+        ),
+        pytest.param(
+            b'{"protocol":"epistemic-driver-ipc.v1","type":"unknown","result":null}\n',
+            id="unknown-type",
+        ),
+        pytest.param((b'[' * 40) + b'0' + (b']' * 40) + b'\n', id="deeply-nested"),
+        # Unnamed, this 64KiB payload becomes the test id verbatim, and pytest
+        # exports the node id as PYTEST_CURRENT_TEST -- past the 32767-char cap
+        # Windows puts on an environment variable, so the case errors in setup
+        # and teardown without ever running.
+        pytest.param(b'x' * (64 * 1024 + 1), id="oversized"),
     ],
 )
 def test_driver_ipc_rejects_malformed_confused_deep_or_oversized_messages(
@@ -898,6 +915,7 @@ def test_recheck3_endpoint_audit_requires_each_equivalent_and_rejects_gap_calls(
 def test_finalreview_whole_driver_deadline_interrupts_surface_and_reaps_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    require_posix_interval_timers()
     import epistemic.broker as broker_module
 
     children = []
@@ -933,6 +951,7 @@ def test_finalreview_whole_driver_deadline_interrupts_surface_and_reaps_child(
 def test_finalreview_surface_timer_restores_handler_and_refuses_conflicting_timer(
     tmp_path: Path,
 ) -> None:
+    require_posix_interval_timers()
     from epistemic.broker import BrokerContractError, ProviderBroker
 
     original_handler = signal.getsignal(signal.SIGALRM)
