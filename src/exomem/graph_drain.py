@@ -89,7 +89,27 @@ def disabled() -> bool:
     return bool(os.environ.get("EXOMEM_DISABLE_GRAPH_DRAIN"))
 
 
-def _pending(vault_root: Path) -> bool:
+def _barrier_pending(vault_root: Path) -> bool:
+    """True when a stopped rebuild left a barrier to repair. Never raises.
+
+    Debt the queue cannot express. A rebuild that stops is terminal --
+    `graph_sync` records the error, clears `_running` and returns -- and the
+    persisted barrier it leaves behind is the retry signal.
+    """
+    from . import epistemic_graph
+
+    try:
+        if not epistemic_graph.graph_enabled():
+            return False
+        if not epistemic_graph.sidecar_path(vault_root).exists():
+            return False
+        return bool(epistemic_graph.EpistemicGraphIndex(vault_root).reads_suspended())
+    except Exception:  # noqa: BLE001 - an unreadable barrier must not kill the worker
+        log.debug("graph drain: barrier state unreadable", exc_info=True)
+        return False
+
+
+def _queue_pending(vault_root: Path) -> bool:
     """True when the durable queue owes work. Never raises."""
     from . import deferred_index
 
@@ -102,6 +122,43 @@ def _pending(vault_root: Path) -> bool:
         return False
 
 
+def _pending(vault_root: Path) -> bool:
+    """True when the graph owes work of either kind.
+
+    Folding the barrier in here rather than giving recovery its own schedule is
+    deliberate: it makes a stopped rebuild ordinary debt, so the backoff already
+    proven for a queue that cannot drain covers a rebuild that cannot publish --
+    one attempt every couple of minutes rather than a full rebuild every poll.
+    """
+    return _queue_pending(vault_root) or _barrier_pending(vault_root)
+
+
+def _recover_once(vault_root: Path) -> bool:
+    """Re-arm a rebuild that stopped. Never raises; True when it recovered.
+
+    Draining the queue is not the whole of convergence. When the incremental
+    path falls back, the whole-vault rebuild that replaces it is terminal if it
+    stops: `graph_sync` records the error, clears `_running` and returns. The
+    persisted barrier it leaves is the retry signal, and until now the only
+    thing that acted on it was the watcher's reconcile -- 300s, and skipped
+    entirely under `EXOMEM_DISABLE_FILE_WATCHER`.
+
+    A product E2E run showed the cost exactly: the queue settled four times in
+    seven seconds, the rebuild stopped at +7.3s, and the server then answered
+    readiness polls for the remaining 120s without ever attempting another one.
+    `recover_suspended_graph` declines by itself when the barrier is absent or
+    when a publication is already proven doomed for this checkpoint, so calling
+    it on a settled queue costs a few cheap checks in the ordinary case.
+    """
+    from . import epistemic_graph
+
+    try:
+        return bool(epistemic_graph.recover_suspended_graph(vault_root))
+    except Exception:  # noqa: BLE001 - the barrier stays, so the signal stays
+        log.warning("graph drain: barrier recovery failed; barrier remains", exc_info=True)
+        return False
+
+
 def _drain_once(vault_root: Path) -> int:
     """One bounded drain. Never raises; returns receipts cleared."""
     from . import index_sync
@@ -111,6 +168,35 @@ def _drain_once(vault_root: Path) -> int:
     except Exception:  # noqa: BLE001 - queued work stays durable and retryable
         log.warning("graph drain: pass failed; work remains queued", exc_info=True)
         return 0
+
+
+def _recover_once(vault_root: Path) -> bool:
+    """Re-arm a rebuild that stopped. Never raises; True when it recovered.
+
+    `recover_suspended_graph` declines on its own when the barrier is absent, a
+    fresh external change is pending, or a publication is already proven doomed
+    for this exact checkpoint (contract R2) -- so this is safe to reach on any
+    pass that finds a barrier.
+    """
+    from . import epistemic_graph
+
+    try:
+        return bool(epistemic_graph.recover_suspended_graph(vault_root))
+    except Exception:  # noqa: BLE001 - the barrier stays, so the signal stays
+        log.warning("graph drain: barrier recovery failed; barrier remains", exc_info=True)
+        return False
+
+
+def _work_once(vault_root: Path) -> int:
+    """Drain what is queued, then repair a barrier if one is still standing.
+
+    Both in one pass, in that order: draining is proportional and may itself
+    clear the condition the rebuild would have been re-run for.
+    """
+    processed = _drain_once(vault_root) if _queue_pending(vault_root) else 0
+    if _barrier_pending(vault_root) and _recover_once(vault_root):
+        processed += 1
+    return processed
 
 
 def _run(vault_root: Path) -> None:
@@ -127,9 +213,9 @@ def _run(vault_root: Path) -> None:
         if not _pending(vault_root):
             interval = IDLE_POLL_SECONDS
             continue
-        processed = _drain_once(vault_root)
+        processed = _work_once(vault_root)
         if not _pending(vault_root):
-            log.info("graph drain: queue settled (%d receipt(s) cleared)", processed)
+            log.info("graph drain: graph settled (%d unit(s) of work cleared)", processed)
             interval = IDLE_POLL_SECONDS
         elif processed:
             # Progress with work left: come straight back for the remainder.

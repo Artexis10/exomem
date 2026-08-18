@@ -619,43 +619,16 @@ class FileWatcher:
             log.exception("file watcher: pending epoch graph recovery failed")
 
     def _recover_suspended_graph(self) -> None:
-        """Repair a persisted graph barrier left by a crash or failed fan-out."""
-        if freshness.external_pending(self._vault_root):
-            return
-        from . import epistemic_graph
-        from . import find as find_module
-        from . import vault as vault_module
+        """Repair a persisted graph barrier left by a crash or failed fan-out.
 
-        if not epistemic_graph.graph_enabled() or not epistemic_graph.sidecar_path(
-            self._vault_root
-        ).exists():
-            return
-        graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
-        if not graph.reads_suspended():
-            return
-        if epistemic_graph.publication_refusal_active(self._vault_root):
-            # Contract R2: a publication already proven doomed for this exact
-            # checkpoint must not be re-attempted at full rebuild cost on every
-            # 300 s cycle. The barrier this method repairs is itself the fence,
-            # so deferring costs nothing but the delay.
-            return
-        try:
-            find_module.evict_resolver_caches(self._vault_root)
-            vault_module.evict_inbound_index(self._vault_root)
-            graph.withdraw_availability()
-            if freshness.external_pending(self._vault_root):
-                return
-            graph.rebuild_all()
-            if not graph.available():
-                raise epistemic_graph.GraphPublicationUnavailable(
-                    "recovered graph did not publish an available marker"
-                )
-        except Exception:  # noqa: BLE001 - persisted barrier remains a retry signal
-            try:
-                graph.suspend_reads()
-            except Exception:  # noqa: BLE001 - the unavailable marker still fails closed
-                pass
-            log.exception("file watcher: persisted graph barrier recovery failed")
+        The body moved to `epistemic_graph.recover_suspended_graph` so the graph
+        drain daemon can run it too: a stopped rebuild is terminal, and this
+        periodic lane is 300s and optional, which left the barrier standing
+        indefinitely wherever the watcher was absent.
+        """
+        from . import epistemic_graph
+
+        epistemic_graph.recover_suspended_graph(self._vault_root)
 
     def _validate_existing_graph_on_seed(self) -> bool:
         """Rebuild an existing graph after startup's exact disk baselines.
