@@ -32,24 +32,22 @@ def _snapshot(root: Path, *, exclude_kb: bool = False) -> dict[str, tuple[int, f
 def _legacy_vault(root: Path, *, kb: bool = False) -> Path:
     vault = root / "legacy-vault"
     (vault / "Warranty Case").mkdir(parents=True)
-    (vault / "Warranty Case" / "laptop-receipt.md").write_text("# Laptop receipt\n\nreceipt\n", encoding="utf-8")
+    (vault / "Warranty Case" / "laptop-receipt.md").write_text("# Laptop receipt\n\nreceipt\n", encoding="utf-8", newline="\n")
     (vault / "Creative Assets").mkdir()
-    (vault / "Creative Assets" / "shoot-reference.md").write_text("photo ideas\n", encoding="utf-8")
+    (vault / "Creative Assets" / "shoot-reference.md").write_text("photo ideas\n", encoding="utf-8", newline="\n")
     (vault / "Repos").mkdir()
-    (vault / "Repos" / "api-incident.md").write_text("deploy failed\n", encoding="utf-8")
+    (vault / "Repos" / "api-incident.md").write_text("deploy failed\n", encoding="utf-8", newline="\n")
     if kb:
         kb_root = vault / "Knowledge Base"
         (kb_root / "Notes").mkdir(parents=True)
         (kb_root / "Sources").mkdir(parents=True)
         (kb_root / "Sources" / "index.md").write_text(
             "# Sources - Index\n\n## By type\n\n## Recent captures\n\n",
-            encoding="utf-8",
-        )
+            encoding="utf-8", newline="\n",)
         (kb_root / "index.md").write_text(
             "# Knowledge Base\n\n## Counts\n\n- Sources: 0\n\n## Recent activity\n\n",
-            encoding="utf-8",
-        )
-        (kb_root / "log.md").write_text("# Log\n\n---\n", encoding="utf-8")
+            encoding="utf-8", newline="\n",)
+        (kb_root / "log.md").write_text("# Log\n\n---\n", encoding="utf-8", newline="\n")
     return vault
 
 
@@ -89,8 +87,7 @@ def test_adopt_scan_only_reports_bounded_semantic_census_without_fabrication(
 
 Rich semantic unit.
 """,
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     before = _snapshot(vault)
 
     report = adopt_module.adopt(vault, mode="scan-only")
@@ -172,10 +169,10 @@ def test_adopt_scan_only_semantic_census_honors_subtree_hidden_and_resource_boun
     vault = _legacy_vault(tmp_path, kb=False)
     focus = vault / "Focus"
     focus.mkdir()
-    (focus / "a.md").write_text("- [alpha] First.\n", encoding="utf-8")
-    (focus / "b.md").write_text("- [beta] Second.\n", encoding="utf-8")
-    (focus / ".hidden.md").write_text("- [secret] Hidden.\n", encoding="utf-8")
-    (vault / "outside.md").write_text("- [outside] Ignore.\n", encoding="utf-8")
+    (focus / "a.md").write_text("- [alpha] First.\n", encoding="utf-8", newline="\n")
+    (focus / "b.md").write_text("- [beta] Second.\n", encoding="utf-8", newline="\n")
+    (focus / ".hidden.md").write_text("- [secret] Hidden.\n", encoding="utf-8", newline="\n")
+    (vault / "outside.md").write_text("- [outside] Ignore.\n", encoding="utf-8", newline="\n")
     before = _snapshot(vault)
 
     report = adopt_module.adopt(
@@ -214,7 +211,7 @@ def test_adopt_semantic_census_bounds_directory_entry_enumeration(
     vault = _legacy_vault(tmp_path, kb=False)
     focus = vault / "Focus"
     focus.mkdir()
-    (focus / "00-semantic.md").write_text("- [bounded] First.\n", encoding="utf-8")
+    (focus / "00-semantic.md").write_text("- [bounded] First.\n", encoding="utf-8", newline="\n")
     for index in range(80):
         (focus / f"directory-{index:03d}").mkdir()
         (focus / f"ordinary-{index:03d}.bin").write_bytes(b"not markdown")
@@ -262,9 +259,9 @@ def test_adopt_semantic_census_rejects_symlink_and_identity_swap(
     focus = vault / "Focus"
     focus.mkdir()
     candidate = focus / "candidate.md"
-    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8", newline="\n")
     outside = vault / "outside.md"
-    outside.write_text("- [escaped] Outside.\n", encoding="utf-8")
+    outside.write_text("- [escaped] Outside.\n", encoding="utf-8", newline="\n")
     (focus / "link.md").symlink_to(outside)
     real_lstat = Path.lstat
     swapped = False
@@ -294,7 +291,7 @@ def test_adopt_semantic_census_never_reads_past_remaining_byte_budget(
     focus = vault / "Focus"
     focus.mkdir()
     candidate = focus / "candidate.md"
-    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8", newline="\n")
     real_read_bytes = Path.read_bytes
 
     def oversized_read(path: Path) -> bytes:
@@ -323,7 +320,7 @@ def test_adopt_semantic_census_rejects_file_growth_during_bounded_read(
     focus = vault / "Focus"
     focus.mkdir()
     candidate = focus / "candidate.md"
-    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8", newline="\n")
     real_read = os.read
     requested: list[int] = []
     grown = False
@@ -412,10 +409,10 @@ def test_adopt_semantic_census_revalidates_parent_identity_after_enumeration(
     focus = vault / "Focus"
     child = focus / "child"
     child.mkdir(parents=True)
-    (child / "candidate.md").write_text("- [safe] Inside.\n", encoding="utf-8")
+    (child / "candidate.md").write_text("- [safe] Inside.\n", encoding="utf-8", newline="\n")
     outside = vault / "Outside"
     outside.mkdir()
-    (outside / "candidate.md").write_text("- [escaped] Outside.\n", encoding="utf-8")
+    (outside / "candidate.md").write_text("- [escaped] Outside.\n", encoding="utf-8", newline="\n")
     parked = focus / "parked"
     real_open = semantic_census._open_regular_file_descriptor
     received_ancestors: list[object] = []
@@ -469,8 +466,7 @@ def test_adopt_scan_only_semantic_census_reports_saved_governance_read_only(
             },
             sort_keys=True,
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     contracts = schema / "contracts"
     contracts.mkdir()
     (contracts / "census.yaml").write_text(
@@ -489,8 +485,7 @@ def test_adopt_scan_only_semantic_census_reports_saved_governance_read_only(
             },
             sort_keys=True,
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     page = vault / "Knowledge Base" / "Notes" / "Insights" / "semantic.md"
     page.parent.mkdir()
     page.write_text(
@@ -510,8 +505,7 @@ tags: []
 - [Config] Canonical spelling.
 - [configuration] Alias spelling.
 """,
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     before = _snapshot(vault)
 
     report = adopt_module.adopt(vault, mode="scan-only")
@@ -571,8 +565,7 @@ tags: []
 
 - [config] Parse once.
 """,
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     real_build_page_state = semantic_census.semantic_contract.build_page_state
     parser_calls: list[str] = []
     markdown_path_reads: list[str] = []
@@ -637,7 +630,7 @@ tags: []
 - [before] Exact scanned bytes.
 """
     replacement = original.replace("[before] Exact scanned bytes", "[after] Replaced")
-    page.write_text(original, encoding="utf-8")
+    page.write_text(original, encoding="utf-8", newline="\n")
     relative = page.relative_to(vault).as_posix()
     real_build_page_state = semantic_census.semantic_contract.build_page_state
     observed_texts: list[str] = []
@@ -647,7 +640,7 @@ tags: []
         if str(args[1]) == relative:
             observed_texts.append(str(args[2]))
             if len(observed_texts) == 1:
-                page.write_text(replacement, encoding="utf-8")
+                page.write_text(replacement, encoding="utf-8", newline="\n")
         return state
 
     monkeypatch.setattr(
@@ -688,8 +681,7 @@ def test_adopt_semantic_census_separates_general_registry_findings_from_category
             },
             sort_keys=True,
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     census = semantic_census.scan(vault)
 
@@ -715,12 +707,10 @@ def test_adopt_semantic_census_hidden_markdown_makes_governance_partial(
     visible = notes / "visible.md"
     visible.write_text(
         f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Visible\n---\n\n# Visible\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     (notes / ".duplicate.md").write_text(
         f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Hidden\n---\n\n# Hidden\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     census = semantic_census.scan(vault)
 
@@ -747,8 +737,7 @@ def test_adopt_semantic_census_separates_identity_ownership_from_corpus_pages(
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(
             f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Owner\n---\n\n# Owner\n",
-            encoding="utf-8",
-        )
+            encoding="utf-8", newline="\n",)
     real_evaluate = semantic_census.semantic_writes.evaluate_posthoc_batch
     captured: list[object] = []
 
@@ -785,8 +774,7 @@ title: Malformed identity
 
 # Malformed identity
 """,
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     census = semantic_census.scan(vault)
 
@@ -891,7 +879,7 @@ def test_adopt_quotes_yaml_significant_imported_path(tmp_path: Path) -> None:
     vault = _legacy_vault(tmp_path, kb=True)
     legacy = vault / "Legacy" / "Step2: Paste your conversation.md"
     legacy.parent.mkdir(parents=True)
-    legacy.write_text("# 会話\n\nOriginal.\n", encoding="utf-8")
+    legacy.write_text("# 会話\n\nOriginal.\n", encoding="utf-8", newline="\n")
 
     report = adopt_module.adopt(
         vault,
@@ -912,7 +900,7 @@ def test_adopt_copy_as_sources_disambiguates_same_basename_batch(tmp_path: Path)
     for folder, body in (("Mercor A", "alpha answer"), ("Mercor B", "beta answer")):
         target = vault / folder / "Task1.md"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(f"# Task1\n\n{body}\n", encoding="utf-8")
+        target.write_text(f"# Task1\n\n{body}\n", encoding="utf-8", newline="\n")
 
     report = adopt_module.adopt(
         vault,
