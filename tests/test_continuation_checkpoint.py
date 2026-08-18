@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import has_posix_file_modes
 
 import exomem
 from exomem._hooks import exomem_continuation_checkpoint as checkpoint
@@ -1373,8 +1374,8 @@ def test_write_is_idempotent_rotates_once_and_rejects_stale_writer(tmp_path: Pat
         checkpoint.load_checkpoint(state / "previous.json")["checkpoint_id"]
         == first["checkpoint_id"]
     )
-    assert stat_mode(state / "current.json") == 0o600
-    assert stat_mode(state / ".lock") == 0o600
+    assert_private_mode(state / "current.json")
+    assert_private_mode(state / ".lock")
     assert len(list(state.glob("*.tmp-*"))) == 0
 
 
@@ -1492,6 +1493,20 @@ def test_interrupted_rotation_previous_is_ordering_floor_for_older_different_id(
 
 def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
+
+
+def assert_private_mode(path: Path) -> None:
+    """Assert 0o600 where the mode is an access-control fact.
+
+    Windows synthesizes `st_mode`: a file reports 0o666 whatever `chmod` was
+    asked for, so asserting the permission there reads a placeholder rather
+    than a permission. Only this one line is platform-bound -- the rotation,
+    idempotency and JSONL-validity claims around it hold everywhere and keep
+    running here.
+    """
+    if not has_posix_file_modes():
+        return
+    assert stat_mode(path) == 0o600
 
 
 def test_structural_workspace_change_rotates_with_unchanged_transcript(tmp_path: Path) -> None:
@@ -2115,7 +2130,7 @@ def test_metadata_log_rotates_at_cap_with_complete_valid_jsonl(tmp_path: Path) -
     assert raw.endswith(b"\n")
     assert records[-1]["duration_ms"] == 1
     assert all(checkpoint._valid_metadata_record(record) for record in records)
-    assert stat_mode(log) == 0o600
+    assert_private_mode(log)
 
 
 def test_metadata_rotation_replace_failure_preserves_log_and_removes_temp(
@@ -2187,7 +2202,7 @@ def test_metadata_log_rotation_serializes_concurrent_process_writers(tmp_path: P
     assert len(raw) <= limit
     assert raw.endswith(b"\n")
     assert all(checkpoint._valid_metadata_record(record) for record in records)
-    assert stat_mode(root / ".events.lock") == 0o600
+    assert_private_mode(root / ".events.lock")
 
 
 def test_windows_handle_relative_guards_are_present_even_when_not_executable_here() -> None:
@@ -2324,7 +2339,14 @@ def test_supported_write_subprocess_contract_is_silent_local_and_bounded(
     tmp_path: Path, client: str, event: str, trigger: str | None
 ) -> None:
     home = tmp_path / f"{client} home with spaces"
-    transcript = tmp_path / "odd\\transcript.jsonl"
+    # A literal backslash inside a *filename* is an ordinary character on
+    # POSIX and the strongest odd-name probe available there. On Windows it
+    # is the path separator, so the same string names a directory that does
+    # not exist and the fixture could not be created at all -- the test
+    # failed before reaching its subject. Keep a name that is odd and legal
+    # on each platform rather than dropping the probe.
+    odd_name = "odd;transcript .jsonl" if os.name == "nt" else "odd\\transcript.jsonl"
+    transcript = tmp_path / odd_name
     transcript.write_bytes(b"private body\xff" * 8000)
     payload: dict[str, object] = {
         "hookEventName": event,
