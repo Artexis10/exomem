@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.56.0](https://github.com/Artexis10/exomem/compare/v0.55.0...v0.56.0) (2026-08-18)
+
+
+### Features
+
+* **graph:** own the schedule that settles queued graph repair ([#630](https://github.com/Artexis10/exomem/issues/630)) ([6f446ee](https://github.com/Artexis10/exomem/commit/6f446eea529eb2b0f2223f52a26abe4726509786))
+* **observability:** record where a call's time went, not just how much ([#621](https://github.com/Artexis10/exomem/issues/621)) ([fc20140](https://github.com/Artexis10/exomem/commit/fc20140bd486021fe8137ddcd8a772260640f3a6))
+* **sources:** let a captured source's classification be corrected ([#624](https://github.com/Artexis10/exomem/issues/624)) ([01b7439](https://github.com/Artexis10/exomem/commit/01b7439897d86587c447ebeb8f4b62b0a42c6ad7))
+
+
+### Bug Fixes
+
+* **doctor:** name the command that actually reclaims rebuild temporaries ([#617](https://github.com/Artexis10/exomem/issues/617)) ([876eac1](https://github.com/Artexis10/exomem/commit/876eac18c2df885a6e97e077ba285c159d54b3fa))
+* **privacy:** teach the public-artifact gate to recognise Windows account SIDs ([#622](https://github.com/Artexis10/exomem/issues/622)) ([dea8b03](https://github.com/Artexis10/exomem/commit/dea8b030924edb53ed3981f728d99a5ac8b29df4))
+* **tests:** give the idempotency store a directory it owns ([#628](https://github.com/Artexis10/exomem/issues/628)) ([5770eb6](https://github.com/Artexis10/exomem/commit/5770eb69952856856e463f85b06f31cf2818dbc4))
+* **tests:** report a POSIX-only hosted API as a skip on Windows ([#629](https://github.com/Artexis10/exomem/issues/629)) ([833001a](https://github.com/Artexis10/exomem/commit/833001abe224c175971f5a7f6c4128b65e9ab67a))
+* **tests:** report an absent proc-fd custody capability instead of failing on it ([#626](https://github.com/Artexis10/exomem/issues/626)) ([5b0181f](https://github.com/Artexis10/exomem/commit/5b0181f2d3772833a7c99c36fdddfad5765472bf))
+* **windows:** accept the DACL Windows writes, and make a rejected one say what it saw ([#618](https://github.com/Artexis10/exomem/issues/618)) ([8bafd5c](https://github.com/Artexis10/exomem/commit/8bafd5cdbac8410968a2ba5c5b6bc96f385ccf8b))
+
 ## [0.55.0](https://github.com/Artexis10/exomem/compare/v0.54.1...v0.55.0) (2026-08-18)
 
 
