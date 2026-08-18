@@ -13,7 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system media engines
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr espeak ffmpeg
+        # Same exposure as the isolation runtime in ci.yml, and the same fix.
+        # This lane is not a required check, so a stall here costs an hour of
+        # runner time rather than a release -- still worth bounding. The larger
+        # allowance covers the media engines actually being sizeable.
+        timeout-minutes: 8
+        run: scripts/ci-apt-install.sh tesseract-ocr espeak ffmpeg
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
