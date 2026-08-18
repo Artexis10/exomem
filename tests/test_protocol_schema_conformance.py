@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from benchmark_capabilities import require_posix_host_paths
 from jsonschema import Draft202012Validator
 from jsonschema import ValidationError as JsonSchemaValidationError
 from pydantic import ValidationError as PydanticValidationError
@@ -443,6 +444,9 @@ def _rejects_model_only(model_name: str, payload: dict, exception: str) -> None:
 def test_memorybench_full_payloads_validate_under_strict_model_and_committed_schema(
     model_name: str,
 ) -> None:
+    # The committed payloads carry `/owned/...`, which `protocol/models.py`
+    # validates as an absolute *host* path -- true on Linux, not on Windows.
+    require_posix_host_paths()
     _accepts_both(model_name, _memorybench_payloads()[model_name])
 
 
@@ -610,6 +614,9 @@ def test_schema_to_model_exception_registry_is_closed_to_genuine_in_document_rel
 def test_run_plan_selection_union_accepts_full_or_ordered_explicit_selection(
     mode: str, target_question_ids: list[str] | None,
 ) -> None:
+    # The committed payloads carry `/owned/...`, which `protocol/models.py`
+    # validates as an absolute *host* path -- true on Linux, not on Windows.
+    require_posix_host_paths()
     payload = _memorybench_payloads()["MemoryBenchRunPlan"]
     payload["selection"] = {"mode": mode, "target_question_ids": target_question_ids}
     _accepts_both("MemoryBenchRunPlan", payload)

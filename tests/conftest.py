@@ -15,8 +15,10 @@ import pytest
 from benchmark_capabilities import (
     declares_absent_sandbox,
     declares_absent_surface_timers,
+    declares_absent_trusted_git,
     has_bwrap_sandbox,
     has_posix_interval_timers,
+    has_trusted_system_git,
 )
 
 from exomem import activation_manifest as activation_manifest_module
@@ -77,6 +79,17 @@ if os.name == "nt":
     ]
 
 
+#: `custody.py` walks a path as POSIX components -- `parts[0] != os.sep`, then a
+#: backslash test on every remaining part -- so on Windows *every* custody path
+#: trips one of these before the module reaches its own capability check.
+#: Neither message is then describing the path it names. Both remain real
+#: findings on a platform that has the capability, which is why matching them is
+#: gated on it being absent.
+_CUSTODY_ALIEN_PATH = re.compile(
+    r"custody path (must identify a non-root directory|contains an unsafe component)"
+)
+
+
 def _declares_custody_unsupported(error: BaseException | None) -> bool:
     """True when *error* is the custody module refusing an absent capability.
 
@@ -89,6 +102,8 @@ def _declares_custody_unsupported(error: BaseException | None) -> bool:
     while error is not None and id(error) not in seen:
         seen.add(id(error))
         if type(error).__name__ == "CustodyUnsupported":
+            return True
+        if type(error).__name__ == "CustodyError" and _CUSTODY_ALIEN_PATH.search(str(error)):
             return True
         error = error.__cause__ or error.__context__
     return False
@@ -129,7 +144,7 @@ def _needs_an_absent_posix_api(error: BaseException | None) -> bool:
 def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     """Report a platform capability this host does not have as a skip.
 
-    Four causes now, every one of them "this API does not exist here" rather
+    Five causes now, every one of them "this API does not exist here" rather
     than "this code is wrong". They were reported as defects when the honest
     report was that the platform cannot run the subsystem.
 
@@ -160,14 +175,27 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     one contract error and met a refusal instead failed for the absent
     capability, not for its own reason.
 
+    The Git branch is the same trade again. `benchmarks/protocol` resolves Git
+    through `os.defpath` rather than `PATH`, so a user-controlled `PATH` cannot
+    substitute the binary that establishes contract identity -- but `os.defpath`
+    on Windows names a drive-root `bin` directory that does not exist, behind
+    the very current-directory entry the anchor exists to exclude. Only the
+    three refusals meaning "the anchor found nothing usable" are matched; a
+    digest mismatch stays a failure, because that is a real finding.
+
     Every branch is gated on the capability actually being absent, so this can
-    never mask a regression where it matters: on Linux CI all three capabilities
-    exist -- `ci.yml` provisions `bwrap` and checks it runs -- so a
-    `CustodyUnsupported`, a timer refusal or a sandbox refusal there stays a
-    failure and is meant to.
+    never mask a regression where it matters: on Linux CI all of them exist --
+    `ci.yml` provisions `bwrap` and checks it runs, and `/usr/bin` is on
+    `os.defpath` -- so a `CustodyUnsupported`, a timer refusal, a sandbox
+    refusal or a Git refusal there stays a failure and is meant to.
     """
     report = (yield).get_result()
-    if report.when != "call" or report.outcome != "failed" or call.excinfo is None:
+    # `setup` as well as `call`: a fixture that builds its subject through the
+    # absent capability raises before the body runs, and an error there is the
+    # same missing prerequisite reported one phase earlier.
+    if report.when not in {"call", "setup"} or report.outcome != "failed":
+        return
+    if call.excinfo is None:
         return
     error = call.excinfo.value
     if not PROC_FD_DIRECTORY_CUSTODY and _declares_custody_unsupported(error):
@@ -178,6 +206,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
         reason = "POSIX interval timers (setitimer/SIGALRM) are unavailable here"
     elif not has_bwrap_sandbox() and declares_absent_sandbox(error):
         reason = "the pinned bubblewrap sandbox runtime is unavailable here"
+    elif not has_trusted_system_git() and declares_absent_trusted_git(error):
+        reason = "os.defpath names no trusted system Git on this platform"
     else:
         return
     report.outcome = "skipped"
