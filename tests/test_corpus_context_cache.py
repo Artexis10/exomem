@@ -929,16 +929,19 @@ def test_census_never_stats_a_sidecar_temporary_at_all(
     assert not any(entry[0].endswith("-wal") for entry in census)
 
 
-def test_census_omits_a_markdown_page_that_vanishes_mid_walk(
+def test_census_refuses_rather_than_omits_a_page_that_vanishes_mid_walk(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A page deleted mid-walk is absent from the snapshot, not fatal to it."""
+    """The one place this walk is deliberately stricter than the one it mirrors.
+
+    `_build_identity_census` skips a page that vanishes mid-walk, because it
+    reports a snapshot and a page that is gone is simply not in it. This walk is
+    a cache key. Returning `None` costs one uncached build; quietly returning a
+    census that omits the page would let a cached context the corpus no longer
+    matches keep its key and be served as current (#561).
+    """
     doomed = vault / "Knowledge Base" / "Notes" / "Insights" / "doomed.md"
     doomed.write_text(_page(title="Doomed"), encoding="utf-8")
     _vanish_on_listing(monkeypatch, "doomed.md")
 
-    census = semantic_contract._corpus_census(vault)
-
-    assert census is not None
-    assert not any(entry[0].endswith("doomed.md") for entry in census)
-    assert any(entry[0] == _PAGE_REL for entry in census)
+    assert semantic_contract._corpus_census(vault) is None
