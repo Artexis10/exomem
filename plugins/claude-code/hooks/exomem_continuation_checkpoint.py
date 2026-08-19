@@ -447,6 +447,15 @@ def _git_probe(cwd: Path, *args: str) -> tuple[str | None, int | None]:
             ],
             capture_output=True,
             text=True,
+            # Pinned, not inherited: without it the pipe is decoded with
+            # the host's active code page, and git happily emits a branch
+            # name or a repository path this hook cannot spell in cp1252.
+            # The resulting UnicodeDecodeError is raised inside subprocess's
+            # reader, so no `except OSError` here would have caught it.
+            # `replace` because a checkpoint hook must degrade, never abort
+            # the session it is recording.
+            encoding="utf-8",
+            errors="replace",
             env=_git_environment(),
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
