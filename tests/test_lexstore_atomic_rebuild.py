@@ -268,7 +268,7 @@ def test_fatal_retired_store_can_publish_and_recover(
     # Inspecting fatal readiness normally launches the single-flight repair. This
     # test drives the same recovery synchronously, so suppress that independent
     # worker rather than racing two valid publishers and requiring this call to win.
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
     assert (
         store.catalog_readiness("kb", freshness.triple(tmp_path, "kb")).status
         == "fatal_failure"
@@ -313,7 +313,7 @@ def test_malformed_checkpoint_is_warming_and_atomic_rebuild_recovers(
         conn.close()
 
     scheduled: list[Path] = []
-    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda root, **_kwargs: scheduled.append(root))
     readiness = store.catalog_readiness("kb", freshness.triple(tmp_path, "kb"))
     assert readiness.status == "stale"
     assert readiness.complete is False
@@ -476,7 +476,7 @@ def test_transient_lock_schedules_no_rebuild(
 
     scheduled = {"n": 0}
     monkeypatch.setattr(
-        lexstore, "_schedule_repair", lambda _vr: scheduled.__setitem__("n", scheduled["n"] + 1)
+        lexstore, "_schedule_repair", lambda _vr, **_kwargs: scheduled.__setitem__("n", scheduled["n"] + 1)
     )
 
     def locked(_conn: Any) -> bool:
@@ -927,7 +927,7 @@ def test_stable_no_live_mode_converges_without_rebuild_storm(
 
     scheduled = {"n": 0}
     monkeypatch.setattr(
-        lexstore, "_schedule_repair", lambda _vr: scheduled.__setitem__("n", scheduled["n"] + 1)
+        lexstore, "_schedule_repair", lambda _vr, **_kwargs: scheduled.__setitem__("n", scheduled["n"] + 1)
     )
 
     assert store.rebuild_atomic() is True
@@ -1043,7 +1043,7 @@ def test_failed_fatal_recovery_schedules_again_on_later_readiness(
 
     scheduled = {"n": 0}
     monkeypatch.setattr(
-        lexstore, "_schedule_repair", lambda _vr: scheduled.__setitem__("n", scheduled["n"] + 1)
+        lexstore, "_schedule_repair", lambda _vr, **_kwargs: scheduled.__setitem__("n", scheduled["n"] + 1)
     )
 
     fresh = freshness.triple(tmp_path, "kb")
@@ -1088,7 +1088,7 @@ def test_upsert_declines_fast_on_publication_contention_then_retries(
     freshness.on_files_changed(tmp_path, changed=[b])
     scheduled = {"n": 0}
     monkeypatch.setattr(
-        lexstore, "_schedule_repair", lambda _root: scheduled.__setitem__("n", scheduled["n"] + 1)
+        lexstore, "_schedule_repair", lambda _root, **_kwargs: scheduled.__setitem__("n", scheduled["n"] + 1)
     )
 
     started = threading.Event()
@@ -1139,7 +1139,7 @@ def test_inline_upsert_on_old_schema_never_walks_and_schedules_atomic_repair(
         lambda: (_ for _ in ()).throw(AssertionError("inline upsert walked corpus")),
     )
     monkeypatch.setattr(
-        lexstore, "_schedule_repair", lambda _root: scheduled.__setitem__("n", scheduled["n"] + 1)
+        lexstore, "_schedule_repair", lambda _root, **_kwargs: scheduled.__setitem__("n", scheduled["n"] + 1)
     )
 
     assert store.upsert_paths([b]) is False
@@ -1167,7 +1167,7 @@ def test_exact_stale_parent_under_publication_contention_returns_incomplete(
     # still reflects the old snapshot, but parent validation detects the stale row.
     a.write_text(_page_text("a", "- [rule] changed_on_disk ^u1"), encoding="utf-8")
     _touch_future(a)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
     result: dict[str, Any] = {}
     finished = threading.Event()
 
@@ -1217,7 +1217,7 @@ def test_upsert_source_disappearing_during_insert_rolls_back_and_defers(
 
     scheduled: list[Path] = []
     monkeypatch.setattr(store, "_insert_page", insert_then_remove)
-    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda root, **_kwargs: scheduled.append(root))
     assert store.upsert_paths([a]) is False
     assert scheduled == [tmp_path]
 
@@ -1412,7 +1412,7 @@ def test_foreground_delta_declines_fast_on_contention_and_schedules_repair(
     monkeypatch.setattr(
         lexstore,
         "_schedule_repair",
-        lambda _vr: scheduled.__setitem__("n", scheduled["n"] + 1),
+        lambda _vr, **_kwargs: scheduled.__setitem__("n", scheduled["n"] + 1),
     )
 
     holding = threading.Event()
