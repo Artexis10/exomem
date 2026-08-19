@@ -1205,6 +1205,36 @@ _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
 _CORPUS_CONTEXT_UPDATE_LOCK = threading.RLock()
 _CORPUS_CONTEXT_CACHE_MAX_VAULTS = 2
 
+#: Bounds populate-on-miss (#539). Both halves exist because that build is
+#: paid by a WRITER: without them, a state that keeps the cache cold -- a
+#: projection patch that fails and evicts on every publish, or external churn
+#: that discards every admission -- makes every governed write pay a full
+#: census and parse of the whole vault that cannot land. Each occurrence is
+#: individually bounded, so this is amplification rather than livelock, but at
+#: thousands of pages it is the dominant cost moved onto writers.
+#:
+#: Single-flight collapses the concurrent case: a second publisher that finds
+#: the same cold key returns instead of starting a second whole-vault build.
+_CORPUS_POPULATE_LOCK = threading.Lock()
+_CORPUS_POPULATE_IN_FLIGHT: set[tuple[str, str]] = set()
+
+#: The memo collapses the sequential case, and is deliberately measured in the
+#: cost of the attempt that just failed rather than in a fixed number of
+#: seconds. A populate that discarded after eight seconds of walking is
+#: evidence the vault is still moving; retrying immediately spends the next
+#: eight the same way. Waiting at least as long as the attempt cost caps
+#: populate at roughly half of wall-clock in the worst state and scales itself
+#: to vault size, which no constant here could. The floor keeps a fast vault's
+#: memo from being a no-op; the ceiling keeps one pathological build from
+#: silencing populate for minutes.
+#:
+#: Deliberately NOT cleared by :func:`evict_corpus_context`: eviction is the
+#: front half of the exact loop being bounded, so letting it reset the memo
+#: would hand back the amplification this removes.
+_CORPUS_POPULATE_MEMO: dict[tuple[str, str], float] = {}
+_CORPUS_POPULATE_MEMO_MIN_SECONDS = 1.0
+_CORPUS_POPULATE_MEMO_MAX_SECONDS = 30.0
+
 
 @dataclass(slots=True)
 class _CorpusContextFlight:
@@ -1226,6 +1256,9 @@ def corpus_context_cache_enabled() -> bool:
 
 def reset_corpus_context_cache() -> None:
     """Drop every cached corpus context; intentionally public for tests."""
+    with _CORPUS_POPULATE_LOCK:
+        _CORPUS_POPULATE_MEMO.clear()
+        _CORPUS_POPULATE_IN_FLIGHT.clear()
     with _CORPUS_CONTEXT_CACHE_LOCK:
         _CORPUS_CONTEXT_CACHE.clear()
         _CORPUS_CONTEXT_EVENT_TOKENS.clear()
@@ -2115,11 +2148,15 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
     cannot complete simply leaves the cache cold, which is exactly today's
     behavior.
 
-    Deliberately NOT single-flighted and NOT memoized on failure: a state that
-    keeps the cache cold (persistent projection-publish failure, or external
-    churn that discards every admission) makes every publish pay a build that
-    cannot land. Bounding that is tracked as #539; the shape to copy is
-    ``lexstore._REPAIRS_IN_FLIGHT``.
+    Single-flighted, and memoized whenever an attempt did not stamp: see
+    ``_CORPUS_POPULATE_IN_FLIGHT`` and ``_CORPUS_POPULATE_MEMO`` for why the
+    unbounded version made writers pay for builds that could not land (#539).
+
+    Neither bound can make the cache wrong. Both only ever decline to *start*
+    a build, and declining leaves the cache cold -- which is precisely the
+    state a publish onto a cold cache produced before populate-on-miss existed,
+    and which every reader already handles by building. The first publish that
+    finds the vault settled populates honestly.
     """
     if not corpus_context_cache_enabled():
         return
@@ -2130,14 +2167,46 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
     with _CORPUS_CONTEXT_CACHE_LOCK:
         if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
             return
+    started = time.monotonic()
+    with _CORPUS_POPULATE_LOCK:
+        # Expired entries are dropped here rather than left to accumulate: the
+        # context cache is bounded to `_CORPUS_CONTEXT_CACHE_MAX_VAULTS`, and a
+        # memo that outlived its own quiet window should not be the one piece
+        # of per-vault state that grows without limit in a long-lived server.
+        for key, deadline in list(_CORPUS_POPULATE_MEMO.items()):
+            if started >= deadline:
+                del _CORPUS_POPULATE_MEMO[key]
+        if cache_key in _CORPUS_POPULATE_IN_FLIGHT:
+            return
+        if cache_key in _CORPUS_POPULATE_MEMO:
+            return
+        _CORPUS_POPULATE_IN_FLIGHT.add(cache_key)
+    admitted = False
     try:
-        _build_and_admit_corpus_context(root, cache_key)
+        admitted = _build_and_admit_corpus_context(root, cache_key)
     except Exception:  # noqa: BLE001 - the publish itself already succeeded
         log.warning("semantic corpus populate-on-miss failed", exc_info=True)
+    finally:
+        elapsed = time.monotonic() - started
+        with _CORPUS_POPULATE_LOCK:
+            _CORPUS_POPULATE_IN_FLIGHT.discard(cache_key)
+            if admitted:
+                _CORPUS_POPULATE_MEMO.pop(cache_key, None)
+            else:
+                _CORPUS_POPULATE_MEMO[cache_key] = time.monotonic() + min(
+                    _CORPUS_POPULATE_MEMO_MAX_SECONDS,
+                    max(_CORPUS_POPULATE_MEMO_MIN_SECONDS, elapsed),
+                )
 
 
-def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> None:
-    """The L2 body of :func:`_populate_corpus_context_after_miss`."""
+def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> bool:
+    """The L2 body of :func:`_populate_corpus_context_after_miss`.
+
+    Returns whether this call stamped a context. A discard is not an error --
+    it is the admission proof correctly refusing a build the vault moved out
+    from under -- but the caller has to tell a discard apart from a stamp to
+    know whether retrying immediately would be productive.
+    """
     relation_definitions = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     # L2/L3: the admission decision is made against this, captured before the
@@ -2145,7 +2214,7 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> N
     before = freshness.consumer_checkpoint(root, "vault")
     census = _timed_corpus_census(root, "populate")
     if census is None:
-        return
+        return False
     # The registries were loaded BEFORE this walk, and the walk stats the two
     # `_Schema` files at its END. A registry rewritten in between therefore
     # produces a census that records the NEW file while the build below would
@@ -2157,7 +2226,7 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> N
     # the same two files.
     if not _registries_match_disk(root, relation_definitions, language):
         log.info("semantic corpus populate discarded: registry moved during the walk")
-        return
+        return False
     started = time.perf_counter()
     context = _build_corpus_context_uncached(
         root,
@@ -2177,16 +2246,16 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> N
         after = freshness.consumer_checkpoint(root, "vault")
         if after != before:
             log.info("semantic corpus populate discarded: registry advanced mid-walk")
-            return
+            return False
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
-                return
+                return False
         if _deferred_corpus_census(root, walk_log, "census") != census:
             log.info("semantic corpus populate discarded: corpus moved mid-build")
-            return
+            return False
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
-                return
+                return False
             _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
             _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
                 f"{language.schema_version}:{language.content_hash}"
@@ -2203,6 +2272,7 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> N
         len(context.pages),
         build_ms,
     )
+    return True
 
 
 @call_spans.timed("corpus_context.build")
