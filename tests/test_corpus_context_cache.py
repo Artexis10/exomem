@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -945,3 +946,231 @@ def test_census_refuses_rather_than_omits_a_page_that_vanishes_mid_walk(
     _vanish_on_listing(monkeypatch, "doomed.md")
 
     assert semantic_contract._corpus_census(vault) is None
+
+
+# --- populate-on-miss is paid by a writer, so it has to be bounded (#539) ----
+
+
+def _discarding_populate(monkeypatch: pytest.MonkeyPatch, seconds: float = 0.0) -> list[tuple]:
+    """Stand in for a build that runs and then legitimately refuses to stamp.
+
+    Every discard route inside `_build_and_admit_corpus_context` -- registry
+    moved, checkpoint advanced, census moved -- reaches the caller as the same
+    `False`, so one stub covers them all. What matters to the caller is only
+    that the attempt did not land.
+    """
+    calls: list[tuple] = []
+
+    def build(root: Path, cache_key: tuple[str, str]) -> bool:
+        calls.append(cache_key)
+        if seconds:
+            time.sleep(seconds)
+        return False
+
+    monkeypatch.setattr(semantic_contract, "_build_and_admit_corpus_context", build)
+    return calls
+
+
+def test_a_second_publisher_joins_no_second_whole_vault_build(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single-flight, the concurrent half of the bound.
+
+    Two governed writes landing on the same cold vault used to start two
+    independent full censuses and parses of it. Only one can stamp; the other
+    pays the whole cost to discard.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[tuple] = []
+
+    def blocking_build(root: Path, cache_key: tuple[str, str]) -> bool:
+        calls.append(cache_key)
+        entered.set()
+        assert release.wait(10)
+        return False
+
+    monkeypatch.setattr(semantic_contract, "_build_and_admit_corpus_context", blocking_build)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(semantic_contract._populate_corpus_context_after_miss, vault)
+        assert entered.wait(10), "the first publisher never reached the build"
+
+        # The second publisher finds the same cold key mid-build and must
+        # return rather than start its own.
+        semantic_contract._populate_corpus_context_after_miss(vault)
+        assert len(calls) == 1
+
+        release.set()
+        first.result(timeout=10)
+
+    assert len(calls) == 1
+
+
+def test_a_discarded_populate_quiets_the_next_publisher(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The memo, the sequential half of the bound.
+
+    A vault that keeps discarding -- external churn, or a projection patch that
+    fails and evicts on every publish -- otherwise makes *every* governed write
+    pay a full build that cannot land.
+    """
+    calls = _discarding_populate(monkeypatch)
+    cache_key = semantic_contract._corpus_cache_key(vault)
+
+    for _ in range(3):
+        semantic_contract._populate_corpus_context_after_miss(vault)
+
+    assert len(calls) == 1
+    assert cache_key in semantic_contract._CORPUS_POPULATE_MEMO
+
+
+def test_a_populate_that_raised_is_quieted_like_one_that_discarded(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raise is "did not stamp" too, and is the more expensive one to repeat.
+
+    The caller already swallows it so the publish it belongs to still succeeds;
+    swallowing it without memoizing would leave the loudest failure the only
+    unbounded one.
+    """
+    calls: list[tuple] = []
+
+    def failing_build(root: Path, cache_key: tuple[str, str]) -> bool:
+        calls.append(cache_key)
+        raise RuntimeError("projection unavailable")
+
+    monkeypatch.setattr(semantic_contract, "_build_and_admit_corpus_context", failing_build)
+
+    for _ in range(3):
+        semantic_contract._populate_corpus_context_after_miss(vault)
+
+    assert len(calls) == 1
+
+
+def test_the_quiet_window_ends_and_the_next_publisher_tries_again(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Suppression is a delay, never a decision.
+
+    A vault that settles has to repopulate on its own; nothing else re-arms
+    populate-on-miss for it.
+    """
+    calls = _discarding_populate(monkeypatch)
+    cache_key = semantic_contract._corpus_cache_key(vault)
+
+    semantic_contract._populate_corpus_context_after_miss(vault)
+    assert len(calls) == 1
+
+    semantic_contract._CORPUS_POPULATE_MEMO[cache_key] = time.monotonic() - 1.0
+    semantic_contract._populate_corpus_context_after_miss(vault)
+
+    assert len(calls) == 2
+    # The expired entry is dropped rather than accumulated: a long-lived server
+    # must not grow one float per vault it ever failed to populate.
+    assert list(semantic_contract._CORPUS_POPULATE_MEMO) == [cache_key]
+
+
+@pytest.mark.parametrize(
+    ("attempt_seconds", "at_least", "at_most"),
+    [
+        # Instant discard: the floor keeps the memo from being a no-op.
+        (0.0, 0.0, 0.05),
+        # A real attempt: the window is the attempt's own cost, which is what
+        # makes it scale with vault size where no constant here could.
+        (0.12, 0.05, 0.30),
+        # A pathological build: the ceiling keeps one of them from silencing
+        # populate for minutes.
+        (0.40, 0.05, 0.30),
+    ],
+)
+def test_the_quiet_window_is_the_clamped_cost_of_the_attempt(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attempt_seconds: float,
+    at_least: float,
+    at_most: float,
+) -> None:
+    """Measured in the failed attempt, not in a number someone picked.
+
+    A populate that discarded after eight seconds of walking is evidence the
+    vault is still moving; retrying it immediately spends the next eight the
+    same way. Waiting at least as long as the attempt cost caps populate at
+    roughly half of wall-clock in the worst state.
+    """
+    monkeypatch.setattr(semantic_contract, "_CORPUS_POPULATE_MEMO_MIN_SECONDS", 0.05)
+    monkeypatch.setattr(semantic_contract, "_CORPUS_POPULATE_MEMO_MAX_SECONDS", 0.30)
+    _discarding_populate(monkeypatch, seconds=attempt_seconds)
+    cache_key = semantic_contract._corpus_cache_key(vault)
+
+    semantic_contract._populate_corpus_context_after_miss(vault)
+    remaining = semantic_contract._CORPUS_POPULATE_MEMO[cache_key] - time.monotonic()
+
+    # Read after the fact, so `remaining` can only understate the window.
+    assert remaining <= at_most
+    assert remaining > at_least
+
+
+def test_a_quieted_publish_leaves_the_cache_cold_not_wrong(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound may only ever decline to start a build.
+
+    Declining leaves the cache empty, which is exactly the state a publish onto
+    a cold cache produced before populate-on-miss existed, and which every
+    reader already handles by building. So a suppressed populate can cost a
+    reader time; it can never cost it correctness.
+    """
+    calls = _discarding_populate(monkeypatch)
+    cache_key = semantic_contract._corpus_cache_key(vault)
+    semantic_contract._populate_corpus_context_after_miss(vault)
+    assert len(calls) == 1
+
+    page = vault / _PAGE_REL
+    page.write_text(_page(title="Edited while quiet"), encoding="utf-8")
+    semantic_contract.publish_corpus_files_changed(vault, changed=(page,))
+
+    # The publish took the miss branch and was turned away there, not earlier.
+    assert len(calls) == 1
+    assert cache_key not in semantic_contract._CORPUS_CONTEXT_CACHE
+
+    context = semantic_contract.build_corpus_context(vault)
+    assert context.pages[_PAGE_REL].title == "Edited while quiet"
+
+
+def test_resetting_the_cache_re_arms_populate(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reset_corpus_context_cache` means cold *and* unquieted.
+
+    It is the seam tests use to start from scratch, so a memo surviving it
+    would leak one test's suppression into the next.
+    """
+    calls = _discarding_populate(monkeypatch)
+    semantic_contract._populate_corpus_context_after_miss(vault)
+    assert len(calls) == 1
+
+    semantic_contract.reset_corpus_context_cache()
+    semantic_contract._populate_corpus_context_after_miss(vault)
+
+    assert len(calls) == 2
+
+
+def test_eviction_does_not_re_arm_populate(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eviction is the front half of the loop being bounded.
+
+    "Patch fails -> evict -> populate -> discard" is the exact cycle that made
+    every write pay a doomed build. Letting the evict clear the memo would hand
+    that amplification straight back.
+    """
+    calls = _discarding_populate(monkeypatch)
+    semantic_contract._populate_corpus_context_after_miss(vault)
+    assert len(calls) == 1
+
+    semantic_contract.evict_corpus_context(vault)
+    semantic_contract._populate_corpus_context_after_miss(vault)
+
+    assert len(calls) == 1
