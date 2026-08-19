@@ -527,12 +527,30 @@ hook if it asks. Re-running `install-hook` migrates only exact legacy
 preserves unrelated hooks (including any user-owned Codex `SessionEnd`), backs
 up changed valid config, and is otherwise idempotent.
 
-There is intentionally no uninstall command. To roll back manually, remove only
-the Exomem continuation groups whose commands name
-`exomem_continuation_checkpoint.py` or
-`exomem-continuation-checkpoint.sh` and pass the matching explicit
-`--client`; remove those two deployed files if no group uses them, then reload
-the client. Existing checkpoint state is inert and may be deleted separately.
+To roll it back:
+
+```bash
+uv run python -m exomem install-hook --uninstall
+```
+
+That removes only the entries this installed — recognised the same way the
+idempotent install recognises its own, so a hook you wrote yourself in the same
+group survives — and then deletes the scripts it deployed. Add `--keep-scripts`
+to unwire the config but leave the yadm-synced hook tree in place, `--client
+codex` (or `--client all`) to pick the client, and `--json` for the machine
+report. Restart the client afterwards; it keeps running the hooks it already
+loaded. Existing checkpoint state is inert and may be deleted separately.
+
+**If your dotfiles are yadm-managed, the deployed file is not the file that
+matters.** Where `settings.json` is produced from alternates
+(`settings.json##os.Msys`, `##os.WSL`, and so on), yadm regenerates it from the
+source whenever alternate selection runs — and an ordinary `yadm status` is
+enough to trigger that, so hooks removed from the deployed file reappear with no
+obvious cause. `--uninstall` finds those sources and prunes them too, then tells
+you to commit them: until the change is committed, the next machine to sync
+restores the hooks from the committed copy. A source it cannot parse (a yadm
+template) is named in the report and exits non-zero rather than being rewritten
+blind.
 
 Tune with `EXOMEM_CAPTURE_NUDGE_MIN_CHARS` / `EXOMEM_RETRIEVE_NUDGE_MIN_CHARS` (and the
 matching `_COOLDOWN_SEC`), `EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS` for the read

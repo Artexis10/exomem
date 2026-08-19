@@ -1618,10 +1618,59 @@ def _install_hook_main(argv: list[str]) -> int:
         action="store_true",
         help="Read-only health check for deployed Claude Code/Codex hooks; writes nothing.",
     )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help=(
+            "Remove the entries and scripts this installed, and nothing else; "
+            "also edits any yadm alternate sources, which is what makes the "
+            "removal survive the next alternate selection."
+        ),
+    )
+    parser.add_argument(
+        "--keep-scripts",
+        action="store_true",
+        help="With --uninstall: unwire the hook config but leave the scripts on disk.",
+    )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
     from . import install_hook as hook_module
+
+    if args.uninstall:
+        if args.check or args.print_only:
+            parser.error("--uninstall cannot be combined with --check or --print-only")
+        if args.client == "all":
+            if args.hook_dir or args.settings:
+                parser.error("--client all cannot be combined with --hook-dir or --settings")
+            report = hook_module.uninstall_all_hooks(remove_scripts=not args.keep_scripts)
+            if args.json:
+                print(json.dumps(report))
+            else:
+                for row in report["clients"]:
+                    if "result" in row:
+                        print(hook_module.render_uninstall_human(row["result"]))
+                    else:
+                        print(
+                            f"Failed to uninstall hooks for {row['client']}: {row['error']}",
+                            file=sys.stderr,
+                        )
+            return 0 if report["success"] else 1
+        try:
+            report = hook_module.uninstall_hook(
+                hook_dir=args.hook_dir,
+                settings_path=args.settings,
+                client=args.client or "claude",
+                remove_scripts=not args.keep_scripts,
+            )
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"exomem install-hook --uninstall: {e}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(report))
+        else:
+            print(hook_module.render_uninstall_human(report))
+        return 0 if report["success"] else 1
 
     if args.check:
         if (args.hook_dir or args.settings) and args.client in {None, "all"}:
