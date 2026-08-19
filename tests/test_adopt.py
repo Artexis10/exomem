@@ -14,6 +14,7 @@ import yaml
 
 from exomem import adopt as adopt_module
 from exomem import commands, knowledge_packs, semantic_census
+from exomem import vault as vault_module
 from exomem.__main__ import main
 
 
@@ -637,7 +638,10 @@ tags: []
 - [before] Exact scanned bytes.
 """
     replacement = original.replace("[before] Exact scanned bytes", "[after] Replaced")
-    page.write_text(original, encoding="utf-8")
+    # This test is about the exact bytes the census read, so it has to put
+    # exact bytes down. `write_text` applies universal-newline translation, so
+    # on Windows it wrote CRLF and then demanded the census hand back LF.
+    page.write_bytes(original.encode("utf-8"))
     relative = page.relative_to(vault).as_posix()
     real_build_page_state = semantic_census.semantic_contract.build_page_state
     observed_texts: list[str] = []
@@ -647,7 +651,7 @@ tags: []
         if str(args[1]) == relative:
             observed_texts.append(str(args[2]))
             if len(observed_texts) == 1:
-                page.write_text(replacement, encoding="utf-8")
+                page.write_bytes(replacement.encode("utf-8"))
         return state
 
     monkeypatch.setattr(
@@ -1302,3 +1306,94 @@ def test_run_manifest_body_carries_counts_and_the_run_reference_only(
     assert leaked == [], f"run manifest body names per-item detail: {leaked}"
     assert "```json" not in body
     assert "Machine-Readable" not in body
+
+# --- the census runs on a platform whose directory entries carry no identity ---
+#
+# Two defects made `adopt(mode="scan-only")` report an empty vault on Windows,
+# and the second was invisible until the first was fixed: an identity pinned
+# from the enumeration record, and a file-state comparison across two stat APIs
+# that disagree about one field. Ten tests in this file failed there.
+
+
+def test_an_enumerated_entry_is_pinned_to_an_identity_that_exists(
+    tmp_path: Path,
+) -> None:
+    """The defect that made the census refuse the whole vault.
+
+    `os.DirEntry.stat()` answers from the directory-enumeration record, and on
+    Windows that record carries no volume serial and no file index -- `st_dev`
+    and `st_ino` both come back 0. Every re-check in the census reads them
+    through `lstat` or `fstat`, which get the real pair, so a directory pinned
+    to the enumeration record could never match itself: the census counted
+    every subdirectory as having changed underneath it and descended into none.
+
+    What this pins is not the platform detail but the invariant it broke -- an
+    entry's pinned identity has to be the one a later look will find.
+    """
+    (tmp_path / "Sub").mkdir()
+    (tmp_path / "Sub" / "page.md").write_bytes(b"---\ntype: note\n---\n# P\n\nBody.\n")
+
+    with os.scandir(tmp_path) as iterator:
+        entry = next(item for item in iterator if item.name == "Sub")
+    pinned = semantic_census._identity_bearing_stat(entry)
+
+    assert vault_module._same_identity(
+        vault_module._identity("Sub", pinned), (tmp_path / "Sub").lstat()
+    )
+
+
+def test_creation_time_is_the_only_field_dropped_across_the_two_stat_apis() -> None:
+    """The narrowing has to stay narrow, and only where the APIs disagree.
+
+    Windows disagrees with itself about `st_ctime` between a handle stat and a
+    path stat -- by a millisecond, for a file nothing touched -- because it is
+    the creation time and it comes from the directory entry. Comparing them
+    made every page read back as "changed during the read". Dropping it there
+    costs nothing: a new inode moves `st_dev`/`st_ino` and a content change
+    moves `st_size`/`st_mtime_ns`, and all four stay compared. Dropping it on
+    POSIX, where it is the inode-change time, would be a real loss.
+    """
+    def _stat(*, size: int, ctime_ns: int) -> os.stat_result:
+        return os.stat_result(
+            (0o100644, 7, 3, 1, 0, 0, size, 0, 100, ctime_ns // 10**9),
+            {"st_mtime_ns": 100 * 10**9, "st_ctime_ns": ctime_ns},
+        )
+
+    base = _stat(size=41, ctime_ns=200 * 10**9)
+    same_but_for_ctime = _stat(size=41, ctime_ns=999 * 10**9)
+    bigger = _stat(size=42, ctime_ns=200 * 10**9)
+
+    tolerated = semantic_census._same_file_state_across_stat_apis(
+        base, same_but_for_ctime
+    )
+
+    assert tolerated is (os.name == "nt")
+    assert semantic_census._same_file_state(base, same_but_for_ctime) is False
+    # A real change is refused on both platforms, which is the point of keeping
+    # every other field in the comparison.
+    assert semantic_census._same_file_state_across_stat_apis(base, bigger) is False
+
+
+def test_a_scan_only_adopt_finds_the_pages_that_are_there(tmp_path: Path) -> None:
+    """The end-to-end statement, which is what actually regressed.
+
+    Both defects were silent: the census reported a coherent, complete-looking
+    report with every count at zero. Nothing raised, nothing warned, and adopt
+    told the user their vault held no markdown at all.
+    """
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (vault_root / "Knowledge Base" / "Notes" / "alpha.md").write_bytes(
+        b"---\ntype: note\n---\n# Alpha\n\n## Finding\n- category: Rule\n\nBody.\n"
+    )
+    (vault_root / "Knowledge Base" / "Notes" / "beta.md").write_bytes(
+        b"---\ntype: note\n---\n# Beta\n\nPlain body.\n"
+    )
+
+    census = semantic_census.scan(vault_root)
+
+    coverage = census["coverage"]
+    assert coverage["markdown_files_scanned"] == 2
+    assert coverage["unreadable_files"] == 0
+    assert coverage["unreadable_directories"] == 0
+    assert coverage["complete"] is True

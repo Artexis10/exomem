@@ -43,6 +43,27 @@ def _is_reparse(info: os.stat_result) -> bool:
     return bool(getattr(info, "st_file_attributes", 0) & marker)
 
 
+def _identity_bearing_stat(entry: os.DirEntry[str]) -> os.stat_result:
+    """A stat result that actually carries this entry's identity.
+
+    `os.DirEntry.stat()` answers from the directory-enumeration record. On
+    Windows that record holds no volume serial and no file index, so `st_dev`
+    and `st_ino` both come back 0 -- while every re-check in this module reads
+    them through `lstat` or `fstat`, which open the object and get the real
+    pair. Pinning an entry to the enumeration record there pins it to an
+    identity nothing can match: the census counted every subdirectory as having
+    changed under it, descended into none of them, and reported an empty vault
+    to a scan-only adopt.
+
+    So take one real look, at the two places an identity is about to be pinned.
+    POSIX fills both fields during enumeration, so the record is returned
+    unchanged and no extra call is made there.
+    """
+    if os.name != "nt":  # pragma: no cover - the Windows branch is the fix
+        return entry.stat(follow_symlinks=False)
+    return os.lstat(entry.path)
+
+
 def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return (
         getattr(left, "st_dev", None) == getattr(right, "st_dev", None)
@@ -59,6 +80,36 @@ def _same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
         == getattr(right, "st_mtime_ns", None)
         and getattr(left, "st_ctime_ns", None)
         == getattr(right, "st_ctime_ns", None)
+    )
+
+
+def _same_file_state_across_stat_apis(
+    left: os.stat_result, right: os.stat_result
+) -> bool:
+    """`_same_file_state` minus the one field the two stat APIs disagree on.
+
+    The read below compares an `fstat` on its own open handle against an
+    `lstat` on the path, to prove nothing swapped the file underneath it. On
+    Windows `st_ctime` is the *creation* time, and it is served from the
+    directory entry, which the filesystem updates lazily -- so those two calls
+    come back a millisecond apart for a file nothing has touched, and every
+    markdown page in the vault read back as "changed during the read".
+
+    Dropping it across that boundary costs nothing. Creation time cannot change
+    for a live inode: producing a new one moves `st_dev`/`st_ino` and a content
+    change moves `st_size`/`st_mtime_ns`, all of which stay compared. On POSIX
+    `st_ctime` is the inode-change time -- it catches a chmod or a link-count
+    change that the other fields miss -- so it is kept there.
+
+    The handle-to-handle comparison keeps the full state on both platforms:
+    both sides come from the same API, so every field means the same thing.
+    """
+    if os.name != "nt":
+        return _same_file_state(left, right)
+    return (
+        _same_identity(left, right)
+        and left.st_size == right.st_size
+        and getattr(left, "st_mtime_ns", None) == getattr(right, "st_mtime_ns", None)
     )
 
 
@@ -250,7 +301,7 @@ def _read_regular_file_bounded(
         not _directory_identities_current(root, expected_ancestors)
         or _is_reparse(current)
         or not vault._same_identity(expected_file, current)
-        or not _same_file_state(opened, current)
+        or not _same_file_state_across_stat_apis(opened, current)
     ):
         return "unsafe", None
     return "ok", b"".join(chunks)
@@ -608,9 +659,23 @@ def scan(
                     hidden_omitted += 1
                     continue
                 child_path = Path(entry.path)
+                try:
+                    pinned = _identity_bearing_stat(entry)
+                except OSError:
+                    unreadable_directories += 1
+                    enumeration_incomplete = True
+                    continue
+                if (
+                    not stat.S_ISDIR(pinned.st_mode)
+                    or stat.S_ISLNK(pinned.st_mode)
+                    or _is_reparse(pinned)
+                ):
+                    unreadable_directories += 1
+                    enumeration_incomplete = True
+                    continue
                 child_identity = vault._identity(
                     child_path.relative_to(root_path).as_posix(),
-                    entry_info,
+                    pinned,
                 )
                 child_directories.append(
                     (child_path, (*expected_ancestors, child_identity))
@@ -626,9 +691,15 @@ def scan(
                 markdown_omitted += 1
                 continue
             disk_path = Path(entry.path)
+            try:
+                pinned_file = _identity_bearing_stat(entry)
+            except OSError:
+                unreadable_files += 1
+                markdown_omitted += 1
+                continue
             expected_file = vault._identity(
                 disk_path.relative_to(root_path).as_posix(),
-                entry_info,
+                pinned_file,
             )
             read_status, raw = _read_regular_file_bounded(
                 root_path,
