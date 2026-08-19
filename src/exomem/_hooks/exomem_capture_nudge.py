@@ -62,8 +62,11 @@ REMINDER = (
     "central, and useful beyond this source may you call "
     'connect_memory(operation="create-entity"). A single incidental mention, unresolved '
     "identity, or transient participant stays in source/note context. Capture conclusions "
-    "as distilled compiled notes, not transcripts, then report Saved -> path. If neither "
-    "case applies, or no Knowledge Base is configured, do nothing and stop."
+    "as distilled compiled notes, not transcripts, then report Saved -> path. Where the "
+    "turn contradicted a conclusion an active page already states, supersede that page "
+    "with replace_memory instead of appending a correction beside it: nothing is "
+    "deleted either way, but two live versions of one conclusion both read as current. "
+    "If neither case applies, or no Knowledge Base is configured, do nothing and stop."
 )
 
 
