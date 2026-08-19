@@ -452,8 +452,17 @@ def collect_candidates(
         bm25_ranking = _eligible(bm25_ranking)
 
         with _span(timings, "keyword"):
+            # Over-fetch by the same factor the BM25 lane uses, and for the same
+            # reason: `collapse_frame_children` and `_eligible` below can drop
+            # members, so a lane that supplied exactly the fused depth could
+            # arrive under it. Before this the lane supplied *everything* --
+            # every matching page in the vault, on every call (#516).
             keyword_ranking = keyword_match_paths(
-                vault_root, query_norm, scope, freshness=snapshot.for_scope(scope)
+                vault_root,
+                query_norm,
+                scope,
+                freshness=snapshot.for_scope(scope),
+                k=candidate_k * 3,
             )
         keyword_ranking = collapse_frame_children(
             keyword_ranking,

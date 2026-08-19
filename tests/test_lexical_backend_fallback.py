@@ -308,6 +308,49 @@ def test_keyword_lane_parity_with_reference_scan(tmp_path, monkeypatch, query):
 
 
 @needs_fts5
+@pytest.mark.parametrize("k", [0, 1, 2, 5, 100])
+def test_a_bounded_keyword_lane_is_the_unbounded_prefix_on_both_backends(
+    tmp_path, monkeypatch, k
+):
+    """The bound may not change the contract, only how much of it is returned.
+
+    The lane answers in `updated` desc order, so a caller cannot bound it by
+    slicing what it gets back -- that would be slicing recency order after the
+    fact only if the order had already been applied, which is the whole reason
+    the bound lives inside the lane. Asserting the bounded result is a literal
+    prefix of the unbounded one is what says it was applied in the right place.
+
+    Both backends are checked at the same `k`, because the sidecar applies it
+    as SQL `LIMIT` and the reference scan applies it as a slice, and the parity
+    gate is worth nothing if it only holds when unbounded.
+    """
+    _parity_corpus(tmp_path)
+
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    reference_all = find_module._keyword_match_paths(tmp_path, "employment", "kb")
+    reference_k = find_module._keyword_match_paths(tmp_path, "employment", "kb", k=k)
+    find_module.clear_cache()
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
+    indexed_all = find_module._keyword_match_paths(tmp_path, "employment", "kb")
+    indexed_k = find_module._keyword_match_paths(tmp_path, "employment", "kb", k=k)
+
+    assert reference_k == reference_all[:k]
+    assert indexed_k == indexed_all[:k]
+    assert indexed_k == reference_k
+
+
+@needs_fts5
+def test_an_unbounded_keyword_lane_is_unchanged(tmp_path, monkeypatch):
+    """`k=None` is the existing contract, and every other caller still passes it."""
+    _parity_corpus(tmp_path)
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
+
+    assert find_module._keyword_match_paths(
+        tmp_path, "employment", "kb", k=None
+    ) == find_module._keyword_match_paths(tmp_path, "employment", "kb")
+
+
+@needs_fts5
 def test_keyword_parity_vault_scope(tmp_path, monkeypatch):
     _parity_corpus(tmp_path)
     _write_page(tmp_path, "Projects/outside.md", "employment beyond the kb", updated="2026-07-01")

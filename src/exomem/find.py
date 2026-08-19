@@ -3446,6 +3446,7 @@ def _keyword_match_paths(
     freshness: tuple | None = None,
     failed_out: list[str] | None = None,
     repair: bool = True,
+    k: int | None = None,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -3459,6 +3460,17 @@ def _keyword_match_paths(
     function's scan (the parity suite), so falling through changes nothing
     but latency. The scan below remains the reference implementation and the
     `EXOMEM_LEXICAL_BACKEND=python` target.
+
+    `k` bounds the candidate set. Every other lane in `find_candidates` already
+    takes one; this one took none, so it answered with every page in the vault
+    that matched, and the fuse and the eligibility filter then paid for all of
+    them on every call (#516). The bound belongs here rather than at the caller
+    because the result is ordered by `updated` desc: a caller that sliced the
+    return value would be slicing recency order, which is only correct if the
+    order was applied first -- which is exactly what the sidecar's `LIMIT` and
+    the truncation below do.
+
+    Both backends truncate identically, so parity holds at any `k`.
     """
     if not query_norm:
         return []
@@ -3470,6 +3482,7 @@ def _keyword_match_paths(
         scope=scope,
         freshness=freshness,
         repair=repair,
+        k=k,
     )
     if indexed is not None:
         return indexed
@@ -3500,7 +3513,8 @@ def _keyword_match_paths(
             continue
         matches.append((page.updated or "0000-00-00", page.rel_path))
     matches.sort(reverse=True)  # most-recent first
-    return [p for _, p in matches]
+    bounded = matches if k is None else matches[: max(0, int(k))]
+    return [p for _, p in bounded]
 
 
 def _outbound_wikilink_paths(

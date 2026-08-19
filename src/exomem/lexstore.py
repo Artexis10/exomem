@@ -485,6 +485,7 @@ def search_substring(
     scope: str = "kb",
     freshness: tuple | None = None,
     repair: bool = True,
+    k: int | None = None,
 ) -> list[str] | None:
     """The keyword lane's match set (every whitespace token a substring of
     title or body), ordered `updated` desc then path desc, navigation files
@@ -498,7 +499,7 @@ def search_substring(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_substring(tokens, scope, freshness, repair)
+    return store.search_substring(tokens, scope, freshness, repair, k)
 
 
 def search_semantic_units(
@@ -3422,6 +3423,7 @@ class LexicalStore:
         scope: str,
         freshness: tuple | None,
         repair: bool = True,
+        k: int | None = None,
     ) -> list[str] | None:
         if self._failed:
             return None
@@ -3433,7 +3435,7 @@ class LexicalStore:
                 scope,
                 freshness,
                 repair=repair,
-                query_fn=lambda conn: self._substring_query(conn, tokens, scope),
+                query_fn=lambda conn: self._substring_query(conn, tokens, scope, k),
             )
         except sqlite3.Error as e:
             self._note_query_failure(
@@ -3443,12 +3445,19 @@ class LexicalStore:
             return None
 
     def _substring_query(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None
     ) -> list[str]:
         """Exact keyword contract: trigram MATCH narrows (tokens >= 3 chars),
         then instr() verifies EVERY token against the stored raw text — the
         verification is what parity rests on; MATCH is only the accelerator.
-        Needles under the trigram floor rely on the verification alone."""
+        Needles under the trigram floor rely on the verification alone.
+
+        `k` truncates a list that is already totally ordered, so a bounded
+        result is a prefix of the unbounded one and the contract is unchanged.
+        It exists because the ordering makes the *caller* unable to bound this
+        safely: a candidate lane cannot take the first `k` it happens to see
+        and still be reading recency order, so the bound has to be applied
+        where the order is."""
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses: list[str] = [f"p.{col} = 1", "p.is_nav = 0"]
         params: list[object] = []
@@ -3460,10 +3469,14 @@ class LexicalStore:
         for t in tokens:
             clauses.append("(instr(tri.title_lower, ?) > 0 OR instr(tri.body_lower, ?) > 0)")
             params.extend((t, t))
+        limit = ""
+        if k is not None:
+            limit = " LIMIT ?"
+            params.append(max(0, int(k)))
         rows = conn.execute(
             "SELECT p.path FROM tri JOIN pages p ON p.rowid = tri.rowid "
             "WHERE " + " AND ".join(clauses) + " "
-            "ORDER BY p.updated DESC, p.path DESC",
+            "ORDER BY p.updated DESC, p.path DESC" + limit,
             params,
         ).fetchall()
         return [r[0] for r in rows]
