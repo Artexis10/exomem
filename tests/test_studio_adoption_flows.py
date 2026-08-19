@@ -81,10 +81,19 @@ def _write(root: Path, rel: str, content: str) -> Path:
 
 
 def _snapshot(root: Path) -> dict[str, bytes]:
+    """Byte-for-byte vault contents outside the KB, keyed by posix relative path.
+
+    `as_posix()`, not `str()`: tests index this dict with forward-slash literals
+    like "Old Notes/a.md", and `str()` on a WindowsPath yields backslashes, so
+    the lookup raised KeyError on the Windows lane only. The separator also
+    decided the exclusion below -- `split("/")[0]` returns the WHOLE path on
+    Windows, turning a first-segment test into a substring test that would
+    exempt any file with "Knowledge Base" anywhere in its path.
+    """
     return {
-        str(p.relative_to(root)): p.read_bytes()
+        p.relative_to(root).as_posix(): p.read_bytes()
         for p in root.rglob("*")
-        if p.is_file() and "Knowledge Base" not in str(p.relative_to(root)).split("/")[0]
+        if p.is_file() and p.relative_to(root).as_posix().split("/")[0] != "Knowledge Base"
     }
 
 
