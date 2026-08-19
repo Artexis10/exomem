@@ -12,6 +12,12 @@ def _workflow() -> dict:
     return yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
 
 
+def _cross_platform_workflow() -> dict:
+    return yaml.safe_load(
+        (ROOT / ".github/workflows/cross-platform.yml").read_text(encoding="utf-8")
+    )
+
+
 def test_lean_python_lanes_have_time_bounds_and_versioned_timing_evidence() -> None:
     workflow = _workflow()
     job = workflow["jobs"]["test"]
@@ -204,3 +210,37 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_requires_every_ci_job() -
     assert gate["if"] == "${{ !cancelled() }}"
     assert set(gate["needs"]) == set(workflow["jobs"]) - {"gate"}
     assert gate["steps"][0]["env"]["RESULTS"] == "${{ join(needs.*.result, ' ') }}"
+
+
+def test_the_cross_platform_split_count_matches_its_shard_matrix() -> None:
+    """A mismatch here loses coverage without losing green.
+
+    `--splits=N` and the shard matrix are two independent numbers that have to
+    agree. Raise the matrix without the flag and the extra groups error; raise
+    the flag without the matrix and the tests in the missing groups are simply
+    never run, on a lane that still reports success. The second failure is
+    invisible, which is why it is asserted rather than reviewed.
+    """
+    job = _cross_platform_workflow()["jobs"]["suite"]
+    shards = job["strategy"]["matrix"]["shard"]
+    run_step = next(step for step in job["steps"] if step.get("name", "").startswith("Run tests"))
+
+    assert shards == list(range(1, len(shards) + 1))
+    assert f"--splits={len(shards)}" in run_step["run"]
+    assert "--group=${{ matrix.shard }}" in run_step["run"]
+    assert job["name"].endswith(f"shard ${{{{ matrix.shard }}}}/{len(shards)})")
+
+
+def test_the_release_bot_branch_does_not_launch_the_cross_platform_matrix() -> None:
+    """Its diff is a version string; `main` runs this lane on push regardless.
+
+    The bot force-pushes that branch on every merge to main, and each push
+    relaunched the whole matrix into a queue real PRs were waiting in. macOS
+    runners cap at five concurrent jobs for a public repo on the free tier, so
+    those launches were not spare capacity -- they were the queue.
+    """
+    condition = " ".join(_cross_platform_workflow()["jobs"]["suite"]["if"].split())
+
+    assert "release-please--branches--" in condition
+    # Skipped for that branch's PR, never for a push to main.
+    assert "github.event_name != 'pull_request'" in condition

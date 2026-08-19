@@ -29,16 +29,33 @@ concurrency:
 
 jobs:
   suite:
-    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/2)
+    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/4)
+    # Not for the release bot's version-bump PR. Its diff is a version string
+    # and a changelog; it carries no code this lane could say anything about,
+    # and `main` runs the lane on push immediately after it merges. The bot
+    # force-pushes that branch on every merge to main -- twenty times in one
+    # release cycle here -- and each force-push relaunched the whole matrix
+    # into a queue that real PRs were waiting in. macOS runners cap at five
+    # concurrent jobs for a public repo on the free tier, so those launches
+    # were not free capacity; they were the queue.
+    if: >-
+      github.event_name != 'pull_request'
+      || !startsWith(github.head_ref, 'release-please--branches--')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-        # Two shards, not the Linux lane's four. This lane exists to expose
-        # platform behaviour, not to be the fastest path to a result.
-        shard: [1, 2]
+        # Four shards, matching the Linux lane. This lane still exists to
+        # expose platform behaviour rather than to be the fastest path to a
+        # result -- but two shards made it the SLOWEST path by a wide margin: a
+        # macOS shard measured 17m53s of execution and Windows shards ran past
+        # 20 minutes, against a Linux lane finishing in a few. That is not a
+        # neutral cost. It is the feedback delay on every change to this repo,
+        # and it is paid on platforms whose defects are the hardest to
+        # reproduce locally, which is exactly where a slow loop hurts most.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,7 +120,7 @@ jobs:
           tests/test_governance_overhead.py::test_governed_receipt_append_overhead_under_budget
           --deselect
           tests/test_governance_overhead.py::test_scrubber_throughput_under_budget
-          --splits=2
+          --splits=4
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
