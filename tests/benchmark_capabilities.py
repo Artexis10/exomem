@@ -88,6 +88,19 @@ def has_resumable_directory_cursor() -> bool:
 
 
 @lru_cache(maxsize=1)
+def has_mount_type_inspection() -> bool:
+    """True where `findmnt` can name the filesystem backing a directory.
+
+    `infra/scripts/ansible_with_sops.sh` decrypts secrets only into tmpfs or
+    ramfs, and proves that with `findmnt --output FSTYPE --target`. That is
+    util-linux, and the hosts this runner provisions are Linux. macOS ships
+    no `findmnt` at all, so the refusal a test asserts there is the shell
+    failing to find a command rather than the runner reaching its own check.
+    """
+    return shutil.which("findmnt") is not None
+
+
+@lru_cache(maxsize=1)
 def has_procfs_descriptor_paths() -> bool:
     """True where `/proc/self/fd/<n>` names an open descriptor as a path.
 
@@ -105,9 +118,9 @@ def has_procfs_descriptor_paths() -> bool:
 
 @lru_cache(maxsize=1)
 def has_arbitrary_byte_filenames() -> bool:
-    """True where a filename may hold bytes that are not valid UTF-8.
+    r"""True where a filename may hold bytes that are not valid UTF-8.
 
-    Linux treats a name as an opaque byte string, so `b"probe-\\xff"` is a legal
+    Linux treats a name as an opaque byte string, so `b"probe-\xff"` is a legal
     file and Python surfaces it through `surrogateescape`. APFS and HFS+
     validate the encoding instead and refuse it with `EILSEQ`, so the hazard
     cannot be staged on macOS at all. Probed rather than keyed off
@@ -118,12 +131,19 @@ def has_arbitrary_byte_filenames() -> bool:
         return False
     directory = tempfile.mkdtemp(prefix="exomem-byte-name-probe-")
     try:
-        probe = os.path.join(os.fsencode(directory), b"probe-\\xff")
+        # Probe through the surface the callers use: a `str` carrying a
+        # surrogate, re-encoded by `surrogateescape` on the way to the syscall.
+        # An `os.open` on a bytes path is not the same question, and the byte
+        # here has to be the real 0xFF -- an escaped literal `\\xff` is four
+        # ordinary ASCII characters that every filesystem accepts, which is why
+        # this first answered yes on macOS and let the caller stage a name the
+        # platform then refused with EILSEQ.
+        probe = Path(directory) / os.fsdecode(b"probe-\xff")
         try:
-            os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            probe.write_bytes(b"")
         except OSError:
             return False
-        os.unlink(probe)
+        probe.unlink()
         return True
     finally:
         os.rmdir(directory)
@@ -296,6 +316,11 @@ def require_trusted_system_git() -> None:
 def require_resumable_directory_cursor() -> None:
     if not has_resumable_directory_cursor():
         pytest.skip("this platform resumes directory scans from the durable prune catalog")
+
+
+def require_mount_type_inspection() -> None:
+    if not has_mount_type_inspection():
+        pytest.skip("findmnt is unavailable, so the mount type cannot be inspected")
 
 
 def require_procfs_descriptor_paths() -> None:

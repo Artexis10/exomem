@@ -741,9 +741,16 @@ def _reaches_a_pinned_inode_after_rename(tmp_path: Path) -> bool:
     """
     probe = tmp_path / "pinned-inode-probe.bin"
     probe.write_bytes(b"probe")
+    decoy = tmp_path / "pinned-inode-probe-decoy.bin"
+    decoy.write_bytes(b"decoy")
     descriptor = os.open(probe, os.O_RDONLY)
     try:
+        # Stage the swap the tests below stage, not a bare rename: the old name
+        # is taken over by a *different* file, which is what makes a stale
+        # `F_GETPATH` answer dangerous and what the binding's identity check
+        # exists to catch. A probe that only renames answers an easier one.
         probe.rename(tmp_path / "pinned-inode-probe-moved.bin")
+        probe.symlink_to(decoy)
         return audit_module._pinned_descriptor_path(descriptor) is not None
     finally:
         os.close(descriptor)
@@ -762,10 +769,16 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
         )
-    with _sqlite(sidecar) as conn:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     external = tmp_path / "external.sqlite"
-    external.write_bytes(sidecar.read_bytes())
+    # `backup()`, not `read_bytes()`. Copying the main database file alone is
+    # complete only when no `-wal` sibling is still carrying committed pages,
+    # and whether one exists here depends on connection lifetime rather than
+    # on anything this test means to vary -- so the attacker's file could
+    # arrive empty and the assertion that it stayed untouched would pass for
+    # the wrong reason.
+    with _sqlite(sidecar) as source, _sqlite(external) as target:
+        source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        source.backup(target)
     moved = tmp_path / "moved.sqlite"
     real_purge = embedding_index.EmbeddingIndex.purge_exact_persisted_rows
 
@@ -838,10 +851,16 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
             "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
             "VALUES ('../../corrupt.md', 'private', 'checksum', X'00', 0)"
         )
-    with _sqlite(sidecar) as conn:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     external = tmp_path / "external-claims.sqlite"
-    external.write_bytes(sidecar.read_bytes())
+    # `backup()`, not `read_bytes()`. Copying the main database file alone is
+    # complete only when no `-wal` sibling is still carrying committed pages,
+    # and whether one exists here depends on connection lifetime rather than
+    # on anything this test means to vary -- so the attacker's file could
+    # arrive empty and the assertion that it stayed untouched would pass for
+    # the wrong reason.
+    with _sqlite(sidecar) as source, _sqlite(external) as target:
+        source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        source.backup(target)
     moved = tmp_path / "moved-claims.sqlite"
     real_purge = claims.ClaimIndex.purge_exact_persisted_rows
 
