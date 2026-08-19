@@ -2615,6 +2615,24 @@ def _build_identity_census(
             rel = path.relative_to(root).as_posix()
             try:
                 source = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                # Deleted between the stat and the read: the same window #528
+                # closed one call earlier, and the same answer. Splitting the
+                # two would make the census's verdict depend on which
+                # microsecond a deletion landed in, and that says nothing about
+                # the vault -- a page that no longer exists is simply not in
+                # this snapshot, and change detection belongs to freshness.
+                #
+                # Only absence is tolerated. Every other OSError and any decode
+                # failure still fails closed below, because those mean the page
+                # is there and cannot be trusted, which is a different fact
+                # about the tree and one the census exists to refuse on.
+                #
+                # `_stable_identity_for_path` keeps the strict behaviour: a
+                # caller that named one page is owed an answer about that page,
+                # so a vanished one is a real result there rather than an entry
+                # missing from a snapshot.
+                continue
             except (OSError, UnicodeDecodeError) as error:
                 code = (
                     "ACTIVATION_MANIFEST_PAGE_UNREADABLE"
