@@ -780,6 +780,17 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
     with _sqlite(sidecar) as source, _sqlite(external) as target:
         source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         source.backup(target)
+    # The attacker's file must hold the row BEFORE the purge, or the
+    # "stayed untouched" assertion below cannot fail -- an empty decoy
+    # passes it for the wrong reason, and an empty decoy that the purge
+    # then reaches looks identical to one the copy never populated. Assert
+    # the precondition so those two are never confused again: this line
+    # failing means the setup is broken, the later one failing means the
+    # repair reached a file it must never touch.
+    with _sqlite(external) as conn:
+        assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
+            ("../../corrupt.md",)
+        ], "the decoy database was not populated; the swap assertion below is vacuous"
     moved = tmp_path / "moved.sqlite"
     real_purge = embedding_index.EmbeddingIndex.purge_exact_persisted_rows
 
@@ -860,6 +871,17 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
     with _sqlite(sidecar) as source, _sqlite(external) as target:
         source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         source.backup(target)
+    # The attacker's file must hold the row BEFORE the purge, or the
+    # "stayed untouched" assertion below cannot fail -- an empty decoy
+    # passes it for the wrong reason, and an empty decoy that the purge
+    # then reaches looks identical to one the copy never populated. Assert
+    # the precondition so those two are never confused again: this line
+    # failing means the setup is broken, the later one failing means the
+    # repair reached a file it must never touch.
+    with _sqlite(external) as conn:
+        assert conn.execute("SELECT file_path FROM claims").fetchall() == [
+            ("../../corrupt.md",)
+        ], "the decoy database was not populated; the swap assertion below is vacuous"
     moved = tmp_path / "moved-claims.sqlite"
     real_purge = claims.ClaimIndex.purge_exact_persisted_rows
 
