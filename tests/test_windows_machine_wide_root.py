@@ -108,17 +108,24 @@ def test_each_tier_of_the_chain_answers(
     assert mode.windows_machine_wide_root() == Path(expected)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="the shared base is a Windows path")
 def test_config_and_log_paths_share_the_one_base(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reuse the helper exists for, asserted rather than assumed."""
+    """The reuse the helper exists for, asserted rather than assumed.
+
+    Windows-only rather than platform-faked. Both callers branch on
+    `os.name` / `sys.platform`, and monkeypatching those is not a local act:
+    they are read by the whole process, including pytest's own reporting
+    hooks. Faking them here made `shutil.which` take its win32 branch on a
+    Linux runner and brought the session down with an INTERNALERROR, which
+    is a far worse failure than the one it was checking for.
+    """
     from exomem import logging_config
 
     monkeypatch.setenv("PROGRAMDATA", "P:" + chr(92) + "Data")
     monkeypatch.delenv("ALLUSERSPROFILE", raising=False)
     monkeypatch.delenv("EXOMEM_CONFIG_PATH", raising=False)
-    monkeypatch.setattr(os, "name", "nt")
-    monkeypatch.setattr(logging_config.sys, "platform", "win32")
 
     base = mode.windows_machine_wide_root()
 
