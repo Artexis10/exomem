@@ -35,7 +35,9 @@ command.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -44,6 +46,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from membench.trackc.hook_home import (
+    platform_env,
+    bash_executable,
     SRC_DIR,
     HookHome,
     ensure_isolated,
@@ -156,6 +160,9 @@ def build_seeded_vault(workdir: Path | None = None, *, seed: int = 1) -> SeededV
     )
 
 
+_CRLF = chr(13) + chr(10)
+
+
 def make_exomem_shim(bin_dir: Path) -> Path:
     """An ``exomem`` executable for the hook's PATH lookup (line 295) that runs
     THIS worktree's code in the test venv. Vault/profile env is inherited from
@@ -169,7 +176,46 @@ def make_exomem_shim(bin_dir: Path) -> Path:
         encoding="utf-8",
     )
     shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    if os.name == "nt":
+        # The hook resolves the CLI with `shutil.which("exomem")`, and on
+        # Windows that only matches a name carrying one of PATHEXT's suffixes.
+        # There is also no execute bit to set, so the extensionless `sh` shim
+        # above is invisible there however the directory is placed on PATH --
+        # the CLI rung simply never resolves, and the ladder is scored as having
+        # degraded to its floor on a platform detail rather than on the
+        # condition the case is testing.
+        native = bin_dir / "exomem.cmd"
+        native.write_text(
+            "@echo off" + _CRLF
+            + f'set "PYTHONPATH={SRC_DIR}"' + _CRLF
+            + f'"{sys.executable}" -m exomem %*' + _CRLF,
+            encoding="utf-8",
+            newline="",
+        )
+        return native
     return shim
+
+
+def _entries_without_exomem(path: str) -> list[str]:
+    """PATH entries that cannot resolve an `exomem`, so the CLI rung is absent.
+
+    Dropping the shim directory was the whole degradation on POSIX, where the
+    base PATH is `/usr/bin:/bin` and never held an `exomem`. On Windows the base
+    PATH has to carry an interpreter directory -- the wrapper resolves `python3`
+    or `python` and otherwise exits 0 with no output, which the suite would read
+    as a hook that chose to stay quiet -- and for a checkout installed into a
+    virtual environment that same directory holds `exomem.exe`. So the shim came
+    off PATH and the hook resolved the real CLI instead: the ladder never
+    degraded, and the case asserted the opposite of what it ran.
+
+    Removing by capability rather than by name keeps the interpreter and takes
+    the CLI, on either platform.
+    """
+    kept: list[str] = []
+    for entry in path.split(os.pathsep):
+        if entry and shutil.which("exomem", path=entry) is None:
+            kept.append(entry)
+    return kept
 
 
 def run_injection(
@@ -192,7 +238,13 @@ def run_injection(
     state_home.mkdir(parents=True, exist_ok=True)
     shim_dir = seeded.workdir / "bin"
     make_exomem_shim(shim_dir)
-    path = "/usr/bin:/bin" if break_cli else f"{shim_dir}:/usr/bin:/bin"
+    # The platform's own base PATH, so this stays "/usr/bin:/bin" on POSIX and
+    # becomes something a Windows child can actually run from.
+    base_path = platform_env().get("PATH", "")
+    if break_cli:
+        path = os.pathsep.join(_entries_without_exomem(base_path))
+    else:
+        path = os.pathsep.join([str(shim_dir), base_path])
     env = home.base_env(
         EXOMEM_HOOK_HOME=str(state_home),
         PATH=path,
@@ -210,7 +262,7 @@ def run_injection(
         "prompt": probe,
     }
     proc = subprocess.run(
-        ["bash", "-c", home.wired_command("UserPromptSubmit")],
+        [bash_executable(), "-c", home.wired_command("UserPromptSubmit")],
         input=json.dumps(event),
         env=env,
         capture_output=True,

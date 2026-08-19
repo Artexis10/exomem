@@ -33,7 +33,7 @@ from membench.trackc.control_prompts import (
     RELEVANT_CASE_IDS,
     ControlCase,
 )
-from membench.trackc.hook_home import HookHome, create_hook_home, ensure_isolated
+from membench.trackc.hook_home import HookHome, bash_executable, create_hook_home, ensure_isolated
 
 HOOK_TIMEOUT_SECONDS = 30.0
 
@@ -123,7 +123,7 @@ def run_case(
         "prompt": case.prompt,
     }
     proc = subprocess.run(
-        ["bash", "-c", home.wired_command("UserPromptSubmit")],
+        [bash_executable(), "-c", home.wired_command("UserPromptSubmit")],
         input=json.dumps(event),
         env=env,
         capture_output=True,

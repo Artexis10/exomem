@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,7 +50,158 @@ SRC_DIR = REPO_ROOT / "src"
 CLAUDE_EVENTS = ("Stop", "UserPromptSubmit", "PreCompact", "SessionEnd", "SessionStart")
 CODEX_EVENTS = ("Stop", "UserPromptSubmit", "PreCompact", "SessionStart")
 
-_BASE_PATH = "/usr/bin:/bin"
+_POSIX_PATH = "/usr/bin:/bin"
+
+#: Variables Windows itself needs in a child, as opposed to anything about the
+#: user's configuration. `SystemRoot` is the load-bearing one: Winsock resolves
+#: its service providers underneath it, so a child without it dies importing
+#: `asyncio` -- `_overlapped` raises `WinError 10106, the requested service
+#: provider could not be loaded or initialized` before any exomem code runs. On
+#: the Windows lane that took out 14 tests across tracks C and D, every one of
+#: them reported as a setup failure of `install-hook` rather than as the
+#: environment defect it is. The rest are the ordinary plumbing a spawned
+#: process expects: where to find the shell and executable suffixes, where to
+#: put temporary files, and the CPU facts some runtimes read at startup.
+_WINDOWS_PASSTHROUGH = (
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "TEMP",
+    "TMP",
+    "PATHEXT",
+    "COMSPEC",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+)
+
+
+def home_env(base: Path) -> dict[str, str]:
+    """Point the platform's own idea of the home directory at `base`.
+
+    `HOME` alone redirects nothing on Windows: `Path.home()` and `~` are read
+    from `USERPROFILE`, falling back to `HOMEDRIVE` plus `HOMEPATH`, and with
+    none of them set the interpreter raises rather than guessing. So a child
+    given only `HOME` did not get an isolated home there -- it got no home at
+    all, which is a different and much louder failure than leaking into the
+    real one.
+
+    All the spellings are set together so the child sees one answer whichever
+    it consults, and so a hook that resolves `~` lands in the same isolated
+    tree the harness is asserting against.
+    """
+    home = {"HOME": str(base)}
+    if os.name == "nt":
+        drive, tail = os.path.splitdrive(str(base))
+        home["USERPROFILE"] = str(base)
+        home["HOMEDRIVE"] = drive
+        home["HOMEPATH"] = tail
+    return home
+
+
+def platform_env() -> dict[str, str]:
+    """OS plumbing for an isolated child, and nothing that carries user state.
+
+    The isolation these harnesses want is from the *user's* configuration --
+    their real client homes, their exomem environment -- not from the operating
+    system. A hardcoded POSIX `PATH` provided both on Linux and neither on
+    Windows, where it named directories that do not exist and left out the
+    variables the platform requires.
+
+    Nothing here is read from exomem's own environment, so what the harness
+    isolates is unchanged; `ensure_isolated` still governs that and still sees
+    exactly the keys it did before.
+    """
+    if os.name != "nt":
+        return {"PATH": _POSIX_PATH}
+    carried = {
+        name: os.environ[name] for name in _WINDOWS_PASSTHROUGH if name in os.environ
+    }
+    system_root = carried.get("SystemRoot") or carried.get("windir") or ""
+    # Resolved tools first; the system directories are fallback plumbing.
+    directories = [
+        *_tool_directories(),
+        str(Path(system_root) / "System32"),
+        system_root,
+        str(Path(system_root) / "System32" / "Wbem"),
+    ]
+    carried["PATH"] = os.pathsep.join(dict.fromkeys(item for item in directories if item))
+    return carried
+
+
+#: The Microsoft Store publishes stub executables under this directory:
+#: `python3.exe` there is an installer prompt, not an interpreter, and a hook
+#: that reaches one gets `NoInstallsError: No runtimes are installed` instead of
+#: running.
+_STORE_ALIASES = "windowsapps"
+
+
+def bash_executable() -> str:
+    """An absolute path to a Windows-native bash, never the WSL launcher.
+
+    Naming it matters because PATH does not settle this on Windows.
+    `subprocess` hands a bare program name to `CreateProcess`, which searches
+    the system directory *before* any PATH entry -- so wherever WSL is
+    installed, `bash` is the launcher in System32, and that one cannot open the
+    `C:` path the wrapper is invoked with. The hook exits 127 and the suite
+    scores a missing interpreter as a hook that chose not to fire, which is the
+    same reading with none of the truth in it.
+
+    Returns the bare name where nothing better is found, so a host without a
+    git-bash fails the way it did rather than differently.
+    """
+    if os.name != "nt":
+        return "bash"
+    resolved = shutil.which("bash")
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir")
+    shim = None
+    if system_root:
+        shim = str(Path(system_root) / "System32" / "bash.exe").casefold()
+    if resolved is not None and (shim is None or resolved.casefold() != shim):
+        return resolved
+    git = shutil.which("git")
+    if git is not None:
+        # Git for Windows keeps bash in a sibling tree of the exe it advertises:
+        # `<root>/mingw64/bin/git.exe` alongside `<root>/usr/bin/bash.exe`.
+        for parent in Path(git).parents:
+            for relative in (("usr", "bin", "bash.exe"), ("bin", "bash.exe")):
+                candidate = parent.joinpath(*relative)
+                if candidate.is_file():
+                    return str(candidate)
+    return resolved or "bash"
+
+
+def _tool_directories() -> list[str]:
+    """Where the programs a wired hook command names actually live.
+
+    The Claude wrappers are invoked as `bash ~/.claude/hooks/<name>.sh` and then
+    resolve an interpreter themselves, so a child that cannot find a real bash
+    and a real Python does not run a hook at all -- it exits non-zero, and the
+    suite reads that as the hook declining to fire rather than as a broken
+    environment.
+
+    The interpreter comes first and is `sys.executable`, so the hooks run under
+    the same Python as the suite asserting about them rather than whichever
+    build is earliest on this machine's PATH. Resolved by directory rather than
+    by inheriting PATH: what these harnesses isolate is the user's
+    configuration, and a toolchain is not that.
+    """
+    # The base interpreter as well as the running one. They are the same
+    # directory outside a virtual environment; inside one they are not, and the
+    # difference matters to the injection ladder, which needs a PATH that
+    # resolves a Python but not this checkout's installed `exomem` console
+    # script -- a distinction that does not exist on POSIX, where the base PATH
+    # never held either.
+    candidates = [
+        Path(sys.executable).parent,
+        Path(sys.base_prefix),
+        Path(bash_executable()).parent,
+    ]
+    git = shutil.which("git")
+    if git is not None:
+        candidates.append(Path(git).parent)
+    return [
+        str(item) for item in candidates if item.name.casefold() != _STORE_ALIASES
+    ]
 
 
 def trusted_tmp_root() -> Path:
@@ -90,8 +242,8 @@ class HookHome:
         would: nothing inherited from the test process, HOME redirected, all
         three isolation knobs pointed at this home."""
         env = {
-            "PATH": _BASE_PATH,
-            "HOME": str(self.base),
+            **platform_env(),
+            **home_env(self.base),
             "EXOMEM_HOOK_HOME": str(self.home),
             "CLAUDE_CONFIG_DIR": str(self.home),
             "CODEX_HOME": str(self.home),
@@ -108,8 +260,8 @@ class HookHome:
 def install_env(base: Path, home: Path) -> dict[str, str]:
     """Env for the ``install-hook`` subprocess (isolated + this worktree's code)."""
     return {
-        "PATH": _BASE_PATH,
-        "HOME": str(base),
+        **platform_env(),
+        **home_env(base),
         "EXOMEM_HOOK_HOME": str(home),
         "CLAUDE_CONFIG_DIR": str(home),
         "CODEX_HOME": str(home),
@@ -167,7 +319,12 @@ def _wiring_problems(home: HookHome, events: tuple[str, ...]) -> list[str]:
     if not home.settings_path.is_file():
         return [f"missing hook config {home.settings_path}"]
     settings = home.settings()
-    hooks_dir = str(home.hooks_dir)
+    # The POSIX spelling, because that is what the installer writes: a custom
+    # hook directory goes in as a POSIX absolute path so the same command runs
+    # under the `bash` the wrapper needs (install_hook.py `_command_for`).
+    # Comparing against the native spelling made every wired entry look as if it
+    # pointed outside the isolated home on Windows, on a separator alone.
+    hooks_dir = home.hooks_dir.as_posix()
     for event in events:
         entries = _entries(settings, event)
         if not entries:

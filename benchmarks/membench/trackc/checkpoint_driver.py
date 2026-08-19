@@ -47,15 +47,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from membench.trackc.hook_home import (
+    bash_executable,
     HookHome,
     create_hook_home,
     ensure_isolated,
     make_workdir,
+    platform_env,
 )
 
 SCHEMA_VERSION = 1  # exomem_continuation_checkpoint.py line 26
@@ -67,6 +71,25 @@ _GIT_IDENTITY = {
     "GIT_COMMITTER_NAME": "Membench",
     "GIT_COMMITTER_EMAIL": "membench@example.invalid",
 }
+
+
+
+def _git_env() -> dict[str, str]:
+    """Isolated git env that can still find and run git on this platform.
+
+    The identity is pinned so a commit here never depends on the developer's
+    global config. `platform_env` supplies the rest; on Windows a child given
+    only a POSIX `PATH` cannot resolve `git` at all, and cannot start a process
+    that opens a socket either.
+    """
+    environment = {**platform_env(), **_GIT_IDENTITY}
+    git = shutil.which("git")
+    if git is not None:
+        environment["PATH"] = os.pathsep.join(
+            [str(Path(git).parent), environment.get("PATH", "")]
+        ).strip(os.pathsep)
+    return environment
+
 
 WORKSPACE_NAME = "membench-workspace"
 BRANCH_MARKER = "membench-marker-branch"
@@ -125,7 +148,7 @@ class RoundTripResult:
 def _git(workspace: Path, *args: str) -> str:
     proc = subprocess.run(
         ["git", "-C", str(workspace), *args],
-        env={"PATH": "/usr/bin:/bin", **_GIT_IDENTITY},
+        env=_git_env(),
         capture_output=True,
         text=True,
         timeout=30,
@@ -147,7 +170,7 @@ def plant_workspace(base: Path) -> PlantedWorkspace:
     ws.mkdir(parents=True)
     subprocess.run(
         ["git", "init", "-q", "-b", BRANCH_MARKER, str(ws)],
-        env={"PATH": "/usr/bin:/bin", **_GIT_IDENTITY},
+        env=_git_env(),
         capture_output=True,
         text=True,
         timeout=30,
@@ -197,14 +220,26 @@ def plant_workspace(base: Path) -> PlantedWorkspace:
 
 def continuation_command(home: HookHome, client: str, event: str) -> str:
     """The wired continuation command for ``event`` from the client's config
-    file in this home (claude: settings.json; codex: hooks.json)."""
+    file in this home (claude: settings.json; codex: hooks.json).
+
+    On Windows the `commandWindows` entry is the one a client runs, and taking
+    it is what makes this a test of the shipped wiring rather than of half of
+    it. The Codex `command` invokes `python3`, which is a name Windows does not
+    have -- that is the whole reason the installer writes the second entry --
+    so reading `command` there exercised a path no Codex client would take and
+    failed with `python3: command not found`.
+    """
     config_path = home.home / ("hooks.json" if client == "codex" else "settings.json")
     settings = json.loads(config_path.read_text(encoding="utf-8"))
     for group in settings["hooks"][event]:
         for entry in group.get("hooks", []):
             command = str(entry.get("command", ""))
-            if "continuation" in command and f"--client {client}" in command:
-                return command
+            if "continuation" not in command or f"--client {client}" not in command:
+                continue
+            native = entry.get("commandWindows")
+            if os.name == "nt" and isinstance(native, str) and native:
+                return native
+            return command
     raise AssertionError(f"no continuation command wired for {client}/{event}")
 
 
@@ -214,7 +249,7 @@ def run_checkpoint_hook(
     env = home.base_env()
     ensure_isolated(env)
     return subprocess.run(
-        ["bash", "-c", continuation_command(home, client, event_name)],
+        [bash_executable(), "-c", continuation_command(home, client, event_name)],
         input=json.dumps(event),
         env=env,
         capture_output=True,

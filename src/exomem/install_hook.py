@@ -54,14 +54,53 @@ _CONTINUATION_EVENTS = {
 }
 DEFAULT_CLIENT = "claude"
 SUPPORTED_CLIENTS = ("claude", "codex")
-DEFAULT_CLAUDE_HOOK_DIR = Path.home() / ".claude" / "hooks"
-DEFAULT_CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
-DEFAULT_CODEX_HOOK_DIR = Path.home() / ".codex" / "hooks"
-DEFAULT_CODEX_SETTINGS = Path.home() / ".codex" / "hooks.json"
 
-# Back-compat for existing tests and callers.
-DEFAULT_HOOK_DIR = DEFAULT_CLAUDE_HOOK_DIR
-DEFAULT_SETTINGS = DEFAULT_CLAUDE_SETTINGS
+#: The conventional locations, resolved on demand rather than at import.
+#:
+#: `Path.home()` raises `RuntimeError: Could not determine home directory` when
+#: the platform cannot answer -- on Windows that means no `USERPROFILE` and no
+#: `HOMEDRIVE`/`HOMEPATH`, which is the ordinary state of a service account and
+#: of any child process given a deliberately minimal environment. Computing
+#: these at module scope turned that into an unimportable module: `exomem
+#: install-hook` died before parsing its own arguments, including the
+#: invocations that name every path explicitly and never need a default at all.
+#:
+#: Exposed through `__getattr__` so the existing names keep working and keep
+#: their meaning; what changes is only that asking is what can fail, not
+#: importing.
+_DEFAULT_PATHS = {
+    "DEFAULT_CLAUDE_HOOK_DIR": (".claude", "hooks"),
+    "DEFAULT_CLAUDE_SETTINGS": (".claude", "settings.json"),
+    "DEFAULT_CODEX_HOOK_DIR": (".codex", "hooks"),
+    "DEFAULT_CODEX_SETTINGS": (".codex", "hooks.json"),
+    # Back-compat for existing tests and callers.
+    "DEFAULT_HOOK_DIR": (".claude", "hooks"),
+    "DEFAULT_SETTINGS": (".claude", "settings.json"),
+}
+
+
+def __getattr__(name: str) -> Path:
+    parts = _DEFAULT_PATHS.get(name)
+    if parts is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return Path.home().joinpath(*parts)
+
+
+def _is_conventional_hook_dir(hook_dir: Path, client: str) -> bool:
+    """Whether this is the location the `~`-relative command form describes.
+
+    The point of that form is that one settings.json works on every machine a
+    yadm-synced home is checked out on, so it is right exactly when the hooks
+    sit at the client's conventional path under the home directory. Where there
+    is no home directory to speak of, `~` has nothing to expand to and the
+    absolute path is the only form that can work -- so this answers no rather
+    than failing, and the caller writes the path it already has.
+    """
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return False
+    return hook_dir == home / (".codex" if client == "codex" else ".claude") / "hooks"
 
 # Substrings identifying a previously-installed nudge entry, so re-running is
 # idempotent and supersedes older entries (incl. the absolute-python-path form).
@@ -129,10 +168,10 @@ def _command_for(
     hook_dir = Path(hook_dir).expanduser()
     if client == "codex":
         py_name = script or wrapper.removesuffix(".sh").replace("-", "_") + ".py"
-        if hook_dir == DEFAULT_CODEX_HOOK_DIR:
+        if _is_conventional_hook_dir(hook_dir, "codex"):
             return f"python3 ~/.codex/hooks/{py_name}"
         return f'python3 "{(hook_dir / py_name).as_posix()}"'
-    if hook_dir == DEFAULT_CLAUDE_HOOK_DIR:
+    if _is_conventional_hook_dir(hook_dir, "claude"):
         return f"bash ~/.claude/hooks/{wrapper}"
     return f'bash "{(hook_dir / wrapper).as_posix()}"'
 

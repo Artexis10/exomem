@@ -56,7 +56,8 @@ def test_installer_wires_isolated_claude_home(claude_home) -> None:
     # The wiring lives entirely inside the isolated home.
     assert str(claude_home.settings_path).startswith(str(claude_home.home))
     command = claude_home.wired_command("UserPromptSubmit")
-    assert command == f'bash "{claude_home.hooks_dir / "exomem-retrieve-nudge.sh"}"'
+    wrapper = (claude_home.hooks_dir / "exomem-retrieve-nudge.sh").as_posix()
+    assert command == f'bash "{wrapper}"'
 
 
 def test_installer_wires_isolated_codex_home() -> None:
@@ -67,7 +68,7 @@ def test_installer_wires_isolated_codex_home() -> None:
         assert home.settings_path.name == "hooks.json"
         command = home.wired_command("UserPromptSubmit")
         assert command.startswith("python3 ")
-        assert str(home.hooks_dir) in command
+        assert home.hooks_dir.as_posix() in command
     finally:
         cleanup_workdir(home.base)
 
