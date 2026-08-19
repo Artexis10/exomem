@@ -32,8 +32,6 @@ def _fake_python(path: Path) -> None:
         import sys
         from pathlib import Path
 
-from benchmark_capabilities import require_posix_executable_scripts
-
         trace = Path(os.environ["TRACE_FILE"])
 
         def log(message):
@@ -381,7 +379,6 @@ def test_help_and_invalid_profile_are_non_mutating() -> None:
 
 
 def test_onnx_profile_installs_the_cpu_lane_and_preflights_as_hybrid(tmp_path: Path) -> None:
-    require_posix_executable_scripts()
     """#481: a GPU-less host had no way to get vectors without a CUDA torch wheel.
 
     `torch` is pinned to the CUDA index for Linux, so `--profile hybrid` pulled
@@ -389,6 +386,7 @@ def test_onnx_profile_installs_the_cpu_lane_and_preflights_as_hybrid(tmp_path: P
     `onnx` is an install lane rather than a doctor profile — it expects exactly
     the vector lane `hybrid` expects, so the preflight maps onto that.
     """
+    require_posix_executable_scripts()
     env, service_root, env_file = _fixture(tmp_path)
     subprocess.run(
         [
