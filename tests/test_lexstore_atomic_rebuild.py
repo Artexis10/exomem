@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import traceback
 import threading
 import time
 import uuid
@@ -998,16 +999,27 @@ def test_live_wal_not_blindly_deleted_and_unsafe_publish_declines(
     # the live main file (and thus without ever reaching a post-replace unlink of
     # the live -wal/-shm). An os.replace spy proves no main-file swap happened.
     replaced = {"n": 0}
+    callers: list[str] = []
     real_replace = lexstore.os.replace
 
     def _spy_replace(src: Any, dst: Any) -> Any:
         replaced["n"] += 1
+        # Named, not just counted. This fired once on a Windows CI runner and
+        # could not be reproduced locally; with only a count there was no way to
+        # tell an unsafe live-main swap from some unrelated rename inside the
+        # build, which is the difference between a data-safety defect and a
+        # test that spies too widely. `rebuild_atomic` has two publish paths --
+        # the quarantine branch replaces before `_quiesce_live_wal` is ever
+        # consulted -- so the caller is exactly what the next failure needs.
+        frame = traceback.extract_stack()[-2]
+        callers.append(f"{frame.filename}:{frame.lineno} in {frame.name} -> {dst}")
         return real_replace(src, dst)
 
     monkeypatch.setattr(lexstore.os, "replace", _spy_replace)
     monkeypatch.setattr(store, "_quiesce_live_wal", lambda: False)
     assert store.rebuild_atomic() is False
-    assert replaced["n"] == 0  # live main never replaced; live -wal/-shm never touched
+    # live main never replaced; live -wal/-shm never touched
+    assert replaced["n"] == 0, callers
     monkeypatch.undo()
     assert store.catalog_checkpoint("kb") == before
     assert any("livecontent" in hit.content for hit in _units_in_category(tmp_path, "config"))
