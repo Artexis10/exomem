@@ -72,6 +72,19 @@ def has_posix_executable_scripts() -> bool:
 
 
 @lru_cache(maxsize=1)
+def has_process_groups() -> bool:
+    """True where a process can be signalled as a group.
+
+    `os.killpg`/`os.getpgid` are POSIX-only, and the escalate-then-reap
+    shutdown that uses them is a POSIX-only strategy, not an unimplemented
+    one: Windows has job objects instead, and no caller asks for that here.
+    A test that monkeypatches `os.killpg` does not merely fail on Windows --
+    `monkeypatch.setattr` refuses an attribute that does not exist, so the
+    failure names the patch rather than the behaviour."""
+    return hasattr(os, "killpg") and hasattr(os, "getpgid")
+
+
+@lru_cache(maxsize=1)
 def has_resumable_directory_cursor() -> bool:
     """True where a `telldir` cookie outlives the stream that produced it.
 
@@ -311,6 +324,11 @@ def require_posix_executable_scripts() -> None:
 def require_trusted_system_git() -> None:
     if not has_trusted_system_git():
         pytest.skip("no trusted system Git on os.defpath (the harness's trust anchor)")
+
+
+def require_process_groups() -> None:
+    if not has_process_groups():
+        pytest.skip("process groups are not a signalling primitive here")
 
 
 def require_resumable_directory_cursor() -> None:

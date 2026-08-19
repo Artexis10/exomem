@@ -1538,11 +1538,17 @@ def test_structural_workspace_change_rotates_with_unchanged_transcript(tmp_path:
     (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
     second = checkpoint.write_checkpoint(event, home, observed_at_ns=200)
 
-    assert second["checkpoint_id"] != first["checkpoint_id"]
     current = checkpoint.load_checkpoint(
         checkpoint.session_state_dir(home, "codex", "session-1") / "current.json"
     )
-    assert current["structural"]["workspace"]["dirty_paths"] == ["tracked.txt"]
+    # The observation before the digest that summarises it. Both assertions
+    # fail together when the `git` probe degrades under load, but only this
+    # one names the cause -- the other reports two equal hashes and leaves
+    # the reader to guess why the workspace looked unchanged.
+    assert current["structural"]["workspace"]["dirty_paths"] == ["tracked.txt"], (
+        current["structural"]
+    )
+    assert second["checkpoint_id"] != first["checkpoint_id"]
 
 
 def test_build_reuses_validated_workspace_root_for_artifact_evidence(

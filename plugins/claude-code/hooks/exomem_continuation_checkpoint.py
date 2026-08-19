@@ -47,7 +47,21 @@ MAX_METADATA_LOG_BYTES = 1024 * 1024
 MAX_METADATA_DURATION_MS = 60_000
 TRANSCRIPT_SLICE_BYTES = 64 * 1024
 RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
-GIT_TIMEOUT_SECONDS = 0.35
+#: Budget for one `git` probe. A checkpoint that cannot read the workspace
+#: records a degradation rather than blocking the session, so this is a
+#: fidelity/latency trade and not a correctness fence -- but degrading is
+#: still the worse outcome, because the checkpoint's whole job is to record
+#: what the workspace looked like.
+#:
+#: Windows gets a larger budget because the cost being bounded there is
+#: mostly process creation, not the status walk: `git status --porcelain`
+#: on an idle Windows box measures ~23 ms p50 for a one-file repository, of
+#: which the walk is a small part, and a shared CI runner executing two
+#: test shards routinely multiplies that by more than the 15x of headroom
+#: 0.35 s leaves. The symptom is silent: every probe degrades, so two
+#: checkpoints taken across a real workspace change record the same empty
+#: structural block and hash identically.
+GIT_TIMEOUT_SECONDS = 2.0 if os.name == "nt" else 0.35
 
 _CLIENT_EVENTS = {
     "claude": {
