@@ -56,8 +56,21 @@ The system SHALL honor an `EXOMEM_LOG_DIR` environment variable that overrides w
 rotating application log (`exomem.log`) and the query/write/read JSONL audit logs
 (`queries.jsonl`, `writes.jsonl`, `reads.jsonl`) are written. Both `server.run()`'s log
 directory resolution and `query_log.py`'s log paths SHALL honor the same override, so no
-log path stays hardcoded under the package install location. When `EXOMEM_LOG_DIR` is
-unset, behavior SHALL be unchanged from today's repo-relative default.
+log path stays hardcoded under the package install location.
+
+When `EXOMEM_LOG_DIR` is unset, the default SHALL depend on whether the package is
+running from a source checkout. From a checkout, logs SHALL be written to the
+checkout-relative `<repo>/logs`, unchanged. From a wheel or service install, logs
+SHALL be written to a per-platform location outside the install:
+`%PROGRAMDATA%\exomem\logs` on Windows, `~/Library/Logs/Exomem` on macOS, and
+`$XDG_STATE_HOME/exomem/logs` (falling back to `~/.local/state`) on Linux.
+
+Naming the wheel default explicitly, rather than deferring to "today's" behavior, is a
+wording correction and not a reversal of intent: the earlier default derived the
+checkout root unconditionally, so on a wheel install the same two-hop climb landed
+inside the venv at `<venv>/Lib/logs` -- under the very install location the first half
+of this requirement forbids. Scoping the guarantee to a checkout is what lets both
+halves hold at once.
 
 #### Scenario: Override honored for the application log
 
@@ -71,11 +84,18 @@ unset, behavior SHALL be unchanged from today's repo-relative default.
 - **THEN** `queries.jsonl`, `writes.jsonl`, and `reads.jsonl` are written under
   `/data/logs`, not the repo-relative default
 
-#### Scenario: Default is unchanged when unset
+#### Scenario: Default is unchanged when unset in a checkout
 
-- **WHEN** `EXOMEM_LOG_DIR` is not set
-- **THEN** logs are written to the existing default location exactly as before this
-  change, for both the application log and the JSONL audit logs
+- **WHEN** `EXOMEM_LOG_DIR` is not set and the package runs from a source checkout
+- **THEN** logs are written to `<repo>/logs` exactly as before this change, for both
+  the application log and the JSONL audit logs
+
+#### Scenario: Default for a wheel or service install stays outside the install
+
+- **WHEN** `EXOMEM_LOG_DIR` is not set and the package is not a source checkout
+- **THEN** logs are written to the per-platform location for that OS, for both the
+  application log and the JSONL audit logs, and nothing is written under the package
+  install location
 
 #### Scenario: Non-root container process can always write its log directory
 
