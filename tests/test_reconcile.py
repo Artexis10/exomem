@@ -1126,9 +1126,11 @@ def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(
     monkeypatch.setattr(
         audit_module,
         "_check_embedding_drift",
-        lambda root: [
-            SimpleNamespace(path=Path("Knowledge Base/Notes/reconcile-deferred.md"))
-        ],
+        # A vault-relative POSIX string, which is what a persisted identity is:
+        # `_safe_persisted_markdown_rel` refuses anything carrying a backslash, so
+        # `str(Path(...))` re-spelled this into a value reconcile drops on Windows
+        # and the refresh under test never ran.
+        lambda root: [SimpleNamespace(path="Knowledge Base/Notes/reconcile-deferred.md")],
     )
     monkeypatch.setattr(
         audit_module,
@@ -1169,7 +1171,7 @@ def test_reconcile_preserves_deferred_work_after_embedding_failure(
     monkeypatch.setattr(
         audit_module,
         "_check_embedding_drift",
-        lambda root: [SimpleNamespace(path=Path("Knowledge Base/Notes/reconcile-retry.md"))],
+        lambda root: [SimpleNamespace(path="Knowledge Base/Notes/reconcile-retry.md")],
     )
     monkeypatch.setattr(
         audit_module,

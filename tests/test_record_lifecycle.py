@@ -239,7 +239,14 @@ def test_v1_append_after_revision_keeps_v2_marker_and_v1_event_shape(tmp_path: P
     records.revise_collection(
         tmp_path,
         current.path,
-        manifest_text=(tmp_path / current.path).read_text().replace("title:", "title: Revised", 1),
+        # Read as UTF-8 bytes: the manifest is re-encoded as UTF-8 downstream, and
+        # a bare `read_text()` decodes with the locale encoding and normalizes
+        # newlines, so the round trip proposed a manifest that differed from the
+        # committed one and the immutability check refused it as a migration.
+        manifest_text=(tmp_path / current.path)
+        .read_bytes()
+        .decode("utf-8")
+        .replace("title:", "title: Revised", 1),
         expected_manifest_hash=current.manifest_version.hash,
         expected_container_hash=records.lifecycle_guards(current, snapshot)["expected_container_hash"],
         why="revise",
