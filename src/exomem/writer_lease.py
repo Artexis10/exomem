@@ -28,7 +28,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -629,6 +629,25 @@ class _CachedCommittedFailure(ValueError):
         return _serialize_committed_failure_payload(self._payload).decode("utf-8")
 
 
+def _default_state_dir() -> Path:
+    """Where lease state lives when the caller names nowhere else.
+
+    A `default_factory`, not a plain default, because a plain one is
+    evaluated when the class body runs -- at import. `Path.home()` raises
+    `RuntimeError` outright when the environment names no home, which is
+    the ordinary state of a service account, a container started without
+    `HOME`, and any child handed a minimal environment. That made
+    `import exomem.commands` fail there, so the whole command surface was
+    unreachable for want of a directory nothing had asked for yet.
+
+    Resolving it here moves the failure to the caller that actually wants
+    the default path, and leaves every caller that passes its own
+    `state_dir` -- the hosted cell and the service both do -- working with
+    no home at all.
+    """
+    return Path.home() / ".cache" / "exomem"
+
+
 @dataclass(frozen=True)
 class LeaseConfig:
     url: str | None = None
@@ -638,7 +657,7 @@ class LeaseConfig:
     ttl_seconds: float = 30.0
     timeout_seconds: float = 3.0
     preferred_writer: bool = False
-    state_dir: Path = Path.home() / ".cache" / "exomem"
+    state_dir: Path = field(default_factory=_default_state_dir)
     # How long a writer waits for the vault mutation boundary before giving up
     # with MUTATION_BUSY.
     #
@@ -698,7 +717,7 @@ class LeaseConfig:
             ttl_seconds=ttl_seconds,
             timeout_seconds=_positive_float(values, "EXOMEM_WRITER_LEASE_TIMEOUT", 3.0),
             preferred_writer=_truthy(values.get("EXOMEM_WRITER_LEASE_PREFERRED", "")),
-            state_dir=Path(state_raw).expanduser() if state_raw else cls.state_dir,
+            state_dir=Path(state_raw).expanduser() if state_raw else _default_state_dir(),
             mutation_timeout_seconds=_positive_float(values, "EXOMEM_MUTATION_TIMEOUT", 5.0),
             idle_release_seconds=idle_release_seconds,
         )

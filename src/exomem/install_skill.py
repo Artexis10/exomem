@@ -33,7 +33,22 @@ _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 
 # Claude Code loads `~/.claude/skills/<name>/SKILL.md`; the folder name must match
 # the skill's `name:` frontmatter (`exomem`).
-DEFAULT_TARGET = Path.home() / ".claude" / "skills" / "exomem"
+# Resolved on attribute access, not at import: see `_DEFAULT_PATHS` in
+# install_hook.py for why an import must not need a home directory.
+_DEFAULT_PATHS = {
+    "DEFAULT_TARGET": (".claude", "skills", "exomem"),
+    "_LEGACY_TARGET": (".claude", "skills", "knowledge-base"),
+}
+
+
+def _default_path(name: str) -> Path:
+    return Path.home().joinpath(*_DEFAULT_PATHS[name])
+
+
+def __getattr__(name: str) -> Path:
+    if name not in _DEFAULT_PATHS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return _default_path(name)
 
 DEFAULT_CLIENT = "claude"
 SUPPORTED_CLIENTS = ("claude", "codex")
@@ -105,7 +120,6 @@ def install_skills(
 # Before the skill was renamed to `exomem` it installed here. Left behind after an
 # upgrade it loads as a stale duplicate, so `remove_legacy_skill` retires it — but
 # only when it is unmistakably ours (see that function).
-_LEGACY_TARGET = Path.home() / ".claude" / "skills" / "knowledge-base"
 _LEGACY_MARKER = "name: knowledge-base"
 _LEGACY_FINGERPRINT = "Exomem"
 
@@ -146,7 +160,9 @@ def install_skill(
             "is the exomem install intact?"
         )
 
-    target = (Path(target) if target is not None else DEFAULT_TARGET).expanduser()
+    target = (
+        Path(target) if target is not None else _default_path("DEFAULT_TARGET")
+    ).expanduser()
     targets = _install_targets(target)
 
     for item in targets:
@@ -255,7 +271,9 @@ def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
 
     Returns the removed path, or ``None`` if there was nothing of ours to remove.
     """
-    legacy = (Path(legacy) if legacy is not None else _LEGACY_TARGET).expanduser()
+    legacy = (
+        Path(legacy) if legacy is not None else _default_path("_LEGACY_TARGET")
+    ).expanduser()
     skill_md = legacy / "SKILL.md"
     if not skill_md.is_file():
         return None
