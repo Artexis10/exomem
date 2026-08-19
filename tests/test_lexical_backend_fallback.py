@@ -487,3 +487,114 @@ def test_nonrepairing_search_serves_an_already_fresh_sidecar(tmp_path):
     )
 
     assert hits and hits[0][0] == "Knowledge Base/a.md"
+
+
+# ------------------------------------------- a declined sidecar is not "empty"
+
+
+def _declining_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The catalog says "I could not check", on a backend that is not python.
+
+    Patched at `lexstore.search_substring` rather than deeper, because None is
+    that function's whole documented contract ("None -> fall back") and every
+    deeper cause -- a retired store, a missing catalog file, a sqlite error, a
+    sync that could not take the publication lock -- funnels into it.
+    """
+    monkeypatch.setattr(lexstore, "backend", lambda: "fts5")
+    monkeypatch.setattr(lexstore, "search_substring", lambda *a, **k: None)
+
+
+def test_a_declined_sidecar_answers_from_the_scan_not_with_an_empty_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The false empty (#526 ask 2), at the seam where it was produced.
+
+    A governed write's lexical upsert defers while the write still holds the
+    vault lock, so the catalog is most likely to decline in the moment right
+    after a write -- on exactly the page the caller is most likely to want.
+    Returning [] there reports "no such memory" for content that was just
+    committed, which is the worst answer this system can give.
+    """
+    _write_page(tmp_path, "Knowledge Base/just-written.md", "kubernetes ingress configuration")
+    _fill_corpus(tmp_path)
+    _declining_sidecar(monkeypatch)
+
+    paths = find_module._keyword_match_paths(tmp_path, "kubernetes ingress", "kb")
+
+    assert paths == ["Knowledge Base/just-written.md"]
+
+
+def test_a_declined_sidecar_is_still_reported_as_a_degradation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Correct AND loud, not correct instead of loud.
+
+    The lane really did fall off its fast rung, and the counter is how a
+    persistently broken sidecar becomes visible rather than merely slow. The
+    marker was the only thing the old branch got right; the fix keeps it and
+    changes the answer, not the reporting.
+    """
+    _write_page(tmp_path, "Knowledge Base/just-written.md", "kubernetes ingress configuration")
+    _declining_sidecar(monkeypatch)
+    failed: list[str] = []
+
+    paths = find_module._keyword_match_paths(
+        tmp_path, "kubernetes ingress", "kb", failed_out=failed
+    )
+
+    assert paths == ["Knowledge Base/just-written.md"]
+    assert failed == ["keyword_lexical"]
+    assert find_module.degradation_counts().get("keyword_lexical") == 1
+
+
+def test_the_python_rung_is_not_a_degradation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On `EXOMEM_LEXICAL_BACKEND=python` the scan IS the lane, not a fallback.
+
+    Both rungs now reach the same scan, so the marker is the only thing that
+    still distinguishes them -- and counting the configured backend as a
+    degradation would make the counter fire constantly and mean nothing.
+    """
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    _write_page(tmp_path, "Knowledge Base/just-written.md", "kubernetes ingress configuration")
+    failed: list[str] = []
+
+    paths = find_module._keyword_match_paths(
+        tmp_path, "kubernetes ingress", "kb", failed_out=failed
+    )
+
+    assert paths == ["Knowledge Base/just-written.md"]
+    assert failed == []
+    assert "keyword_lexical" not in find_module.degradation_counts()
+
+
+@needs_fts5
+def test_a_page_written_this_second_is_visible_when_the_catalog_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read-after-write on the fts5 lane (#526 ask 3), through the real store.
+
+    The write gate pins `EXOMEM_LEXICAL_BACKEND=python` to keep its visibility
+    assertion deterministic, so no CI surface measured this window on the
+    backend that actually ships. Patched at `_serve_synced_live_catalog` rather
+    than at the module function so the None travels the production route --
+    `LexicalStore.search_substring`'s own `sqlite3.Error` handler, which retires
+    the store for this process and is one of the documented causes.
+    """
+    _write_page(tmp_path, "Knowledge Base/older.md", "gardening tips for spring")
+    # Materialize a real catalog first, so the store is healthy up to this read.
+    assert bm25.search(tmp_path, "gardening tips", k=5, scope="kb")
+    assert lexstore.lexical_path(tmp_path).exists()
+
+    _write_page(tmp_path, "Knowledge Base/just-written.md", "kubernetes ingress configuration")
+
+    def erroring(self, *args, **kwargs):  # noqa: ANN001, ANN202, ARG001
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_serve_synced_live_catalog", erroring)
+
+    assert lexstore.search_substring(tmp_path, "kubernetes ingress", scope="kb") is None
+    assert find_module._keyword_match_paths(tmp_path, "kubernetes ingress", "kb") == [
+        "Knowledge Base/just-written.md"
+    ]

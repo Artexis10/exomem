@@ -3487,10 +3487,31 @@ def _keyword_match_paths(
     if indexed is not None:
         return indexed
     if lexstore.backend() != "python":
+        # The sidecar declined. `search_substring` documents exactly one meaning
+        # for None -- "fall back" -- and its causes are a retired store, a
+        # catalog that is not on disk, a sqlite error, or a sync that could not
+        # take the publication lock. Every one of those is "I could not check".
+        #
+        # Answering [] said "there is nothing", which is a different claim, and
+        # for a page a governed write has just committed it is a false empty:
+        # the lexical upsert defers while the write holds the vault lock
+        # (#526), so the one moment the catalog is most likely to decline is the
+        # moment right after a write, on exactly the page the caller is most
+        # likely to be looking for. Recall going silently blank on the newest
+        # content is the worst possible failure for a memory system, and the
+        # only evidence was a trace marker nobody reads mid-query.
+        #
+        # So the marker stays -- the lane really did degrade and the counter
+        # should say so -- and the answer comes from the reference scan below
+        # instead of from an empty list. That is not a second implementation of
+        # the contract: `test_keyword_lane_parity_with_reference_scan` asserts
+        # the sidecar and this scan return IDENTICAL ordered lists across 15
+        # query shapes, so falling through costs latency and changes nothing
+        # else. On a healthy sidecar this branch never runs, so no warm read
+        # pays for it.
         if failed_out is not None:
             failed_out.append("keyword_lexical")
         _record_degradation("keyword_lexical")
-        return []
     if scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
