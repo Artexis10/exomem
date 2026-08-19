@@ -167,18 +167,40 @@ def test_prose_only_sidecar_is_repaired_without_losing_notes(vault: Path) -> Non
     assert media_jobs.status(vault)["counts"]["pending"] == 1
 
 
+def _handle_stat(path: Path) -> os.stat_result:
+    """Stat through an open handle, the way `_read_provenance` does.
+
+    Not interchangeable with `Path.stat()`. On Windows `st_ctime` is the
+    creation time and the two calls read it from different places, so a test
+    that records one and asserts the other is asserting a coincidence.
+    """
+    with path.open("rb") as stream:
+        return os.fstat(stream.fileno())
+
+
 def test_reconciliation_records_binary_provenance_without_mutating_evidence(vault: Path) -> None:
     media_processing = _media_processing()
     payload = b"immutable voice evidence\x00\x01"
     binary = _drop_media(vault, "Voice Memo.M4A", payload)
     os.utime(binary, ns=(1_700_000_000_000_000_000, 1_700_000_123_456_789_000))
     before = binary.stat()
+    # The recorded provenance has to be compared against the SOURCE that
+    # produced it. `_read_provenance` reads `os.fstat` on an open handle, and
+    # `_verify_binary_identity` says why in as many words: on Windows,
+    # `stat(path)` and `fstat(handle)` report different `st_ctime_ns` for the
+    # same unchanged file. `st_ctime` there is the creation time, served from a
+    # lazily-refreshed directory entry, so two reads of a just-created file can
+    # differ -- on CI they differed by 2ms and this assertion failed with the
+    # file provably unmutated. Comparing a path-stat against the product's
+    # fstat is the exact cross-source comparison the product code avoids.
+    handle_before = _handle_stat(binary)
     digest = hashlib.sha256(payload).hexdigest()
 
     media_processing.reconcile_media(vault, binary)
 
     after = binary.stat()
     assert binary.read_bytes() == payload
+    # Same source on both sides, so this still pins "the evidence did not move".
     assert (after.st_size, after.st_mtime_ns, after.st_ctime_ns) == (
         before.st_size,
         before.st_mtime_ns,
@@ -188,8 +210,8 @@ def test_reconciliation_records_binary_provenance_without_mutating_evidence(vaul
     assert frontmatter["original_filename"] == "Voice Memo.M4A"
     assert frontmatter["binary_sha256"] == digest
     assert frontmatter["binary_size"] == len(payload)
-    assert frontmatter["binary_mtime_ns"] == before.st_mtime_ns
-    assert frontmatter["binary_ctime_ns"] == before.st_ctime_ns
+    assert frontmatter["binary_mtime_ns"] == handle_before.st_mtime_ns
+    assert frontmatter["binary_ctime_ns"] == handle_before.st_ctime_ns
 
 
 def test_valid_completed_transcript_is_preserved_and_not_requeued(vault: Path) -> None:
