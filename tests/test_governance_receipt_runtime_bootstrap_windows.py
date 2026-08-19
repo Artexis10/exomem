@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,24 @@ def _first_use_process(
     def apply(path: Path, sid: str) -> None:
         nonlocal root_dacl_applies
         if path == root and list(root.iterdir()):
-            raise AssertionError("runtime root gained a lock artifact before DACL validation")
+            # A *tightening* pass runs on a root that already holds artifacts,
+            # and that is sound: the verdict it repairs is `inherited`, which
+            # means the ACEs were already exactly the private trustee set and
+            # were merely arriving by inheritance. Nothing was ever created
+            # under a weaker DACL, so no handle outside the set can exist.
+            #
+            # What must never happen is what this assertion was written for:
+            # the private DACL applied to a populated root that was genuinely
+            # unsafe, where a foreign principal had the run of the directory
+            # while artifacts landed in it and may still hold a handle no later
+            # tightening can take back.
+            verdict = mutation_lock._windows_private_dacl_verdict(
+                mutation_lock._windows_dacl_sddl(path), sid, directory=True
+            )
+            if verdict != mutation_lock._WINDOWS_DACL_INHERITED:
+                raise AssertionError(
+                    "runtime root gained a lock artifact before DACL validation"
+                )
         if path == root:
             root_dacl_applies += 1
         original_apply(path, sid)
@@ -175,11 +193,34 @@ def test_windows_receipt_first_refuses_existing_unsafe_runtime_without_lock_chil
     """An inherited legacy root remains untouched and actionable at receipt entry."""
     state_root = tmp_path / "unsafe-existing-state"
     state_root.mkdir()
+    # Built, not inherited. A bare `mkdir` under the temporary directory
+    # produces `(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)` on both
+    # this machine and the CI runner -- exactly the private trustee set,
+    # arriving by inheritance -- which the validator classifies as `inherited`
+    # and the writer now *repairs* rather than refuses. Depending on the host's
+    # ambient DACL to supply "unsafe" therefore tested whichever verdict the
+    # machine happened to hand out, and stopped meaning anything once
+    # tightening landed.
+    #
+    # Grant a trustee outside the private set instead. `WD` (Everyone) can
+    # never be tightened away safely -- a principal outside the set may already
+    # hold a handle -- so this is the verdict the refusal exists for, and it is
+    # the same on every host.
+    grant = subprocess.run(
+        ["icacls", str(state_root), "/grant", "*S-1-1-0:(OI)(CI)F"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert grant.returncode == 0, grant.stdout + grant.stderr
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(state_root))
     before_dacl = mutation_lock._windows_dacl_sddl(state_root)
-    assert not mutation_lock._windows_private_dacl_is_valid(
-        before_dacl, mutation_lock._windows_current_user_sid(), directory=True
-    )
+    assert (
+        mutation_lock._windows_private_dacl_verdict(
+            before_dacl, mutation_lock._windows_current_user_sid(), directory=True
+        )
+        == mutation_lock._WINDOWS_DACL_UNSAFE
+    ), before_dacl
 
     sid = mutation_lock._windows_current_user_sid()
     expected_remediation = mutation_lock._windows_private_dacl_repair_command(

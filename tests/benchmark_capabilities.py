@@ -114,6 +114,52 @@ def has_mount_type_inspection() -> bool:
 
 
 @lru_cache(maxsize=1)
+def posix_bash() -> str | None:
+    """An absolute path to a bash that can run a POSIX script, or None.
+
+    `subprocess.run(["bash", ...])` resolves the bare name through
+    `CreateProcess`, which searches the **system directory before PATH**. Where
+    the Windows Subsystem for Linux is registered but has no distribution
+    installed, that directory holds a `bash.exe` which is not a shell at all:
+    it prints "Windows Subsystem for Linux has no installed distributions" in
+    UTF-16 and exits non-zero. A test that asked bash to check a script's
+    syntax got that advertisement back and read it as a syntax error.
+
+    `shutil.which` searches PATH, where the real bash lives (Git for Windows
+    ships one), so resolving the name here and handing over the absolute path
+    is what makes the call mean what it says. Candidates under the system
+    directory are excluded by construction rather than by name, and each one is
+    proved by running it, so a launcher that changes its wording is still
+    rejected.
+
+    Returns None where the only bash is that launcher, so callers declare the
+    missing capability instead of asserting against its output.
+    """
+    if os.name != "nt":
+        return shutil.which("bash")
+    system_root = os.environ.get("SystemRoot")
+    excluded = Path(system_root).resolve() if system_root else None
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = shutil.which("bash", path=entry)
+        if candidate is None:
+            continue
+        resolved = Path(candidate).resolve()
+        if excluded is not None and excluded in resolved.parents:
+            continue
+        try:
+            proof = subprocess.run(
+                [str(resolved), "-c", "exit 0"], capture_output=True, timeout=60
+            )
+        except OSError:
+            continue
+        if proof.returncode == 0:
+            return str(resolved)
+    return None
+
+
+@lru_cache(maxsize=1)
 def has_procfs_descriptor_paths() -> bool:
     """True where `/proc/self/fd/<n>` names an open descriptor as a path.
 

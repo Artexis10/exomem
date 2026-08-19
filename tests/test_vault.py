@@ -219,9 +219,29 @@ def test_missing_parent_swap_cannot_redirect_nested_directory_creation(
     assert not (outside / "nested").exists()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows refuses to rename a directory holding an open stage file",
+)
 def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The parent of a pending write is swapped between two flips.
+
+    Not stageable on Windows, and not because of anything this test
+    does wrong: the batch still holds `stage-1.tmp` open inside
+    `pending/` while the first artifact flips, and Windows refuses to
+    rename a directory that contains an open file. The setup's own
+    `pending_dir.rename(...)` raises `PermissionError [WinError 5]`
+    from inside the patched `os.replace`, where the writer correctly
+    classifies it as a transient sharing refusal and retries -- so the
+    test failed on its own injection rather than on the guard.
+
+    The swap this defends against therefore cannot occur there while a
+    batch is in flight: the platform refuses it before the guard is
+    reached. POSIX permits the rename, which is why the guard has to
+    exist, and why this stays asserted there.
+    """
     first_dir = tmp_path / "first"
     pending_dir = tmp_path / "pending"
     first_dir.mkdir()
