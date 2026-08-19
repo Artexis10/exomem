@@ -713,6 +713,29 @@ def _windows_apply_private_dacl(path: Path, sid: str) -> None:
     _windows_apply_dacl_sddl(path, _windows_private_dacl_sddl(sid))
 
 
+def _windows_tighten_private_directory(
+    target: Path, directory: _SecureDirectory, sid: str
+) -> None:
+    """Protect a directory whose DACL already admits only the private trustees.
+
+    This is not the repair the module declines to perform. That one would rewrite
+    an entry whose ACEs let somebody else in, which cannot help: an ACL change
+    does not close a handle already opened against the old one, so the attacker
+    keeps the access and we would proceed believing otherwise. Here the caller
+    has established the opposite -- every trustee is one this module writes
+    itself -- so there is no such handle to close, and protecting the DACL only
+    removes the parent's future reach into it.
+
+    Applied by path, then proven through the retained handle by the caller's
+    re-validation. A path swapped in between gets our protected DACL, which is
+    harmless to us, while the handle we still hold reports the object we
+    validated -- so a swap fails the re-validation instead of passing it.
+    """
+    if not _same_directory_path(directory):
+        raise OSError("Windows directory changed before its DACL was protected")
+    _windows_apply_private_dacl(target, sid)
+
+
 def _windows_dacl_sddl(path: Path) -> str:
     """Read only the DACL text through native security APIs."""
     import ctypes
@@ -797,8 +820,41 @@ def _windows_dacl_sddl_for_handle(handle: int) -> str:
         kernel32.LocalFree(security_descriptor)
 
 
+_WINDOWS_DACL_PRIVATE = "private"
+_WINDOWS_DACL_INHERITED = "inherited"
+_WINDOWS_DACL_UNSAFE = "unsafe"
+
+
 def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> bool:
-    """Reject broad or altered ACEs; inherited file ACEs are accepted precisely.
+    """True only for a DACL this module would have written itself."""
+    return _windows_private_dacl_verdict(sddl, sid, directory=directory) == (
+        _WINDOWS_DACL_PRIVATE
+    )
+
+
+def _windows_private_dacl_verdict(sddl: str, sid: str, *, directory: bool) -> str:
+    """Classify one DACL as private, private-but-inheriting, or unsafe.
+
+    The middle verdict is the one that earns its keep. A directory whose ACEs
+    name exactly the private trustee set but arrive by inheritance -- no `P`,
+    every ACE flagged `ID` -- has never admitted anybody outside that set, so
+    nothing can hold a handle to it that this module would refuse to grant. It
+    is private in the sense that matters and wrong only in that a later change
+    to its parent would flow into it. That is repairable, and repairing it is
+    strictly a tightening; refusing it outright is not, because the entry is
+    never repaired and the caller is told to run `icacls` by hand.
+
+    Windows hands out that exact shape constantly: any directory created inside
+    an already-private parent inherits its ACEs rather than getting its own.
+    The CI runner's is `O:BA D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)`
+    -- SYSTEM, Administrators, and an owner in that set, and nothing else.
+
+    Anything else is still `unsafe`: a foreign trustee, a right other than full
+    access, a duplicate principal, a deny ACE, a malformed field count. Those
+    say a principal outside the private set may already hold access, and no
+    later tightening can take back a handle it has already opened.
+
+    Reject broad or altered ACEs; inherited file ACEs are accepted precisely.
 
     An `OWNER RIGHTS` (`OW`) ACE counts as the current user's grant, but only
     while the current user owns the object. That is a spelling difference, not a
@@ -817,10 +873,10 @@ def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> b
     created, and a pre-existing entry is validated and never repaired.
     """
     if not isinstance(sddl, str) or "D:" not in sddl:
-        return False
+        return _WINDOWS_DACL_UNSAFE
     dacl = sddl.split("D:", 1)[1]
-    if directory and not dacl.startswith("P"):
-        return False
+    protected = dacl.startswith("P")
+    inheriting = False
     aces = re.findall(r"\(([^()]*)\)", dacl)
     trustees = _windows_private_dacl_trustees(sid)
     expected = {trustee.casefold() for trustee in trustees}
@@ -833,16 +889,16 @@ def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> b
     for ace in aces:
         fields = ace.split(";")
         if len(fields) != 6:
-            return False
+            return _WINDOWS_DACL_UNSAFE
         kind, flags, rights, _object_guid, _inherit_object_guid, trustee = fields
         if kind != "A" or rights.casefold() not in {"fa", "0x1f01ff"}:
-            return False
+            return _WINDOWS_DACL_UNSAFE
         principal = trustee.casefold()
         if principal in _WINDOWS_OWNER_RIGHTS_TRUSTEES:
             # Unresolvable without the owner: an SDDL string carrying no `O:`
             # cannot show that this ACE admits us rather than somebody else.
             if not owner_is_current_user:
-                return False
+                return _WINDOWS_DACL_UNSAFE
             principal = user_principal
         elif principal in _windows_principal_spellings(sid):
             # An alias for the current user, most often `LA`. Unlike `OW` this
@@ -857,13 +913,21 @@ def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> b
         # `OW` alongside a literal grant to the same owner is one principal
         # named twice, which is exactly what the rule is here to reject.
         if principal not in expected or principal in observed:
-            return False
+            return _WINDOWS_DACL_UNSAFE
         normalized_flags = flags.casefold()
-        allowed = {"", "oici", "idoici", "id"} if not directory else {"oici"}
+        allowed = {"oici", "oiciid"} if directory else {"", "oici", "idoici", "id"}
         if normalized_flags not in allowed:
-            return False
+            return _WINDOWS_DACL_UNSAFE
+        if directory and normalized_flags != "oici":
+            inheriting = True
         observed.add(principal)
-    return observed == expected
+    if observed != expected:
+        return _WINDOWS_DACL_UNSAFE
+    if not directory:
+        return _WINDOWS_DACL_PRIVATE
+    if protected and not inheriting:
+        return _WINDOWS_DACL_PRIVATE
+    return _WINDOWS_DACL_INHERITED
 
 
 def _validate_windows_runtime_entry(
@@ -969,6 +1033,7 @@ def _prepare_windows_private_directory(path: Path) -> None:
             )
             return
         deadline = time.monotonic() + _WINDOWS_DACL_STABILIZATION_SECONDS
+        tightened = False
         while True:
             try:
                 _validate_windows_runtime_entry(
@@ -976,6 +1041,18 @@ def _prepare_windows_private_directory(path: Path) -> None:
                 )
                 return
             except WindowsRuntimeDaclError:
+                observed = _windows_dacl_sddl_for_handle(directory.windows_handle)
+                inherited = (
+                    _windows_private_dacl_verdict(observed, sid, directory=True)
+                    == _WINDOWS_DACL_INHERITED
+                )
+                # Once. A second attempt would mean the write did not take, and
+                # looping on that until the deadline turns a permission problem
+                # into a stall rather than the error it is.
+                if inherited and not tightened:
+                    tightened = True
+                    _windows_tighten_private_directory(target, directory, sid)
+                    continue
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(_WINDOWS_DACL_STABILIZATION_POLL_SECONDS)

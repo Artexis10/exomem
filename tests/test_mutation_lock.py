@@ -1387,3 +1387,218 @@ def test_the_administrators_owner_is_not_a_trustee_spelling() -> None:
     assert mutation_lock_module._windows_private_dacl_is_valid(
         literal, _LOCAL_ADMIN_SID, directory=True
     )
+
+
+# --- an inherited private DACL is tightened, not refused -------------------------
+#
+# Windows gives a directory created inside an already-private parent its
+# parent's ACEs by inheritance rather than a DACL of its own, so the entry is
+# private but unprotected. The validator demanded `D:P` with explicit `OICI`
+# flags and refused everything else, which failed closed on directories that
+# had never admitted anybody outside the private set -- 29 of 241 failures on
+# the Windows lane, all of them state roots created under a pytest temporary
+# directory. `tempfile.mkdtemp` protects its own root as
+# `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)`, and everything made
+# inside it inherits exactly that.
+
+_INHERITED_DACL = (
+    f"O:{_USER_SID}D:"
+    f"(A;OICIID;FA;;;{_USER_SID})(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)"
+)
+_INHERITED_OWNER_RIGHTS_DACL = (
+    f"O:{_USER_SID}D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)"
+)
+
+
+def test_an_inherited_private_dacl_is_reported_as_inherited_not_unsafe() -> None:
+    """The verdict the repair decision is made on.
+
+    Every trustee is one this module writes itself, so no principal outside the
+    private set can hold a handle to the entry. That is what separates this from
+    a DACL that must be refused: there is nothing to take back.
+    """
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            _INHERITED_DACL, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_INHERITED
+    )
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        _INHERITED_DACL, _USER_SID, directory=True
+    )
+
+
+def test_the_runners_owner_rights_shape_is_inherited_rather_than_unsafe() -> None:
+    """The exact descriptor the Windows lane fails on, spelled with `OW`."""
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            _INHERITED_OWNER_RIGHTS_DACL, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_INHERITED
+    )
+
+
+def test_a_protected_private_dacl_stays_private() -> None:
+    """The verdict split must not disturb the descriptor this module writes."""
+    written = mutation_lock_module._windows_private_dacl_sddl(_USER_SID)
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            f"O:{_USER_SID}{written}", _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_PRIVATE
+    )
+
+
+@pytest.mark.parametrize(
+    "trustee",
+    ["WD", "AU", "BU", "S-1-5-21-1-2-3-1002"],
+    ids=["everyone", "authenticated-users", "users", "another-account"],
+)
+def test_a_foreign_trustee_is_unsafe_however_it_arrived(trustee: str) -> None:
+    """Inheritance is not a defence, and this is the line that matters.
+
+    A trustee outside the private set means somebody else may already hold a
+    handle, and tightening a DACL does not close a handle opened against the
+    old one. So this stays a refusal rather than becoming a repair.
+    """
+    sddl = (
+        f"O:{_USER_SID}D:(A;OICIID;FA;;;{trustee})"
+        f"(A;OICIID;FA;;;{_USER_SID})(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)"
+    )
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            sddl, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_UNSAFE
+    )
+
+
+def test_partial_rights_are_unsafe_even_for_a_private_trustee() -> None:
+    """Full access is the grant this module writes; anything else is not it."""
+    sddl = (
+        f"O:{_USER_SID}D:(A;OICIID;0x1301bf;;;{_USER_SID})"
+        f"(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)"
+    )
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            sddl, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_UNSAFE
+    )
+
+
+def test_owner_rights_inherited_under_a_foreign_owner_is_unsafe() -> None:
+    """`OW` names whoever owns the entry, so the owner check still decides it."""
+    sddl = "O:S-1-5-21-9-9-9-1001D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)"
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            sddl, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_UNSAFE
+    )
+
+
+def test_an_inherited_file_ace_is_still_private() -> None:
+    """Files already accepted inheritance; the directory split must not move them."""
+    sddl = (
+        f"O:{_USER_SID}D:(A;ID;FA;;;{_USER_SID})(A;ID;FA;;;SY)(A;ID;FA;;;BA)"
+    )
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            sddl, _USER_SID, directory=False
+        )
+        == mutation_lock_module._WINDOWS_DACL_PRIVATE
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL semantics")
+def test_a_directory_inheriting_a_private_dacl_is_protected_in_place(
+    tmp_path: Path,
+) -> None:
+    """End to end on real Windows security, because the verdict is only half of it.
+
+    The entry this observes is built the way the runner's is: a parent carrying
+    the protected private DACL, and a child that inherits it. Before this, the
+    child was refused with a remediation the user had to run by hand in an
+    elevated shell.
+    """
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    sid = mutation_lock_module._windows_current_user_sid()
+    mutation_lock_module._windows_apply_private_dacl(parent, sid)
+    child = parent / "hosted-state"
+    child.mkdir()
+    observed = mutation_lock_module._windows_dacl_sddl(child)
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(observed, sid, directory=True)
+        == mutation_lock_module._WINDOWS_DACL_INHERITED
+    )
+
+    mutation_lock_module._prepare_windows_private_directory(child)
+
+    after = mutation_lock_module._windows_dacl_sddl(child)
+    assert mutation_lock_module._windows_private_dacl_is_valid(after, sid, directory=True)
+    assert after.split("D:", 1)[1].startswith("P")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL semantics")
+def test_a_directory_admitting_another_account_is_refused_and_left_alone(
+    tmp_path: Path,
+) -> None:
+    """The refusal path, on real security, including that it writes nothing.
+
+    Tightening here would be worse than refusing: the foreign grant means a
+    handle may already be open, and rewriting the DACL would hide that while
+    changing nothing about the access already obtained.
+    """
+    target = tmp_path / "state"
+    target.mkdir()
+    sid = mutation_lock_module._windows_current_user_sid()
+    mutation_lock_module._windows_apply_dacl_sddl(
+        target,
+        f"D:(A;OICIID;FA;;;AU)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;{sid})",
+    )
+    before = mutation_lock_module._windows_dacl_sddl(target)
+
+    with pytest.raises(mutation_lock_module.WindowsRuntimeDaclError):
+        mutation_lock_module._prepare_windows_private_directory(target)
+
+    assert mutation_lock_module._windows_dacl_sddl(target) == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL semantics")
+def test_the_tightening_is_attempted_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that does not take is an error, not a reason to spin.
+
+    The stabilization wait exists for a creator that has not written its DACL
+    yet. Retrying our own failed write inside it would spend that whole budget
+    re-attempting something already known not to work, and report a timeout
+    instead of the permission failure that caused it.
+    """
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    sid = mutation_lock_module._windows_current_user_sid()
+    mutation_lock_module._windows_apply_private_dacl(parent, sid)
+    child = parent / "hosted-state"
+    child.mkdir()
+    attempts: list[Path] = []
+
+    def refuse(target: Path, directory: object, sid: str) -> None:
+        attempts.append(target)
+
+    monkeypatch.setattr(
+        mutation_lock_module, "_windows_tighten_private_directory", refuse
+    )
+    monkeypatch.setattr(mutation_lock_module, "_WINDOWS_DACL_STABILIZATION_SECONDS", 0.05)
+
+    with pytest.raises(mutation_lock_module.WindowsRuntimeDaclError):
+        mutation_lock_module._prepare_windows_private_directory(child)
+
+    assert attempts == [child]
