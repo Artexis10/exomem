@@ -504,6 +504,24 @@ def test_staging_bounds_blocked_dns_resolution(tmp_path: Path, monkeypatch: pyte
 
     release = threading.Event()
     monkeypatch.setattr(client_artifacts, "_RETRIEVAL_DEADLINE_SECONDS", 0.01)
+    # Freeze the budget clock, or this test races itself.
+    #
+    # Three separate sites consume the same 10ms before the resolver's own wait
+    # is reached: the loop-top check in `stage_artifact`, and the two
+    # `remaining_retrieval_timeout` calls in `_bounded_resolve` -- with an idna
+    # encode, a semaphore acquire and a thread start in between. Every one of
+    # them raises "download retrieval timed out" when the budget is already
+    # gone, and only the resolver's `Empty` branch says "could not be
+    # resolved". On a loaded Windows runner setup routinely costs more than
+    # 10ms, so which message wins is a coin flip -- observed on two separate
+    # PRs, on two different shards.
+    #
+    # Freezing `_monotonic` makes the budget non-decaying for those checks, so
+    # the resolver's wait is the only place it can expire. `result.get` still
+    # waits 10ms of REAL time (Queue does not use this clock), and the test's
+    # own `time.monotonic()` below is untouched, so the boundedness assertion
+    # still measures real elapsed time.
+    monkeypatch.setattr(client_artifacts, "_monotonic", lambda: 0.0)
     monkeypatch.setattr(
         client_artifacts.socket,
         "getaddrinfo",
