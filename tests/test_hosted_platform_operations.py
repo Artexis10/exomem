@@ -15,7 +15,10 @@ from types import ModuleType
 
 import pytest
 import yaml
-from benchmark_capabilities import require_posix_executable_scripts
+from benchmark_capabilities import (
+    require_posix_executable_scripts,
+    require_posix_file_modes,
+)
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -294,6 +297,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
 
 
 def test_hosted_validator_canonicalizes_relative_terraform_binary(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
     terraform = tmp_path / "terraform"
     _write_executable(terraform, "#!/usr/bin/env bash\nexit 0\n")
     validator = INFRA / "scripts/validate.sh"
@@ -462,6 +466,7 @@ print(json.dumps({'stats': {'exomem-alpha': {
 def test_static_secret_application_validates_exact_destination_before_kubectl(
     tmp_path: Path,
 ) -> None:
+    require_posix_executable_scripts()
     script = INFRA / "scripts/apply_sops_secret.py"
     artifact = tmp_path / "hosted-scheduler.v2.sops.json"
     artifact.write_text('{"sops": {"age": []}}', encoding="utf-8")
@@ -874,6 +879,7 @@ def test_provisioner_database_rotation_contract_and_runbook_are_ordered_and_reve
 
 
 def test_rotation_job_drain_jq_selects_only_captured_controller_jobs(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
     jobs = {
         "items": [
             {
@@ -1696,6 +1702,10 @@ def test_active_secret_registry_verify_only_never_starts_a_subprocess(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # The registry and its key must be non-writable regular files; the script
+    # refuses anything it cannot prove that about, and reports it on stderr
+    # rather than through the exception this suite's capability hook reads.
+    require_posix_file_modes()
     module = _load(
         "infra/scripts/apply_active_sops_secrets.py", "apply_active_sops_secrets_verify_test"
     )
@@ -2973,6 +2983,9 @@ def test_external_probe_never_returns_response_body_or_target() -> None:
 
 
 def test_new_operator_scripts_are_executable() -> None:
+    # The executable bit is the property under test, and Windows has none:
+    # `os.stat` there reports 0666 or 0444 whatever git recorded.
+    require_posix_file_modes()
     for name in (
         "verify_ansible_convergence.py",
         "apply_sops_secret.py",

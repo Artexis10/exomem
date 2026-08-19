@@ -156,6 +156,12 @@ def _needs_an_absent_procfs(error: BaseException | None) -> bool:
 _POSIX_ONLY_API = re.compile(
     r"module 'os' has no attribute 'gete?uid'"
     r"|<module 'os'[^>]*> has no attribute 'gete?uid'"
+    # The hosted operator scripts open every input `O_NOFOLLOW` and every
+    # directory `O_DIRECTORY` so a symlink swapped in mid-read cannot
+    # redirect them. Windows publishes neither flag, so the scripts cannot
+    # even be loaded there -- and they only ever run on the Linux cell.
+    r"|module 'os' has no attribute 'O_(?:NOFOLLOW|DIRECTORY)'"
+    r"|<module 'os'[^>]*> has no attribute 'O_(?:NOFOLLOW|DIRECTORY)'"
     r"|No module named 'fcntl'"
 )
 
@@ -205,6 +211,17 @@ _HOSTED_POSIX_OWNERSHIP_REFUSAL = (
 )
 _HOSTED_TEMP_REFUSAL = re.compile(r"hosted runtime temp is unavailable")
 
+#: The hosted operator scripts refuse any input whose POSIX mode they cannot
+#: vouch for. Windows `chmod` only toggles a read-only bit, so it cannot
+#: express 0600 or the absence of group/world write at all, and the scripts
+#: are correct to refuse. Matched on the sentences that name a mode, never on
+#: a bare refusal type, so a genuine path-safety finding still fails.
+_HOSTED_OPERATOR_MODE_REFUSAL = re.compile(
+    r"must be a non-writable regular file"
+    r"|without group/world write access"
+    r"|must have mode 0600"
+)
+
 
 def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
     """True when *error* is the hosted cell declining to trust a synthesized mode.
@@ -220,6 +237,8 @@ def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
         if type(error).__name__ in _HOSTED_POSIX_OWNERSHIP_REFUSAL:
             return True
         if _HOSTED_TEMP_REFUSAL.search(str(error)):
+            return True
+        if _HOSTED_OPERATOR_MODE_REFUSAL.search(str(error)):
             return True
         error = error.__cause__ or error.__context__
     return False
