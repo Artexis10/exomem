@@ -42,6 +42,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from membench.hermetic_env import apply_os_requirements
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = REPO_ROOT / "src"
 
@@ -116,29 +118,7 @@ def install_env(base: Path, home: Path) -> dict[str, str]:
         "PYTHONPATH": str(SRC_DIR),
         "PYTHONUTF8": "1",
     }
-    if os.name == "nt":
-        # Windows resolves Winsock through `%SystemRoot%`, and `exomem.__main__`
-        # imports `asyncio`, whose Windows event loop pulls that in at import
-        # time. A replacement environment without it does not merely lose a
-        # convenience: the interpreter cannot start the program at all, exiting
-        # with `OSError [WinError 10106] The requested service provider could
-        # not be loaded or initialized` before any exomem code runs. Isolation
-        # is unaffected -- this names the OS install, not the user's state,
-        # which the entries above still redirect.
-        system_root = os.environ.get("SystemRoot")
-        if system_root:
-            env["SystemRoot"] = system_root
-        # `HOME` alone redirects the home directory on POSIX only. Windows
-        # resolves `Path.home()` through `USERPROFILE`, falling back to
-        # `HOMEDRIVE`+`HOMEPATH`, so without these the isolation is not merely
-        # incomplete -- `install_hook` computes a default hook directory from
-        # `Path.home()` at import scope, which raises "Could not determine home
-        # directory" and the subprocess dies before it can install anything.
-        env["USERPROFILE"] = str(base)
-        drive, tail = os.path.splitdrive(str(base))
-        env["HOMEDRIVE"] = drive
-        env["HOMEPATH"] = tail
-    return env
+    return apply_os_requirements(env, base)
 
 
 def create_hook_home(
@@ -190,7 +170,9 @@ def _wiring_problems(home: HookHome, events: tuple[str, ...]) -> list[str]:
     if not home.settings_path.is_file():
         return [f"missing hook config {home.settings_path}"]
     settings = home.settings()
-    hooks_dir = str(home.hooks_dir)
+    # `install_hook` writes the hook directory POSIX-style so one synced config
+    # works on every machine, so the native spelling is never what is in there.
+    hooks_dir = home.hooks_dir.as_posix()
     for event in events:
         entries = _entries(settings, event)
         if not entries:
