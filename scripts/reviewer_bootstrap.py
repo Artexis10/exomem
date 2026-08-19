@@ -64,6 +64,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 CANDIDATE_PROFILE = "hosted-alpha-agent-v1"
+#: `exomem_oauth_client_partition_available` in migration 0048. Operator clients
+#: keep the original bound; auto-registered CIMD clients get a separate 128.
+OPERATOR_CLIENT_BOUND = 32
 LOOPBACK_REDIRECT = "http://localhost:47831/callback"
 CLAUDE_CIMD_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata"
 CLAUDE_CIMD_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
@@ -420,6 +423,30 @@ def preflight(cp: ControlPlane, candidate_id: str, locks: dict) -> bool:
     active = [a for a in clients.get("bootstrapAuthorities", []) if a.get("state") == "active"]
     print(f"  {'ok  ' if not active else 'FAIL'}  active bootstrap authorities: {len(active)}")
     ok &= not active
+
+    # `exomem_oauth_client_partition_available` bounds operator clients at 32, and
+    # nothing reclaims them: every attempt mints a fresh
+    # `exomem-reviewer-bootstrap-<uuid>` pinned client, disabled ones still count,
+    # and no admin action deletes a client. Exhausting it answers `register_pinned`
+    # with a bare 400. A sibling reusing an already-stored client id is exempt from
+    # the bound, so a connector that has authorized before costs nothing -- a brand
+    # new one costs a slot, and spends it mid-window.
+    #
+    # This endpoint does not report provenance, so the count is an upper bound on
+    # operator clients: once auto-registered CIMD clients exist they inflate it,
+    # and they have their own separate partition of 128.
+    stored = len(clients.get("clients", []))
+    headroom = OPERATOR_CLIENT_BOUND - stored
+    print(
+        f"  {'ok  ' if headroom > 2 else 'WARN'}  oauth clients: {stored} stored, "
+        f"<={headroom} of {OPERATOR_CLIENT_BOUND} operator slot(s) free"
+    )
+    if headroom <= 2:
+        print(
+            "        One attempt needs a slot for the bootstrap client, and one\n"
+            "        more for any sibling whose client id has never been stored.\n"
+            "        Nothing reclaims a slot through the API."
+        )
 
     status, capacity = cp.call("GET", "/api/exomem/admin/capacity", label="preflight-capacity")
     cap = capacity.get("capacity", {})
