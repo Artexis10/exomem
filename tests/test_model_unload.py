@@ -242,10 +242,19 @@ def test_default_cache_slots_reap_only_when_cpu_caches_are_evictable(
             "hot_find": {"entries": 1},
         },
     )
+    # The reaper frees memory, so it takes the narrow release that keeps the
+    # recall resolver (#676). The broad eviction is `epistemic_graph`'s, for
+    # forcing a re-derivation, and reaching for it here would cost the next
+    # reader a whole-vault rebuild to reclaim 3 MiB.
+    monkeypatch.setattr(
+        find,
+        "release_idle_ram_caches",
+        lambda: calls.append("find") or {"pages": 1},
+    )
     monkeypatch.setattr(
         find,
         "unload_ram_caches",
-        lambda: calls.append("find") or {"pages": 1},
+        lambda **_: calls.append("find-broad") or {"pages": 1},
     )
     monkeypatch.setattr(accel, "gpu_mem", lambda: None)
 
@@ -254,6 +263,7 @@ def test_default_cache_slots_reap_only_when_cpu_caches_are_evictable(
     reaped = model_reaper._reap_once(slots, now=time.monotonic() + 2.0, threshold=1.0)
     assert reaped == ["index-matrices", "bm25-cache", "find-ram-caches"]
     assert calls == ["index", "bm25", "find"]
+    assert "find-broad" not in calls
 
     calls.clear()
     monkeypatch.setenv("EXOMEM_MODE", "performance")
