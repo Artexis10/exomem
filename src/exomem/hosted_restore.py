@@ -246,7 +246,10 @@ def _hash_archive(path: Path) -> str:
             raise OperatorFailure("HOSTED_ARCHIVE_INVALID")
         descriptor = os.open(
             path,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
         try:
             before = os.fstat(descriptor)

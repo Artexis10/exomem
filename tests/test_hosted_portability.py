@@ -927,3 +927,74 @@ def test_concurrent_checkpoint_commit_adopts_one_atomic_result(tmp_path: Path) -
     assert not artifact.exists()
     assert unrelated.read_bytes() == b"another export"
     assert not list((tmp_path / "state").rglob(".*.json.partial"))
+
+
+# --- the export runs on a platform whose descriptors are not POSIX -----------
+#
+# Three separate defects made `export_quiesced_vault` impossible on Windows, and
+# each one hid the next: descriptors opened in text mode, a cross-API stat
+# comparison on a field Windows serves from a lazily-updated directory entry,
+# and a durability flush through a read-only handle. Sixteen tests in this file
+# failed there; all of them pass now.
+
+
+def test_a_crlf_source_is_digested_exactly_as_it_sits_on_disk(tmp_path: Path) -> None:
+    """The defect that would have been worse than the failure it caused.
+
+    A descriptor opened without `O_BINARY` translates every CRLF to a bare LF on
+    Windows, so the export read 18 bytes of a 20-byte file. The size check
+    caught that and refused -- but a manifest is a promise about bytes, and had
+    the sizes ever agreed the export would have published a SHA-256 of text the
+    file does not contain. That is what this pins: not that the export
+    succeeds, but that what it recorded is a digest of what is on disk.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, "ALPHA")
+    crlf = vault / "Knowledge Base/Notes/Insights/windows-authored.md"
+    raw = b"---\r\ntype: insight\r\n---\r\n# Windows authored\r\n\r\nCRLF body.\r\n"
+    crlf.write_bytes(raw)
+
+    result = portability.export_quiesced_vault(
+        vault, tmp_path / "artifacts", context=_context(), exomem_release="9.9.9"
+    )
+
+    records = {record["path"]: record for record in result.manifest["files"]}
+    recorded = records["Knowledge Base/Notes/Insights/windows-authored.md"]
+    assert recorded["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert recorded["size"] == len(raw)
+
+
+def test_creation_time_is_the_only_field_dropped_across_the_two_stat_apis() -> None:
+    """The narrowing has to stay narrow, on both platforms.
+
+    Windows disagrees with itself about `st_ctime` between a path stat and a
+    handle stat -- by a millisecond, for a file nothing touched -- because it is
+    the creation time and it comes from the directory entry. Dropping it there
+    costs nothing, since a new inode moves `st_dev`/`st_ino` and a content
+    change moves `st_size`/`st_mtime_ns`. Dropping anything else, or dropping it
+    on POSIX where it is the inode-change time, would be a real loss.
+    """
+    signature = (1, 2, 3, 4, 5)
+
+    comparable = portability._comparable_across_stat_apis(signature)
+
+    assert comparable == ((1, 2, 3, 4) if os.name == "nt" else (1, 2, 3, 4, 5))
+
+
+def test_a_completed_artifact_is_flushed_rather_than_refused(tmp_path: Path) -> None:
+    """`os.fsync` needs a writable handle on Windows and a readable one anywhere.
+
+    The export wrote the artifact, digested it, and then failed its own
+    durability step with `ARTIFACT_PUBLICATION_FAILED` -- on a file it had just
+    produced. Reaching a readable artifact at all is the assertion.
+    """
+    vault = tmp_path / "vault"
+    _seed_vault(vault, "ALPHA")
+
+    result = portability.export_quiesced_vault(
+        vault, tmp_path / "artifacts", context=_context(), exomem_release="9.9.9"
+    )
+
+    archive = result.archive_path
+    assert archive.is_file()
+    assert archive.stat().st_size > 0

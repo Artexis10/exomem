@@ -628,7 +628,10 @@ def _read_json(vault_root: Path, path: Path) -> dict[str, Any] | None:
             "LIFECYCLE_PATH_UNSAFE", "lifecycle marker is not a regular file"
         )
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
     except OSError as exc:
         raise LifecycleError(
             "LIFECYCLE_PATH_UNSAFE", "lifecycle marker could not be opened safely"

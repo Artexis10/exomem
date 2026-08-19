@@ -518,6 +518,33 @@ def _source_signature(source_stat: os.stat_result) -> tuple[int, int, int, int, 
     )
 
 
+def _comparable_across_stat_apis(
+    signature: tuple[int, int, int, int, int],
+) -> tuple[int, ...]:
+    """The fields a path stat and a handle stat may be compared on.
+
+    Everywhere except Windows that is the whole signature. On Windows it is not:
+    `st_ctime` there is the *creation* time, and it is served from the directory
+    entry, which the filesystem updates lazily -- so a file written moments ago
+    reads back as one value by path and another by handle, a millisecond apart,
+    with nothing having touched it. That is what made every quiesced export fail
+    on the Windows lane with "a source file changed during export".
+
+    Dropping it costs nothing there. Creation time cannot change for a live
+    inode: producing a new one moves `st_dev`/`st_ino`, which stay compared, and
+    a content change moves `st_size`/`st_mtime_ns`, which also stay compared. On
+    POSIX `st_ctime` is the inode-change time and does catch what those miss --
+    a chmod, a chown, a link count change -- so it is kept.
+
+    This narrowing applies only across the two APIs. The before/after-read
+    comparison uses the full signature from `fstat` on both sides, where every
+    field is produced the same way and every one of them means something.
+    """
+    if os.name == "nt":
+        return signature[:4]
+    return signature
+
+
 def _open_regular_source(
     path: Path,
     *,
@@ -529,7 +556,13 @@ def _open_regular_source(
     if not stat.S_ISREG(before.st_mode):
         _fail("UNSAFE_SOURCE_ENTRY", "vault exports accept regular files only")
 
-    flags = os.O_RDONLY
+    # `O_BINARY` or the digest is not of this file. Windows opens a descriptor
+    # in text mode by default, so every CRLF read back as a bare LF: a 20-byte
+    # source yielded 18 bytes, the size check below called that "a source file
+    # changed during export", and had the sizes ever agreed the manifest would
+    # have carried a SHA-256 of translated bytes instead of the file's. It is
+    # 0 on POSIX, so this changes nothing there.
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -542,7 +575,9 @@ def _open_regular_source(
             _fail("UNSAFE_SOURCE_ENTRY", "vault exports accept regular files only")
         before_signature = _source_signature(before)
         opened_signature = _source_signature(opened)
-        if before_signature != opened_signature or (
+        if _comparable_across_stat_apis(before_signature) != _comparable_across_stat_apis(
+            opened_signature
+        ) or (
             expected_signature is not None and opened_signature != expected_signature
         ):
             _fail("SOURCE_CHANGED_DURING_EXPORT", "a source file changed during export")
@@ -856,8 +891,16 @@ def _hash_file(path: Path) -> str:
 
 
 def _fsync_regular_file(path: Path) -> None:
+    # Windows will not flush a read-only handle: `os.fsync` there is `_commit`,
+    # which needs write access and returns EBADF without it, so every completed
+    # export failed its own durability step with "completed artifact could not
+    # be made durable". POSIX accepts a read-only descriptor, which is why
+    # opening for reading was right until this ran somewhere else. The artifact
+    # was written moments ago by this process, so opening it for update is
+    # available by construction.
+    mode = "r+b" if os.name == "nt" else "rb"
     try:
-        with path.open("rb") as handle:
+        with path.open(mode) as handle:
             os.fsync(handle.fileno())
     except OSError:
         _fail("ARTIFACT_PUBLICATION_FAILED", "completed artifact could not be made durable")

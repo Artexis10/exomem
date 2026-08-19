@@ -1540,7 +1540,10 @@ def _read_marker_payload(
     try:
         descriptor = os.open(
             marker,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError as exc:
         raise HostedConfigError(
