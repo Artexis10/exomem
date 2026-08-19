@@ -20,6 +20,7 @@ from exomem import audit_fix as audit_fix_module
 from exomem import commands
 from exomem import edit as edit_module
 from exomem import find as find_module
+from exomem import indexes as indexes_module
 from exomem import replace as replace_module
 from exomem.vault import (
     document_newline,
@@ -182,3 +183,63 @@ def test_the_drift_guard_accepts_the_hash_get_just_handed_out(
     )
 
     assert "appended line" in (vault / NOTE_REL).read_bytes().decode("utf-8")
+
+
+def _settle_indexes(vault: Path) -> list[Path]:
+    """Bring the vault's indexes to a fixed point and return the ones present."""
+    kb = vault / "Knowledge Base"
+    top = kb / "index.md"
+    for _ in range(4):
+        current_top = top.read_bytes().decode("utf-8")
+        writes, new_top = indexes_module.compute_subindex_writes(
+            vault, top_index_text=current_top
+        )
+        for write in writes:
+            write.path.write_bytes(write.content.encode("utf-8"))
+        if new_top is not None:
+            top.write_bytes(new_top.encode("utf-8"))
+        if not writes and new_top == current_top:
+            break
+    else:  # pragma: no cover - a non-converging refresh is itself the bug
+        raise AssertionError("index refresh never reached a fixed point")
+    candidates = [
+        top,
+        kb / "Sources" / "index.md",
+        kb / "Notes" / "index.md",
+        kb / "Entities" / "index.md",
+    ]
+    return [path for path in candidates if path.exists()]
+
+
+@newlines
+def test_a_settled_index_is_not_rewritten_just_for_its_line_ending(
+    vault: Path, newline: str
+) -> None:
+    """Index refresh is also the change detector; it must be ending-agnostic.
+
+    Every splice in `indexes` is written against LF, and CRLF text does not
+    make one fail -- `find("\\n## ")` matches the LF half of the pair and the
+    surrounding `rstrip()` eats the `\\r`. The regenerated rows then come back
+    LF-only, mixing both endings into one index. Because the caller only writes
+    `if new != base`, that also made an index whose counts were already correct
+    differ from what was read, so every maintenance pass rewrote every index on
+    a CRLF vault while reporting `files_rewritten: 0`.
+    """
+    targets = _settle_indexes(vault)
+    assert targets, "fixture vault has no indexes to exercise"
+    for path in targets:
+        logical = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+        path.write_bytes(logical.replace("\n", newline).encode("utf-8"))
+
+    before = {path: path.read_bytes() for path in targets}
+    top = vault / "Knowledge Base" / "index.md"
+
+    writes, new_top = indexes_module.compute_subindex_writes(
+        vault, top_index_text=top.read_bytes().decode("utf-8")
+    )
+
+    assert writes == []
+    assert new_top == top.read_bytes().decode("utf-8")
+    assert {path: path.read_bytes() for path in targets} == before
+    for path in targets:
+        assert _endings(path.read_bytes().decode("utf-8")) == {newline}
