@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import stat
@@ -435,3 +436,25 @@ def test_windows_installer_gates_remote_and_verifies_before_success() -> None:
     assert text.index("Preflight: exomem doctor --profile remote") < text.index("& $NssmPath install")
     assert text.index("Test-McpEndpoint -HostName") < text.index("Granted no-UAC")
     assert text.index("Test-McpEndpoint -HostName") < text.index("CHATGPT_PLUGIN_REFRESH_REQUIRED")
+
+
+def test_the_embedded_toolchain_stand_ins_are_valid_python() -> None:
+    """The shims are Python source in a string, so nothing type-checks them.
+
+    An edit that inserted a module-level import into this file matched inside
+    one of these bodies too, putting an unindented line inside an indented
+    block. Nothing here failed -- the shim was written out fine and every
+    installer run then died with `IndentationError` from the generated file,
+    which reads as the installer being broken.
+    """
+    module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    bodies = [
+        node.value
+        for node in ast.walk(module)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.lstrip().startswith("#!/usr/bin/python3")
+    ]
+    assert bodies, "no embedded Python stand-in found to check"
+    for body in bodies:
+        ast.parse(textwrap.dedent(body).lstrip())
