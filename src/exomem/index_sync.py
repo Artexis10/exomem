@@ -29,7 +29,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from . import deferred_index, semantic_index
+from . import call_spans, deferred_index, semantic_index
 
 log = logging.getLogger(__name__)
 
@@ -843,6 +843,18 @@ def _drain_graph_work(
     return processed
 
 
+def drain_graph_work(vault_root: Path, *, limit: int | None = None) -> int:
+    """Drain queued epistemic-graph repair without touching the other queues.
+
+    `drain_deferred_work` runs all three queues because its callers -- the
+    periodic reconcile, `maintain`, the CLI -- want all three. The graph drain
+    daemon wants only this one: it fires within a second of the write that
+    queued the debt, and replaying embeddings that often is a different cost
+    decision from repairing the graph.
+    """
+    return _drain_graph_work(vault_root, limit=limit, requested=None)
+
+
 def drain_deferred_work(
     vault_root: Path,
     *,
@@ -1078,6 +1090,7 @@ def _dispatch_upsert_components(
     return components
 
 
+@call_spans.timed("index.upsert_after_write")
 def upsert_after_write(
     vault_root: Path,
     written_paths: list[Path],

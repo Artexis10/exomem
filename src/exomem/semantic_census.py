@@ -62,6 +62,44 @@ def _same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
+def _comparable_identity_stat(entry: os.DirEntry[str]) -> os.stat_result:
+    """Stat *entry* so its device and inode survive comparison with an lstat.
+
+    `DirEntry.stat()` sets `st_dev`, `st_ino` and `st_nlink` to zero on
+    Windows -- documented behaviour, because a directory enumeration there
+    carries no file id. Every identity built from one therefore compared
+    unequal to the fresh `lstat` this module re-takes before it descends into
+    a directory or reads a file, so the census refused all of them: `adopt`
+    reported `markdown_files_scanned: 0` and `unreadable_directories` equal to
+    the subdirectory count on any Windows vault. Pay one extra stat only where
+    the enumeration withheld the id; on POSIX its values are real and this
+    hands them back untouched.
+    """
+    info = entry.stat(follow_symlinks=False)
+    if getattr(info, "st_ino", 0):
+        return info
+    return os.stat(entry.path, follow_symlinks=False)
+
+
+def _same_observed_state(left: os.stat_result, right: os.stat_result) -> bool:
+    """Compare two stats that did not necessarily come from the same call.
+
+    `st_ctime_ns` is deliberately absent. On Windows `os.stat` reports creation
+    time there while `os.fstat` reports metadata-change time -- two different
+    quantities, not two precisions of one -- so a file written any measurable
+    time after it was created compares unequal across the pair even though
+    nothing touched it. That made the census read a page and then discard it as
+    unsafe. Pair a descriptor with a descriptor and a path with a path, as
+    `vault._verify_batch_residue_workspace` already does, and use this only for
+    the one comparison that must span both.
+    """
+    return (
+        _same_identity(left, right)
+        and left.st_size == right.st_size
+        and getattr(left, "st_mtime_ns", None) == getattr(right, "st_mtime_ns", None)
+    )
+
+
 def _directory_identity_chain(
     root: Path,
     directory: Path,
@@ -250,7 +288,8 @@ def _read_regular_file_bounded(
         not _directory_identities_current(root, expected_ancestors)
         or _is_reparse(current)
         or not vault._same_identity(expected_file, current)
-        or not _same_file_state(opened, current)
+        or not _same_observed_state(opened, current)
+        or not _same_file_state(expected, current)
     ):
         return "unsafe", None
     return "ok", b"".join(chunks)
@@ -588,7 +627,7 @@ def scan(
         for entry in sorted(entries, key=lambda item: item.name):
             filename = entry.name
             try:
-                entry_info = entry.stat(follow_symlinks=False)
+                entry_info = _comparable_identity_stat(entry)
             except OSError:
                 if filename.casefold().endswith(".md"):
                     markdown_seen += 1

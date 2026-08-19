@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import threading
@@ -10,6 +11,17 @@ import time
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import (
+    declares_absent_directory_fd,
+    declares_absent_sandbox,
+    declares_absent_surface_timers,
+    declares_absent_trusted_git,
+    has_bwrap_sandbox,
+    has_posix_directory_fd_traversal,
+    has_posix_file_modes,
+    has_posix_interval_timers,
+    has_trusted_system_git,
+)
 
 from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
@@ -33,6 +45,16 @@ if _BENCHMARKS_DIR.is_dir() and str(_BENCHMARKS_DIR) not in sys.path:
 # and a single unimportable module interrupts the entire run. Declaring them
 # here rather than passing `--ignore` on the command line keeps `pytest` one
 # command on every platform, for CI and for a developer on Windows alike.
+#: `benchmarks/protocol/custody.py` is a *Linux* capability, not merely POSIX
+#: code. It builds directory custody on proc-fd magic symlinks: `capability_path`
+#: is `/proc/self/fd/<n>`, and both the module and its callers path-walk through
+#: it -- `capability_path / "child"`, `.iterdir()`, `symlink_to`. macOS has no
+#: `/proc`, and its `/dev/fd/<n>` is not a substitute: fdesc resolves the fd
+#: itself but supports no directory lookup, so `/dev/fd/<n>/child` cannot
+#: resolve. The module already says this itself by raising `CustodyUnsupported`
+#: rather than degrading into a weaker guarantee.
+PROC_FD_DIRECTORY_CUSTODY = os.name == "posix" and Path("/proc/self/fd").is_dir()
+
 collect_ignore: list[str] = []
 if os.name == "nt":
     collect_ignore += [
@@ -41,7 +63,288 @@ if os.name == "nt":
         "test_lme_reader_gate.py",  # -> lme.runner -> protocol.custody
         "test_lme_runner.py",  # -> lme.runner -> protocol.custody
         "test_protocol_custody.py",  # imports fcntl directly
+        # Same subsystem, same reason, and the list was simply incomplete: these
+        # import `protocol.custody` inside the test body rather than at module
+        # scope, so collection succeeded and they failed one by one at run time
+        # instead of being declared unsupported here. On Windows the custody
+        # capability blocks them almost entirely -- 17/17, 8/8, 3/3, 1/1, 11/11
+        # and 75 of 83 -- so ignoring the file costs a handful of cases in a
+        # subsystem this platform cannot run, which is the trade the entries
+        # above already make.
+        "test_lme_basic_memory_direct.py",
+        "test_lme_cli_provider_choices.py",
+        "test_lme_direct_lifecycle.py",
+        "test_lme_hybrid_rag.py",
+        "test_lme_providers.py",
+        "test_lme_runner_protocol.py",
+        "test_protocol_manifest_trace.py",
     ]
+
+
+#: `custody.py` walks a path as POSIX components -- `parts[0] != os.sep`, then a
+#: backslash test on every remaining part -- so on Windows *every* custody path
+#: trips one of these before the module reaches its own capability check.
+#: Neither message is then describing the path it names. Both remain real
+#: findings on a platform that has the capability, which is why matching them is
+#: gated on it being absent.
+_CUSTODY_ALIEN_PATH = re.compile(
+    r"custody path (must identify a non-root directory|contains an unsafe component)"
+)
+
+
+def _declares_custody_unsupported(error: BaseException | None) -> bool:
+    """True when *error* is the custody module refusing an absent capability.
+
+    Matched by qualified name rather than by importing `protocol.custody`: on
+    Windows that import is itself one of the things that fails, and a hook that
+    needs the module in order to decide whether the module is usable is no hook
+    at all.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ == "CustodyUnsupported":
+            return True
+        if type(error).__name__ == "CustodyError" and _CUSTODY_ALIEN_PATH.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+#: `custody.py` says this exact sentence when it finds no procfs. It reaches a
+#: test as text rather than as a raised error in the `assert <exception> is
+#: <expected>` cases, where the refusal is the *value* being compared, so the
+#: qualified-name walk above cannot see it.
+_CUSTODY_PROC_FD_DECLARATION = re.compile(
+    r"POSIX proc-fd directory capabilities are unavailable"
+)
+
+
+def _needs_an_absent_procfs(error: BaseException | None) -> bool:
+    """True when *error* is a custody test reaching `/proc` on a host without one.
+
+    Several of these tests read `/proc/self/fd` or a `/proc/<pid>/fd/<n>/...`
+    capability path directly rather than through `custody.py`, so they never
+    reach the module's own declaration -- and the lifecycle runner wraps what
+    it caught in `LifecycleRunError`, which buries it further. In both shapes
+    the original `FileNotFoundError` survives on the cause chain and names the
+    path it could not find.
+
+    A missing file under `/proc` on a host with no procfs is not ambiguous: the
+    file is absent because the filesystem that would supply it was never
+    mounted. Gated by the caller on that being the case, so on Linux -- where
+    `ci.yml` runs and procfs exists -- a missing `/proc` entry stays a failure.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, OSError):
+            filename = getattr(error, "filename", None)
+            if isinstance(filename, str) and filename.startswith("/proc/"):
+                return True
+        if _CUSTODY_PROC_FD_DECLARATION.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+#: POSIX-only standard-library surfaces the hosted cell runtime is built on.
+#: A hosted cell is a Linux container: it checks its own effective uid before
+#: trusting a runtime path, and takes `fcntl` locks on its state. There is no
+#: Windows behaviour for those to differ from -- the API does not exist -- so a
+#: test that reaches one is describing Linux, not failing on Windows.
+_POSIX_ONLY_API = re.compile(
+    r"module 'os' has no attribute 'gete?uid'"
+    r"|<module 'os'[^>]*> has no attribute 'gete?uid'"
+    # The hosted operator scripts open every input `O_NOFOLLOW` and every
+    # directory `O_DIRECTORY` so a symlink swapped in mid-read cannot
+    # redirect them. Windows publishes neither flag, so the scripts cannot
+    # even be loaded there -- and they only ever run on the Linux cell.
+    r"|module 'os' has no attribute 'O_(?:NOFOLLOW|DIRECTORY)'"
+    r"|<module 'os'[^>]*> has no attribute 'O_(?:NOFOLLOW|DIRECTORY)'"
+    r"|No module named 'fcntl'"
+)
+
+
+def _needs_an_absent_posix_api(error: BaseException | None) -> bool:
+    """True when *error* is this platform simply not having a POSIX API.
+
+    Narrow by construction: only `AttributeError` for the uid calls and
+    `ModuleNotFoundError` for `fcntl` count, and only their exact messages. An
+    ordinary `AttributeError` from a typo or a renamed attribute does not match,
+    so this cannot quietly absorb a real defect into a skip.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, (AttributeError, ImportError)) and _POSIX_ONLY_API.search(
+            str(error)
+        ):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+#: The hosted cell proves its state is private with POSIX ownership and mode
+#: bits -- `st_uid`/`st_gid` against the runtime owner, `0o700` on the state
+#: root, `0o600` on the security database, and a `mkdir(mode=0o700)` to create
+#: it. Windows has none of that as an access-control fact: it reports no owner
+#: ids and synthesizes a mode, so a directory reads `0o777` and a file `0o666`
+#: whatever `chmod` was asked for. Every one of these refusals is that check
+#: reading a placeholder and correctly declining to vouch for it.
+#:
+#: The DACL refusal belongs to the same fact from the other side. Because the
+#: bare `mkdir` above leaves an ordinary inherited DACL on Windows, the
+#: idempotency runtime under the same state root -- which does have a native
+#: Windows implementation, and requires a *protected* DACL it created itself --
+#: refuses the directory the cell just made. The two only disagree on Windows;
+#: on Linux `prepare_windows_private_state_root` is a no-op and
+#: `mkdir(mode=0o700)` is genuinely private, so there is nothing to reconcile
+#: for the platform this component is deployed on. A hosted cell is a Linux
+#: container, which is the same reason `test_hosted_restore_candidate.py` is
+#: ignored outright here.
+_HOSTED_POSIX_OWNERSHIP_REFUSAL = (
+    "HostedSecurityStateInvalid",
+    "HostedSecurityUnavailable",
+    "HostedRuntimeTempUnavailable",
+    "WindowsRuntimeDaclError",
+)
+_HOSTED_TEMP_REFUSAL = re.compile(r"hosted runtime temp is unavailable")
+
+#: The hosted operator scripts refuse any input whose POSIX mode they cannot
+#: vouch for. Windows `chmod` only toggles a read-only bit, so it cannot
+#: express 0600 or the absence of group/world write at all, and the scripts
+#: are correct to refuse. Matched on the sentences that name a mode, never on
+#: a bare refusal type, so a genuine path-safety finding still fails.
+_HOSTED_OPERATOR_MODE_REFUSAL = re.compile(
+    r"must be a non-writable regular file"
+    r"|without group/world write access"
+    r"|must have mode 0600"
+)
+
+
+def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
+    """True when *error* is the hosted cell declining to trust a synthesized mode.
+
+    Matched by the refusal types the cell raises for exactly this, never on a
+    bare `OSError`, and gated by the caller on the platform genuinely lacking
+    POSIX file modes -- so on Linux CI, where the cell actually runs, every one
+    of these stays a failure.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ in _HOSTED_POSIX_OWNERSHIP_REFUSAL:
+            return True
+        if _HOSTED_TEMP_REFUSAL.search(str(error)):
+            return True
+        if _HOSTED_OPERATOR_MODE_REFUSAL.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
+    """Report a platform capability this host does not have as a skip.
+
+    Five causes now, every one of them "this API does not exist here" rather
+    than "this code is wrong". They were reported as defects when the honest
+    report was that the platform cannot run the subsystem.
+
+    On macOS, 82 of them were one platform fact: the capability
+    `protocol.custody` is built on does not exist there, and the module says so
+    in the way it was designed to. A missing capability is what `skip` means.
+
+    Deliberately *not* `collect_ignore` here, which is why macOS is handled
+    differently from Windows above. These modules are only *partly* custody
+    -dependent on macOS -- it collects 162 tests from `test_lme_direct_lifecycle`
+    and only 50 of them need proc-fd -- so ignoring whole files to silence the
+    minority would drop 100+ tests that pass and genuinely cover this platform.
+    Windows is the opposite case: there the same files are blocked almost
+    entirely, so ignoring them costs nearly nothing and buys a declaration.
+
+    The two broker branches are the same trade for different capabilities, and
+    they are separate because the platforms differ: Windows has neither, but
+    macOS has POSIX interval timers and no `bwrap` at all. The sandbox is not
+    merely "Linux" either -- the broker pins `/usr/bin/bwrap` and binds
+    `/usr/bin/python3.12`, `/lib/x86_64-linux-gnu` and
+    `/lib64/ld-linux-x86-64.so.2` into the namespace, so the capability is that
+    exact Debian x86-64 runtime.
+    `epistemic.broker` bounds every provider surface with `setitimer`/`SIGALRM`,
+    isolates it with that sandbox, and refuses up front where either is absent.
+    Its entry points share no helper to gate, so each refusal is matched where it
+    surfaces -- through `__context__` as well, because `pytest.raises(...,
+    match=...)` re-raises as an `AssertionError` holding it: a test that expected
+    one contract error and met a refusal instead failed for the absent
+    capability, not for its own reason.
+
+    The Git branch is the same trade again. `benchmarks/protocol` resolves Git
+    through `os.defpath` rather than `PATH`, so a user-controlled `PATH` cannot
+    substitute the binary that establishes contract identity -- but `os.defpath`
+    on Windows names a drive-root `bin` directory that does not exist, behind
+    the very current-directory entry the anchor exists to exclude. Only the
+    three refusals meaning "the anchor found nothing usable" are matched; a
+    digest mismatch stays a failure, because that is a real finding.
+
+    Every branch is gated on the capability actually being absent, so this can
+    never mask a regression where it matters: on Linux CI all of them exist --
+    `ci.yml` provisions `bwrap` and checks it runs, and `/usr/bin` is on
+    `os.defpath` -- so a `CustodyUnsupported`, a timer refusal, a sandbox
+    refusal or a Git refusal there stays a failure and is meant to.
+    """
+    report = (yield).get_result()
+    # `setup` as well as `call`: a fixture that builds its subject through the
+    # absent capability raises before the body runs, and an error there is the
+    # same missing prerequisite reported one phase earlier.
+    if report.when not in {"call", "setup"} or report.outcome != "failed":
+        return
+    if call.excinfo is None:
+        return
+    error = call.excinfo.value
+    if not PROC_FD_DIRECTORY_CUSTODY and (
+        _declares_custody_unsupported(error) or _needs_an_absent_procfs(error)
+    ):
+        reason = "proc-fd directory custody is unavailable on this platform"
+    elif os.name == "nt" and _needs_an_absent_posix_api(error):
+        reason = "the hosted cell runtime's POSIX APIs do not exist on Windows"
+    elif not has_posix_file_modes() and _needs_posix_ownership_semantics(error):
+        reason = "the hosted cell proves state privacy with POSIX ownership this platform lacks"
+    elif not has_posix_interval_timers() and declares_absent_surface_timers(error):
+        reason = "POSIX interval timers (setitimer/SIGALRM) are unavailable here"
+    elif not has_bwrap_sandbox() and declares_absent_sandbox(error):
+        reason = "the pinned bubblewrap sandbox runtime is unavailable here"
+    elif not has_trusted_system_git() and declares_absent_trusted_git(error):
+        reason = "os.defpath names no trusted system Git on this platform"
+    elif not has_posix_directory_fd_traversal() and declares_absent_directory_fd(error):
+        reason = "POSIX directory descriptors (openat) do not exist on this platform"
+    else:
+        return
+    report.outcome = "skipped"
+    report.longrepr = (str(item.path), item.location[1] or 0, f"Skipped: {reason}")
+
+
+@pytest.fixture(autouse=True)
+def _stop_leaked_graph_drain():
+    """No test leaves the graph drain daemon running into the next one.
+
+    `server_runtime` starts it and nothing stops it, so any test that exercises
+    server startup leaks the thread for the rest of the session. It then keeps
+    polling a vault root whose `tmp_path` has been deleted, and it turns up in
+    every later thread dump -- including the one from the `windows-latest`
+    shard that hangs, where it was the first suspect precisely because it was
+    the only unexplained thread there.
+
+    The daemon is idle-waiting and almost certainly innocent, but a leaked
+    thread that outlives its vault has no business being a variable in someone
+    else's failure. This is the same hazard the rebuild threads already have on
+    record for crossing test boundaries.
+    """
+    yield
+    from exomem import graph_drain
+
+    graph_drain.stop()
+    graph_drain._DEBT.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -87,10 +390,22 @@ def _reset_corpus_context_cache():
 #: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
 #: and the warming path (`epistemic_graph.schedule_background_rebuild`).
 _GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
-#: Generous: a rebuild over a test vault is milliseconds. A pass that cannot
-#: finish in 30 s has not been slow, it has wedged, and that is worth failing on
-#: rather than leaving for whichever test inherits it.
-_GRAPH_QUIESCE_TIMEOUT_SECONDS = 30.0
+#: A rebuild over most test vaults is milliseconds, and one that cannot finish
+#: has wedged rather than slowed -- worth failing on rather than leaving for
+#: whichever test inherits it. But most is not every: the planning-governance
+#: cap fixtures build a vault of ~2000 pages, whose whole-vault rebuild
+#: measures ~36 s on an idle Windows box, so 30 s reported a rebuild that was
+#: progressing normally as wedged and failed the Windows lane in teardown of a
+#: test that had passed.
+#:
+#: Raised well past that measurement rather than tuned to it. A wedged rebuild
+#: never finishes, so this value does not decide whether one is caught -- only
+#: how long a working rebuild is given before it is libelled, and the cost of
+#: guessing low is a false failure in someone else's lane.
+#:
+#: That a routine rebuild is O(vault) at all is #576; when repair becomes
+#: proportional to the change, this can come back down.
+_GRAPH_QUIESCE_TIMEOUT_SECONDS = 180.0
 
 
 def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -> None:
@@ -196,6 +511,17 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # default tests. Tests that exercise these gates set them explicitly.
     monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
     monkeypatch.delenv("EXOMEM_VIDEO_SCENE_FRAMES", raising=False)
+    # An exported EXOMEM_LOG_DIR must not decide where a test's records land.
+    # `query_log._target` consults it per call and short-circuits ahead of the
+    # module-level QUERIES_PATH/WRITES_PATH/READS_PATH that tests monkeypatch,
+    # so three tests in test_query_log.py wrote into the operator's real log
+    # directory and then failed reading their own tmp sidecar (#570). CI never
+    # saw it -- the variable is unset there -- but the project's own Docker
+    # images set it and the documented contract tells operators to export it,
+    # so anyone running the suite on a configured machine got failures
+    # unrelated to their change. Tests that exercise the override set it
+    # themselves; a test-body or module-fixture setenv still wins over this.
+    monkeypatch.delenv("EXOMEM_LOG_DIR", raising=False)
     # The watcher now starts independently of embeddings (it maintains the
     # freshness/inbound registries too), so build_server would spawn a real
     # watchdog observer in the suite without this. Watcher tests opt back in.

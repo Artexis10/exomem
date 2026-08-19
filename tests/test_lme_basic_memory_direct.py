@@ -14,6 +14,7 @@ import inspect
 import json
 import os
 import signal
+import subprocess
 import textwrap
 import time
 from pathlib import Path
@@ -346,12 +347,25 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    # A reaped child lingers as a zombie until waited on; the owner must reap.
+    # A reaped child lingers as a zombie until waited on; the owner must reap,
+    # so "signalable" does not by itself mean "alive".
     try:
         with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
             return handle.read().split(") ", 1)[1].split(" ", 1)[0] != "Z"
     except FileNotFoundError:
-        return False
+        pass
+    # No procfs. Returning False here reported every live process as dead on
+    # macOS -- and `os.kill(pid, 0)` above had already proved this one exists.
+    # Ask `ps` for the state code instead; a leading `Z` is the same zombie the
+    # procfs branch looks for, and empty output means the process is gone.
+    completed = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    state = completed.stdout.strip()
+    return bool(state) and not state.startswith("Z")
 
 
 def test_signal_death_of_the_sidecar_is_observed_not_assumed(

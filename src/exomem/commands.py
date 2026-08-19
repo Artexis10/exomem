@@ -778,7 +778,7 @@ def op_bootstrap(
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
                 "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
                 "structure_suggestion": "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': captures keep landing in the 'other' fallback within one domain, so a real kind probably exists",
-                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, offer to classify that pattern on future captures; captured sources stay put.",
+                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
             },
@@ -4650,6 +4650,10 @@ def op_observe_memory(
     Returns:
         The normalized unit, stable unit reference, parent hashes, bounded
         semantic-contract feedback, and derived-index outcome.
+        `before_hash`/`after_hash` are whole-file `content_hash` values in the
+        same convention `expected_hash` is checked against and `get` hands out,
+        so `after_hash` is exactly what to echo into the next call's
+        `expected_hash`.
     """
     raw_path = str(path or "").strip()
     if raw_path.startswith(("/", "\\")) or Path(raw_path).is_absolute() or (
@@ -6280,6 +6284,79 @@ def op_schema_memory(
     raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
 
 
+def op_reclassify_source(
+    vault_root: Path,
+    *,
+    path: str,
+    source_kind: str | None = None,
+    domain: str | None = None,
+    reason: str | None = None,
+) -> dict:
+    """Correct a captured source's classification and relocate it to match.
+
+    Classification is a judgement made at capture time, often before the answer
+    is knowable. This is how it gets corrected: the source's kind, its domain, or
+    both change, the file moves to the location those values project to, every
+    inbound reference follows it, and the previous path is recorded.
+
+    The body is never touched. Only the classification fields and the fields
+    recording the correction change, which is the same line `ingested_into:`
+    already sits on — an append-only source's frontmatter is maintained, its
+    content is immutable.
+
+    `reason` is required and is stored on the source. A correction that cannot be
+    explained is usually one that should not happen, and the recorded reason is
+    what later distinguishes a deliberate correction from a mistake.
+
+    Both vocabularies are open, exactly as at capture: name the kind and domain
+    you actually mean rather than the closest familiar label.
+    """
+    from . import reclassify_source as reclassify_module
+
+    try:
+        result = reclassify_module.reclassify(
+            vault_root,
+            path=path,
+            source_kind=source_kind,
+            domain=domain,
+            reason=reason,
+        )
+    except reclassify_module.ReclassifyError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    return result.as_dict()
+
+
+def op_propose_reclassification(
+    vault_root: Path,
+    *,
+    path: str,
+    source_kind: str | None = None,
+    domain: str | None = None,
+) -> dict:
+    """Report what correcting one source would do, without writing anything.
+
+    Pass the kind and domain you have decided on to preview that correction: the
+    location it would project to and how many references would move. This is the
+    normal path — read the source, decide, preview, show the user, then apply.
+
+    Called with no values, this reports only what is deterministically observable
+    about the source: the domain segment already in its location, whether it
+    records an origin URL, and its existing metadata. That usually settles the
+    domain and rarely settles the kind, and when nothing observable establishes a
+    kind this says so instead of offering the fallback. Deciding what an artifact
+    IS means reading it — a plausible guess presented for approval is how a
+    fallback becomes permanent.
+    """
+    from . import reclassify_source as reclassify_module
+
+    try:
+        return reclassify_module.propose(
+            vault_root, path, source_kind=source_kind, domain=domain
+        ).as_dict()
+    except reclassify_module.ReclassifyError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+
+
 def op_manage_memory_file(
     vault_root: Path,
     operation: str = "list",
@@ -6294,6 +6371,9 @@ def op_manage_memory_file(
     include_hidden: bool = False,
     old_path: str | None = None,
     new_path: str | None = None,
+    source_kind: str | None = None,
+    domain: str | None = None,
+    reason: str | None = None,
     update_wikilinks: bool = True,
     confirm: bool = False,
     force_orphan: bool = False,
@@ -6319,7 +6399,8 @@ def op_manage_memory_file(
     their canonical leaves.
 
     Args:
-        operation: list, create, append, move, delete, trash-list, or recover.
+        operation: list, create, append, move, reclassify,
+            propose-reclassification, delete, trash-list, or recover.
         path: Path for list/create/append/delete, or default recover trash path.
         content: Text body for create/append.
         frontmatter: Optional frontmatter for create.
@@ -6331,6 +6412,14 @@ def op_manage_memory_file(
         include_hidden: Include hidden files for list.
         old_path: Source path for move.
         new_path: Destination path for move.
+        source_kind: For reclassify, what the captured artifact IS. Open
+            vocabulary, exactly as at capture: name the kind you actually mean.
+            Optional on propose-reclassification, where it previews that
+            correction instead of only what the vault can observe by itself.
+        domain: For reclassify, what it is ABOUT, independent of its kind.
+            Optional on propose-reclassification, same preview behaviour.
+        reason: Required for reclassify. Recorded on the source, so a later
+            reader can tell a deliberate correction from a mistake.
         update_wikilinks: Rewrite inbound wikilinks on move.
         confirm: Required for delete.
         force_orphan: Allow delete despite inbound links.
@@ -6442,6 +6531,23 @@ def op_manage_memory_file(
             allow_curated=allow_curated,
             expected_dead_inbound=expected_dead_inbound,
         )
+    if operation in {"reclassify", "propose-reclassification"}:
+        target = path or old_path
+        if not target:
+            raise ValueError(
+                "INVALID_PATH: reclassify requires `path` naming the captured source"
+            )
+        if operation == "propose-reclassification":
+            return op_propose_reclassification(
+                vault_root, path=target, source_kind=source_kind, domain=domain
+            )
+        return op_reclassify_source(
+            vault_root,
+            path=target,
+            source_kind=source_kind,
+            domain=domain,
+            reason=reason,
+        )
     if operation == "trash-list":
         return op_list_trash(vault_root, date=date)
     if operation == "recover":
@@ -6456,7 +6562,7 @@ def op_manage_memory_file(
         )
     raise ValueError(
         "INVALID_MODE: manage_memory_file operation must be list, create, append, "
-        "move, delete, trash-list, or recover"
+        "move, reclassify, propose-reclassification, delete, trash-list, or recover"
     )
 
 

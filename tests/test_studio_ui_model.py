@@ -23,6 +23,9 @@ def _node(source: str) -> dict:
         check=True,
         capture_output=True,
         text=True,
+        # Node emits UTF-8. Without this the pipe is decoded with the host's
+        # active code page, and a separator like U+00B7 arrives as mojibake.
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 

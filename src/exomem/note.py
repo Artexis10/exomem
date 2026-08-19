@@ -107,7 +107,7 @@ def _plan_project_registrations(
     categories = dict(registry.project_to_category)
     registry_path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
     if registry_path.exists():
-        original = registry_path.read_text(encoding="utf-8")
+        original = registry_path.read_bytes().decode("utf-8")
         text = original
         expected_hash = content_hash(original)
     else:

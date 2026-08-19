@@ -267,6 +267,138 @@ def test_windows_private_dacl_deduplicates_local_system_principal() -> None:
     )
 
 
+#: The DACL Windows actually writes for an entry created beneath a user's
+#: temporary directory: protected, three full-access ACEs, no broad trustee --
+#: and the user's own grant spelled `OW` (OWNER RIGHTS) rather than as a literal
+#: SID. Refusing it failed closed on a directory that was already private.
+_OWNER_RIGHTS_DACL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+#: Deliberately tiny sub-authorities. A real Windows account SID carries
+#: 32-bit values and identifies one specific machine and account, which is
+#: not something a public repository should carry.
+_USER_SID = "S-1-5-21-1-2-3-1001"
+
+
+#: The descriptor a GitHub Windows runner reads back for its own cache
+#: directory, with the runner's real SID replaced by a synthetic one. That
+#: runner's user is its account domain's built-in Administrator
+#: (RID 500), and SDDL renders that account as `LA` -- never as its SID. The
+#: grants are exactly the three this module writes; only the spelling differs.
+_LOCAL_ADMIN_DACL = "O:BAD:P(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+#: RID 500 with the same deliberately tiny sub-authorities as `_USER_SID`.
+_LOCAL_ADMIN_SID = "S-1-5-21-1-2-3-500"
+
+
+def test_local_admin_alias_counts_as_the_users_grant_when_the_user_is_rid_500() -> None:
+    """The validator must not reject a DACL it wrote itself.
+
+    This exact descriptor cost 1725 failures -- 72% of the whole Windows lane --
+    because every runner user is RID 500, so every private directory this module
+    created read back with its own grant spelled `LA` and failed closed with no
+    repair path. The instrumentation added earlier in this PR is what produced
+    the string; it was never guessable from a developer box, where the current
+    user is not the built-in Administrator and the SID is written literally.
+    """
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        _LOCAL_ADMIN_DACL, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_local_admin_alias_is_rejected_for_any_other_account() -> None:
+    """`LA` is a spelling of *us* only when we are the account it names.
+
+    Accepting it for an ordinary user would admit full access for a different
+    principal entirely -- the built-in Administrator -- which is the class of
+    hole this validator exists to catch.
+    """
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        _LOCAL_ADMIN_DACL, _USER_SID, directory=True
+    )
+
+
+def test_local_admin_alias_alongside_a_literal_grant_is_still_a_duplicate() -> None:
+    """Resolving the alias before the duplicate check keeps that check honest."""
+    doubled = (
+        f"O:BAD:P(A;OICI;FA;;;LA)(A;OICI;FA;;;{_LOCAL_ADMIN_SID})"
+        "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    )
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        doubled, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_owner_rights_counts_as_the_users_grant_when_the_user_owns_the_entry() -> None:
+    """`OW` is a spelling of the owner, so ownership decides what it admits."""
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:{_USER_SID}{_OWNER_RIGHTS_DACL}", _USER_SID, directory=True
+    )
+
+
+def test_owner_rights_is_rejected_when_somebody_else_owns_the_entry() -> None:
+    """The concession is ownership-scoped or it is a hole.
+
+    Accepting `OW` unconditionally would admit full access for whoever happens
+    to own the entry -- the one case this validator exists to catch.
+    """
+    stranger = "S-1-5-21-9999-8888-7777-1001"
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:{stranger}{_OWNER_RIGHTS_DACL}", _USER_SID, directory=True
+    )
+
+
+def test_owner_rights_is_rejected_when_the_descriptor_carries_no_owner() -> None:
+    """No owner, no way to resolve `OW` -- so fail closed rather than assume."""
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        _OWNER_RIGHTS_DACL, _USER_SID, directory=True
+    )
+
+
+def test_owner_rights_does_not_let_a_principal_be_granted_twice() -> None:
+    """`OW` beside a literal grant to the same owner is one principal, named twice.
+
+    Resolving `OW` before the duplicate check is what keeps that rule meaningful;
+    checking the raw trustee would see two distinct strings and wave it through.
+    """
+    doubled = (
+        f"O:{_USER_SID}D:P(A;OICI;FA;;;{_USER_SID})"
+        "(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+    )
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        doubled, _USER_SID, directory=True
+    )
+
+
+def test_owner_rights_does_not_excuse_a_broad_trustee() -> None:
+    """Everything else the validator rejected, it still rejects."""
+    with_everyone = f"O:{_USER_SID}{_OWNER_RIGHTS_DACL}(A;OICI;FA;;;WD)"
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        with_everyone, _USER_SID, directory=True
+    )
+    unprotected = f"O:{_USER_SID}D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        unprotected, _USER_SID, directory=True
+    )
+
+
+def test_an_owner_bearing_descriptor_still_accepts_the_dacl_this_module_writes() -> None:
+    """The literal-SID form is the one we write; prefixing an owner cannot break it."""
+    sddl = mutation_lock_module._windows_private_dacl_sddl(_USER_SID)
+
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:{_USER_SID}{sddl}", _USER_SID, directory=True
+    )
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        sddl, _USER_SID, directory=True
+    )
+
+
+def test_sddl_owner_is_read_for_both_raw_sids_and_two_letter_aliases() -> None:
+    """Windows picks the spelling, so both have to parse back to the same answer."""
+    owner = mutation_lock_module._windows_sddl_owner
+    assert owner(f"O:{_USER_SID}{_OWNER_RIGHTS_DACL}") == _USER_SID
+    assert owner(f"O:BA{_OWNER_RIGHTS_DACL}") == "BA"
+    assert owner(_OWNER_RIGHTS_DACL) is None
+
+
 def _process_hold(
     state_root: str,
     vault_root: str,
@@ -1130,3 +1262,343 @@ def test_the_private_state_root_is_creatable_under_a_missing_ancestor(
 
     assert root.is_dir()
     assert store._runtime_state_error is None
+
+
+def test_dacl_error_reports_what_it_observed_not_just_that_it_refused() -> None:
+    """A rejection you cannot reproduce locally is only useful if it self-describes.
+
+    The message named the path and a repair command and stopped there. That is
+    enough on a machine you can log into and inspect, and useless from anywhere
+    else -- so a CI runner's rejection could only be guessed at from whatever
+    shape some other machine happened to produce. Carrying the descriptor turns
+    the report itself into the evidence.
+    """
+    error = mutation_lock_module.WindowsRuntimeDaclError(
+        Path(r"C:\Users\example\.cache\exomem"),
+        "icacls.exe ...",
+        observed="D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;WD)",
+        expected=("S-1-5-21-1-2-3-1001", "SY", "BA"),
+    )
+
+    assert error.observed is not None
+    assert "WD" in str(error), "the offending trustee must survive into the text"
+    assert "expected full-access trustees" in str(error)
+    assert "S-1-5-21-1-2-3-1001" in str(error)
+    assert "icacls.exe" in str(error)
+
+
+def test_dacl_error_still_renders_without_a_descriptor() -> None:
+    """The two new fields are optional; older call sites must not break."""
+    error = mutation_lock_module.WindowsRuntimeDaclError(
+        Path(r"C:\example\x"), "icacls.exe ..."
+    )
+
+    assert error.observed is None
+    assert error.expected == ()
+    assert "unsafe Windows DACL" in str(error)
+
+
+def test_owner_rights_counts_when_the_administrators_group_owns_the_entry() -> None:
+    """The second half of the same descriptor, and 38 more Windows failures.
+
+    `LA` fixed the *trustee* spelling; this is the *owner*. Where the policy
+    "System objects: Default owner for objects created by members of the
+    Administrators group" names the group -- which is how GitHub's
+    `windows-latest` runners are configured -- every directory an administrator
+    creates is owned by `BA`, not by the account. So the descriptor this module
+    writes itself came back as `O:BA` with an `OW` ACE, and `OW` was refused
+    because the owner was not spelled as the current user.
+
+    The built-in Administrator belongs to that group by construction, so the
+    ACE does grant to us.
+    """
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:BA{_OWNER_RIGHTS_DACL}", _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_administrators_owner_is_no_concession_to_an_ordinary_account() -> None:
+    """Membership is what carries the grant, and an ordinary user has none.
+
+    Were this unscoped, any account would accept an `OW` ACE on an entry owned
+    by Administrators -- inferring its own access from a group it may not be in.
+    """
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:BA{_OWNER_RIGHTS_DACL}", _USER_SID, directory=True
+    )
+
+
+def test_the_administrators_owner_concession_admits_no_new_principal() -> None:
+    """`BA` already holds full access here, so resolving `OW` to it widens nothing.
+
+    That is the whole justification: the concession cannot admit anyone the
+    descriptor did not already admit, because the group it names is one of the
+    three trustees private runtime state permits.
+    """
+    trustees = mutation_lock_module._windows_private_dacl_trustees(_LOCAL_ADMIN_SID)
+
+    assert "BA" in trustees
+
+
+def test_a_foreign_owner_is_still_refused_for_the_built_in_administrator() -> None:
+    """Being RID 500 does not make every owner ours."""
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        f"O:S-1-5-21-9-9-9-1001{_OWNER_RIGHTS_DACL}", _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_the_administrators_owner_does_not_relax_the_trustee_set() -> None:
+    """The owner decides what `OW` means, never who else may be granted."""
+    foreign = (
+        "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+        "(A;OICI;FA;;;S-1-5-21-9-9-9-1001)"
+    )
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        foreign, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_an_inherited_directory_dacl_is_still_refused() -> None:
+    """Protection is a separate requirement and this change does not touch it.
+
+    The other 12 of the 50 runner failures are this: a directory that already
+    existed, so it carries its parent's ACEs and no `P`. Whatever grants it
+    happens to name, an unprotected DACL can change under us when the parent's
+    does -- and this module validates a pre-existing entry rather than
+    repairing it.
+    """
+    inherited = "O:BAD:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)"
+
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        inherited, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+def test_the_administrators_owner_is_not_a_trustee_spelling() -> None:
+    """`BA` resolves an owner, never a literal ACE trustee.
+
+    Folding it into the trustee spellings would collapse a real `BA` grant onto
+    the user's slot, and the descriptor below -- which names the user, SYSTEM
+    and Administrators exactly once each -- would read as a duplicate.
+    """
+    literal = (
+        f"O:BAD:P(A;OICI;FA;;;{_LOCAL_ADMIN_SID})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    )
+    assert mutation_lock_module._windows_private_dacl_is_valid(
+        literal, _LOCAL_ADMIN_SID, directory=True
+    )
+
+
+# --- an inherited private DACL is tightened, not refused -------------------------
+#
+# Windows gives a directory created inside an already-private parent its
+# parent's ACEs by inheritance rather than a DACL of its own, so the entry is
+# private but unprotected. The validator demanded `D:P` with explicit `OICI`
+# flags and refused everything else, which failed closed on directories that
+# had never admitted anybody outside the private set -- 29 of 241 failures on
+# the Windows lane, all of them state roots created under a pytest temporary
+# directory. `tempfile.mkdtemp` protects its own root as
+# `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)`, and everything made
+# inside it inherits exactly that.
+
+_INHERITED_DACL = (
+    f"O:{_USER_SID}D:"
+    f"(A;OICIID;FA;;;{_USER_SID})(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)"
+)
+_INHERITED_OWNER_RIGHTS_DACL = (
+    f"O:{_USER_SID}D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)"
+)
+
+
+def test_an_inherited_private_dacl_is_reported_as_inherited_not_unsafe() -> None:
+    """The verdict the repair decision is made on.
+
+    Every trustee is one this module writes itself, so no principal outside the
+    private set can hold a handle to the entry. That is what separates this from
+    a DACL that must be refused: there is nothing to take back.
+    """
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            _INHERITED_DACL, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_INHERITED
+    )
+    assert not mutation_lock_module._windows_private_dacl_is_valid(
+        _INHERITED_DACL, _USER_SID, directory=True
+    )
+
+
+def test_the_runners_owner_rights_shape_is_inherited_rather_than_unsafe() -> None:
+    """The exact descriptor the Windows lane fails on, spelled with `OW`."""
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            _INHERITED_OWNER_RIGHTS_DACL, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_INHERITED
+    )
+
+
+def test_a_protected_private_dacl_stays_private() -> None:
+    """The verdict split must not disturb the descriptor this module writes."""
+    written = mutation_lock_module._windows_private_dacl_sddl(_USER_SID)
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            f"O:{_USER_SID}{written}", _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_PRIVATE
+    )
+
+
+@pytest.mark.parametrize(
+    "trustee",
+    ["WD", "AU", "BU", "S-1-5-21-1-2-3-1002"],
+    ids=["everyone", "authenticated-users", "users", "another-account"],
+)
+def test_a_foreign_trustee_is_unsafe_however_it_arrived(trustee: str) -> None:
+    """Inheritance is not a defence, and this is the line that matters.
+
+    A trustee outside the private set means somebody else may already hold a
+    handle, and tightening a DACL does not close a handle opened against the
+    old one. So this stays a refusal rather than becoming a repair.
+    """
+    sddl = (
+        f"O:{_USER_SID}D:(A;OICIID;FA;;;{trustee})"
+        f"(A;OICIID;FA;;;{_USER_SID})(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)"
+    )
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            sddl, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_UNSAFE
+    )
+
+
+def test_partial_rights_are_unsafe_even_for_a_private_trustee() -> None:
+    """Full access is the grant this module writes; anything else is not it."""
+    sddl = (
+        f"O:{_USER_SID}D:(A;OICIID;0x1301bf;;;{_USER_SID})"
+        f"(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)"
+    )
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            sddl, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_UNSAFE
+    )
+
+
+def test_owner_rights_inherited_under_a_foreign_owner_is_unsafe() -> None:
+    """`OW` names whoever owns the entry, so the owner check still decides it."""
+    sddl = "O:S-1-5-21-9-9-9-1001D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)"
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            sddl, _USER_SID, directory=True
+        )
+        == mutation_lock_module._WINDOWS_DACL_UNSAFE
+    )
+
+
+def test_an_inherited_file_ace_is_still_private() -> None:
+    """Files already accepted inheritance; the directory split must not move them."""
+    sddl = (
+        f"O:{_USER_SID}D:(A;ID;FA;;;{_USER_SID})(A;ID;FA;;;SY)(A;ID;FA;;;BA)"
+    )
+
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(
+            sddl, _USER_SID, directory=False
+        )
+        == mutation_lock_module._WINDOWS_DACL_PRIVATE
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL semantics")
+def test_a_directory_inheriting_a_private_dacl_is_protected_in_place(
+    tmp_path: Path,
+) -> None:
+    """End to end on real Windows security, because the verdict is only half of it.
+
+    The entry this observes is built the way the runner's is: a parent carrying
+    the protected private DACL, and a child that inherits it. Before this, the
+    child was refused with a remediation the user had to run by hand in an
+    elevated shell.
+    """
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    sid = mutation_lock_module._windows_current_user_sid()
+    mutation_lock_module._windows_apply_private_dacl(parent, sid)
+    child = parent / "hosted-state"
+    child.mkdir()
+    observed = mutation_lock_module._windows_dacl_sddl(child)
+    assert (
+        mutation_lock_module._windows_private_dacl_verdict(observed, sid, directory=True)
+        == mutation_lock_module._WINDOWS_DACL_INHERITED
+    )
+
+    mutation_lock_module._prepare_windows_private_directory(child)
+
+    after = mutation_lock_module._windows_dacl_sddl(child)
+    assert mutation_lock_module._windows_private_dacl_is_valid(after, sid, directory=True)
+    assert after.split("D:", 1)[1].startswith("P")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL semantics")
+def test_a_directory_admitting_another_account_is_refused_and_left_alone(
+    tmp_path: Path,
+) -> None:
+    """The refusal path, on real security, including that it writes nothing.
+
+    Tightening here would be worse than refusing: the foreign grant means a
+    handle may already be open, and rewriting the DACL would hide that while
+    changing nothing about the access already obtained.
+    """
+    target = tmp_path / "state"
+    target.mkdir()
+    sid = mutation_lock_module._windows_current_user_sid()
+    mutation_lock_module._windows_apply_dacl_sddl(
+        target,
+        f"D:(A;OICIID;FA;;;AU)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;{sid})",
+    )
+    before = mutation_lock_module._windows_dacl_sddl(target)
+
+    with pytest.raises(mutation_lock_module.WindowsRuntimeDaclError):
+        mutation_lock_module._prepare_windows_private_directory(target)
+
+    assert mutation_lock_module._windows_dacl_sddl(target) == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL semantics")
+def test_the_tightening_is_attempted_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that does not take is an error, not a reason to spin.
+
+    The stabilization wait exists for a creator that has not written its DACL
+    yet. Retrying our own failed write inside it would spend that whole budget
+    re-attempting something already known not to work, and report a timeout
+    instead of the permission failure that caused it.
+    """
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    sid = mutation_lock_module._windows_current_user_sid()
+    mutation_lock_module._windows_apply_private_dacl(parent, sid)
+    child = parent / "hosted-state"
+    child.mkdir()
+    attempts: list[Path] = []
+
+    def refuse(target: Path, directory: object, sid: str) -> None:
+        attempts.append(target)
+
+    monkeypatch.setattr(
+        mutation_lock_module, "_windows_tighten_private_directory", refuse
+    )
+    monkeypatch.setattr(mutation_lock_module, "_WINDOWS_DACL_STABILIZATION_SECONDS", 0.05)
+
+    with pytest.raises(mutation_lock_module.WindowsRuntimeDaclError):
+        mutation_lock_module._prepare_windows_private_directory(child)
+
+    assert attempts == [child]

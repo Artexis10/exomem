@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -22,6 +22,7 @@ from .entity_types import ENTITY_TYPE_REGISTRY, ENTITY_TYPES_BY_FOLDER
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
+    document_newline,
     escape_wikilinks_for_log,
     kb_root,
     read_guarded_text,
@@ -37,6 +38,31 @@ SOURCES_RECENT_HEADER = "## Recent captures"
 INDEX_RECENT_HEADER = "## Recent activity"
 INDEX_COUNTS_HEADER = "## Counts"
 LOG_SEPARATOR = "\n---\n"
+
+
+def _rewritten_in_place(text: str, rewrite: Callable[[str], str]) -> str:
+    r"""Run an LF-only section rewriter without changing the document's endings.
+
+    Every splice in this module is written against LF: `find("\n## ")`,
+    `"\n".join(rows)`, `lstrip("\n")`. Handing one of them CRLF text does not
+    fail loudly. `find("\n## ")` still matches the LF half of the pair, the
+    surrounding `rstrip()` eats the `\r`, and the regenerated rows come back
+    LF-only -- so the document ends up with mixed line endings and a blank line
+    silently consumed.
+
+    The damage is not confined to cosmetics. These rewriters are also the
+    change detector: the caller writes only `if new != base`. A rewriter that
+    re-emits different bytes for an index that needed no change makes every
+    maintenance pass rewrite every index on a CRLF vault, while the report the
+    user reads says nothing was rewritten. Normalizing in and restoring out
+    keeps "nothing to do" byte-identical, which is what makes that comparison
+    mean anything.
+    """
+    newline = document_newline(text)
+    rewritten = rewrite(text.replace("\r\n", "\n").replace("\r", "\n"))
+    if newline == "\n":
+        return rewritten
+    return rewritten.replace("\n", newline)
 
 
 @dataclass
@@ -705,11 +731,13 @@ def compute_subindex_writes(
     # Top index counts refresh (Sources + Notes + Entities rows).
     new_top_text: str | None = None
     if top_index_text is not None:
-        top_index_text = _rewrite_sources_count(top_index_text, counts=sources_counts)
-        new_top_text = _rewrite_top_index_notes_and_entities_counts(
+        new_top_text = _rewritten_in_place(
             top_index_text,
-            notes_counts=notes_counts,
-            entities_counts=entities_counts,
+            lambda logical: _rewrite_top_index_notes_and_entities_counts(
+                _rewrite_sources_count(logical, counts=sources_counts),
+                notes_counts=notes_counts,
+                entities_counts=entities_counts,
+            ),
         )
         new_top_text = render_wikilinks_for_vault(new_top_text, vault_root)
 
@@ -723,12 +751,15 @@ def compute_subindex_writes(
         if current is not None:
             base_write = planned_bases.get(sources_index.resolve())
             base = base_write.content if base_write is not None else current
-            new = _replace_by_type_section(
+            new = _rewritten_in_place(
                 base,
-                folder_title="Articles",
-                folder_description=_LEGACY_FOLDER_DESCRIPTIONS["Articles"],
-                counts=sources_counts,
-                vault_root=vault_root,
+                lambda logical: _replace_by_type_section(
+                    logical,
+                    folder_title="Articles",
+                    folder_description=_LEGACY_FOLDER_DESCRIPTIONS["Articles"],
+                    counts=sources_counts,
+                    vault_root=vault_root,
+                ),
             )
             new = render_wikilinks_for_vault(new, vault_root)
             if include_unchanged or new != base:
@@ -748,10 +779,13 @@ def compute_subindex_writes(
         if current is not None:
             base_write = planned_bases.get(notes_index.resolve())
             base = base_write.content if base_write is not None else current
-            new = _refresh_notes_subindex_text(
+            new = _rewritten_in_place(
                 base,
-                counts_by_type=notes_counts,
-                counts_by_subfolder=notes_by_subfolder,
+                lambda logical: _refresh_notes_subindex_text(
+                    logical,
+                    counts_by_type=notes_counts,
+                    counts_by_subfolder=notes_by_subfolder,
+                ),
             )
             new = render_wikilinks_for_vault(new, vault_root)
             if include_unchanged or new != base:
@@ -771,8 +805,11 @@ def compute_subindex_writes(
         if current is not None:
             base_write = planned_bases.get(entities_index.resolve())
             base = base_write.content if base_write is not None else current
-            new = _refresh_entities_subindex_text(
-                base, counts_by_type=entities_counts
+            new = _rewritten_in_place(
+                base,
+                lambda logical: _refresh_entities_subindex_text(
+                    logical, counts_by_type=entities_counts
+                ),
             )
             new = render_wikilinks_for_vault(new, vault_root)
             if include_unchanged or new != base:

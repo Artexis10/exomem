@@ -2399,6 +2399,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
+        "reclassify": "mutation",
+        "propose-reclassification": "structure",
     },
     ("schema_memory", "operation"): {
         "infer": "save-conditional",
@@ -2949,7 +2951,17 @@ class _ArtifactReferenceGate:
             aliases = {rel, unquote(rel)}
             if rel.startswith(kb_prefix):
                 aliases.add(rel[len(kb_prefix) :])
-            without_suffix = str(Path(rel).with_suffix("")) if path.suffix else rel
+            # `.as_posix()`, not `str()`: `str(WindowsPath)` re-spells the
+            # separators, so on Windows this alias was stored with backslash
+            # separators and never matched the forward-slash token
+            # `resolve` normalises to. An extensionless
+            # full-path wikilink to a withheld page -- the ordinary shape of
+            # frontmatter provenance -- therefore resolved to nothing there, and
+            # a reference that names it survived redaction. `rel` above already
+            # uses `as_posix` for exactly this reason.
+            without_suffix = (
+                Path(rel).with_suffix("").as_posix() if path.suffix else rel
+            )
             aliases.add(without_suffix)
             for alias in aliases:
                 self._add(self.by_path, alias, rel)
@@ -3599,24 +3611,65 @@ def filter_withheld_entries(
         resolved_items[rel_path] = result
         return result
 
+    def _walk_to_real_spelling(parts: list[str]) -> str | None:
+        """Name each component the way the filesystem names it, or `None`.
+
+        Prefers an exact match so a page literally called `a%20b.md` still
+        resolves to itself, then falls back to a case-insensitive one. The
+        cheap `is_file()` probes this replaced were not sound on a
+        case-insensitive filesystem: NTFS and APFS answer yes for `NOTE.MD`
+        when the page on disk is `note.md`, so the resolver handed back the
+        *requested* spelling and the release decision was made against a path
+        the policy does not name. Because that decision is fail-closed, the
+        observed effect was a permitted page dropped on Windows and macOS
+        while the identical payload was released on Linux, where the spelling
+        names nothing and the walk below finds the real one. Same payload,
+        different answer per platform -- which is the whole thing this
+        resolver exists to remove.
+        """
+        current = vault_root
+        real: list[str] = []
+        for part in parts:
+            folded = part.casefold()
+            exact: str | None = None
+            insensitive: str | None = None
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        if entry.name == part:
+                            exact = entry.name
+                            break
+                        if insensitive is None and entry.name.casefold() == folded:
+                            insensitive = entry.name
+            except OSError:
+                return None
+            match = exact if exact is not None else insensitive
+            if match is None:
+                return None
+            real.append(match)
+            current = current / match
+        try:
+            return "/".join(real) if current.is_file() else None
+        except OSError:
+            return None
+
     def _resolve_uncached(rel_path: str) -> str | None:
         if lifecycle.is_tombstoned(vault_root, rel_path):
             return _normalize_pathish(rel_path)
         if rel_path.startswith(("http://", "https://", "exomem://")):
             return None
-        # RAW exact hit first. `_decode_pathish` is otherwise unconditional,
+        # RAW spelling first. `_decode_pathish` is otherwise unconditional,
         # which meant a file literally named `a%20b.md` could never resolve to
         # itself — the decode turned it into `a b.md`, so a reference to the
         # withheld percent-literal file landed on its permitted decoded twin
         # and was kept. Exotic, but the file's own name is the most specific
-        # evidence available and it costs one stat.
+        # evidence available, and `_walk_to_real_spelling` prefers an exact
+        # component match, so the literal wins wherever it exists.
         raw = rel_path.strip().replace("\\", "/").strip("/")
         if raw and ".." not in raw.split("/"):
-            try:
-                if (vault_root / raw).is_file():
-                    return raw
-            except OSError:
-                pass
+            resolved = _walk_to_real_spelling(raw.split("/"))
+            if resolved is not None:
+                return resolved
         candidate = _decode_pathish(rel_path)
         if candidate is None:
             return None
@@ -3640,33 +3693,14 @@ def filter_withheld_entries(
             parts.append(part)
         if not parts:
             return None
-        # Exact hit first — the overwhelmingly common case, one stat.
-        direct = vault_root.joinpath(*parts)
-        try:
-            if direct.is_file():
-                return "/".join(parts)
-        except OSError:
-            return None
-        # Case-insensitive, component by component.
-        current = vault_root
-        real: list[str] = []
-        for part in parts:
-            folded = part.casefold()
-            try:
-                match = next(
-                    (e.name for e in os.scandir(current) if e.name.casefold() == folded),
-                    None,
-                )
-            except OSError:
-                return None
-            if match is None:
-                return None
-            real.append(match)
-            current = current / match
-        try:
-            return "/".join(real) if current.is_file() else None
-        except OSError:
-            return None
+        # One walk, not a fast `is_file()` probe followed by a slow fallback.
+        # The probe was unsound wherever the filesystem folds case: it answered
+        # yes for a spelling the page does not have, and the release decision
+        # was then made against a path the policy never names.
+        resolved = _walk_to_real_spelling(parts)
+        if resolved is not None:
+            return resolved
+        return None
 
     def _keep(entry: Any, directory: str | None = None) -> bool:
         candidates = _entry_candidate_paths(entry, directory)

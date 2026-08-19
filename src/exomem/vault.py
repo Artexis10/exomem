@@ -3867,6 +3867,49 @@ def is_casing_only_rewrite(canonical: str, original: str) -> bool:
     return len(canonical) == len(original) and canonical.casefold() == original.casefold()
 
 
+def _respelled_against_disk(root: Path, relative: str) -> str | None:
+    """Re-spell each existing component of *relative* with its on-disk casing.
+
+    `Path.resolve()` reports the true casing on Windows, so this module got the
+    re-spell for free there and assumed every platform behaved that way. macOS
+    folds case exactly as NTFS does, but `realpath()` only resolves symlinks --
+    it hands back whatever spelling it was given -- so `canonical_vault_rel`
+    was an identity transform on the one other platform that needs it, and two
+    spellings of one page kept two identities.
+
+    Walks the components instead, taking each existing entry's real name. An
+    exact match always wins, so a genuinely case-sensitive volume is never
+    redirected to a differently-cased sibling. The first component that does
+    not exist ends the walk and the remainder is preserved verbatim, matching
+    the non-strict `resolve()` this supplements. Returns None if a directory
+    cannot be read, so the caller keeps its fail-open behaviour.
+    """
+    parts = tuple(part for part in relative.split("/") if part)
+    if not parts:
+        return None
+    current = root
+    spelled: list[str] = []
+    for index, part in enumerate(parts):
+        folded = part.casefold()
+        match: str | None = None
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.name == part:
+                        match = part
+                        break
+                    if match is None and entry.name.casefold() == folded:
+                        match = entry.name
+        except OSError:
+            return None
+        if match is None:
+            spelled.extend(parts[index:])
+            break
+        spelled.append(match)
+        current = current / match
+    return "/".join(spelled)
+
+
 def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     """Return `rel` re-spelled with the real on-disk casing under `vault_root`.
 
@@ -3901,11 +3944,19 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
         return rel
     if not canonical or canonical == ".":
         return rel
-    canonical = _canonical_kb_segment(canonical)
     # Compare against the slash-normalized caller form: `Path` accepts `\` and
     # a leading `/`, and `as_posix()` has already normalized those away, so
     # comparing raw would reject a legitimate re-spell over pure spelling noise.
     cleaned = str(rel).replace("\\", "/").lstrip("/")
+    if canonical == cleaned and os.name != "nt" and vault_casefolds(root):
+        # `resolve()` handed back the caller's own spelling. Either it was
+        # already correct or this platform does not re-spell at all; only a
+        # folding volume can tell those apart, and only there are the extra
+        # directory reads worth taking.
+        respelled = _respelled_against_disk(root, canonical)
+        if respelled:
+            canonical = respelled
+    canonical = _canonical_kb_segment(canonical)
     if not is_casing_only_rewrite(canonical, cleaned):
         return rel
     return canonical
@@ -3975,9 +4026,13 @@ def vault_casefolds(vault_root: Path) -> bool:
     `EXOMEM_CASEFOLD_PATHS=1|0` overrides the answer without probing — that is
     how Linux CI exercises the folding branch. Its reach is exactly this
     predicate: the case-folded identity *comparison* (whether two spellings
-    count as one owner). It does not disable path canonicalization —
-    `canonical_vault_rel` / `resolve_under_vault` re-spell to the on-disk casing
-    unconditionally, on every platform. Otherwise the filesystem is probed once
+    count as one owner), and the supplementary re-spell walk described below.
+    It does not disable path canonicalization — `canonical_vault_rel` /
+    `resolve_under_vault` still re-spell through `Path.resolve()` on every
+    platform. That is the whole re-spell on Windows, where `resolve()` reports
+    true casing; POSIX `realpath()` does not, so on a folding volume there
+    `canonical_vault_rel` walks the components itself, and this predicate is
+    what says the volume folds. Otherwise the filesystem is probed once
     per root; when nothing is probeable the platform default
     (`os.path.normcase`) decides.
     """
@@ -4267,7 +4322,11 @@ def parse_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any
         return {}, text, None
     fm_text = m.group(1)
     body = m.group(2)
-    if body.startswith("\n"):
+    # A CRLF page leaves the blank line after `---` at the head of the body,
+    # so stripping only LF made this contract silently platform-dependent.
+    if body.startswith("\r\n"):
+        body = body[2:]
+    elif body.startswith("\n"):
         body = body[1:]
     try:
         if strict:
@@ -5212,6 +5271,54 @@ def escape_wikilinks_for_log(text: str) -> str:
     return _LOG_WIKILINK_RE.sub(lambda m: f"`{m.group(1)}`", text)
 
 
+def document_newline(text: str) -> str:
+    """Report the line ending a document already uses, so edits match it.
+
+    Mixing endings inside one page breaks more than tidiness:
+    `prepend_log_entry` proves idempotency by asking whether the rendered
+    entry is already present, and an LF entry is never found in a CRLF log,
+    so a replayed write appends a duplicate instead of returning unchanged.
+    """
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def render_frontmatter_document(
+    fm_text: str, body: str, *, newline: str = "\n", blank_line: bool = False
+) -> str:
+    """Compose `---`-delimited frontmatter and body in one line ending.
+
+    Every rewrite path used to hardcode LF delimiters and hardcode LF when
+    appending a YAML key. A page a Windows editor had saved as CRLF then came
+    back with both endings mixed inside it, and the rewrite fired even when
+    the pass had nothing to change -- which is how `audit_fix` reported
+    spurious wikilink fixes for pages it was contractually leaving alone.
+
+    `body` is passed through byte-for-byte; only the delimiters and the
+    frontmatter block, which callers build themselves, are normalized.
+    """
+    block = fm_text.replace("\r\n", "\n").replace("\n", newline)
+    lead = newline if blank_line else ""
+    return f"---{newline}{block}{newline}---{newline}{lead}{body}"
+
+
+def _find_log_separator(log_text: str) -> tuple[int, str]:
+    """Locate the log's header separator whatever line endings the file carries.
+
+    exomem emits `log.md` with LF, but any Windows editor that rewrites the
+    file leaves CRLF behind, and the separator then carries a CR before each
+    LF. Both callers degrade silently when the lookup misses: `prepend_log_entry`
+    appends the entry at the bottom instead of below the header, and
+    `_plan_log_content` stops rotating and lets the log grow unbounded, which
+    puts every write back to O(log size). Return the separator that actually
+    matched so callers keep the file's own newlines.
+    """
+    for separator in ("\n---\n", "\r\n---\r\n"):
+        index = log_text.find(separator)
+        if index != -1:
+            return index, separator
+    return -1, "\n---\n"
+
+
 def prepend_log_entry(
     log_text: str,
     *,
@@ -5230,16 +5337,23 @@ def prepend_log_entry(
     title = rel_path_no_ext
     if title.startswith(kb_prefix()):
         title = title[len(kb_prefix()) :]
+    newline = document_newline(log_text)
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
+    new_entry = new_entry.replace("\r\n", "\n").replace("\n", newline)
     if new_entry in log_text:
         return log_text
     # Reuse the same separator the indexes module emits.
-    separator = "\n---\n"
-    sep_idx = log_text.find(separator)
+    sep_idx, separator = _find_log_separator(log_text)
     if sep_idx == -1:
-        return log_text.rstrip() + "\n\n" + new_entry + "\n"
+        return log_text.rstrip() + newline * 2 + new_entry + newline
     insertion_point = sep_idx + len(separator)
-    return log_text[:insertion_point] + "\n" + new_entry + "\n" + log_text[insertion_point:]
+    return (
+        log_text[:insertion_point]
+        + newline
+        + new_entry
+        + newline
+        + log_text[insertion_point:]
+    )
 
 
 # ---- log.md rotation (scale-proper activity log) ---------------------------
@@ -5293,8 +5407,7 @@ def _plan_log_content(
         existing_archive = False
 
     rotate = len(log_text.encode("utf-8")) > _log_rotate_bytes()
-    separator = "\n---\n"
-    sep_idx = log_text.find(separator)
+    sep_idx, separator = _find_log_separator(log_text)
     starts: list[int] = []
     if rotate and sep_idx != -1:
         head_end = sep_idx + len(separator)
@@ -5306,10 +5419,11 @@ def _plan_log_content(
         live_text = log_text[:head_end] + entries_text[:cut]
         tail = entries_text[cut:]
         moved = len(starts) - LOG_ROTATE_KEEP_ENTRIES
+        newline = document_newline(log_text)
         archive_text = (
-            f"# log.md archive segment ({token_hash})\n\n"
+            f"# log.md archive segment ({token_hash}){newline}{newline}"
             f"Rotated out of `{kb_prefix()}log.md` — {moved} entrie(s), newest "
-            f"first, byte-exact.\n{separator}{tail}"
+            f"first, byte-exact.{newline}{separator}{tail}"
         )
         if current_archive is not None and current_archive != archive_text:
             raise ValueError("LOG_ARCHIVE_COLLISION: deterministic archive already differs")

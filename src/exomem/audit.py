@@ -70,8 +70,10 @@ import math
 import os
 import re
 import stat
+import sys
 from collections import deque
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -737,6 +739,99 @@ class _BoundSidecarRepair:
         return True
 
 
+_DARWIN_F_GETPATH = 50  # <sys/fcntl.h>
+_DARWIN_MAXPATHLEN = 1024
+
+
+@lru_cache(maxsize=1)
+def _proc_fd_directory() -> Path | None:
+    """The procfs descriptor directory, where the running kernel provides one."""
+    candidate = Path("/proc/self/fd")
+    try:
+        return candidate if candidate.is_dir() else None
+    except OSError:  # pragma: no cover - a hostile or absent /proc
+        return None
+
+
+def _names_pinned_inode(candidate: Path, pinned: os.stat_result) -> bool:
+    """True when *candidate* still names the same inode the descriptor holds."""
+    try:
+        named = os.stat(candidate, follow_symlinks=False)
+    except OSError:
+        return False
+    return (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino)
+
+
+def _pinned_descriptor_path(descriptor: int, *, writable: bool = False) -> Path | None:
+    """Name the inode a descriptor holds, not the name it was opened under.
+
+    Linux answers this with the magic symlink `/proc/self/fd/N`, and this
+    module used to assume every POSIX host had one. macOS has no procfs, so
+    the binding handed sqlite a path that could not exist: every bound census
+    read reported `sidecar_unreadable` and every exact-row repair quietly did
+    nothing, which made audit and reconcile repair inert on macOS rather than
+    unavailable. Darwin's `F_GETPATH` answers the same question -- it reports
+    where the pinned inode lives *now* -- so a sidecar replaced behind the
+    descriptor is still reached through the descriptor and not through the
+    name it no longer owns. Where neither exists the caller degrades to the
+    declared `unsupported` state instead of inventing a path.
+    """
+    proc_fd = _proc_fd_directory()
+    if proc_fd is not None:
+        return proc_fd / str(descriptor)
+    if sys.platform != "darwin":
+        return None
+    if writable:
+        # A WRITE may not go through `F_GETPATH`. What it returns is an
+        # ordinary name, and every caller hands it to sqlite, which resolves
+        # it again at open time -- so a rename between this check and that
+        # open redirects the write to whatever holds the name then. That is
+        # the exact swap the pinning exists to defeat, and `entry_matches()`
+        # notices it only afterwards, where it gates the *report* rather than
+        # the write. The procfs branch above has no such gap: sqlite resolves
+        # the magic symlink to wherever the pinned inode lives at open time,
+        # so the write always lands on the inode.
+        #
+        # A hard link would name the inode and close the gap, but these
+        # sidecars are WAL databases (`sidecar_store.apply_sidecar_pragmas`),
+        # and a second name for one database gets its own `-wal`/`-shm` pair.
+        # Two names, two write-ahead logs, one inode is a corruption hazard
+        # strictly worse than the repair being unavailable.
+        #
+        # So Darwin binds for reading and declines to write, reaching the
+        # `unsupported` state that exists to say exactly this. Reads stay
+        # bound because a redirected read can only mis-classify -- it opens
+        # `mode=ro`, and what it would leak back is the attacker's own file.
+        return None
+    pinned = os.fstat(descriptor)
+    # `volfs` (`/.vol/<dev>/<ino>`) addresses the inode directly and looks like
+    # the ideal answer, but it cannot serve one: every caller hands this path to
+    # sqlite, which in WAL mode must create `-wal` and `-shm` siblings inside
+    # `/.vol/<dev>` -- a synthetic read-only directory. Returning it turned an
+    # inert repair into one that raised `EROFS`, so `F_GETPATH` is the only
+    # usable branch here.
+    import fcntl
+
+    try:
+        raw = fcntl.fcntl(descriptor, _DARWIN_F_GETPATH, bytes(_DARWIN_MAXPATHLEN))
+    except (OSError, ValueError):
+        return None
+    resolved = raw.split(b"\x00", 1)[0]
+    if not resolved:
+        return None
+    candidate = Path(os.fsdecode(resolved))
+    # `F_GETPATH` answers from the vnode name cache, and a rename can leave
+    # that stale: after a sidecar is replaced behind this descriptor it may
+    # still report the old name, which now belongs to a *different* file. That
+    # swap is the exact attack pinning the inode exists to defeat, so the path
+    # is usable only while it still names the pinned inode. Where it does not,
+    # the caller degrades to the declared `unsupported` state -- macOS can hold
+    # the inode open but cannot re-open it by identity, so refusing is the only
+    # honest answer. The procfs branch above needs no such check: its magic
+    # symlink names the descriptor itself.
+    return candidate if _names_pinned_inode(candidate, pinned) else None
+
+
 def _sidecar_platform() -> Literal["posix", "windows", "unsupported"]:
     """Select the local no-follow binding primitive without mutating process state."""
     if os.name == "posix" and all(
@@ -831,8 +926,11 @@ def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidec
                 return "invalid", None
             checks.append((kb_fd, name, (info.st_dev, info.st_ino), False))
             signatures.append((name, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)))
+        pinned = _pinned_descriptor_path(leaf_fd, writable=writable)
+        if pinned is None:
+            return "unsupported", None
         bound = _BoundSidecarRepair(
-            tuple(fds), Path(f"/proc/self/fd/{leaf_fd}"), tuple(checks), tuple(signatures)
+            tuple(fds), pinned, tuple(checks), tuple(signatures)
         )
         return "regular", bound
     except FileNotFoundError:

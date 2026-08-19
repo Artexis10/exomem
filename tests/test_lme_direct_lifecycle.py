@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from benchmark_capabilities import require_procfs_descriptor_paths
 
 
 def _attempts(run_dir: Path) -> list[dict[str, object]]:
@@ -2176,6 +2177,11 @@ def test_feedback6_cleanup_orders_publish_reobserve_bind_register_then_retire(
 def test_feedback6_post_publish_reappearance_or_snapshot_drift_invalidates(
     tmp_path: Path,
 ) -> None:
+    # The custodied context below addresses its evidence through a proc-fd
+    # capability path. Off procfs there is no such path to observe, so the live
+    # post-publication observation asserted here cannot be staged at all.
+    require_procfs_descriptor_paths()
+
     from lme.providers.base import ProviderRuntimeBinding
     from lme.providers.lifecycle import CleanupUnproved, run_provider_lifecycle
 

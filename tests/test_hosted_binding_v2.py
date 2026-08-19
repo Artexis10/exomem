@@ -401,7 +401,18 @@ def test_migration_preflight_rejects_every_unsafe_entry_type(
             if not hasattr(socket, "AF_UNIX"):
                 pytest.skip("Unix sockets unavailable")
             opened_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            opened_socket.bind(str(unsafe))
+            # macOS caps `sun_path` at 104 bytes, and a pytest tmp_path under
+            # /private/var/folders/<...> has already spent most of it before
+            # this name is appended -- the bind then fails with "AF_UNIX path
+            # too long" and the test never reaches its subject. Bind through a
+            # relative name from the entry's own directory so the length of the
+            # temp root stops counting.
+            previous_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                opened_socket.bind(unsafe.name)
+            finally:
+                os.chdir(previous_cwd)
         else:
             if not hasattr(os, "mknod") or not hasattr(os, "makedev"):
                 pytest.skip("device nodes unavailable")

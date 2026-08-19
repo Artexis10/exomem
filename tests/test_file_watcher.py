@@ -174,7 +174,7 @@ def test_live_graph_read_barrier_preserves_incremental_repair(
     assert freshness.external_pending(vault) is False
     assert graph.available() is True
     current = next(node for node in graph.nodes(path=rel) if node["kind"] == "file")
-    assert current["source_hash"] == vault_module.content_hash(page.read_text(encoding="utf-8"))
+    assert current["source_hash"] == vault_module.content_hash(page.read_bytes().decode("utf-8"))
 
 
 @pytest.mark.parametrize("restart", [False, True])
@@ -402,7 +402,7 @@ def test_periodic_reconcile_recovers_a_failed_external_publication(
     assert freshness.recall_is_live(vault, "vault") is True
     assert graph.available() is True
     current = next(node for node in graph.nodes(path=rel) if node["kind"] == "file")
-    assert current["source_hash"] == vault_module.content_hash(page.read_text(encoding="utf-8"))
+    assert current["source_hash"] == vault_module.content_hash(page.read_bytes().decode("utf-8"))
 
 
 def test_non_markdown_is_ignored(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -788,7 +788,13 @@ def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
         file_watcher.mode,
         "watcher_policy",
         lambda: file_watcher.mode.WatcherPolicy(
-            debounce_seconds=0.05,
+            # Half a second, not 50 ms. What is under test is that two records
+            # inside one debounce window coalesce into a single dispatch, and
+            # the 10 ms gap below only has to land inside that window -- but a
+            # 5x margin is a coin flip on a runner executing four shards at
+            # once, where macOS CI dispatched `quiet-a` alone before `quiet-b`
+            # was ever recorded. The wait below already bounds the test at 2 s.
+            debounce_seconds=0.5,
             reconcile_interval_seconds=999.0,
             max_embed_files_per_batch=0,
             max_reconcile_embed_files=0,
@@ -804,7 +810,7 @@ def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
         w._record(a, deleted=False)
         time.sleep(0.01)
         w._record(b, deleted=False)
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + 5.0
         while not calls and time.monotonic() < deadline:
             time.sleep(0.02)
         assert len(calls) == 1

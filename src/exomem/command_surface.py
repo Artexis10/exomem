@@ -18,7 +18,12 @@ from dataclasses import dataclass, field
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
 
-from . import capabilities
+from . import call_spans, capabilities
+from .call_spans import (  # noqa: F401 - re-exported for existing importers
+    pop_call_spans,
+    record_span,
+    span,
+)
 from .governance import operations as governance_operations
 from .mutation_terminal import ResponseDetail
 
@@ -45,16 +50,11 @@ _TOOL_FAILURES: dict[str, list[dict[str, object]]] = {}
 _TOOL_FAILURE_TTL_SECONDS = 300.0
 _TOOL_FAILURES_MAX_TOTAL = 1000
 
-# Per-call signal key: minted by the middleware when it binds the request
-# context and read by the sync wrapper inside the threadpool (ContextVars
-# propagate INTO the worker thread's copied context; only mutations don't
-# propagate back). Unlike the client-supplied request id, this token is
-# unique per call, so concurrent calls sharing a request id can never
-# cross-attribute their failures — and a success can never pop a concurrent
-# same-id call's failure marker.
-_MCP_CALL_TOKEN: ContextVar[str | None] = ContextVar(
-    "exomem_mcp_call_token", default=None
-)
+# Per-call signal key, defined in `call_spans` so the phase timers and this
+# failure breadcrumb key off one token rather than two definitions that must
+# agree. Re-exported under the original private name: every reader of this
+# module already knows it by that name.
+_MCP_CALL_TOKEN = call_spans.MCP_CALL_TOKEN
 
 
 def _sweep_tool_failures_locked(now: float) -> None:

@@ -1912,10 +1912,16 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
+        "reclassify": "mutation",
+        "propose-reclassification": "structure",
     }
     manage = product["manage_memory_file"]
     assert commands.invocation_is_read_only(manage, {"operation": "list"})
     assert commands.invocation_is_read_only(manage, {"operation": "trash-list"})
+    assert commands.invocation_is_read_only(
+        manage, {"operation": "propose-reclassification"}
+    )
+    assert not commands.invocation_is_read_only(manage, {"operation": "reclassify"})
     assert commands.invocation_is_read_only(
         manage, {"operation": "create", "validate_only": True}
     )
@@ -2844,6 +2850,27 @@ def test_genuinely_external_md_references_still_survive(vault: Path) -> None:
             vault, {"entries": [{"path": OPEN_PATH, "target_path": value}]}
         )
         assert len(out["entries"]) == 1, f"{value!r} deleted a permitted entry"
+
+
+def test_a_withheld_page_is_filtered_however_the_reference_spells_its_case(
+    vault: Path,
+) -> None:
+    """A reference is decided against the page it names, not its spelling.
+
+    The companion guard to the over-blocking case above. `_governed_shut`
+    withholds `Notes/Patterns/**` and leaves the rest open, so a resolver that
+    hands back a miscased spelling hands the scope glob a directory name that
+    is not the one on disk. This direction holds on `main` today, and it has
+    to keep holding now that resolution walks to the real spelling rather than
+    trusting a case-insensitive `is_file()`.
+    """
+    _governed_shut(vault)
+    head, _sep, tail = RESTRICTED_PATH.rpartition("/Patterns/")
+    miscased = f"{head}/patterns/{tail}"
+
+    out = _filter_as_external(vault, {"entries": [{"path": miscased}]})
+
+    assert out["entries"] == [], f"{miscased!r} crossed the release boundary"
 
 
 def test_permitted_variants_are_not_over_blocked(vault: Path) -> None:

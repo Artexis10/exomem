@@ -428,7 +428,7 @@ def test_an_uninterpreted_authored_metadata_row_survives_an_update(
         kind="prediction",
         unit_ref=unit.unit_ref,
         expected_fingerprint=unit.fingerprint,
-        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
     )
 
     source = page.read_text(encoding="utf-8")
@@ -471,7 +471,7 @@ def test_unowned_rows_survive_an_edit_that_changes_only_tags(tmp_path: Path) -> 
         tags=["reliability", "ops"],
         unit_ref=unit.unit_ref,
         expected_fingerprint=unit.fingerprint,
-        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
     )
 
     source = page.read_text(encoding="utf-8")
@@ -495,7 +495,7 @@ def test_two_unowned_rows_both_survive_in_authored_order(tmp_path: Path) -> None
         kind="prediction",
         unit_ref=unit.unit_ref,
         expected_fingerprint=unit.fingerprint,
-        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
     )
 
     source = page.read_text(encoding="utf-8")
@@ -524,7 +524,7 @@ def test_a_row_that_merely_resembles_a_governed_key_is_preserved_not_swallowed(
         kind="prediction",
         unit_ref=unit.unit_ref,
         expected_fingerprint=unit.fingerprint,
-        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
     )
 
     source = page.read_text(encoding="utf-8")
@@ -550,7 +550,7 @@ def test_an_empty_valued_unowned_row_survives_without_trailing_whitespace(
         kind="prediction",
         unit_ref=unit.unit_ref,
         expected_fingerprint=unit.fingerprint,
-        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
     )
 
     source = page.read_text(encoding="utf-8")
@@ -581,7 +581,7 @@ def test_a_governed_key_is_recognized_through_label_normalization(
         kind="prediction",
         unit_ref=unit.unit_ref,
         expected_fingerprint=unit.fingerprint,
-        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
     )
 
     # Re-emitted under its canonical spelling, and never duplicated as an
@@ -613,7 +613,7 @@ def test_converting_a_unit_carrying_unowned_rows_to_compact_is_refused(
             kind="observation",
             unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint,
-            expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+            expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
         )
 
     message = str(caught.value)
@@ -639,7 +639,7 @@ def test_converting_a_unit_carrying_only_governed_rows_to_compact_is_refused(
             kind="observation",
             unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint,
-            expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+            expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
         )
 
     assert "COMPACT_METADATA_REQUIRES_RICH_KIND" in str(caught.value)
@@ -665,7 +665,7 @@ def test_clearing_the_governed_rows_then_converting_to_compact_succeeds(
         check_by="",
         unit_ref=unit.unit_ref,
         expected_fingerprint=unit.fingerprint,
-        expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
     )
 
     assert converted["unit"]["form"] == "compact"
@@ -705,7 +705,7 @@ def test_an_invalid_existing_governed_row_is_never_dropped_silently(
             unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint,
             expected_hash=vault_module.content_hash(
-                page.read_text(encoding="utf-8")
+                page.read_bytes().decode("utf-8")
             ),
         )
 

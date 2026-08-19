@@ -66,11 +66,13 @@ from .vault import (
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
+    document_newline,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
     parse_frontmatter,
     read_guarded_text,
+    render_frontmatter_document,
     render_wikilink_target,
 )
 
@@ -495,9 +497,15 @@ def audit_fix(
 
         # Reconstruct file text.
         if fm_text is not None:
-            had_blank_after_fm = bool(re.match(r"^---\n.*?\n---\n\n", original, re.DOTALL))
-            body_prefix = "\n" if had_blank_after_fm else ""
-            new_text = f"---\n{new_fm_text}\n---\n{body_prefix}{new_body}"
+            had_blank_after_fm = bool(
+                re.match(r"^---\r?\n.*?\r?\n---\r?\n\r?\n", original, re.DOTALL)
+            )
+            new_text = render_frontmatter_document(
+                new_fm_text,
+                new_body,
+                newline=document_newline(original),
+                blank_line=had_blank_after_fm,
+            )
         else:
             new_text = new_body
 

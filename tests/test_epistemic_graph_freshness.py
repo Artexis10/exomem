@@ -23,7 +23,7 @@ B = "Knowledge Base/Notes/Insights/b.md"
 def _write(vault: Path, rel: str, body: str) -> Path:
     path = vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_text(body, encoding="utf-8", newline="\n")
     return path
 
 
@@ -122,7 +122,7 @@ def test_graph_mutation_lock_unavailable_preserves_current_graph(
     before_nodes = index.nodes()
     before_edges = index.edges()
     unusable_state_root = tmp_path / "not-a-directory"
-    unusable_state_root.write_text("occupied", encoding="utf-8")
+    unusable_state_root.write_text("occupied", encoding="utf-8", newline="\n")
     index._mutation_coordinator = VaultMutationCoordinator(
         unusable_state_root,
         vault,
@@ -205,7 +205,13 @@ def test_spawned_mutator_commits_while_full_rebuild_is_running(
     child.start()
     try:
         assert attempting.wait(5.0)
-        assert completed.wait(0.5)
+        # The property is that the rebuild does not *block* the mutator, not
+        # that the commit is fast. A blocked mutator cannot finish at any
+        # budget: the rebuild holds until `release_rebuild`, which is only set
+        # in the `finally` below. So the budget just has to stay clear of the
+        # 8.0s at which the held rebuild gives up -- and 0.5s was measuring
+        # commit latency instead, which a loaded shared runner exceeds.
+        assert completed.wait(5.0)
     finally:
         release_rebuild.set()
         rebuild_thread.join(timeout=8.0)
@@ -565,8 +571,7 @@ def test_full_rebuild_rejects_direct_edit_before_availability_publication(
         temporary_paths.append(temporary)
         source.write_text(
             f"# Edited during availability publication attempt {attempts}\n",
-            encoding="utf-8",
-        )
+            encoding="utf-8", newline="\n",)
         freshness.mark_external_pending(vault)
 
     monkeypatch.setattr(index, "_before_publish_replacement", race_before_replace)
@@ -593,15 +598,14 @@ def test_full_rebuild_recovers_from_a_stale_live_registry(tmp_path: Path) -> Non
 
     source.write_text(
         source.read_text(encoding="utf-8").replace("A claim", "Manual A claim"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     report = index.rebuild_all()
 
     assert report["indexed_files"] == 2
     assert index.available() is True
     current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
-    assert current["source_hash"] == vault_module.content_hash(source.read_text(encoding="utf-8"))
+    assert current["source_hash"] == vault_module.content_hash(source.read_bytes().decode("utf-8"))
     conn = sqlite3.connect(epistemic_graph.sidecar_path(vault))
     try:
         checkpoint = conn.execute(
@@ -623,19 +627,17 @@ def test_checkpointless_refresh_rebuilds_unseen_direct_edits(tmp_path: Path) -> 
 
     source.write_text(
         source.read_text(encoding="utf-8").replace("A claim", "Changed A claim"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     target.write_text(
         target.read_text(encoding="utf-8").replace("B claim", "Unseen B claim"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     report = index.refresh_paths([source])
 
     assert report["indexed_files"] == 2
     assert index.available() is True
     current = next(node for node in index.nodes(path=B) if node["kind"] == "file")
-    assert current["source_hash"] == vault_module.content_hash(target.read_text(encoding="utf-8"))
+    assert current["source_hash"] == vault_module.content_hash(target.read_bytes().decode("utf-8"))
 
 
 def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
@@ -675,8 +677,7 @@ def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
 
     source.write_text(
         source.read_text(encoding="utf-8").replace("A claim", "Changed A claim"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     freshness.on_files_changed(vault, changed=[source])
     find_module.on_resolver_files_changed(vault, [A], [])
 
@@ -837,8 +838,7 @@ def test_explicit_detached_resolver_matches_direct_fallback_for_ambiguous_links(
     _write(vault, "Knowledge Base/Notes/two/collision.md", "# Second collision\n")
     source.write_text(
         source.read_text(encoding="utf-8") + "\n- supports: [[collision]]\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     page = find_module._parse_page(source, source.stat().st_mtime, vault)
     assert page is not None
     state = semantic_index.build_parent_index_state(vault, source)
@@ -846,7 +846,7 @@ def test_explicit_detached_resolver_matches_direct_fallback_for_ambiguous_links(
     kwargs = {
         "registry": index.registry,
         "source_hash": epistemic_graph.vault_module.content_hash(
-            source.read_text(encoding="utf-8")
+            source.read_bytes().decode("utf-8")
         ),
         "parent_state": state,
     }
@@ -873,8 +873,7 @@ def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
 
     a.write_text(
         a.read_text(encoding="utf-8").replace("A claim", "A changed claim"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     freshness.on_files_changed(vault, changed=[a])
     find_module.on_resolver_files_changed(vault, [A], [])
     report = idx.refresh_paths([a])
@@ -883,7 +882,7 @@ def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
     a_after = next(n for n in idx.nodes(path=A) if n["kind"] == "file")
     b_after = next(n for n in idx.nodes(path=B) if n["kind"] == "file")
     assert a_after["source_hash"] == epistemic_graph.vault_module.content_hash(
-        a.read_text(encoding="utf-8")
+        a.read_bytes().decode("utf-8")
     )
     assert b_after["source_hash"] == b_before
 
@@ -899,8 +898,7 @@ def test_live_incremental_refresh_does_not_repeat_a_full_disk_walk(
 
     source.write_text(
         source.read_text(encoding="utf-8").replace("A claim", "A live changed claim"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     freshness.on_files_changed(vault, changed=[source])
     find_module.on_resolver_files_changed(vault, [A], [])
     monkeypatch.setattr(
@@ -938,7 +936,7 @@ def test_live_incremental_refresh_does_not_repeat_a_full_disk_walk(
     assert report["indexed_files"] == 1
     current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
     assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
-        source.read_text(encoding="utf-8")
+        source.read_bytes().decode("utf-8")
     )
 
 
@@ -1101,7 +1099,7 @@ def test_indirect_source_edit_before_publication_cannot_publish_stale_graph(
     real_mark = index._mark_incremental_available
 
     def edit_before_mark(*args, **kwargs):
-        source.write_text("# A\n\nDirect edit removed the link.\n", encoding="utf-8")
+        source.write_text("# A\n\nDirect edit removed the link.\n", encoding="utf-8", newline="\n")
         return real_mark(*args, **kwargs)
 
     monkeypatch.setattr(index, "_mark_incremental_available", edit_before_mark)
@@ -1133,7 +1131,7 @@ def test_topology_scan_input_edit_before_refresh_cannot_publish_stale_graph(
     real_refresh_pass = index._refresh_paths_pass
 
     def edit_before_refresh(*args, **kwargs):
-        source.write_text("# A\n\nNow links to [[Future Target]].\n", encoding="utf-8")
+        source.write_text("# A\n\nNow links to [[Future Target]].\n", encoding="utf-8", newline="\n")
         return real_refresh_pass(*args, **kwargs)
 
     monkeypatch.setattr(index, "_refresh_paths_pass", edit_before_refresh)
@@ -1241,8 +1239,7 @@ def test_topology_resolver_title_mismatch_outside_kb_forces_rebuild(
     index.rebuild_all()
     shadow.write_text(
         "---\ntitle: Future Target\n---\n# Shadow\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     created_rel = "Knowledge Base/Notes/Insights/future.md"
     created = _write(
         vault,
@@ -1302,10 +1299,9 @@ def test_observed_external_edit_defers_body_refresh_until_watcher_publication(
     # rather than either blessing the stale resolver or scanning the vault.
     shadow.write_text(
         "---\ntitle: Future Target\n---\n# Shadow\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     pending_epoch = freshness.mark_external_pending(vault)
-    c.write_text("# C\n\nAfter!.\n", encoding="utf-8")
+    c.write_text("# C\n\nAfter!.\n", encoding="utf-8", newline="\n")
     freshness.on_files_changed(vault, changed=[c])
     find_module.on_resolver_files_changed(vault, [c_rel], [])
 
@@ -1338,7 +1334,7 @@ def test_topology_scan_rejects_source_hash_mismatch_hidden_by_file_metadata(
     _seed_live_freshness(vault)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
-    unrelated.write_text("# Unrelated\n\nAfter!.\n", encoding="utf-8")
+    unrelated.write_text("# Unrelated\n\nAfter!.\n", encoding="utf-8", newline="\n")
     created_rel = "Knowledge Base/Notes/Insights/future.md"
     created = _write(
         vault,
@@ -1373,7 +1369,7 @@ def test_topology_scan_rejects_source_hash_mismatch_hidden_by_file_metadata(
         node for node in index.nodes(path=unrelated_rel) if node["kind"] == "file"
     )
     assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
-        unrelated.read_text(encoding="utf-8")
+        unrelated.read_bytes().decode("utf-8")
     )
 
 
@@ -1403,12 +1399,10 @@ def test_live_refresh_replays_every_published_delta_before_availability(
 
     a.write_text(
         a.read_text(encoding="utf-8").replace("A claim", "A refreshed claim"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     b.write_text(
         b.read_text(encoding="utf-8").replace("B claim", "B changed during delayed fanout"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     freshness.on_files_changed(vault, changed=[a])
     freshness.on_files_changed(vault, changed=[b])
     # The B resolver/index callback is delayed or lost.  The A callback is all
@@ -1422,7 +1416,7 @@ def test_live_refresh_replays_every_published_delta_before_availability(
     assert index.available() is True
     b_node = next(node for node in index.nodes(path=B) if node["kind"] == "file")
     assert b_node["source_hash"] == epistemic_graph.vault_module.content_hash(
-        b.read_text(encoding="utf-8")
+        b.read_bytes().decode("utf-8")
     )
     assert index.relation_participants(["links_to"]).paths == frozenset({A, B})
 
@@ -1446,8 +1440,7 @@ def test_title_only_target_change_reresolves_unchanged_sources(tmp_path: Path) -
 
     target.write_text(
         target.read_text(encoding="utf-8").replace("title: Old B", "title: New B"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     freshness.on_files_changed(vault, changed=[target])
     find_module.on_resolver_files_changed(vault, [B], [])
 
@@ -1483,12 +1476,10 @@ def test_projected_resolver_coalesces_renamed_target_before_delayed_callback(
     find_module.recall_resolver_snapshot(vault)
     source.write_text(
         "---\ntype: insight\nstatus: active\n---\n# A\n\n## Claim\n\nA claim links to [[New B]].\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     target.write_text(
         "---\ntype: insight\nstatus: active\n---\n# New B\n\n## Claim\n\nTarget.\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     freshness.on_files_changed(vault, changed=[source])
     freshness.on_files_changed(vault, changed=[target])
     find_module.on_resolver_files_changed(vault, [A], [])
@@ -1527,7 +1518,7 @@ def test_published_edit_withholds_stale_graph_until_incremental_refresh(
     index.rebuild_all()
     assert index.relation_participants(["links_to"]).paths == frozenset({A, B})
 
-    source.write_text("# A\n\nThe link was removed directly.\n", encoding="utf-8")
+    source.write_text("# A\n\nThe link was removed directly.\n", encoding="utf-8", newline="\n")
     freshness.on_files_changed(vault, changed=[source])
     find_module.on_resolver_files_changed(vault, [A], [])
 
@@ -1558,7 +1549,7 @@ def test_incremental_refresh_retries_when_path_changes_during_indexing(
         nonlocal raced
         if not raced:
             raced = True
-            source.write_text("# Raced refresh source\n", encoding="utf-8")
+            source.write_text("# Raced refresh source\n", encoding="utf-8", newline="\n")
         return real_edges_for_page(*args, **kwargs)
 
     def acquire(root: Path, **kwargs):
@@ -1575,7 +1566,7 @@ def test_incremental_refresh_retries_when_path_changes_during_indexing(
     assert report["indexed_files"] == 2
     current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
     assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
-        source.read_text(encoding="utf-8")
+        source.read_bytes().decode("utf-8")
     )
 
 
@@ -1587,8 +1578,7 @@ def test_incremental_graph_update_matches_full_rebuild(tmp_path: Path) -> None:
 
     a.write_text(
         a.read_text(encoding="utf-8") + "\n## Decision\n\nKeep it derived.\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     idx.refresh_paths([a])
     incremental = epistemic_graph.graph_context(vault, path=A, depth=1)
 
@@ -1605,7 +1595,7 @@ def test_graph_drift_is_audited_and_reconciled_without_markdown_mutation(tmp_pat
     a, _b = _seed(vault)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     changed = a.read_text(encoding="utf-8").replace("A claim", "Externally edited claim")
-    a.write_text(changed, encoding="utf-8")
+    a.write_text(changed, encoding="utf-8", newline="\n")
 
     report = audit.audit(vault, categories=["graph_drift"])
     assert report.findings
@@ -1655,8 +1645,7 @@ def test_disabled_canonical_upsert_bars_an_existing_sidecar(
             "A claim links to [[Knowledge Base/Notes/Insights/b]].",
             "A claim no longer links to the other note.",
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     real_stat_signature = freshness.stat_signature
     monkeypatch.setattr(
         freshness,
@@ -1693,8 +1682,7 @@ def test_failed_disabled_canonical_barrier_marks_recovery_pending(
             "A claim links to [[Knowledge Base/Notes/Insights/b]].",
             "A claim no longer links to the other note.",
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     real_stat_signature = freshness.stat_signature
     monkeypatch.setattr(
         freshness,
@@ -1748,8 +1736,7 @@ def test_cold_source_proof_rechecks_bytes_changed_during_validation(
                     "A claim links to [[Knowledge Base/Notes/Insights/b]].",
                     "A claim no longer links to the other note.",
                 ),
-                encoding="utf-8",
-            )
+                encoding="utf-8", newline="\n",)
         return real_fingerprint(resolver)
 
     monkeypatch.setattr(
@@ -1773,7 +1760,7 @@ def test_cold_source_proof_never_follows_post_admission_symlink(
     freshness.clear()
     find_module.unload_ram_caches()
     outside = tmp_path / "outside.md"
-    outside.write_text("# Outside\n\nSensitive external bytes.\n", encoding="utf-8")
+    outside.write_text("# Outside\n\nSensitive external bytes.\n", encoding="utf-8", newline="\n")
     real_indexed_membership = index._indexed_recall_membership
     swapped = False
 
@@ -1808,16 +1795,14 @@ def test_relation_edges_follow_incremental_edit_move_and_delete(tmp_path: Path) 
     source, _target = _seed(vault)
     source.write_text(
         source.read_text(encoding="utf-8") + "\n- supports: [[Knowledge Base/Notes/Insights/b]]\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     assert any(edge["relation_type"] == "supports" for edge in index.edges(source_path=A))
 
     source.write_text(
         source.read_text(encoding="utf-8").replace("supports:", "contradicts:"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     index.refresh_paths([source])
     assert any(edge["relation_type"] == "contradicts" for edge in index.edges(source_path=A))
     assert not any(edge["relation_type"] == "supports" for edge in index.edges(source_path=A))
@@ -1843,14 +1828,13 @@ def test_target_refresh_preserves_inbound_relation_as_placeholder(tmp_path: Path
     source, target = _seed(vault)
     source.write_text(
         source.read_text(encoding="utf-8") + "\n- supports: [[Knowledge Base/Notes/Insights/b]]\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     before = next(
         edge for edge in index.edges(source_path=A) if edge["relation_type"] == "supports"
     )
-    target.write_text(target.read_text(encoding="utf-8") + "\nUpdated.\n", encoding="utf-8")
+    target.write_text(target.read_text(encoding="utf-8") + "\nUpdated.\n", encoding="utf-8", newline="\n")
     index.refresh_paths([target])
     assert before in index.edges(source_path=A)
 
@@ -1872,16 +1856,15 @@ def test_incremental_write_after_registry_change_forces_full_reresolution(tmp_pa
             }
         },
     }
-    registry_path.write_text(yaml.safe_dump(proposal), encoding="utf-8")
+    registry_path.write_text(yaml.safe_dump(proposal), encoding="utf-8", newline="\n")
     source.write_text(
         source.read_text(encoding="utf-8") + "\n- mirrors: [[Knowledge Base/Notes/Insights/b]]\n",
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     proposal["extensions"]["science.replicates"]["aliases"] = ["reproduces"]
-    registry_path.write_text(yaml.safe_dump(proposal), encoding="utf-8")
-    target.write_text(target.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+    registry_path.write_text(yaml.safe_dump(proposal), encoding="utf-8", newline="\n")
+    target.write_text(target.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8", newline="\n")
 
     report = epistemic_graph.EpistemicGraphIndex(vault).refresh_paths([target])
 

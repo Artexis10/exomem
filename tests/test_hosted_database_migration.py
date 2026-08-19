@@ -132,11 +132,16 @@ def test_admin_database_authority_is_ephemeral_and_rotation_gated() -> None:
         for block in deploy.split("```bash\n")[1:]
         if "bootstrap_secret=exomem-provisioner-database-bootstrap-admin" in block
     ).split("```", 1)[0]
+    # Bytes, not text. `text=True` wraps the child's stdin in a
+    # `TextIOWrapper` whose default newline policy translates every LF to
+    # `os.linesep` on write, so on Windows bash received a CR before each
+    # line break and reported a syntax error in a block that is correct --
+    # a trailing CR stops `esac` being `esac`. `subprocess.run` has no
+    # `newline=` to ask for otherwise, so the encode happens here.
     syntax = subprocess.run(
         ["bash", "-n"],
-        input=bootstrap_block,
+        input=bootstrap_block.encode("utf-8"),
         capture_output=True,
-        text=True,
         check=False,
     )
-    assert syntax.returncode == 0, syntax.stderr
+    assert syntax.returncode == 0, syntax.stderr.decode("utf-8", "replace")

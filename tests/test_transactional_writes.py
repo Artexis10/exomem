@@ -5,13 +5,14 @@ import os
 import pickle
 import re
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from benchmark_capabilities import require_posix_file_modes
 
 from exomem import cli_ops, graph_sync, media_jobs
 from exomem import move_file as move_module
@@ -26,6 +27,32 @@ def _leaf(value: object) -> str:
 
 def _workspaces(parent: Path) -> list[Path]:
     return sorted(parent.glob(".exomem-batch-*"))
+
+
+def _descriptor_holds(descriptor: int, candidates: Iterable[Path]) -> bool:
+    """Whether an open descriptor holds one of these paths, without procfs.
+
+    Fault injection here has to recognise the descriptor the batch is about
+    to operate on. `/proc/self/fd/<n>` answers that on Linux and nowhere
+    else: on macOS the readlink raises, the guard falls through to the real
+    call, and the injected failure never fires -- so the test asserted a
+    refusal on Linux and asserted nothing at all on Darwin. Comparing the
+    descriptor's `(st_dev, st_ino)` against what is on disk is portable, and
+    stricter, because it matches the file rather than a name that could be
+    reused."""
+    try:
+        held = os.fstat(descriptor)
+    except OSError:
+        return False
+    identity = (held.st_dev, held.st_ino)
+    for candidate in candidates:
+        try:
+            found = candidate.stat()
+        except OSError:
+            continue
+        if (found.st_dev, found.st_ino) == identity:
+            return True
+    return False
 
 
 def _residue_name(index: int) -> str:
@@ -46,6 +73,20 @@ def _make_residue(
     return workspace
 
 
+def _stamp(path: Path, times: tuple[int, int]) -> tuple[int, int]:
+    """Apply *times* and return what the filesystem actually stored.
+
+    NTFS keeps 100ns resolution, so a nanosecond-precise request is truncated on
+    the way in -- `...987_654_321` comes back as `...987_654_300`. These tests
+    assert that a census leaves a timestamp *unchanged*, so comparing a later
+    stat against the value we asked for fails for a reason that has nothing to
+    do with whether anything rewrote it. Compare against what landed.
+    """
+    os.utime(path, ns=times)
+    info = path.stat()
+    return info.st_atime_ns, info.st_mtime_ns
+
+
 def _replace_capability_member(
     monkeypatch: pytest.MonkeyPatch,
     capability: str,
@@ -53,6 +94,20 @@ def _replace_capability_member(
     replacement: object | None,
 ) -> None:
     members = set(getattr(os, capability, set()))
+    if replacement is not None and original not in members:
+        # Installing a replacement means "route the descriptor-relative branch
+        # through my wrapper". Adding it to an empty set would not do that --
+        # it would *fabricate* the capability, and the production check
+        # (`os.open in os.supports_dir_fd`) would then take a branch the
+        # platform cannot execute, so the real call raises
+        # `NotImplementedError: dir_fd unavailable on this platform`. Windows
+        # has no directory descriptors at all, so `os.supports_dir_fd` is empty
+        # there and every one of these swaps was doing exactly that.
+        #
+        # Removal (`replacement is None`) is the opposite intent -- simulate the
+        # capability being absent -- and a platform where it is already absent
+        # satisfies that without help, so it falls through.
+        pytest.skip(f"os.{capability} does not carry this call on this platform")
     members.discard(original)
     if replacement is not None:
         members.add(replacement)
@@ -991,6 +1046,9 @@ def test_batch_atomic_write_metadata_capture_error_precedes_every_flip(
 def test_batch_atomic_write_restores_source_times_when_snapshot_capture_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The restore writes the source times back through the open descriptor.
+    if os.utime not in os.supports_fd:
+        pytest.skip("os.utime does not accept a descriptor on this platform")
     target = tmp_path / "target.md"
     target.write_bytes(b"old")
     source_times = (1_701_111_111_123_456_789, 1_702_222_222_987_654_321)
@@ -1089,6 +1147,11 @@ def test_restore_bound_source_timestamps_distinguishes_read_and_write_churn(
 def test_batch_atomic_write_retries_partial_and_interrupted_stage_and_restore_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The assertions name the staged files by reading the descriptor back
+    # through `/proc/self/fd`, so without procfs `written_names` stays empty
+    # and the test fails for its own instrumentation, not its subject.
+    if not (os.name == "posix" and Path("/proc/self/fd").is_dir()):
+        pytest.skip("/proc/self/fd does not name open descriptors here")
     first = tmp_path / "first.md"
     second = tmp_path / "second.md"
     first_old = b"first-old-with-more-than-three-bytes"
@@ -1140,14 +1203,14 @@ def test_batch_atomic_write_retries_partial_and_interrupted_stage_and_restore_wr
 def test_batch_atomic_write_cleans_owned_workspace_when_fchmod_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The batch only hardens its workspace mode where a mode is an
+    # access-control fact, so on Windows the patched `fchmod` is never
+    # reached and the expected refusal never happens.
+    require_posix_file_modes()
     real_fchmod = os.fchmod
 
     def fail_workspace_fchmod(descriptor: int, mode: int) -> None:
-        try:
-            name = Path(os.readlink(f"/proc/self/fd/{descriptor}")).name
-        except OSError:
-            name = ""
-        if _WORKSPACE_RE.fullmatch(name):
+        if _descriptor_holds(descriptor, _workspaces(tmp_path)):
             raise PermissionError("workspace fchmod failed")
         real_fchmod(descriptor, mode)
 
@@ -1201,16 +1264,16 @@ def test_batch_atomic_write_refreshes_workspace_identity_after_mode_hardening(
 def test_batch_atomic_write_cleans_partially_initialized_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    require_posix_file_modes()
     real_write = os.write
     stage_writes = 0
 
+    def stages() -> list[Path]:
+        return [entry for space in _workspaces(tmp_path) for entry in space.glob("stage-*")]
+
     def fail_after_partial_stage_write(descriptor: int, data) -> int:
         nonlocal stage_writes
-        try:
-            name = Path(os.readlink(f"/proc/self/fd/{descriptor}")).name
-        except OSError:
-            name = ""
-        if name.startswith("stage-"):
+        if _descriptor_holds(descriptor, stages()):
             stage_writes += 1
             if stage_writes == 1:
                 return real_write(descriptor, bytes(data[:3]))
@@ -1603,7 +1666,7 @@ def test_directory_census_ignores_exact_valid_residue_without_touching_it(
         1_701_111_111_123_456_789,
         1_702_222_222_987_654_321,
     )
-    os.utime(residue, ns=workspace_times)
+    workspace_times = _stamp(residue, workspace_times)
     real_open = os.open
     noatime_opened = False
 
@@ -1659,7 +1722,7 @@ def test_directory_census_leaves_invalid_residue_structurally_intact(
         1_701_111_111_123_456_789,
         1_702_222_222_987_654_321,
     )
-    os.utime(residue, ns=workspace_times)
+    workspace_times = _stamp(residue, workspace_times)
 
     with pytest.raises(vault_module.PathGuardError) as unsafe:
         vault_module.DirectoryCensusGuard.capture(
@@ -1898,11 +1961,11 @@ def test_directory_census_does_not_overwrite_concurrent_workspace_timestamps(
     workspace_checks = 0
 
     def update_before_final_fstat(descriptor: int):
-        nonlocal workspace_checks, workspace_descriptor
+        nonlocal workspace_checks, workspace_descriptor, concurrent_times
         if descriptor == workspace_descriptor:
             workspace_checks += 1
             if workspace_checks == 2:
-                os.utime(residue, ns=concurrent_times)
+                concurrent_times = _stamp(residue, concurrent_times)
         info = real_fstat(descriptor)
         if (
             workspace_descriptor is None
@@ -2082,7 +2145,7 @@ def test_directory_census_classifies_residue_through_path_fallbacks(
         1_701_111_111_123_456_789,
         1_702_222_222_987_654_321,
     )
-    os.utime(residue, ns=workspace_times)
+    workspace_times = _stamp(residue, workspace_times)
     real_utime = os.utime
 
     def forbid_residue_timestamp_write(path, *args, **kwargs):

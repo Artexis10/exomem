@@ -259,6 +259,13 @@ def current_parent_index_state(
     if source is None:
         source_path = candidate if candidate.is_absolute() else root / candidate
         source = source_path.read_text(encoding="utf-8")
+    else:
+        # `build_parent_index_state` stores the hash of the newline-normalized
+        # source, so a caller sharing an exact byte snapshot has to be folded the
+        # same way before the comparison below. Hashing CRLF bytes against an LF
+        # hash never matches, and the answer to that miss is a silent reparse of a
+        # page whose parse is already in hand.
+        source = source.replace("\r\n", "\n").replace("\r", "\n")
     active = parent_state_for_path(root, path)
     language = semantic_language_registry.load_registry(root)
     relations = relation_registry.load_registry(root)

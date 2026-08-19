@@ -5,6 +5,7 @@ import signal
 import subprocess
 from pathlib import Path
 
+import benchmark_capabilities
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +98,11 @@ def test_validate_workspace_rejects_token_without_state_and_lock_permissions() -
 
 
 def test_stop_process_group_escalates_and_reaps(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Escalate-then-reap is a POSIX process-group strategy, and this test
+    # monkeypatches `os.killpg` to observe it. Where that attribute does not
+    # exist, `monkeypatch.setattr` refuses before the behaviour is reached,
+    # so the failure would name the patch rather than the verifier.
+    benchmark_capabilities.require_process_groups()
     module = _load_module()
 
     class FakeProcess:

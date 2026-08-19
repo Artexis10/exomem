@@ -121,12 +121,12 @@ def _load_receipt(
         if current.is_symlink():
             raise RotationGateError("rotation receipt reference is unsafe")
     path = candidate.resolve(strict=True)
-    if (
-        resolved_root not in path.parents
-        or not path.is_file()
-        or stat.S_IMODE(path.stat().st_mode) != 0o600
-    ):
+    if resolved_root not in path.parents or not path.is_file():
         raise RotationGateError("rotation receipt reference is unsafe")
+    # Reported apart from the containment check above: an operator meeting a
+    # single "unsafe" cannot tell whether to fix a symlink or a chmod.
+    if stat.S_IMODE(path.stat().st_mode) != 0o600:
+        raise RotationGateError("rotation receipt must have mode 0600")
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_sha:
         raise RotationGateError("rotation receipt digest does not match")

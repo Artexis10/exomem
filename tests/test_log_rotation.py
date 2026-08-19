@@ -23,26 +23,40 @@ def _entry(i: int) -> str:
     return f"## [2026-01-01] note | Notes/probe-{i:04d}\n\nEntry body {i}.\n\n"
 
 
-def _seed_log(vault: Path, n_entries: int) -> tuple[Path, str]:
+@pytest.fixture(params=["\n", "\r\n"], ids=["lf", "crlf"])
+def log_newline(request: pytest.FixtureRequest) -> str:
+    """Exercise both line endings a real vault carries.
+
+    `log.md` is an ordinary markdown file in the user's vault, and any
+    Windows editor that rewrites it leaves CRLF behind. `read_guarded_text`
+    decodes raw bytes without newline translation, so rotation sees exactly
+    what is on disk. Seeding through `write_text` hid that asymmetry: it
+    emitted CRLF only on Windows, and `read_text` normalized it away again on
+    the assertion side.
+    """
+    return str(request.param)
+
+
+def _seed_log(vault: Path, n_entries: int, newline: str) -> tuple[Path, str]:
     log_file = vault / "Knowledge Base" / "log.md"
     entries = "".join(_entry(i) for i in range(n_entries))
     text = HEADER + entries
-    log_file.write_text(text, encoding="utf-8")
+    log_file.write_bytes(text.replace("\n", newline).encode("utf-8"))
     return log_file, text
 
 
-def test_noop_under_threshold(vault: Path) -> None:
-    log_file, original = _seed_log(vault, 10)
+def test_noop_under_threshold(vault: Path, log_newline: str) -> None:
+    log_file, original = _seed_log(vault, 10, log_newline)
     assert rotate_log_if_needed(vault) is None
     assert log_file.read_text(encoding="utf-8") == original
 
 
 def test_rotation_keeps_newest_and_archives_tail_byte_exact(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, monkeypatch: pytest.MonkeyPatch, log_newline: str
 ) -> None:
     monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1000")
     n = LOG_ROTATE_KEEP_ENTRIES + 37
-    log_file, original = _seed_log(vault, n)
+    log_file, original = _seed_log(vault, n, log_newline)
 
     note = rotate_log_if_needed(vault)
     assert note and "_archive/logs/" in note
@@ -63,20 +77,20 @@ def test_rotation_keeps_newest_and_archives_tail_byte_exact(
 
 
 def test_second_rotation_is_noop_at_entry_floor(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, monkeypatch: pytest.MonkeyPatch, log_newline: str
 ) -> None:
     monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1000")
-    _seed_log(vault, LOG_ROTATE_KEEP_ENTRIES + 5)
+    _seed_log(vault, LOG_ROTATE_KEEP_ENTRIES + 5, log_newline)
     assert rotate_log_if_needed(vault) is not None
     # Still over the byte threshold, but at the entry-count floor: no-op.
     assert rotate_log_if_needed(vault) is None
 
 
 def test_write_log_entry_triggers_rotation(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, monkeypatch: pytest.MonkeyPatch, log_newline: str
 ) -> None:
     monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1000")
-    _seed_log(vault, LOG_ROTATE_KEEP_ENTRIES + 5)
+    _seed_log(vault, LOG_ROTATE_KEEP_ENTRIES + 5, log_newline)
     warning = vault_module.write_log_entry(
         vault,
         date_iso="2026-07-04",
@@ -92,10 +106,10 @@ def test_write_log_entry_triggers_rotation(
 
 
 def test_log_rotation_plan_is_pure_deterministic_and_replay_stable(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, monkeypatch: pytest.MonkeyPatch, log_newline: str
 ) -> None:
     monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1000")
-    _seed_log(vault, LOG_ROTATE_KEEP_ENTRIES + 5)
+    _seed_log(vault, LOG_ROTATE_KEEP_ENTRIES + 5, log_newline)
     before = {
         path.relative_to(vault).as_posix(): path.read_bytes()
         for path in vault.rglob("*")
@@ -130,3 +144,29 @@ def test_log_rotation_plan_is_pure_deterministic_and_replay_stable(
     assert tuple(write.content for write in replay.writes) == tuple(
         write.content for write in first.writes
     )
+
+
+def test_log_entry_insertion_matches_the_logs_own_line_endings(log_newline: str) -> None:
+    """A CRLF log must still insert newest-first, once, without mixing endings.
+
+    `prepend_log_entry` proves idempotency by asking whether the rendered entry
+    is already present. Rendering with LF against a CRLF log never matches, so a
+    replayed write appended a duplicate; the separator lookup missed for the same
+    reason and put the entry at the bottom, silently inverting newest-first.
+    """
+    log = (HEADER + _entry(0)).replace("\n", log_newline)
+    kwargs = {
+        "date_iso": "2026-08-19",
+        "op": "edit",
+        "rel_path_no_ext": "Knowledge Base/Notes/probe",
+        "body": "probe body",
+    }
+
+    once = vault_module.prepend_log_entry(log, **kwargs)
+    twice = vault_module.prepend_log_entry(once, **kwargs)
+
+    assert once == twice, "replaying the same entry must not duplicate it"
+    body = once[len(HEADER.replace("\n", log_newline)) :]
+    assert body.lstrip(log_newline).startswith("## [2026-08-19]"), "newest entry goes first"
+    naked_lf = once.replace("\r\n", "")
+    assert ("\n" in naked_lf) is (log_newline == "\n"), "no mixed line endings"

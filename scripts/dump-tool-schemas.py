@@ -26,8 +26,12 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import scratch_root  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
@@ -79,12 +83,12 @@ def _discovery_contract(mcp) -> dict[str, object]:
 
 def main() -> None:
     # Windows can retain a short-lived SQLite/file handle after lifecycle
-    # shutdown. The fixture capture is already complete at that point, so a
-    # delayed best-effort cleanup must not prevent writing deterministic output.
-    with tempfile.TemporaryDirectory(
-        prefix="exomem-schema-", ignore_cleanup_errors=True
-    ) as temp_dir:
-        temp_root = Path(temp_dir)
+    # shutdown, and the fixture capture is already complete at that point, so a
+    # delayed cleanup must not prevent writing deterministic output. That used
+    # to be spelled `ignore_cleanup_errors=True`, which does not wait for the
+    # handle -- it gives up on the first error and says nothing, leaving a
+    # quarter-gigabyte tree behind every run (#579).
+    with scratch_root.scratch_root("exomem-schema-") as temp_root:
         vault_root = temp_root / "schema_vault"
         shutil.copytree(FIXTURE_VAULT, vault_root)
         try:

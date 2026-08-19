@@ -23,6 +23,7 @@ from . import (
     access,
     activation,
     activation_manifest,
+    call_spans,
     freshness,
     memory_refs,
     memory_schema,
@@ -1375,13 +1376,34 @@ def _corpus_census(root: Path) -> tuple | None:
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
+            # Alias refusal comes first and applies to EVERY entry, exactly as
+            # in the walk this mirrors: an aliased subtree can hide or
+            # duplicate pages whatever its name looks like, so filtering by
+            # suffix ahead of this check would open a hole.
+            if child.is_symlink():
+                raise _CensusUnsafe
+            is_directory = child.is_dir(follow_symlinks=False)
+            # Filter BEFORE the stat -- the half of #528 that fixed
+            # `_build_identity_census` but never reached this mirror. The
+            # Knowledge Base root also holds SQLite's transient sidecars
+            # (`.embeddings.sqlite-wal`, `-shm`), created and dropped as
+            # connections open and close. They are not census input, so
+            # statting them bought nothing and cost a race: one vanishing
+            # between the listing and the stat raised FileNotFoundError, which
+            # the handler below turns into a census of `None` -- degrading
+            # every caller to an uncached full build (#561).
+            if not is_directory and path.suffix.casefold() != ".md":
+                continue
+            # A `.md` that vanishes in that same window still fails closed,
+            # unlike in `_build_identity_census`, which skips it. That walk
+            # reports a snapshot; this one is a cache key, and `None` costs
+            # one uncached build where silently omitting a page could vouch
+            # for a cached context the corpus no longer matches.
             info = child.stat(follow_symlinks=False)
-            if child.is_symlink() or vault._is_reparse(info):
+            if vault._is_reparse(info):
                 raise _CensusUnsafe
             if stat.S_ISDIR(info.st_mode):
                 strict_walk(path)
-                continue
-            if path.suffix.casefold() != ".md":
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _CensusUnsafe
@@ -1401,7 +1423,13 @@ def _corpus_census(root: Path) -> tuple | None:
                 and path.suffix.lower() == ".md"
                 and ".sync-conflict-" not in child.name
             ):
-                info = child.stat()
+                try:
+                    info = child.stat()
+                except FileNotFoundError:
+                    # Same race, same answer as the strict walk above: a page
+                    # that vanished between the listing and the stat is not in
+                    # this snapshot.
+                    continue
                 entries.add(
                     (path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns)
                 )
@@ -1430,7 +1458,15 @@ def _corpus_census(root: Path) -> tuple | None:
                 entries.add((marker, "absent", -1, -1))
             else:
                 entries.add((marker, "cfg", info.st_size, info.st_mtime_ns))
-    except (_CensusUnsafe, OSError, ValueError):
+    except _CensusUnsafe:
+        # A deliberate refusal: the tree holds an alias or a nonregular page.
+        log.debug("corpus census refused an unsafe tree at %s", root)
+        return None
+    except (OSError, ValueError):
+        # Anything else -- and the two used to be indistinguishable in
+        # production, so a vanished sidecar and a genuine refusal looked the
+        # same from the outside (#561).
+        log.debug("corpus census could not read %s", root, exc_info=True)
         return None
     return tuple(sorted(entries))
 
@@ -2169,6 +2205,7 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> N
     )
 
 
+@call_spans.timed("corpus_context.build")
 def build_corpus_context(
     vault_root: Path,
     *,

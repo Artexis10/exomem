@@ -523,12 +523,97 @@ def _windows_current_user_sid() -> str:
         kernel32.CloseHandle(token)
 
 
+#: SDDL two-letter aliases Windows substitutes for well-known SIDs. The choice
+#: is the renderer's, not ours: the same principal reaches us as a raw SID from
+#: one source and as its alias from another, so any comparison has to admit both
+#: spellings or it silently rejects the principal it was written to accept.
+_WINDOWS_SID_ALIASES = {"S-1-5-18": "SY", "S-1-5-32-544": "BA"}
+
+#: OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION. The owner is not
+#: decoration here. An `OWNER RIGHTS` ACE grants to whoever currently owns the
+#: object, so a DACL read on its own cannot say who the DACL admits.
+_WINDOWS_OWNER_AND_DACL_INFORMATION = 0x00000001 | 0x00000004
+
+#: `OWNER RIGHTS` (S-1-3-4), which SDDL renders as `OW`. An ACE naming it grants
+#: to the object's current owner rather than to any fixed principal.
+_WINDOWS_OWNER_RIGHTS_TRUSTEES = frozenset({"ow", "s-1-3-4"})
+
+
+def _windows_sddl_owner(sddl: str) -> str | None:
+    """Return the owner principal an SDDL string declares, if it carries one.
+
+    Owner may be rendered as a raw SID or as a two-letter alias, and it runs up
+    against the following `G:`/`D:`/`S:` with no separator, so the SID branch
+    has to stop on its own rather than on a delimiter.
+    """
+    match = re.match(r"O:(S-1-[0-9]+(?:-[0-9]+)*|[A-Za-z]{2})", sddl)
+    return match.group(1) if match else None
+
+
+#: SDDL renders the local domain's built-in Administrator -- the RID 500 account
+#: -- as `LA`, never as its SID. The alias is machine-relative, so unlike `SY`
+#: and `BA` it cannot live in `_WINDOWS_SID_ALIASES`; it has to be derived from
+#: the current SID. A host whose current user *is* that account therefore reads
+#: its own grants back under a spelling the raw-SID comparison cannot match.
+_WINDOWS_LOCAL_ADMIN_PREFIX = "S-1-5-21-"
+_WINDOWS_LOCAL_ADMIN_SUFFIX = "-500"
+
+
+def _windows_is_local_admin_sid(sid: str) -> bool:
+    """True when *sid* is an account domain's built-in Administrator (RID 500)."""
+    return sid.startswith(_WINDOWS_LOCAL_ADMIN_PREFIX) and sid.endswith(
+        _WINDOWS_LOCAL_ADMIN_SUFFIX
+    )
+
+
+def _windows_principal_spellings(sid: str) -> frozenset[str]:
+    """Every casefolded spelling that denotes *sid* in an SDDL string."""
+    spellings = {sid.casefold(), _WINDOWS_SID_ALIASES.get(sid, sid).casefold()}
+    if _windows_is_local_admin_sid(sid):
+        spellings.add("la")
+    return frozenset(spellings)
+
+
+#: Every casefolded spelling of BUILTIN\Administrators, the group an account
+#: domain's RID 500 belongs to by construction.
+_WINDOWS_ADMINISTRATORS_SPELLINGS = frozenset({"ba", "s-1-5-32-544"})
+
+
+def _windows_owner_admits_current_user(owner: str | None, sid: str) -> bool:
+    r"""True when an `OW` ACE on an object owned by *owner* grants to *sid*.
+
+    The literal case is an owner spelled as the current user. The other case is
+    a policy default rather than an oddity: where "System objects: Default owner
+    for objects created by members of the Administrators group" names the group,
+    every directory an administrator creates is owned by
+    BUILTIN\Administrators, not by the account. GitHub's `windows-latest`
+    runners are configured that way, so a directory this module created itself
+    -- `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)`, the exact shape the
+    validator documents as correct -- read back as owned by `BA` and failed.
+
+    The built-in Administrator is a member of that group by construction, so an
+    `OW` ACE there does grant to us. It grants to the rest of the group too, and
+    that is not a widening: `BA` is already one of the three trustees private
+    runtime state permits, so this admits nobody the DACL did not already admit.
+
+    Deliberately not folded into `_windows_principal_spellings`. That set also
+    resolves *literal* ACE trustees, and adding `BA` to it would collapse a real
+    `BA` grant onto the user's slot -- losing the distinction between the two
+    principals the equality check depends on.
+    """
+    if owner is None:
+        return False
+    spelling = owner.casefold()
+    if spelling in _windows_principal_spellings(sid):
+        return True
+    return _windows_is_local_admin_sid(sid) and spelling in _WINDOWS_ADMINISTRATORS_SPELLINGS
+
+
 def _windows_private_dacl_trustees(sid: str) -> tuple[str, ...]:
     """Return the distinct SDDL trustees permitted for private runtime state."""
     if not re.fullmatch(r"S-1-[0-9-]+", sid):
         raise ValueError("invalid current Windows SID")
-    aliases = {"S-1-5-18": "SY", "S-1-5-32-544": "BA"}
-    principals = (aliases.get(sid, sid), "SY", "BA")
+    principals = (_WINDOWS_SID_ALIASES.get(sid, sid), "SY", "BA")
     unique: dict[str, str] = {}
     for principal in principals:
         unique.setdefault(principal.casefold(), principal)
@@ -536,13 +621,36 @@ def _windows_private_dacl_trustees(sid: str) -> tuple[str, ...]:
 
 
 class WindowsRuntimeDaclError(RuntimeError):
-    """Actionable fail-closed result for one unsafe idempotency runtime entry."""
+    """Actionable fail-closed result for one unsafe idempotency runtime entry.
 
-    def __init__(self, path: Path, remediation: str):
+    Carries the descriptor it rejected. Without that the failure is only
+    diagnosable on a machine you can log into: the message named a path and a
+    repair command but never what it actually observed, so a report from another
+    host -- a CI runner, a user -- could not be acted on, and the shape had to be
+    guessed at from whatever a local machine happened to produce. Guessing wrong
+    is cheap to do and expensive to discover.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        remediation: str,
+        *,
+        observed: str | None = None,
+        expected: tuple[str, ...] = (),
+    ):
         self.path = path
         self.remediation = remediation
+        self.observed = observed
+        self.expected = expected
+        detail = ""
+        if observed is not None:
+            detail = f"; observed {observed!r}"
+        if expected:
+            detail += f"; expected full-access trustees {', '.join(expected)}"
         super().__init__(
-            f"unsafe Windows DACL at {path}; run in elevated PowerShell: {remediation}"
+            f"unsafe Windows DACL at {path}{detail}; "
+            f"run in elevated PowerShell: {remediation}"
         )
 
 
@@ -605,6 +713,29 @@ def _windows_apply_private_dacl(path: Path, sid: str) -> None:
     _windows_apply_dacl_sddl(path, _windows_private_dacl_sddl(sid))
 
 
+def _windows_tighten_private_directory(
+    target: Path, directory: _SecureDirectory, sid: str
+) -> None:
+    """Protect a directory whose DACL already admits only the private trustees.
+
+    This is not the repair the module declines to perform. That one would rewrite
+    an entry whose ACEs let somebody else in, which cannot help: an ACL change
+    does not close a handle already opened against the old one, so the attacker
+    keeps the access and we would proceed believing otherwise. Here the caller
+    has established the opposite -- every trustee is one this module writes
+    itself -- so there is no such handle to close, and protecting the DACL only
+    removes the parent's future reach into it.
+
+    Applied by path, then proven through the retained handle by the caller's
+    re-validation. A path swapped in between gets our protected DACL, which is
+    harmless to us, while the handle we still hold reports the object we
+    validated -- so a swap fails the re-validation instead of passing it.
+    """
+    if not _same_directory_path(directory):
+        raise OSError("Windows directory changed before its DACL was protected")
+    _windows_apply_private_dacl(target, sid)
+
+
 def _windows_dacl_sddl(path: Path) -> str:
     """Read only the DACL text through native security APIs."""
     import ctypes
@@ -620,9 +751,9 @@ def _windows_dacl_sddl(path: Path) -> str:
         wintypes.LPVOID, wintypes.LPVOID, ctypes.POINTER(wintypes.LPVOID),
     ]
     get_security.restype = wintypes.DWORD
-    dacl_information = 0x00000004
     result = get_security(
-        str(path), 1, dacl_information, None, None, None, None, ctypes.byref(security_descriptor)
+        str(path), 1, _WINDOWS_OWNER_AND_DACL_INFORMATION, None, None, None, None,
+        ctypes.byref(security_descriptor),
     )
     if result:
         raise OSError(result, "cannot inspect Windows runtime DACL")
@@ -634,7 +765,10 @@ def _windows_dacl_sddl(path: Path) -> str:
         ]
         convert.restype = wintypes.BOOL
         size = wintypes.DWORD()
-        if not convert(security_descriptor, 1, dacl_information, ctypes.byref(text), ctypes.byref(size)):
+        if not convert(
+            security_descriptor, 1, _WINDOWS_OWNER_AND_DACL_INFORMATION,
+            ctypes.byref(text), ctypes.byref(size),
+        ):
             raise OSError(_windows_last_error(ctypes), "cannot render Windows runtime DACL")
         try:
             return str(text.value)
@@ -659,8 +793,10 @@ def _windows_dacl_sddl_for_handle(handle: int) -> str:
         wintypes.LPVOID, wintypes.LPVOID, ctypes.POINTER(wintypes.LPVOID),
     ]
     get_security.restype = wintypes.DWORD
-    dacl_information = 0x00000004
-    result = get_security(handle, 1, dacl_information, None, None, None, None, ctypes.byref(security_descriptor))
+    result = get_security(
+        handle, 1, _WINDOWS_OWNER_AND_DACL_INFORMATION, None, None, None, None,
+        ctypes.byref(security_descriptor),
+    )
     if result:
         raise OSError(result, "cannot inspect Windows runtime DACL")
     try:
@@ -671,7 +807,10 @@ def _windows_dacl_sddl_for_handle(handle: int) -> str:
         ]
         convert.restype = wintypes.BOOL
         size = wintypes.DWORD()
-        if not convert(security_descriptor, 1, dacl_information, ctypes.byref(text), ctypes.byref(size)):
+        if not convert(
+            security_descriptor, 1, _WINDOWS_OWNER_AND_DACL_INFORMATION,
+            ctypes.byref(text), ctypes.byref(size),
+        ):
             raise OSError(_windows_last_error(ctypes), "cannot render Windows runtime DACL")
         try:
             return str(text.value)
@@ -681,31 +820,114 @@ def _windows_dacl_sddl_for_handle(handle: int) -> str:
         kernel32.LocalFree(security_descriptor)
 
 
+_WINDOWS_DACL_PRIVATE = "private"
+_WINDOWS_DACL_INHERITED = "inherited"
+_WINDOWS_DACL_UNSAFE = "unsafe"
+
+
 def _windows_private_dacl_is_valid(sddl: str, sid: str, *, directory: bool) -> bool:
-    """Reject broad or altered ACEs; inherited file ACEs are accepted precisely."""
+    """True only for a DACL this module would have written itself."""
+    return _windows_private_dacl_verdict(sddl, sid, directory=directory) == (
+        _WINDOWS_DACL_PRIVATE
+    )
+
+
+def _windows_private_dacl_verdict(sddl: str, sid: str, *, directory: bool) -> str:
+    """Classify one DACL as private, private-but-inheriting, or unsafe.
+
+    The middle verdict is the one that earns its keep. A directory whose ACEs
+    name exactly the private trustee set but arrive by inheritance -- no `P`,
+    every ACE flagged `ID` -- has never admitted anybody outside that set, so
+    nothing can hold a handle to it that this module would refuse to grant. It
+    is private in the sense that matters and wrong only in that a later change
+    to its parent would flow into it. That is repairable, and repairing it is
+    strictly a tightening; refusing it outright is not, because the entry is
+    never repaired and the caller is told to run `icacls` by hand.
+
+    Windows hands out that exact shape constantly: any directory created inside
+    an already-private parent inherits its ACEs rather than getting its own.
+    The CI runner's is `O:BA D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;OW)`
+    -- SYSTEM, Administrators, and an owner in that set, and nothing else.
+
+    Anything else is still `unsafe`: a foreign trustee, a right other than full
+    access, a duplicate principal, a deny ACE, a malformed field count. Those
+    say a principal outside the private set may already hold access, and no
+    later tightening can take back a handle it has already opened.
+
+    Reject broad or altered ACEs; inherited file ACEs are accepted precisely.
+
+    An `OWNER RIGHTS` (`OW`) ACE counts as the current user's grant, but only
+    while the current user owns the object. That is a spelling difference, not a
+    weaker rule: `OW` names whoever owns the entry, so once ownership is ours the
+    ACE admits exactly the principal a literal SID ACE would, and once it is not,
+    this rejects it as before.
+
+    Refusing `OW` outright was a false negative with real cost. A directory
+    carrying `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)` is protected
+    against inheritance and grants full access to precisely SYSTEM,
+    Administrators and its owner -- the same three principals this module writes
+    itself, with no broad trustee anywhere. Windows hands out that exact shape
+    for entries beneath a user's temporary directory, so the validator failed
+    closed on directories that were already private, with no repair path: the
+    private DACL is applied only to an entry this process's own ``mkdir``
+    created, and a pre-existing entry is validated and never repaired.
+    """
     if not isinstance(sddl, str) or "D:" not in sddl:
-        return False
+        return _WINDOWS_DACL_UNSAFE
     dacl = sddl.split("D:", 1)[1]
-    if directory and not dacl.startswith("P"):
-        return False
+    protected = dacl.startswith("P")
+    inheriting = False
     aces = re.findall(r"\(([^()]*)\)", dacl)
-    expected = {trustee.casefold() for trustee in _windows_private_dacl_trustees(sid)}
+    trustees = _windows_private_dacl_trustees(sid)
+    expected = {trustee.casefold() for trustee in trustees}
+    # The principal an `OW` ACE resolves to, spelled the way this module spells
+    # it, so a substituted grant lands in the same slot as a literal one.
+    user_principal = trustees[0].casefold()
+    owner = _windows_sddl_owner(sddl)
+    owner_is_current_user = _windows_owner_admits_current_user(owner, sid)
     observed: set[str] = set()
     for ace in aces:
         fields = ace.split(";")
         if len(fields) != 6:
-            return False
+            return _WINDOWS_DACL_UNSAFE
         kind, flags, rights, _object_guid, _inherit_object_guid, trustee = fields
         if kind != "A" or rights.casefold() not in {"fa", "0x1f01ff"}:
-            return False
-        if trustee.casefold() not in expected or trustee.casefold() in observed:
-            return False
+            return _WINDOWS_DACL_UNSAFE
+        principal = trustee.casefold()
+        if principal in _WINDOWS_OWNER_RIGHTS_TRUSTEES:
+            # Unresolvable without the owner: an SDDL string carrying no `O:`
+            # cannot show that this ACE admits us rather than somebody else.
+            if not owner_is_current_user:
+                return _WINDOWS_DACL_UNSAFE
+            principal = user_principal
+        elif principal in _windows_principal_spellings(sid):
+            # An alias for the current user, most often `LA`. Unlike `OW` this
+            # needs no owner check: `LA` names one fixed account, and it is only
+            # a spelling of *us* when that account is the current user -- which
+            # is what put it in the spelling set. Folding it onto the canonical
+            # principal keeps the duplicate rule below meaningful, so `LA`
+            # alongside a literal grant to the same account is still one
+            # principal named twice.
+            principal = user_principal
+        # Resolving `OW` before this check keeps the duplicate rule meaningful:
+        # `OW` alongside a literal grant to the same owner is one principal
+        # named twice, which is exactly what the rule is here to reject.
+        if principal not in expected or principal in observed:
+            return _WINDOWS_DACL_UNSAFE
         normalized_flags = flags.casefold()
-        allowed = {"", "oici", "idoici", "id"} if not directory else {"oici"}
+        allowed = {"oici", "oiciid"} if directory else {"", "oici", "idoici", "id"}
         if normalized_flags not in allowed:
-            return False
-        observed.add(trustee.casefold())
-    return observed == expected
+            return _WINDOWS_DACL_UNSAFE
+        if directory and normalized_flags != "oici":
+            inheriting = True
+        observed.add(principal)
+    if observed != expected:
+        return _WINDOWS_DACL_UNSAFE
+    if not directory:
+        return _WINDOWS_DACL_PRIVATE
+    if protected and not inheriting:
+        return _WINDOWS_DACL_PRIVATE
+    return _WINDOWS_DACL_INHERITED
 
 
 def _validate_windows_runtime_entry(
@@ -721,6 +943,8 @@ def _validate_windows_runtime_entry(
             raise WindowsRuntimeDaclError(
                 path,
                 _windows_private_dacl_repair_command(path, sid, directory=directory),
+                observed=sddl,
+                expected=_windows_private_dacl_trustees(sid),
             )
     finally:
         if opened_here:
@@ -774,7 +998,9 @@ def _prepare_windows_private_directory(path: Path) -> None:
     ``~/.cache`` does not exist -- which is every fresh Windows profile, since
     ``.cache`` is an XDG convention Windows does not create -- cannot construct
     the idempotency store at all, and the server dies at startup with
-    ``WinError 3``.  No CI lane runs on Windows, so nothing else would catch it.
+    ``WinError 3``.  There is a Windows lane now (``cross-platform.yml``), but it
+    is advisory and does not gate a merge, so this still has to be reasoned about
+    rather than left to the suite.
     """
     target = Path(path).expanduser().absolute()
     created = False
@@ -807,6 +1033,7 @@ def _prepare_windows_private_directory(path: Path) -> None:
             )
             return
         deadline = time.monotonic() + _WINDOWS_DACL_STABILIZATION_SECONDS
+        tightened = False
         while True:
             try:
                 _validate_windows_runtime_entry(
@@ -814,6 +1041,18 @@ def _prepare_windows_private_directory(path: Path) -> None:
                 )
                 return
             except WindowsRuntimeDaclError:
+                observed = _windows_dacl_sddl_for_handle(directory.windows_handle)
+                inherited = (
+                    _windows_private_dacl_verdict(observed, sid, directory=True)
+                    == _WINDOWS_DACL_INHERITED
+                )
+                # Once. A second attempt would mean the write did not take, and
+                # looping on that until the deadline turns a permission problem
+                # into a stall rather than the error it is.
+                if inherited and not tightened:
+                    tightened = True
+                    _windows_tighten_private_directory(target, directory, sid)
+                    continue
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(_WINDOWS_DACL_STABILIZATION_POLL_SECONDS)
@@ -1120,7 +1359,15 @@ def _windows_create_child_directory_handle(parent: _SecureDirectory, name: str) 
 
     value = ctypes.create_unicode_buffer(name)
     encoded_len = len(name.encode("utf-16-le"))
-    unicode_name = _UnicodeString(encoded_len, encoded_len + 2, value)
+    # `create_unicode_buffer` returns a `c_wchar_Array`, and `buffer` is declared
+    # `LPWSTR`; ctypes does not convert one to the other in a structure
+    # initialiser, it raises `TypeError: incompatible types, c_wchar_Array_N
+    # instance instead of c_wchar_p instance`. So this call has never reached
+    # `NtCreateFile` on Windows. `value` stays referenced for the duration of
+    # the call, which is what keeps the cast pointer valid.
+    unicode_name = _UnicodeString(
+        encoded_len, encoded_len + 2, ctypes.cast(value, wintypes.LPWSTR)
+    )
     attributes = _ObjectAttributes(
         ctypes.sizeof(_ObjectAttributes), parent.windows_handle, ctypes.pointer(unicode_name), 0x40, None, None
     )
