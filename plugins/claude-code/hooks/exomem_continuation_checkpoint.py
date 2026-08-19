@@ -2699,6 +2699,23 @@ def _posix_directory_window(
         closedir(stream)
 
 
+def _resumes_a_directory_stream_from_a_saved_cookie() -> bool:
+    """Whether a `telldir` cookie outlives the stream that produced it.
+
+    Every window here opens a fresh directory stream and resumes it from the
+    cookie the previous window returned, so the cookie has to mean the same
+    thing to a stream that has never seen it. glibc satisfies that: its
+    `telldir` hands back the filesystem's own `d_off`. The 4.4BSD lineage,
+    Darwin included, instead returns an index into a location table owned by
+    the *DIR that produced it*; replayed into a new stream it resolves
+    against a table that no longer holds it and the scan lands at an
+    arbitrary offset. Measured on macOS as entries scattered through a
+    257-entry directory that no window ever returned. Windows has no cookie
+    of any kind. Both resume from the durable prune catalog instead.
+    """
+    return sys.platform.startswith("linux") and os.name != "nt"
+
+
 def _directory_window(
     directory: _SecureDirectory,
     *,
@@ -2710,6 +2727,10 @@ def _directory_window(
     if sys.platform.startswith("linux") and os.name != "nt" and not force_portable:
         return _linux_directory_window(directory, cursor, limit, deadline)
     if os.name != "nt":
+        if cursor and not _resumes_a_directory_stream_from_a_saved_cookie():
+            raise OSError(
+                "this platform resumes a root scan from the durable prune catalog"
+            )
         return _posix_directory_window(directory, cursor, limit, deadline)
     # Windows exposes no resumable directory cursor: `os.scandir` has no
     # `telldir`/`seekdir` equivalent, and re-scanning a prefix to reach the
@@ -2718,7 +2739,7 @@ def _directory_window(
     # `nt`; every other caller enumerates from the start, so the cursor this
     # branch reports back is always 0.
     if cursor:
-        raise OSError("Windows root resumption requires the durable prune catalog")
+        raise OSError("this platform resumes a root scan from the durable prune catalog")
     names: list[str] = []
     inspected = 0
     with os.scandir(directory.path) as entries:
@@ -3634,7 +3655,10 @@ def prune_expired(
                         deadline=lock_deadline,
                     )
                 scan_cursor = _read_prune_sequence(root_lock, offset=17)
-                if os.name == "nt" or force_portable_catalog:
+                if (
+                    force_portable_catalog
+                    or not _resumes_a_directory_stream_from_a_saved_cookie()
+                ):
                     scanned_names, next_cursor, _exhausted, _inspected = _prune_catalog_window(
                         root_handle,
                         cursor=scan_cursor,
