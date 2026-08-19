@@ -1345,11 +1345,17 @@ def _validate_binding_marker(root: Path, kind: str, config: HostedCellConfig) ->
 
 
 def _valid_vault_scaffold(vault_root: Path) -> bool:
+    from .vault import shipped_schema_root
+
     kb = vault_root / kb_dirname()
     required = (
         kb / "index.md",
         kb / "log.md",
-        kb / "_Schema" / "SKILL.md",
+        # Resolved rather than constructed: the shipped contract moved out of the
+        # note namespace (#488) and this check gates whether the hosted runtime
+        # will serve a vault at all, so hard-coding the legacy path would refuse
+        # every migrated vault.
+        shipped_schema_root(vault_root) / "SKILL.md",
         kb / "Sources" / "index.md",
         kb / "Notes" / "index.md",
         kb / "Entities" / "index.md",
