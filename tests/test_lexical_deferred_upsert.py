@@ -195,3 +195,43 @@ def test_the_contention_branch_hands_over_the_paths_it_deferred(
 
     assert store.upsert_paths([page]) is False
     assert seen == [{"root": tmp_path, "deferred_paths": [page]}]
+
+
+def test_a_failed_pass_puts_its_work_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker that dies must not take the request with it.
+
+    The pass consumes both queues before doing the work, so an exception used to
+    drop whatever it had claimed -- and the next caller would find nothing
+    pending and start a worker with nothing to do. That is the same
+    "invalidate cheaply, leave the cost to whoever asks next" shape this whole
+    change exists to remove, reintroduced inside the fix.
+    """
+    page = tmp_path / "Knowledge Base" / "Notes" / "one.md"
+
+    class _Exploding(_FakeStore):
+        def retry_deferred_upsert(self, paths: list[Path]) -> bool:
+            raise RuntimeError("sidecar vanished mid-repair")
+
+    _install(monkeypatch, _Exploding())
+    lexstore._schedule_repair(tmp_path, deferred_paths=[page])
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        with lexstore._REPAIRS_LOCK:
+            if not lexstore._REPAIRS_IN_FLIGHT:
+                break
+        time.sleep(0.01)
+
+    with lexstore._REPAIRS_LOCK:
+        assert lexstore._DEFERRED_UPSERTS.get(tmp_path.resolve()) == {page}
+
+    # And the next scheduling actually drains it rather than starting empty.
+    store = _FakeStore(retry_applies=True)
+    _install(monkeypatch, store)
+    lexstore._schedule_repair(tmp_path, deferred_paths=[page])
+    assert _quiesce()
+
+    assert store.retried == [[page]]
+    assert store.rebuilds == 0

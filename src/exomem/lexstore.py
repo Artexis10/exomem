@@ -434,6 +434,8 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
         _REPAIRS_IN_FLIGHT.add(key)
 
     def _run() -> None:
+        rebuild = False
+        paths: list[Path] = []
         try:
             store = get_store(vault_root)
             while True:
@@ -449,9 +451,21 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                         return
                 if rebuild or not store.retry_deferred_upsert(paths):
                     store.rebuild_atomic()
+                rebuild = False
+                paths = []
         except Exception as e:  # noqa: BLE001 - daemon must not escape into stderr
             log.warning("lexical background repair skipped (%s)", e)
             with _REPAIRS_LOCK:
+                # Put back what this pass consumed and could not finish. Repair
+                # stays best-effort and nothing here retries on its own, but the
+                # next caller that needs the sidecar should find the request
+                # still pending rather than a queue this thread emptied on its
+                # way out -- which is the same "invalidate cheaply, leave the
+                # cost to whoever asks next" shape this change exists to remove.
+                if rebuild:
+                    _FULL_REBUILD_REQUESTED.add(key)
+                if paths:
+                    _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                 _REPAIRS_IN_FLIGHT.discard(key)
 
     # Static name, deliberately — every other exomem thread name is a literal
