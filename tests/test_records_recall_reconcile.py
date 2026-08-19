@@ -9,6 +9,7 @@ from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import benchmark_capabilities
 import numpy as np
 import pytest
 
@@ -728,32 +729,32 @@ def test_windows_binder_closes_partial_open_handles_in_reverse_order(
     assert closed == [4, 3, 2, 1]
 
 
-def _reaches_a_pinned_inode_after_rename(tmp_path: Path) -> bool:
-    """Whether this platform can still address an open file after it is renamed.
+def _repaired_or_untouched(rows: list, corrupt: tuple) -> bool:
+    """Whether a pinned-inode repair landed on the pinned file or refused.
 
-    Linux does, through the procfs symlink that names the descriptor itself.
-    macOS has only `F_GETPATH`, which answers from the vnode name cache and can
-    report the old name -- now belonging to a different file. The binding
-    verifies identity and refuses rather than repair the wrong database, so the
-    honest expectation below depends on whether the cache followed the rename.
-    The security claim does not: the swapped-in file is never touched either
-    way. Asking the production resolver keeps this probe from drifting from it.
+    Which of the two happens is a property of the host, not of the code
+    under test. Linux names the descriptor itself through procfs, so the
+    repair always reaches the inode. macOS has only `F_GETPATH`, which
+    answers from the vnode name cache: after the swap it may report the
+    inode's new name or the old one, and the binding verifies identity and
+    refuses rather than repair a file it cannot prove is the right one.
+
+    An earlier version of these tests predicted which branch the host would
+    take by staging the same swap on a second file and asking the resolver
+    about it. That cannot work: the second probe resolves at a different
+    point in the rename's lifetime than the binding does, so it answered
+    `refused` on macOS runners where the real binding had reached the
+    inode, and the test failed on a disagreement between two probes rather
+    than on anything the product did.
+
+    So this asserts the guarantee instead of the platform: the repair is
+    all-or-nothing on the *pinned* file. The security claim -- that the
+    file swapped in behind it is never touched -- is asserted separately
+    and unconditionally by every caller, and the deterministic
+    followed-the-descriptor case keeps its own exact assertion where
+    procfs makes it deterministic.
     """
-    probe = tmp_path / "pinned-inode-probe.bin"
-    probe.write_bytes(b"probe")
-    decoy = tmp_path / "pinned-inode-probe-decoy.bin"
-    decoy.write_bytes(b"decoy")
-    descriptor = os.open(probe, os.O_RDONLY)
-    try:
-        # Stage the swap the tests below stage, not a bare rename: the old name
-        # is taken over by a *different* file, which is what makes a stale
-        # `F_GETPATH` answer dangerous and what the binding's identity check
-        # exists to catch. A probe that only renames answers an easier one.
-        probe.rename(tmp_path / "pinned-inode-probe-moved.bin")
-        probe.symlink_to(decoy)
-        return audit_module._pinned_descriptor_path(descriptor) is not None
-    finally:
-        os.close(descriptor)
+    return rows in ([], [corrupt])
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX no-follow descriptor binding")
@@ -805,14 +806,12 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
         ]
     with _sqlite(moved) as conn:
         rows = conn.execute("SELECT file_path FROM chunks").fetchall()
-    if _reaches_a_pinned_inode_after_rename(tmp_path):
-        # The repair followed the descriptor to the inode's new name.
+    assert _repaired_or_untouched(rows, ("../../corrupt.md",)), rows
+    if benchmark_capabilities.has_procfs_descriptor_paths():
+        # procfs names the descriptor itself, so the repair reaches the
+        # pinned inode whatever happened to its name. No cache, no
+        # ambiguity, and therefore an exact expectation.
         assert rows == []
-    else:
-        # Fail-closed: the binding could not prove the path still named
-        # the pinned inode, so it repaired nothing rather than the
-        # attacker's file. The assertion above already proved that.
-        assert rows == [("../../corrupt.md",)]
 
 
 def test_corrupt_purge_refuses_without_a_bound_sidecar_descriptor(
@@ -883,14 +882,12 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
         ]
     with _sqlite(moved) as conn:
         rows = conn.execute("SELECT file_path FROM claims").fetchall()
-    if _reaches_a_pinned_inode_after_rename(tmp_path):
-        # The repair followed the descriptor to the inode's new name.
+    assert _repaired_or_untouched(rows, ("../../corrupt.md",)), rows
+    if benchmark_capabilities.has_procfs_descriptor_paths():
+        # procfs names the descriptor itself, so the repair reaches the
+        # pinned inode whatever happened to its name. No cache, no
+        # ambiguity, and therefore an exact expectation.
         assert rows == []
-    else:
-        # Fail-closed: the binding could not prove the path still named
-        # the pinned inode, so it repaired nothing rather than the
-        # attacker's file. The assertion above already proved that.
-        assert rows == [("../../corrupt.md",)]
 
 
 @pytest.mark.parametrize(
