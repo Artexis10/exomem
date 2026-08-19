@@ -176,6 +176,51 @@ def test_reserved_runtime_trees_do_not_enter_identity_census_or_cache_token(
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows answers DirEntry.stat() from the directory listing, so an "
+    "entry deleted after the listing still stats and the race cannot occur",
+)
+def test_a_vanishing_sqlite_sidecar_does_not_degrade_the_census(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `-wal` that disappears mid-walk must not cost every caller its cache.
+
+    The Knowledge Base root holds SQLite's transient sidecars beside the
+    pages. They are not census input, and the identity census stopped
+    statting them in #528 -- but `_corpus_census` mirrors that walk by hand
+    and kept the stat ahead of the `.md` filter, so one sidecar vanishing in
+    the window between the listing and the stat raised FileNotFoundError and
+    degraded the whole census to `None`. Every caller then rebuilt uncached,
+    on a vault where nothing a caller can see had changed (#561).
+
+    The deletion is driven from `_prune_identity_census_directory`, which the
+    walk calls per child immediately before the stat, so the race is exact
+    rather than timed.
+    """
+    kb = vault / "Knowledge Base"
+    sidecar = kb / ".embeddings.sqlite-wal"
+    sidecar.write_bytes(b"transient")
+
+    baseline = semantic_contract._corpus_census(vault)
+    assert baseline is not None
+
+    real_prune = semantic_contract._prune_identity_census_directory
+
+    def prune_then_vanish(kb_root: Path, directory: Path, name: str) -> bool:
+        if name == sidecar.name:
+            sidecar.unlink(missing_ok=True)
+        return real_prune(kb_root, directory, name)
+
+    monkeypatch.setattr(
+        semantic_contract, "_prune_identity_census_directory", prune_then_vanish
+    )
+
+    # Identical, not merely non-None: the sidecar was never census input, so
+    # its removal may not move the key either.
+    assert semantic_contract._corpus_census(vault) == baseline
+
+
 def test_content_change_rebuilds(vault: Path) -> None:
     first = semantic_contract.build_corpus_context(vault)
     (vault / _PAGE_REL).write_text(

@@ -1376,13 +1376,34 @@ def _corpus_census(root: Path) -> tuple | None:
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
+            # Alias refusal comes first and applies to EVERY entry, exactly as
+            # in the walk this mirrors: an aliased subtree can hide or
+            # duplicate pages whatever its name looks like, so filtering by
+            # suffix ahead of this check would open a hole.
+            if child.is_symlink():
+                raise _CensusUnsafe
+            is_directory = child.is_dir(follow_symlinks=False)
+            # Filter BEFORE the stat -- the half of #528 that fixed
+            # `_build_identity_census` but never reached this mirror. The
+            # Knowledge Base root also holds SQLite's transient sidecars
+            # (`.embeddings.sqlite-wal`, `-shm`), created and dropped as
+            # connections open and close. They are not census input, so
+            # statting them bought nothing and cost a race: one vanishing
+            # between the listing and the stat raised FileNotFoundError, which
+            # the handler below turns into a census of `None` -- degrading
+            # every caller to an uncached full build (#561).
+            if not is_directory and path.suffix.casefold() != ".md":
+                continue
+            # A `.md` that vanishes in that same window still fails closed,
+            # unlike in `_build_identity_census`, which skips it. That walk
+            # reports a snapshot; this one is a cache key, and `None` costs
+            # one uncached build where silently omitting a page could vouch
+            # for a cached context the corpus no longer matches.
             info = child.stat(follow_symlinks=False)
-            if child.is_symlink() or vault._is_reparse(info):
+            if vault._is_reparse(info):
                 raise _CensusUnsafe
             if stat.S_ISDIR(info.st_mode):
                 strict_walk(path)
-                continue
-            if path.suffix.casefold() != ".md":
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _CensusUnsafe
