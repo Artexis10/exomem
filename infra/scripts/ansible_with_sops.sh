@@ -40,7 +40,12 @@ while (($# > 0)); do
   esac
 done
 
-for argument in "${ansible_args[@]}"; do
+# `set -u` plus a bare `${arr[@]}` on an *empty* array is an unbound-variable
+# error in bash before 4.4 -- which is the /bin/bash macOS still ships. Without
+# the `+` guard this script aborts on argument parsing before it can report any
+# of its own refusals, so the operator sees `unbound variable` where the real
+# answer is "that directory is not tmpfs".
+for argument in ${ansible_args[@]+"${ansible_args[@]}"}; do
   case "${argument}" in
     -e | -e?* | --extra*)
       echo "Ansible passthrough must not include extra vars" >&2
@@ -100,4 +105,4 @@ done
   --inventory "${inventory}" \
   "${repo_root}/infra/ansible/site.yml" \
   "${extra_vars[@]}" \
-  "${ansible_args[@]}"
+  ${ansible_args[@]+"${ansible_args[@]}"}

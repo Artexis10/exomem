@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from benchmark_capabilities import (
+    has_arbitrary_byte_filenames,
     has_posix_file_modes,
     require_control_characters_in_filenames,
     require_resumable_directory_cursor,
@@ -87,12 +88,14 @@ def _prune_until_swept(*args, **kwargs) -> int:
     catalog record is 579 bytes, so sweeping the whole table in one call would
     read a quarter of a megabyte inside a hook that runs on every write.
 
-    On POSIX the window enumerates real directory entries, so a test vault's
+    On Linux the window enumerates real directory entries, so a test vault's
     handful of them fit in the first call and a single `prune_expired` is the
-    whole sweep. The Windows root is instead a fixed 512-slot open-addressed
-    catalog, and an entry sits at whatever slot its name hashes to -- so the
-    same one call covers 16 mostly-empty slots and usually finds nothing. In
-    production the cursor carries across successive writes and the entry is
+    whole sweep. Everywhere else the root is swept through the fixed 512-slot
+    open-addressed catalog -- Windows for want of any directory cookie, and
+    Darwin because its `telldir` cookie does not outlive the stream that
+    produced it. An entry there sits at whatever slot its name hashes to, so
+    the same one call covers 16 mostly-empty slots and usually finds nothing.
+    In production the cursor carries across successive writes and the entry is
     reached within a bounded number of them; a test asserting the *outcome*
     has to do the same thing rather than assume one call sufficed.
 
@@ -1312,10 +1315,11 @@ def test_control_workspace_paths_are_omitted_or_hashed_before_round_trip(
 
 # Built lazily: os.fsdecode of a non-UTF-8 byte name raises on Windows, and a
 # decorator argument is evaluated at import time, so the skipif below cannot
-# protect it. Keeping the surrogateescape case POSIX-only keeps this module
-# importable on Windows.
+# protect it. The byte-name case additionally needs a filesystem that accepts
+# one: APFS and HFS+ validate the encoding and refuse it with `EILSEQ`, so on
+# macOS the name under test cannot be created at all.
 _UNSAFE_TRANSCRIPT_NAMES = ["transcript\nunsafe.jsonl"]
-if os.name != "nt":
+if has_arbitrary_byte_filenames():
     _UNSAFE_TRANSCRIPT_NAMES.append(os.fsdecode(b"transcript-\xff.jsonl"))
 
 
@@ -2743,6 +2747,7 @@ def test_interrupted_rotation_recovers_labeled_previous(
     assert selected is not None and selected[1] == "rollback"
 
 
+
 @pytest.mark.parametrize("force_fallback", [False, True])
 def test_prune_skips_multiprocess_writer_then_removes_after_release(
     tmp_path: Path, force_fallback: bool
@@ -2777,20 +2782,28 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
         )
         child.kill()
         child.wait(timeout=5)
-        # Pruning is deadline-bounded and cursor-resumed. A loaded runner may
-        # exhaust one 50 ms callback after the writer releases, so assert the
-        # specified eventual result across bounded subsequent callbacks.
-        removals = [
-            checkpoint.prune_expired(
-                home,
-                "codex",
-                current_session="other",
-                now_ns=100 + checkpoint.RETENTION_NS + 1,
-                force_fallback=force_fallback,
+        # `Popen.wait()` reporting an exit does not mean the dead writer's
+        # handles are gone: Windows tears them down after `TerminateProcess`
+        # returns, and until it does the state directory still holds an open
+        # descriptor and cannot be removed. Pruning is separately
+        # deadline-bounded and cursor-resumed, so a loaded runner may also
+        # exhaust one 50 ms callback with the writer already gone. Both are
+        # reasons to bound this eventual result by wall clock rather than by a
+        # callback count a fast box burns through in under a millisecond.
+        removals: list[int] = []
+        deadline = time.monotonic() + 10.0
+        while sum(removals) == 0 and time.monotonic() < deadline:
+            removals.append(
+                checkpoint.prune_expired(
+                    home,
+                    "codex",
+                    current_session="other",
+                    now_ns=100 + checkpoint.RETENTION_NS + 1,
+                    force_fallback=force_fallback,
+                )
             )
-            for _ in range(checkpoint.MAX_PRUNE_ENUM_ENTRIES + 2)
-        ]
         assert sum(removals) == 1
+        assert not checkpoint.session_state_dir(home, "codex", "busy").exists()
     finally:
         if child.poll() is None:
             child.kill()
@@ -3372,14 +3385,21 @@ def test_prune_rotates_bounded_candidates_beyond_sorted_prefix(tmp_path: Path) -
         observed_at_ns=100,
     )
 
+    # Three sweeps, not a flat callback count. Removal is two steps -- the
+    # candidate is tombstoned under a fresh random name, then the tombstone is
+    # deleted -- and a callback that exhausts its 50 ms budget between them
+    # leaves the tombstone at a slot the cursor has already passed, so finding
+    # it again costs a further full sweep of the catalog. A budget of 20 raw
+    # callbacks covers 320 of the 512 slots and reached the tombstone only when
+    # its name happened to hash ahead of the cursor.
     removals = [
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             "codex",
             current_session="current",
             now_ns=now,
         )
-        for _ in range(20)
+        for _ in range(3)
     ]
 
     assert sum(removals) == 1

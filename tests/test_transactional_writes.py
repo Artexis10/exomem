@@ -5,7 +5,7 @@ import os
 import pickle
 import re
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -27,6 +27,32 @@ def _leaf(value: object) -> str:
 
 def _workspaces(parent: Path) -> list[Path]:
     return sorted(parent.glob(".exomem-batch-*"))
+
+
+def _descriptor_holds(descriptor: int, candidates: Iterable[Path]) -> bool:
+    """Whether an open descriptor holds one of these paths, without procfs.
+
+    Fault injection here has to recognise the descriptor the batch is about
+    to operate on. `/proc/self/fd/<n>` answers that on Linux and nowhere
+    else: on macOS the readlink raises, the guard falls through to the real
+    call, and the injected failure never fires -- so the test asserted a
+    refusal on Linux and asserted nothing at all on Darwin. Comparing the
+    descriptor's `(st_dev, st_ino)` against what is on disk is portable, and
+    stricter, because it matches the file rather than a name that could be
+    reused."""
+    try:
+        held = os.fstat(descriptor)
+    except OSError:
+        return False
+    identity = (held.st_dev, held.st_ino)
+    for candidate in candidates:
+        try:
+            found = candidate.stat()
+        except OSError:
+            continue
+        if (found.st_dev, found.st_ino) == identity:
+            return True
+    return False
 
 
 def _residue_name(index: int) -> str:
@@ -1184,11 +1210,7 @@ def test_batch_atomic_write_cleans_owned_workspace_when_fchmod_fails(
     real_fchmod = os.fchmod
 
     def fail_workspace_fchmod(descriptor: int, mode: int) -> None:
-        try:
-            name = Path(os.readlink(f"/proc/self/fd/{descriptor}")).name
-        except OSError:
-            name = ""
-        if _WORKSPACE_RE.fullmatch(name):
+        if _descriptor_holds(descriptor, _workspaces(tmp_path)):
             raise PermissionError("workspace fchmod failed")
         real_fchmod(descriptor, mode)
 
@@ -1246,13 +1268,12 @@ def test_batch_atomic_write_cleans_partially_initialized_stage(
     real_write = os.write
     stage_writes = 0
 
+    def stages() -> list[Path]:
+        return [entry for space in _workspaces(tmp_path) for entry in space.glob("stage-*")]
+
     def fail_after_partial_stage_write(descriptor: int, data) -> int:
         nonlocal stage_writes
-        try:
-            name = Path(os.readlink(f"/proc/self/fd/{descriptor}")).name
-        except OSError:
-            name = ""
-        if name.startswith("stage-"):
+        if _descriptor_holds(descriptor, stages()):
             stage_writes += 1
             if stage_writes == 1:
                 return real_write(descriptor, bytes(data[:3]))

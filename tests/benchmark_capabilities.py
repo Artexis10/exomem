@@ -35,6 +35,8 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -71,15 +73,44 @@ def has_posix_executable_scripts() -> bool:
 
 @lru_cache(maxsize=1)
 def has_resumable_directory_cursor() -> bool:
-    """True where a directory stream can be resumed from a saved cookie.
+    """True where a `telldir` cookie outlives the stream that produced it.
 
-    POSIX `telldir`/`seekdir` hand back an opaque cookie that resumes an open
-    directory stream where it stopped. Windows has no equivalent, so the
-    checkpoint's root prune resumes from the durable prune catalog instead
-    (`_prune_catalog_window`) and `_directory_window` refuses a non-zero
-    cursor there rather than replaying a growing prefix.
+    Each window opens a fresh directory stream, so the cookie has to mean the
+    same thing to a stream that never produced it. glibc's `telldir` returns
+    the filesystem's own `d_off` and does; the 4.4BSD lineage (Darwin) returns
+    an index into a table owned by that one DIR and does not, which lands a
+    replayed scan at an arbitrary offset. Windows has no cookie at all. Both
+    resume the checkpoint's root prune from the durable prune catalog instead
+    (`_prune_catalog_window`), and `_directory_window` refuses a non-zero
+    cursor there rather than silently skipping entries.
     """
-    return os.name != "nt"
+    return sys.platform.startswith("linux") and os.name != "nt"
+
+
+@lru_cache(maxsize=1)
+def has_arbitrary_byte_filenames() -> bool:
+    """True where a filename may hold bytes that are not valid UTF-8.
+
+    Linux treats a name as an opaque byte string, so `b"probe-\\xff"` is a legal
+    file and Python surfaces it through `surrogateescape`. APFS and HFS+
+    validate the encoding instead and refuse it with `EILSEQ`, so the hazard
+    cannot be staged on macOS at all. Probed rather than keyed off
+    `sys.platform`, because this is a property of the filesystem rather than
+    of the kernel.
+    """
+    if os.name == "nt":
+        return False
+    directory = tempfile.mkdtemp(prefix="exomem-byte-name-probe-")
+    try:
+        probe = os.path.join(os.fsencode(directory), b"probe-\\xff")
+        try:
+            os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        except OSError:
+            return False
+        os.unlink(probe)
+        return True
+    finally:
+        os.rmdir(directory)
 
 
 @lru_cache(maxsize=1)
