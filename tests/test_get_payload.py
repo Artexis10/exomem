@@ -32,7 +32,8 @@ def test_default_get_has_no_content_key(vault: Path) -> None:
 def test_include_raw_returns_disk_bytes(vault: Path) -> None:
     rel = _page(vault)
     out = commands.op_get(vault, path=rel, include_raw=True)
-    assert out["content"] == (vault / rel).read_text(encoding="utf-8")
+    # `read_text` normalizes newlines, so it cannot witness disk bytes.
+    assert out["content"] == (vault / rel).read_bytes().decode("utf-8")
     assert out["content_hash"] == content_hash(out["content"])
 
 

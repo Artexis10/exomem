@@ -29,11 +29,14 @@ the cross-platform signal worth having.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -66,6 +69,147 @@ def has_posix_executable_scripts() -> bool:
     executable bit `chmod` was asked for was never set either.
     """
     return os.name == "posix"
+
+
+@lru_cache(maxsize=1)
+def has_process_groups() -> bool:
+    """True where a process can be signalled as a group.
+
+    `os.killpg`/`os.getpgid` are POSIX-only, and the escalate-then-reap
+    shutdown that uses them is a POSIX-only strategy, not an unimplemented
+    one: Windows has job objects instead, and no caller asks for that here.
+    A test that monkeypatches `os.killpg` does not merely fail on Windows --
+    `monkeypatch.setattr` refuses an attribute that does not exist, so the
+    failure names the patch rather than the behaviour."""
+    return hasattr(os, "killpg") and hasattr(os, "getpgid")
+
+
+@lru_cache(maxsize=1)
+def has_resumable_directory_cursor() -> bool:
+    """True where a `telldir` cookie outlives the stream that produced it.
+
+    Each window opens a fresh directory stream, so the cookie has to mean the
+    same thing to a stream that never produced it. glibc's `telldir` returns
+    the filesystem's own `d_off` and does; the 4.4BSD lineage (Darwin) returns
+    an index into a table owned by that one DIR and does not, which lands a
+    replayed scan at an arbitrary offset. Windows has no cookie at all. Both
+    resume the checkpoint's root prune from the durable prune catalog instead
+    (`_prune_catalog_window`), and `_directory_window` refuses a non-zero
+    cursor there rather than silently skipping entries.
+    """
+    return sys.platform.startswith("linux") and os.name != "nt"
+
+
+@lru_cache(maxsize=1)
+def has_mount_type_inspection() -> bool:
+    """True where `findmnt` can name the filesystem backing a directory.
+
+    `infra/scripts/ansible_with_sops.sh` decrypts secrets only into tmpfs or
+    ramfs, and proves that with `findmnt --output FSTYPE --target`. That is
+    util-linux, and the hosts this runner provisions are Linux. macOS ships
+    no `findmnt` at all, so the refusal a test asserts there is the shell
+    failing to find a command rather than the runner reaching its own check.
+    """
+    return shutil.which("findmnt") is not None
+
+
+@lru_cache(maxsize=1)
+def has_procfs_descriptor_paths() -> bool:
+    """True where `/proc/self/fd/<n>` names an open descriptor as a path.
+
+    Linux publishes every open descriptor as a magic symlink, and a *directory*
+    descriptor can be path-walked through: `/proc/self/fd/<dirfd>/child`
+    resolves relative to the directory the descriptor holds, whatever the
+    directory is called now. Code that must re-open exactly what it staged --
+    `infra/scripts/sign_active_secret_registry.py` verifies its staged registry
+    that way before publishing -- has no portable equivalent: macOS has no
+    procfs, and its `/dev/fd/<n>` resolves the descriptor itself but supports
+    no lookup beneath it, so `/dev/fd/<n>/child` cannot resolve at all.
+    """
+    return os.name == "posix" and os.path.isdir("/proc/self/fd")
+
+
+@lru_cache(maxsize=1)
+def has_arbitrary_byte_filenames() -> bool:
+    r"""True where a filename may hold bytes that are not valid UTF-8.
+
+    Linux treats a name as an opaque byte string, so `b"probe-\xff"` is a legal
+    file and Python surfaces it through `surrogateescape`. APFS and HFS+
+    validate the encoding instead and refuse it with `EILSEQ`, so the hazard
+    cannot be staged on macOS at all. Probed rather than keyed off
+    `sys.platform`, because this is a property of the filesystem rather than
+    of the kernel.
+    """
+    if os.name == "nt":
+        return False
+    directory = tempfile.mkdtemp(prefix="exomem-byte-name-probe-")
+    try:
+        # Probe through the surface the callers use: a `str` carrying a
+        # surrogate, re-encoded by `surrogateescape` on the way to the syscall.
+        # An `os.open` on a bytes path is not the same question, and the byte
+        # here has to be the real 0xFF -- an escaped literal `\\xff` is four
+        # ordinary ASCII characters that every filesystem accepts, which is why
+        # this first answered yes on macOS and let the caller stage a name the
+        # platform then refused with EILSEQ.
+        probe = Path(directory) / os.fsdecode(b"probe-\xff")
+        try:
+            probe.write_bytes(b"")
+        except OSError:
+            return False
+        probe.unlink()
+        return True
+    finally:
+        os.rmdir(directory)
+
+
+@lru_cache(maxsize=1)
+def has_control_characters_in_filenames() -> bool:
+    """True where a path component may contain a newline.
+
+    POSIX permits any byte but `/` and NUL in a name, so a directory called
+    `bad<newline>change` is a real thing a repository can contain and the
+    checkpoint has to refuse it explicitly. Windows rejects the name at the
+    filesystem with `[WinError 123]`, so the hazard cannot be staged there --
+    the platform refuses it before any of our code is asked to.
+    """
+    return os.name == "posix"
+
+
+@lru_cache(maxsize=1)
+def has_open_file_replacement() -> bool:
+    """True where a file can be renamed over while a descriptor is open on it.
+
+    POSIX names and inodes are independent, so a reader holding a descriptor
+    keeps reading the old inode after a swap -- exactly the race a stable read
+    has to detect. Windows refuses the rename outright with `[WinError 5]
+    Access is denied`, so the race cannot be staged there at all: the platform
+    forbids what the code under test is proving it survives.
+    """
+    return os.name == "posix"
+
+
+@lru_cache(maxsize=1)
+def has_no_follow_open() -> bool:
+    """True where `os.open` can refuse to traverse a symlink.
+
+    Callers write `getattr(os, "O_NOFOLLOW", 0)`, so on a platform without the
+    flag the request degrades to an ordinary open that follows the link. The
+    refusal such code asserts therefore cannot happen there -- the guarantee is
+    absent, not broken.
+    """
+    return hasattr(os, "O_NOFOLLOW")
+
+
+@lru_cache(maxsize=1)
+def has_posix_only_stdlib() -> bool:
+    """True where the POSIX-only stdlib the operator scripts import exists.
+
+    `infra/scripts/secret_handoff.py` and its keypair sibling `import fcntl` at
+    module scope, and the projected-bundle checks call `os.statvfs`. Windows
+    ships neither, so the script cannot be imported there at all -- the failure
+    is the platform lacking the module, not the script being wrong.
+    """
+    return importlib.util.find_spec("fcntl") is not None and hasattr(os, "statvfs")
 
 
 @lru_cache(maxsize=1)
@@ -180,6 +324,36 @@ def require_posix_executable_scripts() -> None:
 def require_trusted_system_git() -> None:
     if not has_trusted_system_git():
         pytest.skip("no trusted system Git on os.defpath (the harness's trust anchor)")
+
+
+def require_process_groups() -> None:
+    if not has_process_groups():
+        pytest.skip("process groups are not a signalling primitive here")
+
+
+def require_resumable_directory_cursor() -> None:
+    if not has_resumable_directory_cursor():
+        pytest.skip("this platform resumes directory scans from the durable prune catalog")
+
+
+def require_mount_type_inspection() -> None:
+    if not has_mount_type_inspection():
+        pytest.skip("findmnt is unavailable, so the mount type cannot be inspected")
+
+
+def require_procfs_descriptor_paths() -> None:
+    if not has_procfs_descriptor_paths():
+        pytest.skip("/proc/self/fd does not name open descriptors here")
+
+
+def require_control_characters_in_filenames() -> None:
+    if not has_control_characters_in_filenames():
+        pytest.skip("this platform will not create a path component holding a newline")
+
+
+def require_posix_only_stdlib() -> None:
+    if not has_posix_only_stdlib():
+        pytest.skip("the POSIX-only stdlib these operator scripts import is absent here")
 
 
 def require_posix_host_paths() -> None:

@@ -384,3 +384,55 @@ def test_mutation_diagnostics_rejects_noncommitted_or_nonfull_results(
 ) -> None:
     with pytest.raises(RuntimeError, match="remember mutation"):
         e2e_product_loop._mutation_diagnostics(result, operation="remember")
+
+
+def test_the_convergence_digest_rescues_lines_the_tail_has_scrolled_past(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The tail is the wrong 20 000 characters for the failure it accompanies.
+
+    When the graph does not converge the harness polls for two minutes, so the
+    tail it prints is a hundred percent polling and every line that explains
+    the failure has scrolled out of it. Measured on a real failing run: zero
+    decisive lines in the tail, sixteen in the whole file.
+    """
+    decisive = "graph rebuild publication exhausted publication_attempts=4"
+    noise = "\n".join(f"tool_success connect_memory poll {i}" for i in range(4000))
+    text = f"{decisive}\n{noise}\n"
+
+    assert decisive not in text[-e2e_product_loop.SERVER_LOG_TAIL_CHARS :]
+
+    e2e_product_loop._print_convergence_digest(Path("exomem.log"), text)
+
+    out = capsys.readouterr().out
+    assert decisive in out
+    assert "convergence digest" in out
+
+
+def test_the_digest_stays_quiet_when_nothing_matches(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A passing-shaped log must not gain a header announcing nothing."""
+    e2e_product_loop._print_convergence_digest(Path("exomem.log"), "ordinary line\n")
+
+    assert capsys.readouterr().out == ""
+
+
+def test_the_digest_keeps_the_last_matches_and_says_what_it_dropped(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Capped so a chatty log cannot bury the tail beneath its own digest.
+
+    The last matches are the ones kept: a rebuild that stops does so at the
+    end, and the outcome matters more than the hundredth lock acquisition
+    before it.
+    """
+    limit = e2e_product_loop.CONVERGENCE_DIGEST_LINES
+    text = "\n".join(f"graph line {i}" for i in range(limit + 5)) + "\n"
+
+    e2e_product_loop._print_convergence_digest(Path("exomem.log"), text)
+
+    out = capsys.readouterr().out
+    assert f"graph line {limit + 4}" in out
+    assert "graph line 0" not in out
+    assert "5 earlier match(es) elided" in out

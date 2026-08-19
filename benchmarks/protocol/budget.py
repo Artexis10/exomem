@@ -161,12 +161,61 @@ class BudgetLedger:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Whether the process that wrote a lock is still running.
+
+    `os.kill(pid, 0)` is a POSIX liveness probe and nothing like one on
+    Windows, where Python emulates `os.kill` with `TerminateProcess`: for a
+    dead pid it raises `OSError` with WinError 87 rather than
+    `ProcessLookupError`, so the stale-lock breaker crashed and the ledger
+    stayed locked forever -- and for a *live* pid it would have killed the
+    process it was asking about.
+
+    Mirrors `exomem.media_jobs.pid_alive`, deliberately rather than by
+    import: this harness carries no dependency on the package under
+    measurement.
+    """
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except OSError:
+        return False
     return True
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """Ask the kernel for the process state; never signal it."""
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    error_access_denied = 5
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        # Access denied means the process exists and is not ours to inspect.
+        return ctypes.get_last_error() == error_access_denied
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)

@@ -19,6 +19,8 @@ import re
 
 import pytest
 
+from benchmark_capabilities import require_posix_executable_scripts
+
 from membench.trackc import checkpoint_driver, injection_ladder
 from membench.trackc.control_prompts import (
     CONTROL_SUITE,
@@ -44,6 +46,11 @@ def claude_home():
 
 @pytest.fixture(scope="module")
 def suite_report(claude_home):
+    # These drivers run the wired hook the way a client does -- through
+    # `bash -c` against a `#!/bin/sh` wrapper. Windows registers the same
+    # `bash ~/.claude/hooks/<w>.sh` command and has no shell to honour it,
+    # so there is nothing here for the platform to execute.
+    require_posix_executable_scripts()
     return run_suite(claude_home)
 
 
@@ -56,7 +63,8 @@ def test_installer_wires_isolated_claude_home(claude_home) -> None:
     # The wiring lives entirely inside the isolated home.
     assert str(claude_home.settings_path).startswith(str(claude_home.home))
     command = claude_home.wired_command("UserPromptSubmit")
-    assert command == f'bash "{claude_home.hooks_dir / "exomem-retrieve-nudge.sh"}"'
+    wrapper = (claude_home.hooks_dir / "exomem-retrieve-nudge.sh").as_posix()
+    assert command == f'bash "{wrapper}"'
 
 
 def test_installer_wires_isolated_codex_home() -> None:
@@ -67,7 +75,7 @@ def test_installer_wires_isolated_codex_home() -> None:
         assert home.settings_path.name == "hooks.json"
         command = home.wired_command("UserPromptSubmit")
         assert command.startswith("python3 ")
-        assert str(home.hooks_dir) in command
+        assert home.hooks_dir.as_posix() in command
     finally:
         cleanup_workdir(home.base)
 
@@ -190,6 +198,11 @@ def test_summary_reports_expectation_mismatch_as_gate_limit() -> None:
 
 
 def test_injection_cli_rung_and_degradation(claude_home) -> None:
+    # These drivers run the wired hook the way a client does -- through
+    # `bash -c` against a `#!/bin/sh` wrapper. Windows registers the same
+    # `bash ~/.claude/hooks/<w>.sh` command and has no shell to honour it,
+    # so there is nothing here for the platform to execute.
+    require_posix_executable_scripts()
     workdir = make_workdir("inject")
     try:
         seeded = injection_ladder.build_seeded_vault(workdir)
@@ -233,6 +246,11 @@ def test_rest_rung_stub_is_documented_not_run() -> None:
 
 
 def test_checkpoint_round_trip_same_client() -> None:
+    # These drivers run the wired hook the way a client does -- through
+    # `bash -c` against a `#!/bin/sh` wrapper. Windows registers the same
+    # `bash ~/.claude/hooks/<w>.sh` command and has no shell to honour it,
+    # so there is nothing here for the platform to execute.
+    require_posix_executable_scripts()
     result = checkpoint_driver.round_trip("claude", "claude")
     assert result.checkpoint_path is not None
     assert result.schema_version == checkpoint_driver.SCHEMA_VERSION
@@ -243,6 +261,11 @@ def test_checkpoint_round_trip_same_client() -> None:
 
 
 def test_checkpoint_round_trip_cross_client_shared_home() -> None:
+    # These drivers run the wired hook the way a client does -- through
+    # `bash -c` against a `#!/bin/sh` wrapper. Windows registers the same
+    # `bash ~/.claude/hooks/<w>.sh` command and has no shell to honour it,
+    # so there is nothing here for the platform to execute.
+    require_posix_executable_scripts()
     result = checkpoint_driver.round_trip("claude", "codex")
     # Contract (exomem_continuation_checkpoint.py lines 316-317, 2845-2850):
     # per-client state roots + client/state-root binding checks make a claude

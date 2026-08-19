@@ -4650,6 +4650,10 @@ def op_observe_memory(
     Returns:
         The normalized unit, stable unit reference, parent hashes, bounded
         semantic-contract feedback, and derived-index outcome.
+        `before_hash`/`after_hash` are whole-file `content_hash` values in the
+        same convention `expected_hash` is checked against and `get` hands out,
+        so `after_hash` is exactly what to echo into the next call's
+        `expected_hash`.
     """
     raw_path = str(path or "").strip()
     if raw_path.startswith(("/", "\\")) or Path(raw_path).is_absolute() or (

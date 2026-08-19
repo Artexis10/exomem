@@ -112,10 +112,24 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
     monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.01)
     monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.05)
     monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
-    attempts: list[float] = []
+    attempts: list[int] = []
+    scheduled: list[float | None] = []
+    real_wait = graph_drain._DEBT.wait
+
+    def record(timeout: float | None = None) -> bool:
+        # Record the interval the loop *scheduled*, not the wall clock between
+        # attempts. Measuring elapsed time asserted that a 10 ms sleep and a
+        # 50 ms sleep are distinguishable on a shared runner: macOS CI
+        # observed [74 ms, 68 ms, 48 ms] for a schedule that had already
+        # reached its 50 ms ceiling by the second attempt, so every gap was
+        # the same nominal sleep and the ordering was scheduler noise.
+        scheduled.append(timeout)
+        return real_wait(timeout=timeout)
+
+    monkeypatch.setattr(graph_drain._DEBT, "wait", record)
 
     def drain(_root: Path, *, limit: int | None = None) -> int:
-        attempts.append(time.monotonic())
+        attempts.append(1)
         return 0  # never any progress
 
     monkeypatch.setattr(index_sync, "drain_graph_work", drain)
@@ -124,10 +138,17 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
     assert _wait_for(lambda: len(attempts) >= 4, timeout=5.0)
     graph_drain.stop()
 
-    gaps = [b - a for a, b in zip(attempts, attempts[1:], strict=False)]
-    assert gaps, "expected repeated attempts"
-    assert max(gaps) <= 1.0, f"backoff exceeded its ceiling: {gaps}"
-    assert gaps[-1] >= gaps[0], f"expected backoff to grow, got {gaps}"
+    # The first wait is the idle poll the loop starts on; the backoff is what
+    # follows it.
+    backoff = [interval for interval in scheduled[1:] if interval is not None]
+    assert len(backoff) >= 3, f"expected repeated attempts, got {scheduled}"
+    assert max(backoff) <= graph_drain.MAX_RETRY_SECONDS, (
+        f"backoff exceeded its ceiling: {backoff}"
+    )
+    assert min(backoff) >= graph_drain.RETRY_SECONDS, (
+        f"backoff dropped below one retry interval: {backoff}"
+    )
+    assert backoff == sorted(backoff), f"expected backoff to grow, got {backoff}"
 
 
 def test_a_failing_drain_never_kills_the_daemon(

@@ -29,6 +29,10 @@ def _node(source: str) -> dict:
         check=True,
         capture_output=True,
         text=True,
+        # Node emits UTF-8. `text=True` alone decodes with the locale encoding,
+        # which on Windows is cp1252, so every em-dash in the copy came back as
+        # three characters and the rendered line compared unequal to itself.
+        encoding="utf-8",
     )
     return json.loads(result.stdout)
 

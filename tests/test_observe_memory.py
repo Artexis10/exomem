@@ -31,11 +31,37 @@ def _page_source(body: str = "# Observe\n\nExisting prose.\n") -> str:
     )
 
 
-def _write_page(root: Path, *, rel: str = PAGE, source: str | None = None) -> Path:
+def _write_page(
+    root: Path,
+    *,
+    rel: str = PAGE,
+    source: str | None = None,
+    newline: str = "\n",
+) -> Path:
+    """Seed a page with exactly the bytes asked for.
+
+    Deliberately `write_bytes`, not `write_text`: text mode translates the LF
+    in these literals to CRLF on Windows, so which line ending the suite
+    exercises would be an accident of the host rather than a choice. `newline`
+    makes that choice explicit for the tests that care.
+    """
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source or _page_source(), encoding="utf-8")
+    body = source or _page_source()
+    if newline != "\n":
+        body = body.replace("\n", newline)
+    path.write_bytes(body.encode("utf-8"))
     return path
+
+
+def _page_hash(page: Path) -> str:
+    """The `expected_hash` a real caller holds: `get`'s whole-file content hash.
+
+    Not `parent_source_hash` -- that is the semantic index's hash of the
+    newline-normalized logical source, an internal value that merely coincides
+    with this one on an LF page.
+    """
+    return vault.content_hash(page.read_bytes().decode("utf-8"))
 
 
 def test_add_compact_observation_is_canonical_addressable_and_indexed(
@@ -138,7 +164,7 @@ def test_update_and_remove_use_exact_unit_spans_and_preserve_unrelated_markdown(
         operation="update",
         unit_ref=first.unit_ref,
         expected_fingerprint=first.fingerprint,
-        expected_hash=state.parent_source_hash,
+        expected_hash=_page_hash(page),
         category="Decision",
         content="First unit changed",
     )
@@ -160,6 +186,71 @@ def test_update_and_remove_use_exact_unit_spans_and_preserve_unrelated_markdown(
     source = page.read_text(encoding="utf-8")
     assert "Second unit" not in source
     assert "Before." in source and "After." in source
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_reported_hashes_are_the_guard_the_next_write_is_checked_against(
+    tmp_path: Path,
+    newline: str,
+) -> None:
+    """`after_hash` must be usable as the next `expected_hash`, on any newline.
+
+    `observe_memory` is documented as taking the parent page's `content_hash`
+    -- a sha256 over the file's raw bytes, exactly what `get` hands out -- and
+    it reports `before_hash`/`after_hash` for the caller to echo back. It used
+    to report the semantic index's `parent_source_hash` instead, which is taken
+    over the *newline-normalized* source. The two coincide on an LF page, so
+    the mismatch was invisible until a page arrived with CRLF, and then a
+    caller chaining `after_hash` into the next call got STALE_PARENT_HASH with
+    nothing having changed on disk.
+    """
+    page = _write_page(
+        tmp_path,
+        source=_page_source(
+            "## Observations\n\n"
+            "- [rule] First unit ^first\n"
+            "- [rule] Second unit ^second\n"
+        ),
+        newline=newline,
+    )
+    seeded = page.read_bytes()
+    assert (b"\r\n" in seeded) is (newline == "\r\n")
+
+    state = semantic_index.current_parent_index_state(tmp_path, PAGE)
+    first = next(unit for unit in state.document.units if unit.anchor == "first")
+    second = next(unit for unit in state.document.units if unit.anchor == "second")
+
+    supplied = _page_hash(page)
+    updated = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="update",
+        unit_ref=first.unit_ref,
+        expected_fingerprint=first.fingerprint,
+        expected_hash=supplied,
+        category="Decision",
+        content="First unit changed",
+    )
+
+    # `before_hash` names the bytes the guard was checked against -- i.e. the
+    # value the caller supplied. Reporting the normalized logical-source hash
+    # instead told a CRLF-page caller its own accepted guard was some other
+    # value, which is the whole failure.
+    assert updated["before_hash"] == supplied
+    assert updated["after_hash"] == _page_hash(page)
+
+    # ...and the guard the tool documents accepts the value the tool reported.
+    removed = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="remove",
+        unit_ref=second.unit_ref,
+        expected_fingerprint=second.fingerprint,
+        expected_hash=updated["after_hash"],
+    )
+    assert removed["removed_unit_ref"] == second.unit_ref
+    assert removed["before_hash"] == updated["after_hash"]
+    assert removed["after_hash"] == _page_hash(page)
 
 
 @pytest.mark.parametrize("guard", ["parent", "unit"])
@@ -212,7 +303,7 @@ def test_update_and_remove_require_complete_lost_update_guards(
         "path": PAGE,
         "operation": operation,
         "unit_ref": unit.unit_ref,
-        "expected_hash": state.parent_source_hash,
+        "expected_hash": _page_hash(page),
         "expected_fingerprint": unit.fingerprint,
     }
     if operation == "update":
@@ -243,7 +334,7 @@ def test_anonymous_duplicate_selection_is_occurrence_exact(tmp_path: Path) -> No
         operation="update",
         unit_ref=duplicates[1].unit_ref,
         expected_fingerprint=duplicates[1].fingerprint,
-        expected_hash=state.parent_source_hash,
+        expected_hash=_page_hash(page),
         category="rule",
         content="Second only",
     )
@@ -305,7 +396,7 @@ def test_rich_update_relations_still_require_explicit_kind(tmp_path: Path) -> No
             operation="update",
             unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint,
-            expected_hash=state.parent_source_hash,
+            expected_hash=_page_hash(page),
             category="rule",
             content="Changed claim.",
             relations=[{"kind": "supports", "target": "[[Observe]]"}],
@@ -331,7 +422,7 @@ def test_rich_update_preserves_separator_outside_exact_unit_span(tmp_path: Path)
         operation="update",
         unit_ref=unit.unit_ref,
         expected_fingerprint=unit.fingerprint,
-        expected_hash=state.parent_source_hash,
+        expected_hash=_page_hash(page),
         kind="claim",
         category="rule",
         content="Updated claim.",

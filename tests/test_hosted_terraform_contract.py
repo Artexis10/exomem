@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import benchmark_capabilities
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -314,6 +315,11 @@ def test_backend_bootstrap_seals_local_state_and_uses_saved_plans() -> None:
 def test_hcp_bootstrap_refuses_to_overwrite_retained_state_with_old_escrow(
     tmp_path: Path,
 ) -> None:
+    # The refusal under test is the bootstrap shell script's own, reached by
+    # running it and by standing a fake `sops` in its path -- both of which
+    # need a shebang to mean something. Windows has none, so the script is
+    # data there and `subprocess` refuses it as not a valid application.
+    benchmark_capabilities.require_posix_executable_scripts()
     infra = tmp_path / "infra"
     scripts = infra / "scripts"
     root = infra / "terraform/hcp-bootstrap"

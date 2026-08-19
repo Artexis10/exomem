@@ -13,6 +13,12 @@ import time
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import (
+    has_arbitrary_byte_filenames,
+    has_posix_file_modes,
+    require_control_characters_in_filenames,
+    require_resumable_directory_cursor,
+)
 
 import exomem
 from exomem._hooks import exomem_continuation_checkpoint as checkpoint
@@ -70,6 +76,34 @@ def _event(
         "model": "pinned-test-model",
     }
     return row
+
+
+def _prune_until_swept(*args, **kwargs) -> int:
+    """Drive `prune_expired` until it has swept the whole candidate space.
+
+    One call examines at most `MAX_PRUNE_ENUM_ENTRIES` entries and resumes from
+    a cursor persisted in the root lock. That bounded-work contract is
+    deliberate and is pinned by
+    `test_portable_catalog_cursor_is_bounded_persisted_and_fixed_size`: each
+    catalog record is 579 bytes, so sweeping the whole table in one call would
+    read a quarter of a megabyte inside a hook that runs on every write.
+
+    On Linux the window enumerates real directory entries, so a test vault's
+    handful of them fit in the first call and a single `prune_expired` is the
+    whole sweep. Everywhere else the root is swept through the fixed 512-slot
+    open-addressed catalog -- Windows for want of any directory cookie, and
+    Darwin because its `telldir` cookie does not outlive the stream that
+    produced it. An entry there sits at whatever slot its name hashes to, so
+    the same one call covers 16 mostly-empty slots and usually finds nothing.
+    In production the cursor carries across successive writes and the entry is
+    reached within a bounded number of them; a test asserting the *outcome*
+    has to do the same thing rather than assume one call sufficed.
+
+    Returns the total removed, so `== 1` still means exactly one directory
+    went away.
+    """
+    passes = -(-checkpoint.MAX_PRUNE_CATALOG_ENTRIES // checkpoint.MAX_PRUNE_ENUM_ENTRIES) + 1
+    return sum(checkpoint.prune_expired(*args, **kwargs) for _ in range(passes))
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])
@@ -656,6 +690,7 @@ def test_large_artifact_tree_bounds_metadata_scan_and_keeps_dirty_priority(
 
 
 def test_unsafe_artifact_change_directory_is_skipped_explicitly(tmp_path: Path) -> None:
+    require_control_characters_in_filenames()
     root = tmp_path / "repo"
     unsafe = root / "openspec" / "changes" / "bad\nchange" / "tasks.md"
     unsafe.parent.mkdir(parents=True)
@@ -1077,6 +1112,13 @@ def test_subprocess_unknown_event_soft_fails_without_output_or_state(tmp_path: P
 def _init_repo(path: Path) -> None:
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
+    # Some of these fixtures build a ref whose name alone is longer than
+    # Windows' legacy 260-character MAX_PATH, and git stores a loose ref as a
+    # nested path under `.git/refs/heads`. Without this git cannot create the
+    # ref at all, and -- once created with `-c core.longpaths` -- every later
+    # plain `git` call in the repo still fails to resolve HEAD. The knob is
+    # Windows-only and inert elsewhere, so set it for every fixture repo.
+    subprocess.run(["git", "-C", str(path), "config", "core.longpaths", "true"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
     (path / "tracked.txt").write_text("base\n", encoding="utf-8")
@@ -1249,6 +1291,7 @@ def test_control_or_surrogate_session_normalization_round_trips_without_leak(
 def test_control_workspace_paths_are_omitted_or_hashed_before_round_trip(
     tmp_path: Path,
 ) -> None:
+    require_control_characters_in_filenames()
     home = tmp_path / "home"
     repo = tmp_path / "repo\nunsafe"
     _init_repo(repo)
@@ -1272,10 +1315,11 @@ def test_control_workspace_paths_are_omitted_or_hashed_before_round_trip(
 
 # Built lazily: os.fsdecode of a non-UTF-8 byte name raises on Windows, and a
 # decorator argument is evaluated at import time, so the skipif below cannot
-# protect it. Keeping the surrogateescape case POSIX-only keeps this module
-# importable on Windows.
+# protect it. The byte-name case additionally needs a filesystem that accepts
+# one: APFS and HFS+ validate the encoding and refuse it with `EILSEQ`, so on
+# macOS the name under test cannot be created at all.
 _UNSAFE_TRANSCRIPT_NAMES = ["transcript\nunsafe.jsonl"]
-if os.name != "nt":
+if has_arbitrary_byte_filenames():
     _UNSAFE_TRANSCRIPT_NAMES.append(os.fsdecode(b"transcript-\xff.jsonl"))
 
 
@@ -1347,8 +1391,8 @@ def test_write_is_idempotent_rotates_once_and_rejects_stale_writer(tmp_path: Pat
         checkpoint.load_checkpoint(state / "previous.json")["checkpoint_id"]
         == first["checkpoint_id"]
     )
-    assert stat_mode(state / "current.json") == 0o600
-    assert stat_mode(state / ".lock") == 0o600
+    assert_private_mode(state / "current.json")
+    assert_private_mode(state / ".lock")
     assert len(list(state.glob("*.tmp-*"))) == 0
 
 
@@ -1468,6 +1512,20 @@ def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
 
 
+def assert_private_mode(path: Path) -> None:
+    """Assert 0o600 where the mode is an access-control fact.
+
+    Windows synthesizes `st_mode`: a file reports 0o666 whatever `chmod` was
+    asked for, so asserting the permission there reads a placeholder rather
+    than a permission. Only this one line is platform-bound -- the rotation,
+    idempotency and JSONL-validity claims around it hold everywhere and keep
+    running here.
+    """
+    if not has_posix_file_modes():
+        return
+    assert stat_mode(path) == 0o600
+
+
 def test_structural_workspace_change_rotates_with_unchanged_transcript(tmp_path: Path) -> None:
     home = tmp_path / "home"
     repo = tmp_path / "repo"
@@ -1480,11 +1538,17 @@ def test_structural_workspace_change_rotates_with_unchanged_transcript(tmp_path:
     (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
     second = checkpoint.write_checkpoint(event, home, observed_at_ns=200)
 
-    assert second["checkpoint_id"] != first["checkpoint_id"]
     current = checkpoint.load_checkpoint(
         checkpoint.session_state_dir(home, "codex", "session-1") / "current.json"
     )
-    assert current["structural"]["workspace"]["dirty_paths"] == ["tracked.txt"]
+    # The observation before the digest that summarises it. Both assertions
+    # fail together when the `git` probe degrades under load, but only this
+    # one names the cause -- the other reports two equal hashes and leaves
+    # the reader to guess why the workspace looked unchanged.
+    assert current["structural"]["workspace"]["dirty_paths"] == ["tracked.txt"], (
+        current["structural"]
+    )
+    assert second["checkpoint_id"] != first["checkpoint_id"]
 
 
 def test_build_reuses_validated_workspace_root_for_artifact_evidence(
@@ -1817,8 +1881,16 @@ def test_os_advisory_lock_times_out_and_releases_when_owner_is_killed(tmp_path: 
                 pass
         child.kill()
         child.wait(timeout=5)
-        with checkpoint.advisory_lock(lock, timeout=0.5):
-            assert lock.read_bytes()
+        with checkpoint.advisory_lock(lock, timeout=0.5) as held:
+            # Read the sentinel byte through the lock's own descriptor.
+            # Windows' `msvcrt.locking` is a *mandatory* byte-range lock, so
+            # a second handle onto the locked byte is refused with
+            # `PermissionError` even from the owning process; the owning
+            # descriptor is not. `fcntl.flock` is advisory and would allow
+            # either, so this reads the same thing on both platforms.
+            assert held.fd is not None
+            os.lseek(held.fd, 0, os.SEEK_SET)
+            assert os.read(held.fd, 1)
     finally:
         if child.poll() is None:
             child.kill()
@@ -1835,7 +1907,7 @@ def test_expired_state_is_tombstoned_and_pruned_with_both_lock_orders(
     checkpoint.write_checkpoint(old, home, observed_at_ns=100)
     checkpoint.write_checkpoint(current, home, observed_at_ns=200)
 
-    removed = checkpoint.prune_expired(
+    removed = _prune_until_swept(
         home,
         "codex",
         current_session="current",
@@ -1861,7 +1933,7 @@ def test_prune_refuses_copied_checkpoint_in_arbitrary_user_directory(tmp_path: P
     shutil.copytree(source, valuable)
     (valuable / "valuable.txt").write_text("do not delete", encoding="utf-8")
 
-    removed = checkpoint.prune_expired(
+    removed = _prune_until_swept(
         home,
         "codex",
         current_session="active",
@@ -2089,7 +2161,7 @@ def test_metadata_log_rotates_at_cap_with_complete_valid_jsonl(tmp_path: Path) -
     assert raw.endswith(b"\n")
     assert records[-1]["duration_ms"] == 1
     assert all(checkpoint._valid_metadata_record(record) for record in records)
-    assert stat_mode(log) == 0o600
+    assert_private_mode(log)
 
 
 def test_metadata_rotation_replace_failure_preserves_log_and_removes_temp(
@@ -2161,7 +2233,7 @@ def test_metadata_log_rotation_serializes_concurrent_process_writers(tmp_path: P
     assert len(raw) <= limit
     assert raw.endswith(b"\n")
     assert all(checkpoint._valid_metadata_record(record) for record in records)
-    assert stat_mode(root / ".events.lock") == 0o600
+    assert_private_mode(root / ".events.lock")
 
 
 def test_windows_handle_relative_guards_are_present_even_when_not_executable_here() -> None:
@@ -2298,7 +2370,14 @@ def test_supported_write_subprocess_contract_is_silent_local_and_bounded(
     tmp_path: Path, client: str, event: str, trigger: str | None
 ) -> None:
     home = tmp_path / f"{client} home with spaces"
-    transcript = tmp_path / "odd\\transcript.jsonl"
+    # A literal backslash inside a *filename* is an ordinary character on
+    # POSIX and the strongest odd-name probe available there. On Windows it
+    # is the path separator, so the same string names a directory that does
+    # not exist and the fixture could not be created at all -- the test
+    # failed before reaching its subject. Keep a name that is odd and legal
+    # on each platform rather than dropping the probe.
+    odd_name = "odd;transcript .jsonl" if os.name == "nt" else "odd\\transcript.jsonl"
+    transcript = tmp_path / odd_name
     transcript.write_bytes(b"private body\xff" * 8000)
     payload: dict[str, object] = {
         "hookEventName": event,
@@ -2674,6 +2753,7 @@ def test_interrupted_rotation_recovers_labeled_previous(
     assert selected is not None and selected[1] == "rollback"
 
 
+
 @pytest.mark.parametrize("force_fallback", [False, True])
 def test_prune_skips_multiprocess_writer_then_removes_after_release(
     tmp_path: Path, force_fallback: bool
@@ -2708,20 +2788,28 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
         )
         child.kill()
         child.wait(timeout=5)
-        # Pruning is deadline-bounded and cursor-resumed. A loaded runner may
-        # exhaust one 50 ms callback after the writer releases, so assert the
-        # specified eventual result across bounded subsequent callbacks.
-        removals = [
-            checkpoint.prune_expired(
-                home,
-                "codex",
-                current_session="other",
-                now_ns=100 + checkpoint.RETENTION_NS + 1,
-                force_fallback=force_fallback,
+        # `Popen.wait()` reporting an exit does not mean the dead writer's
+        # handles are gone: Windows tears them down after `TerminateProcess`
+        # returns, and until it does the state directory still holds an open
+        # descriptor and cannot be removed. Pruning is separately
+        # deadline-bounded and cursor-resumed, so a loaded runner may also
+        # exhaust one 50 ms callback with the writer already gone. Both are
+        # reasons to bound this eventual result by wall clock rather than by a
+        # callback count a fast box burns through in under a millisecond.
+        removals: list[int] = []
+        deadline = time.monotonic() + 10.0
+        while sum(removals) == 0 and time.monotonic() < deadline:
+            removals.append(
+                checkpoint.prune_expired(
+                    home,
+                    "codex",
+                    current_session="other",
+                    now_ns=100 + checkpoint.RETENTION_NS + 1,
+                    force_fallback=force_fallback,
+                )
             )
-            for _ in range(checkpoint.MAX_PRUNE_ENUM_ENTRIES + 2)
-        ]
         assert sum(removals) == 1
+        assert not checkpoint.session_state_dir(home, "codex", "busy").exists()
     finally:
         if child.poll() is None:
             child.kill()
@@ -2924,6 +3012,7 @@ def test_directory_window_cursor_is_bounded_and_eventually_visits_every_entry(
 def test_portable_directory_window_cursor_never_replays_a_growing_prefix(
     tmp_path: Path,
 ) -> None:
+    require_resumable_directory_cursor()
     root_path = tmp_path / "portable-root"
     root_path.mkdir(mode=0o700)
     expected = {f"entry-{number:04d}" for number in range(257)}
@@ -3302,14 +3391,21 @@ def test_prune_rotates_bounded_candidates_beyond_sorted_prefix(tmp_path: Path) -
         observed_at_ns=100,
     )
 
+    # Three sweeps, not a flat callback count. Removal is two steps -- the
+    # candidate is tombstoned under a fresh random name, then the tombstone is
+    # deleted -- and a callback that exhausts its 50 ms budget between them
+    # leaves the tombstone at a slot the cursor has already passed, so finding
+    # it again costs a further full sweep of the catalog. A budget of 20 raw
+    # callbacks covers 320 of the 512 slots and reached the tombstone only when
+    # its name happened to hash ahead of the cursor.
     removals = [
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             "codex",
             current_session="current",
             now_ns=now,
         )
-        for _ in range(20)
+        for _ in range(3)
     ]
 
     assert sum(removals) == 1
@@ -3330,7 +3426,7 @@ def test_prune_removes_authorized_expired_interrupted_first_write(tmp_path: Path
 
     assert {item.name for item in state.iterdir()} == {".lock"}
     removed = sum(
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             "codex",
             current_session="other",
@@ -3357,7 +3453,7 @@ def test_prune_removes_stale_previous_behind_fresh_current(tmp_path: Path) -> No
     state = checkpoint.session_state_dir(home, "codex", "stale-history")
     assert checkpoint.load_checkpoint(state / "previous.json")["observed_at_ns"] == 101
 
-    removed = checkpoint.prune_expired(
+    removed = _prune_until_swept(
         home,
         "codex",
         current_session="other",
@@ -3466,7 +3562,7 @@ def test_prune_recovers_authorized_crash_tombstone_only(tmp_path: Path) -> None:
     # (2026-08-14, py3.11 shard 2/4) with `assert 0 == 1`.
     removed = 0
     for _ in range(20):
-        removed += checkpoint.prune_expired(
+        removed += _prune_until_swept(
             home,
             client,
             current_session="other",
@@ -3518,7 +3614,7 @@ def test_crash_tombstone_recovery_rotates_past_unauthorized_prefix(
         lookalikes.append(lookalike)
 
     removed = sum(
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             client,
             current_session="other",
@@ -3563,7 +3659,7 @@ def test_true_kill_between_session_directory_creation_and_manifest_is_prunable(
     assert state.is_dir()
 
     removed = sum(
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             "codex",
             current_session="other",
@@ -3634,7 +3730,7 @@ def test_true_kill_after_pending_temp_fsync_is_cleaned_boundedly(
                 observed_at_ns=200,
             )
         else:
-            checkpoint.prune_expired(
+            _prune_until_swept(
                 home,
                 "codex",
                 current_session="other",
@@ -3686,7 +3782,7 @@ def test_true_kill_after_pending_publish_before_directory_is_pruned(
     assert pending.is_file() and not state.exists()
 
     for _ in range(20):
-        checkpoint.prune_expired(
+        _prune_until_swept(
             home,
             "codex",
             current_session="other",

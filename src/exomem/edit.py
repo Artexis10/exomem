@@ -44,6 +44,7 @@ from . import find as find_module
 from .cli_ops import OpError
 from .kbdir import kb_prefix
 from .mutation_timings import MutationTimings, write_timings_enabled
+from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
@@ -55,6 +56,7 @@ from .vault import (
     normalize_body_wikilinks,
     plan_log_writes,
     read_guarded_text,
+    render_frontmatter_document,
 )
 
 log = logging.getLogger(__name__)
@@ -487,11 +489,23 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
 
 @dataclass
 class _Editable:
-    """A page resolved + guarded for in-place editing, split into parts."""
+    """A page resolved + guarded for in-place editing, split into parts.
+
+    Carries two hashes, because two conventions meet here and conflating them
+    is what made CRLF pages un-editable. `raw_hash` is the whole-file
+    `content_hash` over the bytes on disk: the value `get` hands callers, the
+    value `expected_hash` is compared against, and the value a caller echoes
+    back into the next write. `semantic_before_hash` is over the
+    newline-normalized logical source, which is what the semantic index and its
+    `parent_source_hash` are keyed on. The two coincide on an LF page and
+    diverge on a CRLF one, so hand each to the seam that owns it rather than
+    whichever is in reach.
+    """
 
     abs_path: Path
     rel_path: str
     original_text: str
+    raw_hash: str
     semantic_before_hash: str
     fm_text: str
     body: str
@@ -555,15 +569,22 @@ def load_editable(
         raw_text = abs_path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError) as error:
         raise EditError(code="UNREADABLE", missing=["path"], reason=str(error)) from error
-    # Match Path.read_text/newline=None and the public get-memory hash contract
-    # while retaining the raw-byte text hash required by semantic preflight.
+    # Edit reasons about logical Markdown with LF newlines, matching
+    # `Path.read_text(newline=None)` and the body `get` returns.
     original_text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
 
     # Optimistic-concurrency guard. If the caller passed the hash it read via
     # `get`, refuse when the file changed on disk since — don't clobber another
     # writer. Checked before any mutation; the `updated:` bump happens after
     # this read, so it never self-trips.
-    if expected_hash is not None and content_hash(original_text) != expected_hash:
+    #
+    # Hashed over `raw_text`, not the newline-normalized form: `content_hash`
+    # is defined as the sha256 of a file's full raw text and `get_page` hands
+    # out exactly that. Comparing the normalized hash made the two disagree on
+    # every CRLF page, so the guard reported STALE_EDIT when nothing had
+    # changed -- and re-reading returned the same raw hash, so the page could
+    # never be edited through the guarded path at all.
+    if expected_hash is not None and content_hash(raw_text) != expected_hash:
         raise EditError(
             code="STALE_EDIT",
             missing=["expected_hash"],
@@ -581,6 +602,7 @@ def load_editable(
                 abs_path=abs_path,
                 rel_path=rel_path,
                 original_text=original_text,
+                raw_hash=content_hash(raw_text),
                 semantic_before_hash=content_hash(original_text),
                 fm_text="",
                 body=original_text,
@@ -598,6 +620,7 @@ def load_editable(
         abs_path=abs_path,
         rel_path=rel_path,
         original_text=original_text,
+        raw_hash=content_hash(raw_text),
         semantic_before_hash=content_hash(original_text),
         fm_text=fm_match.group(1),
         body=fm_match.group(2),
@@ -606,11 +629,21 @@ def load_editable(
 
 
 def render_editable(editable: _Editable, body: str, fm_text: str) -> str:
-    """Render a candidate with the page's existing frontmatter policy."""
+    """Render a candidate with the page's existing frontmatter policy.
+
+    Emits LF deliberately, not `document_newline(...)`: `original_text` is
+    already newline-normalized, so asking it for the document's line ending
+    can only ever answer LF, and a call that reads as preservation while
+    guaranteeing canonicalization is worse than none. Editing a CRLF page
+    through this seam rewrites it as LF -- that is the current contract, not an
+    accident. Restoring real preservation is a larger change than it looks,
+    because `SemanticPageState.source_hash` hashes whatever bytes it is handed
+    while `semantic_index` compares that against a normalized re-read.
+    """
     body = body.rstrip() + "\n"
     if not editable.has_frontmatter:
         return body
-    return f"---\n{fm_text}\n---\n{body}"
+    return render_frontmatter_document(fm_text, body, newline="\n")
 
 
 def apply_surgical_replace(
@@ -946,7 +979,9 @@ def _match_contexts(body: str, old_string: str, *, max_matches: int = 5) -> list
 # ---------------- frontmatter surgery ----------------
 
 
-_FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
+# One definition, shared with `vault`: these modules fold CRLF to LF before
+# matching, but a private copy is free to drift out of that agreement.
+_FM_PATTERN = _VAULT_FM_PATTERN
 
 
 def _set_or_append(fm_text: str, key: str, value: str) -> str:

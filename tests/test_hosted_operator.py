@@ -8,6 +8,7 @@ import stat
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import require_posix_host_paths
 
 from exomem import __main__ as cli
 from exomem import hosted_operator
@@ -19,6 +20,11 @@ CONTRACT_PATH = (
 
 
 def _request(**overrides: object) -> dict[str, object]:
+    # Every root below is a real path on the hosted Linux cell this operator
+    # runs on. Windows has no drive letter for them, so `_validate_root`
+    # refuses them as non-absolute -- correctly. The fixture is what is
+    # platform-bound here, not the validator.
+    require_posix_host_paths()
     request: dict[str, object] = {
         "request_id": "123e4567-e89b-42d3-a456-426614174000",
         "operation_id": "operation-1",
@@ -140,6 +146,7 @@ def test_live_request_requires_bounded_eof_terminated_stdin(suffix: bytes) -> No
 
 
 def test_live_request_reads_until_real_eof_even_when_stream_returns_short_chunks() -> None:
+    require_posix_host_paths()
     payload = _canonical(
         {
             "request_id": "123e4567-e89b-42d3-a456-426614174000",
@@ -307,6 +314,7 @@ def test_offline_request_rejects_relative_path_parent_symlink_and_non_file(
 
 
 def test_operator_main_emits_one_canonical_envelope_and_empty_stderr() -> None:
+    require_posix_host_paths()
     request = {
         "request_id": "123e4567-e89b-42d3-a456-426614174000",
         "operation_id": "credential-op",
@@ -395,6 +403,7 @@ def test_operator_main_redacts_modeled_and_unexpected_failures() -> None:
 
 
 def test_operator_main_rejects_handler_output_outside_frozen_success_schema() -> None:
+    require_posix_host_paths()
     request = {
         "request_id": "123e4567-e89b-42d3-a456-426614174000",
         "operation_id": "credential-op",

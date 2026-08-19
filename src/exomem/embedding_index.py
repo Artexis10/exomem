@@ -193,7 +193,7 @@ class EmbeddingIndex:
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         target = path if path is not None else self.path
-        target.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_store.ensure_sidecar_parent(target)
         conn = sqlite3.connect(target)
         sidecar_store.apply_sidecar_pragmas(conn)
         conn.execute(

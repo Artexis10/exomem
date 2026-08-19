@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 import uuid
@@ -426,8 +427,13 @@ def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str
     if identity is None:
         raise ReferenceError("INVALID_REFERENCE", f"invalid memory id: {exomem_id!r}")
     new_fm = fm_text.rstrip() + f"\n{ID_FIELD}: {identity}"
-    blank = "\n" if markdown.startswith("---\n") and "\n---\n\n" in markdown else ""
-    return f"---\n{new_fm}\n---\n{blank}{body}", identity
+    blank_line = bool(
+        re.match(r"^---\r?\n.*?\r?\n---\r?\n\r?\n", markdown, re.DOTALL)
+    )
+    rendered = vault_module.render_frontmatter_document(
+        new_fm, body, newline=vault_module.document_newline(markdown), blank_line=blank_line
+    )
+    return rendered, identity
 
 
 def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:

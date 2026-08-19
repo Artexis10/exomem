@@ -185,14 +185,24 @@ def test_windows_receipt_first_refuses_existing_unsafe_runtime_without_lock_chil
     expected_remediation = mutation_lock._windows_private_dacl_repair_command(
         state_root, sid, directory=True
     )
-    expected_error = (
-        f"unsafe Windows DACL at {state_root}; run in elevated PowerShell: "
-        f"{expected_remediation}"
-    )
     with pytest.raises(receipts.ReceiptError) as exc_info:
         receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
 
-    assert str(exc_info.value) == expected_error
+    # Asserted as the four things an operator needs -- which path, what was
+    # seen, what was wanted, and the exact repair -- rather than as one
+    # frozen sentence. `WindowsRuntimeDaclError` later gained the observed
+    # and expected clauses, which is strictly better for the operator and
+    # broke an equality that had encoded the punctuation of the old wording
+    # as if it were the contract.
+    message = str(exc_info.value)
+    assert message.startswith(f"unsafe Windows DACL at {state_root};")
+    assert message.endswith(expected_remediation)
+    for fragment in (
+        repr(before_dacl),
+        *mutation_lock._windows_private_dacl_trustees(sid),
+        expected_remediation,
+    ):
+        assert fragment in message, (fragment, message)
     assert mutation_lock._windows_dacl_sddl(state_root) == before_dacl
     assert list(state_root.iterdir()) == []
 

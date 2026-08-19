@@ -111,3 +111,97 @@ def test_a_wrapped_posix_api_error_is_recognised() -> None:
             raise RuntimeError("hosted runtime bootstrap failed") from exc
     except RuntimeError as outer:
         assert _needs_an_absent_posix_api(outer)
+
+
+def test_a_missing_proc_path_is_recognised_as_an_absent_procfs() -> None:
+    """The custody tests that read `/proc` directly never reach a declaration."""
+    from conftest import _needs_an_absent_procfs
+
+    assert _needs_an_absent_procfs(
+        FileNotFoundError(2, "No such file or directory", "/proc/self/fd")
+    )
+    assert _needs_an_absent_procfs(
+        FileNotFoundError(2, "No such file or directory", "/proc/1270/fd/48/observation.json")
+    )
+
+
+def test_a_missing_file_outside_proc_is_still_a_failure() -> None:
+    """A real missing artefact must not be laundered into a skip."""
+    from conftest import _needs_an_absent_procfs
+
+    assert not _needs_an_absent_procfs(
+        FileNotFoundError(2, "No such file or directory", "/tmp/evidence/observation.json")
+    )
+    assert not _needs_an_absent_procfs(
+        FileNotFoundError(2, "No such file or directory", "processed/report.json")
+    )
+    assert not _needs_an_absent_procfs(FileNotFoundError("no filename recorded"))
+    assert not _needs_an_absent_procfs(None)
+
+
+def test_a_lifecycle_wrapped_proc_failure_is_recognised() -> None:
+    """`run_provider_lifecycle` re-raises what it caught; the cause survives."""
+    from conftest import _needs_an_absent_procfs
+
+    try:
+        try:
+            raise FileNotFoundError(
+                2, "No such file or directory", "/proc/1270/fd/48/observation.json"
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("direct provider lifecycle failed") from exc
+    except RuntimeError as outer:
+        assert _needs_an_absent_procfs(outer)
+
+
+def test_the_declaration_compared_as_a_value_is_recognised() -> None:
+    """`assert <refusal> is <expected>` reports the refusal as text, not as a raise."""
+    from conftest import _needs_an_absent_procfs
+
+    refusal = Exception("POSIX proc-fd directory capabilities are unavailable")
+    assert _needs_an_absent_procfs(
+        AssertionError(f"assert {refusal!r} is BaseException('control')")
+    )
+    assert not _needs_an_absent_procfs(AssertionError("assert 1 == 2"))
+
+
+class HostedRuntimeTempUnavailable(Exception):
+    """Same name as the hosted cell's, deliberately not the same class."""
+
+
+class HostedSecurityStateInvalid(Exception):
+    pass
+
+
+def test_hosted_posix_ownership_refusals_are_recognised() -> None:
+    from conftest import _needs_posix_ownership_semantics
+
+    assert _needs_posix_ownership_semantics(HostedRuntimeTempUnavailable())
+    assert _needs_posix_ownership_semantics(HostedSecurityStateInvalid())
+
+
+def test_a_wrapped_hosted_ownership_refusal_is_recognised() -> None:
+    """`server_hosted` re-raises the temp refusal as a gateway error."""
+    from conftest import _needs_posix_ownership_semantics
+
+    try:
+        try:
+            raise HostedRuntimeTempUnavailable()
+        except HostedRuntimeTempUnavailable as exc:
+            raise RuntimeError(
+                "HOSTED_TRANSFER_UNAVAILABLE: hosted runtime temp is unavailable"
+            ) from exc
+    except RuntimeError as outer:
+        assert _needs_posix_ownership_semantics(outer)
+
+
+def test_an_unrelated_hosted_failure_is_still_a_failure() -> None:
+    """The gate must not absorb ordinary hosted defects into skips."""
+    from conftest import _needs_posix_ownership_semantics
+
+    assert not _needs_posix_ownership_semantics(AssertionError("assert 200 == 403"))
+    assert not _needs_posix_ownership_semantics(OSError("permission denied"))
+    assert not _needs_posix_ownership_semantics(
+        RuntimeError("HOSTED_TRANSFER_DENIED: policy refused the download")
+    )
+    assert not _needs_posix_ownership_semantics(None)

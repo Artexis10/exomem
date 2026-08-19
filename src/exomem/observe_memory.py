@@ -298,7 +298,14 @@ def observe_memory(
                 path=editable.rel_path,
                 after_source=after_source,
                 operation="observe",
-                expected_before_hash=expected_hash or vault.content_hash(editable.original_text),
+                # The semantic seam is keyed on the newline-normalized logical
+                # source, so hand it that hash instead of forwarding the
+                # caller's `expected_hash`, which is over the file's raw bytes.
+                # `load_editable` has already enforced the caller's guard
+                # against those bytes; forwarding it again made one parameter
+                # carry two conventions, which no single value satisfies on a
+                # CRLF page. Matches what `edit` passes at the same seam.
+                expected_before_hash=editable.semantic_before_hash,
                 transition_token=transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
@@ -346,7 +353,7 @@ def observe_memory(
         return _result(
             operation=op,
             path=editable.rel_path,
-            before_hash=vault.content_hash(editable.original_text),
+            before_hash=editable.raw_hash,
             after_hash=vault.content_hash(after_source),
             mutated=False,
             unit=proposed_unit,
@@ -389,8 +396,15 @@ def observe_memory(
     return _result(
         operation=op,
         path=editable.rel_path,
-        before_hash=vault.content_hash(editable.original_text),
-        after_hash=final.parent_source_hash,
+        # Both hashes are the whole-file `content_hash` the caller is told to
+        # echo back as the next `expected_hash` -- the same convention `get`
+        # emits and `load_editable` compares. `final.parent_source_hash` is the
+        # semantic index's hash of the *normalized* logical source, so reporting
+        # it here handed the caller a value its own guard would then refuse on
+        # any CRLF page. `after_source` is written verbatim by
+        # `commit_existing`, so hashing it names exactly the committed bytes.
+        before_hash=editable.raw_hash,
+        after_hash=vault.content_hash(after_source),
         mutated=committed.mutated,
         unit=final_unit,
         removed_unit=removed_unit,
@@ -802,14 +816,14 @@ def _rebuild_source(
         if _UPDATED_RE.search(fm_text)
         else fm_text.rstrip() + f"\nupdated: {date}"
     )
-    closing = original.find("\n---\n")
-    blank = (
-        "\n"
-        if closing >= 0 and original.startswith("\n", closing + len("\n---\n"))
-        else ""
+    newline = vault.document_newline(original)
+    blank_line = bool(
+        re.match(r"^---\r?\n.*?\r?\n---\r?\n\r?\n", original, re.DOTALL)
     )
-    final_body = body if body.endswith("\n") else body + "\n"
-    return f"---\n{updated}\n---\n{blank}{final_body}"
+    final_body = body if body.endswith(newline) else body + newline
+    return vault.render_frontmatter_document(
+        updated, final_body, newline=newline, blank_line=blank_line
+    )
 
 
 def _unit_by_anchor(document: Any, anchor: str | None) -> Any | None:

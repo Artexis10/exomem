@@ -78,7 +78,7 @@ def test_read_memory_resolves_exact_unit_with_parent_citation_and_bounded_contex
         "status": "active",
         "updated": "2026-07-16",
         "superseded_by": [],
-        "content_hash": vault_module.content_hash(path.read_text(encoding="utf-8")),
+        "content_hash": vault_module.content_hash(path.read_bytes().decode("utf-8")),
     }
     context = out["parent_context"]
     assert "- [config] Session TTL is 30 minutes ^session-ttl" in context["markdown"]

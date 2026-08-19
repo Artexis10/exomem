@@ -28,6 +28,21 @@ def apply_sidecar_pragmas(conn: sqlite3.Connection) -> None:
         log.warning("sidecar WAL pragmas failed (%s); continuing on default journal", e)
 
 
+def ensure_sidecar_parent(target: Path) -> None:
+    """Create the sidecar's directory, tolerating a parent that cannot be created.
+
+    An exact-row repair binds to the sidecar's *inode* and hands the connection a
+    descriptor-derived path so a sidecar swapped behind it is still reached. On
+    macOS that path is `/.vol/<dev>/<ino>`, whose parent is a synthetic
+    read-only directory: `mkdir(exist_ok=True)` there raises `EROFS` rather than
+    the `EEXIST` it swallows, which failed every bound repair on the platform.
+    Creating only what is genuinely missing is also just the honest operation.
+    """
+    if target.parent.is_dir():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+
 def file_block(keys: list[str], rel_path: str) -> tuple[int, int]:
     """Locate `rel_path`'s contiguous row block in a sorted key list."""
     lo = hi = None

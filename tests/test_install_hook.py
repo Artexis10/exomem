@@ -22,6 +22,11 @@ from pathlib import Path
 
 import pytest
 
+from benchmark_capabilities import (
+    require_posix_executable_scripts,
+    require_posix_file_modes,
+)
+
 import exomem
 from exomem import install_hook as hook_module
 from exomem._hooks import exomem_continuation_checkpoint as checkpoint
@@ -366,7 +371,12 @@ def test_install_hook_check_requires_one_exact_continuation_registration(
     group = _checkpoint_groups(data, "PreCompact", "codex")[0]
     entry = group["hooks"][0]
     if drift == "command":
-        entry["command"] = entry["command"].replace(str(hd), str(tmp_path / "wrong"))
+        # The registered command spells the hook dir POSIX-style, so splicing in
+        # `str(hd)` matched nothing on Windows and the "drifted" config was
+        # byte-identical to the good one -- the check was right to pass it.
+        entry["command"] = entry["command"].replace(
+            hd.as_posix(), (tmp_path / "wrong").as_posix()
+        )
     elif drift == "commandWindows":
         entry["commandWindows"] += ".wrong"
     elif drift == "timeout":
@@ -723,6 +733,9 @@ def test_normalized_reinstall_does_not_rewrite_or_backup(tmp_path: Path) -> None
 
 
 def test_real_config_change_creates_unique_mode_preserving_backup(tmp_path: Path) -> None:
+    # The backup carrying the original's mode is the property under test, and
+    # Windows synthesizes 0666 for every file whatever `chmod` was asked for.
+    require_posix_file_modes()
     sp = tmp_path / "settings.json"
     original = b'{"theme":"dark","hooks":{}}\n'
     sp.write_bytes(original)
@@ -935,7 +948,13 @@ def test_all_client_cli_isolated_partial_failure_and_override_rejection(
     assert (codex / "hooks.json").read_text(encoding="utf-8") == "{broken"
 
 
-def test_health_check_reports_capability_matrix_hashes_and_first_run(tmp_path: Path) -> None:
+def test_health_check_reports_capability_matrix_hashes_and_first_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `check_hooks` reads continuation state from the client home, not from
+    # `hook_dir`, so without this the assertion that no checkpoint exists yet
+    # was answered by whatever the developer's own machine had accumulated.
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path / "home"))
     hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
     hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
 
@@ -1547,6 +1566,11 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
     wrapper = home / "hooks" / "exomem-continuation-checkpoint.sh"
     command = [sys.executable, str(script), "--client", client]
     if client == "claude":
+        # exomem registers the Claude hook as `bash ~/.claude/hooks/<w>.sh` so one
+        # yadm-synced settings.json works on every machine, so exercising it end
+        # to end needs a shell that can run a shebang script. The codex parameter
+        # runs the same Python directly and still covers Windows.
+        require_posix_executable_scripts()
         command = ["bash", str(wrapper), "--client", client]
 
     assert _checkpoint_groups(config, "PreCompact", client)

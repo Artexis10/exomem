@@ -14,7 +14,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -22,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import scratch_root  # noqa: E402
+
 WINDOWS = sys.platform == "win32"
 
 
@@ -2378,6 +2382,49 @@ def _installed_lease(args: argparse.Namespace) -> int:
 SERVER_LOG_TAIL_CHARS = 20_000
 
 
+#: Lines worth pulling out of a log whose tail is all polling. Deliberately a
+#: coarse net: over-including a few lines costs nothing next to a digest that
+#: misses the one line that explains the failure.
+CONVERGENCE_DIGEST_PATTERN = re.compile(
+    r"graph|drain|rebuild|epoch|defer|barrier|publication|stabiliz|converge",
+    re.IGNORECASE,
+)
+
+#: Cap the digest so a genuinely chatty log cannot bury the tail beneath it.
+CONVERGENCE_DIGEST_LINES = 200
+
+
+def _print_convergence_digest(relative: Path, text: str) -> None:
+    """Pull the convergence story out of the whole log, ahead of the tail.
+
+    The tail alone is the wrong 20 000 characters for the failure it most often
+    accompanies. When the graph does not converge, the harness then polls
+    `connect_memory` every 540 ms for two minutes, so the tail is a hundred
+    percent polling and the writes, fallbacks, drains and rebuild outcomes that
+    explain the failure have scrolled out of it. A real run showed exactly
+    that: the artifact held the whole story in fifteen lines, and the inline
+    tail held none of them.
+
+    Scanning the whole file for those lines costs nothing here -- this runs once
+    on a failure -- and it puts the evidence on the failing run's own page,
+    which is the difference between reading a failure and rerunning it.
+    """
+    matches = [line for line in text.splitlines() if CONVERGENCE_DIGEST_PATTERN.search(line)]
+    if not matches:
+        return
+    shown = matches[-CONVERGENCE_DIGEST_LINES:]
+    dropped = len(matches) - len(shown)
+    elided = "" if not dropped else f", {dropped} earlier match(es) elided"
+    print(
+        f"--- product-e2e convergence digest: {relative} "
+        f"({len(shown)} of {len(matches)} matching line(s){elided}) ---",
+        flush=True,
+    )
+    for line in shown:
+        print(line, flush=True)
+    print(f"--- end convergence digest: {relative} ---", flush=True)
+
+
 def _publish_server_logs(root: Path) -> None:
     """Rescue the server's own log before the scratch root is deleted.
 
@@ -2413,6 +2460,7 @@ def _publish_server_logs(root: Path) -> None:
         except OSError as exc:  # noqa: BLE001 - one unreadable log is not fatal
             print(f"product-e2e: could not publish {relative} ({exc})")
             continue
+        _print_convergence_digest(relative, text)
         tail = text[-SERVER_LOG_TAIL_CHARS:]
         elided = "" if len(tail) == len(text) else f" (last {len(tail)} of {len(text)} chars)"
         print(f"--- product-e2e server log: {relative}{elided} ---", flush=True)
@@ -2432,17 +2480,12 @@ def _e2e_workdir(*, keep: bool):
     until it reproduced rather than by reading the traceback it had already
     written down.
     """
-    path = tempfile.mkdtemp(prefix="exomem-product-e2e-")
-    try:
-        yield path
-    except BaseException:
-        _publish_server_logs(Path(path))
-        raise
-    finally:
-        if keep:
-            print(f"product-e2e: kept working directory {path}")
-        else:
-            shutil.rmtree(path, ignore_errors=True)
+    with scratch_root.scratch_root("exomem-product-e2e-", keep=keep) as path:
+        try:
+            yield str(path)
+        except BaseException:
+            _publish_server_logs(path)
+            raise
 
 
 def _orchestrate(args: argparse.Namespace) -> int:
