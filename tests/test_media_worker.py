@@ -2078,10 +2078,16 @@ def test_follower_supervisor_does_not_launch_media_child(
         sidecar_path=vault / result.sidecar_path,
         media_type="audio",
     )
+    # `_probe_writer_authority`, not `_writer_authority_available`: the
+    # supervisor asks for the refusing CODE so it can pick a recheck cadence,
+    # and the boolean is derived from it. Stubbing the derived form left the
+    # real probe running and the child launched anyway -- and because the
+    # `pytest.fail` fires on the supervisor THREAD, that regression surfaced
+    # only as a warning, not as a failing test.
     monkeypatch.setattr(
         media_worker,
-        "_writer_authority_available",
-        lambda: False,
+        "_probe_writer_authority",
+        lambda: "WRITER_LEASE_REQUIRED",
     )
     monkeypatch.setattr(
         worker,
@@ -2616,3 +2622,73 @@ def test_find_surfaces_media_fields(vault, monkeypatch: pytest.MonkeyPatch) -> N
     d = media[0].as_dict()
     assert d["media_type"] == "audio"
     assert d["media_file"].endswith("meeting.mp3")
+
+
+# --- the probe that produced the log volume ---------------------------------
+
+
+def test_a_missing_lease_contract_slows_the_availability_probe() -> None:
+    """The 5s follower cadence buys nothing against an answer that never changes.
+
+    A coordinator URL that serves no lease contract returns the same 404 to
+    every request. Polling it at the follower cadence cost one request every
+    five seconds per server process, indefinitely, and seven of them ran at
+    once. The recheck is slow enough that a stuck deployment is quiet, and
+    short enough that correcting the URL takes effect without a restart.
+    """
+    assert (
+        media_worker._authority_recheck_seconds("WRITER_COORDINATOR_CONTRACT_ABSENT")
+        == media_worker._CONTRACT_ABSENT_RECHECK_SECONDS
+    )
+    assert media_worker._CONTRACT_ABSENT_RECHECK_SECONDS > media_worker._FOLLOWER_RECHECK_SECONDS
+
+
+def test_an_ordinary_follower_keeps_the_fast_recheck() -> None:
+    """A replica that is simply not the writer must still take over promptly.
+
+    WRITER_LEASE_REQUIRED is the steady state of a healthy passive replica, and
+    slowing it would add the whole recheck interval to every takeover.
+    """
+    for code in ("WRITER_LEASE_REQUIRED", "WRITER_COORDINATOR_UNAVAILABLE", "MUTATION_BUSY"):
+        assert media_worker._authority_recheck_seconds(code) == (
+            media_worker._FOLLOWER_RECHECK_SECONDS
+        )
+
+
+def test_a_missing_lease_contract_still_leaves_work_queued(monkeypatch) -> None:
+    """Fail-closed is unchanged: a misconfiguration never grants authority.
+
+    It is classified transient on purpose -- an operator can correct the URL
+    without restarting anything, so the caller waits rather than crashing. Only
+    the cadence changes.
+    """
+
+    from exomem.cli_ops import OpError
+
+    class Refusing:
+        def ensure_writer(self, *, cause: str = "mutation"):
+            raise OpError(
+                "WRITER_COORDINATOR_CONTRACT_ABSENT",
+                "the configured writer-lease coordinator answered 404",
+            )
+
+    monkeypatch.setattr(media_worker, "get_manager", lambda: Refusing())
+
+    assert media_worker._writer_authority_available() is False
+    assert media_worker._probe_writer_authority() == "WRITER_COORDINATOR_CONTRACT_ABSENT"
+
+
+def test_the_boolean_probe_is_derived_from_the_code_probe(monkeypatch) -> None:
+    """One seam, so a stub of either reaches the supervisor.
+
+    The supervisor needs the refusing code to choose a recheck cadence; other
+    callers only need the boolean. When those were two independent functions, a
+    test stubbing the boolean left the real probe running -- and its assertion
+    fired on the supervisor THREAD, so the regression showed up as a pytest
+    warning rather than a red test.
+    """
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: "WRITER_FENCED")
+    assert media_worker._writer_authority_available() is False
+
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    assert media_worker._writer_authority_available() is True

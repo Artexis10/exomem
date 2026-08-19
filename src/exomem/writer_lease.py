@@ -781,6 +781,73 @@ class LeaseRecord:
         )
 
 
+#: Statuses that mean the URL answered and does not implement the lease
+#: contract at this route: 404 (no such route or operation), 405 (route exists,
+#: wrong method), 501 (the server does not implement it). A real coordinator
+#: 404s only for an unknown operation and this client sends none, so a 404 here
+#: is the wrong URL or an incompatible coordinator -- never one that is merely
+#: busy. That distinction is the whole point: an unavailable coordinator is
+#: worth asking again, and one that does not serve the contract will return the
+#: same answer forever. Collapsing them made a misconfigured lease URL look
+#: exactly like a transient outage, and the 5s availability probe polled it
+#: 1,200 times in 25 minutes from seven server processes, none of which ever
+#: said why (#550).
+_CONTRACT_ABSENT_STATUSES = frozenset({404, 405, 501})
+
+
+def _redacted_coordinator_url(url: str) -> str:
+    """The coordinator URL without any embedded credential.
+
+    `https://user:secret@host/` is a legal coordinator URL, and this string
+    reaches logs and, through the error, MCP clients.
+    """
+    try:
+        parts = urllib.parse.urlsplit(str(url))
+    except ValueError:
+        return "<unparsable coordinator url>"
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _coordinator_unavailable_error(exc: BaseException) -> OpError:
+    return OpError(
+        "WRITER_COORDINATOR_UNAVAILABLE",
+        f"writer coordinator could not confirm authority: {exc}",
+        "Check the coordinator URL, credentials, and service health; "
+        "reads remain available.",
+    )
+
+
+def _contract_absent_error(url: str, operation: str, status: int) -> OpError:
+    """A URL that answers but does not serve the writer-lease contract.
+
+    Fail-closed exactly like an unavailable coordinator -- authority is still
+    unproven, so writes still refuse. What changes is that the refusal names a
+    configuration fault instead of an outage, and callers that poll can slow
+    down instead of asking a 404 the same question every five seconds.
+    """
+    route = "/v1/vaults/<id>/lease" + (f"/{operation}" if operation else "")
+    safe_url = _redacted_coordinator_url(url)
+    logger.warning(
+        "writer-lease coordinator %s answered %d for %s; "
+        "this URL does not serve the writer-lease contract",
+        safe_url,
+        status,
+        route,
+    )
+    return OpError(
+        "WRITER_COORDINATOR_CONTRACT_ABSENT",
+        f"the configured writer-lease coordinator answered {status} for {route}",
+        "Point the writer-lease URL at a service that implements "
+        "/v1/vaults/<id>/lease, or disable coordination. Retrying cannot "
+        "change this answer; reads remain available and writes stay "
+        "fail-closed until it is corrected.",
+        details={"status": status, "coordinator_url": safe_url},
+    )
+
+
 class LeaseCoordinatorClient:
     """Small stdlib HTTP client for the provider-neutral lease contract."""
 
@@ -846,20 +913,20 @@ class LeaseCoordinatorClient:
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
             return LeaseRecord.from_json(payload)
+        except urllib.error.HTTPError as exc:
+            # HTTPError subclasses URLError, so it has to be caught first for
+            # the status to be visible at all.
+            if exc.code in _CONTRACT_ABSENT_STATUSES:
+                raise _contract_absent_error(self.config.url, operation, exc.code) from None
+            raise _coordinator_unavailable_error(exc) from None
         except (
             urllib.error.URLError,
-            urllib.error.HTTPError,
             TimeoutError,
             OSError,
             json.JSONDecodeError,
             ValueError,
         ) as exc:
-            raise OpError(
-                "WRITER_COORDINATOR_UNAVAILABLE",
-                f"writer coordinator could not confirm authority: {exc}",
-                "Check the coordinator URL, credentials, and service health; "
-                "reads remain available.",
-            ) from None
+            raise _coordinator_unavailable_error(exc) from None
 
 
 def _mutation_outcome_unknown_error() -> OpError:

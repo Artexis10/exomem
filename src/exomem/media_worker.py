@@ -92,11 +92,22 @@ _TRANSIENT_OPERATION_CODES = frozenset(
         "MUTATION_BUSY",
         "MUTATION_LOCK_UNAVAILABLE",
         "WRITER_COORDINATOR_UNAVAILABLE",
+        # Deliberately transient too. A misconfigured coordinator URL is not
+        # fixed by asking again, but it IS fixed by an operator without
+        # restarting anything -- so the caller waits rather than crashing. What
+        # changes is only how often it asks; see the recheck cadence below.
+        "WRITER_COORDINATOR_CONTRACT_ABSENT",
         "WRITER_FENCED",
         "WRITER_LEASE_REQUIRED",
     }
 )
 _FOLLOWER_RECHECK_SECONDS = 5.0
+#: A coordinator URL that answers but does not serve the lease contract returns
+#: the same answer to every request, so the follower cadence buys nothing and
+#: costs a request every five seconds per server process, indefinitely. Slow
+#: enough that a stuck deployment is quiet; short enough that fixing the URL
+#: takes effect without a restart (#550).
+_CONTRACT_ABSENT_RECHECK_SECONDS = 300.0
 _TRANSIENT_EXIT_CODE = 75
 _LOCK_UNAVAILABLE_EXIT_CODE = 76
 _TRANSIENT_RECHECK_SECONDS = 5.0
@@ -104,15 +115,34 @@ _LOCK_UNAVAILABLE_RECHECK_SECONDS = 30.0
 
 
 def _writer_authority_available() -> bool:
+    """Derived from :func:`_probe_writer_authority`, never a second probe.
+
+    The supervisor needs the refusing code to pick a recheck cadence and other
+    callers need only the boolean. Keeping one seam means a test that stubs
+    either reaches both; two independent probes meant a stub of this one left
+    the real one running, and its assertion fired on the supervisor thread
+    where pytest could only report it as a warning.
+    """
+    return _probe_writer_authority() is None
+
+
+def _probe_writer_authority() -> str | None:
+    """The code refusing write authority, or ``None`` when this replica holds it."""
     try:
         # cause="probe": an availability poll must not count as write activity
         # for the lease idle-release timer.
         get_manager().ensure_writer(cause="probe")
     except OpError as exc:
         if exc.code in _TRANSIENT_OPERATION_CODES:
-            return False
+            return exc.code
         raise
-    return True
+    return None
+
+
+def _authority_recheck_seconds(code: str) -> float:
+    if code == "WRITER_COORDINATOR_CONTRACT_ABSENT":
+        return _CONTRACT_ABSENT_RECHECK_SECONDS
+    return _FOLLOWER_RECHECK_SECONDS
 
 
 @dataclass(frozen=True)
@@ -812,8 +842,9 @@ class MediaWorker:
                     and time.monotonic() >= relaunch_after
                     and self._store.needs_worker()
                 ):
-                    if not _writer_authority_available():
-                        relaunch_after = time.monotonic() + _FOLLOWER_RECHECK_SECONDS
+                    refusal = _probe_writer_authority()
+                    if refusal is not None:
+                        relaunch_after = time.monotonic() + _authority_recheck_seconds(refusal)
                     else:
                         try:
                             self._child = self._launch_child()

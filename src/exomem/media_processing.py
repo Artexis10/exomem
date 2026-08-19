@@ -41,6 +41,11 @@ _TRANSIENT_COORDINATION_CODES = frozenset(
         "MUTATION_BUSY",
         "MUTATION_LOCK_UNAVAILABLE",
         "WRITER_COORDINATOR_UNAVAILABLE",
+        # Deliberately transient too. A misconfigured coordinator URL is not
+        # fixed by asking again, but it IS fixed by an operator without
+        # restarting anything -- so the caller waits rather than crashing. What
+        # changes is only how often it asks; see the recheck cadence below.
+        "WRITER_COORDINATOR_CONTRACT_ABSENT",
         "WRITER_FENCED",
         "WRITER_LEASE_REQUIRED",
     }

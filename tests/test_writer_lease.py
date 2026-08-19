@@ -730,6 +730,136 @@ def test_coordinator_requests_use_cloudflare_compatible_user_agent(monkeypatch) 
     assert "Exomem-Coordinator" in seen["user_agent"]
 
 
+def _coordinator_answering(monkeypatch, error: Exception):
+    """Point the lease client at a URL that answers with `error`."""
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001, ARG001
+        raise error
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    return LeaseCoordinatorClient(
+        LeaseConfig(url="https://lease.example", vault_id="main", replica_id="desktop")
+    )
+
+
+def test_a_url_that_does_not_serve_the_lease_contract_is_not_an_outage(monkeypatch) -> None:
+    """404 is a configuration answer, and it will not change on the next try.
+
+    Collapsing it into WRITER_COORDINATOR_UNAVAILABLE made a misconfigured lease
+    URL indistinguishable from a coordinator that was merely down, so the
+    availability probe kept asking at the follower cadence -- 1,200 requests in
+    25 minutes across seven server processes, every one a 404, none of them ever
+    saying why.
+    """
+    import urllib.error
+
+    client = _coordinator_answering(
+        monkeypatch,
+        urllib.error.HTTPError("https://lease.example", 404, "Not Found", {}, None),
+    )
+
+    with pytest.raises(OpError) as raised:
+        client.acquire()
+
+    error = raised.value
+    assert error.code == "WRITER_COORDINATOR_CONTRACT_ABSENT"
+    assert error.details["status"] == 404
+    # The route it asked for, so the operator can see it is the lease contract
+    # that is missing rather than the whole host.
+    assert "/v1/vaults/<id>/lease/acquire" in error.message
+    assert "Retrying cannot" in (error.remediation or "")
+
+
+@pytest.mark.parametrize("status", [404, 405, 501])
+def test_every_contract_absent_status_is_classified_alike(monkeypatch, status: int) -> None:
+    """405 and 501 say the same thing 404 does: not served here.
+
+    A coordinator that is present answers the lease route; one that is present
+    and refuses the METHOD, or declares the operation unimplemented, is the
+    wrong service or the wrong version. Neither is fixed by waiting.
+    """
+    import urllib.error
+
+    client = _coordinator_answering(
+        monkeypatch,
+        urllib.error.HTTPError("https://lease.example", status, "nope", {}, None),
+    )
+
+    with pytest.raises(OpError) as raised:
+        client.acquire()
+
+    assert raised.value.code == "WRITER_COORDINATOR_CONTRACT_ABSENT"
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 401, 403])
+def test_a_coordinator_that_is_present_stays_transiently_unavailable(
+    monkeypatch, status: int
+) -> None:
+    """Everything else keeps the old code, and the old fail-closed handling.
+
+    A 5xx is a coordinator having a bad moment and a 401/403 is a credential
+    the operator can fix in place; both are worth asking again, and neither
+    should inherit the slow cadence meant for a URL that serves no contract.
+    """
+    import urllib.error
+
+    client = _coordinator_answering(
+        monkeypatch,
+        urllib.error.HTTPError("https://lease.example", status, "nope", {}, None),
+    )
+
+    with pytest.raises(OpError) as raised:
+        client.acquire()
+
+    assert raised.value.code == "WRITER_COORDINATOR_UNAVAILABLE"
+
+
+def test_an_unreachable_coordinator_stays_transiently_unavailable(monkeypatch) -> None:
+    """A transport failure never reached a service, so it classifies nothing."""
+    import urllib.error
+
+    client = _coordinator_answering(monkeypatch, urllib.error.URLError("connection refused"))
+
+    with pytest.raises(OpError) as raised:
+        client.acquire()
+
+    assert raised.value.code == "WRITER_COORDINATOR_UNAVAILABLE"
+
+
+def test_a_credential_in_the_coordinator_url_is_not_echoed_back(monkeypatch) -> None:
+    """`https://user:secret@host/` is a legal coordinator URL.
+
+    The refusal reaches the server log and, through the error payload, MCP
+    clients. Naming the host is the point of the message; naming the password
+    is a leak.
+    """
+    import urllib.error
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001, ARG001
+        raise urllib.error.HTTPError("https://lease.example", 404, "Not Found", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    client = LeaseCoordinatorClient(
+        LeaseConfig(
+            url="https://operator:hunter2@lease.example:8443",
+            vault_id="main",
+            replica_id="desktop",
+        )
+    )
+
+    with pytest.raises(OpError) as raised:
+        client.acquire()
+
+    rendered = f"{raised.value.message} {raised.value.details}"
+    assert "hunter2" not in rendered
+    assert "operator" not in rendered
+    assert raised.value.details["coordinator_url"] == "https://lease.example:8443"
+
+
 class FakeClient:
     def __init__(self, record: LeaseRecord | Exception):
         self.record = record
