@@ -787,6 +787,27 @@ def _repaired_or_untouched(rows: list, corrupt: tuple) -> bool:
     return rows in ([], [corrupt])
 
 
+def _writable_sidecar_binding_available(sidecar: Path) -> bool:
+    """Whether this host can bind a sidecar for a writable exact-row repair.
+
+    The repair hands its bound path to sqlite, which resolves that name again
+    at open time, so the binding is sound only where the bound name addresses
+    the *inode*: Linux's `/proc/self/fd/<n>` magic symlink, or the Windows
+    handle-based binder. macOS has neither -- `F_GETPATH` answers an ordinary
+    name, and a rename between the check and sqlite's open redirects the write
+    to whatever holds that name then. So `_bind_sidecar(..., writable=True)`
+    reaches the declared `unsupported` state on Darwin and the repair writes
+    nothing at all rather than write somewhere it cannot vouch for.
+
+    Asked of the product rather than of `sys.platform`, so a platform that
+    gains or loses the capability moves these tests with it.
+    """
+    state, binding = audit_module._bind_sidecar(sidecar, writable=True)
+    if binding is not None:
+        binding.close()
+    return state == "regular"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX no-follow descriptor binding")
 def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -845,10 +866,26 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
     )
 
     assert deleted == {}
+    # The decoy is untouched in either branch -- that is the whole claim, and
+    # it is asserted before anything platform-dependent.
     with _sqlite(external) as conn:
         assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
             ("../../corrupt.md",)
         ]
+    if not moved.exists():
+        # The binder refused the writable binding before the repair ran, so
+        # the callback that stages the swap never fired and the sidecar still
+        # owns its own name. Nothing was written anywhere, which is the
+        # stronger outcome -- but it has to be asserted through the name that
+        # exists: reading `moved` here opens a fresh empty database and fails
+        # on a missing table rather than on the guarantee.
+        assert not _writable_sidecar_binding_available(sidecar)
+        assert not sidecar.is_symlink()
+        with _sqlite(sidecar) as conn:
+            assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
+                ("../../corrupt.md",)
+            ]
+        return
     with _sqlite(moved) as conn:
         rows = conn.execute("SELECT file_path FROM chunks").fetchall()
     assert _repaired_or_untouched(rows, ("../../corrupt.md",)), rows
@@ -979,10 +1016,26 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
     )
 
     assert deleted == {}
+    # The decoy is untouched in either branch -- that is the whole claim, and
+    # it is asserted before anything platform-dependent.
     with _sqlite(external) as conn:
         assert conn.execute("SELECT file_path FROM claims").fetchall() == [
             ("../../corrupt.md",)
         ]
+    if not moved.exists():
+        # The binder refused the writable binding before the repair ran, so
+        # the callback that stages the swap never fired and the sidecar still
+        # owns its own name. Nothing was written anywhere, which is the
+        # stronger outcome -- but it has to be asserted through the name that
+        # exists: reading `moved` here opens a fresh empty database and fails
+        # on a missing table rather than on the guarantee.
+        assert not _writable_sidecar_binding_available(sidecar)
+        assert not sidecar.is_symlink()
+        with _sqlite(sidecar) as conn:
+            assert conn.execute("SELECT file_path FROM claims").fetchall() == [
+                ("../../corrupt.md",)
+            ]
+        return
     with _sqlite(moved) as conn:
         rows = conn.execute("SELECT file_path FROM claims").fetchall()
     assert _repaired_or_untouched(rows, ("../../corrupt.md",)), rows
@@ -991,6 +1044,73 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
         # pinned inode whatever happened to its name. No cache, no
         # ambiguity, and therefore an exact expectation.
         assert rows == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX no-follow descriptor binding")
+def test_a_refused_binding_leaves_the_swap_unstaged_and_the_sidecar_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The macOS shape of the two tests above, reachable on any POSIX host.
+
+    Where the binder refuses the writable binding, the repair returns before
+    it calls the model seam -- so the callback that stages the swap never
+    fires. Nothing is renamed, nothing is symlinked, and nothing is written:
+    the strongest of the three outcomes, and the one Darwin actually takes.
+
+    Removing procfs is how to state that on a Linux runner, where the real
+    branch above is the procfs one and this code would otherwise never run.
+    Without this, the refusal path is exercised only on macOS, which is
+    precisely where it was last found broken.
+    """
+    from exomem import embedding_index, index_paths
+
+    sidecar = index_paths.sidecar_path(tmp_path)
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    with _committed(index._connect()) as conn:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
+        )
+    external = tmp_path / "external.sqlite"
+    with _sqlite(sidecar) as source, _sqlite(external) as target:
+        source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        source.backup(target)
+    moved = tmp_path / "moved.sqlite"
+    real_purge = embedding_index.EmbeddingIndex.purge_exact_persisted_rows
+    staged: list[str] = []
+
+    def swap_before_connect(self, values: list[str], **kwargs) -> int:
+        staged.append("called")
+        sidecar.replace(moved)
+        sidecar.symlink_to(external)
+        return real_purge(self, values, **kwargs)
+
+    monkeypatch.setattr(
+        embedding_index.EmbeddingIndex,
+        "purge_exact_persisted_rows",
+        swap_before_connect,
+    )
+    monkeypatch.setattr(audit_module, "_proc_fd_directory", lambda: None)
+    assert not _writable_sidecar_binding_available(sidecar)
+
+    deleted = audit_module.purge_corrupt_semantic_recall_isolation_rows(
+        tmp_path,
+        (audit_module._SemanticIsolationRow("vector", "../../corrupt.md", None),),
+    )
+
+    assert deleted == {}
+    # The seam was never reached, so the attack was never even staged.
+    assert staged == []
+    assert not moved.exists()
+    assert not sidecar.is_symlink()
+    with _sqlite(sidecar) as conn:
+        assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
+            ("../../corrupt.md",)
+        ]
+    with _sqlite(external) as conn:
+        assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
+            ("../../corrupt.md",)
+        ]
 
 
 @pytest.mark.parametrize(
@@ -1050,10 +1170,21 @@ def test_census_purges_graph_edge_placeholders_and_corrupt_rows(
     assert limited.truncation["deferred_semantic"] > 0
     assert limited.corrupt_dicts()
 
-    assert audit_module.purge_corrupt_semantic_recall_isolation_rows(
+    from exomem import deferred_index as _deferred_index
+
+    purged = audit_module.purge_corrupt_semantic_recall_isolation_rows(
         tmp_path, limited.corrupt_rows
     )
-    assert audit_module.semantic_recall_isolation_census(tmp_path).truncation == {}
+    if _writable_sidecar_binding_available(_deferred_index.store_path(tmp_path)):
+        assert purged
+        assert audit_module.semantic_recall_isolation_census(tmp_path).truncation == {}
+    else:
+        # Where the repair cannot bind the sidecar's inode it declines to
+        # write at all, so there is no purge to observe. Assert the other
+        # half of that contract rather than skipping the whole test: the
+        # census above still ran, and the corrupt rows must still be there.
+        assert purged == {}
+        assert audit_module.semantic_recall_isolation_census(tmp_path).corrupt_dicts()
 
 
 def test_corrupt_purge_uses_sidecar_model_cleanup_and_invalidates_warm_state(
@@ -1111,6 +1242,17 @@ def test_corrupt_purge_uses_sidecar_model_cleanup_and_invalidates_warm_state(
             )
 
     census = audit_module.semantic_recall_isolation_census(tmp_path)
+    if not _writable_sidecar_binding_available(claims.sidecar_path(tmp_path)):
+        # Everything below asserts what the repair *did* to each sidecar.
+        # Where the binder refuses the writable binding the repair correctly
+        # does nothing at all, so there is no behaviour here to assert -- and
+        # that refusal has its own tests
+        # (`test_a_host_without_procfs_refuses_the_writable_sidecar_binding`,
+        # `test_corrupt_purge_refuses_without_a_bound_sidecar_descriptor`).
+        # A missing capability is what skip means.
+        pytest.skip(
+            "this host cannot bind a sidecar for a writable exact-row repair"
+        )
     assert audit_module.purge_corrupt_semantic_recall_isolation_rows(
         tmp_path, census.corrupt_rows
     )
