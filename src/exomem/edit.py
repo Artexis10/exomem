@@ -558,15 +558,22 @@ def load_editable(
         raw_text = abs_path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError) as error:
         raise EditError(code="UNREADABLE", missing=["path"], reason=str(error)) from error
-    # Match Path.read_text/newline=None and the public get-memory hash contract
-    # while retaining the raw-byte text hash required by semantic preflight.
+    # Edit reasons about logical Markdown with LF newlines, matching
+    # `Path.read_text(newline=None)` and the body `get` returns.
     original_text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
 
     # Optimistic-concurrency guard. If the caller passed the hash it read via
     # `get`, refuse when the file changed on disk since — don't clobber another
     # writer. Checked before any mutation; the `updated:` bump happens after
     # this read, so it never self-trips.
-    if expected_hash is not None and content_hash(original_text) != expected_hash:
+    #
+    # Hashed over `raw_text`, not the newline-normalized form: `content_hash`
+    # is defined as the sha256 of a file's full raw text and `get_page` hands
+    # out exactly that. Comparing the normalized hash made the two disagree on
+    # every CRLF page, so the guard reported STALE_EDIT when nothing had
+    # changed -- and re-reading returned the same raw hash, so the page could
+    # never be edited through the guarded path at all.
+    if expected_hash is not None and content_hash(raw_text) != expected_hash:
         raise EditError(
             code="STALE_EDIT",
             missing=["expected_hash"],

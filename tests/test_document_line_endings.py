@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from exomem import audit_fix as audit_fix_module
+from exomem import commands
 from exomem import edit as edit_module
 from exomem import find as find_module
 from exomem import replace as replace_module
@@ -154,3 +155,30 @@ def test_supersede_marks_the_old_page_whatever_its_line_ending(newline: str) -> 
     assert fm["status"] == "superseded"
     assert any("successor" in str(link) for link in fm["superseded_by"])
     assert _endings(marked) == {newline}
+
+
+@newlines
+def test_the_drift_guard_accepts_the_hash_get_just_handed_out(
+    vault: Path, newline: str
+) -> None:
+    """`get` -> `edit(expected_hash=...)` must round-trip on any page.
+
+    `content_hash` is defined as the sha256 of a file's full raw text, and
+    `get_page` hands out exactly that, but `edit` hashed the newline-normalized
+    form before comparing. On a CRLF page the two never agreed, so the guard
+    reported STALE_EDIT when nothing had changed -- and re-reading returned the
+    same raw hash, leaving the page permanently un-editable through the guarded
+    path with no way for a caller to recover.
+    """
+    _seed(vault, newline)
+
+    got = commands.op_get(vault, path=NOTE_REL)
+    commands.op_edit(
+        vault,
+        path=NOTE_REL,
+        new_body=got["body"] + "\nappended line\n",
+        expected_hash=got["content_hash"],
+        why="drift guard round-trip probe",
+    )
+
+    assert "appended line" in (vault / NOTE_REL).read_bytes().decode("utf-8")
