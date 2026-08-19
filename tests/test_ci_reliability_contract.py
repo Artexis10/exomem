@@ -244,3 +244,31 @@ def test_the_release_bot_branch_does_not_launch_the_cross_platform_matrix() -> N
     assert "release-please--branches--" in condition
     # Skipped for that branch's PR, never for a push to main.
     assert "github.event_name != 'pull_request'" in condition
+
+
+def test_the_capped_runner_is_paid_on_merge_not_on_every_pull_request() -> None:
+    """macOS caps at five concurrent jobs; a four-shard matrix cannot fit twice.
+
+    Two open PRs want eight macOS jobs against that cap, so the second run's
+    shards queue -- and a run's jobs are scheduled together, so the whole second
+    run stalls behind the first. That is a throughput cliff with no visible
+    symptom: every run still goes green, just later and later, and the obvious
+    reading is "CI is slow" rather than "these runs cannot overlap".
+
+    Asserted rather than reviewed because the tempting edit -- putting macOS
+    back on the pull_request arm "for parity" -- reintroduces the cliff while
+    looking like strictly more coverage.
+    """
+    matrix = _cross_platform_workflow()["jobs"]["suite"]["strategy"]["matrix"]
+    expression = " ".join(str(matrix["os"]).split())
+    pull_request_arm, _, push_arm = expression.partition("||")
+
+    assert "github.event_name == 'pull_request'" in pull_request_arm
+    assert "windows-latest" in pull_request_arm
+    assert "macos-latest" not in pull_request_arm, (
+        "the capped runner is back on every PR; two concurrent PRs will serialise"
+    )
+    # A push to main still runs both, so no commit stops reaching macOS -- it
+    # reaches it one merge later, on a lane that is advisory by design.
+    assert "macos-latest" in push_arm
+    assert "windows-latest" in push_arm
