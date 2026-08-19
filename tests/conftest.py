@@ -141,6 +141,33 @@ def _needs_an_absent_posix_api(error: BaseException | None) -> bool:
     return False
 
 
+#: The hosted cell's runtime temp refusing a platform it cannot isolate on.
+#: Matched on the module's own refusal text rather than on the exception type
+#: alone, because `HostedRuntimeTempUnavailable` is also how a real ownership
+#: breach, an escaped symlink and a blown quota are reported -- and those stay
+#: failures wherever they happen.
+_POSIX_RUNTIME_TEMP = re.compile(
+    r"hosted runtime temp requires POSIX ownership and mode semantics"
+)
+
+
+def _declares_posix_runtime_temp(error: BaseException | None) -> bool:
+    """True when the hosted runtime temp refuses this platform by name.
+
+    Walked through the cause chain because the gateway wraps it: a test sees
+    `HostedGatewayError: HOSTED_TRANSFER_UNAVAILABLE` and the reason is one link
+    down, which is exactly why this was being counted as 24 Windows defects
+    instead of one platform fact.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if _POSIX_RUNTIME_TEMP.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     """Report a platform capability this host does not have as a skip.
@@ -203,6 +230,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
         reason = "proc-fd directory custody is unavailable on this platform"
     elif os.name == "nt" and _needs_an_absent_posix_api(error):
         reason = "the hosted cell runtime's POSIX APIs do not exist on Windows"
+    elif os.name == "nt" and _declares_posix_runtime_temp(error):
+        reason = "the hosted cell's runtime temp isolates by POSIX ownership and mode"
     elif not has_posix_interval_timers() and declares_absent_surface_timers(error):
         reason = "POSIX interval timers (setitimer/SIGALRM) are unavailable here"
     elif not has_bwrap_sandbox() and declares_absent_sandbox(error):

@@ -24,6 +24,33 @@ class HostedRuntimeTempUnavailable(RuntimeError):
     code = "HOSTED_RUNTIME_TEMP_UNAVAILABLE"
 
 
+#: Named, because "unavailable" was covering three unrelated conditions.
+#: Tenant isolation here *is* POSIX ownership and mode: every entry is checked
+#: against an expected uid and gid and required to be `0700`, and a hosted cell
+#: is a Linux container by construction -- it is only ever reached through a
+#: `HostedCellConfig`, which carries the `runtime_uid` and `runtime_gid` those
+#: checks compare against. Windows has no equivalent in this module, and
+#: `mkdir(mode=0o700)` does not produce mode `0o700` for a directory there, so
+#: the mode check failed and the gateway reported `HOSTED_TRANSFER_UNAVAILABLE`
+#: -- the same message it gives for a real ownership breach or a blown quota,
+#: with the cause dropped at the boundary. Refusing up front says which of the
+#: three it is.
+POSIX_PRIVACY_REFUSAL = (
+    "hosted runtime temp requires POSIX ownership and mode semantics; "
+    "a hosted cell runs as a Linux container"
+)
+
+
+def posix_privacy_available() -> bool:
+    """Whether this platform has the ownership semantics the isolation needs."""
+    return os.name != "nt"
+
+
+def _require_posix_privacy() -> None:
+    if not posix_privacy_available():
+        raise HostedRuntimeTempUnavailable(POSIX_PRIVACY_REFUSAL)
+
+
 def _private_directory(path: Path, *, expected_uid: int, expected_gid: int) -> None:
     try:
         path.mkdir(mode=0o700, parents=False, exist_ok=True)
@@ -100,6 +127,7 @@ def prepare_hosted_runtime_temp(
 ) -> Path:
     """Create and no-follow clear the disposable runtime root during locked startup."""
 
+    _require_posix_privacy()
     root = ensure_hosted_runtime_temp(
         state_root,
         expected_uid=expected_uid,
@@ -121,6 +149,7 @@ def ensure_hosted_runtime_temp(
 ) -> Path:
     """Validate or create the private runtime root without deleting any entry."""
 
+    _require_posix_privacy()
     state = Path(state_root)
     if not state.is_absolute():
         raise HostedRuntimeTempUnavailable
