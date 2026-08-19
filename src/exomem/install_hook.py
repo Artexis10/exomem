@@ -54,14 +54,42 @@ _CONTINUATION_EVENTS = {
 }
 DEFAULT_CLIENT = "claude"
 SUPPORTED_CLIENTS = ("claude", "codex")
-DEFAULT_CLAUDE_HOOK_DIR = Path.home() / ".claude" / "hooks"
-DEFAULT_CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
-DEFAULT_CODEX_HOOK_DIR = Path.home() / ".codex" / "hooks"
-DEFAULT_CODEX_SETTINGS = Path.home() / ".codex" / "hooks.json"
+# Resolved on attribute access rather than at import. `Path.home()` raises
+# when the environment names no home -- a service account, a container
+# started without `HOME`, a child handed a minimal environment -- and these
+# were four import-time calls, so merely importing this module failed there.
+# The names and values are unchanged for every caller that reads them.
+_DEFAULT_PATHS = {
+    "DEFAULT_CLAUDE_HOOK_DIR": (".claude", "hooks"),
+    "DEFAULT_CLAUDE_SETTINGS": (".claude", "settings.json"),
+    "DEFAULT_CODEX_HOOK_DIR": (".codex", "hooks"),
+    "DEFAULT_CODEX_SETTINGS": (".codex", "hooks.json"),
+    # Back-compat for existing tests and callers.
+    "DEFAULT_HOOK_DIR": (".claude", "hooks"),
+    "DEFAULT_SETTINGS": (".claude", "settings.json"),
+}
 
-# Back-compat for existing tests and callers.
-DEFAULT_HOOK_DIR = DEFAULT_CLAUDE_HOOK_DIR
-DEFAULT_SETTINGS = DEFAULT_CLAUDE_SETTINGS
+
+def __getattr__(name: str) -> Path:
+    parts = _DEFAULT_PATHS.get(name)
+    if parts is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return Path.home().joinpath(*parts)
+
+
+def _is_conventional_hook_dir(hook_dir: Path, client: str) -> bool:
+    """True when *hook_dir* is the one `~` would name for *client*.
+
+    Only ever used to decide whether the rendered command may say `~` instead
+    of an absolute path. Where the environment names no home there is no `~`
+    to abbreviate to, so the answer is no and the absolute form is rendered --
+    rather than raising out of a command renderer.
+    """
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return False
+    return hook_dir == home / (".codex" if client == "codex" else ".claude") / "hooks"
 
 # Substrings identifying a previously-installed nudge entry, so re-running is
 # idempotent and supersedes older entries (incl. the absolute-python-path form).
@@ -129,10 +157,10 @@ def _command_for(
     hook_dir = Path(hook_dir).expanduser()
     if client == "codex":
         py_name = script or wrapper.removesuffix(".sh").replace("-", "_") + ".py"
-        if hook_dir == DEFAULT_CODEX_HOOK_DIR:
+        if _is_conventional_hook_dir(hook_dir, "codex"):
             return f"python3 ~/.codex/hooks/{py_name}"
         return f'python3 "{(hook_dir / py_name).as_posix()}"'
-    if hook_dir == DEFAULT_CLAUDE_HOOK_DIR:
+    if _is_conventional_hook_dir(hook_dir, "claude"):
         return f"bash ~/.claude/hooks/{wrapper}"
     return f'bash "{(hook_dir / wrapper).as_posix()}"'
 
