@@ -4,6 +4,8 @@ import importlib
 import inspect
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +15,28 @@ import pytest
 from exomem import audit as audit_module
 from exomem import file_watcher, mode
 from exomem import reconcile as reconcile_module
+
+
+@contextmanager
+def _committed(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Commit a connection and actually close it afterwards.
+
+    `sqlite3.Connection.__exit__` ends the transaction; it does not close the
+    connection, and CPython only closes it when the object is collected. On
+    POSIX that is invisible, because an open descriptor does not stop a
+    rename. On Windows the still-open handle makes the very next
+    `Path.replace` fail with `[WinError 32]` -- which is exactly how these
+    tests stage the swap they are about to census.
+    """
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def _sqlite(path: Path) -> AbstractContextManager[sqlite3.Connection]:
+    return _committed(sqlite3.connect(path))
 
 
 def _raw_record(vault: Path) -> tuple[Path, str]:
@@ -33,7 +57,7 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
     )
 
     lexical = lexstore.get_store(vault)
-    with lexical._connect() as conn:
+    with _committed(lexical._connect()) as conn:
         lexical._ensure_schema(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
@@ -54,7 +78,7 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
         )
 
     embedding = embedding_index.EmbeddingIndex(vault)
-    with embedding._connect() as conn:
+    with _committed(embedding._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES (?, 0, 'private', X'00', 0)",
@@ -70,7 +94,7 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
         )
 
     graph = epistemic_graph.EpistemicGraphIndex(vault)
-    with graph._connect() as conn:
+    with _committed(graph._connect()) as conn:
         conn.execute(
             "INSERT INTO graph_nodes(node_key, kind, path, text, source_hash, metadata) "
             "VALUES ('raw', 'file', ?, 'private', 'hash', '{}')",
@@ -78,7 +102,7 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
         )
 
     claim = claims.ClaimIndex(vault)
-    with claim._connect() as conn:
+    with _committed(claim._connect()) as conn:
         conn.execute(
             "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
             "VALUES (?, 'private', 'checksum', X'00', 0)",
@@ -86,7 +110,7 @@ def _seed_suppressed_sidecars(vault: Path, rel: str) -> None:
         )
 
     clip = clip_index.ClipIndex(vault)
-    with clip._connect() as conn:
+    with _committed(clip._connect()) as conn:
         conn.execute(
             "INSERT INTO images(file_path, frame_ts, vector, file_mtime) "
             "VALUES (?, NULL, X'00', 0)",
@@ -196,7 +220,7 @@ def test_access_policy_transition_purges_stale_vector_row(tmp_path: Path, monkey
     page.write_text("formerly admitted", encoding="utf-8")
     rel = page.relative_to(tmp_path).as_posix()
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES (?, 0, 'formerly admitted', X'00', 0)",
@@ -224,7 +248,7 @@ def test_disabled_features_purge_unit_only_vector_without_creating_absent_sideca
 
     _raw, rel = _raw_record(tmp_path)
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO semantic_unit_vectors(unit_key, record_type, unit_ref, parent_path, "
             "parent_generation, parent_source_hash, parser_version, form, category, kind, content, "
@@ -240,7 +264,7 @@ def test_disabled_features_purge_unit_only_vector_without_creating_absent_sideca
     report = reconcile_module.reconcile(tmp_path)
 
     assert report.semantic_suppressed_purged == [rel]
-    with sqlite3.connect(index_paths.sidecar_path(tmp_path)) as conn:
+    with _sqlite(index_paths.sidecar_path(tmp_path)) as conn:
         assert conn.execute("SELECT parent_path FROM semantic_unit_vectors").fetchall() == []
     assert not claims.sidecar_path(tmp_path).exists()
     assert not epistemic_graph.sidecar_path(tmp_path).exists()
@@ -259,7 +283,7 @@ def test_census_ignores_symlinked_record_path_without_following_it(tmp_path: Pat
     except OSError:
         pytest.skip("symlinks are unavailable")
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES (?, 0, 'stale', X'00', 0)",
@@ -277,12 +301,12 @@ def test_census_rejects_symlinked_sidecar_without_mutating_external_database(
 
     sidecar = index_paths.sidecar_path(tmp_path)
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES ('../../external.md', 0, 'private', X'00', 0)"
         )
-    with sqlite3.connect(sidecar) as conn:
+    with _sqlite(sidecar) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     external = tmp_path / "external.sqlite"
     sidecar.replace(external)
@@ -299,7 +323,7 @@ def test_census_rejects_symlinked_sidecar_without_mutating_external_database(
         tmp_path,
         (audit_module._SemanticIsolationRow("vector", "../../external.md", None),),
     ) == {}
-    with sqlite3.connect(external) as conn:
+    with _sqlite(external) as conn:
         assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
             ("../../external.md",)
         ]
@@ -312,13 +336,13 @@ def test_census_rejects_symlinked_kb_parent_without_mutating_external_database(
 
     external_root = tmp_path / "external-root"
     external = claims.ClaimIndex(external_root)
-    with external._connect() as conn:
+    with _committed(external._connect()) as conn:
         conn.execute(
             "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
             "VALUES ('../../external.md', 'private', 'checksum', X'00', 0)"
         )
     sidecar = claims.sidecar_path(external_root)
-    with sqlite3.connect(sidecar) as conn:
+    with _sqlite(sidecar) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     kb = tmp_path / "Knowledge Base"
     try:
@@ -334,7 +358,7 @@ def test_census_rejects_symlinked_kb_parent_without_mutating_external_database(
         tmp_path,
         (audit_module._SemanticIsolationRow("claims", "../../external.md", None),),
     ) == {}
-    with sqlite3.connect(sidecar) as conn:
+    with _sqlite(sidecar) as conn:
         assert conn.execute("SELECT file_path FROM claims").fetchall() == [
             ("../../external.md",)
         ]
@@ -344,7 +368,7 @@ def test_census_rejects_symlinked_sidecar_companion(tmp_path: Path) -> None:
     from exomem import claims
 
     index = claims.ClaimIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
             "VALUES ('../../external.md', 'private', 'checksum', X'00', 0)"
@@ -372,17 +396,23 @@ def test_census_rejects_windows_reparse_kb_parent_seam(
     from exomem import claims
 
     index = claims.ClaimIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
             "VALUES ('../../external.md', 'private', 'checksum', X'00', 0)"
         )
     kb = claims.sidecar_path(tmp_path).parent
     real_fstat = os.fstat
+    # Recognise the KB directory by the inode the descriptor holds, not by
+    # `/proc/self/fd/<n>`: that readlink is Linux-only, and on macOS it raised
+    # out of the patched `fstat`, so the reparse seam under test was never
+    # staged at all and the census reported nothing to assert on. Comparing
+    # identity is portable and stricter than comparing a name.
+    kb_identity = (kb.stat().st_dev, kb.stat().st_ino)
 
     def fstat(fd: int):
         info = real_fstat(fd)
-        if os.readlink(f"/proc/self/fd/{fd}") == str(kb):
+        if (info.st_dev, info.st_ino) == kb_identity:
             return SimpleNamespace(
                 st_mode=info.st_mode,
                 st_dev=info.st_dev,
@@ -404,19 +434,44 @@ def test_census_rejects_windows_reparse_kb_parent_seam(
     assert census.incomplete["claims"] == "sidecar_unreadable"
 
 
+def _refuse_reparse_at_the_binder_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make this platform's sidecar binder see a reparse point where it looks.
+
+    The two binders ask different questions. `_bind_posix_sidecar` fstats the
+    descriptor and asks `audit._is_reparse_point`. `_bind_windows_sidecar`
+    never reaches that function: `mutation_lock._windows_open_path` refuses
+    `FILE_ATTRIBUTE_REPARSE_POINT` on the handle before returning it. Patching
+    only the POSIX seam left this test asserting a refusal on POSIX and
+    asserting that the census read the sidecar normally on Windows. What is
+    under test either way is the *classification* -- `sidecar_unreadable`, no
+    claim of corruption -- not the detection, which
+    `test_census_rejects_symlinked_sidecar_without_mutating_external_database`
+    covers with a real symlink.
+    """
+    monkeypatch.setattr(audit_module, "_is_reparse_point", lambda _info: True)
+    if os.name != "nt":
+        return
+    from exomem import mutation_lock
+
+    def refuse(*_args: object, **_kwargs: object) -> int:
+        raise OSError("reparse points are not allowed")
+
+    monkeypatch.setattr(mutation_lock, "_windows_open_path", refuse)
+
+
 def test_census_rejects_reparse_point_sidecar_seam(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import embedding_index, index_paths
 
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES ('../../external.md', 0, 'private', X'00', 0)"
         )
     assert index_paths.sidecar_path(tmp_path).is_file()
-    monkeypatch.setattr(audit_module, "_is_reparse_point", lambda _info: True)
+    _refuse_reparse_at_the_binder_seam(monkeypatch)
 
     census = audit_module.semantic_recall_isolation_census(tmp_path)
 
@@ -430,7 +485,7 @@ def test_census_reports_unsupported_sidecar_platform_without_claiming_corruption
     from exomem import embedding_index, index_paths
 
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
@@ -466,7 +521,7 @@ def test_sidecar_rows_keeps_sqlite_schema_failure_distinct(tmp_path: Path) -> No
 
     sidecar = index_paths.sidecar_path(tmp_path)
     sidecar.parent.mkdir(parents=True)
-    with sqlite3.connect(sidecar):
+    with _sqlite(sidecar):
         pass
 
     assert audit_module._sidecar_rows(
@@ -483,7 +538,7 @@ def test_windows_census_reads_healthy_regular_sidecar(tmp_path: Path) -> None:
     from exomem import embedding_index
 
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
@@ -616,7 +671,7 @@ def test_corrupt_purge_suppresses_credit_after_final_identity_mismatch(
     from exomem import embedding_index
 
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
@@ -702,12 +757,12 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
 
     sidecar = index_paths.sidecar_path(tmp_path)
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
         )
-    with sqlite3.connect(sidecar) as conn:
+    with _sqlite(sidecar) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     external = tmp_path / "external.sqlite"
     external.write_bytes(sidecar.read_bytes())
@@ -731,11 +786,11 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
     )
 
     assert deleted == {}
-    with sqlite3.connect(external) as conn:
+    with _sqlite(external) as conn:
         assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
             ("../../corrupt.md",)
         ]
-    with sqlite3.connect(moved) as conn:
+    with _sqlite(moved) as conn:
         rows = conn.execute("SELECT file_path FROM chunks").fetchall()
     if _reaches_a_pinned_inode_after_rename(tmp_path):
         # The repair followed the descriptor to the inode's new name.
@@ -753,7 +808,7 @@ def test_corrupt_purge_refuses_without_a_bound_sidecar_descriptor(
     from exomem import embedding_index
 
     index = embedding_index.EmbeddingIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
             "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
@@ -764,7 +819,7 @@ def test_corrupt_purge_refuses_without_a_bound_sidecar_descriptor(
         tmp_path,
         (audit_module._SemanticIsolationRow("vector", "../../corrupt.md", None),),
     ) == {}
-    with sqlite3.connect(index.path) as conn:
+    with _sqlite(index.path) as conn:
         assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
             ("../../corrupt.md",)
         ]
@@ -778,12 +833,12 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
 
     sidecar = claims.sidecar_path(tmp_path)
     index = claims.ClaimIndex(tmp_path)
-    with index._connect() as conn:
+    with _committed(index._connect()) as conn:
         conn.execute(
             "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
             "VALUES ('../../corrupt.md', 'private', 'checksum', X'00', 0)"
         )
-    with sqlite3.connect(sidecar) as conn:
+    with _sqlite(sidecar) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     external = tmp_path / "external-claims.sqlite"
     external.write_bytes(sidecar.read_bytes())
@@ -803,11 +858,11 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
     )
 
     assert deleted == {}
-    with sqlite3.connect(external) as conn:
+    with _sqlite(external) as conn:
         assert conn.execute("SELECT file_path FROM claims").fetchall() == [
             ("../../corrupt.md",)
         ]
-    with sqlite3.connect(moved) as conn:
+    with _sqlite(moved) as conn:
         rows = conn.execute("SELECT file_path FROM claims").fetchall()
     if _reaches_a_pinned_inode_after_rename(tmp_path):
         # The repair followed the descriptor to the inode's new name.
@@ -846,7 +901,7 @@ def test_census_purges_graph_edge_placeholders_and_corrupt_rows(
 
     _raw, rel = _raw_record(tmp_path)
     graph = epistemic_graph.EpistemicGraphIndex(tmp_path)
-    with graph._connect() as conn:
+    with _committed(graph._connect()) as conn:
         conn.execute(
             "INSERT INTO graph_edges(edge_key, src_key, dst_key, raw_relation, registry_status, "
             "registry_version, registry_hash, origin, source_path, metadata) "
@@ -909,7 +964,7 @@ def test_corrupt_purge_uses_sidecar_model_cleanup_and_invalidates_warm_state(
     assert claim._all_claims_unchecked()[0][0][0] == bad_markdown
 
     graph = epistemic_graph.EpistemicGraphIndex(tmp_path)
-    with graph._connect() as conn:
+    with _committed(graph._connect()) as conn:
         conn.execute(
             "INSERT INTO graph_nodes(node_key, kind, path, text, source_hash, metadata) "
             "VALUES ('corrupt', 'file', ?, 'private', 'hash', '{}')",
@@ -921,7 +976,7 @@ def test_corrupt_purge_uses_sidecar_model_cleanup_and_invalidates_warm_state(
         ).fetchone()[0]
 
     lexical = lexstore.get_store(tmp_path)
-    with lexical._connect() as conn:
+    with _committed(lexical._connect()) as conn:
         lexical._ensure_schema(conn)
         conn.execute(
             "INSERT INTO pages(path, mtime_ns, updated, in_kb, in_vault, is_nav) "
@@ -944,12 +999,12 @@ def test_corrupt_purge_uses_sidecar_model_cleanup_and_invalidates_warm_state(
     assert embedding.all_vectors()[0] == []
     assert clip.all_vectors()[0] == []
     assert claim._all_claims_unchecked()[0] == []
-    with graph._connect() as conn:
+    with _committed(graph._connect()) as conn:
         assert conn.execute("SELECT path FROM graph_nodes").fetchall() == []
         assert conn.execute(
             "SELECT value FROM graph_meta WHERE key = 'generation'"
         ).fetchone()[0] != generation_before
-    with lexical._connect() as conn:
+    with _committed(lexical._connect()) as conn:
         assert conn.execute("SELECT path FROM pages").fetchall() == []
         if lexstore.fts5_available():
             assert conn.execute("SELECT rowid FROM fts").fetchall() == []
@@ -978,9 +1033,9 @@ def test_reconcile_routes_safe_missing_rows_through_generic_cleanup(
     assert report["semantic_missing_purged"] == [rel]
     from exomem import claims, deferred_index
 
-    with sqlite3.connect(claims.sidecar_path(tmp_path)) as conn:
+    with _sqlite(claims.sidecar_path(tmp_path)) as conn:
         assert conn.execute("SELECT file_path FROM claims").fetchall() == []
-    with sqlite3.connect(deferred_index.store_path(tmp_path)) as conn:
+    with _sqlite(deferred_index.store_path(tmp_path)) as conn:
         assert conn.execute("SELECT rel_path FROM semantic_upserts").fetchall() == []
 
 
@@ -1042,7 +1097,7 @@ def test_isolation_dry_run_does_not_mutate_a_legacy_deferred_sidecar(
 
     path = deferred_index.store_path(tmp_path)
     path.parent.mkdir(parents=True)
-    with sqlite3.connect(path) as conn:
+    with _sqlite(path) as conn:
         conn.execute(
             "CREATE TABLE semantic_upserts ("
             "rel_path TEXT PRIMARY KEY, created_at REAL, updated_at REAL, revision INTEGER)"
@@ -1054,7 +1109,7 @@ def test_isolation_dry_run_does_not_mutate_a_legacy_deferred_sidecar(
 
     assert path.read_bytes() == before_bytes
     assert path.stat().st_mtime_ns == before_stat.st_mtime_ns
-    with sqlite3.connect(path) as conn:
+    with _sqlite(path) as conn:
         assert conn.execute(
             "SELECT name FROM sqlite_master WHERE name = 'maintenance_state'"
         ).fetchone() is None
