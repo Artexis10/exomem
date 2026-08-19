@@ -104,11 +104,17 @@ def _install_lifecycle_slot(
     )
     prepared_path = relation_review.lifecycle_prepared_path(root, page_id)
     decision_path.parent.mkdir(parents=True, exist_ok=True)
-    decision_path.write_text(
-        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+    # `write_bytes`, because these artifacts are canonical by digest.
+    # `write_text` applies universal-newline translation, so on Windows every
+    # line feed the serializer emitted landed as CRLF and reconcile answered
+    # RELATION_REVIEW_NONCANONICAL to every one of these tests -- a true report
+    # about a file the test never meant to write that way. The product writes
+    # these through binary descriptors and is unaffected.
+    decision_path.write_bytes(
+        relation_review.serialize_lifecycle_decision(decision).encode("utf-8")
     )
-    prepared_path.write_text(
-        relation_review.serialize_lifecycle_prepared(prepared), encoding="utf-8"
+    prepared_path.write_bytes(
+        relation_review.serialize_lifecycle_prepared(prepared).encode("utf-8")
     )
     return page, prepared_path, before, after
 
@@ -479,9 +485,8 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
                 current,
                 transition_id="00000000-0000-4000-8000-000000000299",
             )
-            prepared_path.write_text(
-                relation_review.serialize_lifecycle_prepared(replacement),
-                encoding="utf-8",
+            prepared_path.write_bytes(
+                relation_review.serialize_lifecycle_prepared(replacement).encode("utf-8")
             )
         elif race == "primary_change":
             page.write_text(after, encoding="utf-8")
