@@ -685,6 +685,21 @@ def run(
         f"  authority consumed; tenant {tenant_id[:8]} assignment {assignment_id[:8]} gen {generation}"
     )
 
+    # `promotion_evidence.py observe` reads exactly these three values, from a file
+    # named `bootstrap-outcome-final.json` by default. Nothing wrote it: the
+    # operator had to hand-author it mid-window by digging `outcomeTenantId`,
+    # `outcomeAssignmentId` and `outcomeAssignmentGeneration` out of the raw admin
+    # response. Writing it here is the handoff the two scripts always assumed.
+    outcome_path = cp.state_dir / "bootstrap-outcome-final.json"
+    outcome_path.write_text(
+        json.dumps(
+            {"tenantId": tenant_id, "assignmentId": assignment_id, "generation": generation},
+            indent=2,
+        )
+    )
+    outcome_path.chmod(0o600)
+    print(f"  outcome written to {outcome_path.name}")
+
     # The assignment expires while the cell provisions. Issue credentials NOW.
     # Both platforms in this one pass: promote-cohort needs a claudeArtifactId AND
     # an openaiArtifactId, and each canary credential is welded to this bootstrap's

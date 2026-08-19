@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import hmac
 import importlib.util
 import pathlib
@@ -406,3 +407,66 @@ def test_run_resolves_the_connector_before_creating_the_authority(monkeypatch) -
 
     assert resolved == ["CONN"]
     assert cp.calls == [], "nothing may be spent when the connector cannot be read"
+
+
+def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_path) -> None:
+    """The two halves of the promotion hand off through one file.
+
+    `promotion_evidence.py observe` reads `bootstrap-outcome-final.json` by
+    default and takes exactly `tenantId`, `assignmentId` and `generation` from it.
+    Nothing wrote it, so the operator had to hand-author it mid-window out of the
+    raw admin response. This pins the contract from the producing side.
+    """
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "chatgpt_cimd_identity", lambda c, o=None: ("https://c/x.json", ["https://c/cb"])
+    )
+
+    authority_id = "11111111-1111-4111-8111-111111111111"
+    cp = _RecordingControlPlane(
+        {
+            "run-authority": (200, {"authority": {"id": authority_id}}),
+            "run-authorize": (303, {}),
+            "run-redeem": (200, {"destination": "https://x/cb?code=abc"}),
+            "run-token": (200, {}),
+            "run-authority-outcome": (
+                200,
+                {
+                    "bootstrapAuthorities": [
+                        {
+                            "id": authority_id,
+                            "state": "consumed",
+                            "outcomeTenantId": "tenant-1",
+                            "outcomeAssignmentId": "assign-1",
+                            "outcomeAssignmentGeneration": 4,
+                        }
+                    ]
+                },
+            ),
+            # Stop right after the outcome is written.
+            "run-sibling-stage-claude": (500, {}),
+        }
+    )
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit):
+        module.run(
+            cp,
+            {
+                "inviteId": "i",
+                "stageId": "s",
+                "oauthClientId": "c",
+                "candidateId": "cand-1",
+                "clientId": "cid",
+                "state": "st",
+                "codeChallenge": "ch",
+                "codeVerifier": "cv",
+            },
+            "tok",
+            _locks(),
+            "CONN",
+        )
+
+    written = json.loads((tmp_path / "bootstrap-outcome-final.json").read_text())
+    assert written == {"tenantId": "tenant-1", "assignmentId": "assign-1", "generation": 4}
+    assert (tmp_path / "bootstrap-outcome-final.json").stat().st_mode & 0o777 == 0o600
