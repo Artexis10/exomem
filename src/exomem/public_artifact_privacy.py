@@ -232,6 +232,16 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
     BinaryProvenance("*.ico", "repository-authored Exomem application icon"),
 )
 
+#: Named in every refusal, because this gate historically only ran on Linux
+#: CI: a Windows contributor met it for the first time on a red PR, after two
+#: clean reviews, rather than in their own lane (#574). It is pure Python over
+#: files and runs anywhere.
+LOCAL_COMMAND_HINT = (
+    "Run this gate locally before pushing: "
+    "uv run python scripts/validate-public-artifacts.py --repository"
+)
+
+
 _CONTENT_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "absolute_local_path",
@@ -650,5 +660,5 @@ def assert_public_artifacts_clean(
         diagnostics = "\n".join(str(finding) for finding in unique)
         raise PublicArtifactPrivacyError(
             f"public artifact privacy validation failed ({len(unique)} findings):\n"
-            f"{diagnostics}"
+            f"{diagnostics}\n" + LOCAL_COMMAND_HINT
         )

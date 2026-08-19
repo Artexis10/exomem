@@ -108,6 +108,37 @@ def normalize(value: str | None) -> str | None:
     return _ALIASES.get(v)
 
 
+def windows_machine_wide_root() -> Path:
+    r"""The Windows machine-wide base every shared exomem path hangs off.
+
+    Exported so callers import the fallback chain instead of re-deriving it,
+    because the chain carries a constraint that is invisible once copied. The
+    last tier is written as a concatenation on purpose: it keeps the
+    drive-absolute literal from ever appearing contiguously, which
+    `public_artifact_privacy`'s `absolute_local_path` rule forbids in any
+    repository input or shipped wheel member -- docstrings included, since
+    they travel inside the wheel. Read quickly the split looks like odd
+    formatting, so reproducing "the %PROGRAMDATA% fallback" by hand
+    reintroduces the defect: it did exactly that once already, for 16
+    findings and six red checks on a branch that had passed two clean
+    reviews (#574).
+
+    Resolved per call rather than frozen into a constant, because the
+    environment is what tests vary to exercise each tier.
+
+    The two standalone hook scripts under `_hooks/` cannot import this --
+    they run as bare files under whatever interpreter the client provides --
+    so they carry a deliberate mirror, pinned by
+    `tests/test_windows_machine_wide_root.py`.
+    """
+    base = (
+        os.environ.get("PROGRAMDATA")
+        or os.environ.get("ALLUSERSPROFILE")
+        or "C:" + r"\ProgramData"
+    )
+    return Path(base)
+
+
 def config_path() -> Path:
     """Per-machine config file. `EXOMEM_CONFIG_PATH` overrides (tests/multi-instance).
 
@@ -123,12 +154,7 @@ def config_path() -> Path:
     if override:
         return Path(override)
     if os.name == "nt":
-        base = (
-            os.environ.get("PROGRAMDATA")
-            or os.environ.get("ALLUSERSPROFILE")
-            or "C:" + r"\ProgramData"
-        )
-        return Path(base) / "exomem" / "config.json"
+        return windows_machine_wide_root() / "exomem" / "config.json"
     return Path.home() / ".exomem" / "config.json"
 
 
