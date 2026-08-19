@@ -5,8 +5,13 @@ compatibility_date = "2026-07-12"
 [vars]
 VAULT_ID = "personal-main"
 DESKTOP_REPLICA_ID = "desktop"
-LAPTOP_REPLICA_ID = "laptop"
 DESKTOP_ORIGIN = "https://exomem-desktop.example.com"
+# The LAPTOP_* pair is optional. Leave both unset for a standalone deployment:
+# a single-node Exomem reports replica_id null and coordination disabled, and
+# the edge accepts that as eligible only when it is the sole configured origin.
+# Comment them out when you decommission the second replica -- and take the
+# worker out of the route if nothing is left for it to arbitrate (#581).
+LAPTOP_REPLICA_ID = "laptop"
 LAPTOP_ORIGIN = "https://exomem-laptop.example.com"
 ORIGIN_TIMEOUT_MS = "2500"
 # MCP tools can legitimately take longer than a connectivity probe. Keep this
