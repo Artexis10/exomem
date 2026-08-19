@@ -1360,13 +1360,40 @@ def _check_runtime_processes() -> DoctorCheck | None:
         )
     else:
         memory_message = f"about {memory['rss_mb_total']} MB RSS total"
+    # Name a lever the reader can actually pull. The previous remedy led with
+    # HTTP service mode, which will not start without EXOMEM_BASE_URL, a GitHub
+    # OAuth app and its credentials (#482) -- so a laptop user with seven
+    # sessions and 8 GB resident was told to obtain a public hostname to solve a
+    # purely local memory problem (#597). `mode quiet` is one command, needs
+    # nothing external, and is exactly the policy the old text gestured at:
+    # no boot preload and release models when idle.
+    #
+    # Mode-aware, because recommending quiet to someone already in it is worse
+    # than saying nothing: it reads as "you have not tried the fix" when they
+    # have, and hides that the remaining cost is per-process and structural.
+    from . import mode as mode_module
+
+    current_mode = mode_module.resolve_mode()
+    if current_mode == "quiet":
+        remedy = (
+            "Compute mode is already 'quiet' (no boot preload, models released when "
+            "idle), so the remaining cost is per-process: close sessions you are not "
+            "using, or run one shared HTTP service if this machine has a public base "
+            "URL and a GitHub OAuth app."
+        )
+    else:
+        remedy = (
+            f"Compute mode is '{current_mode}'; `exomem mode quiet` drops boot preload "
+            "and releases models when idle, which is the lever that needs nothing "
+            "external. One shared HTTP service also fixes it, but only where a public "
+            "base URL and a GitHub OAuth app are available."
+        )
     return _check(
         "runtime.processes",
         status,
         f"Detected {count} other exomem server process(es) using {memory_message}. "
-        "Each stdio MCP client/session launches its own process; use HTTP service mode "
-        "or lazy/quiet policies on small-memory Macs.",
-        details={"count": count, **memory, "processes": rows[:8]},
+        f"Each stdio MCP client/session launches its own process. {remedy}",
+        details={"count": count, "mode": current_mode, **memory, "processes": rows[:8]},
     )
 
 
