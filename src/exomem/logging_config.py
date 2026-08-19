@@ -89,8 +89,8 @@ def _user_log_dir() -> Path:
     `Lib`/`site-packages` directory is not writable by convention and not
     where a log directory belongs.
 
-    Windows is machine-wide (`%PROGRAMDATA%/exomem/logs`, with the same
-    `%ALLUSERSPROFILE%` / hardcoded-`ProgramData` fallback chain and lowercase
+    Windows is machine-wide (`%PROGRAMDATA%/exomem/logs`, through the same
+    `mode.windows_machine_wide_root()` fallback chain and the same lowercase
     `exomem` directory name as `mode.config_path()`), NOT the user profile:
     the exomem service commonly runs as `LocalSystem` while an operator's
     `exomem` CLI runs as their own logged-in user, and a home- or
@@ -108,12 +108,9 @@ def _user_log_dir() -> Path:
     Linux — state, not configuration, per the XDG Base Directory spec.
     """
     if sys.platform == "win32":
-        base = (
-            os.environ.get("PROGRAMDATA")
-            or os.environ.get("ALLUSERSPROFILE")
-            or "C:" + r"\ProgramData"
-        )
-        return Path(base) / "exomem" / "logs"
+        from .mode import windows_machine_wide_root
+
+        return windows_machine_wide_root() / "exomem" / "logs"
     if sys.platform == "darwin":
         home = _safe_home()
         if home is not None:

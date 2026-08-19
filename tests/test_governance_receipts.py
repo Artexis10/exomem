@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import select
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -466,6 +469,52 @@ def test_receipt_connection_lru_evicts_and_closes_idle_handles(
     assert closed == 1
 
 
+#: A child that deadlocks must fail this test, not the session. Forking with
+#: another thread inside a receipt connection is the whole point here, and a
+#: fork handler that ever fails to quiesce leaves the child holding a mutex
+#: no thread will release. An unbounded `os.read`/`os.waitpid` then blocks the
+#: parent forever: pytest's session timeout eventually kills the shard, no
+#: junit is written, and CI reports a whole shard missing rather than one
+#: named test. Ten seconds is ~200x the timer this test arms.
+_FORK_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def _kill_child(pid: int) -> None:
+    """Stop a wedged child so the reap below cannot block in turn."""
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.kill(pid, signal.SIGKILL)
+    with contextlib.suppress(ChildProcessError, OSError):
+        os.waitpid(pid, 0)
+
+
+def _read_from_child(read_fd: int, pid: int) -> bytes:
+    """Read the child's one report, or say plainly that it never sent one."""
+    ready, _, _ = select.select([read_fd], [], [], _FORK_PROBE_TIMEOUT_SECONDS)
+    if not ready:
+        _kill_child(pid)
+        raise AssertionError(
+            f"forked child sent nothing within {_FORK_PROBE_TIMEOUT_SECONDS:.0f}s; "
+            "the fork handlers left it holding a receipt lock no thread can release"
+        )
+    return os.read(read_fd, 4096)
+
+
+def _reap_child(pid: int) -> tuple[int, int]:
+    """Wait for the child, bounded, so a late hang is named rather than hung on."""
+    deadline = time.monotonic() + _FORK_PROBE_TIMEOUT_SECONDS
+    while True:
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+        if reaped:
+            return reaped, status
+        if time.monotonic() >= deadline:
+            _kill_child(pid)
+            raise AssertionError(
+                f"forked child wrote its report but did not exit within "
+                f"{_FORK_PROBE_TIMEOUT_SECONDS:.0f}s"
+            )
+        time.sleep(0.01)
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 def test_fork_quiesces_active_receipt_connection_and_reopens_per_pid(
     vault: Path,
@@ -509,9 +558,9 @@ def test_fork_quiesces_active_receipt_connection_and_reopens_per_pid(
         os._exit(0)
 
     os.close(write_fd)
-    child_payload = os.read(read_fd, 4096)
+    child_payload = _read_from_child(read_fd, pid)
     os.close(read_fd)
-    _, status = os.waitpid(pid, 0)
+    _, status = _reap_child(pid)
     timer.join(timeout=5)
     holder.join(timeout=5)
     assert not holder.is_alive()

@@ -187,6 +187,8 @@ def _probe_nvidia_smi() -> dict[str, Any]:
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
         )
     except Exception as e:  # noqa: BLE001
