@@ -1294,38 +1294,121 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
     )
 
 
-def _list_exomem_processes() -> list[dict[str, object]]:
-    if os.name == "nt":
-        return []
-    ps = shutil.which("ps")
-    if not ps:
-        return []
+#: How long the process census may take before the check gives up on it.
+#:
+#: `ps` answers in milliseconds. Windows has no `ps`, and the only supported way
+#: to read another process's command line is a CIM query, which pays PowerShell
+#: startup first -- typically under a second, but a cold shell on a loaded box is
+#: slower. A doctor check may be slow enough to be worth waiting for and must
+#: never hang, so the two platforms get bounds sized to what they actually do.
+_PROCESS_CENSUS_TIMEOUT_SECONDS = 2.0
+_WINDOWS_PROCESS_CENSUS_TIMEOUT_SECONDS = 8.0
+
+#: One line per process: pid, working set / RSS in bytes, full command line.
+#: Pipe-separated with the command last, so a command containing a pipe still
+#: parses. `$_.CommandLine` is null for processes this session cannot see into;
+#: those print empty and are dropped by the shared filter, exactly as a `ps` line
+#: without a command is.
+_WINDOWS_PROCESS_CENSUS = (
+    "Get-CimInstance Win32_Process | ForEach-Object { "
+    "$_.ProcessId.ToString() + '|' + $_.WorkingSetSize.ToString() + '|' "
+    "+ $_.PrivatePageCount.ToString() + '|' + $_.CommandLine }"
+)
+
+
+def _run_process_census(command: list[str], timeout: float) -> str | None:
+    """Run one census command, or None if it cannot answer."""
     try:
         result = subprocess.run(
-            [ps, "-axo", "pid=,rss=,command="],
+            command,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=2.0,
+            timeout=timeout,
             check=False,
         )
-    except Exception:  # noqa: BLE001
-        return []
+    except Exception:  # noqa: BLE001 - a diagnostic may never raise
+        return None
     if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _posix_process_samples() -> list[tuple[int, int, str, int | None]]:
+    ps = shutil.which("ps")
+    if not ps:
         return []
-    rows: list[dict[str, object]] = []
-    current_pid = os.getpid()
-    for line in result.stdout.splitlines():
+    stdout = _run_process_census(
+        [ps, "-axo", "pid=,rss=,command="], _PROCESS_CENSUS_TIMEOUT_SECONDS
+    )
+    if stdout is None:
+        return []
+    samples: list[tuple[int, int, str, int | None]] = []
+    for line in stdout.splitlines():
         parts = line.strip().split(None, 2)
         if len(parts) < 3:
             continue
         try:
-            pid = int(parts[0])
-            rss_kb = int(parts[1])
+            # `ps` reports RSS in kilobytes; the shared filter takes bytes. No
+            # commit figure: `ps` has no portable column for it, and on Linux
+            # RSS does not evaporate the way a trimmed Windows working set does.
+            samples.append((int(parts[0]), int(parts[1]) * 1024, parts[2], None))
         except ValueError:
             continue
-        command = parts[2]
+    return samples
+
+
+def _windows_process_samples() -> list[tuple[int, int, str, int | None]]:
+    """The same census on Windows, where there is no `ps`.
+
+    `tasklist` cannot report a command line, and the check's whole filter is a
+    command-line filter -- it has to tell an exomem stdio server from any other
+    python.exe, and a media worker child from a session. So this reads
+    `Win32_Process` through CIM, which carries `CommandLine` and
+    `WorkingSetSize` together.
+
+    Windows PowerShell 5.1 ships with every supported Windows and is preferred
+    for that reason; `pwsh` is accepted where it is the only one present.
+    """
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if not shell:
+        return []
+    stdout = _run_process_census(
+        [shell, "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_PROCESS_CENSUS],
+        _WINDOWS_PROCESS_CENSUS_TIMEOUT_SECONDS,
+    )
+    if stdout is None:
+        return []
+    samples: list[tuple[int, int, str, int | None]] = []
+    for line in stdout.splitlines():
+        parts = line.strip().split("|", 3)
+        # An empty command field is a process this session cannot read the
+        # command line of. Dropped here so it matches `ps`, where a line without
+        # a command is short and gets dropped for the same reason -- the shared
+        # filter would exclude it anyway, but the two censuses should not differ
+        # about what they even collected.
+        if len(parts) < 4 or not parts[3]:
+            continue
+        try:
+            samples.append((int(parts[0]), int(parts[1]), parts[3], int(parts[2])))
+        except ValueError:
+            continue
+    return samples
+
+
+def _list_exomem_processes() -> list[dict[str, object]]:
+    """Every OTHER exomem session process, with what it costs.
+
+    The census is per-platform because the tools are; the filter is shared,
+    because a lane that selects processes differently from the other reports a
+    different thing under the same check name. `tests/test_doctor.py` pins that
+    both lanes route through this one filter.
+    """
+    samples = _windows_process_samples() if os.name == "nt" else _posix_process_samples()
+    rows: list[dict[str, object]] = []
+    current_pid = os.getpid()
+    for pid, rss_bytes, command, private_bytes in samples:
         if pid == current_pid:
             continue
         command_l = command.lower()
@@ -1335,8 +1418,16 @@ def _list_exomem_processes() -> list[dict[str, object]]:
             continue
         if "--transport" not in command_l and "python -m exomem" not in command_l:
             continue
-        rss_mb = round(rss_kb / 1024, 1)
-        rows.append({"pid": pid, "rss_mb": rss_mb, "command": command[:180], **process_memory.enrich_process_memory(pid, rss_mb)})
+        rss_mb = round(rss_bytes / (1024 * 1024), 1)
+        row: dict[str, object] = {
+            "pid": pid,
+            "rss_mb": rss_mb,
+            "command": command[:180],
+            **process_memory.enrich_process_memory(pid, rss_mb),
+        }
+        if private_bytes is not None:
+            row["private_commit_mb"] = round(private_bytes / (1024 * 1024), 1)
+        rows.append(row)
     return rows
 
 
@@ -1360,6 +1451,16 @@ def _check_runtime_processes() -> DoctorCheck | None:
         )
     else:
         memory_message = f"about {memory['rss_mb_total']} MB RSS total"
+    # Windows trims an idle process's working set aggressively, so the resident
+    # figure above is a reading of this instant rather than of what the process
+    # costs -- one server here measured 1196 MB resident while active and 1.1 MB
+    # minutes later, against a private commit that did not move. Reporting only
+    # the resident number would tell a user their idle sessions are free.
+    private_total = round(
+        sum(float(row.get("private_commit_mb") or 0.0) for row in rows), 1
+    )
+    if private_total:
+        memory_message += f" and {private_total} MB private commit"
     return _check(
         "runtime.processes",
         status,
