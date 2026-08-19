@@ -290,13 +290,16 @@ def _patch_runtime(monkeypatch):
     """Stub runtime unload/start hooks; return a call recorder."""
     from exomem import bm25, embeddings, find, model_reaper
 
-    calls = {"unload": 0, "cache": 0, "start": 0, "stop": 0}
+    calls = {"unload": 0, "cache": 0, "broad": 0, "start": 0, "stop": 0}
     monkeypatch.setattr(embeddings, "unload_model", lambda: calls.__setitem__("unload", calls["unload"] + 1) or True)
     monkeypatch.setattr(embeddings, "unload_reranker", lambda: True)
     monkeypatch.setattr(embeddings, "unload_clip_model", lambda: True)
     monkeypatch.setattr(embeddings, "unload_index_caches", lambda: calls.__setitem__("cache", calls["cache"] + 1) or {"embedding": 0, "clip": 0})
     monkeypatch.setattr(bm25, "unload_cache", lambda: calls.__setitem__("cache", calls["cache"] + 1) or False)
-    monkeypatch.setattr(find, "unload_ram_caches", lambda: calls.__setitem__("cache", calls["cache"] + 1) or {})
+    # Quiet mode is a memory decision, so it takes the narrow release that keeps
+    # the recall resolver; the broad one stays here to prove it is NOT called.
+    monkeypatch.setattr(find, "release_idle_ram_caches", lambda: calls.__setitem__("cache", calls["cache"] + 1) or {})
+    monkeypatch.setattr(find, "unload_ram_caches", lambda **_: calls.__setitem__("broad", calls["broad"] + 1) or {})
     monkeypatch.setattr(model_reaper, "start", lambda: calls.__setitem__("start", calls["start"] + 1))
     monkeypatch.setattr(model_reaper, "stop", lambda: calls.__setitem__("stop", calls["stop"] + 1))
     return calls
@@ -324,6 +327,9 @@ def test_apply_live_quiet_unloads_heavy_caches(monkeypatch: pytest.MonkeyPatch) 
     policy = mode.apply_live()
     assert policy["mode"] == "quiet"
     assert calls["cache"] == 3
+    # Entering quiet mode frees memory; it does not force a re-derivation, so it
+    # must not reach for the eviction that discards the recall resolver (#676).
+    assert calls["broad"] == 0
     assert calls["start"] == 1 and calls["stop"] == 0
 
 

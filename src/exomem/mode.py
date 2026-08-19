@@ -348,7 +348,12 @@ def apply_live() -> dict:
     if _applied_mode == "quiet":
         from . import bm25, find
 
-        for unload in (embeddings.unload_index_caches, bm25.unload_cache, find.unload_ram_caches):
+        for unload in (
+            embeddings.unload_index_caches,
+            bm25.unload_cache,
+            # Entering quiet mode is a memory decision, not a correctness one.
+            find.release_idle_ram_caches,
+        ):
             try:
                 unload()
             except Exception:  # noqa: BLE001 — quiet entry must remain best-effort
