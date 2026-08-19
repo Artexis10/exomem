@@ -2011,9 +2011,24 @@ def _ensure_session_manifest(
     client: str,
     session_id: str,
     created_at_ns: int,
+    *,
+    descriptor: int | None = None,
 ) -> None:
-    fd = _open_secure_file_at(state, ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    """Write the session manifest into `.lock`, through a held descriptor if given.
+
+    Same reason as `load_session_manifest_at`: Windows byte-range locks are
+    mandatory, so a caller already holding this file's advisory lock cannot
+    reach the bytes through a second descriptor. The pruner does exactly that
+    when it adopts a pending record for a session killed before its manifest
+    was written, which is why that case could never be repaired -- and so never
+    pruned -- on Windows.
+    """
+    fd = descriptor if descriptor is not None else _open_secure_file_at(
+        state, ".lock", os.O_RDWR | os.O_CREAT, 0o600
+    )
     try:
+        if descriptor is not None:
+            os.lseek(fd, 0, os.SEEK_SET)
         raw = os.read(fd, 4097)
         if raw not in {b"", b"\0"}:
             return
@@ -2025,7 +2040,8 @@ def _ensure_session_manifest(
         os.ftruncate(fd, len(payload))
         os.fsync(fd)
     finally:
-        os.close(fd)
+        if descriptor is None:
+            os.close(fd)
 
 
 def load_session_manifest_at(
@@ -2033,16 +2049,35 @@ def load_session_manifest_at(
     home: Path,
     client: str,
     state_name: str,
+    *,
+    descriptor: int | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
+    """Read the session manifest, optionally through a descriptor already held.
+
+    The manifest lives inside `.lock`, and a caller holding that file's
+    advisory lock must pass its descriptor. POSIX locks are advisory, so a
+    second descriptor could read the bytes regardless; Windows byte-range
+    locks are mandatory, and the read through a second descriptor is refused.
+    That refusal surfaced as `corrupt` -- indistinguishable from a genuinely
+    damaged manifest -- and it made every expired session whose first write was
+    interrupted permanently unprunable on Windows, because the pruner reads the
+    manifest while holding exactly that lock. Reading through the descriptor
+    that owns the lock is allowed on both platforms.
+    """
     try:
-        fd = _open_secure_file_at(state, ".lock", os.O_RDONLY, 0o600)
+        fd = descriptor if descriptor is not None else _open_secure_file_at(
+            state, ".lock", os.O_RDONLY, 0o600
+        )
         try:
             info = os.fstat(fd)
             if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
                 return None, "corrupt"
+            if descriptor is not None:
+                os.lseek(fd, 0, os.SEEK_SET)
             raw = os.read(fd, 4097)
         finally:
-            os.close(fd)
+            if descriptor is None:
+                os.close(fd)
         if not raw.startswith(b"\0") or len(raw) > 4096:
             return None, "missing"
         value = json.loads(raw[1:])
@@ -3066,7 +3101,9 @@ def _tombstone_expired_candidate(
             if now - int(previous["observed_at_ns"]) <= RETENTION_NS:
                 return None
         else:
-            manifest, manifest_status = load_session_manifest_at(state_handle, home, client, name)
+            manifest, manifest_status = load_session_manifest_at(
+                state_handle, home, client, name, descriptor=lock.fd
+            )
             if manifest_status != "valid" or manifest is None:
                 pending, pending_status = _load_pending_session_at(root_handle, home, client, name)
                 if (
@@ -3080,9 +3117,10 @@ def _tombstone_expired_candidate(
                         client,
                         str(pending["session_id"]),
                         int(pending["created_at_ns"]),
+                        descriptor=lock.fd,
                     )
                     manifest, manifest_status = load_session_manifest_at(
-                        state_handle, home, client, name
+                        state_handle, home, client, name, descriptor=lock.fd
                     )
                     if manifest_status == "valid":
                         try:
@@ -3495,7 +3533,9 @@ def _authorize_recovery_tombstone(
             None,
         )
         if authorized is None:
-            manifest, status_value = load_session_manifest_at(state, home, client, original_name)
+            manifest, status_value = load_session_manifest_at(
+                state, home, client, original_name, descriptor=lock.fd
+            )
             if (
                 status_value != "valid"
                 or manifest is None
