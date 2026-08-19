@@ -3591,6 +3591,32 @@ _RESOLVER_CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
 _RECALL_RESOLVER_CHECKPOINTS: dict[Path, freshness.RecallFreshnessCheckpoint] = {}
 _RESOLVER_LOCK = threading.Lock()
 
+#: Vaults with a projected-resolver build already running.
+#:
+#: `recall_resolver_snapshot` builds from a full `walk_vault_md` plus a parse
+#: per admitted page -- O(vault), and measured at 30.7s of a 34s `ask_memory`
+#: call on a 2.4k-page vault, which is 90% of that read (#676). Nothing bounded
+#: it: eviction is cheap and asynchronous while the rebuild is expensive and
+#: synchronous, so the whole cost landed on whichever caller asked first, and
+#: on the read path that is a reader.
+#:
+#: Two things use this. Concurrent callers on a cold cache wait for one build
+#: instead of each running their own, and `_evict_recall_resolver` starts a
+#: background rebuild so the gap between an eviction and the next warm cache is
+#: closed by a daemon thread rather than by the next query. Neither changes what
+#: a caller gets -- a build still returns the same resolver, and a caller that
+#: arrives mid-build still waits -- so ranking is untouched.
+_RECALL_RESOLVER_BUILDS: dict[Path, threading.Event] = {}
+#: Its own lock, NOT `_RESOLVER_LOCK`: `_evict_recall_resolver` runs while that
+#: one is held, and the build below must be able to register itself without
+#: holding a lock across a whole-vault walk.
+_RECALL_REBUILD_LOCK = threading.Lock()
+#: Long enough that a follower waits out a real build on a large vault rather
+#: than duplicating it, short enough that a wedged leader cannot hold a reader
+#: indefinitely -- the follower simply builds its own after this.
+_RECALL_RESOLVER_BUILD_WAIT_SECONDS = 120.0
+_RECALL_RESOLVER_REBUILDS: set[Path] = set()
+
 
 def _recall_checkpoint_identity(
     checkpoint: freshness.RecallFreshnessCheckpoint,
@@ -3603,8 +3629,82 @@ def _recall_checkpoint_identity(
 
 
 def _evict_recall_resolver(root: Path) -> None:
+    """Drop the projected resolver, and start rebuilding it off the read path.
+
+    Callers hold `_RESOLVER_LOCK`; the rebuild is scheduled, never run, here.
+
+    Every eviction site in `on_resolver_files_changed` is a correctness refusal
+    -- an incomplete event delta, a moved path guard, a policy identity that
+    advanced -- and each is right to drop the cache. What they cannot do is
+    leave the vault with no resolver and no plan to get one, because the next
+    caller to need it pays a whole-vault walk and parse in the foreground.
+    Scheduling the rebuild here is what makes the eviction cheap for everyone
+    except a daemon thread.
+    """
     _RECALL_RESOLVER_CACHE.pop(root, None)
     _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+    _schedule_recall_resolver_rebuild(root)
+
+
+def _schedule_recall_resolver_rebuild(root: Path) -> None:
+    """Start at most one background projected-resolver build per vault.
+
+    Best-effort and deliberately silent on failure: this exists to make the
+    next reader fast, and a vault that cannot be walked right now will simply
+    be built by whoever needs it, exactly as before. Never blocks the caller,
+    which may be holding `_RESOLVER_LOCK` or serving a request.
+    """
+    if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
+        return
+    key = Path(root)
+    with _RECALL_REBUILD_LOCK:
+        if key in _RECALL_RESOLVER_REBUILDS:
+            return
+        _RECALL_RESOLVER_REBUILDS.add(key)
+
+    def _run() -> None:
+        try:
+            recall_resolver_snapshot(key)
+        except Exception as error:  # noqa: BLE001 - a daemon must not escape
+            log.warning("projected resolver background rebuild skipped (%s)", error)
+        finally:
+            with _RECALL_REBUILD_LOCK:
+                _RECALL_RESOLVER_REBUILDS.discard(key)
+
+    # A literal thread name, like every other exomem thread: names reach the
+    # log through `JsonLinesFormatter`, and hosted-cell redaction blanks a
+    # record's fields rather than rebuilding it from an allowlist, so a vault
+    # path encoded in a thread name would survive that boundary.
+    thread = threading.Thread(
+        target=_run,
+        name="exomem-recall-resolver-warm",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except RuntimeError:
+        with _RECALL_REBUILD_LOCK:
+            _RECALL_RESOLVER_REBUILDS.discard(key)
+
+
+def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
+    """Block until no background projected-resolver build is running.
+
+    A quiesce seam, not a convergence helper: it says nothing about whether a
+    resolver is now cached, only that no daemon thread is still walking a
+    vault. Production is one long-lived process where a warm thread outliving
+    its trigger is the point; a test suite is many vaults in one process,
+    where a thread outliving the tmp vault that started it is a cross-test
+    leak. Mirrors `graph_sync.await_active_rebuild`.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with _RECALL_REBUILD_LOCK:
+            if not _RECALL_RESOLVER_REBUILDS:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
 
 
 def _evict_resolver(root: Path) -> None:
@@ -3716,24 +3816,65 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
         if cached and cached[0] == identity:
             return cached[1].fork()
 
-    entries: list[tuple[str, str | None]] = []
-    for path in walk_vault_md(root):
-        if not recall_policy.is_recall_candidate(root, path):
-            continue
-        page = _CACHE.get(path, root)
-        if page is not None:
-            entries.append((page.rel_path, page.title))
-    resolver = WikilinkResolver.from_entries(root, entries)
-    with _RESOLVER_LOCK:
-        # The supplied freshness key names this immutable resolver snapshot.
-        # A later caller with changed disk/policy identity cannot reuse it;
-        # graph rebuild performs its stronger direct before/after proof around
-        # sidecar publication.
-        _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
-        if checkpoint is not None:
-            _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
-        else:
-            _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+    # Single-flight. The build below is a full vault walk plus a parse per
+    # admitted page, so N callers arriving on a cold cache used to run N of
+    # them concurrently -- each reading the same files, each producing a
+    # resolver N-1 of them would discard. Followers wait on the leader's event
+    # and then re-check the cache, which is where the leader publishes.
+    #
+    # A follower whose wait times out, or whose leader published a different
+    # identity, falls through and builds its own. That is the pre-existing
+    # behaviour and it stays correct; the wait is an optimisation, never a
+    # dependency.
+    leader = False
+    while True:
+        with _RECALL_REBUILD_LOCK:
+            building = _RECALL_RESOLVER_BUILDS.get(root)
+            if building is None:
+                building = threading.Event()
+                _RECALL_RESOLVER_BUILDS[root] = building
+                leader = True
+        if leader:
+            break
+        if not building.wait(_RECALL_RESOLVER_BUILD_WAIT_SECONDS):
+            break
+        with _RESOLVER_LOCK:
+            cached = _RECALL_RESOLVER_CACHE.get(root)
+            if cached and cached[0] == identity:
+                return cached[1].fork()
+        # The leader finished with a different identity, or its result was
+        # evicted before this thread looked. Try to become the leader.
+
+    # The publication is INSIDE the try, so the leader's event is released only
+    # once the cache actually holds the result. Signalling at the end of the
+    # build instead would wake every follower onto a still-empty cache, and each
+    # would then elect itself leader and rebuild -- reintroducing the stampede
+    # this exists to prevent, just narrowed to a race window.
+    try:
+        entries: list[tuple[str, str | None]] = []
+        for path in walk_vault_md(root):
+            if not recall_policy.is_recall_candidate(root, path):
+                continue
+            page = _CACHE.get(path, root)
+            if page is not None:
+                entries.append((page.rel_path, page.title))
+        resolver = WikilinkResolver.from_entries(root, entries)
+        with _RESOLVER_LOCK:
+            # The supplied freshness key names this immutable resolver snapshot.
+            # A later caller with changed disk/policy identity cannot reuse it;
+            # graph rebuild performs its stronger direct before/after proof
+            # around sidecar publication.
+            _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
+            if checkpoint is not None:
+                _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
+            else:
+                _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+    finally:
+        if leader:
+            with _RECALL_REBUILD_LOCK:
+                done = _RECALL_RESOLVER_BUILDS.pop(root, None)
+            if done is not None:
+                done.set()
     return resolver.fork()
 
 
@@ -4069,6 +4210,11 @@ def unload_ram_caches() -> dict[str, int]:
     _CACHE.clear()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
+        # Deliberately clears the maps directly rather than going through
+        # `_evict_recall_resolver`: this is the idle reaper handing memory back,
+        # and immediately spending a thread to rebuild what it just released
+        # would defeat the whole point of releasing it. The next caller builds,
+        # single-flighted.
         _RESOLVER_CACHE.clear()
         _RECALL_RESOLVER_CACHE.clear()
         _RESOLVER_CHECKPOINTS.clear()

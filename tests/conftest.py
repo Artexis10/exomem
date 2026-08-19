@@ -549,6 +549,13 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # filesystem census can observe. Default it off in the suite;
     # test_corpus_context_cache.py deletes this var to exercise it.
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    # The projected-resolver warm thread is a production optimisation: it walks
+    # the vault after an eviction so the next reader does not pay for it. In the
+    # suite it would outlive the tmp vault that started it -- production is one
+    # long-lived process, the suite is hundreds of vaults in one -- and touch
+    # process-global caches from a test that has already finished.
+    # `tests/test_recall_resolver_warm.py` deletes this var to exercise it.
+    monkeypatch.setenv("EXOMEM_DISABLE_RESOLVER_WARM", "1")
 
 
 @pytest.fixture
