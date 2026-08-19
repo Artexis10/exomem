@@ -66,7 +66,9 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
         "exomem-review",
         "exomem-media",
     ]
-    assert out["workflow_skills"][0]["path"].startswith("Knowledge Base/_Schema/")
+    # The shipped skills moved out of the note namespace (#488). Still pinned,
+    # because this path is the address the agent is told to read a skill from.
+    assert out["workflow_skills"][0]["path"].startswith(".exomem/schema/workflow-skills/")
     assert out["knowledge_packs"]["selected"]["selected_pack_ids"] == ["personal-records"]
     assert out["knowledge_packs"]["available"][0]["beginner_description"]
     assert [item["id"] for item in out["entity_registry"]["types"]] == list(

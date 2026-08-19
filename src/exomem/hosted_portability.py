@@ -201,6 +201,22 @@ def _is_hosted_runtime_state(_path: str, parts: tuple[str, ...]) -> bool:
     )
 
 
+def _is_shipped_schema(_path: str, parts: tuple[str, ...]) -> bool:
+    """The governance contract, which moved to `.exomem/schema/` (#488).
+
+    Registered explicitly because the rule below fails ALL hidden state closed,
+    and this content used to live under `Knowledge Base/` where it was canonical
+    by default. Without this the move would silently change portability
+    semantics: the archive would drop the schema, and `_valid_vault_scaffold`
+    requires `SKILL.md`, so the restored vault would be refused.
+
+    Canonical rather than rebuildable even though the package can redeploy it,
+    because that is what it was before the move. Changing where a file lives
+    should not also change whether it survives an export.
+    """
+    return len(parts) >= 2 and parts[0].casefold() == ".exomem" and parts[1].casefold() == "schema"
+
+
 def _is_unregistered_hidden_state(_path: str, parts: tuple[str, ...]) -> bool:
     # New machine-local sidecars are conventionally hidden.  Defaulting them to
     # disposable prevents a new cache/database from silently entering exports;
@@ -260,6 +276,12 @@ _CLASSIFICATION_RULES = (
         ArtifactClass.DISPOSABLE_RUNTIME,
         "Cell binding, writer leases, and request idempotency are runtime control state.",
         _is_hosted_runtime_state,
+    ),
+    _ClassificationRule(
+        "portable-shipped-schema",
+        ArtifactClass.CANONICAL,
+        "The governance contract is vault content wherever it is stored.",
+        _is_shipped_schema,
     ),
     _ClassificationRule(
         "unregistered-hidden-state",
@@ -1187,8 +1209,11 @@ def verify_export_archive(
 
 def _verify_required_scaffold(records: Iterable[Mapping[str, Any]]) -> None:
     paths = {str(record["path"]) for record in records}
+    # The schema is accepted at either location: `Knowledge Base/_Schema/` for an
+    # archive taken before #488, `.exomem/schema/` for one taken after.
     if not any(path.startswith("Knowledge Base/") for path in paths) or not any(
-        path.startswith("Knowledge Base/_Schema/") for path in paths
+        path.startswith("Knowledge Base/_Schema/") or path.startswith(".exomem/schema/")
+        for path in paths
     ):
         _fail("INVALID_VAULT_STRUCTURE", "archive does not contain the required vault scaffold")
 

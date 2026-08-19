@@ -25,7 +25,6 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .kbdir import kb_dirname
 
 # Required fields appear in the source frontmatter section as "| <field> | yes |".
 REQUIRED_FIELD_ROW_PATTERN = re.compile(
@@ -59,7 +58,9 @@ def load_source_schema(vault_path: Path) -> SourceSchema:
 
     Raises SchemaParseError if anything looks wrong.
     """
-    schema_dir = vault_path / kb_dirname() / "_Schema" / "references"
+    from .vault import shipped_schema_root
+
+    schema_dir = shipped_schema_root(vault_path) / "references"
     frontmatter_doc = schema_dir / "frontmatter.md"
     page_types_doc = schema_dir / "page-types.md"
 

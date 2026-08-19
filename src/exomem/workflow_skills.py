@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from . import semantic_authoring
-from .kbdir import kb_dirname
+from .vault import SHIPPED_SCHEMA_DIRNAME
 
 WORKFLOW_SKILLS_DIR = Path(__file__).parent / "_scaffold" / "_Schema" / "workflow-skills"
 WORKFLOW_SKILLS_INDEX = WORKFLOW_SKILLS_DIR / "index.yaml"
@@ -80,7 +80,11 @@ def bootstrap_entries() -> list[dict[str, Any]]:
                 "name": name,
                 "purpose": str(skill.get("purpose", "")),
                 "triggers": [str(t) for t in skill.get("triggers", [])],
-                "path": f"{kb_dirname()}/_Schema/workflow-skills/{name}/SKILL.md",
+                # Vault-relative, and it moved out of the note namespace with
+                # the rest of the shipped markdown (#488). A stale path here is
+                # not a cosmetic defect: it is the address the agent is told to
+                # read the skill from.
+                "path": f"{SHIPPED_SCHEMA_DIRNAME}/schema/workflow-skills/{name}/SKILL.md",
             }
         )
     return entries

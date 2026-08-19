@@ -85,6 +85,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "setup",
         "init",
+        "reclaim-schema",
         "install-skill",
         "package-skills",
         "personalize",
@@ -179,6 +180,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return setup_main(raw[1:])
     if raw and raw[0] == "init":
         return _init_main(raw[1:])
+    if raw and raw[0] == "reclaim-schema":
+        return _reclaim_schema_main(raw[1:])
     if raw and raw[0] == "install-skill":
         return _install_skill_main(raw[1:])
     if raw and raw[0] == "package-skills":
@@ -1411,6 +1414,55 @@ def _lease_main(argv: list[str]) -> int:
     if args.command == "status":
         return _lease_status_main(config, as_json=args.json)
     return _lease_release_main(config, confirmed=args.yes, as_json=args.json)
+
+
+def _reclaim_schema_main(argv: list[str]) -> int:
+    """Remove the pre-#488 copy of the shipped contract from the note namespace.
+
+    A separate command, and a preview by default, because the alternative is an
+    upgrade that silently deletes a few hundred kilobytes from inside a user's
+    Obsidian vault. The bytes are reproducible from the package, but the vault is
+    the artifact the product promises the user owns, so a deletion inside it is
+    something they ask for rather than something they discover.
+    """
+    parser = argparse.ArgumentParser(
+        prog="exomem reclaim-schema",
+        description=(
+            f"Remove the superseded copy of the shipped schema from "
+            f"{kb_prefix()}_Schema/ once it has been redeployed to .exomem/schema/."
+        ),
+    )
+    parser.add_argument(
+        "--vault",
+        help="Vault root (default: $EXOMEM_VAULT_PATH, else current dir).",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually delete. Without this the command reports what it would do.",
+    )
+    args = parser.parse_args(argv)
+
+    from . import init as init_module
+
+    vault = Path(args.vault or os.environ.get("EXOMEM_VAULT_PATH") or ".")
+    report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
+
+    if not report["removed"] and not report["declined"]:
+        print(f"Nothing to reclaim: {vault} has no superseded schema copy.")
+        return 0
+
+    verb = "Removed" if report["applied"] else "Would remove"
+    print(f"{verb} {len(report['removed'])} file(s), {report['reclaimed_kb']} KB:")
+    for relative in report["removed"]:
+        print(f"  {kb_prefix()}_Schema/{relative}")
+    if report["declined"]:
+        print(f"Kept {len(report['declined'])} file(s):")
+        for entry in report["declined"]:
+            print(f"  {kb_prefix()}_Schema/{entry['path']} — {entry['reason']}")
+    if not report["applied"]:
+        print("Re-run with --apply to delete.")
+    return 0
 
 
 def _init_main(argv: list[str]) -> int:
