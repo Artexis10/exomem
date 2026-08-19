@@ -52,7 +52,24 @@ def _replace_capability_member(
     original: object,
     replacement: object | None,
 ) -> None:
+    """Re-register a capability under a patched function, where it exists.
+
+    These tests replace `os.open`, `os.stat` or `os.scandir` and then need the
+    product to keep taking its descriptor-relative branch, which it selects by
+    membership in `os.supports_dir_fd` / `os.supports_fd`. Rewriting that set
+    cannot conjure the kernel feature. On Windows it is empty, and telling the
+    product otherwise sent it into `os.open(..., dir_fd=...)` for a
+    `NotImplementedError` -- against a platform the product itself handles,
+    through exactly the path fallback these tests are not about. Seven failures
+    on the cross-platform lane were that, reported as defects in code that has a
+    Windows implementation and takes it correctly when not lied to.
+
+    Removing a member is a different question and stays available everywhere:
+    a capability that is already absent is the state those tests want.
+    """
     members = set(getattr(os, capability, set()))
+    if replacement is not None and original not in members:
+        pytest.skip(f"os.{capability} traversal is unavailable on this platform")
     members.discard(original)
     if replacement is not None:
         members.add(replacement)
