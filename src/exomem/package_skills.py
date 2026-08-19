@@ -56,6 +56,8 @@ def _exomem_checkout_containing(path: Path) -> Path | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError:
         return None
