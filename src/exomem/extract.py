@@ -726,6 +726,8 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
                 [str(py), str(_diarizer_worker_script()), str(path), str(out_path)],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=_diarizer_timeout(path),
                 env=_diarizer_child_env(),
             )
