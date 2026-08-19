@@ -188,7 +188,12 @@ def _ordered_pages(vault_root: Path, scan: Any) -> list[Any]:
 
 def _page_content_hash(page: Any) -> str:
     try:
-        return vault_module.content_hash(page.path.read_text(encoding="utf-8"))
+        # Raw bytes, not `read_text`: `content_hash` is defined as the sha256
+        # of a file's full raw text and `get_page` hands out exactly that, so a
+        # hash taken over the newline-normalized form disagrees with it on every
+        # CRLF page -- and the caller echoes this one straight back into
+        # `edit(expected_hash=...)`, which then refuses the write.
+        return vault_module.content_hash(page.path.read_bytes().decode("utf-8"))
     except (OSError, UnicodeDecodeError):
         return ""
 

@@ -107,7 +107,7 @@ def _hash_file(root: Path, path: str) -> str | None:
     """
     fpath = Path(root) / _clean(path)
     try:
-        return vault_module.content_hash(fpath.read_text(encoding="utf-8"))
+        return vault_module.content_hash(fpath.read_bytes().decode("utf-8"))
     except (OSError, UnicodeDecodeError):
         return None
 

@@ -174,7 +174,7 @@ def test_live_graph_read_barrier_preserves_incremental_repair(
     assert freshness.external_pending(vault) is False
     assert graph.available() is True
     current = next(node for node in graph.nodes(path=rel) if node["kind"] == "file")
-    assert current["source_hash"] == vault_module.content_hash(page.read_text(encoding="utf-8"))
+    assert current["source_hash"] == vault_module.content_hash(page.read_bytes().decode("utf-8"))
 
 
 @pytest.mark.parametrize("restart", [False, True])
@@ -402,7 +402,7 @@ def test_periodic_reconcile_recovers_a_failed_external_publication(
     assert freshness.recall_is_live(vault, "vault") is True
     assert graph.available() is True
     current = next(node for node in graph.nodes(path=rel) if node["kind"] == "file")
-    assert current["source_hash"] == vault_module.content_hash(page.read_text(encoding="utf-8"))
+    assert current["source_hash"] == vault_module.content_hash(page.read_bytes().decode("utf-8"))
 
 
 def test_non_markdown_is_ignored(vault, monkeypatch: pytest.MonkeyPatch) -> None:

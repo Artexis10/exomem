@@ -1233,7 +1233,7 @@ def test_incremental_graph_ack_rollback_keeps_prior_rows_and_ack(
     index.rebuild_all()
     prior_checkpoint = graph_sync.read_checkpoint(tmp_path)
     assert prior_checkpoint is not None
-    prior_hash = vault_module.content_hash(note.read_text(encoding="utf-8"))
+    prior_hash = vault_module.content_hash(note.read_bytes().decode("utf-8"))
 
     vault_module.batch_atomic_write(
         [

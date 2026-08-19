@@ -605,7 +605,7 @@ def test_full_rebuild_recovers_from_a_stale_live_registry(tmp_path: Path) -> Non
     assert report["indexed_files"] == 2
     assert index.available() is True
     current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
-    assert current["source_hash"] == vault_module.content_hash(source.read_text(encoding="utf-8"))
+    assert current["source_hash"] == vault_module.content_hash(source.read_bytes().decode("utf-8"))
     conn = sqlite3.connect(epistemic_graph.sidecar_path(vault))
     try:
         checkpoint = conn.execute(
@@ -637,7 +637,7 @@ def test_checkpointless_refresh_rebuilds_unseen_direct_edits(tmp_path: Path) -> 
     assert report["indexed_files"] == 2
     assert index.available() is True
     current = next(node for node in index.nodes(path=B) if node["kind"] == "file")
-    assert current["source_hash"] == vault_module.content_hash(target.read_text(encoding="utf-8"))
+    assert current["source_hash"] == vault_module.content_hash(target.read_bytes().decode("utf-8"))
 
 
 def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
@@ -846,7 +846,7 @@ def test_explicit_detached_resolver_matches_direct_fallback_for_ambiguous_links(
     kwargs = {
         "registry": index.registry,
         "source_hash": epistemic_graph.vault_module.content_hash(
-            source.read_text(encoding="utf-8")
+            source.read_bytes().decode("utf-8")
         ),
         "parent_state": state,
     }
@@ -882,7 +882,7 @@ def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
     a_after = next(n for n in idx.nodes(path=A) if n["kind"] == "file")
     b_after = next(n for n in idx.nodes(path=B) if n["kind"] == "file")
     assert a_after["source_hash"] == epistemic_graph.vault_module.content_hash(
-        a.read_text(encoding="utf-8")
+        a.read_bytes().decode("utf-8")
     )
     assert b_after["source_hash"] == b_before
 
@@ -936,7 +936,7 @@ def test_live_incremental_refresh_does_not_repeat_a_full_disk_walk(
     assert report["indexed_files"] == 1
     current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
     assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
-        source.read_text(encoding="utf-8")
+        source.read_bytes().decode("utf-8")
     )
 
 
@@ -1369,7 +1369,7 @@ def test_topology_scan_rejects_source_hash_mismatch_hidden_by_file_metadata(
         node for node in index.nodes(path=unrelated_rel) if node["kind"] == "file"
     )
     assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
-        unrelated.read_text(encoding="utf-8")
+        unrelated.read_bytes().decode("utf-8")
     )
 
 
@@ -1416,7 +1416,7 @@ def test_live_refresh_replays_every_published_delta_before_availability(
     assert index.available() is True
     b_node = next(node for node in index.nodes(path=B) if node["kind"] == "file")
     assert b_node["source_hash"] == epistemic_graph.vault_module.content_hash(
-        b.read_text(encoding="utf-8")
+        b.read_bytes().decode("utf-8")
     )
     assert index.relation_participants(["links_to"]).paths == frozenset({A, B})
 
@@ -1566,7 +1566,7 @@ def test_incremental_refresh_retries_when_path_changes_during_indexing(
     assert report["indexed_files"] == 2
     current = next(node for node in index.nodes(path=A) if node["kind"] == "file")
     assert current["source_hash"] == epistemic_graph.vault_module.content_hash(
-        source.read_text(encoding="utf-8")
+        source.read_bytes().decode("utf-8")
     )
 
 
