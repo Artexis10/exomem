@@ -12,6 +12,20 @@
 #
 # These are starter examples — rename or replace them with your own.
 
+# How new note filenames are derived from their titles.
+#
+#   slug   lowercase-ascii-kebab-case (the default, and what every existing
+#          vault already uses)
+#   title  the title itself, with only the characters a filesystem cannot
+#          carry removed, so the name reads the way it does in Obsidian's
+#          quick switcher and file explorer
+#
+# Shipped unset so an upgrade never changes what an existing vault names its
+# files. Nothing on disk is renamed when this changes; it governs new names
+# only, so the two styles can coexist in one vault.
+#
+# filename_style: title
+
 projects:
   # Cross-cutting — anything not tied to a specific project or domain.
   personal:
