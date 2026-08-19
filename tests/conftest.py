@@ -392,6 +392,17 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # default tests. Tests that exercise these gates set them explicitly.
     monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
     monkeypatch.delenv("EXOMEM_VIDEO_SCENE_FRAMES", raising=False)
+    # An exported EXOMEM_LOG_DIR must not decide where a test's records land.
+    # `query_log._target` consults it per call and short-circuits ahead of the
+    # module-level QUERIES_PATH/WRITES_PATH/READS_PATH that tests monkeypatch,
+    # so three tests in test_query_log.py wrote into the operator's real log
+    # directory and then failed reading their own tmp sidecar (#570). CI never
+    # saw it -- the variable is unset there -- but the project's own Docker
+    # images set it and the documented contract tells operators to export it,
+    # so anyone running the suite on a configured machine got failures
+    # unrelated to their change. Tests that exercise the override set it
+    # themselves; a test-body or module-fixture setenv still wins over this.
+    monkeypatch.delenv("EXOMEM_LOG_DIR", raising=False)
     # The watcher now starts independently of embeddings (it maintains the
     # freshness/inbound registries too), so build_server would spawn a real
     # watchdog observer in the suite without this. Watcher tests opt back in.
