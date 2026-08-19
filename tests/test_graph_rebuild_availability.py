@@ -1404,6 +1404,87 @@ def test_registered_builder_failure_logs_and_chains_a_content_free_state_aware_p
     assert checkpoint.checkpoint_sha256 in caplog.text
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        graph_sync.GraphSidecarReplaceUnavailable(),
+        graph_sync.GraphRebuildLockUnavailable(),
+        graph_sync.GraphWaiterCapacityError(),
+        graph_sync.GraphResetFailed(),
+        graph_sync.GraphRebuildStopped(),
+        graph_sync.GraphEpochIncoherent("incoherent"),
+    ],
+    ids=lambda f: type(f).__name__,
+)
+def test_every_classified_failure_escalates_when_the_lineage_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure
+) -> None:
+    """The advice upgrade cannot depend on which failure happened to fire.
+
+    `rebuild_graph=true` is the sole switch that reaches
+    `reconcile.isolate_unavailable_graph_lineage`; a plain reconcile does not
+    quarantine a broken lineage. So an operator whose epoch lineage is
+    genuinely unavailable and who is told to run a plain reconcile runs a
+    recovery that cannot fix the condition they have.
+
+    The escalation used to live inside a `GraphEpochIncoherent` branch, which
+    left exactly one classified failure able to reach it while every other
+    member of the hierarchy kept its own remediation. The two conditions are
+    orthogonal by construction -- `_mark_unavailable` edits `graph_meta` in the
+    sidecar, `status()` reads the floor, checkpoint and acknowledgement -- so
+    any of these can co-occur with an unavailable epoch (#573).
+
+    The classification is the part that was already right, so `code` survives
+    the upgrade untouched.
+    """
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    checkpoint = _checkpoint(1)
+    monkeypatch.setattr(
+        graph_sync,
+        "status",
+        lambda _root: {"state": "unavailable", "generation": checkpoint.generation},
+    )
+
+    def fail(_checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        raise failure
+
+    waiter = coordinator.start_or_join(checkpoint, fail)
+    with pytest.raises(graph_sync.GraphRebuildRegistrationError) as stopped:
+        waiter.wait(1)
+
+    assert stopped.value.remediation == graph_sync._LINEAGE_UNAVAILABLE_REMEDIATION
+    assert stopped.value.code == failure.code
+    assert stopped.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("state", ["current", "recovery_required"])
+def test_a_classified_failure_keeps_its_own_advice_when_the_lineage_is_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    """The escalation is for one condition, and must not fire for the others.
+
+    Widening which failures can escalate would be worth nothing if it also
+    widened *when* -- a lineage that is merely stale wants the retry advice
+    each type already carries, not the heavier quarantine.
+    """
+    failure = graph_sync.GraphSidecarReplaceUnavailable()
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    checkpoint = _checkpoint(1)
+    monkeypatch.setattr(
+        graph_sync, "status", lambda _root: {"state": state, "generation": checkpoint.generation}
+    )
+
+    def fail(_checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        raise failure
+
+    waiter = coordinator.start_or_join(checkpoint, fail)
+    with pytest.raises(graph_sync.GraphRebuildRegistrationError) as stopped:
+        waiter.wait(1)
+
+    assert stopped.value is failure
+    assert stopped.value.remediation == failure.remediation
+
+
 def test_registered_unavailable_lineage_failure_projects_explicit_reset_without_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

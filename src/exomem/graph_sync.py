@@ -140,6 +140,14 @@ _RECONCILE_CALL = (
 _RECONCILE_HINT = f"run {_RECONCILE_CALL} to recover the derived graph."
 _RECONCILE_REMEDIATION = f"Run {_RECONCILE_CALL} to recover the derived graph."
 _RETRY_OR_RECONCILE = f"Retry the same mutation identity, or {_RECONCILE_HINT}"
+#: The one remediation that reaches `reconcile.isolate_unavailable_graph_lineage`.
+#: `rebuild_graph=true` is the switch; a plain reconcile does not quarantine a
+#: broken lineage, so advising one against an unavailable epoch sends an
+#: operator to a recovery that cannot fix the condition they have.
+_LINEAGE_UNAVAILABLE_REMEDIATION = (
+    'Run maintain_memory(mode="reconcile", dry_run=false, rebuild_graph=true) '
+    "to recover the derived graph."
+)
 _COORDINATORS: dict[str, GraphRebuildCoordinator] = {}
 _COORDINATORS_LOCK = threading.Lock()
 _LIVE_TEMPORARIES: set[Path] = set()
@@ -2431,6 +2439,49 @@ class GraphRebuildCoordinator:
         with self._condition:
             self._waiter_count = max(0, self._waiter_count - 1)
 
+    def _advice_for(
+        self, error: GraphRebuildRegistrationError
+    ) -> GraphRebuildRegistrationError:
+        """Keep the classification; upgrade the advice when the lineage is gone.
+
+        `rebuild_graph=true` is the sole switch that reaches
+        `reconcile.isolate_unavailable_graph_lineage`, which is itself gated on
+        the epoch classifying as `unavailable`. A plain reconcile does not
+        quarantine a broken lineage, so an operator following the unescalated
+        advice runs a recovery that cannot fix the condition they actually
+        have.
+
+        This escalation used to sit inside a `GraphEpochIncoherent` branch, so
+        exactly one classified failure could reach it. Every other member of
+        the hierarchy -- a sidecar that could not be replaced, an unavailable
+        lock or waiter, a failed reset, a stopped rebuild, a publication that
+        could not stabilize -- kept its own remediation and sent the operator
+        down the weaker recovery. The intent generalised; the placement did
+        not (#573).
+
+        The two conditions are orthogonal by construction, so the co-occurrence
+        is real rather than theoretical: `_mark_unavailable` edits `graph_meta`
+        inside the sidecar, while `status()` reads the floor, the checkpoint
+        and the acknowledgement. A Class B publication failure can therefore
+        land while the epoch lineage is independently unavailable -- a valid
+        floor at generation N with the checkpoint still at N-1, say, which is
+        what an interrupted mutation leaves behind.
+
+        Only the remediation is replaced. `code` survives, because the
+        classification is the part that was already right.
+        """
+        try:
+            state = status(self.vault_root)["state"]
+        except Exception:  # noqa: BLE001 - status is fail-closed
+            return error
+        if state != "unavailable":
+            return error
+        projection = GraphRebuildRegistrationError(
+            error.code, _LINEAGE_UNAVAILABLE_REMEDIATION
+        )
+        projection.__cause__ = error
+        return projection
+
     def _run(self) -> None:
         attempts = 0
         while attempts < MAX_GRAPH_REBUILD_ATTEMPTS:
@@ -2444,20 +2495,7 @@ class GraphRebuildCoordinator:
                 outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
                 if isinstance(error, GraphRebuildRegistrationError):
-                    projection = error
-                    if isinstance(error, GraphEpochIncoherent):
-                        try:
-                            state = status(self.vault_root)["state"]
-                        except Exception:  # noqa: BLE001 - status is fail-closed
-                            pass
-                        else:
-                            if state == "unavailable":
-                                projection = GraphRebuildRegistrationError(
-                                    error.code,
-                                    "Run maintain_memory(mode=\"reconcile\", dry_run=false, "
-                                    "rebuild_graph=true) to recover the derived graph.",
-                                )
-                                projection.__cause__ = error
+                    projection = self._advice_for(error)
                 else:
                     try:
                         state = status(self.vault_root)["state"]
@@ -2465,10 +2503,9 @@ class GraphRebuildCoordinator:
                         remediation = _RECONCILE_REMEDIATION
                     else:
                         remediation = (
-                            "Run maintain_memory(mode=\"reconcile\", dry_run=false, rebuild_graph=true) "
-                            "to recover the derived graph."
+                            _LINEAGE_UNAVAILABLE_REMEDIATION
                             if state == "unavailable"
-                            else f"Retry the same mutation identity, or {_RECONCILE_HINT}"
+                            else _RETRY_OR_RECONCILE
                         )
                     projection = GraphRebuildStopped(remediation)
                     projection.__cause__ = error
