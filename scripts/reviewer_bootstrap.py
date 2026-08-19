@@ -30,6 +30,18 @@ Design notes, each of which is a bug this script exists to prevent:
 * Creating the authority is the irreversible step: it spends the invite whether
   it later succeeds, expires or is revoked. `prepare` therefore stops short of
   it, so the invite keeps its full 7-day life while a human fetches the token.
+* The locks are read from `--repo`, and they must be the ones the candidate was
+  cut from, NOT whatever this repo's HEAD generates. A change that touches the
+  schema contract moves `schema_contract_sha256` and `compatibility_sha256`
+  without moving the packaged artifact, and every server-side join on those
+  digests then fails -- `create-stage` with a bare 500, `attach-openai-locks`
+  with a silent `false`. `preflight` compares them and names the field that
+  moved; when it is red, point `--repo` at a worktree of the matching revision
+  rather than editing a lock file.
+* A candidate is created with `openai_package_lock` NULL, always, because the
+  OpenAI artifact is not part of the checked Exomem release. `prepare` attaches
+  it. Skipping that leaves `run` unable to create the OpenAI sibling stage, and
+  `run` discovers it only after the invite is spent.
 
 Secrets are never printed. Issued reviewer credentials are written to the state
 directory with mode 0600 and only their presence is reported.
@@ -40,6 +52,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import os
 import sys
@@ -169,6 +182,94 @@ def chatgpt_cimd_identity(
     return client_id, redirects
 
 
+def canonical_json(value: object) -> str:
+    """Reproduce the control plane's `canonical()` byte for byte.
+
+    `attachOpenAiContractLocks` verifies an HMAC over this encoding, so it is not
+    ordinary JSON: object keys are sorted recursively and there is no whitespace.
+    A mismatch here is indistinguishable from a wrong secret.
+    """
+    if isinstance(value, list):
+        return "[" + ",".join(canonical_json(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return (
+            "{"
+            + ",".join(
+                f"{json.dumps(key, ensure_ascii=False)}:{canonical_json(value[key])}"
+                for key in sorted(value)
+            )
+            + "}"
+        )
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def attach_openai_locks(cp: ControlPlane, candidate_id: str, locks: dict) -> None:
+    """Register the OpenAI package and archive locks on the pending candidate.
+
+    Without this the candidate carries `openai_package_lock IS NULL`, which is how
+    every candidate is created -- `storeExomemAgentContractCandidate` sets it to
+    null deliberately, because the OpenAI artifact is not part of the checked
+    Exomem release. `create-stage` for platform `openai` joins on
+    `candidate.openai_package_lock->>'artifact_sha256'`, so a null lock matches
+    nothing and the OpenAI sibling stage cannot be created.
+
+    That failure is the expensive one. `run` builds the Claude sibling first, so
+    the OpenAI stage is attempted AFTER the invite has been spent and the <=30
+    minute authority clock has started, and no retry can recover the window. Doing
+    it here, in `prepare`, moves it to a point where nothing is consumed.
+
+    The update is guarded server-side by `state = 'pending'` and by all three
+    contract digests, so attaching locks from a repo that does not match the
+    candidate fails loudly rather than certifying a mismatched pair.
+    """
+    key_id = os.environ.get("EXOMEM_HOSTED_CONTRACT_IMPORT_KEY_ID")
+    secret = os.environ.get("EXOMEM_HOSTED_CONTRACT_IMPORT_SECRET")
+    if not key_id or not secret:
+        raise SystemExit(
+            "EXOMEM_HOSTED_CONTRACT_IMPORT_KEY_ID and "
+            "EXOMEM_HOSTED_CONTRACT_IMPORT_SECRET must be set to attach the "
+            "OpenAI locks; without them the OpenAI sibling stage fails mid-window."
+        )
+    unsigned = {
+        "candidateId": candidate_id,
+        "packageLock": locks["openai_package_lock"],
+        "archiveLock": locks["openai_archive_lock"],
+        "operatorKeyId": key_id,
+    }
+    signature = hmac.new(
+        secret.encode(), canonical_json(unsigned).encode(), hashlib.sha256
+    ).hexdigest()
+
+    status, attached = cp.call(
+        "POST",
+        "/api/exomem/admin/contracts",
+        label="prepare-attach-openai-locks",
+        body={
+            "action": "attach-openai-locks",
+            "candidateId": candidate_id,
+            "packageLock": locks["openai_package_lock"],
+            "archiveLock": locks["openai_archive_lock"],
+            "operatorKeyId": key_id,
+            "operatorSignature": signature,
+        },
+    )
+    if status != 200:
+        raise SystemExit(f"attach-openai-locks failed: {status} {attached}")
+    if attached.get("attached") is True:
+        print("  openai locks attached")
+        return
+    # The guard also requires `openai_package_lock IS NULL`, so a false here means
+    # the candidate already carries locks. Preflight has just proved its state and
+    # all three digests, which leaves nothing else the predicate could have
+    # rejected -- but locks attached from a different repo checkout would still
+    # break the sibling stage, and that cannot be read back through any endpoint.
+    print(
+        "  openai locks were already attached by an earlier prepare.\n"
+        "        If that run used a different checkout, `run` will fail at the\n"
+        "        OpenAI sibling stage and the candidate must be replaced."
+    )
+
+
 def pkce_pair() -> tuple[str, str]:
     verifier = base64.urlsafe_b64encode(os.urandom(48)).decode().rstrip("=")
     challenge = (
@@ -254,7 +355,7 @@ class ControlPlane:
         return status, parsed
 
 
-def preflight(cp: ControlPlane, candidate_id: str) -> bool:
+def preflight(cp: ControlPlane, candidate_id: str, locks: dict) -> bool:
     """Report every blocker. Returns True when a bootstrap can succeed."""
     ok = True
 
@@ -281,6 +382,39 @@ def preflight(cp: ControlPlane, candidate_id: str) -> bool:
         f"routable={rollout['routableCellCount']}"
     )
     ok &= good
+
+    # The candidate freezes the contract the deployed cell actually serves. This
+    # repo's locks are whatever HEAD generates, and the two drift the moment a
+    # change touches the schema contract without a matching candidate being cut.
+    # Every downstream guard -- `create-stage`, `attach-openai-locks` -- joins on
+    # these three digests and answers a bare 500 or a silent false when they
+    # disagree, the first of them inside the window. Compare here, where it is
+    # free, and name the field that moved.
+    contract = next(
+        (c for c in contracts.get("agentContracts", []) if c["id"] == candidate_id), None
+    )
+    if contract is None:
+        print(f"  FAIL  candidate {candidate_id[:8]} has no contract row")
+        return False
+    drift = [
+        (field, expected, contract[key])
+        for field, key, expected in (
+            ("schema contract", "schemaDigest", locks["contract"]),
+            ("compatibility", "compatibilityDigest", locks["compatibility"]),
+            ("command surface", "commandFingerprint", locks["command_surface"]),
+        )
+        if contract[key] != expected
+    ]
+    print(f"  {'ok  ' if not drift else 'FAIL'}  repo locks match candidate")
+    for field, expected, actual in drift:
+        print(f"          {field}: repo {expected[:16]} != candidate {actual[:16]}")
+    if drift:
+        print(
+            "        This checkout is not the release the candidate was cut from.\n"
+            "        Point --repo at a worktree of the matching revision, or cut a\n"
+            "        fresh candidate from what is deployed. Do not edit the locks."
+        )
+    ok &= not drift
 
     status, clients = cp.call("GET", "/api/exomem/admin/oauth-clients", label="preflight-clients")
     active = [a for a in clients.get("bootstrapAuthorities", []) if a.get("state") == "active"]
@@ -327,6 +461,10 @@ def _stage_collision_hint(status: int, platform: str) -> str:
 
 def prepare(cp: ControlPlane, candidate_id: str, email: str, locks: dict) -> dict:
     """Create stage, pinned client and invite. Spends nothing irreversible."""
+    # First, because `run` cannot create the OpenAI sibling stage without it and
+    # by then the window is already running.
+    attach_openai_locks(cp, candidate_id, locks)
+
     client_id = f"exomem-reviewer-bootstrap-{uuid.uuid4()}"
     verifier, challenge = pkce_pair()
     config_sha = client_config_sha256(
@@ -663,9 +801,14 @@ def load_locks(repo: Path) -> dict:
         "openai_registered_app": openai["registered_app_id_sha256"],
         "compatibility": claude["compatibility_sha256"],
         "contract": claude["schema_contract_sha256"],
+        "command_surface": claude["command_surface_sha256"],
         "plugin_version": claude["plugin_version"],
         "fixture_version": fixture["fixture_version"],
         "fixture_digest": fixture["payload_sha256"],
+        # `attach-openai-locks` stores these documents verbatim and re-validates
+        # every key, so they are passed through rather than reduced to digests.
+        "openai_package_lock": openai,
+        "openai_archive_lock": openai_zip,
     }
 
 
@@ -706,14 +849,14 @@ def main() -> int:
 
     if args.command == "preflight":
         print("preflight:")
-        return 0 if preflight(cp, args.candidate_id) else 1
+        return 0 if preflight(cp, args.candidate_id, locks) else 1
 
     if args.command == "prepare":
         if not args.email:
             print("--email is required for prepare", file=sys.stderr)
             return 2
         print("preflight:")
-        if not preflight(cp, args.candidate_id):
+        if not preflight(cp, args.candidate_id, locks):
             print("\nrefusing to prepare while preflight is red")
             return 1
         print("\nprepare:")

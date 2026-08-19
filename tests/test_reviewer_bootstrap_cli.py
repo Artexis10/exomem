@@ -13,6 +13,8 @@ future option that is consumed but not declared fails here instead of live.
 from __future__ import annotations
 
 import ast
+import hashlib
+import hmac
 import importlib.util
 import pathlib
 import subprocess
@@ -153,3 +155,227 @@ def test_openai_redirect_is_declared_and_documented() -> None:
         "the operator is told to use this flag when the connector document is "
         "unreadable from their network; it has to appear in --help"
     )
+
+
+# --- OpenAI lock attachment -------------------------------------------------
+#
+# Every contract candidate is created with `openai_package_lock` NULL --
+# `storeExomemAgentContractCandidate` sets it to null deliberately, because the
+# OpenAI artifact is not part of the checked Exomem release. `create-stage` for
+# platform `openai` joins on `candidate.openai_package_lock->>'artifact_sha256'`,
+# so until the locks are attached the OpenAI sibling stage matches nothing.
+#
+# `run` builds the Claude sibling first, which means that failure lands after the
+# invite is spent and the <=30 minute authority clock has started. These tests pin
+# the attachment to `prepare`, and pin the signature encoding, because a wrong
+# encoding is indistinguishable from a wrong secret in the server's reply.
+
+OPENAI_PACKAGE_LOCK = {
+    "platform": "openai",
+    "artifact_sha256": "b9" * 32,
+    "registered_app_id_sha256": "b0" * 32,
+    "schema_version": 1,
+    "platform_schema_version": "1.0.0",
+    "plugin_id": "exomem-hosted",
+    "plugin_version": "0.1.0",
+    "endpoint": "https://example.invalid/api/exomem/mcp/v1",
+    "profile": "hosted-alpha-agent-v1",
+    "command_surface_sha256": "ed" * 32,
+    "schema_contract_sha256": "47" * 32,
+    "definition_sha256": "be" * 32,
+    "skills_sha256": "e2" * 32,
+    "compatibility_sha256": "54" * 32,
+    "oauth_discovery_sha256": "10" * 32,
+}
+OPENAI_ARCHIVE_LOCK = {
+    "platform": "openai",
+    "archive_sha256": "d8" * 32,
+    "registered_app_id_sha256": "b0" * 32,
+}
+
+
+def _locks() -> dict:
+    return {
+        "claude_package": "9d" * 32,
+        "claude_archive": "0d" * 32,
+        "openai_package": OPENAI_PACKAGE_LOCK["artifact_sha256"],
+        "openai_archive": OPENAI_ARCHIVE_LOCK["archive_sha256"],
+        "openai_registered_app": OPENAI_PACKAGE_LOCK["registered_app_id_sha256"],
+        "compatibility": OPENAI_PACKAGE_LOCK["compatibility_sha256"],
+        "contract": OPENAI_PACKAGE_LOCK["schema_contract_sha256"],
+        "command_surface": OPENAI_PACKAGE_LOCK["command_surface_sha256"],
+        "plugin_version": "0.1.0",
+        "fixture_version": "v1",
+        "fixture_digest": "ff" * 32,
+        "openai_package_lock": OPENAI_PACKAGE_LOCK,
+        "openai_archive_lock": OPENAI_ARCHIVE_LOCK,
+    }
+
+
+class _RecordingControlPlane:
+    """Records calls and answers from a canned table keyed by label."""
+
+    def __init__(self, responses: dict):
+        self.responses = responses
+        self.calls: list[dict] = []
+        self.base_url = "https://example.invalid"
+
+    def call(self, method, path, *, label, body=None, **_):
+        self.calls.append({"method": method, "path": path, "label": label, "body": body})
+        return self.responses.get(label, (200, {}))
+
+
+def test_canonical_json_sorts_keys_recursively_and_omits_whitespace() -> None:
+    module = _load_module()
+    assert module.canonical_json({"b": 1, "a": [3, {"d": None, "c": True}]}) == (
+        '{"a":[3,{"c":true,"d":null}],"b":1}'
+    )
+
+
+def test_attach_signs_the_payload_the_control_plane_will_verify(monkeypatch) -> None:
+    """The HMAC is over the control plane's `canonical()` of the unsigned payload.
+
+    Reproduced here rather than deferred to the server: a mismatched encoding and
+    a wrong secret produce the same rejection, and the operator cannot tell them
+    apart from the reply.
+    """
+    module = _load_module()
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_KEY_ID", "key-1")
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_SECRET", "s3cret")
+    cp = _RecordingControlPlane({"prepare-attach-openai-locks": (200, {"attached": True})})
+
+    module.attach_openai_locks(cp, "cand-1", _locks())
+
+    body = cp.calls[0]["body"]
+    assert body["action"] == "attach-openai-locks"
+    assert body["packageLock"] == OPENAI_PACKAGE_LOCK
+    assert body["archiveLock"] == OPENAI_ARCHIVE_LOCK
+    expected = hmac.new(
+        b"s3cret",
+        module.canonical_json(
+            {
+                "candidateId": "cand-1",
+                "packageLock": OPENAI_PACKAGE_LOCK,
+                "archiveLock": OPENAI_ARCHIVE_LOCK,
+                "operatorKeyId": "key-1",
+            }
+        ).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert body["operatorSignature"] == expected
+
+
+def test_attach_refuses_without_the_operator_signing_key(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.delenv("EXOMEM_HOSTED_CONTRACT_IMPORT_KEY_ID", raising=False)
+    monkeypatch.delenv("EXOMEM_HOSTED_CONTRACT_IMPORT_SECRET", raising=False)
+    cp = _RecordingControlPlane({})
+
+    with pytest.raises(SystemExit) as raised:
+        module.attach_openai_locks(cp, "cand-1", _locks())
+
+    assert "CONTRACT_IMPORT" in str(raised.value)
+    assert cp.calls == [], "no request may be sent without a signing key"
+
+
+def test_attach_surfaces_a_rejected_attachment(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_KEY_ID", "key-1")
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_SECRET", "s3cret")
+    cp = _RecordingControlPlane({"prepare-attach-openai-locks": (400, {"code": "INVALID"})})
+
+    with pytest.raises(SystemExit):
+        module.attach_openai_locks(cp, "cand-1", _locks())
+
+
+def test_prepare_attaches_the_openai_locks_before_anything_else(monkeypatch) -> None:
+    """Ordering is the whole point: after `run` starts, this is unrecoverable."""
+    module = _load_module()
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_KEY_ID", "key-1")
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_SECRET", "s3cret")
+    cp = _RecordingControlPlane(
+        {
+            "prepare-attach-openai-locks": (200, {"attached": True}),
+            # Stop at the next call. Reaching it is what this test asserts.
+            "prepare-stage": (500, {}),
+        }
+    )
+
+    with pytest.raises(SystemExit):
+        module.prepare(cp, "cand-1", "reviewer@example.invalid", _locks())
+
+    assert cp.calls[0]["label"] == "prepare-attach-openai-locks"
+    assert cp.calls[1]["label"] == "prepare-stage"
+
+
+# --- preflight lock-drift gate ---------------------------------------------
+
+
+def _contracts_response(schema: str, compatibility: str, command: str) -> dict:
+    return {
+        "liveCohortCandidateId": None,
+        "agentContracts": [
+            {
+                "id": "cand-1",
+                "state": "pending",
+                "schemaDigest": schema,
+                "compatibilityDigest": compatibility,
+                "commandFingerprint": command,
+            }
+        ],
+        "rolloutStatus": [
+            {
+                "candidateId": "cand-1",
+                "state": "pending",
+                "sourceRelease": "0.54.1",
+                "routableCellCount": 0,
+            }
+        ],
+    }
+
+
+def _preflight_cp(contracts: dict) -> _RecordingControlPlane:
+    return _RecordingControlPlane(
+        {
+            "preflight-contracts": (200, contracts),
+            "preflight-clients": (200, {"bootstrapAuthorities": []}),
+            "preflight-capacity": (
+                200,
+                {
+                    "capacity": {
+                        "runtimeCapacitySlots": 4,
+                        "reservedRuntimeSlots": 0,
+                        "provisionClaimCapacity": 2,
+                        "activeProvisionClaims": 0,
+                    }
+                },
+            ),
+        }
+    )
+
+
+def test_preflight_is_green_when_the_repo_matches_the_candidate() -> None:
+    module = _load_module()
+    locks = _locks()
+    cp = _preflight_cp(
+        _contracts_response(locks["contract"], locks["compatibility"], locks["command_surface"])
+    )
+    assert module.preflight(cp, "cand-1", locks) is True
+
+
+@pytest.mark.parametrize("field", ["contract", "compatibility", "command_surface"], ids=lambda f: f)
+def test_preflight_fails_when_a_contract_digest_drifted(field: str, capsys) -> None:
+    """Each digest is joined on by `create-stage` or `attach-openai-locks`.
+
+    Both answer a bare 500 or a silent `false` when they disagree, and the first
+    of them lands inside the promotion window.
+    """
+    module = _load_module()
+    locks = _locks()
+    drifted = dict(locks)
+    drifted[field] = "aa" * 32
+    cp = _preflight_cp(
+        _contracts_response(locks["contract"], locks["compatibility"], locks["command_surface"])
+    )
+    assert module.preflight(cp, "cand-1", drifted) is False
+    assert "repo locks match candidate" in capsys.readouterr().out
