@@ -114,6 +114,30 @@ def load_project_registry(vault_root: Path) -> ProjectRegistry:
     return registry
 
 
+def filename_style(vault_root: Path) -> str | None:
+    """The vault's `filename_style` key, or None when it does not set one.
+
+    Deliberately separate from `load_project_registry`: that reader answers with
+    a fallback registry on any failure, which is right for project keys (a vault
+    with none still has to route writes somewhere) and wrong here. A missing or
+    unreadable file must mean "this vault expressed no preference" so the caller
+    falls through to the default, not "this vault chose something".
+
+    Returns the raw value; `vault.resolve_filename_style` validates it, so an
+    unrecognised value is refused there with the source named rather than
+    silently becoming the default.
+    """
+    path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("filename_style")
+    return value if isinstance(value, str) else None
+
+
 def _registry_from_data(data: object) -> ProjectRegistry | None:
     if not isinstance(data, dict):
         return None
