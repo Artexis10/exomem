@@ -14,7 +14,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -22,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import scratch_root  # noqa: E402
+
 WINDOWS = sys.platform == "win32"
 
 
@@ -2432,17 +2436,12 @@ def _e2e_workdir(*, keep: bool):
     until it reproduced rather than by reading the traceback it had already
     written down.
     """
-    path = tempfile.mkdtemp(prefix="exomem-product-e2e-")
-    try:
-        yield path
-    except BaseException:
-        _publish_server_logs(Path(path))
-        raise
-    finally:
-        if keep:
-            print(f"product-e2e: kept working directory {path}")
-        else:
-            shutil.rmtree(path, ignore_errors=True)
+    with scratch_root.scratch_root("exomem-product-e2e-", keep=keep) as path:
+        try:
+            yield str(path)
+        except BaseException:
+            _publish_server_logs(path)
+            raise
 
 
 def _orchestrate(args: argparse.Namespace) -> int:
