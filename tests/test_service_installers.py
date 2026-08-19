@@ -9,6 +9,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+from benchmark_capabilities import require_posix_executable_scripts
+
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = ROOT / "scripts" / "install-service.sh"
 
@@ -29,6 +31,8 @@ def _fake_python(path: Path) -> None:
         import stat
         import sys
         from pathlib import Path
+
+from benchmark_capabilities import require_posix_executable_scripts
 
         trace = Path(os.environ["TRACE_FILE"])
 
@@ -197,6 +201,7 @@ def _fixture(tmp_path: Path, *, os_name: str = "Linux", arch: str = "x86_64") ->
 
 
 def _run(tmp_path: Path, *args: str, os_name: str = "Linux", arch: str = "x86_64") -> tuple[subprocess.CompletedProcess[str], Path, Path, dict[str, str]]:
+    require_posix_executable_scripts()
     env, service_root, env_file = _fixture(tmp_path, os_name=os_name, arch=arch)
     result = subprocess.run(
         [
@@ -291,6 +296,7 @@ def test_macos_arm64_media_adds_mlx_and_launchd_environment(tmp_path: Path) -> N
 
 
 def test_doctor_failure_does_not_touch_service_manager(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
     env, service_root, env_file = _fixture(tmp_path)
     env["FAKE_DOCTOR_FAIL_PROFILE"] = "hybrid"
     result = subprocess.run(
@@ -320,6 +326,7 @@ def test_doctor_failure_does_not_touch_service_manager(tmp_path: Path) -> None:
 
 
 def test_http_200_stops_service_and_fails_closed(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
     env, service_root, env_file = _fixture(tmp_path)
     env["FAKE_HTTP_STATUS"] = "200"
     result = subprocess.run(
@@ -349,6 +356,7 @@ def test_http_200_stops_service_and_fails_closed(tmp_path: Path) -> None:
 
 
 def test_help_and_invalid_profile_are_non_mutating() -> None:
+    require_posix_executable_scripts()
     help_result = subprocess.run(
         ["bash", str(INSTALL_SH), "--help"],
         cwd=ROOT,
@@ -373,6 +381,7 @@ def test_help_and_invalid_profile_are_non_mutating() -> None:
 
 
 def test_onnx_profile_installs_the_cpu_lane_and_preflights_as_hybrid(tmp_path: Path) -> None:
+    require_posix_executable_scripts()
     """#481: a GPU-less host had no way to get vectors without a CUDA torch wheel.
 
     `torch` is pinned to the CUDA index for Linux, so `--profile hybrid` pulled
