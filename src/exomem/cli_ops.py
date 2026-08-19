@@ -64,6 +64,10 @@ _REMEDIATION: dict[str, str] = {
     "WRITER_COORDINATOR_UNAVAILABLE": (
         "Check the coordinator URL, credentials, and service health; reads remain available."
     ),
+    "WRITER_COORDINATOR_CONTRACT_ABSENT": (
+        "Point the writer-lease URL at a service that implements /v1/vaults/<id>/lease, "
+        "or disable coordination; retrying cannot change this answer."
+    ),
     "WRITER_FENCED": "Retry the mutation on the current writer.",
     "INGRESS_BYPASSED": (
         "Public traffic must enter via the HA edge hostname; check DNS, tunnel ingress, "
@@ -118,6 +122,7 @@ _REMEDIATION: dict[str, str] = {
 _SERVICE_UNAVAILABLE_CODES = frozenset(
     {
         "WRITER_COORDINATOR_UNAVAILABLE",
+        "WRITER_COORDINATOR_CONTRACT_ABSENT",
         "MUTATION_LOCK_UNAVAILABLE",
         # Retrieval-index-reliability (restore-indexed-category-recall): a safe
         # exact category/kind plan whose maintained semantic catalog cannot yet
