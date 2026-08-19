@@ -88,6 +88,22 @@ def has_resumable_directory_cursor() -> bool:
 
 
 @lru_cache(maxsize=1)
+def has_procfs_descriptor_paths() -> bool:
+    """True where `/proc/self/fd/<n>` names an open descriptor as a path.
+
+    Linux publishes every open descriptor as a magic symlink, and a *directory*
+    descriptor can be path-walked through: `/proc/self/fd/<dirfd>/child`
+    resolves relative to the directory the descriptor holds, whatever the
+    directory is called now. Code that must re-open exactly what it staged --
+    `infra/scripts/sign_active_secret_registry.py` verifies its staged registry
+    that way before publishing -- has no portable equivalent: macOS has no
+    procfs, and its `/dev/fd/<n>` resolves the descriptor itself but supports
+    no lookup beneath it, so `/dev/fd/<n>/child` cannot resolve at all.
+    """
+    return os.name == "posix" and os.path.isdir("/proc/self/fd")
+
+
+@lru_cache(maxsize=1)
 def has_arbitrary_byte_filenames() -> bool:
     """True where a filename may hold bytes that are not valid UTF-8.
 
@@ -280,6 +296,11 @@ def require_trusted_system_git() -> None:
 def require_resumable_directory_cursor() -> None:
     if not has_resumable_directory_cursor():
         pytest.skip("this platform resumes directory scans from the durable prune catalog")
+
+
+def require_procfs_descriptor_paths() -> None:
+    if not has_procfs_descriptor_paths():
+        pytest.skip("/proc/self/fd does not name open descriptors here")
 
 
 def require_control_characters_in_filenames() -> None:

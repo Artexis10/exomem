@@ -8,6 +8,7 @@ import socket
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import require_procfs_descriptor_paths
 
 
 def _fd_snapshot() -> set[str]:
@@ -174,6 +175,13 @@ def test_feedback6_recursive_retirement_enforces_entry_and_depth_limits(tmp_path
 
 
 def test_feedback6_review_capability_probe_never_removes_a_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `protocol.custody` builds directory custody on proc-fd magic symlinks: a
+    # capability path is `/proc/self/fd/<n>` and callers walk *through* it. Off
+    # procfs `prove_supported` refuses before it ever publishes a proof, so the
+    # probe whose replacement-safety is under test here never runs and the
+    # refusal asserted below happens for an unrelated reason.
+    require_procfs_descriptor_paths()
+
     from protocol.custody import CustodyUnsupported, HeldDirectory, hold_directory
 
     root_path = tmp_path / "root"

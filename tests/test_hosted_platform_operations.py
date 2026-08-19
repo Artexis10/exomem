@@ -18,6 +18,7 @@ import yaml
 from benchmark_capabilities import (
     require_posix_executable_scripts,
     require_posix_file_modes,
+    require_procfs_descriptor_paths,
 )
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -1332,6 +1333,13 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The signer verifies its staged registry through
+    # `/proc/self/fd/<dirfd>/<name>` before it publishes, so that what it
+    # checks is what it links rather than whatever the name resolves to a
+    # moment later. That is a Linux facility with no portable equivalent; off
+    # procfs the verification raises, `main` maps it to exit 2, and the
+    # refusal never reaches pytest as an error it could classify.
+    require_procfs_descriptor_paths()
     signer = _load(
         "infra/scripts/sign_active_secret_registry.py", "sign_active_secret_registry_test"
     )
@@ -1415,6 +1423,13 @@ def test_active_secret_registry_signer_rejects_unsafe_inputs_and_leaves_no_parti
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The signer verifies its staged registry through
+    # `/proc/self/fd/<dirfd>/<name>` before it publishes, so that what it
+    # checks is what it links rather than whatever the name resolves to a
+    # moment later. That is a Linux facility with no portable equivalent; off
+    # procfs the verification raises, `main` maps it to exit 2, and the
+    # refusal never reaches pytest as an error it could classify.
+    require_procfs_descriptor_paths()
     signer = _load(
         "infra/scripts/sign_active_secret_registry.py", "active_secret_registry_signer_safety"
     )
