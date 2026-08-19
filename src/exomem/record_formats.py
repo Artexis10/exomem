@@ -986,6 +986,38 @@ def splice_record_presentation(
     return bom + text[:close_end] + newline + block + text[close_end:]
 
 
+def _span_terminator(yaml_text: str, span: tuple[int, int]) -> str:
+    r"""The line ending a compose span already swallowed, or "" if it swallowed none.
+
+    Block-style nodes -- a literal or folded scalar, a nested mapping, a block
+    sequence -- end their span *after* their own trailing newline. Plain, flow
+    and quoted scalars stop at the last content byte. Every splice decision
+    below turns on that difference, and it has to be read off the span itself:
+    a single CRLF anywhere in the document used to make the answer
+    `"\r\n"` for the whole file, so an LF-terminated span looked as though
+    it had swallowed nothing and its line ending was never restored.
+    """
+    text = yaml_text[span[0] : span[1]]
+    if text.endswith("\r\n"):
+        return "\r\n"
+    if text.endswith("\n"):
+        return "\n"
+    return ""
+
+
+def _line_terminator(text: str, index: int) -> str:
+    r"""The line ending that terminates the line holding `index`.
+
+    Searches for the LF that both conventions end with, so a `"\r\n"` document
+    with one LF-terminated line -- or the reverse -- is read as it actually is
+    rather than as its majority. Returns "" when nothing terminates the line.
+    """
+    stop = text.find("\n", index)
+    if stop == -1:
+        return ""
+    return "\r\n" if stop and text[stop - 1] == "\r" else "\n"
+
+
 def render_markdown_item_update(
     source: str,
     changes: Mapping[str, Any],
@@ -1022,18 +1054,44 @@ def render_markdown_item_update(
         if key_node.value in spans:
             raise collections.CollectionError("DUPLICATE_FRONTMATTER_KEY", "item key is duplicated")
         spans[key_node.value] = (key_node.start_mark.index, value_node.end_mark.index)
+    # Everything appended below lands after the final frontmatter line, so it
+    # takes that line's ending. Falling back to the document newline only
+    # matters for a frontmatter block that is not newline-terminated at all.
+    trailing = _span_terminator(yaml_text, (0, len(yaml_text))) or newline
     replacements: list[tuple[int, int, str]] = []
     for name in delete_fields:
         span = spans.get(name)
         if span is None:
             continue
-        end = yaml_text.find(newline, span[1])
-        replacements.append((span[0], len(yaml_text) if end == -1 else end + len(newline), ""))
+        if _span_terminator(yaml_text, span):
+            # The span already covers this field's own line ending. Searching
+            # forward from here lands on the *next* field's terminator, and the
+            # deletion range then swallows that field whole -- valid YAML with a
+            # governed key silently gone, which no parse-level guard can see.
+            replacements.append((span[0], span[1], ""))
+            continue
+        # A plain, flow or quoted scalar stops at its last content byte, so the
+        # line ending after it is still ours to remove. Search for the LF both
+        # conventions end with rather than for the document's majority newline.
+        stop = yaml_text.find("\n", span[1])
+        replacements.append((span[0], len(yaml_text) if stop == -1 else stop + 1, ""))
     for name, value in changes.items():
         span = spans.get(name)
-        rendered = vault.serialize_frontmatter({name: value}).replace("\n", newline)
+        # Render with the line ending in force where this field actually lives,
+        # not the document's majority: one CRLF anywhere used to decide it for
+        # every line, which is what left a mixed-ending page unwritable.
+        local = (
+            newline
+            if span is None
+            else (
+                _span_terminator(yaml_text, span)
+                or _line_terminator(yaml_text, span[1])
+                or newline
+            )
+        )
+        rendered = vault.serialize_frontmatter({name: value}).replace("\n", local)
         if span is None:
-            replacements.append((len(yaml_text), len(yaml_text), rendered + newline))
+            replacements.append((len(yaml_text), len(yaml_text), rendered + trailing))
         else:
             # Block-style original values (dict/list-with-nested-items, or a
             # literal/folded scalar) end their compose span *after* their own
@@ -1046,8 +1104,9 @@ def render_markdown_item_update(
             # another key's span replacement, an appended new field, or the
             # closing `---` fence. Reproduce that swallowed newline so the
             # splice always lands on its own line.
-            if yaml_text[span[0] : span[1]].endswith(newline) and not rendered.endswith(newline):
-                rendered += newline
+            consumed = _span_terminator(yaml_text, span)
+            if consumed and not rendered.endswith(consumed):
+                rendered += consumed
             replacements.append((*span, rendered))
     updated_yaml = yaml_text
     for start, end, rendered in sorted(replacements, reverse=True):
@@ -1055,13 +1114,46 @@ def render_markdown_item_update(
     profile = profile_for(semantic_profile)
     marker = re.escape(profile.item_audit_marker)
     updated_yaml = re.sub(rf"(?m)^# {marker}: [0-9a-f]{{24}}\r?\n?", "", updated_yaml)
+    # Field-set fidelity, checked before the parse guard below because the
+    # failure this closes leaves *valid* YAML: a deletion range that ran past
+    # its own field takes the next one with it, and nothing downstream can tell
+    # a key that was never asked for from a key that was silently dropped.
+    expected_keys = [name for name in spans if name not in set(delete_fields)]
+    expected_keys += [name for name in changes if name not in spans]
+    try:
+        spliced = vault.yaml.compose(updated_yaml)
+    except vault.yaml.YAMLError as error:
+        raise collections.CollectionError(
+            "INVALID_RECORD_ITEM", "spliced item frontmatter is not valid YAML"
+        ) from error
+    if spliced is None:
+        observed: list[str] = []
+    elif isinstance(spliced, vault.yaml.nodes.MappingNode):
+        observed = [node.value for node, _value in spliced.value]
+    else:
+        raise collections.CollectionError(
+            "INVALID_RECORD_ITEM", "spliced item frontmatter is not a mapping"
+        )
+    if observed != expected_keys:
+        raise collections.CollectionError(
+            "INVALID_RECORD_ITEM",
+            "spliced item frontmatter did not preserve the requested field set",
+        )
     audit_line = (
-        f"# {profile.item_audit_marker}: {audit_correlation}{newline}"
+        f"# {profile.item_audit_marker}: {audit_correlation}{trailing}"
         if audit_correlation
         else ""
     )
     close_end = close_start + len(closing.group(0))
-    suffix = text[close_end:] if body is None else newline + body
+    # `^---\r?$` matches *before* the LF, so a CRLF fence leaves its CR inside
+    # `closing.group(0)` and only the LF after `close_end`. Prefixing a replaced
+    # body with the document newline therefore wrote `---\r\r\n` on a CRLF page
+    # -- a fence line the self-check below then refused, which is the same
+    # unwritable-page failure by a different route. Keep the source's own
+    # terminator instead.
+    fence_end = text.find("\n", close_end)
+    fence_terminator = newline if fence_end == -1 else text[close_end : fence_end + 1]
+    suffix = text[close_end:] if body is None else fence_terminator + body
     rebuilt = text[: opening.end()] + updated_yaml + audit_line + text[close_start:close_end] + suffix
     # Post-write self-check: a splice bug that glues a field into whatever
     # follows it must fail loudly here, not persist an unreadable page for a
