@@ -286,7 +286,11 @@ export default {
         // Try the passive replica. Its writer guard still fails closed until takeover.
       }
     }
-    return lastResponse || json({ error: "both Exomem replicas are unavailable" }, 503);
+    return lastResponse || json({
+      error: configuredCandidates(env).length === 1
+        ? "the configured Exomem origin is unavailable"
+        : "no configured Exomem origin is available",
+    }, 503);
   },
 };
 
@@ -333,16 +337,30 @@ async function proxyMutationRequest(request, env, lease) {
   }
   if (holder) {
     if (!admissionEligible(lease.admission, env, holder, lease.fencing_token)) {
-      candidate = await probeCandidateReadiness(candidate, env, shortTimeout);
+      const probe = await probeCandidateReadiness(candidate, env, shortTimeout);
+      candidate = probe.candidate;
       if (!candidate) {
-        return json({ error: "active Exomem replica is not runtime-ready" }, 503);
+        return json({
+          error: "the active Exomem origin is not runtime-ready",
+          refusals: [{ origin: probe.origin, replica_id: holder, reason: probe.reason }],
+        }, 503);
       }
       const stored = await recordAdmission(env, lease, candidate.readiness);
       if (!stored) return json({ error: "writer lease changed during runtime admission" }, 503);
     }
   } else {
-    candidate = await selectEligibleOrigin(env, shortTimeout);
-    if (!candidate) return json({ error: "both Exomem replicas are ineligible" }, 503);
+    const selection = await selectEligibleOrigin(env, shortTimeout);
+    candidate = selection.candidate;
+    if (!candidate) {
+      // Name the gate. `evaluateReadiness` computes exactly why each origin was
+      // refused and this used to discard it, so the only symptom was a 503
+      // naming replicas -- which, on a deployment that no longer has two, sent
+      // triage after an architecture that was not there (#581).
+      return json({
+        error: refusalSummary(selection.refusals),
+        refusals: selection.refusals,
+      }, 503);
+    }
   }
 
   try {
@@ -441,26 +459,54 @@ function configuredCandidates(env) {
 }
 
 async function selectEligibleOrigin(env, timeoutMs) {
+  const candidates = configuredCandidates(env);
   const checked = await Promise.all(
-    configuredCandidates(env).map((candidate) => probeCandidateReadiness(candidate, env, timeoutMs)),
+    candidates.map((candidate) => probeCandidateReadiness(candidate, env, timeoutMs)),
   );
-  return checked.find(Boolean) || null;
+  const accepted = checked.find((result) => result.candidate);
+  if (accepted) return { candidate: accepted.candidate, refusals: [] };
+  return {
+    candidate: null,
+    refusals: checked.map((result) => ({
+      origin: result.origin,
+      replica_id: result.replicaId,
+      reason: result.reason,
+    })),
+  };
 }
 
 async function probeCandidateReadiness(candidate, env, timeoutMs) {
+  const refused = (reason) => ({
+    candidate: null,
+    origin: candidate.origin,
+    replicaId: candidate.replicaId,
+    reason,
+  });
   try {
     const target = new URL("/health/ready", candidate.origin);
     const response = await fetch(new Request(target), {
       signal: AbortSignal.timeout(timeoutMs),
       redirect: "manual",
     });
-    if (response.status !== 200) return null;
+    if (response.status !== 200) return refused(`health_status_${response.status}`);
     const readiness = await response.json();
     const evaluation = evaluateReadiness(readiness, env, candidate.replicaId);
-    return evaluation.eligible ? { ...candidate, readiness } : null;
+    if (!evaluation.eligible) return refused(evaluation.reason);
+    return {
+      candidate: { ...candidate, readiness },
+      origin: candidate.origin,
+      replicaId: candidate.replicaId,
+      reason: null,
+    };
   } catch {
-    return null;
+    return refused("health_probe_unreachable");
   }
+}
+
+function refusalSummary(refusals) {
+  if (refusals.length === 0) return "no Exomem origin is configured";
+  if (refusals.length === 1) return "the configured Exomem origin is ineligible";
+  return "no configured Exomem origin is eligible";
 }
 
 export function evaluateReadiness(readiness, env, expectedReplicaId) {
@@ -481,14 +527,28 @@ export function evaluateReadiness(readiness, env, expectedReplicaId) {
   if (readiness.transport !== requiredTransport) {
     return { eligible: false, reason: "unsupported_transport" };
   }
-  if (readiness.replica_id !== expectedReplicaId) {
+  // Both gates below encode "HA is mandatory", and on a deployment with one
+  // configured origin each could only ever refuse: a standalone server reports
+  // `replica_id: null` -- no configured value equals null -- and
+  // `coordination.enabled: false`, because there is no second writer to
+  // coordinate with. A correct standalone origin was therefore unrepresentable,
+  // and decommissioning the second replica took the whole MCP surface down
+  // while the surviving origin's own health stayed green (#581).
+  //
+  // The relaxation needs BOTH sides to say so: exactly one origin configured
+  // here AND the origin self-reporting standalone. Dropping one origin from a
+  // live pair by mistake therefore still refuses, because the survivor keeps
+  // reporting its replica id and its coordination as enabled.
+  const standalone = isSingleOriginDeployment(env) && declaresStandalone(readiness);
+  const unidentified = readiness.replica_id === null || readiness.replica_id === undefined;
+  if (readiness.replica_id !== expectedReplicaId && !(standalone && unidentified)) {
     return { eligible: false, reason: "replica_identity_mismatch" };
   }
   if (readiness.takeover_eligible !== true) {
     return { eligible: false, reason: "takeover_ineligible" };
   }
   const coordination = readiness.coordination;
-  if (requireCoordination(env)) {
+  if (requireCoordination(env) && !standalone) {
     if (!coordination || coordination.enabled !== true) {
       return { eligible: false, reason: "coordination_required" };
     }
@@ -505,6 +565,21 @@ function supportedRuntimeContracts(env) {
     .map((value) => Number(value.trim()))
     .filter(Number.isInteger);
   return new Set(values);
+}
+
+function isSingleOriginDeployment(env) {
+  return configuredCandidates(env).length === 1;
+}
+
+function declaresStandalone(readiness) {
+  const coordination = readiness.coordination;
+  return Boolean(
+    coordination
+      && typeof coordination === "object"
+      && !Array.isArray(coordination)
+      && coordination.enabled === false
+      && coordination.role === "standalone",
+  );
 }
 
 function requireCoordination(env) {

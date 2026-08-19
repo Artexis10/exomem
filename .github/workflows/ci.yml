@@ -284,6 +284,21 @@ jobs:
       - name: Validate specs
         run: npm exec --yes @fission-ai/openspec -- validate --specs --strict
 
+  edge-worker:
+    name: edge worker (cloudflare-ha)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # This worker sits in front of every MCP call when it is deployed, and it
+      # can refuse a healthy origin without the origin ever learning of it. It
+      # shipped untested; #581 is what that cost.
+      - name: Worker routing and readiness-admission suite
+        run: node --test deploy/cloudflare-ha/test/worker.test.mjs
+
   build:
     name: package build
     runs-on: ubuntu-latest
@@ -381,6 +396,7 @@ jobs:
       - onboarding
       - docker
       - specs
+      - edge-worker
       - build
       - capabilities
       - lint

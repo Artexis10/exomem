@@ -761,3 +761,191 @@ test("safe MCP initialization retains short-timeout fallback", async () => {
     AbortSignal.timeout = originalTimeout;
   }
 });
+
+
+// --- a single-origin deployment is a topology, not a half-configured pair ---
+
+const standaloneEnv = (overrides = {}) => {
+  const env = edgeEnv(null);
+  delete env.LAPTOP_ORIGIN;
+  delete env.LAPTOP_REPLICA_ID;
+  return { ...env, ...overrides };
+};
+
+const standaloneReadiness = (overrides = {}) => readiness("desktop", {
+  replica_id: null,
+  instance_id: null,
+  coordination: { enabled: false, role: "standalone", coordinator_healthy: true },
+  ...overrides,
+});
+
+test("a standalone origin is eligible when it is the only one configured", () => {
+  // Neither gate could ever pass for it: no configured value equals `null`, and
+  // a standalone server reports coordination disabled by design. That made a
+  // correct single-node deployment unrepresentable, and decommissioning the
+  // second replica took every MCP call down -- read-only ones included -- while
+  // the surviving origin kept answering /health/ready with 200 and `reasons: []`.
+  assert.deepEqual(
+    evaluateReadiness(standaloneReadiness(), standaloneEnv(), "desktop"),
+    { eligible: true, reason: null },
+  );
+});
+
+test("a standalone claim from one origin of a configured pair is still refused", () => {
+  // The relaxation needs both sides to agree. If it keyed off the origin's
+  // claim alone, a replica that lost its coordinator would announce itself
+  // standalone and take writes while its peer was still live.
+  assert.equal(
+    evaluateReadiness(standaloneReadiness(), edgeEnv(), "desktop").reason,
+    "replica_identity_mismatch",
+  );
+  assert.equal(
+    evaluateReadiness(
+      readiness("desktop", {
+        coordination: { enabled: false, role: "standalone", coordinator_healthy: true },
+      }),
+      edgeEnv(),
+      "desktop",
+    ).reason,
+    "coordination_required",
+  );
+});
+
+test("a single configured origin that still claims a replica identity is refused", () => {
+  // The other half of "both sides agree": dropping one origin from a live pair
+  // by mistake must not silently promote the survivor past the coordination
+  // gate. It keeps reporting its replica id and enabled coordination, so it
+  // keeps being judged as a replica.
+  assert.equal(
+    evaluateReadiness(readiness("laptop"), standaloneEnv(), "desktop").reason,
+    "replica_identity_mismatch",
+  );
+  assert.equal(
+    evaluateReadiness(readiness("desktop"), standaloneEnv(), "desktop").eligible,
+    true,
+  );
+});
+
+test("a standalone origin serves a tool call end to end", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    const url = new URL(request.url);
+    calls.push(url.href);
+    if (url.pathname === "/health/ready") return Response.json(standaloneReadiness());
+    return new Response("ok", { status: 200 });
+  };
+  try {
+    const response = await worker.fetch(toolCall(), standaloneEnv());
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [
+      "https://desktop.example.com/health/ready",
+      "https://desktop.example.com/mcp",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- a refusal has to say which gate refused --------------------------------
+
+test("a refused selection names the failing gate per origin", async () => {
+  // The worker computes the reason and used to throw it away, so the only
+  // symptom was a 503 naming replicas -- on a deployment that no longer had
+  // two, that sent triage after an architecture which was not there.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    const url = new URL(request.url);
+    if (url.origin.includes("laptop")) return new Response("nope", { status: 503 });
+    return Response.json(readiness("desktop", { runtime_contract: 99 }));
+  };
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv(null));
+    assert.equal(response.status, 503);
+    const payload = await response.json();
+    assert.equal(payload.error, "no configured Exomem origin is eligible");
+    assert.deepEqual(payload.refusals, [
+      {
+        origin: "https://desktop.example.com",
+        replica_id: "desktop",
+        reason: "unsupported_runtime_contract",
+      },
+      {
+        origin: "https://laptop.example.com",
+        replica_id: "laptop",
+        reason: "health_status_503",
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a refused single-origin deployment does not report itself as replicas", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json(standaloneReadiness({ status: "starting" }));
+  try {
+    const response = await worker.fetch(toolCall(), standaloneEnv());
+    assert.equal(response.status, 503);
+    const payload = await response.json();
+    assert.equal(payload.error, "the configured Exomem origin is ineligible");
+    assert.deepEqual(payload.refusals, [
+      {
+        origin: "https://desktop.example.com",
+        replica_id: "desktop",
+        reason: "runtime_not_ready",
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an unreachable origin is reported as unreachable, not as ineligible", async () => {
+  // A probe that throws and a probe that is refused used to collapse into the
+  // same null, so the 503 could not tell "the origin never answered" from "the
+  // origin answered and I turned it away".
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("connection refused");
+  };
+  try {
+    const response = await worker.fetch(toolCall(), standaloneEnv());
+    assert.equal(response.status, 503);
+    const payload = await response.json();
+    assert.deepEqual(payload.refusals, [
+      {
+        origin: "https://desktop.example.com",
+        replica_id: "desktop",
+        reason: "health_probe_unreachable",
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a refused active holder names its gate too", async () => {
+  const lease = {
+    holder: "desktop",
+    expires_at: Date.now() / 1000 + 30,
+    fencing_token: 12,
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json(readiness("desktop", { runtime_contract: 99 }));
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv(lease));
+    assert.equal(response.status, 503);
+    const payload = await response.json();
+    assert.equal(payload.error, "the active Exomem origin is not runtime-ready");
+    assert.deepEqual(payload.refusals, [
+      {
+        origin: "https://desktop.example.com",
+        replica_id: "desktop",
+        reason: "unsupported_runtime_contract",
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
