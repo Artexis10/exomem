@@ -413,6 +413,69 @@ _GRAPH_CONVERGENCE_SECONDS = 120.0
 _GRAPH_POLL_SECONDS = 0.5
 
 
+def _server_side_graph_state() -> str:
+    """Read the graph's own state from disk for a convergence failure report.
+
+    Necessary because the failure is otherwise undiagnosable from the artifact
+    it produces. `connect_memory` answers `available: false` with a `reason`
+    string and nothing behind it, so a CI failure could not distinguish "the
+    rebuild is still running" from "the graph is fenced and nothing will
+    retry before this deadline" -- which are different bugs with different
+    fixes. That ambiguity already cost one wrong diagnosis.
+
+    Read-only, best-effort, and never raises: a diagnostic that can fail the
+    run it is explaining is worse than no diagnostic.
+    """
+    vault = os.environ.get("EXOMEM_VAULT_PATH")
+    if not vault:
+        return "EXOMEM_VAULT_PATH unset; no server-side state read"
+    root = Path(vault)
+    facts: list[str] = []
+    try:
+        from exomem import graph_sync
+
+        facts.append(f"graph_sync.status={graph_sync.status(root)!r}")
+        # The status string is lossy in exactly the place that matters.
+        # `recovery_required` is three different epoch kinds collapsed into one
+        # word -- `pre_floor`, an unacknowledged `coherent`, and a
+        # checkpointless `recoverable` -- and only `coherent` is in
+        # `REPAIRABLE_EPOCH_KINDS`. So the status alone cannot say whether
+        # queued paths are blocked from draining or merely waiting their turn,
+        # which is the whole question when the queue is non-empty.
+        facts.append(f"epoch_kind={graph_sync.classify_epoch(root).kind!r}")
+    except Exception as error:  # noqa: BLE001 - diagnostics never fail the run
+        facts.append(f"graph_sync.status unavailable ({error!r})")
+    try:
+        from exomem import freshness
+
+        # The term that fences every reader. If this is true, no reader sees
+        # the graph until something clears it, and the only thing that does is
+        # the watcher's periodic reconcile.
+        facts.append(f"external_pending={freshness.external_pending(root)!r}")
+    except Exception as error:  # noqa: BLE001
+        facts.append(f"external_pending unavailable ({error!r})")
+    try:
+        from exomem import deferred_index
+
+        queued = deferred_index.list_graph_paths(root)
+        facts.append(f"graph_queue_depth={len(queued)} sample={queued[:5]!r}")
+    except Exception as error:  # noqa: BLE001
+        facts.append(f"graph queue unavailable ({error!r})")
+    try:
+        from exomem import mode
+
+        # Recovery cadence. A deadline shorter than this cannot observe a
+        # recovery that only the periodic pass performs, so the interval
+        # belongs in the failure text next to the deadline it is compared with.
+        facts.append(
+            "reconcile_interval_seconds="
+            f"{mode.watcher_policy().reconcile_interval_seconds!r}"
+        )
+    except Exception as error:  # noqa: BLE001
+        facts.append(f"reconcile interval unavailable ({error!r})")
+    return "; ".join(facts)
+
+
 async def _await_graph_convergence(
     client,
     *,
@@ -452,7 +515,8 @@ async def _await_graph_convergence(
             raise RuntimeError(
                 f"graph did not converge within {_GRAPH_CONVERGENCE_SECONDS:.0f}s of "
                 f"the write that changed it ({reason!r}) -- a rebuild that never "
-                f"lands is exactly what this waits for: {context!r}"
+                f"lands is exactly what this waits for. Server-side state: "
+                f"{_server_side_graph_state()}. Response: {context!r}"
             )
         await asyncio.sleep(_GRAPH_POLL_SECONDS)
 
