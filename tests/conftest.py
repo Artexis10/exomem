@@ -390,10 +390,22 @@ def _reset_corpus_context_cache():
 #: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
 #: and the warming path (`epistemic_graph.schedule_background_rebuild`).
 _GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
-#: Generous: a rebuild over a test vault is milliseconds. A pass that cannot
-#: finish in 30 s has not been slow, it has wedged, and that is worth failing on
-#: rather than leaving for whichever test inherits it.
-_GRAPH_QUIESCE_TIMEOUT_SECONDS = 30.0
+#: A rebuild over most test vaults is milliseconds, and one that cannot finish
+#: has wedged rather than slowed -- worth failing on rather than leaving for
+#: whichever test inherits it. But most is not every: the planning-governance
+#: cap fixtures build a vault of ~2000 pages, whose whole-vault rebuild
+#: measures ~36 s on an idle Windows box, so 30 s reported a rebuild that was
+#: progressing normally as wedged and failed the Windows lane in teardown of a
+#: test that had passed.
+#:
+#: Raised well past that measurement rather than tuned to it. A wedged rebuild
+#: never finishes, so this value does not decide whether one is caught -- only
+#: how long a working rebuild is given before it is libelled, and the cost of
+#: guessing low is a false failure in someone else's lane.
+#:
+#: That a routine rebuild is O(vault) at all is #576; when repair becomes
+#: proportional to the change, this can come back down.
+_GRAPH_QUIESCE_TIMEOUT_SECONDS = 180.0
 
 
 def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -> None:
