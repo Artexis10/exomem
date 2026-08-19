@@ -43,6 +43,42 @@ declare the same version, and
 `tests/test_uv_lock_policy.py::test_uv_writer_version_is_pinned_across_repository_surfaces`
 fails if any of the four drifts. Bumping uv means bumping all four together.
 
+## The privacy gate runs anywhere — run it before you push
+
+`public_artifact_privacy` refuses a drive-absolute path literal in any
+repository input or shipped wheel member. Docstrings count: they travel inside
+the wheel.
+
+```
+uv run python scripts/validate-public-artifacts.py --repository
+```
+
+It is pure Python over files and takes a couple of seconds on any platform. It
+is worth running deliberately because the CI job that enforces it is
+Linux-only, so a Windows-only contributor's first encounter with it is a red
+PR. That is not hypothetical: a branch that had passed two independent clean
+reviews landed 16 findings and six red checks this way (#574).
+
+### The %PROGRAMDATA% fallback: import it, don't retype it
+
+The Windows machine-wide base genuinely needs `ProgramData`, so the last tier
+of the fallback chain is written as a concatenation, which keeps the literal
+from ever appearing contiguously. Read quickly that looks like odd formatting,
+which is exactly how it gets dropped when the chain is reproduced by hand.
+
+- **Python inside the package:** import `mode.windows_machine_wide_root()`.
+  Nothing else may re-derive the chain; `tests/test_windows_machine_wide_root.py`
+  fails if a new file does.
+- **The standalone hook scripts** under `src/exomem/_hooks/` run as bare files
+  under the client's interpreter and cannot import the package, so they carry a
+  deliberate mirror. The same test pins their spelling.
+- **PowerShell** cannot import a Python helper either. Use the same split --
+  `"C:" + "\ProgramData"` -- as `scripts/install-service.ps1` does, or
+  `$env:SystemDrive`.
+- **Prose and docstrings:** write `%PROGRAMDATA%`. The gate permits the
+  environment-variable spelling, and one canonical form is what makes the
+  convention imitable.
+
 ## Installing the service on a CPU-only host
 
 `scripts/install-service.sh --profile hybrid` pulls `torch`, which is pinned to
