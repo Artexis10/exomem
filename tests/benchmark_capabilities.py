@@ -70,6 +70,32 @@ def has_posix_executable_scripts() -> bool:
 
 
 @lru_cache(maxsize=1)
+def has_resumable_directory_cursor() -> bool:
+    """True where a directory stream can be resumed from a saved cookie.
+
+    POSIX `telldir`/`seekdir` hand back an opaque cookie that resumes an open
+    directory stream where it stopped. Windows has no equivalent, so the
+    checkpoint's root prune resumes from the durable prune catalog instead
+    (`_prune_catalog_window`) and `_directory_window` refuses a non-zero
+    cursor there rather than replaying a growing prefix.
+    """
+    return os.name != "nt"
+
+
+@lru_cache(maxsize=1)
+def has_control_characters_in_filenames() -> bool:
+    """True where a path component may contain a newline.
+
+    POSIX permits any byte but `/` and NUL in a name, so a directory called
+    `bad<newline>change` is a real thing a repository can contain and the
+    checkpoint has to refuse it explicitly. Windows rejects the name at the
+    filesystem with `[WinError 123]`, so the hazard cannot be staged there --
+    the platform refuses it before any of our code is asked to.
+    """
+    return os.name == "posix"
+
+
+@lru_cache(maxsize=1)
 def has_open_file_replacement() -> bool:
     """True where a file can be renamed over while a descriptor is open on it.
 
@@ -218,6 +244,16 @@ def require_posix_executable_scripts() -> None:
 def require_trusted_system_git() -> None:
     if not has_trusted_system_git():
         pytest.skip("no trusted system Git on os.defpath (the harness's trust anchor)")
+
+
+def require_resumable_directory_cursor() -> None:
+    if not has_resumable_directory_cursor():
+        pytest.skip("this platform resumes directory scans from the durable prune catalog")
+
+
+def require_control_characters_in_filenames() -> None:
+    if not has_control_characters_in_filenames():
+        pytest.skip("this platform will not create a path component holding a newline")
 
 
 def require_posix_only_stdlib() -> None:

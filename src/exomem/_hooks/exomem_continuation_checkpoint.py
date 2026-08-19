@@ -2711,23 +2711,24 @@ def _directory_window(
         return _linux_directory_window(directory, cursor, limit, deadline)
     if os.name != "nt":
         return _posix_directory_window(directory, cursor, limit, deadline)
+    # Windows exposes no resumable directory cursor: `os.scandir` has no
+    # `telldir`/`seekdir` equivalent, and re-scanning a prefix to reach the
+    # cursor replays a growing prefix under a fixed budget -- the shape
+    # `_prune_catalog_window` exists to avoid. Root pruning routes there on
+    # `nt`; every other caller enumerates from the start, so the cursor this
+    # branch reports back is always 0.
     if cursor:
         raise OSError("Windows root resumption requires the durable prune catalog")
-    target: object = directory.path if os.name == "nt" else directory.fd
     names: list[str] = []
     inspected = 0
-    position = 0
-    with os.scandir(target) as entries:
+    with os.scandir(directory.path) as entries:
         for entry in entries:
             if time.monotonic() >= deadline:
-                return names, position, False, inspected
+                return names, 0, False, inspected
             inspected += 1
-            position += 1
-            if position <= cursor:
-                continue
             names.append(entry.name)
             if len(names) >= limit:
-                return names, position, False, inspected
+                return names, 0, False, inspected
     return names, 0, True, inspected
 
 

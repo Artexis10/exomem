@@ -13,7 +13,11 @@ import time
 from pathlib import Path
 
 import pytest
-from benchmark_capabilities import has_posix_file_modes
+from benchmark_capabilities import (
+    has_posix_file_modes,
+    require_control_characters_in_filenames,
+    require_resumable_directory_cursor,
+)
 
 import exomem
 from exomem._hooks import exomem_continuation_checkpoint as checkpoint
@@ -683,6 +687,7 @@ def test_large_artifact_tree_bounds_metadata_scan_and_keeps_dirty_priority(
 
 
 def test_unsafe_artifact_change_directory_is_skipped_explicitly(tmp_path: Path) -> None:
+    require_control_characters_in_filenames()
     root = tmp_path / "repo"
     unsafe = root / "openspec" / "changes" / "bad\nchange" / "tasks.md"
     unsafe.parent.mkdir(parents=True)
@@ -1104,6 +1109,13 @@ def test_subprocess_unknown_event_soft_fails_without_output_or_state(tmp_path: P
 def _init_repo(path: Path) -> None:
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
+    # Some of these fixtures build a ref whose name alone is longer than
+    # Windows' legacy 260-character MAX_PATH, and git stores a loose ref as a
+    # nested path under `.git/refs/heads`. Without this git cannot create the
+    # ref at all, and -- once created with `-c core.longpaths` -- every later
+    # plain `git` call in the repo still fails to resolve HEAD. The knob is
+    # Windows-only and inert elsewhere, so set it for every fixture repo.
+    subprocess.run(["git", "-C", str(path), "config", "core.longpaths", "true"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
     (path / "tracked.txt").write_text("base\n", encoding="utf-8")
@@ -1276,6 +1288,7 @@ def test_control_or_surrogate_session_normalization_round_trips_without_leak(
 def test_control_workspace_paths_are_omitted_or_hashed_before_round_trip(
     tmp_path: Path,
 ) -> None:
+    require_control_characters_in_filenames()
     home = tmp_path / "home"
     repo = tmp_path / "repo\nunsafe"
     _init_repo(repo)
@@ -1858,8 +1871,16 @@ def test_os_advisory_lock_times_out_and_releases_when_owner_is_killed(tmp_path: 
                 pass
         child.kill()
         child.wait(timeout=5)
-        with checkpoint.advisory_lock(lock, timeout=0.5):
-            assert lock.read_bytes()
+        with checkpoint.advisory_lock(lock, timeout=0.5) as held:
+            # Read the sentinel byte through the lock's own descriptor.
+            # Windows' `msvcrt.locking` is a *mandatory* byte-range lock, so
+            # a second handle onto the locked byte is refused with
+            # `PermissionError` even from the owning process; the owning
+            # descriptor is not. `fcntl.flock` is advisory and would allow
+            # either, so this reads the same thing on both platforms.
+            assert held.fd is not None
+            os.lseek(held.fd, 0, os.SEEK_SET)
+            assert os.read(held.fd, 1)
     finally:
         if child.poll() is None:
             child.kill()
@@ -2972,6 +2993,7 @@ def test_directory_window_cursor_is_bounded_and_eventually_visits_every_entry(
 def test_portable_directory_window_cursor_never_replays_a_growing_prefix(
     tmp_path: Path,
 ) -> None:
+    require_resumable_directory_cursor()
     root_path = tmp_path / "portable-root"
     root_path.mkdir(mode=0o700)
     expected = {f"entry-{number:04d}" for number in range(257)}
