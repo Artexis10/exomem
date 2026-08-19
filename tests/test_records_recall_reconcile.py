@@ -729,6 +729,36 @@ def test_windows_binder_closes_partial_open_handles_in_reverse_order(
     assert closed == [4, 3, 2, 1]
 
 
+def _sidecar_diagnosis(path: Path, index_path: Path) -> str:
+    """Say what a database actually holds when a precondition says it should not.
+
+    These two tests stage a path swap and then assert the attacker's file was
+    never written to. That assertion is vacuous against an empty decoy, and an
+    empty decoy has two utterly different causes -- a copy that carried nothing,
+    or a repair that reached a file it must never touch. One is a broken test
+    and the other is a security defect, and a bare `assert [] == [...]` cannot
+    tell them apart. It cost a CI round to learn that much, so the message
+    carries what the next reader would otherwise have to guess at.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        size = f"unstattable ({error})"
+    try:
+        with _sqlite(path) as conn:
+            tables = sorted(
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            )
+    except Exception as error:  # noqa: BLE001 - diagnosis must not raise
+        tables = f"unreadable ({error})"
+    return (
+        f"{path} holds {tables} at {size} bytes; the index writes to {index_path} "
+        f"(same path: {path == index_path}); siblings: "
+        f"{sorted(p.name for p in path.parent.glob(path.name + '*'))}"
+    )
+
+
 def _repaired_or_untouched(rows: list, corrupt: tuple) -> bool:
     """Whether a pinned-inode repair landed on the pinned file or refused.
 
@@ -787,10 +817,14 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
     # the precondition so those two are never confused again: this line
     # failing means the setup is broken, the later one failing means the
     # repair reached a file it must never touch.
+    with _sqlite(sidecar) as conn:
+        assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
+            ("../../corrupt.md",)
+        ], _sidecar_diagnosis(sidecar, index.path)
     with _sqlite(external) as conn:
         assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
             ("../../corrupt.md",)
-        ], "the decoy database was not populated; the swap assertion below is vacuous"
+        ], _sidecar_diagnosis(external, index.path)
     moved = tmp_path / "moved.sqlite"
     real_purge = embedding_index.EmbeddingIndex.purge_exact_persisted_rows
 
@@ -921,10 +955,14 @@ def test_corrupt_purge_binds_claim_repair_to_sidecar_inode_across_path_swap(
     # the precondition so those two are never confused again: this line
     # failing means the setup is broken, the later one failing means the
     # repair reached a file it must never touch.
+    with _sqlite(sidecar) as conn:
+        assert conn.execute("SELECT file_path FROM claims").fetchall() == [
+            ("../../corrupt.md",)
+        ], _sidecar_diagnosis(sidecar, index.path)
     with _sqlite(external) as conn:
         assert conn.execute("SELECT file_path FROM claims").fetchall() == [
             ("../../corrupt.md",)
-        ], "the decoy database was not populated; the swap assertion below is vacuous"
+        ], _sidecar_diagnosis(external, index.path)
     moved = tmp_path / "moved-claims.sqlite"
     real_purge = claims.ClaimIndex.purge_exact_persisted_rows
 
