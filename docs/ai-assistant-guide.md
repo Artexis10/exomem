@@ -380,12 +380,13 @@ Re-running installation performs a narrow migration: only exact legacy
 `kb_continuation_checkpoint.py` and `kb-continuation-checkpoint.sh` basenames are
 retired, unrelated hook order is preserved, user-owned Codex `SessionEnd`
 handlers stay untouched, and changed valid config is backed up and replaced
-atomically. Malformed config fails closed. For manual rollback, remove only the
-Exomem groups invoking `exomem_continuation_checkpoint.py` or
-`exomem-continuation-checkpoint.sh` with that group's explicit `--client`, then
-remove the two deployed files if unused and reload the client. The local state
-is inert afterward and can be deleted independently; no uninstall command is
-provided.
+atomically. Malformed config fails closed. `install-hook --uninstall` rolls the
+whole thing back: it removes only the entries this installed and then the
+scripts it deployed, `--keep-scripts` unwires the config alone, and where the
+config is deployed by yadm alternates it prunes the `##os.*` sources as well —
+without that, the next alternate selection regenerates the deployed file and the
+hooks return. The local state is inert afterward and can be deleted
+independently.
 
 Codex reads repository instructions from `AGENTS.md`. Put the instruction block
 there, or keep an equivalent policy. Restart Codex sessions after changing MCP
