@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+from benchmark_capabilities import has_no_follow_open, has_open_file_replacement
+
 MINI = Path("benchmarks/lme/fixtures/mini.json")
 LEAKY = Path("benchmarks/lme/fixtures/leaky.json")
 
@@ -194,12 +196,15 @@ def test_frozen_selection_uses_one_no_follow_stable_read_for_bytes_hash_and_pars
         selection.load_frozen_lme_selection()
 
     artifact.unlink()
-    artifact.symlink_to(source.resolve())
-    with pytest.raises(ValueError, match="no-follow regular"):
-        selection.load_frozen_lme_selection()
+    if has_no_follow_open():
+        artifact.symlink_to(source.resolve())
+        with pytest.raises(ValueError, match="no-follow regular"):
+            selection.load_frozen_lme_selection()
+        artifact.unlink()
 
-    artifact.unlink()
     artifact.write_bytes(raw)
+    if not has_open_file_replacement():
+        return
     replacement = tmp_path / "replacement.json"
     replacement.write_bytes(raw)
     original_read = selection.os.read

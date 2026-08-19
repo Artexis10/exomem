@@ -29,6 +29,7 @@ the cross-platform signal worth having.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -66,6 +67,43 @@ def has_posix_executable_scripts() -> bool:
     executable bit `chmod` was asked for was never set either.
     """
     return os.name == "posix"
+
+
+@lru_cache(maxsize=1)
+def has_open_file_replacement() -> bool:
+    """True where a file can be renamed over while a descriptor is open on it.
+
+    POSIX names and inodes are independent, so a reader holding a descriptor
+    keeps reading the old inode after a swap -- exactly the race a stable read
+    has to detect. Windows refuses the rename outright with `[WinError 5]
+    Access is denied`, so the race cannot be staged there at all: the platform
+    forbids what the code under test is proving it survives.
+    """
+    return os.name == "posix"
+
+
+@lru_cache(maxsize=1)
+def has_no_follow_open() -> bool:
+    """True where `os.open` can refuse to traverse a symlink.
+
+    Callers write `getattr(os, "O_NOFOLLOW", 0)`, so on a platform without the
+    flag the request degrades to an ordinary open that follows the link. The
+    refusal such code asserts therefore cannot happen there -- the guarantee is
+    absent, not broken.
+    """
+    return hasattr(os, "O_NOFOLLOW")
+
+
+@lru_cache(maxsize=1)
+def has_posix_only_stdlib() -> bool:
+    """True where the POSIX-only stdlib the operator scripts import exists.
+
+    `infra/scripts/secret_handoff.py` and its keypair sibling `import fcntl` at
+    module scope, and the projected-bundle checks call `os.statvfs`. Windows
+    ships neither, so the script cannot be imported there at all -- the failure
+    is the platform lacking the module, not the script being wrong.
+    """
+    return importlib.util.find_spec("fcntl") is not None and hasattr(os, "statvfs")
 
 
 @lru_cache(maxsize=1)
@@ -180,6 +218,11 @@ def require_posix_executable_scripts() -> None:
 def require_trusted_system_git() -> None:
     if not has_trusted_system_git():
         pytest.skip("no trusted system Git on os.defpath (the harness's trust anchor)")
+
+
+def require_posix_only_stdlib() -> None:
+    if not has_posix_only_stdlib():
+        pytest.skip("the POSIX-only stdlib these operator scripts import is absent here")
 
 
 def require_posix_host_paths() -> None:

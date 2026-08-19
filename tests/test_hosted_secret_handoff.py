@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from benchmark_capabilities import require_posix_only_stdlib
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "infra" / "scripts" / "secret_handoff.py"
 MATRIX = ROOT / "infra" / "contracts" / "secret-destinations-v1.json"
@@ -839,6 +841,10 @@ def test_pinned_sops_age_round_trip_preserves_json_escaped_secret(
 
 
 def test_cli_dry_run_validates_route_without_reading_stdin() -> None:
+    # The script under test imports `fcntl` at module scope and stats the
+    # mount with `os.statvfs`; Windows ships neither, so it cannot be loaded
+    # there at all. It only ever runs on the hosted Linux cell.
+    require_posix_only_stdlib()
     result = subprocess.run(
         [
             sys.executable,
@@ -868,6 +874,10 @@ def test_cli_dry_run_validates_route_without_reading_stdin() -> None:
 
 
 def test_cli_has_no_argument_that_can_carry_a_secret_value() -> None:
+    # The script under test imports `fcntl` at module scope and stats the
+    # mount with `os.statvfs`; Windows ships neither, so it cannot be loaded
+    # there at all. It only ever runs on the hosted Linux cell.
+    require_posix_only_stdlib()
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--help"],
         capture_output=True,

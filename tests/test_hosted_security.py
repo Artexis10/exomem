@@ -15,6 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from benchmark_capabilities import require_posix_only_stdlib
+
 from exomem import hosted_security as security
 from exomem.hosted_runtime import HostedCellConfig
 from exomem.server_auth import HostedCellTokenVerifier
@@ -100,6 +102,10 @@ def test_projected_bundle_reads_one_confined_atomicwriter_generation(tmp_path: P
 def test_projected_bundle_can_require_a_read_only_secret_mount(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The script under test imports `fcntl` at module scope and stats the
+    # mount with `os.statvfs`; Windows ships neither, so it cannot be loaded
+    # there at all. It only ever runs on the hosted Linux cell.
+    require_posix_only_stdlib()
     active = _credential("active")
     leaf = _projected_bundle(
         tmp_path / "credentials",
@@ -207,6 +213,10 @@ def test_projected_bundle_rejects_unsafe_atomicwriter_topology(
 def test_projected_bundle_opens_fifo_nonblocking_before_type_rejection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The script under test imports `fcntl` at module scope and stats the
+    # mount with `os.statvfs`; Windows ships neither, so it cannot be loaded
+    # there at all. It only ever runs on the hosted Linux cell.
+    require_posix_only_stdlib()
     mount = tmp_path / "mount"
     leaf = _projected_bundle(
         mount,
