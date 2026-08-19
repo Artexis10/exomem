@@ -1148,6 +1148,68 @@ def test_runtime_process_check_warns_for_multiple_stdio_servers(
     assert check.details["count"] == 2
 
 
+def test_runtime_process_check_recommends_a_lever_the_reader_can_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The remedy has to be reachable from the machine that is running out of memory.
+
+    It used to lead with HTTP service mode, which will not start without
+    EXOMEM_BASE_URL, a GitHub OAuth app and its credentials (#482). So a laptop
+    user with seven sessions and 8 GB resident was told to obtain a public
+    hostname to solve a purely local problem (#597). `mode quiet` needs nothing
+    external and is the policy the old text was gesturing at.
+    """
+    from exomem import mode as mode_module
+
+    monkeypatch.setattr(mode_module, "resolve_mode", lambda: "performance")
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {"pid": 101, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+            {"pid": 102, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert "exomem mode quiet" in check.message
+    assert check.details["mode"] == "performance"
+    # Service mode may still be mentioned, but never without its precondition:
+    # naming it bare is what sent a laptop user after a public hostname.
+    if "HTTP service" in check.message:
+        assert "public base URL" in check.message
+
+
+def test_runtime_process_check_does_not_recommend_the_mode_already_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Telling someone already in quiet mode to switch to it is worse than silence.
+
+    It reads as "you have not tried the fix" when they have, and hides that the
+    remaining cost is per-process and structural rather than a setting.
+    """
+    from exomem import mode as mode_module
+
+    monkeypatch.setattr(mode_module, "resolve_mode", lambda: "quiet")
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {"pid": 101, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+            {"pid": 102, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert "exomem mode quiet" not in check.message
+    assert "already" in check.message
+    assert check.details["mode"] == "quiet"
+
+
 def test_runtime_process_check_names_physical_footprint_when_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
