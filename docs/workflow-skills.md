@@ -39,7 +39,7 @@ src/exomem/_scaffold/_Schema/workflow-skills/
 ```
 
 `exomem init` copies them into new vaults under
-`Knowledge Base/_Schema/workflow-skills/`.
+`.exomem/schema/workflow-skills/`, outside the note namespace.
 
 `exomem install-skill` installs the core `exomem` skill and also installs each
 workflow skill as a sibling Claude Code skill folder, so clients that support

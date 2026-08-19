@@ -140,8 +140,12 @@ def main() -> int:
                 raise RuntimeError(
                     f"setup exited {proc.returncode}:\n{proc.stdout}\n{proc.stderr}"
                 )
-            if not (vault / "Knowledge Base" / "_Schema" / "SKILL.md").is_file():
-                raise RuntimeError("setup did not initialize the Knowledge Base scaffold")
+            # The shipped contract lives outside the note namespace, and this gate
+            # deliberately checks the vault from the outside rather than importing
+            # exomem to resolve the path -- the whole point is that the wheel alone
+            # produced it.
+            if not (vault / ".exomem" / "schema" / "SKILL.md").is_file():
+                raise RuntimeError("setup did not initialize the vault scaffold")
 
         step("exomem setup --yes (wheel)", _setup)
 

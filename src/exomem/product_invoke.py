@@ -84,7 +84,7 @@ def resolve_vault_for(op: str, kwargs: dict, vault_root: Path | str | None) -> P
             return root
         raise RuntimeError(
             f"{str(root)!r} does not look like a vault "
-            f"(no {kb_prefix()}_Schema/SKILL.md found)"
+            f"(no schema contract in .exomem/schema/ or {kb_prefix()}_Schema/)"
         )
     try:
         return vault_module.resolve_vault()

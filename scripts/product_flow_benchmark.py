@@ -399,10 +399,12 @@ def flow_fresh_setup(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> FlowR
         home=home,
     )
     kb = vault / "Knowledge Base"
+    contract = vault / ".exomem" / "schema" / "SKILL.md"
     skill = home / ".claude" / "skills" / "exomem" / "SKILL.md"
     checks = [
         Check("setup exits successfully", run.ok, f"exit={run.returncode}"),
-        Check("Knowledge Base scaffold exists", (kb / "_Schema" / "SKILL.md").is_file(), str(kb)),
+        Check("vault scaffold exists", contract.is_file(), str(contract)),
+        Check("note scaffold exists", (kb / "index.md").is_file(), str(kb)),
         Check("skill install isolated to temp HOME", skill.is_file(), str(skill)),
     ]
     evidence = [

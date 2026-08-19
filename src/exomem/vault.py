@@ -202,6 +202,24 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
     return None
 
 
+#: Where the PRODUCT-owned governance markdown lives in a vault.
+#:
+#: A dot-directory, so it inherits the treatment every other non-note directory
+#: in the vault already gets -- from Obsidian, and from any other indexer the
+#: user runs -- instead of exomem having to ask each of them separately.
+#: `VAULT_SCAN_SKIP_DIRS` already excludes `_Schema` from exomem's own index, but
+#: nothing else honours that, so 265 KB of shipped documentation sat in the note
+#: namespace and ranked above real notes in a second tool's search (#488).
+#:
+#: Per-vault configuration -- the YAML registries, `contracts/`,
+#: `relation-reviews/`, `private-skills/`, the activation manifest -- deliberately
+#: stays under `Knowledge Base/_Schema/`. It belongs to the user, it is small, and
+#: it is not markdown, so it is not what pollutes a note index.
+SHIPPED_SCHEMA_DIRNAME = ".exomem"
+_SHIPPED_SCHEMA_SUBDIR = "schema"
+_SCHEMA_SENTINEL = "SKILL.md"
+
+
 # When scanning the full vault for inbound wikilinks, skip these.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name
@@ -223,6 +241,12 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         "_archive",
         "_trash",
         "_Schema",
+        # The shipped contract's new home (#488). It has to be skipped here for
+        # the same reason `_Schema` is: `find(scope="vault")` reaches through
+        # this walk, and moving 265 KB of product-owned markdown out of the note
+        # namespace would only relocate the pollution if exomem's own vault-wide
+        # search started indexing it at the new path.
+        SHIPPED_SCHEMA_DIRNAME,
         "_Governance",
         "_Adoption",
     }
@@ -359,13 +383,53 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
     if not _is_vault(path):
         raise RuntimeError(
             f"{env_var}={override!r} does not look like a vault "
-            f"(no {kb_prefix()}_Schema/SKILL.md found)"
+            f"(no schema contract in .exomem/schema/ or {kb_prefix()}_Schema/)"
         )
     return path
 
 
+def shipped_schema_target(vault_root: Path) -> Path:
+    """Where shipped governance markdown is WRITTEN. Always the new location.
+
+    Separate from `shipped_schema_root` so a refresh moves the read path forward
+    without deleting anything: after it runs, both locations hold the content and
+    the resolver prefers the new one. Reclaiming the old copy is its own explicit
+    step, because an upgrade that silently deletes 404 KB from inside a user's
+    Obsidian vault is the wrong default even when the bytes are reproducible.
+    """
+    return Path(vault_root) / SHIPPED_SCHEMA_DIRNAME / _SHIPPED_SCHEMA_SUBDIR
+
+
+def legacy_shipped_schema_root(vault_root: Path) -> Path:
+    """The pre-#488 location, still read and still valid."""
+    return Path(vault_root) / kb_dirname() / "_Schema"
+
+
+def shipped_schema_root(vault_root: Path) -> Path:
+    """Where shipped governance markdown is READ from.
+
+    New location when it holds the sentinel, else the legacy one. Preferring the
+    new location matters when both exist: a refresh writes the new one, so
+    reading the old one would serve the bytes the refresh just superseded.
+    """
+    target = shipped_schema_target(vault_root)
+    if (target / _SCHEMA_SENTINEL).exists():
+        return target
+    return legacy_shipped_schema_root(vault_root)
+
+
 def _is_vault(path: Path) -> bool:
-    return (path / kb_dirname() / "_Schema" / "SKILL.md").exists()
+    """Whether this directory is an exomem vault.
+
+    Either sentinel counts. This function decides whether `resolve_vault`,
+    `product_invoke`, `doctor` and the hosted runtime will speak to a directory
+    at all, so a vault has to stay a vault across the move in both directions --
+    one that has migrated, and one that never will.
+    """
+    return (
+        (path / kb_dirname() / "_Schema" / _SCHEMA_SENTINEL).exists()
+        or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
+    )
 
 
 def kb_root(vault: Path) -> Path:
