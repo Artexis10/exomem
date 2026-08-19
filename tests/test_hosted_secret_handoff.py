@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-
 from benchmark_capabilities import require_posix_only_stdlib
 
 ROOT = Path(__file__).resolve().parents[1]

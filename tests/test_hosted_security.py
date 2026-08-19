@@ -14,7 +14,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from benchmark_capabilities import require_posix_only_stdlib
 
 from exomem import hosted_security as security

@@ -8,7 +8,6 @@ import stat
 from pathlib import Path
 
 import pytest
-
 from benchmark_capabilities import require_posix_host_paths
 
 from exomem import __main__ as cli
