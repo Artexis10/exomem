@@ -182,6 +182,73 @@ def test_an_unreadable_markdown_page_still_fails_closed(tmp_path: Path, monkeypa
     assert raised.value.code == "IDENTITY_CENSUS_ENTRY_UNREADABLE"
 
 
+def _fail_read_of(monkeypatch, name: str, error: OSError) -> list[str]:
+    """Make `read_text` raise for one page, after its stat has already passed."""
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def read_text(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        if self.name == name:
+            reads.append(self.name)
+            raise error
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return reads
+
+
+def test_a_markdown_page_deleted_between_the_stat_and_the_read_is_skipped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The residual half of the same race, one call later.
+
+    The stat window has tolerated this since #528. Leaving the read window
+    fail-closed made the census's verdict depend on which microsecond the
+    deletion landed in -- absent from the snapshot if it beat the stat, a hard
+    `IDENTITY_CENSUS_PAGE_UNREADABLE` if it lost by a hair. That distinction
+    describes the timing, not the vault.
+    """
+    _seed(tmp_path, GHOST_REL)
+    reads = _fail_read_of(
+        monkeypatch,
+        "ghost.md",
+        FileNotFoundError(2, "No such file or directory", "ghost.md"),
+    )
+
+    census = semantic_contract.build_stable_identity_census(tmp_path)
+
+    # The page survived the stat, so the read was genuinely attempted.
+    assert reads == ["ghost.md"]
+    paths = {entry.path for entry in census.entries}
+    assert PAGE_REL in paths
+    assert GHOST_REL not in paths
+
+
+def test_an_unreadable_page_still_fails_closed_at_the_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only absence is tolerated, at the read exactly as at the stat.
+
+    A page that is present and cannot be read is a different fact from one that
+    is gone: it says the tree holds something this census cannot vouch for, and
+    refusing is the whole point of a fail-closed census.
+    """
+    _seed(tmp_path, GHOST_REL)
+    _fail_read_of(
+        monkeypatch,
+        "ghost.md",
+        PermissionError(13, "Permission denied", "ghost.md"),
+    )
+
+    with pytest.raises(activation_manifest.ActivationManifestError) as raised:
+        semantic_contract.build_stable_identity_census(tmp_path)
+
+    assert raised.value.code in {
+        "IDENTITY_CENSUS_PAGE_UNREADABLE",
+        "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
+    }
+
+
 def test_a_non_markdown_alias_still_refuses_the_census(tmp_path: Path, monkeypatch) -> None:
     """Filtering before the stat must not open an alias-refusal hole.
 
