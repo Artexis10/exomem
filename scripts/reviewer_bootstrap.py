@@ -683,6 +683,16 @@ def main() -> int:
         "Create the connector in ChatGPT first: the OpenAI sibling stage is built "
         "from the identity that connector actually presents.",
     )
+    parser.add_argument(
+        "--openai-redirect",
+        action="append",
+        metavar="URL",
+        help="Redirect URI declared by the ChatGPT connector document, repeatable. "
+        "Only needed when this machine cannot read the document itself: the "
+        "publisher's bot protection may answer a residential address with 403 "
+        "where it answers the control plane with 200. Read `redirect_uris` from "
+        "the document in a browser and pass each one.",
+    )
     args = parser.parse_args()
 
     base_url = os.environ.get("EXOMEM_PUBLIC_BASE_URL")
