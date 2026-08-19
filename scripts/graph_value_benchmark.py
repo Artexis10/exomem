@@ -2130,7 +2130,11 @@ def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[
             operation="update",
             unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint,
-            expected_hash=state.parent_source_hash,
+            # The documented guard is the page's whole-file `content_hash`
+            # over raw bytes, not the index's hash of the normalized source.
+            expected_hash=vault_module.content_hash(
+                path.read_bytes().decode("utf-8")
+            ),
             category="config",
             content="Keep current indexes rebuildable.",
         )
@@ -2185,7 +2189,9 @@ def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[
             why="repair the benchmark schema violation without discarding content",
             field="status",
             value="active",
-            expected_hash=vault_module.content_hash(path.read_text(encoding="utf-8")),
+            expected_hash=vault_module.content_hash(
+                path.read_bytes().decode("utf-8")
+            ),
         )
         final = path.read_text(encoding="utf-8")
         return (
