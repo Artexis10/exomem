@@ -13,6 +13,7 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from . import sidecar_store
 from .kbdir import kb_dirname
 
 _SEMANTIC_ISOLATION_CURSOR_KEY = "semantic_isolation_cursors:v1"
@@ -56,7 +57,7 @@ def _connect(
     path = connection_path if connection_path is not None else store_path(vault_root)
     if not create:
         return _connect_readonly(vault_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_store.ensure_sidecar_parent(path)
     conn = sqlite3.connect(path, timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")

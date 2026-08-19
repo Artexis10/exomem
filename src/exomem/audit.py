@@ -782,14 +782,12 @@ def _pinned_descriptor_path(descriptor: int) -> Path | None:
     if sys.platform != "darwin":
         return None
     pinned = os.fstat(descriptor)
-    # macOS can address a file by identity through `volfs`, which is the
-    # closest equivalent to the procfs symlink: it names the inode, so a
-    # sidecar replaced behind this descriptor is still reached at the inode
-    # rather than at the name it no longer owns. Verified rather than trusted,
-    # because the volume may not publish it.
-    volfs = Path(f"/.vol/{pinned.st_dev}/{pinned.st_ino}")
-    if _names_pinned_inode(volfs, pinned):
-        return volfs
+    # `volfs` (`/.vol/<dev>/<ino>`) addresses the inode directly and looks like
+    # the ideal answer, but it cannot serve one: every caller hands this path to
+    # sqlite, which in WAL mode must create `-wal` and `-shm` siblings inside
+    # `/.vol/<dev>` -- a synthetic read-only directory. Returning it turned an
+    # inert repair into one that raised `EROFS`, so `F_GETPATH` is the only
+    # usable branch here.
     import fcntl
 
     try:

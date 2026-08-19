@@ -677,12 +677,12 @@ def _reaches_a_pinned_inode_after_rename(tmp_path: Path) -> bool:
     """Whether this platform can still address an open file after it is renamed.
 
     Linux does, through the procfs symlink that names the descriptor itself.
-    macOS does when the volume publishes `volfs`; when it does not, all that
-    is left is `F_GETPATH`, which answers from the vnode name cache and can
+    macOS has only `F_GETPATH`, which answers from the vnode name cache and can
     report the old name -- now belonging to a different file. The binding
-    verifies identity and refuses rather than repair the wrong database, so
-    the honest expectation below depends on which of those holds here. The
-    security claim does not: the swapped-in file is never touched either way.
+    verifies identity and refuses rather than repair the wrong database, so the
+    honest expectation below depends on whether the cache followed the rename.
+    The security claim does not: the swapped-in file is never touched either
+    way. Asking the production resolver keeps this probe from drifting from it.
     """
     probe = tmp_path / "pinned-inode-probe.bin"
     probe.write_bytes(b"probe")
