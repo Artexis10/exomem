@@ -101,9 +101,30 @@ def _prune_until_swept(*args, **kwargs) -> int:
 
     Returns the total removed, so `== 1` still means exactly one directory
     went away.
+
+    The pass count above is derived from slots-per-call, so it only sweeps the
+    ring if every call really does inspect a full window. It does not:
+    `prune_expired` also bounds itself by wall clock
+    (`MAX_PRUNE_LOCK_SECONDS`, 50 ms), and a truncated window advances the
+    cursor only past the slots it actually read -- correct for the product,
+    fatal for this arithmetic. On a loaded Windows runner the 33 calls covered
+    a fraction of the 512 slots and the expired entry was simply never reached,
+    which is how `test_prune_refuses_copied_checkpoint_in_arbitrary_user_-
+    directory` failed with `0 == 1` on CI while passing everywhere else.
+
+    So the latency bound is lifted for the duration of the sweep. That bound is
+    a production property -- keep the hook's share of a write small -- and it
+    stays pinned by `test_prune_respects_total_budget_when_root_lock_is_held`.
+    A test asserting the *outcome* of a complete sweep is the one caller that
+    must not be cut short part way through it.
     """
     passes = -(-checkpoint.MAX_PRUNE_CATALOG_ENTRIES // checkpoint.MAX_PRUNE_ENUM_ENTRIES) + 1
-    return sum(checkpoint.prune_expired(*args, **kwargs) for _ in range(passes))
+    original = checkpoint.MAX_PRUNE_LOCK_SECONDS
+    checkpoint.MAX_PRUNE_LOCK_SECONDS = 60.0
+    try:
+        return sum(checkpoint.prune_expired(*args, **kwargs) for _ in range(passes))
+    finally:
+        checkpoint.MAX_PRUNE_LOCK_SECONDS = original
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])
@@ -2218,6 +2239,17 @@ def test_metadata_rotation_replace_failure_preserves_log_and_removes_temp(
 
 
 def test_metadata_log_rotation_serializes_concurrent_process_writers(tmp_path: Path) -> None:
+    """Four processes writing at once must produce one well-formed log.
+
+    The children raise `METADATA_LOG_LOCK_SECONDS` because this test builds a
+    contention level production does not: four writers queued behind a full-log
+    rotation, deliberately, so that serialization is what is being observed. The
+    shipped budget is sized to give up rather than delay a hook -- losing it
+    costs one diagnostics row, and every caller in `_dispatch` swallows that --
+    so at the shipped value a loaded runner makes this assert the give-up rather
+    than the serialization, which is how it failed on Windows CI with
+    `TimeoutError: timed out acquiring .events.lock`.
+    """
     home = tmp_path / "home"
     root = checkpoint.client_state_root(home, "codex")
     root.mkdir(parents=True)
@@ -2233,6 +2265,7 @@ def test_metadata_log_rotation_serializes_concurrent_process_writers(tmp_path: P
     code = (
         "import sys; from pathlib import Path; "
         "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "c.METADATA_LOG_LOCK_SECONDS = 30.0; "
         "[(c._metadata_log(Path(sys.argv[1]),'codex','SessionStart','empty',i)) "
         "for i in range(20)]"
     )
