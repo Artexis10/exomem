@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import scratch_root  # noqa: E402
 from synth_vault import gen_dense_vault  # noqa: E402
 
 from exomem import (  # noqa: E402
@@ -328,8 +329,7 @@ def measure_all(
             ]
         finally:
             graph_sync.drain_active_rebuilds()
-    with tempfile.TemporaryDirectory(prefix="exomem-write-latency-") as temp:
-        base = Path(temp)
+    with scratch_root.scratch_root("exomem-write-latency-") as base:
         results: list[dict[str, float | int]] = []
         try:
             for size in sizes:
