@@ -379,3 +379,30 @@ def test_preflight_fails_when_a_contract_digest_drifted(field: str, capsys) -> N
     )
     assert module.preflight(cp, "cand-1", drifted) is False
     assert "repo locks match candidate" in capsys.readouterr().out
+
+
+def test_run_resolves_the_connector_before_creating_the_authority(monkeypatch) -> None:
+    """The connector document is fetched from chatgpt.com, and that can 403.
+
+    Creating the authority is the irreversible step: it spends the invite and
+    starts the clock whether or not anything after it succeeds. So a fetch that
+    can fail for reasons outside this system must happen first.
+    """
+    module = _load_module()
+    cp = _RecordingControlPlane({"run-authority": (500, {})})
+    resolved: list[str] = []
+
+    def _identity(connector, override=None):
+        resolved.append(connector)
+        assert cp.calls == [], "the connector must resolve before any control-plane call"
+        raise SystemExit("connector document unreadable")
+
+    monkeypatch.setattr(module, "chatgpt_cimd_identity", _identity)
+
+    with pytest.raises(SystemExit):
+        module.run(
+            cp, {"inviteId": "i", "stageId": "s", "oauthClientId": "c"}, "tok", _locks(), "CONN"
+        )
+
+    assert resolved == ["CONN"]
+    assert cp.calls == [], "nothing may be spent when the connector cannot be read"

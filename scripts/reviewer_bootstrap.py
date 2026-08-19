@@ -155,8 +155,9 @@ def chatgpt_cimd_identity(
         return client_id, redirect_override
     # The control plane fetches this document from Vercel's edge; this script runs
     # from wherever the operator is, and the publisher's bot protection may answer
-    # a residential address with 403 where it answers the server with 200. A
-    # failure here must not cost the window, hence --openai-redirect.
+    # a residential address with 403 where it answers the server with 200. Hence
+    # --openai-redirect, and hence `run` calling this before it creates the
+    # authority rather than at the sibling loop where the answer is first needed.
     request = urllib.request.Request(
         client_id,
         headers={"accept": "application/json", "user-agent": "exomem-reviewer-bootstrap/1"},
@@ -581,6 +582,16 @@ def run(
     """Authority through both canary credentials, with no waiting in between."""
     resource = f"{cp.base_url}/api/exomem/mcp/v1"
 
+    # Resolve the connector BEFORE the authority exists. This reads a document
+    # from chatgpt.com, and the publisher's bot protection can refuse a
+    # residential address outright; done in place at the sibling loop it would
+    # abort with the invite already spent and the clock running. Nothing here
+    # touches the control plane, so failing at this point costs nothing.
+    openai_client_id, openai_redirects = chatgpt_cimd_identity(
+        openai_connector, openai_redirect_override
+    )
+    print(f"  connector resolved: {openai_client_id}")
+
     status, authority = cp.call(
         "POST",
         "/api/exomem/admin/oauth-clients",
@@ -685,9 +696,6 @@ def run(
     # per connector, and the pinned digest could never be matched by the connector
     # that has to produce the evidence — see `chatgpt_cimd_identity`.
     sibling_stage_ids: dict[str, str] = {}
-    openai_client_id, openai_redirects = chatgpt_cimd_identity(
-        openai_connector, openai_redirect_override
-    )
     siblings = (
         (
             "claude",
