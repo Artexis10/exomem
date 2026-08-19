@@ -5,6 +5,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import benchmark_capabilities
 import pytest
 import yaml
 
@@ -138,8 +139,15 @@ def test_admin_database_authority_is_ephemeral_and_rotation_gated() -> None:
     # line break and reported a syntax error in a block that is correct --
     # a trailing CR stops `esac` being `esac`. `subprocess.run` has no
     # `newline=` to ask for otherwise, so the encode happens here.
+    bash = benchmark_capabilities.posix_bash()
+    if bash is None:
+        pytest.skip("no POSIX bash on this host to check the block's syntax with")
+    # The resolved absolute path, not the bare name: `CreateProcess` searches
+    # the system directory before PATH, and on a Windows host with WSL
+    # registered but no distribution installed that directory answers `bash`
+    # with a launcher that prints an advertisement and exits non-zero.
     syntax = subprocess.run(
-        ["bash", "-n"],
+        [bash, "-n"],
         input=bootstrap_block.encode("utf-8"),
         capture_output=True,
         check=False,

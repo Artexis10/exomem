@@ -1121,9 +1121,30 @@ def _init_repo(path: Path) -> None:
     subprocess.run(["git", "-C", str(path), "config", "core.longpaths", "true"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
-    (path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    # A fixture repo has to be clean when it is handed over, and inheriting
+    # the host's line-ending policy is the one way it silently is not. Git
+    # for Windows defaults `core.autocrlf` to true and `write_text` emits
+    # CRLF there, so the combination decides on its own whether the
+    # committed file matches the working tree. A test that then dirties one
+    # path and expects the checkpoint digest to rotate would be comparing
+    # two observations that were already dirty, and reports two equal
+    # hashes with no hint why.
+    subprocess.run(["git", "-C", str(path), "config", "core.autocrlf", "false"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "core.eol", "lf"], check=True)
+    # Bytes, so the newline is the one written here and not the platform's.
+    (path / "tracked.txt").write_bytes(b"base\n")
     subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"], check=True)
+    # Proved, not assumed. A repo that starts dirty makes every downstream
+    # "this change rotated the digest" assertion vacuous, and it fails far
+    # from here when it does.
+    residue = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert residue == "", f"fixture repo is dirty before the test starts: {residue!r}"
 
 
 def test_git_status_timeout_is_degraded_not_reported_clean(
