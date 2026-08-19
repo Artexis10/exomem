@@ -318,12 +318,15 @@ def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
         )
 
     path = Path(raw).expanduser()
-    skill = path / kb_dirname() / "_Schema" / "SKILL.md"
+    from .vault import shipped_schema_root
+
+    skill = shipped_schema_root(path) / "SKILL.md"
     if not skill.exists():
         return path, _check(
             "vault.path",
             "fail",
-            f"{path} does not contain {kb_prefix()}_Schema/SKILL.md.",
+            f"{path} contains no exomem schema contract "
+            f"(looked in .exomem/schema/ and {kb_prefix()}_Schema/).",
             f"Pass the vault root, not the {kb_dirname()} folder. For a new vault, run "
             "`uv run python -m exomem init --vault <path>`.",
         )
@@ -413,10 +416,12 @@ def _check_repo_env() -> DoctorCheck:
 def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
     if vault_root is None:
         return []
+    from .vault import shipped_schema_root
+
     kb = vault_root / kb_dirname()
     checks: list[DoctorCheck] = []
     required = [
-        ("vault.schema", kb / "_Schema" / "SKILL.md", f"{kb_dirname()} schema contract"),
+        ("vault.schema", shipped_schema_root(vault_root) / "SKILL.md", "schema contract"),
         ("vault.index", kb / "index.md", f"{kb_prefix()}index.md"),
         ("vault.log", kb / "log.md", f"{kb_prefix()}log.md"),
         (

@@ -23,16 +23,18 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     # The three load-bearing files exist.
     assert (kb / "index.md").exists()
     assert (kb / "log.md").exists()
-    assert (kb / "_Schema" / "SKILL.md").exists()
-    assert (kb / "_Schema" / "workflow-skills" / "index.yaml").exists()
+    # The shipped contract and the skill registry moved out of the note
+    # namespace (#488); asserted at the new location, not merely dropped.
+    shipped = vault_module.shipped_schema_target(tmp_path)
+    assert (shipped / "SKILL.md").exists()
+    assert (shipped / "workflow-skills" / "index.yaml").exists()
+    assert not (kb / "_Schema" / "SKILL.md").exists()
     semantic_registry = kb / "_Schema" / "semantic-language-registry.yaml"
     assert semantic_registry.exists()
     assert semantic_registry.read_text(encoding="utf-8") == (
         "schema_version: 1\ncategories: {}\nkinds: {}\n"
     )
-    assert (
-        kb / "_Schema" / "workflow-skills" / "exomem-capture" / "SKILL.md"
-    ).exists()
+    assert (shipped / "workflow-skills" / "exomem-capture" / "SKILL.md").exists()
 
     # log.md carries the `---` separator the writers prepend after.
     assert "---" in (kb / "log.md").read_text(encoding="utf-8")
@@ -123,7 +125,7 @@ def test_init_via_cli(tmp_path: Path) -> None:
     from exomem.__main__ import main
 
     assert main(["init", "--vault", str(tmp_path)]) == 0
-    assert (tmp_path / "Knowledge Base" / "_Schema" / "SKILL.md").exists()
+    assert (vault_module.shipped_schema_target(tmp_path) / "SKILL.md").exists()
     # idempotency guard: second run refuses without --force.
     assert main(["init", "--vault", str(tmp_path)]) == 1
 
@@ -165,7 +167,9 @@ def test_init_vault_accepts_writes_and_stays_clean(
 
 
 def _shipped(kb: Path) -> Path:
-    return kb / "_Schema" / "SKILL.md"
+    # `kb` is the Knowledge Base; the shipped contract now sits beside the vault
+    # root rather than inside it (#488).
+    return vault_module.shipped_schema_target(kb.parent) / "SKILL.md"
 
 
 def test_refresh_rewrites_a_stale_shipped_doc(tmp_path: Path) -> None:
@@ -182,7 +186,7 @@ def test_refresh_rewrites_a_stale_shipped_doc(tmp_path: Path) -> None:
 
     refreshed = init_module.refresh_shipped_schema(vault)
 
-    assert "Knowledge Base/_Schema/SKILL.md" in refreshed
+    assert ".exomem/schema/SKILL.md" in refreshed
     packaged = (Path(init_module.__file__).parent / "_scaffold" / "_Schema" / "SKILL.md")
     assert _shipped(kb).read_bytes() == packaged.read_bytes()
 
