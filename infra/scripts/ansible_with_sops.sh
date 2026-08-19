@@ -64,6 +64,15 @@ if [[ -z "${tmpfs_root}" || ! -d "${tmpfs_root}" ]]; then
 fi
 
 tmpfs_root="$(cd -- "${tmpfs_root}" && pwd -P)"
+# `findmnt` is util-linux and the hosts this provisions are Linux, but say so
+# rather than letting `set -e` abort on `command not found`: that message names
+# a shell failure where the real answer is that this host cannot prove where
+# the secrets would land, and secrets must not be decrypted on an unproven
+# filesystem.
+if ! command -v findmnt >/dev/null 2>&1; then
+  echo "findmnt is required to prove the secret workspace is tmpfs or ramfs" >&2
+  exit 2
+fi
 filesystem_type="$(findmnt --noheadings --output FSTYPE --target "${tmpfs_root}")"
 case "${filesystem_type}" in
   tmpfs | ramfs) ;;
