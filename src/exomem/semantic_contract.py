@@ -1423,7 +1423,13 @@ def _corpus_census(root: Path) -> tuple | None:
                 and path.suffix.lower() == ".md"
                 and ".sync-conflict-" not in child.name
             ):
-                info = child.stat()
+                try:
+                    info = child.stat()
+                except FileNotFoundError:
+                    # Same race, same answer as the strict walk above: a page
+                    # that vanished between the listing and the stat is not in
+                    # this snapshot.
+                    continue
                 entries.add(
                     (path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns)
                 )
@@ -1452,7 +1458,15 @@ def _corpus_census(root: Path) -> tuple | None:
                 entries.add((marker, "absent", -1, -1))
             else:
                 entries.add((marker, "cfg", info.st_size, info.st_mtime_ns))
-    except (_CensusUnsafe, OSError, ValueError):
+    except _CensusUnsafe:
+        # A deliberate refusal: the tree holds an alias or a nonregular page.
+        log.debug("corpus census refused an unsafe tree at %s", root)
+        return None
+    except (OSError, ValueError):
+        # Anything else -- and the two used to be indistinguishable in
+        # production, so a vanished sidecar and a genuine refusal looked the
+        # same from the outside (#561).
+        log.debug("corpus census could not read %s", root, exc_info=True)
         return None
     return tuple(sorted(entries))
 

@@ -59,5 +59,8 @@ trap cleanup EXIT
 "${terraform_bin}" -chdir="${root}" init -input=false
 "${terraform_bin}" -chdir="${root}" show -json "${plan_path}" >"${json_path}"
 chmod 0600 -- "${json_path}"
-"${python_bin}" "${script_dir}/inspect_terraform_plan.py" "${json_path}" "${inspector_args[@]}"
+# Guarded for the same reason as `ansible_with_sops.sh`: bash 3.2 treats a bare
+# expansion of an empty array under `set -u` as an unbound variable.
+"${python_bin}" "${script_dir}/inspect_terraform_plan.py" "${json_path}" \
+  ${inspector_args[@]+"${inspector_args[@]}"}
 "${terraform_bin}" -chdir="${root}" apply -input=false "${plan_path}"

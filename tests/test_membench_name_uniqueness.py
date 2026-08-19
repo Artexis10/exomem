@@ -43,7 +43,10 @@ def corpus(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _rows(corpus: Path, name: str) -> list[dict]:
-    return [json.loads(line) for line in (corpus / name).read_text().splitlines()]
+    # JSONL is UTF-8 by definition; a bare `read_text()` decodes with the
+    # host's active code page and dies on the first name outside it.
+    text = (corpus / name).read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines()]
 
 
 def test_no_canonical_name_is_shared_across_scenarios() -> None:

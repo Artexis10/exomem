@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import datetime as dt
 from pathlib import Path
 
 import pytest
 
 from exomem import edit as edit_module
 from exomem import find as find_module
+from exomem import temporal
 
 NOTE_REL = "Knowledge Base/Notes/Insights/heading-test.md"
 
@@ -138,7 +138,10 @@ def test_bad_section_position_rejected(vault, monkeypatch: pytest.MonkeyPatch) -
 
 def test_bumps_updated_and_writes_log(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     p = _seed(vault)
-    today = dt.date.today().isoformat()
+    # `temporal.stamp` folds the instant to UTC for storage, so the stamp's date
+    # is the UTC day, not the local one. Asserting against `date.today()` failed
+    # for every run between UTC midnight and local midnight.
+    today = temporal.stamp(temporal.now())[: len("0000-00-00")]
     edit_module.edit(
         vault, path=NOTE_REL, why="section edit auditable",
         heading="Overview", section_position="append", new_string="Logged line.",

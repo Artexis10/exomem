@@ -6,6 +6,8 @@ path itself is exercised by `tests/tui/` (skipped when the extra is absent).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from exomem import __main__ as main_module
@@ -53,7 +55,10 @@ def test_tty_with_extra_launches_lazily(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(tui_pkg, "run", fake_run)
     rc = main(["tui", "--vault", "/tmp/some-vault"])
     assert rc == 0
-    assert calls["vault"] == "/tmp/some-vault"
+    # The entry point passes the argument through `Path(...).expanduser()`, which
+    # re-spells separators for the platform, so a hardcoded POSIX form asserts
+    # the wrong thing off POSIX. What is under test is that the value arrives.
+    assert calls["vault"] == str(Path("/tmp/some-vault").expanduser())
     assert calls["mouse"] is True
 
     rc = main(["tui", "--no-mouse"])

@@ -42,6 +42,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from membench.hermetic_env import apply_os_requirements
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = REPO_ROOT / "src"
 
@@ -107,7 +109,7 @@ class HookHome:
 
 def install_env(base: Path, home: Path) -> dict[str, str]:
     """Env for the ``install-hook`` subprocess (isolated + this worktree's code)."""
-    return {
+    env = {
         "PATH": _BASE_PATH,
         "HOME": str(base),
         "EXOMEM_HOOK_HOME": str(home),
@@ -116,6 +118,7 @@ def install_env(base: Path, home: Path) -> dict[str, str]:
         "PYTHONPATH": str(SRC_DIR),
         "PYTHONUTF8": "1",
     }
+    return apply_os_requirements(env, base)
 
 
 def create_hook_home(
@@ -167,7 +170,9 @@ def _wiring_problems(home: HookHome, events: tuple[str, ...]) -> list[str]:
     if not home.settings_path.is_file():
         return [f"missing hook config {home.settings_path}"]
     settings = home.settings()
-    hooks_dir = str(home.hooks_dir)
+    # `install_hook` writes the hook directory POSIX-style so one synced config
+    # works on every machine, so the native spelling is never what is in there.
+    hooks_dir = home.hooks_dir.as_posix()
     for event in events:
         entries = _entries(settings, event)
         if not entries:

@@ -402,11 +402,16 @@ def test_content_drift_does_not_consume_the_token(vault: Path) -> None:
     file would silently destroy a still-valid escalation."""
     govern(vault)
     token = _mint(vault)
-    original = (vault / RESTRICTED_PATH).read_text(encoding="utf-8")
-    (vault / RESTRICTED_PATH).write_text("changed", encoding="utf-8")
+    # Bytes, not text: the fingerprint is a digest of raw bytes, and a
+    # `read_text`/`write_text` round-trip is not byte-identical on Windows --
+    # reading folds CRLF to LF and writing expands it back, so restoring
+    # "the original" through text would restore different bytes and the
+    # redemption would fail for a reason this test is not about.
+    original = (vault / RESTRICTED_PATH).read_bytes()
+    (vault / RESTRICTED_PATH).write_bytes(b"changed")
     with pytest.raises(tokens.WithholdTokenError):
         tokens.redeem(vault, token, audience=EXTERNAL)
-    (vault / RESTRICTED_PATH).write_text(original, encoding="utf-8")
+    (vault / RESTRICTED_PATH).write_bytes(original)
     assert tokens.redeem(vault, token, audience=EXTERNAL).audience == EXTERNAL
 
 
@@ -414,9 +419,9 @@ def test_content_fingerprint_tracks_bytes_not_mtime(vault: Path) -> None:
     govern(vault)
     before = tokens.content_fingerprint(vault, RESTRICTED_PATH)
     path = vault / RESTRICTED_PATH
-    path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")  # touch
+    path.write_bytes(path.read_bytes())  # touch: rewrite the same bytes
     assert tokens.content_fingerprint(vault, RESTRICTED_PATH) == before
-    path.write_text("different", encoding="utf-8")
+    path.write_bytes(b"different")
     assert tokens.content_fingerprint(vault, RESTRICTED_PATH) != before
 
 

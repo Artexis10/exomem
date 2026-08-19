@@ -78,7 +78,7 @@ def _install_lifecycle_slot(
     }[state]
     page = root / path
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text(current, encoding="utf-8")
+    page.write_text(current, encoding="utf-8", newline="\n")
     decision = relation_review.build_lifecycle_decision(
         page_identity=page_id,
         after_fingerprint=semantic_contract.review_content_fingerprint(
@@ -105,11 +105,9 @@ def _install_lifecycle_slot(
     prepared_path = relation_review.lifecycle_prepared_path(root, page_id)
     decision_path.parent.mkdir(parents=True, exist_ok=True)
     decision_path.write_text(
-        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
-    )
+        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8", newline="\n")
     prepared_path.write_text(
-        relation_review.serialize_lifecycle_prepared(prepared), encoding="utf-8"
-    )
+        relation_review.serialize_lifecycle_prepared(prepared), encoding="utf-8", newline="\n")
     return page, prepared_path, before, after
 
 
@@ -131,8 +129,7 @@ def _trash_exact_committed_page(
                 "frontmatter_snapshot": {"exomem_id": page_id},
             }
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     return trash, sidecar
 
 
@@ -143,8 +140,7 @@ def test_reconcile_dry_run_reports_semantic_drift_without_writing_manifest_or_ma
     page.parent.mkdir(parents=True)
     page.write_text(
         _semantic_page("00000000-0000-4000-8000-000000000201"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     original = page.read_bytes()
     manifest = activation_manifest.manifest_path(tmp_path)
 
@@ -180,8 +176,7 @@ def test_reconcile_marks_direct_post_activation_page_current_and_not_grandfather
     page.parent.mkdir(parents=True)
     page.write_text(
         _semantic_page("00000000-0000-4000-8000-000000000202"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
 
@@ -198,8 +193,7 @@ def test_reconcile_does_not_report_relation_disposition_for_inactive_external_dr
         _semantic_page(
             "00000000-0000-4000-8000-000000000203", status="draft"
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
 
@@ -242,23 +236,21 @@ def test_reconcile_recomputes_and_clears_repaired_semantic_finding(
     page.parent.mkdir(parents=True)
     target.parent.mkdir(parents=True, exist_ok=True)
     source = _semantic_page("00000000-0000-4000-8000-000000000204")
-    page.write_text(source, encoding="utf-8")
+    page.write_text(source, encoding="utf-8", newline="\n")
     target.write_text(
         _semantic_page("00000000-0000-4000-8000-000000000205").replace(
             "## Relations\n",
             "## Relations\n"
             "- supports [[Knowledge Base/Notes/Insights/reconcile-anchor]]\n",
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     anchor.write_text(
         _semantic_page("00000000-0000-4000-8000-000000000206").replace(
             "## Relations\n",
             "## Relations\n"
             "- supports [[Knowledge Base/Notes/Insights/reconcile-target]]\n",
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     before = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
     page.write_text(
@@ -267,8 +259,7 @@ def test_reconcile_recomputes_and_clears_repaired_semantic_finding(
             "## Relations\n"
             "- supports [[Knowledge Base/Notes/Insights/reconcile-target]]\n",
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     after = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
 
     relative = page.relative_to(tmp_path).as_posix()
@@ -410,8 +401,7 @@ def test_reconcile_recognizes_directory_trash_root_suffix_proof(
                 "frontmatter_snapshot": {},
             }
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
 
@@ -453,8 +443,7 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
             else _semantic_page(page_id).replace(
                 "Direct editor content.", "Different trashed bytes."
             ),
-            encoding="utf-8",
-        )
+            encoding="utf-8", newline="\n",)
         sidecar = race_trash.with_name(f"{race_trash.name}.meta.json")
         sidecar.write_text(
             json.dumps(
@@ -467,8 +456,7 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
                     "frontmatter_snapshot": {"exomem_id": page_id},
                 }
             ),
-            encoding="utf-8",
-        )
+            encoding="utf-8", newline="\n",)
     real_cleanup = relation_review.cleanup_stale_lifecycle_prepared_batch
 
     def race_then_cleanup(root: Path, inspections):
@@ -481,14 +469,13 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
             )
             prepared_path.write_text(
                 relation_review.serialize_lifecycle_prepared(replacement),
-                encoding="utf-8",
-            )
+                encoding="utf-8", newline="\n",)
         elif race == "primary_change":
-            page.write_text(after, encoding="utf-8")
+            page.write_text(after, encoding="utf-8", newline="\n")
         elif race == "trash_appearance":
             trash = root / "Knowledge Base/_trash/2026-07-15/120003-race.md"
             trash.parent.mkdir(parents=True, exist_ok=True)
-            trash.write_text(after, encoding="utf-8")
+            trash.write_text(after, encoding="utf-8", newline="\n")
             trash.with_name(f"{trash.name}.meta.json").write_text(
                 json.dumps(
                     {
@@ -496,8 +483,7 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
                         "frontmatter_snapshot": {"exomem_id": page_id},
                     }
                 ),
-                encoding="utf-8",
-            )
+                encoding="utf-8", newline="\n",)
         elif race == "sidecar_change":
             assert sidecar is not None
             sidecar.write_text(
@@ -507,11 +493,10 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
                         "frontmatter_snapshot": {"exomem_id": page_id},
                     }
                 ),
-                encoding="utf-8",
-            )
+                encoding="utf-8", newline="\n",)
         else:
             assert race_trash is not None
-            race_trash.write_text(after, encoding="utf-8")
+            race_trash.write_text(after, encoding="utf-8", newline="\n")
         return real_cleanup(root, inspections)
 
     monkeypatch.setattr(
@@ -553,8 +538,7 @@ def test_lifecycle_batch_cleanup_blocks_late_unrelated_duplicate_owner(
         _semantic_page(page_id).replace(
             "Direct editor content.", "Late duplicate owner."
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     result = relation_review.cleanup_stale_lifecycle_prepared_batch(
         tmp_path, inspected.inspections
@@ -585,11 +569,10 @@ def test_lifecycle_batch_cleanup_rechecks_shared_guards_once(
         prepared_paths.append(prepared)
     trash = tmp_path / "Knowledge Base/_trash/2026-07-15/unrelated.txt"
     trash.parent.mkdir(parents=True, exist_ok=True)
-    trash.write_text("unrelated trash", encoding="utf-8")
+    trash.write_text("unrelated trash", encoding="utf-8", newline="\n")
     trash.with_name(f"{trash.name}.meta.json").write_text(
         json.dumps({"original_path": "Knowledge Base/Notes/unrelated.txt"}),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     posthoc = semantic_writes.evaluate_posthoc_batch(
         tmp_path, operation="reconcile"
     )
@@ -658,7 +641,7 @@ def test_reconcile_reports_malformed_state_and_deletes_nothing(tmp_path: Path) -
     malformed_id = "00000000-0000-4000-8000-000000000216"
     malformed = relation_review.lifecycle_prepared_path(tmp_path, malformed_id)
     malformed.parent.mkdir(parents=True, exist_ok=True)
-    malformed.write_text("not-json", encoding="utf-8")
+    malformed.write_text("not-json", encoding="utf-8", newline="\n")
     stale_page, stale, _, _ = _install_lifecycle_slot(
         tmp_path,
         state="stale",
@@ -669,7 +652,7 @@ def test_reconcile_reports_malformed_state_and_deletes_nothing(tmp_path: Path) -
     page_bytes = stale_page.read_bytes()
     bad_sidecar = tmp_path / "Knowledge Base/_trash/2026-07-15/bad.meta.json"
     bad_sidecar.parent.mkdir(parents=True, exist_ok=True)
-    bad_sidecar.write_text("not-json", encoding="utf-8")
+    bad_sidecar.write_text("not-json", encoding="utf-8", newline="\n")
 
     payload = reconcile_module.reconcile(tmp_path).as_dict()
 
@@ -714,7 +697,7 @@ def test_reconcile_sidecar_byte_limits_make_cleanup_indeterminate(
     sidecar_count = 1 if limit_kind == "single" else 2
     for index in range(sidecar_count):
         target = trash / f"bounded-{index}.txt"
-        target.write_text("trash", encoding="utf-8")
+        target.write_text("trash", encoding="utf-8", newline="\n")
         target.with_name(f"{target.name}.meta.json").write_text(
             json.dumps(
                 {
@@ -722,8 +705,7 @@ def test_reconcile_sidecar_byte_limits_make_cleanup_indeterminate(
                     "padding": "x" * 96,
                 }
             ),
-            encoding="utf-8",
-        )
+            encoding="utf-8", newline="\n",)
     if limit_kind == "single":
         monkeypatch.setattr(
             relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 64
@@ -759,12 +741,11 @@ def test_lifecycle_sidecar_snapshot_reads_only_bounded_descriptor_bytes(
     )
     trash = tmp_path / "Knowledge Base/_trash/2026-07-15/bounded-read.txt"
     trash.parent.mkdir(parents=True, exist_ok=True)
-    trash.write_text("trash", encoding="utf-8")
+    trash.write_text("trash", encoding="utf-8", newline="\n")
     sidecar = trash.with_name(f"{trash.name}.meta.json")
     sidecar.write_text(
         json.dumps({"original_path": "Knowledge Base/Notes/bounded-read.txt"}),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     monkeypatch.setattr(
         relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 256
     )
@@ -839,17 +820,15 @@ def test_lifecycle_sidecar_symlink_swap_fails_closed_before_cleanup(
     )
     trash = tmp_path / "Knowledge Base/_trash/2026-07-15/swapped.txt"
     trash.parent.mkdir(parents=True, exist_ok=True)
-    trash.write_text("trash", encoding="utf-8")
+    trash.write_text("trash", encoding="utf-8", newline="\n")
     sidecar = trash.with_name(f"{trash.name}.meta.json")
     sidecar.write_text(
         json.dumps({"original_path": "Knowledge Base/Notes/swapped.txt"}),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     replacement = tmp_path / "replacement-sidecar.json"
     replacement.write_text(
         json.dumps({"original_path": "Knowledge Base/Notes/swapped.txt"}),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     real_open = relation_review.os.open
     swapped = False
 
@@ -918,11 +897,11 @@ def test_reconcile_reports_noncleanable_lifecycle_issues(
     )
     if failure == "decision":
         decision = next(child for child in prepared.parent.iterdir() if child != prepared)
-        decision.write_text("not-json", encoding="utf-8")
+        decision.write_text("not-json", encoding="utf-8", newline="\n")
         expected = "RELATION_REVIEW_INVALID_JSON"
     else:
         duplicate = tmp_path / "Knowledge Base/Notes/Insights/duplicate-owner.md"
-        duplicate.write_text(page.read_text(encoding="utf-8"), encoding="utf-8")
+        duplicate.write_text(page.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
         expected = "LIFECYCLE_PRIMARY_AMBIGUOUS"
     prepared_bytes = prepared.read_bytes()
 
@@ -971,7 +950,7 @@ def test_reconcile_heals_index_count_drift(vault: Path) -> None:
     original = top.read_text(encoding="utf-8")
     drifted = original.replace("- Notes (insight): 4", "- Notes (insight): 9")
     assert drifted != original, "fixture index.md changed shape; update the test"
-    top.write_text(drifted, encoding="utf-8")
+    top.write_text(drifted, encoding="utf-8", newline="\n")
 
     # Drift is now visible to audit.
     pre = audit_module.audit(vault, categories=["index_drift"])
@@ -998,8 +977,7 @@ def test_reconcile_via_maintain_memory_heals_out_of_band_count_drift(vault: Path
     notes_dir = vault / "Knowledge Base" / "Notes" / "Insights"
     out_of_band = notes_dir / "manual-oob-note.md"
     out_of_band.write_text(
-        "---\ntype: note\npage_type: insight\n---\n\n# Manual OOB\n", encoding="utf-8"
-    )
+        "---\ntype: note\npage_type: insight\n---\n\n# Manual OOB\n", encoding="utf-8", newline="\n")
 
     # Call exactly as an MCP client would: no explicit dry_run.
     res = commands.op_maintain_memory(vault, mode="reconcile")
@@ -1059,12 +1037,11 @@ def test_reconcile_rebuild_graph_refuses_an_active_direct_boundary(
 def test_reconcile_refreshes_source_indexes_and_total_rows(vault: Path) -> None:
     kb = vault / "Knowledge Base"
     extra = kb / "Sources" / "Articles" / "manual-source.md"
-    extra.write_text("---\ntype: source\nsource_type: article\n---\n\n# Manual\n", encoding="utf-8")
+    extra.write_text("---\ntype: source\nsource_type: article\n---\n\n# Manual\n", encoding="utf-8", newline="\n")
     top = kb / "index.md"
     top.write_text(
         top.read_text(encoding="utf-8").replace("- Sources: 4", "- Sources: 0"),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
 
     rep = reconcile_module.reconcile(vault)
 
@@ -1084,8 +1061,7 @@ def test_reconcile_dry_run_reports_without_writing(vault: Path) -> None:
         top.read_text(encoding="utf-8").replace(
             "- Notes (insight): 1", "- Notes (insight): 9"
         ),
-        encoding="utf-8",
-    )
+        encoding="utf-8", newline="\n",)
     drifted = top.read_text(encoding="utf-8")
 
     rep = reconcile_module.reconcile(vault, dry_run=True)
@@ -1101,7 +1077,7 @@ def test_reconcile_creates_baseline_only_when_not_dry_run_and_never_refreshes_it
     path = activation_manifest.manifest_path(vault)
     assert not path.exists()
     page = vault / "Knowledge Base/Notes/Insights/legacy-reconcile.md"
-    page.write_text("---\ntype: insight\nstatus: active\n---\n\n# Legacy\n", encoding="utf-8")
+    page.write_text("---\ntype: insight\nstatus: active\n---\n\n# Legacy\n", encoding="utf-8", newline="\n")
     before_page = page.read_bytes()
 
     reconcile_module.reconcile(vault, dry_run=True)
@@ -1115,7 +1091,7 @@ def test_reconcile_creates_baseline_only_when_not_dry_run_and_never_refreshes_it
     assert not (vault / "Knowledge Base/.review-state.json").exists()
 
     later = vault / "Knowledge Base/Notes/Insights/later-reconcile.md"
-    later.write_text("---\ntype: insight\nstatus: active\n---\n\n# Later\n", encoding="utf-8")
+    later.write_text("---\ntype: insight\nstatus: active\n---\n\n# Later\n", encoding="utf-8", newline="\n")
     reconcile_module.reconcile(vault)
     assert path.read_bytes() == first_bytes
     assert not activation_manifest.is_grandfathered(vault, later)
@@ -1138,7 +1114,7 @@ def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(
     )
     target = vault / "Knowledge Base" / "Notes" / "reconcile-deferred.md"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("# reconcile deferred\n", encoding="utf-8")
+    target.write_text("# reconcile deferred\n", encoding="utf-8", newline="\n")
     index_sync.upsert_after_write(vault, [target])
     assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 1
 
@@ -1150,9 +1126,11 @@ def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(
     monkeypatch.setattr(
         audit_module,
         "_check_embedding_drift",
-        lambda root: [
-            SimpleNamespace(path=Path("Knowledge Base/Notes/reconcile-deferred.md"))
-        ],
+        # A vault-relative POSIX string, which is what a persisted identity is:
+        # `_safe_persisted_markdown_rel` refuses anything carrying a backslash, so
+        # `str(Path(...))` re-spelled this into a value reconcile drops on Windows
+        # and the refresh under test never ran.
+        lambda root: [SimpleNamespace(path="Knowledge Base/Notes/reconcile-deferred.md")],
     )
     monkeypatch.setattr(
         audit_module,
@@ -1186,14 +1164,14 @@ def test_reconcile_preserves_deferred_work_after_embedding_failure(
     monkeypatch.setattr(find, "on_resolver_files_changed", lambda root, changed, deleted: None)
     target = vault / "Knowledge Base" / "Notes" / "reconcile-retry.md"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("# reconcile retry\n", encoding="utf-8")
+    target.write_text("# reconcile retry\n", encoding="utf-8", newline="\n")
     index_sync.upsert_after_write(vault, [target])
 
     monkeypatch.setattr("exomem.embeddings.upsert_after_write", lambda root, paths: False)
     monkeypatch.setattr(
         audit_module,
         "_check_embedding_drift",
-        lambda root: [SimpleNamespace(path=Path("Knowledge Base/Notes/reconcile-retry.md"))],
+        lambda root: [SimpleNamespace(path="Knowledge Base/Notes/reconcile-retry.md")],
     )
     monkeypatch.setattr(
         audit_module,

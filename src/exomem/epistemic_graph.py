@@ -38,6 +38,7 @@ from . import (
     semantic_index,
     semantic_language_registry,
     semantic_units,
+    sidecar_store,
     traversal_profiles,
 )
 from . import find as find_module
@@ -1108,7 +1109,7 @@ class EpistemicGraphIndex:
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         target = path if path is not None else self.path
-        target.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_store.ensure_sidecar_parent(target)
         conn = sqlite3.connect(target)
         try:
             from . import embeddings

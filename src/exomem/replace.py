@@ -29,6 +29,7 @@ from . import find as find_module
 from . import indexes, memory_refs, relation_review, semantic_writes, temporal
 from . import note as note_module
 from .kbdir import kb_prefix
+from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     ContentHashMismatchError,
     PathGuard,
@@ -36,9 +37,11 @@ from .vault import (
     PlannedWrite,
     batch_atomic_write,
     content_hash,
+    document_newline,
     kb_root,
     parse_frontmatter,
     plan_log_writes,
+    render_frontmatter_document,
     render_wikilink_target,
     rotate_log_if_needed,
 )
@@ -294,7 +297,10 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
 
 
 # Match "---\n<frontmatter>\n---\n<body>" exactly as find.py does.
-_FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
+# The canonical pattern from `vault`: a private LF-only copy here silently
+# refused every CRLF page, so `replace` reported success while leaving the
+# old page unmarked and the new page's `supersedes` pointer unwritten.
+_FM_PATTERN = _VAULT_FM_PATTERN
 
 
 def _inject_supersedes(text: str, rel_old_no_ext: str) -> str:
@@ -312,7 +318,7 @@ def _inject_supersedes(text: str, rel_old_no_ext: str) -> str:
         return text  # already present; idempotent
     wikilink = f'"[[{rel_old_no_ext}]]"'
     new_fm = fm_text.rstrip() + f"\nsupersedes: {wikilink}"
-    return f"---\n{new_fm}\n---\n{body}"
+    return render_frontmatter_document(new_fm, body, newline=document_newline(text))
 
 
 def _mark_superseded(text: str, rel_new_no_ext: str, date_iso: str) -> str:
@@ -355,7 +361,7 @@ def _mark_superseded(text: str, rel_new_no_ext: str, date_iso: str) -> str:
     else:
         fm_text = fm_text.rstrip() + f"\nsuperseded_by:\n  - {new_link}"
 
-    return f"---\n{fm_text}\n---\n{body}"
+    return render_frontmatter_document(fm_text, body, newline=document_newline(text))
 
 
 def _append_to_yaml_list(fm_text: str, key: str, new_quoted_value: str) -> str:

@@ -26,7 +26,7 @@ def _crash_after_canonical_terminal(database: str, marker: str) -> None:
     from exomem.writer_lease import IdempotencyStore
 
     def operation() -> dict[str, object]:
-        Path(marker).write_text("committed", encoding="utf-8")
+        Path(marker).write_text("committed", encoding="utf-8", newline="\n")
         return {"state": "committed", "graph_sync": "pending"}
 
     def crash(_result: object) -> object:
@@ -205,7 +205,7 @@ def test_malformed_checkpoint_after_a_valid_floor_is_recovered_by_the_next_batch
         vault_root=tmp_path,
         post_commit_fanout=False,
     )
-    graph_sync.checkpoint_path(tmp_path).write_text("{broken", encoding="utf-8")
+    graph_sync.checkpoint_path(tmp_path).write_text("{broken", encoding="utf-8", newline="\n")
 
     vault_module.batch_atomic_write(
         [vault_module.PlannedWrite(second, "# Second\n")],
@@ -285,7 +285,7 @@ def test_valid_floor_with_malformed_checkpoint_recovers_at_a_higher_full_epoch(
         vault_root=tmp_path,
         post_commit_fanout=False,
     )
-    graph_sync.checkpoint_path(tmp_path).write_text("{broken", encoding="utf-8")
+    graph_sync.checkpoint_path(tmp_path).write_text("{broken", encoding="utf-8", newline="\n")
 
     recovered = graph_sync.recover_checkpoint(tmp_path)
 
@@ -310,7 +310,7 @@ def test_full_rebuild_rejects_malformed_checkpoint_before_live_sidecar_replaceme
     index.rebuild_all()
     with index._connect() as conn:
         prior_rows = conn.execute("SELECT node_key, source_hash FROM graph_nodes").fetchall()
-    graph_sync.checkpoint_path(tmp_path).write_text("{broken", encoding="utf-8")
+    graph_sync.checkpoint_path(tmp_path).write_text("{broken", encoding="utf-8", newline="\n")
     seam_reached = False
 
     def seam(_temporary: Path, _live: Path) -> None:
@@ -349,7 +349,7 @@ def test_publication_epoch_retries_a_floor_checkpoint_commit_window(
         reads += 1
         state = real_checkpoint_state(root)
         if reads == 1:
-            graph_sync.checkpoint_path(root).write_text(second.render(), encoding="utf-8")
+            graph_sync.checkpoint_path(root).write_text(second.render(), encoding="utf-8", newline="\n")
         return state
 
     monkeypatch.setattr(graph_sync, "checkpoint_state", complete_after_read)
@@ -367,7 +367,7 @@ def test_rebuild_retries_an_epoch_window_that_outlives_inner_resampling(
 
     note = tmp_path / "Knowledge Base/Notes/epoch-window.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Epoch window\n", encoding="utf-8")
+    note.write_text("# Epoch window\n", encoding="utf-8", newline="\n")
     freshness.seed(tmp_path, "vault", [(str(note), freshness.stat_signature(note))])
     first = _checkpoint(1)
     second = graph_sync.GraphSyncCheckpoint.create(
@@ -386,7 +386,7 @@ def test_rebuild_retries_an_epoch_window_that_outlives_inner_resampling(
         nonlocal reads
         reads += 1
         if reads == 3:
-            graph_sync.checkpoint_path(root).write_text(second.render(), encoding="utf-8")
+            graph_sync.checkpoint_path(root).write_text(second.render(), encoding="utf-8", newline="\n")
         return real_checkpoint_state(root)
 
     monkeypatch.setattr(graph_sync, "checkpoint_state", finish_on_outer_retry)
@@ -680,7 +680,7 @@ def test_nonlegacy_malformed_floor_cannot_be_overwritten_by_a_new_write(tmp_path
         vault_root=tmp_path,
         post_commit_fanout=False,
     )
-    graph_sync.floor_path(tmp_path).write_text("{broken", encoding="utf-8")
+    graph_sync.floor_path(tmp_path).write_text("{broken", encoding="utf-8", newline="\n")
 
     with pytest.raises(graph_sync.GraphEpochIncoherent, match="floor"):
         vault_module.batch_atomic_write(
@@ -699,7 +699,7 @@ def test_deletion_epoch_restores_the_prior_floor_when_checkpoint_commit_fails(
     path = "Knowledge Base/Notes/Insights/deleted.md"
     source = tmp_path / path
     source.parent.mkdir(parents=True)
-    source.write_text("# Deleted\n", encoding="utf-8")
+    source.write_text("# Deleted\n", encoding="utf-8", newline="\n")
     epoch = graph_sync.prepare_deletion_epoch(tmp_path, [path])
     assert epoch is not None
     assert graph_sync.read_floor(tmp_path).generation == 1
@@ -723,7 +723,7 @@ def test_file_delete_checkpoint_failure_restores_the_source_and_epoch(
     rel = "Knowledge Base/Notes/Insights/rollback-file.md"
     source = tmp_path / rel
     source.parent.mkdir(parents=True)
-    source.write_text("# Rollback\n", encoding="utf-8")
+    source.write_text("# Rollback\n", encoding="utf-8", newline="\n")
 
     monkeypatch.setattr(
         graph_sync,
@@ -747,7 +747,7 @@ def test_recursive_delete_checkpoint_failure_restores_the_tree_and_epoch(
     rel = "Knowledge Base/Notes/Insights/rollback-directory"
     source = tmp_path / rel / "nested.md"
     source.parent.mkdir(parents=True)
-    source.write_text("# Rollback\n", encoding="utf-8")
+    source.write_text("# Rollback\n", encoding="utf-8", newline="\n")
 
     monkeypatch.setattr(
         graph_sync,
@@ -977,7 +977,7 @@ def test_failed_incremental_proof_queues_the_affected_paths_without_rebuilding(
 
     note = tmp_path / "Knowledge Base/Notes/Insights/deferred.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Deferred\n", encoding="utf-8")
+    note.write_text("# Deferred\n", encoding="utf-8", newline="\n")
     index = EpistemicGraphIndex(tmp_path)
     required = _checkpoint(1)
     graph_sync._write_checkpoint(tmp_path, required)
@@ -1020,7 +1020,7 @@ def test_an_enqueue_that_failed_still_earns_a_whole_vault_rebuild(
 
     note = tmp_path / "Knowledge Base/Notes/Insights/unqueued.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Unqueued\n", encoding="utf-8")
+    note.write_text("# Unqueued\n", encoding="utf-8", newline="\n")
     index = EpistemicGraphIndex(tmp_path)
     required = _checkpoint(1)
     graph_sync._write_checkpoint(tmp_path, required)
@@ -1063,7 +1063,7 @@ def test_a_queued_repair_is_not_rescheduled_as_a_whole_vault_rebuild(
 
     note = tmp_path / "Knowledge Base/Notes/Insights/queued.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Queued\n", encoding="utf-8")
+    note.write_text("# Queued\n", encoding="utf-8", newline="\n")
     required = _checkpoint(1)
     graph_sync._write_checkpoint(tmp_path, required)
     registrations: list[graph_sync.GraphSyncCheckpoint] = []
@@ -1113,7 +1113,7 @@ def test_a_standalone_caller_still_gets_a_converged_graph(
 
     note = tmp_path / "Knowledge Base/Notes/Insights/standalone.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Standalone\n", encoding="utf-8")
+    note.write_text("# Standalone\n", encoding="utf-8", newline="\n")
     required = _checkpoint(1)
     graph_sync._write_checkpoint(tmp_path, required)
     registrations: list[graph_sync.GraphSyncCheckpoint] = []
@@ -1170,7 +1170,7 @@ def test_rollback_compatibility_disables_new_scheduling_but_keeps_epoch_recovery
 
     note = tmp_path / "Knowledge Base/Notes/Insights/compatibility.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Compatibility\n", encoding="utf-8")
+    note.write_text("# Compatibility\n", encoding="utf-8", newline="\n")
     checkpoint = _checkpoint(1)
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(1))
     graph_sync._write_checkpoint(tmp_path, checkpoint)
@@ -1233,7 +1233,7 @@ def test_incremental_graph_ack_rollback_keeps_prior_rows_and_ack(
     index.rebuild_all()
     prior_checkpoint = graph_sync.read_checkpoint(tmp_path)
     assert prior_checkpoint is not None
-    prior_hash = vault_module.content_hash(note.read_text(encoding="utf-8"))
+    prior_hash = vault_module.content_hash(note.read_bytes().decode("utf-8"))
 
     vault_module.batch_atomic_write(
         [
@@ -1488,7 +1488,7 @@ def test_original_index_publication_seam_rechecks_freshness_before_replace(
 
     note = tmp_path / "Knowledge Base/Notes/Insights/publication-race.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Before\n", encoding="utf-8")
+    note.write_text("# Before\n", encoding="utf-8", newline="\n")
     required = _checkpoint(1)
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(1))
     graph_sync._write_checkpoint(tmp_path, required)
@@ -1499,7 +1499,7 @@ def test_original_index_publication_seam_rechecks_freshness_before_replace(
         nonlocal raced
         if not raced:
             raced = True
-            note.write_text("# After\n", encoding="utf-8")
+            note.write_text("# After\n", encoding="utf-8", newline="\n")
             freshness.mark_external_pending(tmp_path)
 
     monkeypatch.setattr(index, "_before_publish_replacement", race)
@@ -1522,7 +1522,7 @@ def test_publication_hook_exception_discards_ticket_and_retries(
 
     note = tmp_path / "Knowledge Base/Notes/hook-retry.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Hook retry\n", encoding="utf-8")
+    note.write_text("# Hook retry\n", encoding="utf-8", newline="\n")
     freshness.seed(tmp_path, "vault", [(str(note), freshness.stat_signature(note))])
     index = EpistemicGraphIndex(tmp_path)
     calls = 0
@@ -1548,7 +1548,7 @@ def test_persistent_publication_hook_failure_is_exact_stabilization_exhaustion(
 
     note = tmp_path / "Knowledge Base/Notes/hook-failure.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Before\n", encoding="utf-8")
+    note.write_text("# Before\n", encoding="utf-8", newline="\n")
     freshness.seed(tmp_path, "vault", [(str(note), freshness.stat_signature(note))])
     index = epistemic_graph.EpistemicGraphIndex(tmp_path)
     index.rebuild_all()
@@ -1592,7 +1592,7 @@ def test_rebuild_publication_hold_runs_no_disk_or_sqlite_work(
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/availability.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Availability\n", encoding="utf-8")
+    note.write_text("# Availability\n", encoding="utf-8", newline="\n")
     freshness.seed(vault, "vault", [(str(note), freshness.stat_signature(note))])
     index = epistemic_graph.EpistemicGraphIndex(vault)
     state_root = tmp_path / "state"
@@ -1669,7 +1669,7 @@ def test_publication_rejects_a_hook_swapped_temp_symlink(
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/symlink-race.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Safe\n", encoding="utf-8")
+    note.write_text("# Safe\n", encoding="utf-8", newline="\n")
     freshness.seed(vault, "vault", [(str(note), freshness.stat_signature(note))])
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
@@ -1698,7 +1698,7 @@ def test_publication_rejects_a_hook_swapped_temp_reparse_point(
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/reparse-race.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Safe\n", encoding="utf-8")
+    note.write_text("# Safe\n", encoding="utf-8", newline="\n")
     freshness.seed(vault, "vault", [(str(note), freshness.stat_signature(note))])
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
@@ -1760,12 +1760,18 @@ def test_temporary_identity_rejects_a_windows_reparse_attribute(
 
 
 def test_private_ticket_handles_special_character_vault_paths(tmp_path: Path) -> None:
+    # The point of the fixture is a vault path Windows will not accept:
+    # `?` is a reserved character in a path component there, so the
+    # directory cannot be created at all. Narrowing it to characters both
+    # platforms allow would drop the case this test exists for.
+    if os.name == "nt":
+        pytest.skip("the fixture vault name uses a character Windows reserves")
     from exomem import epistemic_graph
 
     vault = tmp_path / "vault?#"
     note = vault / "Knowledge Base/Notes/escaped.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Escaped\n", encoding="utf-8")
+    note.write_text("# Escaped\n", encoding="utf-8", newline="\n")
     freshness.seed(vault, "vault", [(str(note), freshness.stat_signature(note))])
     checkpoint = graph_sync.GraphSyncCheckpoint.create(
         generation=1,
@@ -1790,7 +1796,7 @@ def test_publication_retries_when_access_policy_changes_at_hook(
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/controlled.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Controlled\n", encoding="utf-8")
+    note.write_text("# Controlled\n", encoding="utf-8", newline="\n")
     freshness.seed(vault, "vault", [(str(note), freshness.stat_signature(note))])
     index = epistemic_graph.EpistemicGraphIndex(vault)
     changed = False
@@ -1800,8 +1806,7 @@ def test_publication_retries_when_access_policy_changes_at_hook(
         if not changed:
             changed = True
             (vault / "Knowledge Base/_access.yaml").write_text(
-                "excluded:\n  - Notes\n", encoding="utf-8"
-            )
+                "excluded:\n  - Notes\n", encoding="utf-8", newline="\n")
 
     monkeypatch.setattr(index, "_before_publish_replacement", change_policy)
 
@@ -1817,7 +1822,7 @@ def test_rebuild_refuses_a_malformed_live_acknowledgement(tmp_path: Path) -> Non
 
     note = tmp_path / "Knowledge Base/Notes/ack.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Ack\n", encoding="utf-8")
+    note.write_text("# Ack\n", encoding="utf-8", newline="\n")
     freshness.seed(tmp_path, "vault", [(str(note), freshness.stat_signature(note))])
     checkpoint = graph_sync.GraphSyncCheckpoint.create(
         generation=1,
@@ -2351,7 +2356,7 @@ def test_legacy_refresh_releases_canonical_boundary_before_missing_sidecar_rebui
 
     note = tmp_path / "Knowledge Base/Notes/Insights/legacy-refresh.md"
     note.parent.mkdir(parents=True)
-    note.write_text("# Legacy refresh\n", encoding="utf-8")
+    note.write_text("# Legacy refresh\n", encoding="utf-8", newline="\n")
     rebuild_started = threading.Event()
     release_rebuild = threading.Event()
     concurrent_writer_admitted = threading.Event()
@@ -2375,7 +2380,7 @@ def test_legacy_refresh_releases_canonical_boundary_before_missing_sidecar_rebui
     def canonical_leaf(vault_root: Path) -> dict[str, str]:
         record = vault_root / "Knowledge Base/Records/concurrent.md"
         record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text("# Concurrent canonical mutation\n", encoding="utf-8")
+        record.write_text("# Concurrent canonical mutation\n", encoding="utf-8", newline="\n")
         concurrent_writer_admitted.set()
         return {"status": "committed"}
 
@@ -2459,7 +2464,7 @@ def test_malformed_checkpoint_refuses_an_acknowledged_graph_and_reconcile_keeps_
     from exomem.epistemic_graph import EpistemicGraphIndex
 
     EpistemicGraphIndex(tmp_path).rebuild_all()
-    graph_sync.checkpoint_path(tmp_path).write_text("{not-json", encoding="utf-8")
+    graph_sync.checkpoint_path(tmp_path).write_text("{not-json", encoding="utf-8", newline="\n")
 
     assert EpistemicGraphIndex(tmp_path).available() is False
     report = reconcile_module.reconcile(tmp_path)
@@ -2473,7 +2478,7 @@ def test_malformed_checkpoint_refuses_an_acknowledged_graph_and_reconcile_keeps_
 def test_legacy_graph_without_a_checkpoint_remains_available(tmp_path: Path) -> None:
     note = tmp_path / "Knowledge Base/Notes/Insights/legacy.md"
     note.parent.mkdir(parents=True)
-    note.write_text("---\ntype: insight\nstatus: active\n---\n# Legacy\n", encoding="utf-8")
+    note.write_text("---\ntype: insight\nstatus: active\n---\n# Legacy\n", encoding="utf-8", newline="\n")
     from exomem.epistemic_graph import EpistemicGraphIndex
 
     index = EpistemicGraphIndex(tmp_path)
@@ -2513,7 +2518,7 @@ def test_reconcile_does_not_claim_current_when_the_generation_floor_is_malformed
     from exomem.epistemic_graph import EpistemicGraphIndex
 
     EpistemicGraphIndex(tmp_path).rebuild_all()
-    graph_sync.floor_path(tmp_path).write_text("{not-json", encoding="utf-8")
+    graph_sync.floor_path(tmp_path).write_text("{not-json", encoding="utf-8", newline="\n")
 
     report = reconcile_module.reconcile(tmp_path)
 
@@ -2780,7 +2785,7 @@ def test_full_rebuild_replacement_refusal_retains_complete_temp_for_later_recove
     index = EpistemicGraphIndex(tmp_path)
     index.rebuild_all()
     old_live = index.path.read_bytes()
-    note.write_text("# After\n", encoding="utf-8")
+    note.write_text("# After\n", encoding="utf-8", newline="\n")
     retained: list[Path] = []
     original_replace = graph_sync.replace_sidecar
 
@@ -2904,7 +2909,7 @@ def test_refused_replacement_publishes_in_place_without_moving_the_live_entry(
     index.rebuild_all()
     live = index.path
     identity_before = live.stat()
-    note.write_text("# After the refused replacement\n", encoding="utf-8")
+    note.write_text("# After the refused replacement\n", encoding="utf-8", newline="\n")
 
     _refuse_replacement_onto(monkeypatch, live)
     # A reader that stays open across the whole publication, exactly the
@@ -2950,7 +2955,7 @@ def test_publication_refused_by_both_paths_still_fails_closed(
     index = EpistemicGraphIndex(tmp_path)
     index.rebuild_all()
     old_live = index.path.read_bytes()
-    note.write_text("# After\n", encoding="utf-8")
+    note.write_text("# After\n", encoding="utf-8", newline="\n")
     epistemic_graph.clear_publication_memos()
 
     _refuse_replacement_onto(monkeypatch, index.path)

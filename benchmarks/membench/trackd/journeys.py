@@ -55,6 +55,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from membench.hermetic_env import apply_os_requirements
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = REPO_ROOT / "src"
 COMMAND_TIMEOUT_SECONDS = 60.0
@@ -125,7 +127,7 @@ def journey_env(vault: Path, workdir: Path, instant: dt.datetime) -> dict[str, s
     from membench.adapters.exomem_local import lexical_profile
 
     hook_dir = _write_clock_hook(workdir, instant)
-    return {
+    env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(workdir),
         "EXOMEM_VAULT_PATH": str(vault),
@@ -136,6 +138,7 @@ def journey_env(vault: Path, workdir: Path, instant: dt.datetime) -> dict[str, s
         "EXOMEM_TRACKD_INSTANT": instant.isoformat(),
         **lexical_profile().settings,
     }
+    return apply_os_requirements(env, workdir)
 
 
 @dataclass

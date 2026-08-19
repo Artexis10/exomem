@@ -47,7 +47,21 @@ MAX_METADATA_LOG_BYTES = 1024 * 1024
 MAX_METADATA_DURATION_MS = 60_000
 TRANSCRIPT_SLICE_BYTES = 64 * 1024
 RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
-GIT_TIMEOUT_SECONDS = 0.35
+#: Budget for one `git` probe. A checkpoint that cannot read the workspace
+#: records a degradation rather than blocking the session, so this is a
+#: fidelity/latency trade and not a correctness fence -- but degrading is
+#: still the worse outcome, because the checkpoint's whole job is to record
+#: what the workspace looked like.
+#:
+#: Windows gets a larger budget because the cost being bounded there is
+#: mostly process creation, not the status walk: `git status --porcelain`
+#: on an idle Windows box measures ~23 ms p50 for a one-file repository, of
+#: which the walk is a small part, and a shared CI runner executing two
+#: test shards routinely multiplies that by more than the 15x of headroom
+#: 0.35 s leaves. The symptom is silent: every probe degrades, so two
+#: checkpoints taken across a real workspace change record the same empty
+#: structural block and hash identically.
+GIT_TIMEOUT_SECONDS = 2.0 if os.name == "nt" else 0.35
 
 _CLIENT_EVENTS = {
     "claude": {
@@ -2020,9 +2034,24 @@ def _ensure_session_manifest(
     client: str,
     session_id: str,
     created_at_ns: int,
+    *,
+    descriptor: int | None = None,
 ) -> None:
-    fd = _open_secure_file_at(state, ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    """Write the session manifest into `.lock`, through a held descriptor if given.
+
+    Same reason as `load_session_manifest_at`: Windows byte-range locks are
+    mandatory, so a caller already holding this file's advisory lock cannot
+    reach the bytes through a second descriptor. The pruner does exactly that
+    when it adopts a pending record for a session killed before its manifest
+    was written, which is why that case could never be repaired -- and so never
+    pruned -- on Windows.
+    """
+    fd = descriptor if descriptor is not None else _open_secure_file_at(
+        state, ".lock", os.O_RDWR | os.O_CREAT, 0o600
+    )
     try:
+        if descriptor is not None:
+            os.lseek(fd, 0, os.SEEK_SET)
         raw = os.read(fd, 4097)
         if raw not in {b"", b"\0"}:
             return
@@ -2034,7 +2063,8 @@ def _ensure_session_manifest(
         os.ftruncate(fd, len(payload))
         os.fsync(fd)
     finally:
-        os.close(fd)
+        if descriptor is None:
+            os.close(fd)
 
 
 def load_session_manifest_at(
@@ -2042,16 +2072,35 @@ def load_session_manifest_at(
     home: Path,
     client: str,
     state_name: str,
+    *,
+    descriptor: int | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
+    """Read the session manifest, optionally through a descriptor already held.
+
+    The manifest lives inside `.lock`, and a caller holding that file's
+    advisory lock must pass its descriptor. POSIX locks are advisory, so a
+    second descriptor could read the bytes regardless; Windows byte-range
+    locks are mandatory, and the read through a second descriptor is refused.
+    That refusal surfaced as `corrupt` -- indistinguishable from a genuinely
+    damaged manifest -- and it made every expired session whose first write was
+    interrupted permanently unprunable on Windows, because the pruner reads the
+    manifest while holding exactly that lock. Reading through the descriptor
+    that owns the lock is allowed on both platforms.
+    """
     try:
-        fd = _open_secure_file_at(state, ".lock", os.O_RDONLY, 0o600)
+        fd = descriptor if descriptor is not None else _open_secure_file_at(
+            state, ".lock", os.O_RDONLY, 0o600
+        )
         try:
             info = os.fstat(fd)
             if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
                 return None, "corrupt"
+            if descriptor is not None:
+                os.lseek(fd, 0, os.SEEK_SET)
             raw = os.read(fd, 4097)
         finally:
-            os.close(fd)
+            if descriptor is None:
+                os.close(fd)
         if not raw.startswith(b"\0") or len(raw) > 4096:
             return None, "missing"
         value = json.loads(raw[1:])
@@ -2673,6 +2722,23 @@ def _posix_directory_window(
         closedir(stream)
 
 
+def _resumes_a_directory_stream_from_a_saved_cookie() -> bool:
+    """Whether a `telldir` cookie outlives the stream that produced it.
+
+    Every window here opens a fresh directory stream and resumes it from the
+    cookie the previous window returned, so the cookie has to mean the same
+    thing to a stream that has never seen it. glibc satisfies that: its
+    `telldir` hands back the filesystem's own `d_off`. The 4.4BSD lineage,
+    Darwin included, instead returns an index into a location table owned by
+    the *DIR that produced it*; replayed into a new stream it resolves
+    against a table that no longer holds it and the scan lands at an
+    arbitrary offset. Measured on macOS as entries scattered through a
+    257-entry directory that no window ever returned. Windows has no cookie
+    of any kind. Both resume from the durable prune catalog instead.
+    """
+    return sys.platform.startswith("linux") and os.name != "nt"
+
+
 def _directory_window(
     directory: _SecureDirectory,
     *,
@@ -2684,24 +2750,29 @@ def _directory_window(
     if sys.platform.startswith("linux") and os.name != "nt" and not force_portable:
         return _linux_directory_window(directory, cursor, limit, deadline)
     if os.name != "nt":
+        if cursor and not _resumes_a_directory_stream_from_a_saved_cookie():
+            raise OSError(
+                "this platform resumes a root scan from the durable prune catalog"
+            )
         return _posix_directory_window(directory, cursor, limit, deadline)
+    # Windows exposes no resumable directory cursor: `os.scandir` has no
+    # `telldir`/`seekdir` equivalent, and re-scanning a prefix to reach the
+    # cursor replays a growing prefix under a fixed budget -- the shape
+    # `_prune_catalog_window` exists to avoid. Root pruning routes there on
+    # `nt`; every other caller enumerates from the start, so the cursor this
+    # branch reports back is always 0.
     if cursor:
-        raise OSError("Windows root resumption requires the durable prune catalog")
-    target: object = directory.path if os.name == "nt" else directory.fd
+        raise OSError("this platform resumes a root scan from the durable prune catalog")
     names: list[str] = []
     inspected = 0
-    position = 0
-    with os.scandir(target) as entries:
+    with os.scandir(directory.path) as entries:
         for entry in entries:
             if time.monotonic() >= deadline:
-                return names, position, False, inspected
+                return names, 0, False, inspected
             inspected += 1
-            position += 1
-            if position <= cursor:
-                continue
             names.append(entry.name)
             if len(names) >= limit:
-                return names, position, False, inspected
+                return names, 0, False, inspected
     return names, 0, True, inspected
 
 
@@ -3075,7 +3146,9 @@ def _tombstone_expired_candidate(
             if now - int(previous["observed_at_ns"]) <= RETENTION_NS:
                 return None
         else:
-            manifest, manifest_status = load_session_manifest_at(state_handle, home, client, name)
+            manifest, manifest_status = load_session_manifest_at(
+                state_handle, home, client, name, descriptor=lock.fd
+            )
             if manifest_status != "valid" or manifest is None:
                 pending, pending_status = _load_pending_session_at(root_handle, home, client, name)
                 if (
@@ -3089,9 +3162,10 @@ def _tombstone_expired_candidate(
                         client,
                         str(pending["session_id"]),
                         int(pending["created_at_ns"]),
+                        descriptor=lock.fd,
                     )
                     manifest, manifest_status = load_session_manifest_at(
-                        state_handle, home, client, name
+                        state_handle, home, client, name, descriptor=lock.fd
                     )
                     if manifest_status == "valid":
                         try:
@@ -3504,7 +3578,9 @@ def _authorize_recovery_tombstone(
             None,
         )
         if authorized is None:
-            manifest, status_value = load_session_manifest_at(state, home, client, original_name)
+            manifest, status_value = load_session_manifest_at(
+                state, home, client, original_name, descriptor=lock.fd
+            )
             if (
                 status_value != "valid"
                 or manifest is None
@@ -3602,7 +3678,10 @@ def prune_expired(
                         deadline=lock_deadline,
                     )
                 scan_cursor = _read_prune_sequence(root_lock, offset=17)
-                if os.name == "nt" or force_portable_catalog:
+                if (
+                    force_portable_catalog
+                    or not _resumes_a_directory_stream_from_a_saved_cookie()
+                ):
                     scanned_names, next_cursor, _exhausted, _inspected = _prune_catalog_window(
                         root_handle,
                         cursor=scan_cursor,

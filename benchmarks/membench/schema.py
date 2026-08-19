@@ -425,7 +425,7 @@ def export_json_schemas(out_dir: Path) -> list[Path]:
     for name, model in sorted(SCHEMA_EXPORTS.items()):
         target = out_dir / f"{name}.schema.json"
         payload = json.dumps(model.model_json_schema(), indent=2, sort_keys=True) + "\n"
-        target.write_text(payload, encoding="utf-8")
+        target.write_text(payload, encoding="utf-8", newline="\n")
         written.append(target)
     return written
 

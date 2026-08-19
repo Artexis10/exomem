@@ -846,3 +846,102 @@ def test_kill_switch_disables_cache(vault: Path, monkeypatch: pytest.MonkeyPatch
     first = semantic_contract.build_corpus_context(vault)
     second = semantic_contract.build_corpus_context(vault)
     assert second is not first
+
+
+# --- #561: a vanishing sidecar temporary must not void the whole census ----
+
+
+class _VanishedEntry:
+    """A listing entry whose file disappeared before anything stat'ed it.
+
+    Deleting the file for real does not stage the race portably: on Windows
+    `DirEntry.stat()` answers from the data `scandir` already returned, so the
+    stat succeeds on a file that is gone. Standing in for the entry exercises
+    the window on every platform, and counts whether the walk stats at all --
+    which is what #528's fix, and now #561's, actually changed.
+    """
+
+    def __init__(self, entry: os.DirEntry) -> None:
+        self._entry = entry
+        self.stat_calls = 0
+
+    @property
+    def name(self) -> str:
+        return self._entry.name
+
+    @property
+    def path(self) -> str:
+        return self._entry.path
+
+    def is_symlink(self) -> bool:
+        return self._entry.is_symlink()
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        return self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+    def is_file(self, *, follow_symlinks: bool = True) -> bool:
+        return self._entry.is_file(follow_symlinks=follow_symlinks)
+
+    def stat(self, *, follow_symlinks: bool = True):
+        self.stat_calls += 1
+        raise FileNotFoundError(2, "No such file or directory", self._entry.path)
+
+
+def _vanish_on_listing(monkeypatch: pytest.MonkeyPatch, name: str) -> list[_VanishedEntry]:
+    """Replace *name* in every listing with an entry that cannot be stat'ed."""
+    real_scandir = os.scandir
+    swapped: list[_VanishedEntry] = []
+
+    def scandir_with_a_vanished_entry(path):
+        entries = []
+        for entry in real_scandir(path):
+            if entry.name == name:
+                stand_in = _VanishedEntry(entry)
+                swapped.append(stand_in)
+                entries.append(stand_in)
+            else:
+                entries.append(entry)
+        return entries
+
+    monkeypatch.setattr(semantic_contract.os, "scandir", scandir_with_a_vanished_entry)
+    return swapped
+
+
+def test_census_never_stats_a_sidecar_temporary_at_all(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `-wal` companion is not census input, so losing one must cost nothing.
+
+    Before #561 the strict walk stat'ed every entry ahead of the `.md` filter,
+    and the `FileNotFoundError` from a companion that had already been dropped
+    degraded the whole census to `None` -- which forces an uncached
+    whole-corpus build on the write path, for a reason unrelated to anything
+    that changed.
+    """
+    (vault / "Knowledge Base" / ".embeddings.sqlite-wal").write_bytes(b"transient")
+    swapped = _vanish_on_listing(monkeypatch, ".embeddings.sqlite-wal")
+
+    census = semantic_contract._corpus_census(vault)
+
+    assert swapped, "the fixture never saw the sidecar in a listing"
+    assert all(entry.stat_calls == 0 for entry in swapped)
+    assert census is not None
+    assert not any(entry[0].endswith("-wal") for entry in census)
+
+
+def test_census_refuses_rather_than_omits_a_page_that_vanishes_mid_walk(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one place this walk is deliberately stricter than the one it mirrors.
+
+    `_build_identity_census` skips a page that vanishes mid-walk, because it
+    reports a snapshot and a page that is gone is simply not in it. This walk is
+    a cache key. Returning `None` costs one uncached build; quietly returning a
+    census that omits the page would let a cached context the corpus no longer
+    matches keep its key and be served as current (#561).
+    """
+    doomed = vault / "Knowledge Base" / "Notes" / "Insights" / "doomed.md"
+    doomed.write_text(_page(title="Doomed"), encoding="utf-8")
+    _vanish_on_listing(monkeypatch, "doomed.md")
+
+    assert semantic_contract._corpus_census(vault) is None

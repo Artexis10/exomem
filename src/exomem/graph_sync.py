@@ -3001,17 +3001,24 @@ def claim_rebuild_owner(
         _try_os_lock,
     )
 
-    runtime_root = _rebuild_runtime_root(state_root)
-    key = _rebuild_lock_key(vault_root, runtime_root)
-    with _COORDINATORS_LOCK:
-        if key in _REBUILD_LOCK_HANDLES:
-            return False
-    lock = _rebuild_lock_path(vault_root, state_root=runtime_root)
     directory: Any = None
     directory_transferred = False
     handle: BinaryIO | None = None
     locked = False
     try:
+        # Resolving the runtime root touches the filesystem, and on Windows it
+        # refuses a reparse-point state directory. That refusal *is* this
+        # function's contract -- the lock could not be established -- so it has
+        # to leave as `GraphRebuildLockUnavailable` like every other failure
+        # here. Sitting above the `try` it escaped as a bare `OSError` that no
+        # caller expects, which is what
+        # `test_windows_rebuild_lock_rejects_a_reparse_lock_directory` catches.
+        runtime_root = _rebuild_runtime_root(state_root)
+        key = _rebuild_lock_key(vault_root, runtime_root)
+        with _COORDINATORS_LOCK:
+            if key in _REBUILD_LOCK_HANDLES:
+                return False
+        lock = _rebuild_lock_path(vault_root, state_root=runtime_root)
         directory = _acquire_trusted_runtime_root(lock.parent)
         descriptor = _open_owned_runtime_lock_file(directory, lock.name)
         handle = os.fdopen(descriptor, "a+b")

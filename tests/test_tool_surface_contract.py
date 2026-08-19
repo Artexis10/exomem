@@ -13,6 +13,7 @@ from fastmcp.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from exomem import commands, semantic_authoring, semantic_index
+from exomem import vault as vault_module
 from exomem import server as server_module
 from exomem.__main__ import main
 
@@ -468,7 +469,9 @@ def test_observe_final_unit_removal_envelope_matches_all_facades_without_mutatio
     relative = "Knowledge Base/Notes/Insights/final-unit.md"
     page = vault / relative
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text(
+    # `write_bytes`, not `write_text`: text mode turns these LF literals
+    # into CRLF on Windows, and `expected_hash` is a hash of raw bytes.
+    page.write_bytes(
         "---\n"
         "type: insight\n"
         "exomem_id: 00000000-0000-4000-8000-000000000402\n"
@@ -479,8 +482,8 @@ def test_observe_final_unit_removal_envelope_matches_all_facades_without_mutatio
         "---\n\n"
         "# Final unit\n\n"
         "## Observations\n\n"
-        "- [operating constraint] Keep retries bounded #reliability ^only-unit\n",
-        encoding="utf-8",
+        "- [operating constraint] Keep retries bounded #reliability ^only-unit\n"
+        .encode("utf-8")
     )
     state = semantic_index.current_parent_index_state(vault, relative)
     unit = state.document.units[0]
@@ -490,7 +493,11 @@ def test_observe_final_unit_removal_envelope_matches_all_facades_without_mutatio
         "operation": "remove",
         "unit_ref": unit.unit_ref,
         "expected_fingerprint": unit.fingerprint,
-        "expected_hash": state.parent_source_hash,
+        # The documented guard is the page's whole-file `content_hash`, not
+        # the semantic index's hash of the newline-normalized source.
+        "expected_hash": vault_module.content_hash(
+            page.read_bytes().decode("utf-8")
+        ),
     }
     before = {
         path.relative_to(vault).as_posix(): path.read_bytes()

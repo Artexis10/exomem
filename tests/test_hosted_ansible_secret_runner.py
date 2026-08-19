@@ -7,7 +7,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from benchmark_capabilities import has_posix_executable_scripts
+from benchmark_capabilities import (
+    has_posix_executable_scripts,
+    require_mount_type_inspection,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "infra" / "scripts" / "ansible_with_sops.sh"
@@ -28,6 +31,11 @@ def _write_executable(path: Path, body: str) -> None:
 
 
 def test_ansible_secret_runner_requires_tmpfs_before_decrypting(tmp_path: Path) -> None:
+    # The runner proves the workspace is tmpfs with `findmnt`, which macOS does
+    # not ship. Without it the refusal under test is unreachable -- the runner
+    # stops one step earlier, on its own missing-tool refusal.
+    require_mount_type_inspection()
+
     encrypted = tmp_path / "secret.v1.sops.json"
     encrypted.write_text('{"sops":{}}', encoding="utf-8")
     inventory = tmp_path / "inventory.yml"

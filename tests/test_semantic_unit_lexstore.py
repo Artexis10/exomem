@@ -111,6 +111,9 @@ Use SQLite for the index.
     assert {row["record_type"] for row in rows} == {"semantic_unit"}
     assert {row["parent_path"] for row in rows} == {"Knowledge Base/Notes/units.md"}
     assert {row["parent_ref"] for row in rows} == {_PARENT_REF}
+    # Normalized, unlike the file `content_hash` the drift guard uses: a unit's
+    # parent source hash is taken over logical Markdown, which `semantic_units`
+    # folds to LF before hashing.
     assert {row["parent_source_hash"] for row in rows} == {
         vault.content_hash(page.read_text(encoding="utf-8"))
     }

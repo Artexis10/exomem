@@ -138,7 +138,10 @@ def test_wheel_install_fallback_lands_in_a_per_platform_location(
 
     result = logging_config.resolve_log_dir()
 
-    assert result.name == "logs"
+    # Deliberately no blanket `result.name == "logs"`: macOS follows Apple's
+    # convention and lands on `~/Library/Logs/Exomem`, which the darwin branch
+    # below already asserts in full. The two platforms that do end in `logs`
+    # assert their whole path, which is the stronger claim anyway.
     if sys.platform == "win32":
         # Machine-wide, NOT the user profile: a LocalSystem-run service and
         # an operator's own-user `exomem` CLI must land on the same
@@ -157,6 +160,7 @@ def test_wheel_install_fallback_lands_in_a_per_platform_location(
     elif sys.platform == "darwin":
         assert result == Path.home() / "Library" / "Logs" / "Exomem"
     else:
+        assert result.name == "logs"
         assert result.parent.name == "exomem"
 
 

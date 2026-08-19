@@ -518,6 +518,30 @@ def _source_signature(source_stat: os.stat_result) -> tuple[int, int, int, int, 
     )
 
 
+def _cross_source_signature(source_stat: os.stat_result) -> tuple[int, int, int, int]:
+    """The part of `_source_signature` a path stat and an fstat can be compared on.
+
+    `st_ctime_ns` is deliberately absent. On Windows `os.stat` reports creation
+    time there while `os.fstat` reports metadata-change time -- two different
+    quantities, not two precisions of one -- so the `lstat` taken before the
+    open never matched the `fstat` taken after it for any file written a
+    measurable interval after it was created. Every Windows vault export
+    therefore failed with SOURCE_CHANGED_DURING_EXPORT, on a file nothing had
+    touched.
+
+    Only that one comparison spans the two calls. Descriptor-to-descriptor
+    comparisons keep the full signature, and so does the check against the
+    signature recorded at enumeration, which is itself descriptor-derived --
+    those are where a real mid-export change shows up.
+    """
+    return (
+        source_stat.st_dev,
+        source_stat.st_ino,
+        source_stat.st_size,
+        source_stat.st_mtime_ns,
+    )
+
+
 def _open_regular_source(
     path: Path,
     *,
@@ -529,7 +553,14 @@ def _open_regular_source(
     if not stat.S_ISREG(before.st_mode):
         _fail("UNSAFE_SOURCE_ENTRY", "vault exports accept regular files only")
 
-    flags = os.O_RDONLY
+    # `O_BINARY` or Windows opens this in text mode and translates CRLF away
+    # on the way in. The bytes are hashed and counted, so that is not a
+    # cosmetic difference: a CRLF page read back short of its own `st_size`
+    # tripped the "source changed during export" guard, and any page whose
+    # translated length happened to match would have been exported under the
+    # digest of content that is not on disk. The constant does not exist on
+    # POSIX, where the distinction does not either.
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -540,9 +571,8 @@ def _open_regular_source(
         opened = os.fstat(descriptor)
         if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
             _fail("UNSAFE_SOURCE_ENTRY", "vault exports accept regular files only")
-        before_signature = _source_signature(before)
         opened_signature = _source_signature(opened)
-        if before_signature != opened_signature or (
+        if _cross_source_signature(before) != _cross_source_signature(opened) or (
             expected_signature is not None and opened_signature != expected_signature
         ):
             _fail("SOURCE_CHANGED_DURING_EXPORT", "a source file changed during export")
@@ -856,8 +886,15 @@ def _hash_file(path: Path) -> str:
 
 
 def _fsync_regular_file(path: Path) -> None:
+    # Opened for update, not for reading: Windows implements `os.fsync` with
+    # `FlushFileBuffers`, which requires a handle carrying write access and
+    # fails with `EBADF` on a read-only one. So the durability step this
+    # function exists for could never succeed there -- it raised, and the
+    # export reported ARTIFACT_PUBLICATION_FAILED instead of publishing. The
+    # target is this operation's own `.partial` temporary, so it is writable;
+    # POSIX permits either mode.
     try:
-        with path.open("rb") as handle:
+        with path.open("r+b") as handle:
             os.fsync(handle.fileno())
     except OSError:
         _fail("ARTIFACT_PUBLICATION_FAILED", "completed artifact could not be made durable")

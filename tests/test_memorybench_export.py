@@ -615,6 +615,14 @@ def test_preregistration_plan_digest_is_only_an_assertion_against_derived_identi
 def test_production_default_calls_the_real_setup_verifier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Calls `run_export` directly rather than through `_run`, so it has to
+    # state `_run`'s toolchain requirement itself: `_resolve_toolchain` is not
+    # injectable, and without the pinned Bun the export is BLOCKED long before
+    # it reaches the verifier this asserts on. Only `ci.yml` installs Bun, so
+    # on the cross-platform runners it is genuinely absent.
+    require_posix_file_modes()
+    require_pinned_bun()
+
     import memorybench.export as export
 
     plan = _plan(tmp_path)
@@ -1688,6 +1696,13 @@ def test_cleanup_retains_checkpoint_target_after_late_private_projection_write_f
 def test_real_foreground_second_signal_cannot_kill_isolated_cleanup_group(
     tmp_path: Path,
 ) -> None:
+    # Gate *before* forking. The child reaches `_run`, whose `require_pinned_bun`
+    # raises `Skipped` inside a forked process, where the surrounding
+    # `except BaseException: os._exit(90)` turns a skip into a dead coordinator
+    # and the parent reports `coordinator never entered the owned stage`.
+    require_posix_file_modes()
+    require_pinned_bun()
+
     plan = _fresh_plan(tmp_path)
     stage_ready = tmp_path / "stage-ready"
     cleanup_ready = tmp_path / "cleanup-ready"

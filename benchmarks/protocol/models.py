@@ -1493,6 +1493,14 @@ def export_json_schemas(out_dir: Path) -> list[Path]:
         basename = "case-trace" if name == "case-trace-v2" else name
         path = out_dir / f"{basename}.v{version}.schema.json"
         schema = _enhance_memorybench_schema(name, model.model_json_schema())
-        path.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # An explicit LF, because these files are committed and the drift
+        # gate compares them byte for byte. Text mode would translate the
+        # separators to CRLF on Windows, so a re-export there differs from
+        # the committed bytes without a single schema field having changed.
+        path.write_text(
+            json.dumps(schema, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         written.append(path)
     return written

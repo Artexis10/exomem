@@ -18,6 +18,7 @@ from benchmark_capabilities import (
     declares_absent_trusted_git,
     has_bwrap_sandbox,
     has_posix_directory_fd_traversal,
+    has_posix_file_modes,
     has_posix_interval_timers,
     has_trusted_system_git,
 )
@@ -110,6 +111,43 @@ def _declares_custody_unsupported(error: BaseException | None) -> bool:
     return False
 
 
+#: `custody.py` says this exact sentence when it finds no procfs. It reaches a
+#: test as text rather than as a raised error in the `assert <exception> is
+#: <expected>` cases, where the refusal is the *value* being compared, so the
+#: qualified-name walk above cannot see it.
+_CUSTODY_PROC_FD_DECLARATION = re.compile(
+    r"POSIX proc-fd directory capabilities are unavailable"
+)
+
+
+def _needs_an_absent_procfs(error: BaseException | None) -> bool:
+    """True when *error* is a custody test reaching `/proc` on a host without one.
+
+    Several of these tests read `/proc/self/fd` or a `/proc/<pid>/fd/<n>/...`
+    capability path directly rather than through `custody.py`, so they never
+    reach the module's own declaration -- and the lifecycle runner wraps what
+    it caught in `LifecycleRunError`, which buries it further. In both shapes
+    the original `FileNotFoundError` survives on the cause chain and names the
+    path it could not find.
+
+    A missing file under `/proc` on a host with no procfs is not ambiguous: the
+    file is absent because the filesystem that would supply it was never
+    mounted. Gated by the caller on that being the case, so on Linux -- where
+    `ci.yml` runs and procfs exists -- a missing `/proc` entry stays a failure.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, OSError):
+            filename = getattr(error, "filename", None)
+            if isinstance(filename, str) and filename.startswith("/proc/"):
+                return True
+        if _CUSTODY_PROC_FD_DECLARATION.search(str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 #: POSIX-only standard-library surfaces the hosted cell runtime is built on.
 #: A hosted cell is a Linux container: it checks its own effective uid before
 #: trusting a runtime path, and takes `fcntl` locks on its state. There is no
@@ -118,6 +156,12 @@ def _declares_custody_unsupported(error: BaseException | None) -> bool:
 _POSIX_ONLY_API = re.compile(
     r"module 'os' has no attribute 'gete?uid'"
     r"|<module 'os'[^>]*> has no attribute 'gete?uid'"
+    # The hosted operator scripts open every input `O_NOFOLLOW` and every
+    # directory `O_DIRECTORY` so a symlink swapped in mid-read cannot
+    # redirect them. Windows publishes neither flag, so the scripts cannot
+    # even be loaded there -- and they only ever run on the Linux cell.
+    r"|module 'os' has no attribute 'O_(?:NOFOLLOW|DIRECTORY)'"
+    r"|<module 'os'[^>]*> has no attribute 'O_(?:NOFOLLOW|DIRECTORY)'"
     r"|No module named 'fcntl'"
 )
 
@@ -136,6 +180,65 @@ def _needs_an_absent_posix_api(error: BaseException | None) -> bool:
         if isinstance(error, (AttributeError, ImportError)) and _POSIX_ONLY_API.search(
             str(error)
         ):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+#: The hosted cell proves its state is private with POSIX ownership and mode
+#: bits -- `st_uid`/`st_gid` against the runtime owner, `0o700` on the state
+#: root, `0o600` on the security database, and a `mkdir(mode=0o700)` to create
+#: it. Windows has none of that as an access-control fact: it reports no owner
+#: ids and synthesizes a mode, so a directory reads `0o777` and a file `0o666`
+#: whatever `chmod` was asked for. Every one of these refusals is that check
+#: reading a placeholder and correctly declining to vouch for it.
+#:
+#: The DACL refusal belongs to the same fact from the other side. Because the
+#: bare `mkdir` above leaves an ordinary inherited DACL on Windows, the
+#: idempotency runtime under the same state root -- which does have a native
+#: Windows implementation, and requires a *protected* DACL it created itself --
+#: refuses the directory the cell just made. The two only disagree on Windows;
+#: on Linux `prepare_windows_private_state_root` is a no-op and
+#: `mkdir(mode=0o700)` is genuinely private, so there is nothing to reconcile
+#: for the platform this component is deployed on. A hosted cell is a Linux
+#: container, which is the same reason `test_hosted_restore_candidate.py` is
+#: ignored outright here.
+_HOSTED_POSIX_OWNERSHIP_REFUSAL = (
+    "HostedSecurityStateInvalid",
+    "HostedSecurityUnavailable",
+    "HostedRuntimeTempUnavailable",
+    "WindowsRuntimeDaclError",
+)
+_HOSTED_TEMP_REFUSAL = re.compile(r"hosted runtime temp is unavailable")
+
+#: The hosted operator scripts refuse any input whose POSIX mode they cannot
+#: vouch for. Windows `chmod` only toggles a read-only bit, so it cannot
+#: express 0600 or the absence of group/world write at all, and the scripts
+#: are correct to refuse. Matched on the sentences that name a mode, never on
+#: a bare refusal type, so a genuine path-safety finding still fails.
+_HOSTED_OPERATOR_MODE_REFUSAL = re.compile(
+    r"must be a non-writable regular file"
+    r"|without group/world write access"
+    r"|must have mode 0600"
+)
+
+
+def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
+    """True when *error* is the hosted cell declining to trust a synthesized mode.
+
+    Matched by the refusal types the cell raises for exactly this, never on a
+    bare `OSError`, and gated by the caller on the platform genuinely lacking
+    POSIX file modes -- so on Linux CI, where the cell actually runs, every one
+    of these stays a failure.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ in _HOSTED_POSIX_OWNERSHIP_REFUSAL:
+            return True
+        if _HOSTED_TEMP_REFUSAL.search(str(error)):
+            return True
+        if _HOSTED_OPERATOR_MODE_REFUSAL.search(str(error)):
             return True
         error = error.__cause__ or error.__context__
     return False
@@ -199,10 +302,14 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     if call.excinfo is None:
         return
     error = call.excinfo.value
-    if not PROC_FD_DIRECTORY_CUSTODY and _declares_custody_unsupported(error):
+    if not PROC_FD_DIRECTORY_CUSTODY and (
+        _declares_custody_unsupported(error) or _needs_an_absent_procfs(error)
+    ):
         reason = "proc-fd directory custody is unavailable on this platform"
     elif os.name == "nt" and _needs_an_absent_posix_api(error):
         reason = "the hosted cell runtime's POSIX APIs do not exist on Windows"
+    elif not has_posix_file_modes() and _needs_posix_ownership_semantics(error):
+        reason = "the hosted cell proves state privacy with POSIX ownership this platform lacks"
     elif not has_posix_interval_timers() and declares_absent_surface_timers(error):
         reason = "POSIX interval timers (setitimer/SIGALRM) are unavailable here"
     elif not has_bwrap_sandbox() and declares_absent_sandbox(error):
@@ -283,10 +390,22 @@ def _reset_corpus_context_cache():
 #: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
 #: and the warming path (`epistemic_graph.schedule_background_rebuild`).
 _GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
-#: Generous: a rebuild over a test vault is milliseconds. A pass that cannot
-#: finish in 30 s has not been slow, it has wedged, and that is worth failing on
-#: rather than leaving for whichever test inherits it.
-_GRAPH_QUIESCE_TIMEOUT_SECONDS = 30.0
+#: A rebuild over most test vaults is milliseconds, and one that cannot finish
+#: has wedged rather than slowed -- worth failing on rather than leaving for
+#: whichever test inherits it. But most is not every: the planning-governance
+#: cap fixtures build a vault of ~2000 pages, whose whole-vault rebuild
+#: measures ~36 s on an idle Windows box, so 30 s reported a rebuild that was
+#: progressing normally as wedged and failed the Windows lane in teardown of a
+#: test that had passed.
+#:
+#: Raised well past that measurement rather than tuned to it. A wedged rebuild
+#: never finishes, so this value does not decide whether one is caught -- only
+#: how long a working rebuild is given before it is libelled, and the cost of
+#: guessing low is a false failure in someone else's lane.
+#:
+#: That a routine rebuild is O(vault) at all is #576; when repair becomes
+#: proportional to the change, this can come back down.
+_GRAPH_QUIESCE_TIMEOUT_SECONDS = 180.0
 
 
 def _drain_graph_rebuild_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -> None:
