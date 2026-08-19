@@ -522,6 +522,20 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # unrelated to their change. Tests that exercise the override set it
     # themselves; a test-body or module-fixture setenv still wins over this.
     monkeypatch.delenv("EXOMEM_LOG_DIR", raising=False)
+    # Same defect class as EXOMEM_LOG_DIR above, one layer deeper. An exported
+    # EXOMEM_VAULT_PATH is the documented way to point the CLI and the service
+    # at a real vault, and `LeaseManager._receipt_vault_root` falls back to it
+    # whenever a mutation names no vault of its own. So on a configured machine
+    # `_durable_graph_outcome` read the OPERATOR'S live vault and stamped its
+    # graph state onto a terminal the test asserts is bare -- five
+    # test_writer_lease.py tests failed that way, in isolation, on a checkout
+    # with no defect in it.
+    #
+    # Worse than a false failure: the ambient value made every unscoped test a
+    # reader of real user data, and CI never sees it because the variable is
+    # unset there. The `vault` fixture sets it explicitly for tests that want
+    # one, and autouse setup runs first, so that setenv still wins.
+    monkeypatch.delenv("EXOMEM_VAULT_PATH", raising=False)
     # The watcher now starts independently of embeddings (it maintains the
     # freshness/inbound registries too), so build_server would spawn a real
     # watchdog observer in the suite without this. Watcher tests opt back in.
