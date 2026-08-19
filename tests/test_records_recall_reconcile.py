@@ -825,6 +825,49 @@ def test_corrupt_purge_binds_repair_to_sidecar_inode_across_path_swap(
         assert rows == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the POSIX binder is what refuses")
+def test_a_host_without_procfs_refuses_the_writable_sidecar_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No inode-addressable name, no write. The whole guarantee in one line.
+
+    The repair hands its bound path to sqlite, which resolves that path again
+    at open time. Only procfs survives that: its magic symlink names the
+    descriptor, so the write lands on the pinned inode wherever the inode has
+    moved to. Any ordinary name -- Darwin's `F_GETPATH` answer, say -- can be
+    replaced between the check and the open, and the swap wins.
+
+    So the binder must refuse to bind for writing when procfs is absent, and
+    the repair must then write nothing at all rather than write somewhere it
+    cannot vouch for. Removing procfs is the one way to state that on every
+    POSIX host, including the Linux runners where the real branch is taken.
+    """
+    from exomem import embedding_index, index_paths
+
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    with _committed(index._connect()) as conn:
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+            "VALUES ('../../corrupt.md', 0, 'private', X'00', 0)"
+        )
+    sidecar = index_paths.sidecar_path(tmp_path)
+    monkeypatch.setattr(audit_module, "_proc_fd_directory", lambda: None)
+
+    assert audit_module._bind_sidecar(sidecar, writable=True)[0] == "unsupported"
+    assert audit_module._bound_sidecar_repair(sidecar) is None
+    assert (
+        audit_module.purge_corrupt_semantic_recall_isolation_rows(
+            tmp_path,
+            (audit_module._SemanticIsolationRow("vector", "../../corrupt.md", None),),
+        )
+        == {}
+    )
+    with _sqlite(sidecar) as conn:
+        assert conn.execute("SELECT file_path FROM chunks").fetchall() == [
+            ("../../corrupt.md",)
+        ]
+
+
 def test_corrupt_purge_refuses_without_a_bound_sidecar_descriptor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

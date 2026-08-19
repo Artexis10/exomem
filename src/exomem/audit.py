@@ -762,7 +762,7 @@ def _names_pinned_inode(candidate: Path, pinned: os.stat_result) -> bool:
     return (named.st_dev, named.st_ino) == (pinned.st_dev, pinned.st_ino)
 
 
-def _pinned_descriptor_path(descriptor: int) -> Path | None:
+def _pinned_descriptor_path(descriptor: int, *, writable: bool = False) -> Path | None:
     """Name the inode a descriptor holds, not the name it was opened under.
 
     Linux answers this with the magic symlink `/proc/self/fd/N`, and this
@@ -780,6 +780,28 @@ def _pinned_descriptor_path(descriptor: int) -> Path | None:
     if proc_fd is not None:
         return proc_fd / str(descriptor)
     if sys.platform != "darwin":
+        return None
+    if writable:
+        # A WRITE may not go through `F_GETPATH`. What it returns is an
+        # ordinary name, and every caller hands it to sqlite, which resolves
+        # it again at open time -- so a rename between this check and that
+        # open redirects the write to whatever holds the name then. That is
+        # the exact swap the pinning exists to defeat, and `entry_matches()`
+        # notices it only afterwards, where it gates the *report* rather than
+        # the write. The procfs branch above has no such gap: sqlite resolves
+        # the magic symlink to wherever the pinned inode lives at open time,
+        # so the write always lands on the inode.
+        #
+        # A hard link would name the inode and close the gap, but these
+        # sidecars are WAL databases (`sidecar_store.apply_sidecar_pragmas`),
+        # and a second name for one database gets its own `-wal`/`-shm` pair.
+        # Two names, two write-ahead logs, one inode is a corruption hazard
+        # strictly worse than the repair being unavailable.
+        #
+        # So Darwin binds for reading and declines to write, reaching the
+        # `unsupported` state that exists to say exactly this. Reads stay
+        # bound because a redirected read can only mis-classify -- it opens
+        # `mode=ro`, and what it would leak back is the attacker's own file.
         return None
     pinned = os.fstat(descriptor)
     # `volfs` (`/.vol/<dev>/<ino>`) addresses the inode directly and looks like
@@ -904,7 +926,7 @@ def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidec
                 return "invalid", None
             checks.append((kb_fd, name, (info.st_dev, info.st_ino), False))
             signatures.append((name, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)))
-        pinned = _pinned_descriptor_path(leaf_fd)
+        pinned = _pinned_descriptor_path(leaf_fd, writable=writable)
         if pinned is None:
             return "unsupported", None
         bound = _BoundSidecarRepair(
