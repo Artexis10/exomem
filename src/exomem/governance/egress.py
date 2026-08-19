@@ -2952,9 +2952,9 @@ class _ArtifactReferenceGate:
             if rel.startswith(kb_prefix):
                 aliases.add(rel[len(kb_prefix) :])
             # `.as_posix()`, not `str()`: `str(WindowsPath)` re-spells the
-            # separators, so this alias was stored as
-            # `Knowledge Base\\Notes\\x` on Windows and never matched the
-            # forward-slash token `resolve` normalises to. An extensionless
+            # separators, so on Windows this alias was stored with backslash
+            # separators and never matched the forward-slash token
+            # `resolve` normalises to. An extensionless
             # full-path wikilink to a withheld page -- the ordinary shape of
             # frontmatter provenance -- therefore resolved to nothing there, and
             # a reference that names it survived redaction. `rel` above already
