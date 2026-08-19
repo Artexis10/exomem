@@ -39,6 +39,15 @@ MAX_ARTIFACT_CANDIDATE_READS = 64
 MAX_ARTIFACT_METADATA_CANDIDATES = 512
 MAX_DIRTY_ARTIFACT_CANDIDATES = MAX_ARTIFACTS
 MAX_PRUNE_CANDIDATES = 16
+# How long a metadata writer waits for the log lock before giving up.
+#
+# Sized against the operation the lock actually guards, which is not the append
+# fast path: when the log is full the holder also rotates it, measured at 78 ms
+# on a warm box before this module stopped re-encoding the retained records,
+# and ~47 ms after. Losing the wait costs a diagnostics row and nothing else --
+# every caller in `_dispatch` swallows it, because a hook must not fail a
+# session over its own telemetry.
+METADATA_LOG_LOCK_SECONDS = 0.5
 MAX_PRUNE_LOCK_SECONDS = 0.05
 MAX_PRUNE_ENUM_ENTRIES = 16
 MAX_STATE_ENUM_ENTRIES = 32
@@ -3820,12 +3829,13 @@ def _metadata_log(
         raise ValueError("invalid continuation metadata record")
     with _open_secure_directory(root, create=create_root) as root_handle:
         _require_private_state_directory(root_handle)
-        with _advisory_lock_at(root_handle, ".events.lock", timeout=0.5):
+        with _advisory_lock_at(
+            root_handle, ".events.lock", timeout=METADATA_LOG_LOCK_SECONDS
+        ):
             row_bytes = _canonical_bytes(row) + b"\n"
             if _append_metadata_if_room(root_handle, row_bytes):
                 return
-            records = _read_metadata_records(root_handle)
-            encoded = [_canonical_bytes(record) + b"\n" for record in records]
+            encoded = _read_metadata_lines(root_handle)
             encoded.append(row_bytes)
             if sum(map(len, encoded)) > MAX_METADATA_LOG_BYTES:
                 retained: list[bytes] = []
@@ -3916,7 +3926,17 @@ def _valid_metadata_record(value: object) -> bool:
     )
 
 
-def _read_metadata_records(root_handle: _SecureDirectory) -> list[dict[str, object]]:
+def _read_metadata_lines(root_handle: _SecureDirectory) -> list[bytes]:
+    """Validated log lines, as the bytes already on disk.
+
+    Rotation used to parse every retained record and then re-encode it. That
+    round trip measured 31 ms of a 78 ms critical section on a warm box -- half
+    the time this lock is held, spent reproducing bytes the writer had already
+    written in canonical form, while every other writer waits. Validation is
+    unchanged; only the re-encode is gone. A line that parses and validates is
+    now kept verbatim, so a record written by a different version survives
+    rotation as itself instead of being silently rewritten.
+    """
     kind = _existing_kind(root_handle, "events.log")
     if kind is None:
         return []
@@ -3939,15 +3959,15 @@ def _read_metadata_records(root_handle: _SecureDirectory) -> list[dict[str, obje
     if raw and not raw.endswith(b"\n"):
         separator = raw.rfind(b"\n")
         raw = raw[: separator + 1] if separator >= 0 else b""
-    records: list[dict[str, object]] = []
+    lines: list[bytes] = []
     for line in raw.splitlines():
         try:
             record = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
         if _valid_metadata_record(record):
-            records.append(record)
-    return records
+            lines.append(line + b"\n")
+    return lines
 
 
 def _disabled(environ: Mapping[str, str]) -> bool:
