@@ -463,6 +463,77 @@ def clear_publication_refusal(vault_root: Path) -> None:
         _PUBLICATION_REFUSALS.pop(_publication_memo_key(vault_root), None)
 
 
+#: Every reason `recover_suspended_graph` can decline, as a stable token.
+RECOVERY_DECLINE_EXTERNAL_PENDING = "external_change_pending"
+RECOVERY_DECLINE_GRAPH_DISABLED = "graph_disabled"
+RECOVERY_DECLINE_NO_SIDECAR = "no_sidecar"
+RECOVERY_DECLINE_NO_BARRIER = "no_barrier"
+RECOVERY_DECLINE_PUBLICATION_REFUSED = "publication_refused"
+
+_RECOVERY_DECLINE_LOCK = threading.Lock()
+_RECOVERY_DECLINES: dict[str, str] = {}
+
+
+def recovery_decline_reason(vault_root: Path) -> str | None:
+    """Why a barrier repair would decline right now, or None if it would run.
+
+    Each of these is a real reason not to pay a whole-vault rebuild, and every
+    one of them used to be a bare `return False`. Correct behaviour, silent
+    diagnosis: a graph that never converges produced no evidence of *why*,
+    because the scheduler was running, finding debt, calling in here, and being
+    turned away without a word. A product E2E polled an unavailable graph for
+    110 seconds and logged nothing at all in that window.
+
+    That silence is expensive. This module already carries the scar -- "two
+    published analyses of this incident named the wrong mechanism before one
+    measured it" -- so the reason is now a value a caller can log and a test can
+    assert, rather than something to be inferred from an absence.
+    """
+    from . import freshness
+
+    if freshness.external_pending(vault_root):
+        return RECOVERY_DECLINE_EXTERNAL_PENDING
+    if not graph_enabled():
+        return RECOVERY_DECLINE_GRAPH_DISABLED
+    if not sidecar_path(vault_root).exists():
+        return RECOVERY_DECLINE_NO_SIDECAR
+    if not EpistemicGraphIndex(vault_root).reads_suspended():
+        return RECOVERY_DECLINE_NO_BARRIER
+    if publication_refusal_active(vault_root):
+        # Contract R2: a publication already proven doomed for this exact
+        # checkpoint must not be re-attempted at full rebuild cost on every
+        # cycle. The barrier this repairs is itself the fence, so deferring
+        # costs nothing but the delay.
+        return RECOVERY_DECLINE_PUBLICATION_REFUSED
+    return None
+
+
+def _note_recovery_decline(vault_root: Path, reason: str | None) -> None:
+    """Log a decline once per distinct reason, not once per poll.
+
+    The scheduler retries on a backoff that reaches one attempt every two
+    minutes, so logging every decline would fill a long-lived service's log
+    with the same line. Logging only the *transition* keeps the record of what
+    changed -- which is the question a stuck graph actually poses -- at one
+    line per change.
+    """
+    key = _publication_memo_key(vault_root)
+    with _RECOVERY_DECLINE_LOCK:
+        previous = _RECOVERY_DECLINES.get(key)
+        if reason is None:
+            _RECOVERY_DECLINES.pop(key, None)
+        else:
+            _RECOVERY_DECLINES[key] = reason
+    if reason is not None and reason != previous:
+        log.info("graph barrier repair declined reason=%s", reason)
+
+
+def clear_recovery_declines() -> None:
+    """Test seam: forget which decline was last reported for each vault."""
+    with _RECOVERY_DECLINE_LOCK:
+        _RECOVERY_DECLINES.clear()
+
+
 def recover_suspended_graph(vault_root: Path) -> bool:
     """Repair a persisted graph barrier left by a crash or a failed fan-out.
 
@@ -481,19 +552,11 @@ def recover_suspended_graph(vault_root: Path) -> bool:
     from . import freshness
     from . import vault as vault_module
 
-    if freshness.external_pending(vault_root):
-        return False
-    if not graph_enabled() or not sidecar_path(vault_root).exists():
+    decline = recovery_decline_reason(vault_root)
+    _note_recovery_decline(vault_root, decline)
+    if decline is not None:
         return False
     graph = EpistemicGraphIndex(vault_root)
-    if not graph.reads_suspended():
-        return False
-    if publication_refusal_active(vault_root):
-        # Contract R2: a publication already proven doomed for this exact
-        # checkpoint must not be re-attempted at full rebuild cost on every
-        # cycle. The barrier this repairs is itself the fence, so deferring
-        # costs nothing but the delay.
-        return False
     try:
         find_module.evict_resolver_caches(vault_root)
         vault_module.evict_inbound_index(vault_root)
