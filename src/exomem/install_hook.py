@@ -1224,16 +1224,24 @@ def _write_unique(path: Path, raw: bytes, mode: int) -> None:
         _write_unique_at(directory, path.name, raw, mode)
 
 
-def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
-    """Fail-closed, drift-aware, same-directory atomic hook-config migration."""
+def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
+    """Fail-closed, drift-aware, same-directory atomic hook-config migration.
+
+    `transform` maps the config read from disk to the config to write, and
+    returning it unchanged is how "nothing to do" is reported. Install merges
+    its entries in and uninstall prunes them out, but both need precisely this
+    loop -- the retry on concurrent drift, the backup, the same-directory
+    atomic replace -- and a second copy of it would be a second place for
+    those windows to be got wrong.
+    """
     from ._hooks import exomem_continuation_checkpoint as safe
 
     path = Path(path).expanduser()
-    with safe._open_secure_directory(path.parent, create=True) as parent:
+    with safe._open_secure_directory(path.parent, create=create) as parent:
         safe._require_trusted_directory(parent)
         for _attempt in range(3):
             initial = _snapshot_config_at(parent, path.name, path)
-            merged = _merged_config(initial["data"], installed, timeout)
+            merged = transform(initial["data"])
             if merged == initial["data"]:
                 return {"changed": False, "backup": None}
             observed = _snapshot_config_at(parent, path.name, path)
@@ -1278,6 +1286,10 @@ def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
             backup = path.parent / backup_name if backup_name else None
             return {"changed": True, "backup": str(backup) if backup else None}
     raise RuntimeError(f"concurrent hook config changes persisted at {path}")
+
+
+def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
+    return _rewrite_hooks(path, lambda data: _merged_config(data, installed, timeout))
 
 
 def _mark_restart_pending(hook_dir: Path) -> None:
@@ -1389,6 +1401,283 @@ def install_all_hooks(*, wire: bool = True, timeout: int = 10) -> dict:
             )
     return {"success": all(row["success"] for row in reports), "clients": reports}
 
+
+# Every file name install-hook has ever deployed, current and legacy. Uninstall
+# has to know the legacy names too: a machine installed before the kb -> exomem
+# rename still has those scripts on disk and those entries in its config, and an
+# uninstall that leaves them behind has not uninstalled anything the user can see.
+_DEPLOYED_NAMES = (
+    *(name for py_name, sh_name, _event in _HOOK_SPECS for name in (py_name, sh_name)),
+    _CONTINUATION_SCRIPT,
+    _CONTINUATION_WRAPPER,
+    *_CONTINUATION_LEGACY,
+    "kb_capture_nudge.py",
+    "kb-capture-nudge.sh",
+    "kb_retrieve_nudge.py",
+    "kb-retrieve-nudge.sh",
+)
+
+
+def _is_exomem_entry(hook: dict) -> bool:
+    """True for an entry install-hook wrote, in any shape it has ever written.
+
+    Deliberately wider than `_is_matching_entry`, which asks "is this the entry
+    I am about to replace?" and so requires the client argument to agree.
+    Uninstall asks a different question -- "did we put this here?" -- and an
+    entry naming our own continuation script is ours whichever client wired it.
+    Narrowing it to one client would strand the other client's entry in a file
+    the user asked to be cleaned out.
+    """
+    if _contains_any(hook, _MARKERS):
+        return True
+    command = f"{hook.get('command', '')} {hook.get('commandWindows', '')}"
+    continuation = {_CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER, *_CONTINUATION_LEGACY}
+    return bool(_command_basenames(command).intersection(continuation))
+
+
+def _pruned_config(source: dict) -> tuple[dict, int]:
+    """Drop every entry we own, and only the containers that became ours-only.
+
+    Walks every event rather than the events the current specs name, because a
+    config wired by an older exomem carries events this build no longer
+    installs -- Claude's `SessionEnd`, the legacy `kb_*` nudges -- and those are
+    exactly the entries a user uninstalling cannot find by hand.
+
+    A group emptied by that removal goes with it, and an event left with no
+    groups goes too: both only existed to hold our entry. A group that was
+    already empty stays, because it was not ours to remove.
+    """
+    data = json.loads(json.dumps(source))
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return data, 0
+    removed = 0
+    for event in list(hooks):
+        groups = hooks[event]
+        if not isinstance(groups, list):
+            continue
+        kept: list = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept.append(group)
+                continue
+            original = group["hooks"]
+            remaining = [
+                hook
+                for hook in original
+                if not (isinstance(hook, dict) and _is_exomem_entry(hook))
+            ]
+            removed += len(original) - len(remaining)
+            if len(remaining) == len(original):
+                kept.append(group)
+            elif remaining:
+                kept.append({**group, "hooks": remaining})
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    return data, removed
+
+
+def _alternate_sources(path: Path) -> list[Path]:
+    """The yadm alternate sources a deployed config is regenerated from.
+
+    `yadm alt` re-runs alternate selection after ordinary commands -- `yadm
+    status` is enough -- and rewrites the deployed file from these, so an
+    uninstall that edits only the deployed file is silently undone with no
+    visible trigger (#580). Editing the source is the edit that survives.
+
+    Detection is by name (`settings.json##os.Msys`) plus, where yadm links
+    rather than copies, the link target. Whether a source is plain JSON or a
+    template is decided later by trying to parse it, so this does not have to
+    encode yadm's condition grammar to stay correct.
+    """
+    sources: list[Path] = []
+    try:
+        for item in sorted(path.parent.iterdir()):
+            if item.name.startswith(f"{path.name}##") and not item.is_symlink():
+                sources.append(item)
+    except OSError:
+        return []
+    if path.is_symlink():
+        try:
+            target = path.resolve(strict=True)
+        except OSError:
+            target = None
+        if target is not None and "##" in target.name and target not in sources:
+            sources.append(target)
+    return [item for item in sources if item.is_file()]
+
+
+def _prune_one_config(path: Path) -> dict:
+    """Prune one config file, reporting rather than raising on its own failure.
+
+    An uninstall spanning a deployed file and two alternate sources must not
+    stop at the first unreadable one: the whole point is to leave nothing
+    behind, and a template source that cannot be parsed is a thing to name, not
+    a reason to abandon the sources beside it.
+    """
+    counted = {"removed": 0}
+
+    def prune(data: dict) -> dict:
+        pruned, removed = _pruned_config(data)
+        counted["removed"] = removed
+        return pruned
+
+    report: dict = {
+        "path": str(path),
+        "changed": False,
+        "backup": None,
+        "removed": 0,
+        "error": None,
+    }
+    try:
+        migration = _rewrite_hooks(path, prune, create=False)
+    except FileNotFoundError:
+        return report
+    except (OSError, RuntimeError, ValueError) as error:
+        report["error"] = str(error)
+        return report
+    report["changed"] = migration["changed"]
+    report["backup"] = migration["backup"]
+    report["removed"] = counted["removed"]
+    return report
+
+
+def _remove_deployed_scripts(hook_dir: Path) -> list[dict]:
+    """Remove the scripts we deployed, one name at a time, never the directory.
+
+    The hook directory is shared with every other hook the user runs, so this
+    unlinks only names this installer writes. `_unlink_at` refuses anything that
+    is not a regular file, which also means a yadm-linked hook tree is reported
+    rather than broken.
+    """
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    removed: list[dict] = []
+    try:
+        with safe._open_secure_directory(hook_dir, create=False) as directory:
+            for name in _DEPLOYED_NAMES:
+                if safe._existing_kind(directory, name) is None:
+                    continue
+                entry: dict = {
+                    "path": str(hook_dir / name),
+                    "removed": False,
+                    "error": None,
+                }
+                try:
+                    safe._unlink_at(directory, name)
+                    entry["removed"] = True
+                except OSError as error:
+                    entry["error"] = str(error)
+                removed.append(entry)
+    except OSError:
+        # A hook directory that is gone, or that the secure-open refuses, is a
+        # thing to report through the config side of the report rather than a
+        # reason to fail the unwiring that already succeeded.
+        return removed
+    return removed
+
+
+def uninstall_hook(
+    *,
+    hook_dir: Path | None = None,
+    settings_path: Path | None = None,
+    client: str = DEFAULT_CLIENT,
+    remove_scripts: bool = True,
+) -> dict:
+    """Undo `install_hook`: unwire our entries, then remove our scripts.
+
+    Removes only what this installer wrote -- recognised the same way the
+    idempotent install recognises its own entries -- so a hand-written hook
+    sitting in the same group survives, and so does the rest of the config.
+
+    Returns {"client", "settings", "config_changed", "removed_entries",
+    "backup", "settings_error", "alternates", "hook_dir", "scripts", "success"}.
+    Never raises for a config it could not read: an uninstall reports what it
+    could not reach, because the user still has to go and finish it by hand.
+    """
+    client = _normalize_client(client)
+    hook_dir = Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client)
+    settings = Path(settings_path).expanduser() if settings_path else _default_settings(client)
+
+    deployed = _prune_one_config(settings)
+    alternates = [_prune_one_config(source) for source in _alternate_sources(settings)]
+    scripts = _remove_deployed_scripts(hook_dir) if remove_scripts else []
+    return {
+        "client": client,
+        "settings": str(settings),
+        "config_changed": deployed["changed"],
+        "removed_entries": deployed["removed"],
+        "backup": deployed["backup"],
+        "settings_error": deployed["error"],
+        "alternates": alternates,
+        "hook_dir": str(hook_dir),
+        "scripts": scripts,
+        "success": deployed["error"] is None
+        and all(row["error"] is None for row in alternates)
+        and all(row["error"] is None for row in scripts),
+    }
+
+
+def uninstall_all_hooks(*, remove_scripts: bool = True) -> dict:
+    reports: list[dict] = []
+    for client in SUPPORTED_CLIENTS:
+        try:
+            result = uninstall_hook(client=client, remove_scripts=remove_scripts)
+            reports.append({"client": client, "success": result["success"], "result": result})
+        except (OSError, RuntimeError, ValueError) as error:
+            reports.append(
+                {
+                    "client": client,
+                    "success": False,
+                    "error": str(error),
+                    "error_class": type(error).__name__,
+                }
+            )
+    return {"success": all(row["success"] for row in reports), "clients": reports}
+
+
+def render_uninstall_human(report: dict) -> str:
+    """The uninstall summary, including the part a user cannot infer.
+
+    An edited alternate source is not yet an uninstall that sticks: yadm
+    regenerates the deployed file from its committed copy, so an uncommitted
+    source edit is undone by the next sync. Saying so here is the difference
+    between this landing and the hooks quietly reappearing later (#580).
+    """
+    lines: list[str] = []
+    label = "Codex" if report["client"] == "codex" else "Claude Code"
+    count = report["removed_entries"]
+    if report["config_changed"]:
+        noun = "entry" if count == 1 else "entries"
+        lines.append(f"Removed {count} exomem hook {noun} from {report['settings']}.")
+    elif report["settings_error"]:
+        lines.append(f"Could not update {report['settings']}: {report['settings_error']}")
+    else:
+        lines.append(f"No exomem hook entries were wired in {report['settings']}.")
+    for row in report["alternates"]:
+        if row["error"]:
+            lines.append(f"  ! yadm alternate {row['path']}: {row['error']}")
+        elif row["changed"]:
+            lines.append(f"  also removed from yadm alternate source {row['path']}")
+        else:
+            lines.append(f"  yadm alternate source {row['path']} had none")
+    if report["alternates"]:
+        lines.append(
+            "Those are yadm alternate sources: commit them, or the next alternate "
+            "selection (an ordinary yadm status triggers one) regenerates the "
+            "deployed file from the committed copy and the hooks come back."
+        )
+    gone = [row for row in report["scripts"] if row["removed"]]
+    stuck = [row for row in report["scripts"] if not row["removed"]]
+    if gone:
+        noun = "script" if len(gone) == 1 else "scripts"
+        lines.append(f"Removed {len(gone)} hook {noun} from {report['hook_dir']}.")
+    for row in stuck:
+        lines.append(f"  ! left {row['path']}: {row['error']}")
+    lines.append(f"Restart {label} to stop running the hooks it already loaded.")
+    return "\n".join(lines)
 
 def _continuation_root(client: str) -> Path:
     """The one place the checkpoint-store layout rule lives for readers."""

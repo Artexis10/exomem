@@ -109,6 +109,70 @@ def _barrier_pending(vault_root: Path) -> bool:
         return False
 
 
+def _availability_pending(vault_root: Path) -> bool:
+    """True when readers cannot use the graph and a rebuild could still fix it.
+
+    The barrier is the *ordinary* signal that a rebuild stopped, and the one
+    recovery acts on -- but it is not the only route to an unreadable graph. A
+    rebuild that exhausts its publication attempts leaves no barrier at all,
+    and the drain, seeing neither queued work nor a barrier, reported the graph
+    settled and went idle against a graph no reader could open.
+
+    That is not hypothetical. A product E2E run on `main` caught it exactly:
+    generation 1 published, later generations died Class C ("the recall
+    projection identity moved across the pass") and then
+    `GRAPH_SYNC_STABILIZATION_EXHAUSTED`, and from there the queue logged
+    "graph settled" three times in five seconds while every read answered
+    `graph sidecar unavailable` -- for the remaining 120s, until the run failed.
+
+    Two states are deliberately not debt, because no amount of draining changes
+    them: a vault with no sidecar has nothing to repair yet, and a disabled
+    graph is an operator's decision. Both would otherwise poll forever.
+    """
+    from . import epistemic_graph
+
+    try:
+        if not epistemic_graph.graph_enabled():
+            return False
+        if not epistemic_graph.sidecar_path(vault_root).exists():
+            return False
+        return not epistemic_graph.EpistemicGraphIndex(vault_root).available()
+    except Exception:  # noqa: BLE001 - unreadable availability must not kill the worker
+        log.debug("graph drain: availability unreadable", exc_info=True)
+        return False
+
+
+def _request_full_rebuild(vault_root: Path) -> bool:
+    """Queue a whole-vault rebuild for an unreadable graph. True when queued.
+
+    Routed through the durable marker rather than by calling the rebuild here,
+    so the one path that runs rebuilds keeps running them and this stays a
+    statement of debt. It is also why the retry rate is already bounded: the
+    marker makes the queue non-empty, so the next pass is an ordinary drain
+    under the backoff that is already proven for work that cannot clear.
+
+    Never queues a second marker over a standing one -- that would be the same
+    debt counted twice, and would keep `processed` non-zero, which is how the
+    caller decides it is making progress.
+    """
+    from . import deferred_index, graph_sync
+
+    try:
+        if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
+            return False
+        generation = int(graph_sync.status(vault_root).get("generation") or 0)
+        deferred_index.mark_graph_full_rebuild(vault_root, generation=generation)
+    except Exception:  # noqa: BLE001 - the graph stays unavailable, so the signal stays
+        log.warning("graph drain: could not queue a rebuild for an unreadable graph")
+        return False
+    log.info(
+        "graph drain: graph unreadable with no barrier; queued a whole-vault "
+        "rebuild at generation %d",
+        generation,
+    )
+    return True
+
+
 def _queue_pending(vault_root: Path) -> bool:
     """True when the durable queue owes work. Never raises."""
     from . import deferred_index
@@ -130,7 +194,11 @@ def _pending(vault_root: Path) -> bool:
     proven for a queue that cannot drain covers a rebuild that cannot publish --
     one attempt every couple of minutes rather than a full rebuild every poll.
     """
-    return _queue_pending(vault_root) or _barrier_pending(vault_root)
+    return (
+        _queue_pending(vault_root)
+        or _barrier_pending(vault_root)
+        or _availability_pending(vault_root)
+    )
 
 
 def _recover_once(vault_root: Path) -> bool:
@@ -194,7 +262,14 @@ def _work_once(vault_root: Path) -> int:
     clear the condition the rebuild would have been re-run for.
     """
     processed = _drain_once(vault_root) if _queue_pending(vault_root) else 0
-    if _barrier_pending(vault_root) and _recover_once(vault_root):
+    if _barrier_pending(vault_root):
+        if _recover_once(vault_root):
+            processed += 1
+    elif _availability_pending(vault_root) and _request_full_rebuild(vault_root):
+        # Only where there is no barrier: with one standing, repair is the
+        # cheaper and more specific answer, and it is the one that knows how to
+        # decline. Reaching here means the graph is unreadable and nothing in
+        # the system is holding a signal that says so.
         processed += 1
     return processed
 
