@@ -91,6 +91,60 @@ jobs:
         if: matrix.shard == 1
         run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
 
+  windows-held-filesystem:
+    name: Windows held filesystem (native NTFS)
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - name: Require NTFS and 8.3 aliases
+        shell: pwsh
+        run: |
+          $drive = (Get-Item $env:GITHUB_WORKSPACE).PSDrive.Name
+          $volume = Get-Volume -DriveLetter $drive
+          if ($volume.FileSystem -ne "NTFS") {
+            throw "held-filesystem verification requires NTFS"
+          }
+          $writableNtfs = @()
+          foreach ($candidate in Get-Volume | Where-Object { $_.DriveLetter -and $_.FileSystem -eq "NTFS" }) {
+            $probe = "$($candidate.DriveLetter):\exomem-held-volume-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            try {
+              New-Item -ItemType Directory -Path $probe -ErrorAction Stop | Out-Null
+              Remove-Item -LiteralPath $probe -Force -ErrorAction Stop
+              $writableNtfs += $candidate.DriveLetter
+            } catch {
+              # The native test will report which volume was unavailable.
+            }
+          }
+          if (@($writableNtfs | Sort-Object -Unique).Count -lt 2) {
+            throw "held-filesystem verification requires at least two writable NTFS volumes"
+          }
+          fsutil.exe 8dot3name set "$drive`:" 0
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to enable per-volume 8.3 alias creation"
+          }
+          fsutil.exe 8dot3name query "$drive`:"
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to verify per-volume 8.3 alias creation"
+          }
+      - name: Native held-filesystem gate
+        env:
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_CLIP: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python -m pytest -q
+          tests/test_held_fs_contract.py
+          tests/test_held_fs_windows.py
+          --session-timeout=600
+
   tui:
     name: terminal UI (textual, headless + snapshots)
     runs-on: ubuntu-latest
@@ -374,6 +428,7 @@ jobs:
     if: ${{ !cancelled() }}
     needs:
       - test
+      - windows-held-filesystem
       - tui
       - product-e2e
       - retrieval-quality
