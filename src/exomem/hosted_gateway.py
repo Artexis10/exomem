@@ -9,9 +9,10 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, NamedTuple
 
 from fastmcp.tools import FunctionTool
 
@@ -22,6 +23,7 @@ from .hosted_runtime import (
     SUPPORTED_HOSTED_PROTOCOL_VERSIONS,
     HostedCellConfig,
 )
+from .kbdir import kb_dirname, kb_page_relative_form, kb_page_target, kb_relative_form
 
 CONTRACT_SCHEMA_VERSION = 1
 TRANSFER_GRANT_VERSION = 1
@@ -147,6 +149,419 @@ def _mcp_tool_contract(
         for key, value in tool.to_mcp_tool().model_dump(mode="json", by_alias=True).items()
         if value is not None
     }
+
+
+#: Vault subtrees a hosted tenant's own agent may read but never rewrite.
+#:
+#: `_Schema` is the vault's governing doctrine -- `schema.py` loads
+#: `_Schema/references/frontmatter.md` and `page-types.md` as *the* frontmatter
+#: and page-type contract -- and `_Governance` is the policy tree. Neither is
+#: ordinary content.
+#:
+#: `hosted-alpha-agent-v1` protected both by accident of omission: it simply did
+#: not expose a broad page-mutation command, and its own specification recorded
+#: that absence as the control ("the command is absent from the profile and
+#: rejected before invocation or lifecycle admission", including for a path
+#: under `_Schema`). `hosted-alpha-agent-v3` exposes `edit_memory` and
+#: `replace_memory`, so that control has to become a real one. A hosted tenant
+#: is hookless and has the least out-of-band supervision of any tier; a
+#: prompt-injected `capture_source` would otherwise be enough to rewrite the
+#: doctrine that governs every later write.
+PROTECTED_TREE_DIRNAMES: frozenset[str] = frozenset({"_Schema", "_Governance"})
+
+#: Fixed locations inside a protected tree that ordinary hosted writes manage.
+#:
+#: `relation_review.review_artifact_path` hardcodes
+#: `<KB>/_Schema/relation-reviews/<page-identity>.json`, and the semantic-write
+#: machinery drops one sidecar there on every committed page create or
+#: supersession. That happens on *every* profile including `v1`, on the plain
+#: success path, with no attack involved -- so "a hosted profile never writes
+#: inside `_Schema`" was never true and this change did not make it true.
+#:
+#: It is nonetheless not a hole, and the distinction is the one the requirement
+#: now draws: the *location* is fixed by the system, never caller-supplied.
+#: The open source taxonomy and project-key registries are the same kind of
+#: fixed-placement side effect: a caller can introduce vocabulary through the
+#: owning command, but cannot choose where the registry lives. They remain
+#: user-owned per-vault configuration; "system-managed" describes only the
+#: write path, not ownership of the bytes.
+#:
+#: None of these paths is exempt from the guard. A tenant-chosen target is still
+#: refused, so an agent may cause a fixed-path update only through the command
+#: that owns it and can never name the same file as an edit or replacement
+#: target. The enumeration exists so success-path assertions can exclude these
+#: paths by name while checking every other protected byte and directory entry.
+SYSTEM_MANAGED_PROTECTED_PATHS: tuple[str, ...] = (
+    "_Schema/project-keys.yaml",
+    "_Schema/relation-reviews",
+    "_Schema/source-taxonomy.yaml",
+)
+
+
+def is_system_managed_protected_path(kb_relative: str) -> bool:
+    """Whether a KB-relative path is a fixed-placement managed write."""
+
+    text = str(kb_relative).replace("\\", "/").strip("/")
+    return any(
+        text == owned or text.startswith(f"{owned}/")
+        for owned in SYSTEM_MANAGED_PROTECTED_PATHS
+    )
+
+#: Caller-supplied write-target arguments, per command, that the guard inspects.
+#:
+#: The membership rule is deliberate and mechanical: this set is exactly the
+#: commands the widening *newly* exposes (v3 minus v2). Already-published
+#: surface is left classified as it was, so no shipped profile changes
+#: behaviour. That rule, not the parameter name, is why `plan_memory`'s
+#: `manifest_path` is guarded while `record_memory`'s identically-named,
+#: identically-constrained `manifest_path` is not -- see
+#: `test_guarded_set_is_exactly_what_the_widening_newly_exposes`.
+#:
+#: For `plan_memory` the guard is therefore defence in depth rather than the
+#: only control: `structured_collections._require_profile_layer` already pins a
+#: planning manifest under `Knowledge Base/Planning/`, so a protected tree is
+#: unreachable through it either way. For `edit_memory` and `replace_memory`
+#: the guard *is* the control.
+#:
+#: Within a guarded command *every* caller-supplied target argument is listed,
+#: not just the obvious one -- partial coverage of a guarded command is how a
+#: guard grows its next hole. `plan_memory` selects by `collection` as well as
+#: `manifest_path`, so both are here. `replace_memory`'s `slug` names the
+#: successor page's filename but cannot reach a tree: `vault.resolve_filename_slug`
+#: admits lowercase ASCII kebab-case only, which has no `/`, `.` or `_` to spell
+#: one with.
+#:
+#: Each entry carries the *kind* of target its arguments name, because the leaves
+#: normalise them differently and the guard's whole premise is that it judges the
+#: path the leaf will actually open. A `page` argument gets the Markdown suffix
+#: the page leaves supply and names a file; a `collection` argument does not, and
+#: names a directory or manifest. Reading a page argument as a directory is what
+#: made `edit_memory path="Knowledge Base/Notes/_Schema"` refuse while its
+#: identical `.md` spelling was allowed.
+class ProtectedTargets(NamedTuple):
+    """The guarded arguments of one command, and how its leaf reads them."""
+
+    kind: str
+    arguments: tuple[str, ...]
+
+
+PROTECTED_TREE_PATH_ARGUMENTS: dict[str, ProtectedTargets] = {
+    "edit_memory": ProtectedTargets("page", ("path",)),
+    "replace_memory": ProtectedTargets("page", ("old_path",)),
+    "plan_memory": ProtectedTargets("collection", ("collection", "manifest_path")),
+}
+
+#: Mutating commands that do not need the guard because their own leaf refuses a
+#: protected-tree target. Every member takes at least one caller-supplied
+#: argument that shapes where it writes -- an earlier version of this comment
+#: claimed four of them were "policy-owned placement" with "no caller-chosen
+#: path argument at all", which was simply false and is the kind of claim that
+#: turns into a bypass. What is true, per member:
+#:
+#: - `observe_memory` rejects a `_Schema` document with
+#:   `OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE`; the tree holds no writable
+#:   compiled page.
+#: - `record_memory` is pinned under `Knowledge Base/Records/` by
+#:   `structured_collections._require_profile_layer`, for both `manifest_path`
+#:   and `collection`.
+#: - `connect_memory` reads its `path` to decide what to write *elsewhere*.
+#: - `remember` and `capture_source` derive a filename from `slug`/`title`, and
+#:   `vault.resolve_filename_slug` admits lowercase ASCII kebab-case only.
+#: - `triage_memory` selects an existing review item by `ref`.
+#: - `preserve_evidence` composes its path from `scope`, `category` and
+#:   `filename` -- those three *are* the path. Its leaf strips separators and
+#:   dots from each component, so a traversal collapses into one literal
+#:   filename that cannot leave `Knowledge Base/Evidence/`. Note that this leaf
+#:   writes without a `PathGuard`, which is a pre-existing gap shared with v1
+#:   and v2 and is filed as a security follow-up rather than fixed here.
+#:
+#: Every one of these claims is exercised by
+#: `test_target_constrained_mutations_are_actually_constrained`, which probes
+#: every string argument in each command's published schema rather than a
+#: hand-picked few.
+#:
+#: Membership is not self-certifying, so two separate checks back it.
+#: `assert_profile_mutations_are_classified` runs at route registration and
+#: refuses to serve a profile whose mutating commands are not all accounted for
+#: in one list or the other, so a later widening cannot reopen this hole by
+#: silence -- but that only proves every command is *named*, not that the claim
+#: about it is true. The behavioural sweep proves the claim per member.
+TARGET_CONSTRAINED_MUTATIONS: frozenset[str] = frozenset(
+    {
+        "remember",
+        "observe_memory",
+        "capture_source",
+        "preserve_evidence",
+        "triage_memory",
+        "connect_memory",
+        "record_memory",
+    }
+)
+
+
+def _folded_segment(part: str) -> str:
+    """One path component reduced to what the filesystem will actually match.
+
+    Case is folded, and trailing dots and spaces are dropped because Windows
+    strips them from a component before the call reaches the filesystem --
+    `_Schema ` and `_Schema.` both open `_Schema`. A guard that compares the
+    component as typed reports "not protected" for both.
+    """
+
+    return part.strip().rstrip(". ").casefold()
+
+
+def _has_protected_segment(parts: Iterable[str]) -> bool:
+    folded = {_folded_segment(name) for name in PROTECTED_TREE_DIRNAMES}
+    return any(_folded_segment(part) in folded for part in parts)
+
+
+def _spelling_names_a_protected_tree(text: str, *, drop_final: bool = False) -> bool:
+    """Segment check under every flavour a target platform could apply.
+
+    `PurePosixPath` alone is wrong for the platform this actually deploys to:
+    it reads `C:_Schema/x.md` as one opaque component and reports no protected
+    tree, while Windows reads it as drive-relative and opens `_Schema`. Both
+    flavours are applied and either one is enough to refuse, which also covers
+    UNC and `\\\\?\\` spellings without special-casing them.
+
+    `drop_final` excludes the last component, which is what a *page* target
+    needs: the leaf opens it as a file, so the component can never be a
+    protected directory. Without it, `Knowledge Base/Notes/_Schema` -- an
+    ordinary page the leaf opens as `_Schema.md` -- is refused while the
+    identical `.md` spelling is allowed. Callers pass the suffixed rel-form, so
+    a trailing separator still leaves a real final component (`.md`) to drop
+    and the tree above it is still read.
+    """
+
+    for flavour in (PurePosixPath, PureWindowsPath):
+        parts = flavour(text).parts
+        if drop_final:
+            parts = parts[:-1]
+        if _has_protected_segment(parts):
+            return True
+    return False
+
+
+def _deepest_existing(target: Path) -> tuple[Path, tuple[str, ...]]:
+    """Split `target` into its deepest existing ancestor and the tail below it.
+
+    `resolve()` cannot canonicalise a component that is not on disk, and the
+    interesting targets usually are not: a hosted agent asking to create a new
+    page inside `_Schema` names a file that does not exist yet. Resolving the
+    deepest ancestor that *does* exist is what lets an alias, junction or link
+    in the middle of the path be expanded, while the tail stays available for
+    the literal check.
+
+    A symlink counts as existing even when it dangles, so a broken link is
+    resolved rather than walked through.
+    """
+
+    remainder: list[str] = []
+    current = target
+    while True:
+        try:
+            if current.exists() or current.is_symlink():
+                return current, tuple(reversed(remainder))
+        except OSError:
+            pass
+        parent = current.parent
+        if parent == current:
+            return current, tuple(reversed(remainder))
+        remainder.append(current.name)
+        current = parent
+
+
+def _protected_roots(vault_root: Path) -> tuple[Path, ...]:
+    """The resolved real directories this guard exists to protect."""
+
+    kb = Path(vault_root) / kb_dirname()
+    roots: list[Path] = []
+    for name in sorted(PROTECTED_TREE_DIRNAMES):
+        candidate = kb / name
+        if candidate.exists() or candidate.is_symlink():
+            roots.append(candidate.resolve())
+    return tuple(roots)
+
+
+def _resolution_names_a_protected_tree(target: Path, vault_root: Path) -> bool:
+    """Resolve `target` as far as the filesystem allows and judge the result.
+
+    This is the reading that sees what a *name* cannot: an NTFS 8.3 alias
+    (`_GOVER~1` for `_Governance`), a junction, a symlink, or a `..` chain that
+    lands inside a protected tree without ever spelling it. Containment is
+    tested against the resolved protected roots rather than by comparing
+    component names, because by the time the OS has resolved the path the
+    alias is gone and only the real location remains.
+    """
+
+    existing, remainder = _deepest_existing(target)
+    resolved = existing.resolve()
+
+    for root in _protected_roots(vault_root):
+        if resolved == root or root in resolved.parents:
+            return True
+
+    # Protected trees are not only the two at the KB root -- a nested one is
+    # protected too -- so the resolved location is also read per segment.
+    # Scoped to the vault where possible so a host directory above the vault
+    # cannot decide the answer; outside the vault, over-refuse.
+    try:
+        scoped = resolved.relative_to(Path(vault_root).resolve()).parts
+    except ValueError:
+        scoped = resolved.parts
+    if _has_protected_segment(scoped):
+        return True
+
+    # The tail below the deepest existing ancestor was never resolved, so it
+    # gets the literal reading. This is what refuses a not-yet-existing page
+    # inside `_Schema`.
+    return _has_protected_segment(remainder)
+
+
+def _evaluate_protected_tree(
+    value: object, *, vault_root: Path | None, kind: str = "page"
+) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+
+    page = kind == "page"
+
+    if page:
+        # A page target is a *file*. The rel-form the leaf uses carries the
+        # Markdown suffix, and only the directories above the file can be a
+        # protected tree -- hence `drop_final`. The unprefixed raw text is kept
+        # alongside it because a Windows drive or UNC root is only parseable
+        # before the KB prefix is prepended, and it is suffixed the same way so
+        # its final component is a filename too.
+        suffixed = raw if raw.endswith(".md") else f"{raw}.md"
+        spellings = ((kb_page_relative_form(raw), True), (suffixed, True))
+    else:
+        # A collection target names a directory or a manifest, and the
+        # collection leaf supplies no suffix, so every component counts.
+        spellings = (
+            (kb_relative_form(raw), False),
+            (raw, False),
+            (raw.replace("\\", "/").lstrip("/"), False),
+        )
+
+    for text, drop_final in spellings:
+        if _spelling_names_a_protected_tree(text, drop_final=drop_final):
+            return True
+
+    if vault_root is None:
+        return False
+
+    root = Path(vault_root)
+    # Resolution readings, one per join the consuming leaf can perform. The
+    # page write leaves join at the *KB* root via `kb_page_target`; evaluating
+    # only the vault-root join is how the third bypass worked, because
+    # `_GOVER~1/README.md` resolved to nothing there and its alias was never
+    # expanded.
+    if page:
+        targets = [kb_page_target(root, raw)[0]]
+    else:
+        # `structured_collections.parse_manifest_bytes` does `root / Path(raw)`,
+        # where a backslash is an ordinary filename character rather than a
+        # separator. Folding `\` to `/` first and stopping there *under*
+        # approximates that leaf: with `Planning/back\slash` a link into
+        # `_Schema`, the folded reading resolves nowhere while the leaf's own
+        # join lands inside the tree. All three joins are evaluated so the
+        # reproduction over-approximates rather than under-approximates.
+        targets = [
+            root / kb_relative_form(raw),
+            root / raw.replace("\\", "/").lstrip("/"),
+            root / Path(raw),
+        ]
+    literal = Path(raw)
+    if literal.is_absolute():
+        targets.append(literal)
+    return any(_resolution_names_a_protected_tree(target, root) for target in targets)
+
+
+def _names_a_protected_tree(
+    value: object, *, vault_root: Path | None, kind: str = "page"
+) -> bool:
+    """Return whether `value` names a path that touches a protected subtree.
+
+    Three bypasses of this guard had one cause: the guard and the executor held
+    independent notions of the same path. Round two matched segment names the
+    executor never compared. Round three branched on `is_absolute()` while the
+    executor stripped the separator and wrote the file. Round four joined at
+    the vault root while the executor joined at the *KB* root, so an unprefixed
+    `_GOVER~1/README.md` resolved to nothing and its NTFS 8.3 alias was never
+    expanded. Enumerating shapes did not fix any of them.
+
+    So the guard no longer has a normaliser of its own. It calls
+    `kbdir.kb_relative_form` / `kb_page_relative_form` -- the same functions
+    `edit._resolve` and `replace._resolve_kb_path` call -- and judges the path
+    the executor will actually open. Two readings then run over every candidate
+    target, and any hit refuses: a *spelling* reading, per component,
+    case-folded, with trailing dots and spaces stripped and both Posix and
+    Windows flavours applied; and a *resolution* reading, which resolves the
+    deepest existing ancestor so aliases and links are expanded by the OS,
+    tests containment against the resolved protected roots, then applies the
+    spelling reading to the tail that could not be resolved.
+
+    `kind` selects which leaf is being mirrored -- `"page"` for the page write
+    leaves, `"collection"` for the structured-collection leaves -- because they
+    normalise differently, and mirroring the wrong one is the whole failure
+    mode this guard keeps being caught by.
+
+    Over-refusing an exotic path costs a caller nothing; under-refusing one
+    costs the tenant its doctrine. Every `Exception` raised anywhere in the
+    evaluation therefore refuses: a guard's unknown case is never "allow". A
+    `BaseException` -- `KeyboardInterrupt`, `SystemExit`, a cancellation -- is
+    deliberately *not* caught, because those unwind the request rather than
+    producing an answer, so nothing is admitted either way.
+    """
+
+    try:
+        return _evaluate_protected_tree(value, vault_root=vault_root, kind=kind)
+    except Exception:  # noqa: BLE001 - deliberate: an unreadable target is refused
+        return True
+
+
+def protected_tree_argument(
+    command_name: str,
+    kwargs: Mapping[str, Any],
+    *,
+    vault_root: Path | None = None,
+) -> str | None:
+    """Return the argument naming a protected subtree, or None when clean."""
+
+    targets = PROTECTED_TREE_PATH_ARGUMENTS.get(command_name)
+    if targets is None:
+        return None
+    for argument in targets.arguments:
+        if argument in kwargs and _names_a_protected_tree(
+            kwargs[argument], vault_root=vault_root, kind=targets.kind
+        ):
+            return argument
+    return None
+
+
+def assert_profile_mutations_are_classified(profile: str) -> None:
+    """Fail closed when a hosted profile exposes an unclassified mutation.
+
+    Called once while registering the hosted routes, so a cell configured for a
+    profile whose write surface nobody has triaged refuses to start rather than
+    serving an unguarded write primitive over the tenant's own doctrine.
+    """
+
+    unclassified = sorted(
+        command.name
+        for command in commands_module.product_commands_for_profile(profile, "rest")
+        if not command.read_only
+        and command.name not in PROTECTED_TREE_PATH_ARGUMENTS
+        and command.name not in TARGET_CONSTRAINED_MUTATIONS
+    )
+    if unclassified:
+        raise HostedGatewayError(
+            "HOSTED_SURFACE_PROFILE_UNSUPPORTED",
+            "hosted agent surface profile exposes an unclassified mutation",
+        )
 
 
 def hosted_agent_surface_descriptor(

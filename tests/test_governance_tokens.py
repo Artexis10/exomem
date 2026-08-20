@@ -538,9 +538,19 @@ def test_sweep_is_safe_on_a_vault_with_no_sidecar(vault: Path) -> None:
 
 
 def test_minting_sweeps_opportunistically(vault: Path) -> None:
+    """Minting sweeps tokens that have already expired.
+
+    Pinned to an explicit clock. Reading the stale token back with the wall
+    clock meant the one-second TTL had to outlive everything between the mint
+    and the read, which a loaded Windows runner does not guarantee -- it failed
+    on CI with `TOKEN_EXPIRED` raised by the setup rather than by the subject.
+    What this test is about is the sweep, and the sweep's own clock is already
+    a parameter.
+    """
     govern(vault)
-    stale = _mint(vault, ttl_seconds=1)
-    stale_claim = tokens.verify(vault, stale, audience=EXTERNAL)
+    minted_at = int(time.time())
+    stale = _mint(vault, ttl_seconds=1, now=minted_at)
+    stale_claim = tokens.verify(vault, stale, audience=EXTERNAL, now=minted_at)
     _mint(vault, now=stale_claim.expires_at + 1)
     with sqlite3.connect(sidecar_path(vault)) as conn:
         rows = conn.execute("SELECT COUNT(*) FROM withhold_tokens").fetchone()[0]

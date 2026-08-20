@@ -180,6 +180,12 @@ def test_upload_reconciles_when_media_worker_is_unavailable(
     )
 
 
+# Deadlock valves for the concurrency tests below. The hold outlasts the
+# observation so an ordering assertion cannot be satisfied by an expiry.
+_HOLD_SECONDS = 60.0
+_OBSERVE_SECONDS = 30.0
+
+
 def test_upload_reconciliation_does_not_block_async_event_loop(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -220,7 +226,11 @@ def test_upload_reconciliation_does_not_block_async_event_loop(
                     headers={"Authorization": "Bearer sekret"},
                 )
             )
-            deadline = asyncio.get_running_loop().time() + 2.0
+            # A deadlock valve. The claim is that the reconcile runs off the
+            # event loop, not that a threadpool worker starts within two
+            # seconds of being asked -- which on a loaded Windows runner it
+            # need not.
+            deadline = asyncio.get_running_loop().time() + _OBSERVE_SECONDS
             while not entered.is_set() and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.01)
             assert entered.is_set(), "reconciliation never started"
@@ -374,7 +384,7 @@ def test_identical_concurrent_uploads_serialize_before_append_only_check(
             call = calls
         if call == 1:
             first_entered.set()
-            assert release_first.wait(3.0)
+            assert release_first.wait(_HOLD_SECONDS)
         else:
             second_entered.set()
         return original(*args, **kwargs)
@@ -388,7 +398,7 @@ def test_identical_concurrent_uploads_serialize_before_append_only_check(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(first_client.post, "/upload", **request)
-        assert first_entered.wait(2.0)
+        assert first_entered.wait(_OBSERVE_SECONDS)
         second = pool.submit(second_client.post, "/upload", **request)
         try:
             assert not second_entered.wait(0.15), "second upload entered commit concurrently"
