@@ -37,7 +37,7 @@ def _boundary(snapshot: dict) -> dict:
 #: whole discriminating power of the contention assertions: a contender that
 #: waited for the holder instead of honouring its own timeout blows straight
 #: through the observation window.
-_HOLD_SECONDS = 60.0
+_HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 15.0
 
 #: A NEGATIVE observation -- how long the test waits to prove something has NOT

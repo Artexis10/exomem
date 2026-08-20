@@ -80,8 +80,18 @@ def _forked_graph_lock_state(vault_root: str, temporary: str, result) -> None:  
 #: vacuously, and an observation sized for an idle laptop fails on a loaded
 #: shard while the code under test is behaving correctly.
 #:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
 #: These are not latency claims. Nothing here asserts the product is fast.
-_HOLD_SECONDS = 60.0
+_HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 30.0
 _ADMIT_SECONDS = 15.0
 
@@ -2071,7 +2081,7 @@ def test_cross_process_rebuild_lock_rejects_a_second_builder(tmp_path: Path) -> 
         assert not (tmp_path / "Knowledge Base/.graph-rebuild.owner").exists()
     finally:
         release.set()
-        owner.join(10)
+        owner.join(_HOLD_SECONDS)
     assert owner.exitcode == 0
 
 
@@ -2141,10 +2151,10 @@ def test_fork_child_drops_inherited_graph_lock_without_unlocking_parent(tmp_path
         args=(str(tmp_path), str(child_temporary), result),
     )
     child.start()
-    child.join(10)
+    child.join(_HOLD_SECONDS)
     try:
         assert child.exitcode == 0
-        assert result.get(timeout=2) == (False, False)
+        assert result.get(timeout=_OBSERVE_SECONDS) == (False, False)
 
         spawn_context = multiprocessing.get_context("spawn")
         competitor_result = spawn_context.Queue()
@@ -2153,9 +2163,9 @@ def test_fork_child_drops_inherited_graph_lock_without_unlocking_parent(tmp_path
             args=(str(tmp_path), str(competitor_temporary), competitor_result),
         )
         competitor.start()
-        competitor.join(10)
+        competitor.join(_HOLD_SECONDS)
         assert competitor.exitcode == 0
-        assert competitor_result.get(timeout=2) is False
+        assert competitor_result.get(timeout=_OBSERVE_SECONDS) is False
     finally:
         graph_sync.release_rebuild_owner(tmp_path, parent_temporary)
 
@@ -2738,8 +2748,8 @@ def test_canonical_handoff_is_non_owned_until_off_boundary_graph_work_completes(
     )
     replay.start()
     release_graph.set()
-    owner.join(2)
-    replay.join(2)
+    owner.join(_HOLD_SECONDS)
+    replay.join(_HOLD_SECONDS)
 
     assert result == [
         {"state": "committed", "graph_sync": "completed"},
@@ -3177,7 +3187,7 @@ def test_live_sidecar_readers_are_registered_and_drained_for_a_publication_hold(
 
     worker = threading.Thread(target=leak_a_reader)
     worker.start()
-    worker.join(10)
+    worker.join(_HOLD_SECONDS)
     assert leaked and leaked[0] is not None
     assert len(epistemic_graph._SIDECAR_READERS.get(key, {})) == 1
 

@@ -29,8 +29,18 @@ B = "Knowledge Base/Notes/Insights/b.md"
 #: ordering pass vacuously, and an observation sized for an idle laptop fails on
 #: a loaded shard while the code under test behaves perfectly.
 #:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
 #: These are not latency claims. Nothing here asserts the product is fast.
-_HOLD_SECONDS = 60.0
+_HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 15.0
 
 def _write(vault: Path, rel: str, body: str) -> Path:

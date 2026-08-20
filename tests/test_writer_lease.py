@@ -48,9 +48,25 @@ from exomem.writer_lease import (
 #: yet and stays tight: widening one changes the scenario rather than merely
 #: slowing it, because the product's own timeouts run in the same window.
 #:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
 #: These are not latency claims. Nothing here asserts the product is fast.
-_HOLD_SECONDS = 60.0
+_HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 15.0
+
+#: How long to let a thread run before asserting it is STILL parked.
+#: Negative, so it stays tight -- a loaded runner can only make it more
+#: true, never less, and this is the one window a healthy run always
+#: spends in full.
+_STILL_BLOCKED_SECONDS = 0.3
 
 def _boundary(snapshot: dict) -> dict:
     """Drop the additive contention block so the boundary shape stays exact.
@@ -3634,7 +3650,7 @@ def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(
 
     acquirer = threading.Thread(target=run_acquire)
     acquirer.start()
-    acquirer.join(timeout=_HOLD_SECONDS)
+    acquirer.join(_STILL_BLOCKED_SECONDS)
     assert acquirer.is_alive(), "ensure_writer did not wait for the locked release"
     assert "record" not in acquired
 

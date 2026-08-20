@@ -19,6 +19,7 @@ add another to the tuple once it has been converted.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -56,16 +57,44 @@ _LITERAL_JOIN = re.compile(
 )
 
 
+#: `t.join(timeout=0.3)` followed by `assert t.is_alive()` is the same negative
+#: observation in join form: it proves a competitor is STILL parked. It is also
+#: the only shape that spends its entire window on a healthy run -- every other
+#: wait here returns the moment its event fires. Widening one is therefore pure
+#: cost, and the first sweep widened this exact site from 0.3s to 60s, where it
+#: raced pytest's own 60s per-test timeout and took out a Linux shard with a
+#: thread dump instead of an assertion.
+_STILL_PARKED = re.compile(r"assert\s+(?!not\b)([A-Za-z_][A-Za-z0-9_]*)\.is_alive\(\)")
+
+
+def _still_parked_after(lines: list[str], index: int, thread: str) -> bool:
+    """True when a join is followed by `assert <thread>.is_alive()`.
+
+    `assert not <thread>.is_alive()` is the opposite claim -- it waits for
+    completion -- so it is deliberately not matched here and stays governed by
+    the literal rule.
+    """
+    for nearby in lines[index + 1 : index + 4]:
+        match = _STILL_PARKED.search(nearby)
+        if match and match.group(1) == thread:
+            return True
+    return False
+
+
 def _offenders(source: str) -> list[tuple[int, str]]:
+    lines = source.splitlines()
     found: list[tuple[int, str]] = []
-    for number, line in enumerate(source.splitlines(), start=1):
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         if _NEGATIVE.search(line):
             continue
-        if _POSITIVE_LITERAL_WAIT.search(line) or _LITERAL_JOIN.search(line):
-            found.append((number, stripped))
+        join = _LITERAL_JOIN.search(line)
+        if join and _still_parked_after(lines, index, join.group(1)):
+            continue
+        if _POSITIVE_LITERAL_WAIT.search(line) or join:
+            found.append((index + 1, stripped))
     return found
 
 
@@ -104,3 +133,43 @@ def test_the_guard_can_actually_fail() -> None:
     assert not _offenders("    # assert entered.wait(1.0)\n")
     assert not _offenders("    assert not holder_entered.wait(0.05)\n")
     assert not _offenders("    assert entered.wait(_OBSERVE_SECONDS)\n")
+    assert not _offenders("    worker.join(0.3)\n    assert worker.is_alive()\n")
+    assert _offenders("    worker.join(0.3)\n    assert not worker.is_alive()\n")
+    assert _offenders("    worker.join(0.3)\n    assert other.is_alive()\n")
+
+
+def _per_test_timeout_seconds() -> float:
+    config = tomllib.loads((TESTS.parent / "pyproject.toml").read_text(encoding="utf-8"))
+    return float(config["tool"]["pytest"]["ini_options"]["timeout"])
+
+
+_SECONDS_CONSTANT = re.compile(
+    r"^(_[A-Z][A-Z0-9_]*SECONDS)\s*=\s*(\d+(?:\.\d+)?)\s*$", re.MULTILINE
+)
+
+
+def test_timing_constants_stay_under_pytests_own_timeout() -> None:
+    """A valve at or above the harness timeout never gets to fire.
+
+    Ten of these constants were written as exactly 60.0 -- the same number as
+    `timeout` in pyproject. A valve is supposed to convert a hang into a named
+    assertion; at parity with the harness the harness wins the race, and the
+    run reports a thread dump and no junit XML instead. That is how a one-line
+    ordering bug arrived as an unreadable Linux shard failure.
+
+    Scoped to test modules. `tests/conftest.py` holds a longer quiesce valve
+    that runs in teardown, a different phase with its own budget, and there is
+    no evidence it is mis-sized.
+    """
+    limit = _per_test_timeout_seconds()
+    over: list[str] = []
+    for path in sorted(TESTS.glob("test_*.py")):
+        for name, value in _SECONDS_CONSTANT.findall(path.read_text(encoding="utf-8")):
+            if float(value) >= limit:
+                over.append(f"  {path.name}: {name} = {value}")
+
+    assert not over, (
+        f"These wall-clock constants are at or above pytest's per-test timeout "
+        f"({limit}s), so they can never report a failure of their own -- the "
+        "harness kills the test first.\n\n" + "\n".join(over)
+    )
