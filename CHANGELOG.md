@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.57.0](https://github.com/Artexis10/exomem/compare/v0.56.0...v0.57.0) (2026-08-20)
+
+
+### Features
+
+* **graph:** make the unclassified fan-out incompleteness explain itself ([#632](https://github.com/Artexis10/exomem/issues/632)) ([9bd736c](https://github.com/Artexis10/exomem/commit/9bd736cd7fc74f2e4171c889d8bc2534f6b5f169))
+* **graph:** re-arm a rebuild that stopped, not just a queue that stalled ([#634](https://github.com/Artexis10/exomem/issues/634)) ([4026d35](https://github.com/Artexis10/exomem/commit/4026d351154c15ccabd108b0ff11e0b273f46f4a))
+* **hooks:** uninstall what install-hook wired, yadm sources included ([#656](https://github.com/Artexis10/exomem/issues/656)) ([4df95d5](https://github.com/Artexis10/exomem/commit/4df95d5544638238df1a929dac750b6f9684dc0d))
+* **hosted:** widen the hosted profile to the full epistemic loop ([#572](https://github.com/Artexis10/exomem/issues/572)) ([a69af72](https://github.com/Artexis10/exomem/commit/a69af72dc49091bbfed39c654ca084859ff15d23))
+* **ops:** let the origin notice it is answering probes and nothing else ([#698](https://github.com/Artexis10/exomem/issues/698)) ([5cc8a08](https://github.com/Artexis10/exomem/commit/5cc8a08024bae03e18db30635361629948db35f6))
+* **vault:** let a vault name its files the way a human reads them ([#687](https://github.com/Artexis10/exomem/issues/687)) ([702340c](https://github.com/Artexis10/exomem/commit/702340ccb4b27408ba331152a87bcc9d3f83699a))
+* **vault:** move the shipped contract out of the note namespace ([#688](https://github.com/Artexis10/exomem/issues/688)) ([2c091d8](https://github.com/Artexis10/exomem/commit/2c091d88b1eb7efeea2fd87e68b18cd622deca52))
+
+
+### Bug Fixes
+
+* **benchmarks:** give the guest lane the manifest lineage rule ([#691](https://github.com/Artexis10/exomem/issues/691)) ([5a9e8ce](https://github.com/Artexis10/exomem/commit/5a9e8ceec1e3c3b2a35004d10cd879b4ff8e61d4))
+* **benchmarks:** scan the public export for what a value is, not just its bytes ([#701](https://github.com/Artexis10/exomem/issues/701)) ([9dc7c27](https://github.com/Artexis10/exomem/commit/9dc7c27d2abbb68fd2522b30a6b7b3967b91b3bf))
+* **census:** answer the read window the way the stat window already answers ([#670](https://github.com/Artexis10/exomem/issues/670)) ([25c1678](https://github.com/Artexis10/exomem/commit/25c1678be1fa52f913ef2ddebe68e4b40badbddc))
+* **census:** filter the corpus census before the stat, not after ([#648](https://github.com/Artexis10/exomem/issues/648)) ([354ab18](https://github.com/Artexis10/exomem/commit/354ab1890343bc1d8560f83b224080254d35bb5c))
+* **checkpoint:** let a bounded prune slice do at least one unit of work ([#706](https://github.com/Artexis10/exomem/issues/706)) ([175ffc8](https://github.com/Artexis10/exomem/commit/175ffc833bfe5ad183d0cb6604491917973654e1))
+* **ci:** give the contention tests a hold/observe shape instead of tight literals ([#702](https://github.com/Artexis10/exomem/issues/702)) ([4a49689](https://github.com/Artexis10/exomem/commit/4a49689d7685cb55e164a6d76c2d5fced94ac96d))
+* **ci:** make the Windows cross-platform shard report its results ([#638](https://github.com/Artexis10/exomem/issues/638)) ([979825b](https://github.com/Artexis10/exomem/commit/979825be4d4a56c3fee09c9bfc67614613187685))
+* **ci:** make Windows refusals name what they observed, and stop timing a cancel ([#693](https://github.com/Artexis10/exomem/issues/693)) ([f6022ec](https://github.com/Artexis10/exomem/commit/f6022ec018f45d61baa07fef03ab209d59a69d53))
+* **ci:** stop the cross-platform lane and the write-latency gate asserting a fast runner ([#689](https://github.com/Artexis10/exomem/issues/689)) ([52ab550](https://github.com/Artexis10/exomem/commit/52ab550d043b640e50441003f1b430e5cf59813b))
+* **codex:** stop handing lane workers a sandbox that cannot run the tests ([#700](https://github.com/Artexis10/exomem/issues/700)) ([779d842](https://github.com/Artexis10/exomem/commit/779d842122e1e539fdc9ef3d9771c2bf667216b2))
+* **collections:** stop a letterless audit head being read back as an integer ([#707](https://github.com/Artexis10/exomem/issues/707)) ([122c2a0](https://github.com/Artexis10/exomem/commit/122c2a089135d32889e2a6f2863f6b656fde1b2e))
+* **doctor:** recommend a lever the reader can actually pull ([#679](https://github.com/Artexis10/exomem/issues/679)) ([4b0a132](https://github.com/Artexis10/exomem/commit/4b0a1328741f31d8df69189f7201d134fab5c852))
+* **doctor:** run the process census on Windows, where the report came from ([#685](https://github.com/Artexis10/exomem/issues/685)) ([babcfa4](https://github.com/Artexis10/exomem/commit/babcfa4302702a8173f2f79809f66ce15966a638))
+* **doctor:** stop sending people after a public hostname they no longer need ([#696](https://github.com/Artexis10/exomem/issues/696)) ([68a08be](https://github.com/Artexis10/exomem/commit/68a08bebb69ae100f55283f08ec26fd1c414e1ea))
+* **e2e:** publish the server's own log instead of deleting it on failure ([#625](https://github.com/Artexis10/exomem/issues/625)) ([880cd16](https://github.com/Artexis10/exomem/commit/880cd1661b70be107b58d9820c8cd12f9fb8b849))
+* **e2e:** report the graph's own state when convergence times out ([#620](https://github.com/Artexis10/exomem/issues/620)) ([5f7d2f9](https://github.com/Artexis10/exomem/commit/5f7d2f9f71a75f2bedb1a189d47e94dc87720197))
+* **edge:** make a standalone origin representable and name the gate that refused ([#672](https://github.com/Artexis10/exomem/issues/672)) ([95bcd61](https://github.com/Artexis10/exomem/commit/95bcd6116ddcff5ecf900444cf6f9e9a41dd8292))
+* **egress:** resolve a reference to the page it names, not to the spelling it used ([#644](https://github.com/Artexis10/exomem/issues/644)) ([fe06036](https://github.com/Artexis10/exomem/commit/fe06036b549495d206e96a08babec4fb7d75e7de))
+* **governance:** make durable governance writes work on Windows ([#639](https://github.com/Artexis10/exomem/issues/639)) ([ab2d7b6](https://github.com/Artexis10/exomem/commit/ab2d7b64611d35a8c49d33122fcd968472c151fe))
+* **graph:** escalate the lineage advice for every classified failure, not one ([#654](https://github.com/Artexis10/exomem/issues/654)) ([fff26f1](https://github.com/Artexis10/exomem/commit/fff26f1362be6a76476db07d9bee38d3fa0e3b62))
+* **graph:** make a graph that will not converge say why ([#653](https://github.com/Artexis10/exomem/issues/653)) ([8d620cb](https://github.com/Artexis10/exomem/commit/8d620cb9cc5921c6d3a295cb4d6dcf7352e4fed4))
+* **hosted:** make the promotion harness survive its own window ([#686](https://github.com/Artexis10/exomem/issues/686)) ([3a7c80a](https://github.com/Artexis10/exomem/commit/3a7c80a375a5e4bbd5fda9f3f3790b61387e2a94))
+* **lease:** tell a missing coordinator contract from a coordinator that is down ([#674](https://github.com/Artexis10/exomem/issues/674)) ([2980d93](https://github.com/Artexis10/exomem/commit/2980d93b453e446ff39985cfb8c5cb7c7eac6700))
+* **lexstore:** key the store cache on the same path repair state keys on ([#709](https://github.com/Artexis10/exomem/issues/709)) ([3ae744f](https://github.com/Artexis10/exomem/commit/3ae744f150becdef33ab1cd45b1e7a3a5ec9ca9a))
+* **lexstore:** stop a background repair being charged to a declining publish ([#703](https://github.com/Artexis10/exomem/issues/703)) ([3c02266](https://github.com/Artexis10/exomem/commit/3c022660dbaff4acef9e2431f8fdf1c88972c865))
+* **nudge:** give supersession a route from the hook that drives captures ([#669](https://github.com/Artexis10/exomem/issues/669)) ([f36e920](https://github.com/Artexis10/exomem/commit/f36e9208c7871a6e22f5f770851f3f8a0e199840))
+* **platform:** decode captured subprocess output as UTF-8, not the code page ([#645](https://github.com/Artexis10/exomem/issues/645)) ([dbed9b3](https://github.com/Artexis10/exomem/commit/dbed9b35a1d4ba80af56463c5ad02f14e537f4b4))
+* **platform:** encode the machine-wide-base constraint instead of exemplifying it ([#646](https://github.com/Artexis10/exomem/issues/646)) ([e596471](https://github.com/Artexis10/exomem/commit/e59647108e4e52b129a7e12a75e67f6de58ba8d5))
+* **platform:** repair the Windows and macOS defects behind the cross-platform failures ([#642](https://github.com/Artexis10/exomem/issues/642)) ([42c9495](https://github.com/Artexis10/exomem/commit/42c94959ced7b41dd994e8827581728c4b681edb))
+* **recall:** a sidecar that could not check is not a sidecar that found nothing ([#682](https://github.com/Artexis10/exomem/issues/682)) ([ce03fd3](https://github.com/Artexis10/exomem/commit/ce03fd3d7524fc25b5030dd81eda51d93b74e715))
+* **records:** decide the splice newline per span, and refuse a splice that loses a field ([#643](https://github.com/Artexis10/exomem/issues/643)) ([a8ed25f](https://github.com/Artexis10/exomem/commit/a8ed25fd980ad46aad325ff9719e0c1494a5b241))
+* **scripts:** reclaim tool scratch roots instead of suppressing the failure ([#652](https://github.com/Artexis10/exomem/issues/652)) ([99f3c33](https://github.com/Artexis10/exomem/commit/99f3c33c609af0da8b701d4d46cabee0848b0a58))
+* **startup:** stop the import of a command module needing a home directory ([#666](https://github.com/Artexis10/exomem/issues/666)) ([13fc4e6](https://github.com/Artexis10/exomem/commit/13fc4e696296a9231fd3cfcadf062c380eb9cfd1))
+* **tests:** assert the mutator is unblocked, not that it is fast ([#633](https://github.com/Artexis10/exomem/issues/633)) ([6faa469](https://github.com/Artexis10/exomem/commit/6faa46965008103bbe5965ed3333fae19b57c5d9))
+* **tests:** compare recorded provenance against the source that produced it ([#683](https://github.com/Artexis10/exomem/issues/683)) ([c65b7c7](https://github.com/Artexis10/exomem/commit/c65b7c70e410b1b7590465415cda13786cd07e20))
+* **tests:** declare the epistemic harness's openat requirement ([#640](https://github.com/Artexis10/exomem/issues/640)) ([22ad3ff](https://github.com/Artexis10/exomem/commit/22ad3ff0b0f52deeab7c64a35ee3ebe4f3732e0d))
+* **tests:** declare what the Linux-only benchmark harnesses require ([#631](https://github.com/Artexis10/exomem/issues/631)) ([08a5b74](https://github.com/Artexis10/exomem/commit/08a5b74f6cb9b7c4efc7abb24a4c1474a5254ace))
+* **tests:** gate the contract harness on a trust anchor Windows cannot have ([#636](https://github.com/Artexis10/exomem/issues/636)) ([12793b5](https://github.com/Artexis10/exomem/commit/12793b5446eeb8d817122ca375a636f04f6357ec))
+* **tests:** key the vault snapshot by posix path so Windows can read it back ([#675](https://github.com/Artexis10/exomem/issues/675)) ([bc443c2](https://github.com/Artexis10/exomem/commit/bc443c2597f06f0468a0bb069d5799200392c7da))
+* **tests:** run the rotation gate through sys.executable and declare POSIX ops ([#641](https://github.com/Artexis10/exomem/issues/641)) ([7668473](https://github.com/Artexis10/exomem/commit/7668473d9a8d7096e8df6997f8daee9afe4eb8e7))
+* **tests:** stop the DNS-bound test racing its own 10ms budget ([#684](https://github.com/Artexis10/exomem/issues/684)) ([8ca2a78](https://github.com/Artexis10/exomem/commit/8ca2a78f8deb9003534e1831bcd5993b9d319f6b))
+* **tests:** stop the suite reading whatever vault the shell points at ([#678](https://github.com/Artexis10/exomem/issues/678)) ([8387837](https://github.com/Artexis10/exomem/commit/83878370e77d4f9042f942c525bb5522f218eae4))
+* **windows:** accept the owner Windows gives a directory an admin created ([#637](https://github.com/Artexis10/exomem/issues/637)) ([277767b](https://github.com/Artexis10/exomem/commit/277767b93c9becd10084a29f6bb6bce473f2fe93))
+* **windows:** close the last four cross-platform failures ([#668](https://github.com/Artexis10/exomem/issues/668)) ([5c4b674](https://github.com/Artexis10/exomem/commit/5c4b6743609f7fb9392401157004de55d79a15e0))
+* **windows:** tighten an inherited private DACL instead of refusing it ([#658](https://github.com/Artexis10/exomem/issues/658)) ([475319e](https://github.com/Artexis10/exomem/commit/475319eb7217832be146879897dcc6ce44838e8e))
+
+
+### Performance
+
+* **bm25:** repair the corpus from the change delta instead of rebuilding it whole ([#692](https://github.com/Artexis10/exomem/issues/692)) ([8793f87](https://github.com/Artexis10/exomem/commit/8793f8767ab44ac4480fed048d39c105a0f92ac4))
+* **corpus:** bound the populate-on-miss a writer pays for ([#671](https://github.com/Artexis10/exomem/issues/671)) ([4fc7c5e](https://github.com/Artexis10/exomem/commit/4fc7c5ea6cd96d3bf0a21defcc0ba86c91e79b4a))
+* **find:** give the keyword candidate lane the bound every other lane has ([#655](https://github.com/Artexis10/exomem/issues/655)) ([1ecfd32](https://github.com/Artexis10/exomem/commit/1ecfd32735687a1c20609f1043d915a348d5c61d))
+* **find:** let a repeated query survive a write that cannot have changed its answer ([#695](https://github.com/Artexis10/exomem/issues/695)) ([68c1631](https://github.com/Artexis10/exomem/commit/68c16315ed4d2f72ecc7b03cd6caa4c33315c901))
+* **lexstore:** replay a bounded recall delta before declining the keyword lane ([#694](https://github.com/Artexis10/exomem/issues/694)) ([eb7daa7](https://github.com/Artexis10/exomem/commit/eb7daa784e6e7b7f2b6de671aea2660ded33b500))
+* **lexstore:** retry the page a contended upsert deferred, not the corpus ([#680](https://github.com/Artexis10/exomem/issues/680)) ([e80f73b](https://github.com/Artexis10/exomem/commit/e80f73b04d346522401f6dd9bb46382edf4d6b13))
+* **recall:** build the cold resolver from the lexical sidecar instead of the vault ([#708](https://github.com/Artexis10/exomem/issues/708)) ([f1b022e](https://github.com/Artexis10/exomem/commit/f1b022e0e10d3b3afbbee926de3e9caf831823ed))
+* **recall:** stop rebuilding the projected resolver on a reader's thread ([#677](https://github.com/Artexis10/exomem/issues/677)) ([e097e4e](https://github.com/Artexis10/exomem/commit/e097e4e62fc08a34b45fee36e98413cda1643ded))
+* **recall:** stop the idle reaper throwing away the recall resolver ([#690](https://github.com/Artexis10/exomem/issues/690)) ([06ec4bd](https://github.com/Artexis10/exomem/commit/06ec4bd914183242342f98a7ec89bd482af73b0d))
+
 ## [0.56.0](https://github.com/Artexis10/exomem/compare/v0.55.0...v0.56.0) (2026-08-18)
 
 
