@@ -39,7 +39,7 @@ def main() -> int:
     parser.add_argument("--openai-app-id")
     parser.add_argument(
         "--candidate",
-        choices=(hosted_plugins.DEFAULT_CANDIDATE, hosted_plugins.LIFECYCLE_CANDIDATE),
+        choices=tuple(hosted_plugins.CANDIDATE_PROFILES),
         default=hosted_plugins.DEFAULT_CANDIDATE,
     )
     parser.add_argument("--platform", choices=(*hosted_plugins.PLATFORMS, "all"))

@@ -28,7 +28,7 @@ from pathlib import Path
 from . import find as find_module
 from . import indexes, memory_refs, relation_review, semantic_writes, temporal
 from . import note as note_module
-from .kbdir import kb_prefix
+from .kbdir import kb_page_target, kb_prefix
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     ContentHashMismatchError,
@@ -269,12 +269,9 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
             missing=["old_path"],
             reason="old_path is empty",
         )
-    rel = path.strip().replace("\\", "/").lstrip("/")
-    if not rel.startswith(kb_prefix()):
-        rel = kb_prefix() + rel
-    if not rel.endswith(".md"):
-        rel = rel + ".md"
-    candidate = vault_root / rel
+    # Shared with `edit._resolve` and the hosted protected-tree guard. See
+    # `kbdir.kb_relative_form` for why this must not be inlined.
+    candidate, rel = kb_page_target(vault_root, path)
     try:
         resolved = candidate.resolve()
         resolved.relative_to(kb_root(vault_root).resolve())

@@ -2237,6 +2237,14 @@ def test_reconcile_recovers_an_unacknowledged_checkpoint_without_rewriting_markd
     assert report.graph_status == "refreshed"
 
 
+# Deadlock valves for the ordering test below. The hold must outlast both the
+# observation and the admission timeout, or the ordering it pins can resolve
+# itself by expiry and the assertions stop meaning anything.
+_HOLD_SECONDS = 60.0
+_OBSERVE_SECONDS = 30.0
+_ADMIT_SECONDS = 15.0
+
+
 def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2260,16 +2268,23 @@ def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
 
     def slow_rebuild(index: EpistemicGraphIndex) -> dict[str, int]:
         rebuild_started.set()
-        assert release_rebuild.wait(2)
+        assert release_rebuild.wait(_HOLD_SECONDS)
         return original(index)
 
     monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_locked", slow_rebuild)
     state_dir = tmp_path / "state"
     reconcile_manager = LeaseManager(
-        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=1
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=_ADMIT_SECONDS
     )
+    # The second mutation must be ADMITTED, and it is admitted only because the
+    # reconcile released the canonical boundary before rebuilding. A tenth of a
+    # second said "admitted promptly", which is a claim about runner speed; the
+    # claim under test is "admitted at all". A retained boundary still fails,
+    # because the boundary is not released until the `finally` below -- so a
+    # timeout that is shorter than the hold keeps the failure a failure rather
+    # than a deadlock.
     mutation_manager = LeaseManager(
-        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.1
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=_ADMIT_SECONDS
     )
     reconcile_command = next(
         command
@@ -2305,13 +2320,13 @@ def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
 
     reconcile_thread = threading.Thread(target=run_reconcile)
     reconcile_thread.start()
-    assert rebuild_started.wait(1)
+    assert rebuild_started.wait(_OBSERVE_SECONDS)
     try:
         mutation_manager.invoke(second_command, (tmp_path,), {})
         assert second_admitted.is_set()
     finally:
         release_rebuild.set()
-        reconcile_thread.join(timeout=3)
+        reconcile_thread.join(timeout=_HOLD_SECONDS)
 
     assert not reconcile_thread.is_alive()
     assert reconcile_result[0]["graph_status"] == "refreshed", reconcile_result
@@ -2850,6 +2865,65 @@ def test_windows_replacement_refusal_keeps_the_previous_complete_sidecar(
     assert temporary.read_bytes() == b"new"
 
 
+def test_replacement_refusal_names_what_it_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal has to say more than "an open reader".
+
+    It fired on a Windows CI shard without reproducing locally, and by the time
+    it is raised the code has already spent three in-place attempts behind a 5s
+    busy timeout, under four publication attempts above it -- so something held
+    on for close to a minute. "Has an open reader" is a hypothesis, not an
+    observation, and it cannot be told apart from a permission error that is
+    not a sharing conflict at all. Widening a budget that size again would be
+    guessing; carrying the evidence is not.
+    """
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True)
+    live.write_bytes(b"old")
+    temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
+    temporary.write_bytes(b"new")
+    monkeypatch.setattr(
+        graph_sync.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(PermissionError(13, "sharing violation")),
+    )
+
+    with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable) as raised:
+        graph_sync.replace_sidecar(temporary, live)
+
+    message = str(raised.value)
+    # What os.replace itself said, not a paraphrase of it.
+    assert "PermissionError" in message
+    assert "sharing violation" in message
+    # Every in-place attempt is accounted for, with the error each one hit.
+    assert f"in-place {graph_sync.PUBLISH_IN_PLACE_ATTEMPTS} attempt(s)" in message
+    assert message.count("#") == graph_sync.PUBLISH_IN_PLACE_ATTEMPTS
+    # Elapsed time is the term that separates "a reader held SHARED for the
+    # whole busy timeout" from "this failed instantly and is not a lock at all".
+    assert "s:" in message and "after" in message
+
+
+def test_replacement_refusal_says_when_there_was_nothing_to_publish_into(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An absent live sidecar is a different failure and must read as one."""
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True)
+    temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
+    temporary.write_bytes(b"new")
+    monkeypatch.setattr(
+        graph_sync.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(PermissionError(13, "denied")),
+    )
+
+    with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable) as raised:
+        graph_sync.replace_sidecar(temporary, live)
+
+    assert "live sidecar absent" in str(raised.value)
+
+
 def test_full_rebuild_replacement_refusal_retains_complete_temp_for_later_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3040,7 +3114,13 @@ def test_publication_refused_by_both_paths_still_fails_closed(
     epistemic_graph.clear_publication_memos()
 
     _refuse_replacement_onto(monkeypatch, index.path)
-    monkeypatch.setattr(graph_sync, "_publish_sidecar_in_place", lambda *_args: False)
+    # Takes **_kwargs so it keeps matching the real signature: the refusal now
+    # collects per-attempt evidence through an `attempts_out` list, and a stub
+    # that only accepts positionals fails with TypeError instead of exercising
+    # the fail-closed path this test is about.
+    monkeypatch.setattr(
+        graph_sync, "_publish_sidecar_in_place", lambda *_args, **_kwargs: False
+    )
 
     with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable):
         index.rebuild_all()

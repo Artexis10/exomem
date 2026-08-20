@@ -101,9 +101,30 @@ def _prune_until_swept(*args, **kwargs) -> int:
 
     Returns the total removed, so `== 1` still means exactly one directory
     went away.
+
+    The pass count above is derived from slots-per-call, so it only sweeps the
+    ring if every call really does inspect a full window. It does not:
+    `prune_expired` also bounds itself by wall clock
+    (`MAX_PRUNE_LOCK_SECONDS`, 50 ms), and a truncated window advances the
+    cursor only past the slots it actually read -- correct for the product,
+    fatal for this arithmetic. On a loaded Windows runner the 33 calls covered
+    a fraction of the 512 slots and the expired entry was simply never reached,
+    which is how `test_prune_refuses_copied_checkpoint_in_arbitrary_user_-
+    directory` failed with `0 == 1` on CI while passing everywhere else.
+
+    So the latency bound is lifted for the duration of the sweep. That bound is
+    a production property -- keep the hook's share of a write small -- and it
+    stays pinned by `test_prune_respects_total_budget_when_root_lock_is_held`.
+    A test asserting the *outcome* of a complete sweep is the one caller that
+    must not be cut short part way through it.
     """
     passes = -(-checkpoint.MAX_PRUNE_CATALOG_ENTRIES // checkpoint.MAX_PRUNE_ENUM_ENTRIES) + 1
-    return sum(checkpoint.prune_expired(*args, **kwargs) for _ in range(passes))
+    original = checkpoint.MAX_PRUNE_LOCK_SECONDS
+    checkpoint.MAX_PRUNE_LOCK_SECONDS = 60.0
+    try:
+        return sum(checkpoint.prune_expired(*args, **kwargs) for _ in range(passes))
+    finally:
+        checkpoint.MAX_PRUNE_LOCK_SECONDS = original
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])
@@ -2218,6 +2239,17 @@ def test_metadata_rotation_replace_failure_preserves_log_and_removes_temp(
 
 
 def test_metadata_log_rotation_serializes_concurrent_process_writers(tmp_path: Path) -> None:
+    """Four processes writing at once must produce one well-formed log.
+
+    The children raise `METADATA_LOG_LOCK_SECONDS` because this test builds a
+    contention level production does not: four writers queued behind a full-log
+    rotation, deliberately, so that serialization is what is being observed. The
+    shipped budget is sized to give up rather than delay a hook -- losing it
+    costs one diagnostics row, and every caller in `_dispatch` swallows that --
+    so at the shipped value a loaded runner makes this assert the give-up rather
+    than the serialization, which is how it failed on Windows CI with
+    `TimeoutError: timed out acquiring .events.lock`.
+    """
     home = tmp_path / "home"
     root = checkpoint.client_state_root(home, "codex")
     root.mkdir(parents=True)
@@ -2233,6 +2265,7 @@ def test_metadata_log_rotation_serializes_concurrent_process_writers(tmp_path: P
     code = (
         "import sys; from pathlib import Path; "
         "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "c.METADATA_LOG_LOCK_SECONDS = 30.0; "
         "[(c._metadata_log(Path(sys.argv[1]),'codex','SessionStart','empty',i)) "
         "for i in range(20)]"
     )
@@ -2836,6 +2869,12 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
             child.kill()
 
 
+# Headroom over the prune's lock budget for the writer to land in. Wide enough
+# that a slow runner cannot fail it, narrow enough that a writer which genuinely
+# queued behind the whole prune still does.
+_WRITER_OVERTAKE_SLACK_SECONDS = 5.0
+
+
 def test_many_busy_prune_candidates_do_not_starve_supported_writer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2934,7 +2973,15 @@ def test_many_busy_prune_candidates_do_not_starve_supported_writer(
     with busy_guard:
         observed_busy = len(busy_entries)
     assert observed_busy >= 1, "prune never contended with the writer"
-    assert elapsed < checkpoint.MAX_PRUNE_ENUM_ENTRIES * busy_hold + 0.3
+    # Starvation means the writer waits out the prune's whole budget instead of
+    # overtaking it. `MAX_PRUNE_ENUM_ENTRIES * busy_hold + 0.3` -- 0.46s -- was
+    # not that bound: it was the theoretical contention cost plus a slice of
+    # runner speed, and a Windows runner spent 1.06s on file locking alone while
+    # behaving perfectly. Bound it against the only thing that would actually be
+    # wrong: waiting for the prune's own lock budget to expire. Anything faster
+    # than that overtook the prune, which is the property. The status assertion
+    # above remains the primary check, as its comment says.
+    assert elapsed < checkpoint.MAX_PRUNE_LOCK_SECONDS + _WRITER_OVERTAKE_SLACK_SECONDS
 
 
 def test_prune_respects_total_budget_when_root_lock_is_held(tmp_path: Path) -> None:
