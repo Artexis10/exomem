@@ -194,7 +194,7 @@ def test_check_failure_is_confirmed_by_a_second_measurement(monkeypatch) -> None
     module = load_module()
     attempts: list[int] = []
 
-    def fake_measure_all(sizes, samples, root):
+    def fake_measure_all(sizes, samples, root, **_kwargs):
         attempts.append(len(attempts) + 1)
         return SUPERLINEAR if len(attempts) == 1 else HEALTHY
 
@@ -209,7 +209,7 @@ def test_a_reproducible_failure_still_fails(monkeypatch) -> None:
     module = load_module()
     attempts: list[int] = []
 
-    def fake_measure_all(sizes, samples, root):
+    def fake_measure_all(sizes, samples, root, **_kwargs):
         attempts.append(len(attempts) + 1)
         return SUPERLINEAR
 
@@ -223,7 +223,7 @@ def test_attempts_one_disables_confirmation(monkeypatch) -> None:
     module = load_module()
     attempts: list[int] = []
 
-    def fake_measure_all(sizes, samples, root):
+    def fake_measure_all(sizes, samples, root, **_kwargs):
         attempts.append(len(attempts) + 1)
         return SUPERLINEAR
 
@@ -235,5 +235,7 @@ def test_attempts_one_disables_confirmation(monkeypatch) -> None:
 
 def test_no_check_flag_never_fails(monkeypatch) -> None:
     module = load_module()
-    monkeypatch.setattr(module, "measure_all", lambda sizes, samples, root: SUPERLINEAR)
+    monkeypatch.setattr(
+        module, "measure_all", lambda sizes, samples, root, **_kwargs: SUPERLINEAR
+    )
     assert module.main([]) == 0
