@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import stat
+import threading
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,47 @@ from . import access, freshness, vault
 
 RECALL_POLICY_VERSION = "structured-collection-manifest-only-v2"
 _MAX_MANIFEST_BYTES = 512 * 1024
+
+# `_canonical_parts_after_safe_validation` compares a candidate's resolved
+# spelling against the resolved vault root. The candidate side varies; the root
+# side is the same directory for every candidate in a request, and a 600-
+# candidate query paid 600 identical `_getfinalpathname` calls for it (#283).
+# Memoizing only the fixed side keeps the alias check itself untouched: every
+# candidate is still resolved fresh.
+#
+# Safe in the direction that matters. If the root is swapped underneath us, the
+# remembered value no longer prefixes the candidate's freshly-resolved path, so
+# `relative_to` raises and the candidate is REJECTED. A stale entry can refuse a
+# legitimate page; it cannot admit one that escapes the boundary.
+_RESOLVED_ROOTS: dict[str, Path] = {}
+_RESOLVED_ROOTS_LOCK = threading.Lock()
+_MAX_RESOLVED_ROOTS = 32
+
+
+def _resolved_root(root: Path) -> Path:
+    """``root.resolve()``, memoized per vault root."""
+    key = str(root)
+    with _RESOLVED_ROOTS_LOCK:
+        remembered = _RESOLVED_ROOTS.get(key)
+    if remembered is not None:
+        return remembered
+    # Outside the lock: `resolve()` is a syscall, and holding a global lock
+    # across it would serialize every concurrent reader on a cold cache.
+    resolved = root.resolve()
+    with _RESOLVED_ROOTS_LOCK:
+        if len(_RESOLVED_ROOTS) >= _MAX_RESOLVED_ROOTS:
+            # Bounded, and a whole-map clear rather than an LRU: the working set
+            # is one vault in production and a handful of tmp roots in tests, so
+            # eviction never runs hot enough to need finer bookkeeping.
+            _RESOLVED_ROOTS.clear()
+        _RESOLVED_ROOTS[key] = resolved
+    return resolved
+
+
+def clear_resolved_roots() -> None:
+    """Forget memoized root resolutions (test seam; also used by cache eviction)."""
+    with _RESOLVED_ROOTS_LOCK:
+        _RESOLVED_ROOTS.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,7 +324,7 @@ def _canonical_parts_after_safe_validation(root: Path, parts: list[str]) -> list
     exercises the real 8.3 behaviour where the volume supports it.
     """
     try:
-        resolved = (root.joinpath(*parts)).resolve().relative_to(root.resolve())
+        resolved = (root.joinpath(*parts)).resolve().relative_to(_resolved_root(root))
     except (OSError, ValueError):
         return None
     if not resolved.parts or any(part in {"", ".", ".."} for part in resolved.parts):

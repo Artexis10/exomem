@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -473,13 +474,26 @@ class SemanticUnitHit:
 
 
 class FindTimings:
-    """Opt-in per-stage timing collector for one find call."""
+    """Opt-in per-stage timing collector for one find call.
+
+    The stage table is only as honest as its coverage. A read whose measured
+    stages summed to 4.4 s of a 6.1 s call (#283) had no defect in any stage —
+    the missing 28 % was work that no `span` wrapped, and nothing in the output
+    said so. `unattributed_ms` closes that: it is wall time inside the call
+    that no span claimed, so an uninstrumented region announces itself instead
+    of waiting to be found by subtracting a table by hand.
+    """
 
     def __init__(self) -> None:
         self._t0 = time.perf_counter()
         self.stages: dict[str, dict[str, Any]] = {}
         self.cache: dict[str, Any] = {"enabled": False, "hit": False}
         self.profile: dict[str, Any] = {}
+        # Every span's (start, end). `unattributed_ms` merges these rather than
+        # summing stage times, so a nested span is not double-counted and a
+        # lane that ever moves to its own thread still accounts correctly.
+        self._intervals: list[tuple[float, float]] = []
+        self._intervals_lock = threading.Lock()
 
     @contextmanager
     def span(self, name: str):
@@ -487,8 +501,21 @@ class FindTimings:
         try:
             yield
         finally:
+            t1 = time.perf_counter()
+            with self._intervals_lock:
+                self._intervals.append((t0, t1))
             entry = self.stages.setdefault(name, {})
-            entry["ms"] = round((time.perf_counter() - t0) * 1000.0, 3)
+            elapsed = round((t1 - t0) * 1000.0, 3)
+            if "ms" in entry:
+                # A stage can run twice in one call — `filter_eligibility` does,
+                # once for the unit lane and once for the page lane, whenever
+                # result_level is "mixed". Assigning would report whichever ran
+                # last and silently drop the other, so accumulate and say how
+                # many calls the number covers.
+                entry["ms"] = round(entry["ms"] + elapsed, 3)
+                entry["calls"] = entry.get("calls", 1) + 1
+            else:
+                entry["ms"] = elapsed
 
     def skipped(self, name: str) -> None:
         self.stages.setdefault(name, {})["skipped"] = True
@@ -496,9 +523,31 @@ class FindTimings:
     def error(self, name: str, exc: BaseException) -> None:
         self.stages.setdefault(name, {})["error"] = type(exc).__name__
 
+    def _covered_seconds(self) -> float:
+        """Wall seconds covered by at least one span, counting overlap once."""
+        with self._intervals_lock:
+            intervals = sorted(self._intervals)
+        covered = 0.0
+        reach: float | None = None  # end of the run being merged
+        for start, end in intervals:
+            if reach is None or start > reach:
+                covered += end - start
+                reach = end
+            elif end > reach:
+                covered += end - reach
+                reach = end
+        return covered
+
     def as_dict(self) -> dict[str, Any]:
+        total = time.perf_counter() - self._t0
         return {
-            "total_ms": round((time.perf_counter() - self._t0) * 1000.0, 3),
+            "total_ms": round(total * 1000.0, 3),
+            # Clamped: `as_dict` reads the clock after the last span closes, so
+            # this cannot legitimately go negative, and a float epsilon that
+            # made it -0.0 would read as a defect rather than as zero.
+            "unattributed_ms": round(
+                max(0.0, total - self._covered_seconds()) * 1000.0, 3
+            ),
             "cache": dict(self.cache),
             "profile": dict(self.profile),
             "stages": {k: dict(v) for k, v in self.stages.items()},

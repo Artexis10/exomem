@@ -47,6 +47,8 @@ import statistics
 import sys
 import tempfile
 import time
+from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 # --- Isolate this benchmark from any host/service config BEFORE importing exomem.
@@ -75,9 +77,11 @@ if str(HERE) not in sys.path:
 
 from synth_vault import gen_dense_vault  # noqa: E402
 
-from exomem import bm25  # noqa: E402
+from exomem import (
+    bm25,  # noqa: E402
+    freshness,  # noqa: E402
+)
 from exomem import find as find_module  # noqa: E402
-from exomem import freshness  # noqa: E402
 from exomem.vault import walk_vault_md  # noqa: E402
 
 DEFAULT_SIZES = [100, 500, 1000, 2000, 5000]
@@ -101,6 +105,25 @@ DEFAULT_QUERIES = [
 # lane visible; on a real vault it was a per-query cost the harness silently
 # omitted (see docs/benchmarks.md, real-vault section).
 LANES = ("vector", "bm25", "keyword", "graph", "outside_kb", "fusion", "rerank")
+
+# Reported after every real stage. Not a stage: it is `FindTimings`' wall time
+# that no span claimed, and a curve that rises here means the next fix should
+# be an instrument, not an optimisation.
+UNATTRIBUTED = "unattributed"
+
+
+def _lane_order(observed: Iterable[str]) -> list[str]:
+    """LANES first, in their fixed order, then anything else alphabetically.
+
+    Keeps the historical columns where readers expect them while guaranteeing a
+    newly-added or newly-expensive stage still gets a column.
+    """
+    seen = set(observed)
+    ordered = [lane for lane in LANES if lane in seen]
+    ordered += sorted(seen - set(LANES) - {UNATTRIBUTED})
+    if UNATTRIBUTED in seen:
+        ordered.append(UNATTRIBUTED)
+    return ordered
 
 
 class _NoEmbeddingIndex:
@@ -230,7 +253,12 @@ def _measure_pass(
     """Warm every lane, then time the query set. Returns `(lanes, total, top10s)`
     where `top10s` is the ordered top-10 path list per query (for cross-backend
     overlap)."""
-    lane_samples: dict[str, list[float]] = {lane: [] for lane in LANES}
+    # Keyed by every stage actually observed, not by a fixed list. LANES only
+    # decides COLUMN ORDER now: a closed list is how a growing stage stays
+    # invisible, which is the harness-level version of the "5ms lie" this file
+    # exists to prevent. `unattributed` rides along as a pseudo-lane so time no
+    # span claimed shows up as a column instead of as a gap you have to notice.
+    lane_samples: dict[str, list[float]] = defaultdict(list)
     total_samples: list[float] = []
 
     # Warm every lane once (bm25 corpus, resolver, model/sidecar/vec tables) so
@@ -255,14 +283,14 @@ def _measure_pass(
             )
             d = t.as_dict()
             total_samples.append(d["total_ms"])
-            for lane in LANES:
-                stage = d["stages"].get(lane, {})
+            for lane, stage in d["stages"].items():
                 # A lane's `_span` finally-block records `ms` even when the
                 # lane body raised (e.g. the model-free vector ImportError),
                 # so exclude any lane that errored or was skipped — it did not
                 # actually run to completion and its ~0ms is not a lane cost.
                 if "ms" in stage and "error" not in stage and "skipped" not in stage:
                     lane_samples[lane].append(stage["ms"])
+            lane_samples[UNATTRIBUTED].append(d["unattributed_ms"])
 
     lanes: dict[str, dict] = {}
     for lane, vals in lane_samples.items():
@@ -586,13 +614,17 @@ def render_markdown(results: list[dict], *, embeddings_on: bool, rerank: bool) -
         label = f" — vector backend: {backend}" if backend != "off" else ""
         lines.append(f"Per-lane latency (ms, median / p90) — mode: {mode}{label}")
         lines.append("")
-        header = ["Notes", *LANES, "total"]
+        observed: set[str] = set()
+        for r in results:
+            observed |= set(r["backends"][backend]["lanes"])
+        columns = _lane_order(observed)
+        header = ["Notes", *columns, "total"]
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "|".join(["---"] * len(header)) + "|")
         for r in results:
             b = r["backends"][backend]
             cells = [str(r["n"])]
-            for lane in LANES:
+            for lane in columns:
                 cells.append(_fmt_cell(b["lanes"].get(lane)))
             cells.append(_fmt_cell(b["total"]))
             lines.append("| " + " | ".join(cells) + " |")
