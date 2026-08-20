@@ -196,7 +196,7 @@ made before both PRs and their combined verification are complete.
   Pair absent/present fixtures for every graph-sync/floor/receipt descendant,
   review-state/temp, and lexical rebuild/quarantine member and require stable list/walk/
   search/get/download/dataset/export/transfer envelopes.
-- [ ] 4.4a **PR A:** Add red native primitive/API fixture tests, independent of the
+- [x] 4.4a **PR A:** Add red native primitive/API fixture tests, independent of the
   closed registry and public leaves: held no-follow parent acquisition, relative
   read/write/rename/link/unlink API behaviour, same-device versus cross-device result,
   destination-only copy publication, ordered per-entry saga records, stable identity
@@ -241,7 +241,7 @@ made before both PRs and their combined verification are complete.
   symlink/reparse/hardlink/physical aliases. Also cover case/NFKC/separators/prefix/dot/
   drive/UNC/ADS, short names, refs, and managed aliases; do not claim universal detection
   or zero effect for direct OS-vault-owner filesystem/block access.
-- [ ] 4.7 **PR A:** Provide and verify the shared native held-handle primitive used later
+- [x] 4.7 **PR A:** Provide and verify the shared native held-handle primitive used later
   by every leaf and internal-store lifecycle: publish SQLite primary/WAL/SHM stable
   identities before releasing cooperative coordination, not before filesystem
   reachability; hold no-follow vault/parent traversal through primitive operations,
