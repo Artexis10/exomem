@@ -34,13 +34,19 @@ from exomem import (  # noqa: E402
 from exomem.vault import walk_vault_md  # noqa: E402
 
 DEFAULT_SIZES = (2_000, 8_000)
-# FTS5 stays report-only.  Measured 2026-08-20 on the same contended Windows
-# host as the Python baseline: the targeted retry itself landed in 32ms @ 2k
-# and 250ms @ 8k, but the subsequent verified keyword read took 35.6s @ 2k and
-# 164.4s @ 8k (~4.6x at 4x pages).  A ceiling with honest runner headroom over
-# that maximum would be too broad to be useful and would gate corpus-sync noise,
-# not a stable visibility SLO.  CI still prints this metric on every run; the
-# deterministic regression test separately enforces correctness on every read.
+# FTS5 visibility is report-only AND opt-in (--fts5-visibility).  Measured
+# 2026-08-20 on the same contended Windows host as the Python baseline: the
+# targeted retry itself landed in 32ms @ 2k and 250ms @ 8k, but the subsequent
+# verified keyword read took 35.6s @ 2k and 164.4s @ 8k (~4.6x at 4x pages).  A
+# ceiling with honest runner headroom over that maximum would be too broad to
+# express a visibility SLO and would gate corpus-sync noise instead.
+#
+# So it cannot fail the build -- which is exactly why it does not run by
+# default.  Producing it costs the cold catalog build plus the visibility wait
+# at both sizes, about seven minutes on a required gate that currently takes
+# four.  Correctness on this path is enforced every run by
+# tests/test_read_after_write_visibility.py, which is deterministic and cheap;
+# this flag is for measuring the window when someone is working on it.
 VALIDATE_MEDIAN_MS = 500.0
 VALIDATE_P95_MS = 1_000.0
 COMMIT_MEDIAN_MS = 750.0
@@ -265,15 +271,25 @@ def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, f
     return validate_ms, commit_ms, read_after_write_ms
 
 
-def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]:
+def measure(
+    vault_root: Path,
+    size: int,
+    samples: int,
+    *,
+    fts5_visibility: bool = False,
+) -> dict[str, float | int]:
     # Keep the historical deterministic baseline pinned to the Python rung.
     # The focused FTS5 phase below overrides this scope only for its own reads.
     with _lexical_backend("python"):
-        return _measure(vault_root, size, samples)
+        return _measure(vault_root, size, samples, fts5_visibility=fts5_visibility)
 
 
 def _measure(
-    vault_root: Path, size: int, samples: int
+    vault_root: Path,
+    size: int,
+    samples: int,
+    *,
+    fts5_visibility: bool,
 ) -> dict[str, float | int]:
     semantic_contract.reset_corpus_context_cache()
     freshness.clear()
@@ -327,13 +343,8 @@ def _measure(
     freshness.clear()
     cold_read_after_write_ms = _read_after_write(vault_root, target_rel, cold_write_version)
     cold_preflight_ms, _, _ = _transition(vault_root, target_rel, cold_probe_version)
-    fts5_visibility_ms = _measure_fts5_visibility(
-        vault_root,
-        target_rel,
-        current_version=cold_probe_version,
-    )
 
-    return {
+    measured: dict[str, float | int] = {
         "pages": size,
         "samples": samples,
         "cold_ms": round(cold_ms, 1),
@@ -345,8 +356,15 @@ def _measure(
         "read_after_write_p95_ms": round(_percentile(reads, 0.95), 1),
         "cold_read_after_write_ms": round(cold_read_after_write_ms, 1),
         "cold_preflight_ms": round(cold_preflight_ms, 1),
-        "fts5_visibility_latency_ms": round(fts5_visibility_ms, 1),
     }
+    if fts5_visibility:
+        measured["fts5_visibility_latency_ms"] = round(
+            _measure_fts5_visibility(
+                vault_root, target_rel, current_version=cold_probe_version
+            ),
+            1,
+        )
+    return measured
 
 
 def check(results: list[dict[str, float | int]]) -> None:
@@ -424,7 +442,11 @@ def check(results: list[dict[str, float | int]]) -> None:
 
 
 def measure_all(
-    sizes: list[int], samples: int, root: Path | None
+    sizes: list[int],
+    samples: int,
+    root: Path | None,
+    *,
+    fts5_visibility: bool = False,
 ) -> list[dict[str, float | int]]:
     if root is not None:
         root.mkdir(parents=True, exist_ok=False)
@@ -437,8 +459,12 @@ def measure_all(
         try:
             results = []
             for index, (vault_root, size) in enumerate(zip(roots, sizes, strict=True)):
-                results.append(measure(vault_root, size, samples))
-                if index < len(roots) - 1:
+                results.append(
+                    measure(vault_root, size, samples, fts5_visibility=fts5_visibility)
+                )
+                # Only the FTS5 phase starts a repair worker, and one still
+                # running would charge its tail to the next corpus.
+                if fts5_visibility and index < len(roots) - 1:
                     _wait_for_lexical_repair_idle(vault_root, timeout=300.0)
             return results
         finally:
@@ -449,8 +475,10 @@ def measure_all(
             for index, size in enumerate(sizes):
                 vault_root = base / f"vault-{size}"
                 vault_root.mkdir()
-                results.append(measure(vault_root, size, samples))
-                if index < len(sizes) - 1:
+                results.append(
+                    measure(vault_root, size, samples, fts5_visibility=fts5_visibility)
+                )
+                if fts5_visibility and index < len(sizes) - 1:
                     _wait_for_lexical_repair_idle(vault_root, timeout=300.0)
         finally:
             # A write stopped joining its own graph rebuild (#576), so a rebuild
@@ -482,6 +510,14 @@ def main(argv: list[str] | None = None) -> int:
         default=2,
         help="measurement attempts before --check fails the build (default 2)",
     )
+    parser.add_argument(
+        "--fts5-visibility",
+        action="store_true",
+        help=(
+            "also measure committed-to-queryable latency on the production FTS5 "
+            "backend (report-only, and slow: see the note above DEFAULT_SIZES)"
+        ),
+    )
     args = parser.parse_args(argv)
     for name in (
         "EXOMEM_DISABLE_EMBEDDINGS",
@@ -496,7 +532,9 @@ def main(argv: list[str] | None = None) -> int:
     # `fts5_visibility_latency_*` metrics alongside it.
     os.environ["EXOMEM_LEXICAL_BACKEND"] = "python"
 
-    results = measure_all(args.sizes, args.samples, args.root)
+    results = measure_all(
+        args.sizes, args.samples, args.root, fts5_visibility=args.fts5_visibility
+    )
     print(json.dumps({"results": results}, sort_keys=True))
     if not args.check:
         return 0
