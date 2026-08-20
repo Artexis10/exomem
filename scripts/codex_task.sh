@@ -55,6 +55,48 @@ needed (do not add it yourself).
 EOF
 }
 
+# Every brief in this repo ends in "run the tests", so a sandbox that cannot run
+# them is not a safer worker -- it is a worker that cannot do the job, and it
+# does not find that out until it has spent an hour trying. That is exactly what
+# happened on 2026-08-16: one lane burned roughly an hour and 18M tokens under
+# `-s workspace-write` and produced zero commits.
+#
+# The failure is not a permission that can be granted. On Windows, Codex's
+# `sandbox = "unelevated"` runs the worker under a restricted token, and exomem
+# deliberately hardens its state directories to a private DACL naming the real
+# user SID. The restricted token is then denied by design -- pytest's own
+# `shutil.rmtree` of its tmpdir dies with WinError 5. Widening `writable_roots`
+# moves the path but not the ACL, so it cannot be configured away.
+#
+# The workers run in linked worktrees under $PARENT, against a repo whose own
+# guardrail is `require_linked_worktree`, and `cmd_verify` gates every diff
+# before it can merge. Full access is the mode that matches that containment.
+CODEX_SANDBOX=${CODEX_SANDBOX:-danger-full-access}
+
+# Prove the worker's environment can run one test BEFORE handing it a brief.
+# A lane costs an hour; this costs seconds, and it converts an unrunnable
+# sandbox from a silent hour of thrashing into a loud failure on line one.
+preflight_sandbox() {
+  local wt=${1:?} profile=${2:?}
+  echo "codex_task: preflight (sandbox=$CODEX_SANDBOX) -- can a worker run one test?"
+  local out
+  if out=$(codex exec --profile "$profile" -s "$CODEX_SANDBOX" -C "$wt" \
+      "Run exactly this and nothing else, then reply with only its final line: \
+uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q" 2>&1); then
+    if grep -qE "[0-9]+ (passed|skipped)" <<<"$out"; then
+      echo "codex_task: preflight OK"
+      return 0
+    fi
+  fi
+  echo "GATE FAIL: the worker sandbox cannot run the test suite." >&2
+  echo "  sandbox=$CODEX_SANDBOX profile=$profile worktree=$wt" >&2
+  echo "  Every brief ends in 'run the tests'; a worker that cannot is worse" >&2
+  echo "  than no worker. Do not launch the lane until this passes." >&2
+  echo "--- last 20 lines of preflight output:" >&2
+  tail -20 <<<"$out" >&2
+  exit 1
+}
+
 cmd_start() {
   local lane=${1:?usage: codex_task.sh start <lane> <brief-file> [--profile <name>]}
   local brief=${2:?brief file required}
@@ -86,8 +128,10 @@ cmd_start() {
 
   (cd "$wt" && uv sync)
 
-  echo "codex_task: launching codex exec (profile=$profile) in $wt"
-  codex exec --profile "$profile" -s workspace-write -C "$wt" \
+  preflight_sandbox "$wt" "$profile"
+
+  echo "codex_task: launching codex exec (profile=$profile, sandbox=$CODEX_SANDBOX) in $wt"
+  codex exec --profile "$profile" -s "$CODEX_SANDBOX" -C "$wt" \
     --json -o "$wt/.task/codex-run.jsonl" "$WORKER_PROMPT"
   echo "codex_task: worker finished — inspect $wt/.task/RESULT.md then run: codex_task.sh verify $wt"
 }
