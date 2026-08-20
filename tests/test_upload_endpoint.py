@@ -182,7 +182,7 @@ def test_upload_reconciles_when_media_worker_is_unavailable(
 
 # Deadlock valves for the concurrency tests below. The hold outlasts the
 # observation so an ordering assertion cannot be satisfied by an expiry.
-_HOLD_SECONDS = 60.0
+_HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 30.0
 
 
