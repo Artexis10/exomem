@@ -148,7 +148,7 @@ def default_slots() -> list[ResourceSlot]:
             lambda: any(
                 section.get("entries", 0) for section in find.cache_status().values()
             ),
-            lambda: any(find.unload_ram_caches().values()),
+            lambda: any(find.release_idle_ram_caches().values()),
         ),
     ]
 
