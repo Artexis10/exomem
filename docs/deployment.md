@@ -493,13 +493,17 @@ on a single coordinator node but not highly available; for HA, implement the sam
 HTTP contract on a linearizable store such as a Durable Object, transactional SQL,
 Consul, or etcd.
 
-For a single public connector with two private origins, the supported Cloudflare
-deployment is in `deploy/cloudflare-ha/`. Its SQLite Durable Object implements the
-lease contract, holds client-encrypted shared OAuth records, and routes the stable
-public hostname to the current writer with a bounded fallback to the other replica.
-It stores no vault content. This is optional: deployments that do not use
-Cloudflare can place the same coordinator/state contract behind their own reverse
-proxy or load balancer.
+A reference Cloudflare edge worker for this shape used to ship in
+`deploy/cloudflare-ha/`. **It has been removed.** Leaving retired routing
+infrastructure deployed cost a total MCP outage: the worker had no way to
+represent a legitimate single-node deployment, so once the second replica was
+decommissioned it refused the only healthy origin on every request, and the
+origin never learned it was being refused (#581, #550). Recover it from git
+history if you genuinely run two replicas; do not resurrect it by default.
+
+Nothing about the contract above depends on that worker. The coordinator and
+state contracts are plain HTTP, so any reverse proxy, load balancer or edge that
+implements them will do.
 
 Configure both Exomem hosts with the same vault ID and coordinator, but unique
 replica IDs. Desktop example:
