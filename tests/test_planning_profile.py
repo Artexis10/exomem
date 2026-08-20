@@ -291,3 +291,68 @@ def test_planning_saved_views_use_plan_id_not_records_identity(tmp_path: Path) -
     invalid = load_manifest(tmp_path, path)
     with pytest.raises(CollectionError, match="INVALID_SAVED_VIEW"):
         resolve_saved_view(invalid, "pinned")
+
+
+def test_an_all_digit_audit_head_survives_a_yaml_round_trip() -> None:
+    """A head with no letters in it must not come back as an integer.
+
+    The head is 24 characters of `uuid4().hex`, so roughly one in 79,000 draws
+    contains no letter at all. Written bare into a YAML flow mapping, that one
+    is typed as an integer rather than a string, and the reader -- which
+    requires a str -- rejects the manifest with INVALID_COLLECTION_AUDIT. The
+    collection is then unreadable for good.
+
+    It is nondeterministic per write, which is exactly how it presented in
+    #549: a single product-E2E failure on main that passed on a rerun of the
+    identical tree, because the rerun drew a different id.
+
+    Both writer branches are covered here. The append branch adds the mapping;
+    the update branch rewrites the head scalar in place, and its replacement
+    span includes the surrounding quotes -- so an unquoted replacement would
+    strip them and reintroduce the defect on the very next mutation.
+    """
+    from exomem import record_formats, structured_collections, vault
+
+    all_digits = "123456789012345678901234"
+    successor = "987654321098765432109876"
+    source = "---\ntype: plan\nsemantic_profile: planning\n---\nbody\n"
+
+    appended = record_formats.render_manifest_audit_head(
+        source, all_digits, semantic_profile="planning"
+    )
+    updated = record_formats.render_manifest_audit_head(
+        appended, successor, semantic_profile="planning"
+    )
+
+    for stage, document, expected in (
+        ("append", appended, all_digits),
+        ("update", updated, successor),
+    ):
+        parsed, _body, _marker = vault.parse_frontmatter(document, strict=True)
+        head = parsed["plan_audit"]["head"]
+        assert isinstance(head, str), (
+            f"{stage} wrote the head unquoted, so YAML typed it as "
+            f"{type(head).__name__} and the manifest no longer loads"
+        )
+        assert structured_collections.plan_audit_head(parsed) == expected
+
+
+def test_a_manifest_already_written_with_a_bare_all_digit_head_still_loads() -> None:
+    """Recovery for manifests written before the head was quoted.
+
+    Quoting stops new occurrences; it does nothing for a collection that
+    already has one on disk, and that collection is otherwise permanently
+    unreadable. The width is fixed at 24, so the integer YAML handed back
+    zero-pads to exactly the string that was written.
+    """
+    from exomem import structured_collections, vault
+
+    bare = "plan_audit: {version: 1, head: 123456789012345678901234}"
+    document = f"---\ntype: plan\nsemantic_profile: planning\n{bare}\n---\nbody\n"
+
+    parsed, _body, _marker = vault.parse_frontmatter(document, strict=True)
+
+    assert not isinstance(parsed["plan_audit"]["head"], str), (
+        "this fixture is meant to reproduce the untyped-scalar shape"
+    )
+    assert structured_collections.plan_audit_head(parsed) == "123456789012345678901234"
