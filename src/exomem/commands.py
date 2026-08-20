@@ -1247,8 +1247,11 @@ def op_find(
         include_timings: When true (off by default), the return becomes an
             envelope {"hits": [...], "timings": {...}} (with pack=true the
             envelope also carries "pack"). `timings` reports total_ms,
-            hot-cache status, and per-stage milliseconds for the retrieval
-            lanes (skipped/failed optional lanes are marked, never fatal).
+            unattributed_ms (wall time no stage claimed — a large value means
+            the cost is somewhere not yet instrumented, not that the stages
+            are wrong), hot-cache status, and per-stage milliseconds for the
+            retrieval lanes (skipped/failed optional lanes are marked, never
+            fatal).
             Diagnostics only — timings never include note content. Omitted
             → the response shape is unchanged.
         explain: Add a bounded retrieval profile and per-hit ranking evidence.
@@ -1285,7 +1288,7 @@ def op_find(
         With detail="compact": each hit is the routing stub described under
         `detail` (no excerpt/signals) — same paths, same order.
         With include_timings on: {"hits": [...], ["pack": {...},]
-        "timings": {total_ms, cache, stages}}.
+        "timings": {total_ms, unattributed_ms, cache, stages}}.
         Right after a server start, while models are still warming in the
         background, semantic lanes are skipped rather than blocked on — the
         result is then the envelope {"hits": [...], "warming": {"components":
@@ -1754,6 +1757,11 @@ def _timing_log_summary(timings_dict: dict | None) -> dict | None:
         return None
     return {
         "total_ms": timings_dict.get("total_ms"),
+        # Carried deliberately. This projection is closed, so a field it does
+        # not name never reaches the query log — and the query log is exactly
+        # where a rising uninstrumented term would become visible over time,
+        # which is the thing #283 spent a month unable to see.
+        "unattributed_ms": timings_dict.get("unattributed_ms"),
         "cache_hit": bool(timings_dict.get("cache", {}).get("hit")),
         "stage_ms": {
             name: entry["ms"]

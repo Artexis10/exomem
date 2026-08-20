@@ -4476,6 +4476,10 @@ def unload_ram_caches(*, keep_recall_resolver: bool = False) -> dict[str, int]:
         _FIND_CACHE_CHECKPOINTS.clear()
     with _RECALL_PATH_CACHE_LOCK:
         _RECALL_PATH_CACHE.clear()
+    # Tiny (bounded at 32 paths), but this seam means "drop everything
+    # rebuildable", and a memo left behind by an otherwise-complete eviction is
+    # the kind of exception that later reads as an oversight.
+    recall_policy.clear_resolved_roots()
     return {"pages": page_entries, "resolvers": resolver_entries, "hot_find": hot_entries}
 
 
