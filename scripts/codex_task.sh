@@ -84,19 +84,34 @@ CODEX_SANDBOX=${CODEX_SANDBOX:-danger-full-access}
 preflight_sandbox() {
   local wt=${1:?} profile=${2:?}
   echo "codex_task: preflight (sandbox=$CODEX_SANDBOX) -- can a worker run one test?"
-  # The success signal is emitted by the shell, never chosen by the model. The
-  # first version grepped for pytest's "N passed" summary and rejected a
-  # WORKING sandbox, because the worker replied with pytest's progress dots
-  # instead. A preflight that blocks a healthy lane costs as much as no
-  # preflight at all, so the gate must not depend on how a reply is phrased.
+  # The worker leaves evidence on disk and the runner reads it. Two earlier
+  # versions inspected the worker's REPLY instead and both blocked a healthy
+  # lane: the first grepped for pytest's "N passed" summary and got its progress
+  # dots; the second appended `echo PREFLIGHT_EXIT=$?`, which is a POSIX idiom
+  # the worker then ran through pwsh, where `$?` is a boolean and the exit code
+  # lives in $LASTEXITCODE.
+  #
+  # Both failures share one cause: the gate depended on how something else chose
+  # to phrase an answer. A redirect into a file does not, and it still exercises
+  # the thing that actually broke -- writing inside the worktree and running
+  # pytest under the worker's own token. `.task/` is git-excluded, so the log is
+  # never committed.
+  local log="$wt/.task/preflight.log"
+  rm -f "$log"
   local out
-  if out=$(codex exec --profile "$profile" -s "$CODEX_SANDBOX" -C "$wt" \
-      "Run exactly this one command and nothing else, then reply with its complete output: \
-uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q; echo PREFLIGHT_EXIT=\$?" 2>&1); then
-    if grep -q "PREFLIGHT_EXIT=0" <<<"$out"; then
-      echo "codex_task: preflight OK"
-      return 0
-    fi
+  out=$(codex exec --profile "$profile" -s "$CODEX_SANDBOX" -C "$wt" \
+      "Run exactly this one command and nothing else, then reply with the word done: \
+uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q > .task/preflight.log 2>&1" 2>&1)
+  if [ -f "$log" ] && grep -qE "[0-9]+ (passed|skipped)" "$log"; then
+    echo "codex_task: preflight OK -- $(grep -oE "[0-9]+ (passed|skipped).*" "$log" | tail -1)"
+    rm -f "$log"
+    return 0
+  fi
+  if [ -f "$log" ]; then
+    echo "--- worker's pytest output:" >&2
+    tail -15 "$log" >&2
+  else
+    echo "--- the worker produced no log at all (could not write inside the worktree)" >&2
   fi
   echo "GATE FAIL: the worker sandbox cannot run the test suite." >&2
   echo "  sandbox=$CODEX_SANDBOX profile=$profile worktree=$wt" >&2
