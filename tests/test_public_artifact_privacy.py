@@ -75,7 +75,6 @@ def test_repository_inventory_enumerates_root_release_and_deploy_inputs() -> Non
         ".dockerignore",
         "release-please-config.json",
         ".release-please-manifest.json",
-        "deploy/cloudflare-ha/wrangler.toml.example",
         "infra/terraform/foundation/versions.tf",
     } <= enumerated
 

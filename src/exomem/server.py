@@ -79,8 +79,13 @@ class ExomemFastMCP(FastMCP):
 class CallTraceMiddleware(Middleware):
     """Per-call traceability: log every tool invocation with name + duration."""
 
-    def __init__(self, *, hosted: bool = False) -> None:
+    def __init__(self, *, hosted: bool = False, traffic_monitor=None) -> None:
         self.hosted = hosted
+        if traffic_monitor is None:
+            from .runtime_readiness import get_silent_traffic_monitor
+
+            traffic_monitor = get_silent_traffic_monitor()
+        self.traffic_monitor = traffic_monitor
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         from .command_surface import (
@@ -207,6 +212,10 @@ class CallTraceMiddleware(Middleware):
                         f"event={event_prefix}tool_success tool={tool_name} "
                         f"request_id={request_id} duration_ms={dur}{extras}"
                     )
+                    try:
+                        self.traffic_monitor.record_successful_tool_call()
+                    except Exception:  # noqa: BLE001 - telemetry must not break a call
+                        log.debug("silent traffic tool tracking failed", exc_info=True)
                 # One row, at the one point where both the duration and the
                 # outcome are known. A refusal returns an envelope rather than
                 # raising, so inferring the outcome from control flow alone is
