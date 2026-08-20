@@ -1,16 +1,14 @@
-"""BM25Okapi over compiled KB pages, with mtime-based per-process caches.
+"""BM25Okapi over compiled KB pages, with incremental per-process caches.
 
-On every `search()` call we scan the tree once for the max observed mtime and
-rebuild the index if it advanced. The rebuild is *incremental at the document
-level*: a per-doc token cache (keyed by path + mtime, mirroring
-`find.FrontmatterCache`) means only the documents that actually changed get
-re-tokenized. So one large doc, a big corpus, or a write-heavy session no
-longer forces an O(corpus) Snowball re-tokenize on the next `find` — which was
-the failure behind the "uncapped large doc poisoned find" incident (the 512 KB
-extract cap is the complementary, orthogonal fix). The `BM25Okapi` object
-itself is still reconstructed from the cached token lists each rebuild
-(`rank_bm25` has no incremental add/remove API), but that step is cheap
-relative to the stemming it now avoids.
+The assembled corpus is retained with a freshness checkpoint. A complete,
+small change delta repairs only the changed/deleted paths; cold starts, policy
+changes, incomplete histories, and large deltas fall back to a full walk. The
+per-doc token cache remains keyed by path + mtime, mirroring
+`find.FrontmatterCache`, so unchanged documents are not re-tokenized on either
+path. `BM25Okapi` itself is still reconstructed from the retained token lists
+whenever the corpus changes (`rank_bm25` has no incremental add/remove API),
+but that in-memory global-stat step is cheap relative to walking, admitting,
+and reading the vault.
 
 Tokens are stemmed with Snowball (English) so morphologically related
 words score together — "regulation" matches a page with "regulator",
@@ -25,7 +23,7 @@ import re
 import threading
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import find as find_module
 from . import freshness, recall_policy
@@ -37,6 +35,26 @@ log = logging.getLogger(__name__)
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _STEMMER_LOCAL = threading.local()
+
+# Above this fraction of the retained corpus, bounded per-path repair gives way
+# to the existing full walk. The measurement supporting the value lives in the
+# worker result for the change that introduced incremental corpus repair.
+MAX_INCREMENTAL_REPAIR_FRACTION = 0.10
+
+
+class _CorpusCacheEntry(NamedTuple):
+    """One assembled corpus plus the provenance needed for safe delta repair.
+
+    Keep the first three fields in the historical positional order: residency
+    diagnostics intentionally read ``entry[2]`` without allocating projections.
+    """
+
+    cache_identity: tuple
+    bm25: Any
+    paths: list[str]
+    tokens_by_path: dict[str, list[str]]
+    checkpoint: freshness.RecallFreshnessCheckpoint
+    policy_identity: tuple[str, str]
 
 
 def _get_stemmer():
@@ -73,8 +91,7 @@ class BM25Index:
     """
 
     def __init__(self) -> None:
-        # (vault_root, scope) -> (freshness key triple, bm25, paths)
-        self._cache: dict[tuple[Path, str], tuple[tuple, Any, list[str]]] = {}
+        self._cache: dict[tuple[Path, str], _CorpusCacheEntry] = {}
         # Per-doc token cache, shared across scopes (a file's tokens don't depend
         # on scope; KB ⊆ vault). Mirrors find.FrontmatterCache's mtime
         # invalidation: a doc is Snowball-tokenized once and reused until its
@@ -102,22 +119,31 @@ class BM25Index:
         self.last_tokenized += 1
         return tokens
 
-    def _build(self, vault_root: Path, scope: str) -> tuple[Any, list[str]]:
-        """Walk the KB (or full vault), tokenize each file, build BM25Okapi.
-
-        Returns (bm25, paths) where `paths` is parallel to the BM25 document
-        index. Reuses cached per-doc tokens for unchanged files (see
-        `_doc_tokens`), so only changed docs are re-tokenized.
-        """
-        # Lazy import — rank_bm25 isn't on the keyword-only hot path.
+    @staticmethod
+    def _derive_bm25(tokens_by_path: dict[str, list[str]]) -> tuple[Any, list[str]]:
+        """Recompute corpus-global BM25 maths without touching the filesystem."""
+        if not tokens_by_path:
+            # rank_bm25 chokes on empty corpora; return a sentinel.
+            return None, []
         from rank_bm25 import BM25Okapi
 
+        paths = list(tokens_by_path)
+        return BM25Okapi([tokens_by_path[path] for path in paths]), paths
+
+    def _build(
+        self, vault_root: Path, scope: str
+    ) -> tuple[Any, list[str], dict[str, list[str]]]:
+        """Walk the KB (or full vault), tokenize each file, build BM25Okapi.
+
+        Returns the BM25 index, its parallel paths, and the retained per-path
+        token corpus. Reuses cached per-doc tokens for unchanged files (see
+        `_doc_tokens`), so only changed docs are re-tokenized.
+        """
         walk = _recall_walk(vault_root, scope)
 
         self.last_tokenized = 0
         self.last_reused = 0
-        paths: list[str] = []
-        corpus: list[list[str]] = []
+        tokens_by_path: dict[str, list[str]] = {}
         for md in walk:
             page = find_module._CACHE.get(md, vault_root)
             if page is None:
@@ -125,42 +151,150 @@ class BM25Index:
             tokens = self._doc_tokens(md, page)
             if not tokens:
                 continue
-            paths.append(page.rel_path)
-            corpus.append(tokens)
-        if not corpus:
-            # rank_bm25 chokes on empty corpora; return a sentinel.
-            return None, []
-        bm25 = BM25Okapi(corpus)
-        return bm25, paths
+            tokens_by_path[page.rel_path] = tokens
+        bm25, paths = self._derive_bm25(tokens_by_path)
+        return bm25, paths, tokens_by_path
+
+    @staticmethod
+    def _relative_path(vault_root: Path, path: str) -> str | None:
+        """Return a delta path's vault spelling without resolving or stat'ing it."""
+        try:
+            return Path(path).relative_to(vault_root).as_posix()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _repair_limit(document_count: int) -> int:
+        """Maximum delta size worth repairing for the retained corpus."""
+        return max(1, int(document_count * MAX_INCREMENTAL_REPAIR_FRACTION))
+
+    def _repair(
+        self,
+        vault_root: Path,
+        scope: str,
+        cached: _CorpusCacheEntry,
+        target_freshness: tuple,
+        policy_identity: tuple[str, str],
+    ) -> _CorpusCacheEntry | None:
+        """Repair one cached corpus, or return ``None`` when proof is absent."""
+        if cached.policy_identity != policy_identity:
+            return None
+
+        delta = freshness.recall_delta_since(vault_root, scope, cached.checkpoint)
+        delta_policy_identity = (
+            delta.to.policy_version,
+            delta.to.access_policy_fingerprint,
+        )
+        if (
+            not delta.complete
+            or delta.to.triple != target_freshness
+            or delta_policy_identity != policy_identity
+        ):
+            return None
+
+        changed_count = len(delta.changed) + len(delta.deleted)
+        if changed_count > self._repair_limit(len(cached.tokens_by_path)):
+            return None
+
+        self.last_tokenized = 0
+        self.last_reused = 0
+        tokens_by_path = dict(cached.tokens_by_path)
+
+        for raw_path in delta.deleted:
+            rel_path = self._relative_path(vault_root, raw_path)
+            if rel_path is None:
+                return None
+            tokens_by_path.pop(rel_path, None)
+
+        for raw_path in delta.changed:
+            path = Path(raw_path)
+            rel_path = self._relative_path(vault_root, raw_path)
+            if rel_path is None:
+                return None
+            if not recall_policy.is_recall_candidate(vault_root, path):
+                tokens_by_path.pop(rel_path, None)
+                continue
+            page = find_module._CACHE.get(path, vault_root)
+            if page is None:
+                tokens_by_path.pop(rel_path, None)
+                continue
+            tokens = self._doc_tokens(path, page)
+            if not tokens:
+                tokens_by_path.pop(rel_path, None)
+                tokens_by_path.pop(page.rel_path, None)
+                continue
+            if page.rel_path != rel_path:
+                tokens_by_path.pop(rel_path, None)
+            tokens_by_path[page.rel_path] = tokens
+
+        repaired_bm25, repaired_paths = self._derive_bm25(tokens_by_path)
+        return _CorpusCacheEntry(
+            (*delta.to.triple, *policy_identity),
+            repaired_bm25,
+            repaired_paths,
+            tokens_by_path,
+            delta.to,
+            policy_identity,
+        )
 
     def _fresh_corpus(
-        self, vault_root: Path, scope: str, freshness: tuple | None
+        self, vault_root: Path, scope: str, freshness_key: tuple | None
     ) -> tuple[Any, list[str]]:
-        """The cached (bm25, paths) pair, rebuilt when the freshness key moved.
+        """Return cached corpus state, repaired or rebuilt when identity moves.
 
         The key is find's digest-strength `_walk_freshness_key` triple — the
         historical `current_max > cached_max` comparison missed deletes,
-        renames, and replacements carrying an older mtime, all of which now
-        rebuild correctly. Callers inside a `find` request pass the request
-        snapshot's key so this never re-walks; `freshness=None` computes it
-        here for out-of-request callers.
+        renames, and replacements carrying an older mtime. Callers inside a
+        `find` request pass the request snapshot's key; out-of-request callers
+        compute it from the live registry. A small complete delta repairs only
+        its paths. Every unprovable case retains the full-build behavior.
         """
-        if freshness is None:
-            freshness = corpus_key(vault_root, scope)
-        cache_identity = (*freshness, *recall_policy.recall_policy_identity(vault_root))
+        if freshness_key is None:
+            freshness_key = corpus_key(vault_root, scope)
+        policy_identity = recall_policy.recall_policy_identity(vault_root)
+        cache_identity = (*freshness_key, *policy_identity)
         cache_key = (vault_root, scope)
         cached = self._cache.get(cache_key)
-        if cached is None or cached[0] != cache_identity:
+        if cached is None or cached.cache_identity != cache_identity:
             with self._build_lock:
                 # Double-check: a concurrent builder may have stored a fresh
                 # corpus while this thread waited on the lock.
                 cached = self._cache.get(cache_key)
-                if cached is None or cached[0] != cache_identity:
-                    log.debug("bm25: rebuilding index for %s scope=%s", vault_root, scope)
-                    bm25, paths = self._build(vault_root, scope)
-                    cached = (cache_identity, bm25, paths)
+                if cached is None or cached.cache_identity != cache_identity:
+                    repaired = None
+                    if cached is not None:
+                        repaired = self._repair(
+                            vault_root,
+                            scope,
+                            cached,
+                            freshness_key,
+                            policy_identity,
+                        )
+                    if repaired is not None:
+                        log.debug(
+                            "bm25: repaired index for %s scope=%s", vault_root, scope
+                        )
+                        cached = repaired
+                    else:
+                        log.debug(
+                            "bm25: rebuilding index for %s scope=%s", vault_root, scope
+                        )
+                        checkpoint = freshness.recall_checkpoint(vault_root, scope)
+                        build_policy_identity = (
+                            checkpoint.policy_version,
+                            checkpoint.access_policy_fingerprint,
+                        )
+                        bm25, paths, tokens_by_path = self._build(vault_root, scope)
+                        cached = _CorpusCacheEntry(
+                            (*checkpoint.triple, *build_policy_identity),
+                            bm25,
+                            paths,
+                            tokens_by_path,
+                            checkpoint,
+                            build_policy_identity,
+                        )
                     self._cache[cache_key] = cached
-        return cached[1], cached[2]
+        return cached.bm25, cached.paths
 
     def search(
         self,
