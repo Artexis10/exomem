@@ -1,4 +1,4 @@
-"""Aggregate-only semantic validate/commit latency gate at realistic scale."""
+"""Semantic write and read-after-write visibility gate at realistic scale."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ import os
 import statistics
 import sys
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,12 +27,20 @@ from exomem import (  # noqa: E402
     find,
     freshness,
     graph_sync,
+    lexstore,
     semantic_contract,
     semantic_writes,
 )
 from exomem.vault import walk_vault_md  # noqa: E402
 
 DEFAULT_SIZES = (2_000, 8_000)
+# FTS5 stays report-only.  Measured 2026-08-20 on the same contended Windows
+# host as the Python baseline: the targeted retry itself landed in 32ms @ 2k
+# and 250ms @ 8k, but the subsequent verified keyword read took 35.6s @ 2k and
+# 164.4s @ 8k (~4.6x at 4x pages).  A ceiling with honest runner headroom over
+# that maximum would be too broad to be useful and would gate corpus-sync noise,
+# not a stable visibility SLO.  CI still prints this metric on every run; the
+# deterministic regression test separately enforces correctness on every read.
 VALIDATE_MEDIAN_MS = 500.0
 VALIDATE_P95_MS = 1_000.0
 COMMIT_MEDIAN_MS = 750.0
@@ -152,7 +162,64 @@ def _read_after_write(vault_root: Path, rel_path: str, version: int) -> float:
     return read_ms
 
 
-def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, float, float]:
+@contextmanager
+def _lexical_backend(name: str):
+    """Scope a benchmark phase to one backend without leaking cache entries."""
+    previous = os.environ.get("EXOMEM_LEXICAL_BACKEND")
+    os.environ["EXOMEM_LEXICAL_BACKEND"] = name
+    find.clear_cache()
+    try:
+        yield
+    finally:
+        find.clear_cache()
+        if previous is None:
+            os.environ.pop("EXOMEM_LEXICAL_BACKEND", None)
+        else:
+            os.environ["EXOMEM_LEXICAL_BACKEND"] = previous
+
+
+def _wait_for_lexical_repair_idle(vault_root: Path, timeout: float = 60.0) -> None:
+    """Wait for the repair-flight condition; timeout is only a deadlock valve."""
+    key = vault_root.resolve()
+    deadline = time.monotonic() + timeout
+    wake = threading.Event()
+    while True:
+        with lexstore._REPAIRS_LOCK:
+            if key not in lexstore._REPAIRS_IN_FLIGHT:
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("lexical repair worker did not become idle")
+        wake.wait(min(0.01, remaining))
+
+
+def _measure_fts5_visibility(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    current_version: int,
+) -> float:
+    """Measure committed-to-queryable visibility on the production backend."""
+    if not lexstore.fts5_available():
+        raise RuntimeError("fts5 visibility measurement requires SQLite FTS5 support")
+    with _lexical_backend("fts5"):
+        # Build and warm the real catalog before samples.  Every measured write
+        # then takes the production deferred-upsert path: the governed writer
+        # holds the vault lock and the inline upsert declines.  The deterministic
+        # test covers an immediate reader racing that worker; this metric measures
+        # the visibility window itself by waiting on the real repair-flight
+        # condition and then verifying the FTS5 keyword query.
+        lexstore.ensure_fresh(vault_root)
+        _read_after_write(vault_root, rel_path, current_version)
+        version = current_version + 1
+        _commit_transition(vault_root, rel_path, version)
+        visible_started = time.perf_counter()
+        _wait_for_lexical_repair_idle(vault_root)
+        _read_after_write(vault_root, rel_path, version)
+        return (time.perf_counter() - visible_started) * 1_000.0
+
+
+def _commit_transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, float]:
     path = vault_root / rel_path
     before = path.read_text(encoding="utf-8")
     after = _next_source(before, version)
@@ -170,11 +237,25 @@ def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, f
     started = time.perf_counter()
     semantic_writes.commit_existing(vault_root, preflight=preflight)
     commit_ms = (time.perf_counter() - started) * 1_000.0
+    return validate_ms, commit_ms
+
+
+def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, float, float]:
+    validate_ms, commit_ms = _commit_transition(vault_root, rel_path, version)
     read_after_write_ms = _read_after_write(vault_root, rel_path, version)
     return validate_ms, commit_ms, read_after_write_ms
 
 
 def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]:
+    # Keep the historical deterministic baseline pinned to the Python rung.
+    # The focused FTS5 phase below overrides this scope only for its own reads.
+    with _lexical_backend("python"):
+        return _measure(vault_root, size, samples)
+
+
+def _measure(
+    vault_root: Path, size: int, samples: int
+) -> dict[str, float | int]:
     semantic_contract.reset_corpus_context_cache()
     freshness.clear()
     gen_dense_vault(vault_root, size, links_per_note=3)
@@ -227,6 +308,11 @@ def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]
     freshness.clear()
     cold_read_after_write_ms = _read_after_write(vault_root, target_rel, cold_write_version)
     cold_preflight_ms, _, _ = _transition(vault_root, target_rel, cold_probe_version)
+    fts5_visibility_ms = _measure_fts5_visibility(
+        vault_root,
+        target_rel,
+        current_version=cold_probe_version,
+    )
 
     return {
         "pages": size,
@@ -240,6 +326,7 @@ def measure(vault_root: Path, size: int, samples: int) -> dict[str, float | int]
         "read_after_write_p95_ms": round(_percentile(reads, 0.95), 1),
         "cold_read_after_write_ms": round(cold_read_after_write_ms, 1),
         "cold_preflight_ms": round(cold_preflight_ms, 1),
+        "fts5_visibility_latency_ms": round(fts5_visibility_ms, 1),
     }
 
 
@@ -323,19 +410,23 @@ def measure_all(
         for vault_root in roots:
             vault_root.mkdir(parents=True)
         try:
-            return [
-                measure(vault_root, size, samples)
-                for vault_root, size in zip(roots, sizes, strict=True)
-            ]
+            results = []
+            for index, (vault_root, size) in enumerate(zip(roots, sizes, strict=True)):
+                results.append(measure(vault_root, size, samples))
+                if index < len(roots) - 1:
+                    _wait_for_lexical_repair_idle(vault_root, timeout=300.0)
+            return results
         finally:
             graph_sync.drain_active_rebuilds()
     with scratch_root.scratch_root("exomem-write-latency-") as base:
         results: list[dict[str, float | int]] = []
         try:
-            for size in sizes:
+            for index, size in enumerate(sizes):
                 vault_root = base / f"vault-{size}"
                 vault_root.mkdir()
                 results.append(measure(vault_root, size, samples))
+                if index < len(sizes) - 1:
+                    _wait_for_lexical_repair_idle(vault_root, timeout=300.0)
         finally:
             # A write stopped joining its own graph rebuild (#576), so a rebuild
             # is routinely still running here -- writing into a tree
@@ -374,18 +465,10 @@ def main(argv: list[str] | None = None) -> int:
         "EXOMEM_DISABLE_RANKING",
     ):
         os.environ[name] = "1"
-    # The read-after-write probe (`_transition`) must measure the corpus/
-    # freshness cost this gate exists for, not the lexical sidecar's OWN
-    # independent eventual-consistency window: a commit's incremental
-    # lexstore upsert defers to a background thread when it can't nest inside
-    # the write's own vault lock (VAULT_LOCK_NESTED; "heals on next sync"),
-    # so an immediate keyword read can race a multi-second async rebuild that
-    # has nothing to do with corpus-context/freshness eviction. The `python`
-    # kill switch (same lean/model-free spirit as the DISABLE_* vars above)
-    # routes keyword search through the synchronous, always-current
-    # reference scan instead, so a stale read here can only mean OUR target
-    # mechanism regressed. The excluded async-lexstore read-after-write
-    # window this pin steps around is tracked separately as #526.
+    # Preserve the historical Python baseline as the process default. `measure`
+    # scopes that baseline explicitly, then `_measure_fts5_visibility` switches
+    # only its focused phase to the production backend and reports the distinct
+    # `fts5_visibility_latency_*` metrics alongside it.
     os.environ["EXOMEM_LEXICAL_BACKEND"] = "python"
 
     results = measure_all(args.sizes, args.samples, args.root)
