@@ -2,16 +2,144 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
 RUNTIME_CONTRACT = 1
 HTTP_TRANSPORT = "streamable-http-stateless"
+
+log = logging.getLogger(__name__)
+
+# The incident behind #581 lasted roughly three days, and its stale poller hit
+# readiness every few seconds.  A full day avoids treating an ordinary quiet
+# night on a personal KB as an outage; 288 probes prove a sustained average
+# cadence of at least one probe per five minutes rather than one late burst.
+SILENT_TRAFFIC_WINDOW_SECONDS = 24 * 60 * 60
+SILENT_TRAFFIC_MINIMUM_HEALTH_PROBES = 288
+
+
+class SilentTrafficMonitor:
+    """Process-local relationship between health probes and successful tools."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        window_seconds: float = SILENT_TRAFFIC_WINDOW_SECONDS,
+        minimum_health_probes: int = SILENT_TRAFFIC_MINIMUM_HEALTH_PROBES,
+    ) -> None:
+        self.clock = clock
+        self.window_seconds = float(window_seconds)
+        self.minimum_health_probes = int(minimum_health_probes)
+        self.process_started_at = float(clock())
+        self.last_successful_tool_call_at: float | None = None
+        self.last_health_probe_at: float | None = None
+        self.successful_tool_call_count = 0
+        self.health_probe_count = 0
+        self._health_probe_count_at_last_tool_call = 0
+        self._first_health_probe_after_tool_call_at: float | None = None
+        self._suspected_silent_outage = False
+        self._lock = threading.Lock()
+
+    def record_health_probe(self) -> dict[str, Any]:
+        with self._lock:
+            now = float(self.clock())
+            self.last_health_probe_at = now
+            self.health_probe_count += 1
+            if self._first_health_probe_after_tool_call_at is None:
+                self._first_health_probe_after_tool_call_at = now
+            self._enter_suspicious_state_if_due(now)
+            return self._snapshot(now)
+
+    def record_successful_tool_call(self) -> dict[str, Any]:
+        with self._lock:
+            now = float(self.clock())
+            self.last_successful_tool_call_at = now
+            self.successful_tool_call_count += 1
+            self._health_probe_count_at_last_tool_call = self.health_probe_count
+            self._first_health_probe_after_tool_call_at = None
+            if self._suspected_silent_outage:
+                self._suspected_silent_outage = False
+                log.info(
+                    "event=silent_traffic_outage_cleared successful MCP tool "
+                    "traffic reached the origin; the edge, tunnel, and route are "
+                    "delivering calls again"
+                )
+            return self._snapshot(now)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return self._snapshot(float(self.clock()))
+
+    def _enter_suspicious_state_if_due(self, now: float) -> None:
+        first_probe = self._first_health_probe_after_tool_call_at
+        probes = self.health_probe_count - self._health_probe_count_at_last_tool_call
+        if (
+            self._suspected_silent_outage
+            or first_probe is None
+            or probes < self.minimum_health_probes
+            or now - first_probe < self.window_seconds
+        ):
+            return
+        self._suspected_silent_outage = True
+        log.warning(
+            "event=silent_traffic_outage_suspected health probes have continued "
+            "for %.0fs (%d probes) without a successful MCP tool call; check the "
+            "edge, tunnel, and route",
+            max(0.0, now - first_probe),
+            probes,
+        )
+
+    def _snapshot(self, now: float) -> dict[str, Any]:
+        first_probe = self._first_health_probe_after_tool_call_at
+        last_tool = self.last_successful_tool_call_at
+        last_probe = self.last_health_probe_at
+        return {
+            "suspected_silent_outage": self._suspected_silent_outage,
+            "successful_tool_call_count": self.successful_tool_call_count,
+            "health_probe_count": self.health_probe_count,
+            "health_probes_since_last_tool_call": (
+                self.health_probe_count - self._health_probe_count_at_last_tool_call
+            ),
+            "seconds_without_successful_tool_call": round(
+                max(
+                    0.0,
+                    now
+                    - (
+                        last_tool
+                        if last_tool is not None
+                        else self.process_started_at
+                    ),
+                ),
+                3,
+            ),
+            "probe_window_seconds": round(
+                max(0.0, now - first_probe) if first_probe is not None else 0.0,
+                3,
+            ),
+            "last_successful_tool_call_age_seconds": (
+                round(max(0.0, now - last_tool), 3) if last_tool is not None else None
+            ),
+            "last_health_probe_age_seconds": (
+                round(max(0.0, now - last_probe), 3) if last_probe is not None else None
+            ),
+            "window_seconds": self.window_seconds,
+            "minimum_health_probes": self.minimum_health_probes,
+        }
+
+
+_SILENT_TRAFFIC_MONITOR = SilentTrafficMonitor()
+
+
+def get_silent_traffic_monitor() -> SilentTrafficMonitor:
+    return _SILENT_TRAFFIC_MONITOR
 
 
 def _instance_id() -> str | None:
@@ -170,6 +298,7 @@ def build_runtime_readiness(
     mcp_tool_surface_sha256: str | None,
     session_store: Mapping[str, Any] | None = None,
     observability: Mapping[str, Any] | None = None,
+    traffic: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the public readiness payload from already-measured coordination state."""
     enabled = bool(coordination.get("enabled"))
@@ -212,7 +341,7 @@ def build_runtime_readiness(
     graph_sync = _public_graph_sync(coordination.get("graph_sync"))
     if graph_sync is not None:
         coordination_payload["graph_sync"] = graph_sync
-    return {
+    payload = {
         "status": "ready" if takeover_eligible else "not_ready",
         "service": "exomem",
         "release": release,
@@ -230,6 +359,9 @@ def build_runtime_readiness(
         "takeover_eligible": takeover_eligible,
         "reasons": reasons,
     }
+    if traffic is not None:
+        payload["traffic"] = dict(traffic)
+    return payload
 
 
 def _measure_observability() -> dict[str, Any]:
@@ -281,7 +413,11 @@ def _measure_observability() -> dict[str, Any]:
     }
 
 
-def runtime_readiness(*, mcp_tool_surface_sha256: str | None) -> dict[str, Any]:
+def runtime_readiness(
+    *,
+    mcp_tool_surface_sha256: str | None,
+    traffic: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Measure this process's eligibility without exposing vault or credential state."""
     from .session_validation_cache import session_store_readiness
     from .writer_lease import coordination_status
@@ -315,4 +451,9 @@ def runtime_readiness(*, mcp_tool_surface_sha256: str | None) -> dict[str, Any]:
         mcp_tool_surface_sha256=mcp_tool_surface_sha256,
         session_store=session_store_readiness(),
         observability=_measure_observability(),
+        traffic=(
+            traffic
+            if traffic is not None
+            else get_silent_traffic_monitor().snapshot()
+        ),
     )
