@@ -3254,7 +3254,15 @@ def test_portable_catalog_cursor_progress_survives_fresh_processes(
 
 def test_portable_catalog_prune_reaches_owned_state_and_ignores_foreign_copy(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # This asserts a CORRECTNESS property -- the owned state goes, the foreign
+    # copy stays -- so it must not also depend on how much pruning a contended
+    # runner fits into 50ms. `prune_expired` deliberately does a bounded slice
+    # per call, and on a loaded Windows shard a slice can end before it reaches
+    # the entry; 40 of them then sum to 0 and this failed as `assert 0 == 1`.
+    # Starvation under a tight budget is pinned separately, just below.
+    monkeypatch.setattr(checkpoint, "MAX_PRUNE_LOCK_SECONDS", 5.0)
     home = tmp_path / "home"
     client = "codex"
     session = "portable-expired"
@@ -3282,6 +3290,44 @@ def test_portable_catalog_prune_reaches_owned_state_and_ignores_foreign_copy(
     assert removed == 1
     assert not state.exists()
     assert foreign.is_dir()
+
+
+def test_a_spent_budget_still_advances_the_prune_cursor(tmp_path: Path) -> None:
+    """A bounded slice must do at least one unit of work, never zero.
+
+    `_prune_catalog_window` used to consult its deadline before reading any
+    slot. Handed an already-spent budget it inspected nothing and returned the
+    cursor it was given, so the next call started in the same place and stopped
+    just as early. That is not a slow prune, it is no prune: expired state
+    accumulates forever while every call returns an ordinary 0.
+
+    A deadline decides whether to START another unit of work. It must never
+    decide whether to do the first one. Handing this an expired deadline is the
+    whole test -- no sleeping, no timing, no dependence on how fast the runner
+    is.
+    """
+    home = tmp_path / "home"
+    client = "codex"
+    checkpoint.write_checkpoint(
+        _event(client=client, session_id="spent-budget"),
+        home,
+        observed_at_ns=100,
+    )
+    root_path = checkpoint.client_state_root(home, client)
+
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        names, cursor, exhausted, inspected = checkpoint._prune_catalog_window(
+            root,
+            cursor=0,
+            limit=checkpoint.MAX_PRUNE_ENUM_ENTRIES,
+            deadline=time.monotonic() - 1.0,
+        )
+
+    assert inspected >= 1, "a spent budget inspected nothing, so nothing can ever progress"
+    assert cursor != 0 or exhausted, (
+        "the durable cursor did not move, so the next slice repeats this one"
+    )
+    assert len(names) <= checkpoint.MAX_PRUNE_ENUM_ENTRIES
 
 
 def test_valid_legacy_current_access_registers_only_the_bound_state(
