@@ -116,7 +116,7 @@ def test_legacy_lock_child_has_no_authority_over_the_direct_runtime_lock(
             args=(str(vault_root), str(second), claimed),
         )
         contender.start()
-        contender.join(10)
+        contender.join(_HOLD_SECONDS)
         assert contender.exitcode == 0
         assert claimed.get(timeout=2) is False
     finally:
@@ -146,7 +146,7 @@ def test_explicit_rebuild_runtime_root_overrides_ambient_environment_and_coalesc
             args=(str(vault_root), str(second), str(manager_root), claimed),
         )
         contender.start()
-        contender.join(10)
+        contender.join(_HOLD_SECONDS)
         assert contender.exitcode == 0
         assert claimed.get(timeout=2) is False
     finally:
@@ -210,7 +210,7 @@ def test_overlapping_custom_manager_registrations_do_not_cross_coalesce(tmp_path
     def build_a(checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
         observed.append(("a", checkpoint.generation))
         first_started.set()
-        assert release_first.wait(2)
+        assert release_first.wait(_HOLD_SECONDS)
         return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
     def build_b(checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
@@ -221,13 +221,13 @@ def test_overlapping_custom_manager_registrations_do_not_cross_coalesce(tmp_path
         vault_root, _checkpoint(1), build_a, state_root=state_a
     )
     first.start()
-    assert first_started.wait(1)
+    assert first_started.wait(_OBSERVE_SECONDS)
     second = graph_sync.register_rebuild(
         vault_root, _checkpoint(2), build_b, state_root=state_b
     )
-    assert second.wait(1).covers(_checkpoint(2))
+    assert second.wait(_REGISTERED_REBUILD_WAIT_SECONDS).covers(_checkpoint(2))
     release_first.set()
-    assert first.wait(1).covers(_checkpoint(1))
+    assert first.wait(_REGISTERED_REBUILD_WAIT_SECONDS).covers(_checkpoint(1))
     assert observed == [("a", 1), ("b", 2)]
 
 
@@ -314,8 +314,8 @@ def test_pending_registrations_are_isolated_by_runtime_root(tmp_path: Path) -> N
     assert graph_sync.start_registered(vault_root, state_root=state_b) is not None
     assert graph_sync.wait_for_registered(vault_root, state_root=state_a).covers(_checkpoint(1))
     assert graph_sync.wait_for_registered(vault_root, state_root=state_b).covers(_checkpoint(2))
-    assert first.wait(1).covers(_checkpoint(1))
-    assert second.wait(1).covers(_checkpoint(2))
+    assert first.wait(_REGISTERED_REBUILD_WAIT_SECONDS).covers(_checkpoint(1))
+    assert second.wait(_REGISTERED_REBUILD_WAIT_SECONDS).covers(_checkpoint(2))
 
 
 def test_registration_start_does_not_consume_waiter_capacity(tmp_path: Path) -> None:
@@ -325,12 +325,12 @@ def test_registration_start_does_not_consume_waiter_capacity(tmp_path: Path) -> 
 
     def build(checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
         entered.set()
-        assert release.wait(2)
+        assert release.wait(_HOLD_SECONDS)
         return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
     registration = graph_sync.GraphRebuildRegistration(coordinator, _checkpoint(), build)
     registration.start()
-    assert entered.wait(1)
+    assert entered.wait(_OBSERVE_SECONDS)
     for _ in range(255):
         registration.start()
     assert coordinator.waiter_count == 0
@@ -342,12 +342,12 @@ def test_join_releases_waiter_capacity_after_timeout(tmp_path: Path) -> None:
     release = threading.Event()
 
     def build(checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
-        assert release.wait(2)
+        assert release.wait(_HOLD_SECONDS)
         return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
     coordinator.ensure_started(_checkpoint(), build)
     with pytest.raises(TimeoutError):
-        coordinator.join(_checkpoint()).wait(0.01)
+        coordinator.join(_checkpoint()).wait(_JOIN_TIMEOUT_SECONDS)
     assert coordinator.waiter_count == 0
     release.set()
 
@@ -404,18 +404,18 @@ def test_final_graph_publish_uses_the_lease_manager_mutation_boundary(
     def hold_final_publish() -> None:
         with publisher.hold(operation="epistemic_graph_publish_rebuild", holder_kind="graph"):
             entered.set()
-            assert release.wait(2)
+            assert release.wait(_HOLD_SECONDS)
 
     thread = threading.Thread(target=hold_final_publish)
     thread.start()
-    assert entered.wait(1)
+    assert entered.wait(_OBSERVE_SECONDS)
     try:
         with pytest.raises(OpError, match="MUTATION_BUSY"):
             with manager.mutation_guard(vault_root):
                 pytest.fail("writer entered during final graph publication")
     finally:
         release.set()
-        thread.join(timeout=2)
+        thread.join(timeout=_HOLD_SECONDS)
     assert not thread.is_alive()
     assert publisher.state_root == state_root
 
@@ -447,16 +447,39 @@ def test_registered_builder_retains_the_originating_custom_lease_boundary(
         )[1],
     )
 
-    assert registration.wait(1).covers(_checkpoint())
+    assert registration.wait(_REGISTERED_REBUILD_WAIT_SECONDS).covers(_checkpoint())
     assert observed_roots == [state_root]
 
 
-# Deadlock valves for the ordering test below, sized so the hold outlasts the
-# observation. A whole-vault rebuild on a loaded Windows runner is the thing
-# being waited on, and two seconds does not bound it.
+#: The wall-clock shape of every contention test in this file.
+#:
+#: A HOLD parks a thread or process while the test observes an ordering; an
+#: OBSERVATION is how long the test waits for that state to be reached. The gap
+#: between them is the entire discriminating power of these tests -- a hold that
+#: does not outlast its observation lets the ordering pass vacuously, and an
+#: observation sized for an idle laptop fails on a loaded shard while the code
+#: under test behaves correctly.
+#:
+#: A NEGATIVE wait (`assert not x.wait(0.1)`) proves something has NOT happened
+#: yet and stays tight: widening one changes the scenario rather than merely
+#: slowing it, because the product's own timeouts run in the same window.
+#:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
 _HOLD_SECONDS = 45.0
-_OBSERVE_SECONDS = 30.0
+_OBSERVE_SECONDS = 15.0
 _SWAP_WAIT_SECONDS = 30.0
+_REGISTERED_REBUILD_WAIT_SECONDS = 1.0
+_JOIN_TIMEOUT_SECONDS = 0.01
 
 
 def test_graph_swap_waits_for_a_real_lease_manager_writer(
@@ -518,7 +541,7 @@ def test_graph_swap_waits_for_a_real_lease_manager_writer(
         assert not publish_entered.is_set()
     finally:
         release_writer.set()
-        writer.join(timeout=_OBSERVE_SECONDS)
+        writer.join(timeout=_HOLD_SECONDS)
         rebuilder.join(timeout=_HOLD_SECONDS)
     assert not writer.is_alive()
     assert not rebuilder.is_alive()

@@ -14,6 +14,34 @@ from exomem import commands, preserve, schema
 from exomem.cli_ops import OpError
 from exomem.writer_lease import LeaseConfig, LeaseManager
 
+#: The wall-clock shape of every contention test in this file.
+#:
+#: A HOLD parks a thread or process while the test observes an ordering; an
+#: OBSERVATION is how long the test waits for that state to be reached. The gap
+#: between them is the entire discriminating power of these tests -- a hold that
+#: does not outlast its observation lets the ordering pass vacuously, and an
+#: observation sized for an idle laptop fails on a loaded shard while the code
+#: under test behaves correctly.
+#:
+#: A NEGATIVE wait (`assert not x.wait(0.1)`) proves something has NOT happened
+#: yet and stays tight: widening one changes the scenario rather than merely
+#: slowing it, because the product's own timeouts run in the same window.
+#:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 15.0
+_BARRIER_SECONDS = 2.0
+
 
 def _add_command():
     return next(command for command in commands.COMMANDS if command.name == "add")
@@ -44,7 +72,7 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
 
     def capture(number: int, *, synchronize: bool, retry: bool = False) -> dict:
         if synchronize:
-            start.wait(timeout=10.0)
+            start.wait(timeout=_OBSERVE_SECONDS)
         return (retry_manager if retry else manager).invoke(
             command,
             (vault, source_schema),
@@ -54,11 +82,11 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
     def hold_boundary() -> None:
         with holder.mutation_guard(vault, request_id="holder", operation="capture"):
             holding.set()
-            assert release.wait(10.0)
+            assert release.wait(_HOLD_SECONDS)
 
     thread = threading.Thread(target=hold_boundary)
     thread.start()
-    assert holding.wait(10.0)
+    assert holding.wait(_OBSERVE_SECONDS)
     with ThreadPoolExecutor(max_workers=20) as pool:
         first_attempts = [pool.submit(capture, number, synchronize=True) for number in range(20)]
         refused: list[OpError] = []
@@ -72,7 +100,7 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
         assert not list((vault / "Knowledge Base/Sources/Other").glob("concurrent-capture-*.md"))
 
         release.set()
-        thread.join(timeout=10.0)
+        thread.join(timeout=_HOLD_SECONDS)
         assert not thread.is_alive()
         pending = set(range(20))
         results: dict[int, dict] = {}
@@ -123,7 +151,7 @@ class _BarrierStream(io.BytesIO):
     def read(self, size: int = -1) -> bytes:
         if self._first_read:
             self._first_read = False
-            self._barrier.wait(timeout=2.0)
+            self._barrier.wait(timeout=_BARRIER_SECONDS)
         return super().read(size)
 
 
