@@ -10,7 +10,21 @@
 #   codex_task.sh verify <worktree-dir>             run the merge gate in a lane worktree
 #
 # Safety: start/verify refuse to operate on anything that is not a *linked*
-# worktree — the shared primary checkout can never be a Codex workspace.
+# worktree — the shared primary checkout can never be where a Codex lane starts.
+#
+# Workers run `danger-full-access`, not `workspace-write`. A linked worktree's
+# gitdir lives under the primary's `.git/worktrees/`, outside a workspace-write
+# sandbox, so a sandboxed worker could not create `index.lock` and could not
+# commit its own work. The same sandbox blocked `~/.cache/uv` and every PyPI
+# route, so a brief could not name `uvx` in an acceptance command either. Those
+# limits made briefs ask for deliverables the worker was structurally unable to
+# produce.
+#
+# The cost is explicit: the sandbox no longer confines a worker to its worktree.
+# `require_linked_worktree` still decides where a lane may *start*, but nothing
+# stops a worker reaching the primary checkout mid-run. The brief's scope
+# allowlist and `verify` are what catch that, and both run after the fact — so
+# read the diff before you trust it.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -87,7 +101,7 @@ cmd_start() {
   (cd "$wt" && uv sync)
 
   echo "codex_task: launching codex exec (profile=$profile) in $wt"
-  codex exec --profile "$profile" -s workspace-write -C "$wt" \
+  codex exec --profile "$profile" -s danger-full-access -C "$wt" \
     --json -o "$wt/.task/codex-run.jsonl" "$WORKER_PROMPT"
   echo "codex_task: worker finished — inspect $wt/.task/RESULT.md then run: codex_task.sh verify $wt"
 }

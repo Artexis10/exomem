@@ -117,10 +117,15 @@ Lane mechanics: one lane = one sibling worktree (`../exomem-<lane>`, branch
 `codex/<lane>`, from `origin/main`) = one self-contained `.task/TASK.md` brief
 (`codex_task.sh template`) naming the OpenSpec artifacts as source of truth,
 a scope allowlist, and exact acceptance commands. `codex exec` runs
-`workspace-write`, sandboxed to the worktree — never on the primary checkout
-(the runner enforces this). Results come back as commits on the lane branch
-plus `.task/RESULT.md`; briefs live under `.task/` (git-excluded, never
-committed). Before merging, `scripts/codex_task.sh verify <worktree>` must
+`danger-full-access`, started only in a linked worktree (the runner enforces
+where a lane *starts*, not where it stays). Full access is deliberate:
+`workspace-write` put a linked worktree's gitdir out of reach, so workers could
+not commit, could not use `~/.cache/uv`, and had no PyPI route — briefs kept
+asking for deliverables the sandbox made impossible. In exchange, nothing but
+the brief's allowlist and `verify` keeps a worker out of the primary checkout,
+and both act after the fact: **read the lane diff before trusting it.** Results
+come back as commits on the lane branch plus `.task/RESULT.md`; briefs live
+under `.task/` (git-excluded, never committed). Before merging, `scripts/codex_task.sh verify <worktree>` must
 pass: clean tree, diff within the brief's allowlist, guarded files untouched
 (`tests/golden/`, gate tests, `.github/`), lean pytest + latency gate green.
 On failure: write `.task/FEEDBACK.md`, retry once, escalate Terra→Sol, then
