@@ -268,7 +268,7 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       all lock hashes recompute. Final independent FEEDBACK6 recheck: `CLEAR`.
       No competitor/provider/network/model/dataset benchmark, credential,
       metered call, commit, push, or §4.6 work occurred.
-- [ ] 4.5a Bound Exomem guest-service residency across staged processes
+- [x] 4.5a Bound Exomem guest-service residency across staged processes
       (configurable positive cap, default one); retire LRU process groups and
       descriptors before replacement; preserve restartable vault state until
       terminal per-container cleanup; clear finished searches and every
