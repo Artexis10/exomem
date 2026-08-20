@@ -250,6 +250,16 @@ def test_retrieval_deadline_bounds_every_attempt() -> None:
         remaining_retrieval_timeout(10.0, clock=lambda: 10.0)
 
 
+# A deadlock valve, not a latency claim. Both tests below hand the code a
+# 0.01s deadline and then block the underlying call indefinitely. If the
+# deadline never fires, the call never returns, the `finally` that releases the
+# block never runs, and the test hangs -- so any bound at all catches the bug
+# and a generous one catches it just as well. The previous 0.5s said something
+# additional and untrue: that a contended Windows shard schedules a thread
+# within half a second.
+_DEADLINE_VALVE_SECONDS = 30.0
+
+
 def test_bounded_retrieval_call_stops_blocked_headers_or_body() -> None:
     from exomem.client_artifacts import SafeFetchError, _bounded_retrieval_call
 
@@ -261,7 +271,7 @@ def test_bounded_retrieval_call_stops_blocked_headers_or_body() -> None:
     finally:
         release.set()
 
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < _DEADLINE_VALVE_SECONDS
 
 
 # How long the peer waits before closing the socket, and how long the test
@@ -555,7 +565,7 @@ def test_staging_bounds_blocked_dns_resolution(tmp_path: Path, monkeypatch: pyte
     finally:
         release.set()
 
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < _DEADLINE_VALVE_SECONDS
 
 
 def test_staging_resets_socket_timeout_before_each_read(
