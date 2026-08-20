@@ -16,7 +16,8 @@ from exomem import edge_ingress
 # Pure HMAC + predicate helpers
 # --------------------------------------------------------------------------- #
 # Golden cross-implementation vector: the worker suite asserts the identical
-# constant for edgeAuthHmac (deploy/cloudflare-ha/test/worker.test.mjs), so a
+# constant for edgeAuthHmac (formerly asserted in the retired HA edge worker's
+# own suite), so a
 # unilateral change to key/message encoding or hex casing in either
 # implementation fails one of the two suites instead of 403ing production.
 _GOLDEN_EDGE_AUTH = "1d489d84d7a8dcec3ddef522064e6ee09269bb80fd3dc91cd62c4ebf1ab220b4"
