@@ -23,6 +23,33 @@ from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 
+#: The wall-clock shape of every contention test in this file.
+#:
+#: A HOLD parks a thread or process while the test observes an ordering; an
+#: OBSERVATION is how long the test waits for that state to be reached. The gap
+#: between them is the entire discriminating power of these tests -- a hold that
+#: does not outlast its observation lets the ordering pass vacuously, and an
+#: observation sized for an idle laptop fails on a loaded shard while the code
+#: under test behaves correctly.
+#:
+#: A NEGATIVE wait (`assert not x.wait(0.1)`) proves something has NOT happened
+#: yet and stays tight: widening one changes the scenario rather than merely
+#: slowing it, because the product's own timeouts run in the same window.
+#:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 15.0
+
 
 def _write_editable_note(vault: Path, *, body: str = "Before") -> str:
     relative = "Knowledge Base/Notes/Insights/retry-safe-edit.md"
@@ -410,16 +437,16 @@ def test_bound_replace_preview_bypasses_writer_authority_boundary_and_receipts(
     def hold_live_mutation() -> None:
         with coordinator.hold(timeout_seconds=2.0):
             entered.set()
-            assert release.wait(2.0)
+            assert release.wait(_HOLD_SECONDS)
 
     holder = threading.Thread(target=hold_live_mutation)
     holder.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_OBSERVE_SECONDS)
     try:
         preview = bound(validate_only=True)
     finally:
         release.set()
-        holder.join(timeout=2.0)
+        holder.join(timeout=_HOLD_SECONDS)
 
     assert preview["advisory"] is True
     assert "receipt_id" not in preview
@@ -489,11 +516,11 @@ def test_bound_validate_only_edit_bypasses_live_mutation_boundary(
     def hold_live_mutation() -> None:
         with manager.mutation_guard(tmp_path / "vault"):
             entered.set()
-            assert release.wait(2.0)
+            assert release.wait(_HOLD_SECONDS)
 
     holder = threading.Thread(target=hold_live_mutation)
     holder.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_OBSERVE_SECONDS)
     try:
         assert bound(
             operation={
@@ -505,7 +532,7 @@ def test_bound_validate_only_edit_bypasses_live_mutation_boundary(
         ) == {"validate_only": True}
     finally:
         release.set()
-        holder.join(timeout=2.0)
+        holder.join(timeout=_HOLD_SECONDS)
     assert not holder.is_alive()
 
 
@@ -522,7 +549,7 @@ def test_identical_pending_retry_waits_outside_mutation_boundary_and_replays(
         nonlocal calls
         calls += 1
         entered.set()
-        assert release.wait(2.0)
+        assert release.wait(_HOLD_SECONDS)
         return {"value": value}
 
     command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
@@ -548,12 +575,12 @@ def test_identical_pending_retry_waits_outside_mutation_boundary_and_replays(
     first = threading.Thread(target=invoke)
     retry = threading.Thread(target=invoke)
     first.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_OBSERVE_SECONDS)
     retry.start()
     time.sleep(0.08)
     release.set()
-    first.join(timeout=2.0)
-    retry.join(timeout=2.0)
+    first.join(timeout=_HOLD_SECONDS)
+    retry.join(timeout=_HOLD_SECONDS)
 
     assert not first.is_alive()
     assert not retry.is_alive()

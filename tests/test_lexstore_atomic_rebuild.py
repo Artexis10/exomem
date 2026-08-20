@@ -42,9 +42,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import traceback
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,35 @@ import pytest
 
 from exomem import find as find_module
 from exomem import freshness, lexstore
+
+#: The wall-clock shape of every contention test in this file.
+#:
+#: A HOLD parks a thread or process while the test observes an ordering; an
+#: OBSERVATION is how long the test waits for that state to be reached. The gap
+#: between them is the entire discriminating power of these tests -- a hold that
+#: does not outlast its observation lets the ordering pass vacuously, and an
+#: observation sized for an idle laptop fails on a loaded shard while the code
+#: under test behaves correctly.
+#:
+#: A NEGATIVE wait (`assert not x.wait(0.1)`) proves something has NOT happened
+#: yet and stays tight: widening one changes the scenario rather than merely
+#: slowing it, because the product's own timeouts run in the same window.
+#:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 15.0
+_FOREGROUND_BOUND_SECONDS = 0.5
+_STILL_BLOCKED_SECONDS = 1.0
 
 
 @pytest.fixture(autouse=True)
@@ -1000,7 +1029,7 @@ def test_await_repairs_idle_waits_for_an_in_flight_repair() -> None:
         released = threading.Event()
 
         def release() -> None:
-            released.wait(30.0)
+            released.wait(_HOLD_SECONDS)
             with lexstore._REPAIRS_LOCK:
                 lexstore._REPAIRS_IN_FLIGHT.discard(key)
 
@@ -1008,7 +1037,7 @@ def test_await_repairs_idle_waits_for_an_in_flight_repair() -> None:
         worker.start()
         released.set()
         assert lexstore.await_repairs_idle(root, timeout=30.0) is True
-        worker.join(timeout=30.0)
+        worker.join(timeout=_HOLD_SECONDS)
         assert not worker.is_alive()
     finally:
         with lexstore._REPAIRS_LOCK:
@@ -1181,13 +1210,13 @@ def test_upsert_declines_fast_on_publication_contention_then_retries(
     worker = threading.Thread(target=do_upsert, daemon=True)
     with vault_creation_lock(tmp_path, "lexical-catalog-publication", timeout=5):
         worker.start()
-        assert started.wait(5)
-        assert finished.wait(0.5)
+        assert started.wait(_OBSERVE_SECONDS)
+        assert finished.wait(_FOREGROUND_BOUND_SECONDS)
         assert outcome["applied"] is False
         assert outcome["elapsed"] < 0.5
         assert scheduled["n"] == 1
 
-    worker.join(5)
+    worker.join(_HOLD_SECONDS)
     assert store.upsert_paths([b]) is True
     contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
     assert any("upsertadded" in c for c in contents)
@@ -1264,10 +1293,10 @@ def test_exact_stale_parent_under_publication_contention_returns_incomplete(
     worker = threading.Thread(target=query, daemon=True)
     with vault_creation_lock(tmp_path, "lexical-catalog-publication", timeout=5):
         worker.start()
-        assert finished.wait(0.5)
+        assert finished.wait(_FOREGROUND_BOUND_SECONDS)
         assert result["hits"] is None
         assert result["elapsed"] < 0.5
-    worker.join(5)
+    worker.join(_HOLD_SECONDS)
 
 
 def test_upsert_source_disappearing_during_insert_rolls_back_and_defers(
@@ -1458,10 +1487,10 @@ def test_repair_heal_reconcile_serializes_behind_publication_barrier(
         worker.start()
         # The heal must block on the barrier we hold. (Pre-fix, the reconcile
         # rebuilt/healed the live sidecar with no barrier, racing the replace.)
-        assert not healed.wait(1.0)
+        assert not healed.wait(_STILL_BLOCKED_SECONDS)
 
-    assert healed.wait(5)
-    worker.join(5)
+    assert healed.wait(_OBSERVE_SECONDS)
+    worker.join(_HOLD_SECONDS)
     contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
     assert any("healedtoken" in c for c in contents)
 
@@ -1497,17 +1526,17 @@ def test_foreground_delta_declines_fast_on_contention_and_schedules_repair(
     def hold_barrier() -> None:
         with vault_creation_lock(tmp_path, "lexical-catalog-publication", timeout=5):
             holding.set()
-            release.wait(10)
+            release.wait(_HOLD_SECONDS)
 
     worker = threading.Thread(target=hold_barrier, daemon=True)
     worker.start()
-    assert holding.wait(5)
+    assert holding.wait(_OBSERVE_SECONDS)
 
     start = time.monotonic()
     readiness = store.catalog_readiness("kb", drifted)
     elapsed = time.monotonic() - start
     release.set()
-    worker.join(5)
+    worker.join(_HOLD_SECONDS)
 
     # Declined within the short foreground bound (not the 30s background wait),
     # deferring to a scheduled single-flight repair rather than false-emptying.
@@ -1554,7 +1583,7 @@ def test_repair_search_opens_connection_only_after_publication_barrier(
             worker.start()
             time.sleep(0.1)
             assert not connected.is_set(), "repair opened the pre-publication DB inode"
-        worker.join(timeout=5)
+        worker.join(timeout=_HOLD_SECONDS)
         assert not worker.is_alive()
         assert connected.is_set()
         assert result and result[0] is not None

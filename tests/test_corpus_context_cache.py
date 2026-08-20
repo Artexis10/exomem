@@ -32,6 +32,36 @@ from exomem.vault import WikilinkResolver
 _PAGE_REL = "Knowledge Base/Notes/Insights/one.md"
 
 
+#: The wall-clock shape of every contention test in this file.
+#:
+#: A HOLD parks a thread or process while the test observes an ordering; an
+#: OBSERVATION is how long the test waits for that state to be reached. The gap
+#: between them is the entire discriminating power of these tests -- a hold that
+#: does not outlast its observation lets the ordering pass vacuously, and an
+#: observation sized for an idle laptop fails on a loaded shard while the code
+#: under test behaves correctly.
+#:
+#: A NEGATIVE wait (`assert not x.wait(0.1)`) proves something has NOT happened
+#: yet and stays tight: widening one changes the scenario rather than merely
+#: slowing it, because the product's own timeouts run in the same window.
+#:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 15.0
+_NO_DUPLICATE_SECONDS = 0.5
+_PUBLISH_BLOCKED_SECONDS = 0.25
+
+
 def _page(*, title: str = "Page", body: str = "Body.\n") -> str:
     return f"---\ntitle: {title}\ntype: insight\nstatus: active\nproject: atlas\n---\n\n{body}"
 
@@ -378,7 +408,7 @@ def test_atomic_event_publish_keeps_concurrent_page_changes(vault: Path) -> None
     start = threading.Barrier(2)
 
     def publish(path: Path) -> None:
-        start.wait(timeout=5)
+        start.wait(timeout=_OBSERVE_SECONDS)
         semantic_contract.publish_corpus_files_changed(vault, changed=(path,))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -429,13 +459,13 @@ def test_concurrent_cold_builds_share_one_uncached_result(
             calls += 1
             if calls > 1:
                 duplicate_entered.set()
-        assert release_build.wait(timeout=5)
+        assert release_build.wait(timeout=_HOLD_SECONDS)
         return real_build(*args, **kwargs)
 
     monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", slow_build)
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(semantic_contract.build_corpus_context, vault) for _ in range(2)]
-        duplicated = duplicate_entered.wait(timeout=0.5)
+        duplicated = duplicate_entered.wait(timeout=_NO_DUPLICATE_SECONDS)
         (vault / _PAGE_REL).write_text(_page(title="Current during flight"), encoding="utf-8")
         release_build.set()
         results = [future.result(timeout=10) for future in futures]
@@ -468,7 +498,7 @@ def test_cold_builds_with_different_registry_inputs_serialize_then_refresh(
             if calls == 1:
                 first_build_entered.set()
         if calls == 1:
-            assert release_first_build.wait(timeout=5)
+            assert release_first_build.wait(timeout=_HOLD_SECONDS)
         try:
             return real_build(*args, **kwargs)
         finally:
@@ -488,7 +518,7 @@ def test_cold_builds_with_different_registry_inputs_serialize_then_refresh(
     monkeypatch.setattr(semantic_contract, "_corpus_census", observed_census)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first_future = pool.submit(semantic_contract.build_corpus_context, vault)
-        assert first_build_entered.wait(timeout=5)
+        assert first_build_entered.wait(timeout=_OBSERVE_SECONDS)
         registry_path = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
         registry_path.parent.mkdir(parents=True, exist_ok=True)
         registry_path.write_text(
@@ -498,7 +528,7 @@ def test_cold_builds_with_different_registry_inputs_serialize_then_refresh(
         )
         current_hash = relation_registry.load_registry(vault).extension_hash
         second_future = pool.submit(semantic_contract.build_corpus_context, vault)
-        assert current_census_seen.wait(timeout=5)
+        assert current_census_seen.wait(timeout=_OBSERVE_SECONDS)
         release_first_build.set()
         first = first_future.result(timeout=10)
         second = second_future.result(timeout=10)
@@ -532,15 +562,15 @@ def test_cold_cache_publication_serializes_with_file_events(
         snapshot = real_census(root)
         if census_calls == 2:
             publish_now.set()
-            assert page_written.wait(timeout=5)
+            assert page_written.wait(timeout=_OBSERVE_SECONDS)
             # On the unsafe implementation publication completes here and is
             # then overwritten. The fixed boundary deliberately keeps it
             # waiting until the cold context is captioned and installed.
-            publish_done.wait(timeout=0.25)
+            publish_done.wait(timeout=_PUBLISH_BLOCKED_SECONDS)
         return snapshot
 
     def publish_edit() -> None:
-        assert publish_now.wait(timeout=5)
+        assert publish_now.wait(timeout=_OBSERVE_SECONDS)
         page.write_text(_page(title="Event after cold census"), encoding="utf-8")
         page_written.set()
         semantic_contract.publish_corpus_files_changed(vault, changed=(page,))
@@ -987,14 +1017,14 @@ def test_a_second_publisher_joins_no_second_whole_vault_build(
     def blocking_build(root: Path, cache_key: tuple[str, str]) -> bool:
         calls.append(cache_key)
         entered.set()
-        assert release.wait(10)
+        assert release.wait(_HOLD_SECONDS)
         return False
 
     monkeypatch.setattr(semantic_contract, "_build_and_admit_corpus_context", blocking_build)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         first = pool.submit(semantic_contract._populate_corpus_context_after_miss, vault)
-        assert entered.wait(10), "the first publisher never reached the build"
+        assert entered.wait(_OBSERVE_SECONDS), "the first publisher never reached the build"
 
         # The second publisher finds the same cold key mid-build and must
         # return rather than start its own.

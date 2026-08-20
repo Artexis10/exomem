@@ -30,6 +30,11 @@ TESTS = Path(__file__).parent
 #: constants. Adding a file here is a promise that it contains no tight
 #: positive wait, so convert it first.
 CONVERTED = (
+    "test_command_surface_retry.py",
+    "test_corpus_context_cache.py",
+    "test_lexstore_atomic_rebuild.py",
+    "test_graph_rebuild_locking.py",
+    "test_mutation_concurrency.py",
     "test_graph_rebuild_availability.py",
     "test_mutation_lock.py",
     "test_epistemic_graph_freshness.py",
