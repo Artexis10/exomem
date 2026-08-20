@@ -72,7 +72,7 @@ from .kbdir import kb_dirname
 log = logging.getLogger(__name__)
 
 _NAV_BASENAMES = frozenset({"index.md", "log.md"})
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 CATALOG_FOREGROUND_DELTA_CAP = 32
 
 # Publication-barrier timeouts. Every LIVE-sidecar mutation and journal-mode
@@ -1473,19 +1473,16 @@ class LexicalStore:
             except OSError:
                 pass
 
-    # The current normal-table shape sentinel: an older (v4) `pages` table lacks
-    # this column, so its presence distinguishes a mutation-safe current shape
-    # from a legacy shape a new-column index/INSERT would fault against.
-    _CURRENT_PAGES_COLUMN = "emitted_parent_path"
+    # The current normal-table shape sentinels. An older `pages` table lacks
+    # one or more of these, so it must be rebuilt before a new-column INSERT.
+    _CURRENT_PAGES_COLUMNS = frozenset({"emitted_parent_path", "title"})
 
     @staticmethod
-    def _pages_has_emitted_parent(conn: sqlite3.Connection) -> bool:
-        """Read-only: does the `pages` table carry the current emitted-parent
-        column? False when the table is absent or is an old (v4) shape."""
-        return any(
-            row[1] == LexicalStore._CURRENT_PAGES_COLUMN
-            for row in conn.execute("PRAGMA table_info(pages)")
-        )
+    def _pages_has_current_columns(conn: sqlite3.Connection) -> bool:
+        """Read-only: does `pages` carry every current schema sentinel?"""
+        return LexicalStore._CURRENT_PAGES_COLUMNS <= {
+            row[1] for row in conn.execute("PRAGMA table_info(pages)")
+        }
 
     def _schema_is_current(self, conn: sqlite3.Connection) -> bool:
         """Read-only probe: is the catalog schema at the current version AND the
@@ -1502,12 +1499,13 @@ class LexicalStore:
             return False  # no `meta` table yet
         if not (row and row[0] == str(SCHEMA_VERSION)):
             return False
-        return self._pages_has_emitted_parent(conn)
+        return self._pages_has_current_columns(conn)
 
     def _create_catalog_tables(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pages("
             " path TEXT PRIMARY KEY,"
+            " title TEXT,"
             " mtime_ns INTEGER NOT NULL,"
             " updated TEXT NOT NULL DEFAULT '0000-00-00',"
             " in_kb INTEGER NOT NULL DEFAULT 0,"
@@ -1594,7 +1592,7 @@ class LexicalStore:
         place while never faulting on the legacy shape. The read paths never
         reach here — they use the read-only `_schema_is_current` probe."""
         self._create_catalog_tables(conn)
-        if not self._pages_has_emitted_parent(conn):
+        if not self._pages_has_current_columns(conn):
             self._drop_catalog_tables(conn)
             self._create_catalog_tables(conn)
         self._create_catalog_indexes(conn)
@@ -2151,9 +2149,10 @@ class LexicalStore:
         page = find_module._CACHE.get(path, self.vault_root)
         if page is not None:
             rel = page.rel_path
-            title_lower = page.title_norm
+            title = page.title
+            title_lower = page.title_norm if title else ""
             body_lower = page.body_norm
-            stemmed = " ".join(bm25_module.tokenize(page.title + " " + page.body))
+            stemmed = " ".join(bm25_module.tokenize((title or "") + " " + page.body))
             updated = page.updated or "0000-00-00"
             # Scene-frame children carry the parent video they collapse into;
             # unparseable rows (page is None) stay NULL like ordinary pages.
@@ -2163,15 +2162,17 @@ class LexicalStore:
                 rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
             except ValueError:
                 return
+            title = None
             title_lower = body_lower = stemmed = ""
             updated = "0000-00-00"
             emitted_parent_path = None
         is_nav = path.name.lower() in _NAV_BASENAMES
         cur = conn.execute(
-            "INSERT INTO pages(path, mtime_ns, updated, in_kb, in_vault, is_nav, "
-            "emitted_parent_path) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO pages(path, title, mtime_ns, updated, in_kb, in_vault, is_nav, "
+            "emitted_parent_path) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rel,
+                title,
                 mtime_ns,
                 updated,
                 int(in_kb),
@@ -3275,6 +3276,50 @@ class LexicalStore:
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(e, backend_name)
+
+    def recall_resolver_entries(
+        self, scope: str, freshness: tuple | None
+    ) -> list[tuple[str, str | None]] | None:
+        """Return exact resolver `(path, title)` entries from a current sidecar.
+
+        A resolver cannot safely omit a page, so this deliberately declines a
+        sidecar that needs even a bounded foreground delta. The caller then uses
+        the established walk-and-parse fallback while the repair worker rebuilds
+        the disposable sidecar. A current stored checkpoint includes the recall
+        policy/access identity; `_walk_entries` and `_insert_page` both apply
+        that policy before any row receives its scope flag. The sidecar test
+        pins the resulting `in_vault` row set against a fresh full policy walk.
+        """
+        from . import freshness as freshness_module
+
+        backend_name = backend()
+        if backend_name == "python":
+            return None
+        if self._failed:
+            return None
+        if not self.path.exists():
+            return None
+        try:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN")
+                target = freshness_module.recall_checkpoint(self.vault_root, scope)
+                if (
+                    not self._schema_is_current(conn)
+                    or _checkpoint_state(self._meta_checkpoint(conn, scope))
+                    != _checkpoint_state(target)
+                ):
+                    return None
+                col = "in_vault" if scope == "vault" else "in_kb"
+                rows = conn.execute(
+                    f"SELECT path, title FROM pages WHERE {col} = 1 ORDER BY path"
+                ).fetchall()
+                return [(str(path), title) for path, title in rows]
+            finally:
+                conn.close()
+        except sqlite3.Error as error:
+            self._catalog_readiness_error(error, backend_name)
+            return None
 
     def _serve_from_ready_catalog_result(self, scope, freshness, query_fn, failure_message):
         """Validate readiness AND run `query_fn(conn)` bound to ONE connection and
