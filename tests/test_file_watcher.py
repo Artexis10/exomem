@@ -701,6 +701,11 @@ def test_delete_then_recreate_only_upserts(vault, monkeypatch: pytest.MonkeyPatc
     assert ups == [[p]]
 
 
+# How long a test will wait for a background flush before calling it hung.
+# Generous on purpose: see the note at its use site.
+_FLUSH_VALVE_SECONDS = 30.0
+
+
 def test_dispatch_thread_coalesces_within_debounce(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     ups, _dels = _stub_embeddings(monkeypatch)
     w = file_watcher.FileWatcher(vault, debounce_seconds=0.05)
@@ -714,7 +719,13 @@ def test_dispatch_thread_coalesces_within_debounce(vault, monkeypatch: pytest.Mo
         b.write_text("# B\n", encoding="utf-8")
         w._record(a, deleted=False)
         w._record(b, deleted=False)
-        deadline = time.monotonic() + 2.0
+        # A deadlock valve, not a latency assertion. What is under test is that
+        # the dispatch thread flushes at all and that the two saves coalesce
+        # into one batch -- neither claim is about how quickly a CI runner gets
+        # round to scheduling the thread. Two seconds was tight enough to fire
+        # on a loaded Windows runner, reporting a coalescing defect that was
+        # really a busy machine.
+        deadline = time.monotonic() + _FLUSH_VALVE_SECONDS
         while not ups and time.monotonic() < deadline:
             time.sleep(0.02)
         assert ups, "dispatch thread should flush after the debounce window"

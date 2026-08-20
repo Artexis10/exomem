@@ -2237,6 +2237,14 @@ def test_reconcile_recovers_an_unacknowledged_checkpoint_without_rewriting_markd
     assert report.graph_status == "refreshed"
 
 
+# Deadlock valves for the ordering test below. The hold must outlast both the
+# observation and the admission timeout, or the ordering it pins can resolve
+# itself by expiry and the assertions stop meaning anything.
+_HOLD_SECONDS = 60.0
+_OBSERVE_SECONDS = 30.0
+_ADMIT_SECONDS = 15.0
+
+
 def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2260,16 +2268,23 @@ def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
 
     def slow_rebuild(index: EpistemicGraphIndex) -> dict[str, int]:
         rebuild_started.set()
-        assert release_rebuild.wait(2)
+        assert release_rebuild.wait(_HOLD_SECONDS)
         return original(index)
 
     monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_locked", slow_rebuild)
     state_dir = tmp_path / "state"
     reconcile_manager = LeaseManager(
-        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=1
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=_ADMIT_SECONDS
     )
+    # The second mutation must be ADMITTED, and it is admitted only because the
+    # reconcile released the canonical boundary before rebuilding. A tenth of a
+    # second said "admitted promptly", which is a claim about runner speed; the
+    # claim under test is "admitted at all". A retained boundary still fails,
+    # because the boundary is not released until the `finally` below -- so a
+    # timeout that is shorter than the hold keeps the failure a failure rather
+    # than a deadlock.
     mutation_manager = LeaseManager(
-        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=0.1
+        LeaseConfig(state_dir=state_dir), mutation_timeout_seconds=_ADMIT_SECONDS
     )
     reconcile_command = next(
         command
@@ -2305,13 +2320,13 @@ def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
 
     reconcile_thread = threading.Thread(target=run_reconcile)
     reconcile_thread.start()
-    assert rebuild_started.wait(1)
+    assert rebuild_started.wait(_OBSERVE_SECONDS)
     try:
         mutation_manager.invoke(second_command, (tmp_path,), {})
         assert second_admitted.is_set()
     finally:
         release_rebuild.set()
-        reconcile_thread.join(timeout=3)
+        reconcile_thread.join(timeout=_HOLD_SECONDS)
 
     assert not reconcile_thread.is_alive()
     assert reconcile_result[0]["graph_status"] == "refreshed", reconcile_result

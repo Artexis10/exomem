@@ -47,6 +47,25 @@ COMMIT_MEDIAN_MS = 750.0
 COMMIT_P95_MS = 1_500.0
 SCALING_RATIO = 2.0
 SCALING_SLACK_MS = 200.0
+# The scaling bound is derived from the SMALL corpus measurement, and on this
+# shared runner that measurement is the noisiest number the gate produces.
+# Across twelve consecutive CI runs the 2k commit median ranged 110.1-519.0ms
+# (median 129.8) while the 8k median it is supposed to bound stayed inside
+# 265.7-454.7ms (median 331.1). So the thing being measured is roughly stable
+# and the ruler is not: `small * 2 + 200` put four of those twelve runs within
+# 100ms of failing and one at -3.9ms, which is how a green tree gets a red
+# required gate. Sampling more is not available here -- a `--root` run gets one
+# attempt per size.
+#
+# Floor the bound at a fraction of the operation's own absolute ceiling so a
+# lucky-fast small sample cannot make it tighter than an unregressed large
+# sample can satisfy. At 0.8 the commit floor is 600ms (32% clear of the worst
+# 8k median observed) and validate's is 400ms (58% clear of its worst, 253.2ms)
+# -- while both stay strictly below their ceilings, so the scaling check still
+# fails a real super-linear regression before the absolute ceiling does. Only
+# the two operations expected to stay FLAT with corpus size get this; the
+# read/cold rows are deliberately O(N) and carry their own ratios.
+SCALING_BOUND_CEILING_FRACTION = 0.8
 
 # --- Read-after-write budget (warm path). A governed write normally PATCHES
 # the corpus-context cache and the live freshness registry, so the very next
@@ -350,9 +369,15 @@ def check(results: list[dict[str, float | int]]) -> None:
     if len(results) >= 2:
         ordered = sorted(results, key=lambda item: int(item["pages"]))
         small, large = ordered[0], ordered[-1]
-        for operation in ("validate", "commit"):
+        for operation, operation_ceiling in (
+            ("validate", VALIDATE_MEDIAN_MS),
+            ("commit", COMMIT_MEDIAN_MS),
+        ):
             key = f"{operation}_median_ms"
-            bound = float(small[key]) * SCALING_RATIO + SCALING_SLACK_MS
+            bound = max(
+                float(small[key]) * SCALING_RATIO + SCALING_SLACK_MS,
+                operation_ceiling * SCALING_BOUND_CEILING_FRACTION,
+            )
             if float(large[key]) >= bound:
                 failures.append(
                     f"{operation} scaling: {large[key]}ms >= {bound:.1f}ms "

@@ -290,13 +290,16 @@ def _patch_runtime(monkeypatch):
     """Stub runtime unload/start hooks; return a call recorder."""
     from exomem import bm25, embeddings, find, model_reaper
 
-    calls = {"unload": 0, "cache": 0, "start": 0, "stop": 0}
+    calls = {"unload": 0, "cache": 0, "broad": 0, "start": 0, "stop": 0}
     monkeypatch.setattr(embeddings, "unload_model", lambda: calls.__setitem__("unload", calls["unload"] + 1) or True)
     monkeypatch.setattr(embeddings, "unload_reranker", lambda: True)
     monkeypatch.setattr(embeddings, "unload_clip_model", lambda: True)
     monkeypatch.setattr(embeddings, "unload_index_caches", lambda: calls.__setitem__("cache", calls["cache"] + 1) or {"embedding": 0, "clip": 0})
     monkeypatch.setattr(bm25, "unload_cache", lambda: calls.__setitem__("cache", calls["cache"] + 1) or False)
-    monkeypatch.setattr(find, "unload_ram_caches", lambda: calls.__setitem__("cache", calls["cache"] + 1) or {})
+    # Quiet mode is a memory decision, so it takes the narrow release that keeps
+    # the recall resolver; the broad one stays here to prove it is NOT called.
+    monkeypatch.setattr(find, "release_idle_ram_caches", lambda: calls.__setitem__("cache", calls["cache"] + 1) or {})
+    monkeypatch.setattr(find, "unload_ram_caches", lambda **_: calls.__setitem__("broad", calls["broad"] + 1) or {})
     monkeypatch.setattr(model_reaper, "start", lambda: calls.__setitem__("start", calls["start"] + 1))
     monkeypatch.setattr(model_reaper, "stop", lambda: calls.__setitem__("stop", calls["stop"] + 1))
     return calls
@@ -324,6 +327,9 @@ def test_apply_live_quiet_unloads_heavy_caches(monkeypatch: pytest.MonkeyPatch) 
     policy = mode.apply_live()
     assert policy["mode"] == "quiet"
     assert calls["cache"] == 3
+    # Entering quiet mode frees memory; it does not force a re-derivation, so it
+    # must not reach for the eviction that discards the recall resolver (#676).
+    assert calls["broad"] == 0
     assert calls["start"] == 1 and calls["stop"] == 0
 
 
@@ -341,7 +347,46 @@ def test_config_watch_applies_on_change(monkeypatch: pytest.MonkeyPatch) -> None
         time.sleep(0.06)
         assert applied == []  # baseline normal, no change yet
         mode.write_mode("quiet")
-        time.sleep(0.12)
+        # Wait on the outcome, not on a fixed budget. The positive half of this
+        # test asserts that a change IS eventually applied, so a deadline that
+        # ends the moment it happens is both faster on a quiet machine and
+        # immune to a loaded runner starving six 20 ms ticks -- which is how it
+        # failed on macOS. The negative half above is the opposite shape and
+        # correctly stays a fixed sleep: there is no event to wait for.
+        deadline = time.monotonic() + 10.0
+        while not applied and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        mode.stop_config_watch()
+    assert "quiet" in applied
+
+
+def test_restarting_the_watch_leaves_a_watcher_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop/start cycle must not hand back a thread that is already leaving.
+
+    `start_config_watch` returns the existing thread when one is alive. Before
+    `stop_config_watch` joined, a restart inside a single tick returned the
+    outgoing thread -- so the caller held a live `Thread`, its new interval was
+    silently ignored, and moments later nothing was watching the config at all.
+    """
+    import time
+
+    monkeypatch.delenv("EXOMEM_DISABLE_MODE_WATCH", raising=False)
+    monkeypatch.delenv("EXOMEM_MODE", raising=False)
+    applied: list[str] = []
+    monkeypatch.setattr(mode, "apply_live", lambda: applied.append(mode.resolve_mode()))
+    try:
+        first = mode.start_config_watch(interval=30.0)
+        assert first is not None
+        mode.stop_config_watch()
+        assert not first.is_alive()  # stopped means stopped, not "asked to stop"
+
+        second = mode.start_config_watch(interval=0.02)
+        assert second is not None and second is not first
+        mode.write_mode("quiet")
+        deadline = time.monotonic() + 10.0
+        while not applied and time.monotonic() < deadline:
+            time.sleep(0.01)
     finally:
         mode.stop_config_watch()
     assert "quiet" in applied
