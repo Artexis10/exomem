@@ -15,7 +15,7 @@ from exomem import graph_sync
 _OBSERVE_SECONDS = 30.0
 #: How long a stage is deliberately held open. Must exceed _OBSERVE_SECONDS, or
 #: the ordering assertion could be satisfied by the hold simply expiring.
-_GRAPH_HOLD_SECONDS = 60.0
+_GRAPH_HOLD_SECONDS = 45.0
 
 
 def _receipt(root: Path, *, digest: str, attempt: object) -> None:
