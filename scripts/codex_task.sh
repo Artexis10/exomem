@@ -83,41 +83,35 @@ CODEX_SANDBOX=${CODEX_SANDBOX:-danger-full-access}
 # sandbox from a silent hour of thrashing into a loud failure on line one.
 preflight_sandbox() {
   local wt=${1:?} profile=${2:?}
-  echo "codex_task: preflight (sandbox=$CODEX_SANDBOX) -- can a worker run one test?"
-  # The worker leaves evidence on disk and the runner reads it. Two earlier
-  # versions inspected the worker's REPLY instead and both blocked a healthy
-  # lane: the first grepped for pytest's "N passed" summary and got its progress
-  # dots; the second appended `echo PREFLIGHT_EXIT=$?`, which is a POSIX idiom
-  # the worker then ran through pwsh, where `$?` is a boolean and the exit code
-  # lives in $LASTEXITCODE.
-  #
-  # Both failures share one cause: the gate depended on how something else chose
-  # to phrase an answer. A redirect into a file does not, and it still exercises
-  # the thing that actually broke -- writing inside the worktree and running
-  # pytest under the worker's own token. `.task/` is git-excluded, so the log is
-  # never committed.
-  local log="$wt/.task/preflight.log"
-  rm -f "$log"
-  local out
-  out=$(codex exec --profile "$profile" -s "$CODEX_SANDBOX" -C "$wt" \
-      "Run exactly this one command and nothing else, then reply with the word done: \
-uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q > .task/preflight.log 2>&1" 2>&1)
-  if [ -f "$log" ] && grep -qE "[0-9]+ (passed|skipped)" "$log"; then
-    echo "codex_task: preflight OK -- $(grep -oE "[0-9]+ (passed|skipped).*" "$log" | tail -1)"
-    rm -f "$log"
+
+  # Under danger-full-access the worker runs with the same token as this
+  # script, so running the test here IS the worker's environment -- and it is
+  # deterministic, which three attempts at asking the worker to report back
+  # were not. Each of those blocked a healthy lane: one grepped the reply for
+  # pytest's summary and got its progress dots; one appended a POSIX `$?` that
+  # pwsh evaluates as a boolean; one redirected into a file that pwsh left
+  # empty. A gate whose false positives outnumber its true ones protects
+  # nothing, and each false one cost a launch.
+  if [ "$CODEX_SANDBOX" != "danger-full-access" ]; then
+    echo "codex_task: preflight SKIPPED -- CODEX_SANDBOX=$CODEX_SANDBOX." >&2
+    echo "  A direct run here would use this shell's token, not the worker's," >&2
+    echo "  so it cannot tell you whether a narrowed sandbox can run the tests." >&2
+    echo "  Watch the first lane closely; that is the configuration that broke." >&2
     return 0
   fi
-  if [ -f "$log" ]; then
-    echo "--- worker's pytest output:" >&2
-    tail -15 "$log" >&2
-  else
-    echo "--- the worker produced no log at all (could not write inside the worktree)" >&2
+
+  echo "codex_task: preflight -- can this environment run one test?"
+  local out
+  if out=$(cd "$wt" && uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q 2>&1); then
+    echo "codex_task: preflight OK -- $(grep -oE '[0-9]+ (passed|skipped).*' <<<"$out" | tail -1)"
+    return 0
   fi
-  echo "GATE FAIL: the worker sandbox cannot run the test suite." >&2
+
+  echo "GATE FAIL: this environment cannot run the test suite." >&2
   echo "  sandbox=$CODEX_SANDBOX profile=$profile worktree=$wt" >&2
   echo "  Every brief ends in 'run the tests'; a worker that cannot is worse" >&2
   echo "  than no worker. Do not launch the lane until this passes." >&2
-  echo "--- last 20 lines of preflight output:" >&2
+  echo "--- last 20 lines:" >&2
   tail -20 <<<"$out" >&2
   exit 1
 }
