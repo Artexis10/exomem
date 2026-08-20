@@ -10,7 +10,7 @@
 #   codex_task.sh verify <worktree-dir>             run the merge gate in a lane worktree
 #
 # Safety: start/verify refuse to operate on anything that is not a *linked*
-# worktree — the shared primary checkout can never be a Codex workspace.
+# worktree — the shared primary checkout can never be where a Codex lane starts.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -48,11 +48,81 @@ config is a gate failure unless listed above.
 - `uv run python -m pytest -q` green
 - <benchmark command> meets <threshold>
 
+On Windows and macOS, append `--ignore=tests/test_latency_gate.py`. CI runs that
+file on ubuntu only (see cross-platform.yml); it builds an 8k-page fixture and
+times out elsewhere. If it is your only failure, you are green -- say so in
+RESULT.md and do not spend the lane chasing it.
+
 ## Deliverable
 Commit to the current branch (do not push). Write .task/RESULT.md with a
 summary, acceptance-command output, and any new dependency you believe is
 needed (do not add it yourself).
 EOF
+}
+
+# Every brief in this repo ends in "run the tests", so a sandbox that cannot run
+# them is not a safer worker -- it is a worker that cannot do the job, and it
+# does not find that out until it has spent an hour trying. That is exactly what
+# happened on 2026-08-16: one lane burned roughly an hour and 18M tokens under
+# `-s workspace-write` and produced zero commits.
+#
+# The failure is not a permission that can be granted. On Windows, Codex's
+# `sandbox = "unelevated"` runs the worker under a restricted token, and exomem
+# deliberately hardens its state directories to a private DACL naming the real
+# user SID. The restricted token is then denied by design -- pytest's own
+# `shutil.rmtree` of its tmpdir dies with WinError 5. Widening `writable_roots`
+# moves the path but not the ACL, so it cannot be configured away.
+#
+# Two more deliverables were structurally impossible under that sandbox, which
+# is why a compliant worker read afterwards like a disobedient one. A linked
+# worktree's gitdir lives under the primary's `.git/worktrees/`, outside the
+# sandbox, so a worker could not create `index.lock` and could not commit the
+# work the brief asked it to commit. And `~/.cache/uv` and every PyPI route
+# were blocked, so an acceptance command naming `uvx` could never pass.
+#
+# The cost, stated rather than implied: full access does NOT confine a worker
+# to its worktree. `require_linked_worktree` decides where a lane may *start*;
+# nothing stops a worker reaching the primary checkout mid-run. The brief's
+# scope allowlist and `cmd_verify` are what catch that, and both run after the
+# fact -- so read the diff before you trust it.
+CODEX_SANDBOX=${CODEX_SANDBOX:-danger-full-access}
+
+# Prove the worker's environment can run one test BEFORE handing it a brief.
+# A lane costs an hour; this costs seconds, and it converts an unrunnable
+# sandbox from a silent hour of thrashing into a loud failure on line one.
+preflight_sandbox() {
+  local wt=${1:?} profile=${2:?}
+
+  # Under danger-full-access the worker runs with the same token as this
+  # script, so running the test here IS the worker's environment -- and it is
+  # deterministic, which three attempts at asking the worker to report back
+  # were not. Each of those blocked a healthy lane: one grepped the reply for
+  # pytest's summary and got its progress dots; one appended a POSIX `$?` that
+  # pwsh evaluates as a boolean; one redirected into a file that pwsh left
+  # empty. A gate whose false positives outnumber its true ones protects
+  # nothing, and each false one cost a launch.
+  if [ "$CODEX_SANDBOX" != "danger-full-access" ]; then
+    echo "codex_task: preflight SKIPPED -- CODEX_SANDBOX=$CODEX_SANDBOX." >&2
+    echo "  A direct run here would use this shell's token, not the worker's," >&2
+    echo "  so it cannot tell you whether a narrowed sandbox can run the tests." >&2
+    echo "  Watch the first lane closely; that is the configuration that broke." >&2
+    return 0
+  fi
+
+  echo "codex_task: preflight -- can this environment run one test?"
+  local out
+  if out=$(cd "$wt" && uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q 2>&1); then
+    echo "codex_task: preflight OK -- $(grep -oE '[0-9]+ (passed|skipped).*' <<<"$out" | tail -1)"
+    return 0
+  fi
+
+  echo "GATE FAIL: this environment cannot run the test suite." >&2
+  echo "  sandbox=$CODEX_SANDBOX profile=$profile worktree=$wt" >&2
+  echo "  Every brief ends in 'run the tests'; a worker that cannot is worse" >&2
+  echo "  than no worker. Do not launch the lane until this passes." >&2
+  echo "--- last 20 lines:" >&2
+  tail -20 <<<"$out" >&2
+  exit 1
 }
 
 cmd_start() {
@@ -86,11 +156,24 @@ cmd_start() {
 
   (cd "$wt" && uv sync)
 
-  echo "codex_task: launching codex exec (profile=$profile) in $wt"
-  codex exec --profile "$profile" -s workspace-write -C "$wt" \
+  preflight_sandbox "$wt" "$profile"
+
+  echo "codex_task: launching codex exec (profile=$profile, sandbox=$CODEX_SANDBOX) in $wt"
+  codex exec --profile "$profile" -s "$CODEX_SANDBOX" -C "$wt" \
     --json -o "$wt/.task/codex-run.jsonl" "$WORKER_PROMPT"
   echo "codex_task: worker finished — inspect $wt/.task/RESULT.md then run: codex_task.sh verify $wt"
 }
+
+# CI runs tests/test_latency_gate.py on ubuntu ONLY -- cross-platform.yml
+# passes `--ignore=tests/test_latency_gate.py` for windows-latest and
+# macos-latest. It generates an 8k-page fixture and reproducibly exceeds the
+# per-item timeout on a Windows host, so demanding it here fails a lane for a
+# test its own CI would not have run. Mirror the platform policy instead of
+# inventing a stricter one.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  Linux) PLATFORM_PYTEST_IGNORES=() ;;
+  *) PLATFORM_PYTEST_IGNORES=(--ignore=tests/test_latency_gate.py) ;;
+esac
 
 cmd_verify() {
   local wt=${1:?usage: codex_task.sh verify <worktree-dir>}
@@ -114,8 +197,12 @@ cmd_verify() {
     echo "$guarded" >&2
   fi
 
-  (cd "$wt" && uv run python -m pytest -q) || fail=1
-  (cd "$wt" && uv run python -m pytest tests/test_latency_gate.py -q) || fail=1
+  (cd "$wt" && uv run python -m pytest -q "${PLATFORM_PYTEST_IGNORES[@]}") || fail=1
+  if [ ${#PLATFORM_PYTEST_IGNORES[@]} -eq 0 ]; then
+    (cd "$wt" && uv run python -m pytest tests/test_latency_gate.py -q) || fail=1
+  else
+    echo "GATE NOTE: skipping tests/test_latency_gate.py (CI runs it on ubuntu only)"
+  fi
   (cd "$wt" && uvx ruff check .) || echo "GATE WARNING: ruff findings (advisory)" >&2
 
   [ "$fail" -eq 0 ] && echo "GATE PASS (benchmark before/after still your job)" || die "gate failed"
