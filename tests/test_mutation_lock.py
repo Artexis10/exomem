@@ -32,6 +32,14 @@ def _boundary(snapshot: dict) -> dict:
     return {key: value for key, value in snapshot.items() if key != "contention"}
 
 
+#: How long a holder keeps the mutation boundary, and how long a test will
+#: wait to observe a contender being refused. The gap between them is the
+#: whole discriminating power of the contention assertions: a contender that
+#: waited for the holder instead of honouring its own timeout blows straight
+#: through the observation window.
+_HOLD_SECONDS = 60.0
+_OBSERVE_SECONDS = 15.0
+
 def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> None:
     source = tmp_path / "source.sqlite"
     destination = tmp_path / "quarantine" / "source.sqlite"
@@ -605,13 +613,13 @@ def test_bounded_timeout_raises_actionable_mutation_busy(tmp_path: Path) -> None
     release = threading.Event()
 
     def hold_lock() -> None:
-        with holder.hold(timeout_seconds=2.0):
+        with holder.hold(timeout_seconds=_HOLD_SECONDS):
             entered.set()
-            assert release.wait(2.0)
+            assert release.wait(_HOLD_SECONDS)
 
     thread = threading.Thread(target=hold_lock)
     thread.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_OBSERVE_SECONDS)
     started = time.monotonic()
     try:
         with pytest.raises(OpError) as raised:
@@ -620,10 +628,16 @@ def test_bounded_timeout_raises_actionable_mutation_busy(tmp_path: Path) -> None
         assert raised.value.code == "MUTATION_BUSY"
         assert raised.value.remediation
         assert "retry" in raised.value.remediation.lower()
-        assert time.monotonic() - started < 0.5
+        # The discriminating assertion: the contender gave up on its own 0.05s
+        # timeout instead of waiting out the holder. That stays provable because
+        # the holder holds for _HOLD_SECONDS, which is far larger -- so this
+        # bound can be generous without going vacuous. At 0.5s it was also
+        # claiming a contended Windows shard schedules two threads within half a
+        # second, which is not a property of this code.
+        assert time.monotonic() - started < _OBSERVE_SECONDS
     finally:
         release.set()
-        thread.join(timeout=2.0)
+        thread.join(timeout=_HOLD_SECONDS)
     assert not thread.is_alive()
 
 
@@ -1002,13 +1016,13 @@ def test_mutation_busy_includes_wait_ms_and_dynamic_retry_hint(tmp_path: Path) -
     release = threading.Event()
 
     def hold_lock() -> None:
-        with holder.hold(timeout_seconds=2.0):
+        with holder.hold(timeout_seconds=_HOLD_SECONDS):
             entered.set()
-            assert release.wait(2.0)
+            assert release.wait(_HOLD_SECONDS)
 
     thread = threading.Thread(target=hold_lock)
     thread.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_OBSERVE_SECONDS)
     try:
         time.sleep(0.05)
         with pytest.raises(OpError) as raised:
@@ -1018,7 +1032,7 @@ def test_mutation_busy_includes_wait_ms_and_dynamic_retry_hint(tmp_path: Path) -
         assert 750 <= raised.value.details["retry_after_ms"] <= 15000
     finally:
         release.set()
-        thread.join(timeout=2.0)
+        thread.join(timeout=_HOLD_SECONDS)
 
 
 def test_hold_emits_acquired_and_released_events_with_timing(

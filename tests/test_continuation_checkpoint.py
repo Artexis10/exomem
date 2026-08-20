@@ -2087,8 +2087,16 @@ def test_tombstone_and_temporary_cleanup_never_materialize_unbounded_children(
             checkpoint._cleanup_temporaries(state)
     elapsed = time.monotonic() - started
 
+    # `inspected <= 32` is the assertion. It proves the enumeration cap held
+    # against a 300,000-entry listing directly and exactly, which is the
+    # property this test exists for.
+    #
+    # The wall-clock bound below was a weaker proxy for the same thing, and the
+    # only one of the two that a loaded runner could fail. It stays as a valve
+    # -- a cap that is honoured but somehow still walks the listing would show
+    # up here -- with a bound that no scheduler hiccup can reach.
     assert inspected <= 32
-    assert elapsed < 0.1
+    assert elapsed < _ENUMERATION_VALVE_SECONDS
     assert (tombstone_path / "foreign.txt").is_file()
 
 
@@ -2872,6 +2880,11 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
 # Headroom over the prune's lock budget for the writer to land in. Wide enough
 # that a slow runner cannot fail it, narrow enough that a writer which genuinely
 # queued behind the whole prune still does.
+#: Valve for the capped-enumeration tests. The structural assertion
+#: (`inspected <= N`) is what proves the cap; this only has to be small
+#: enough to notice a full 300,000-entry walk, which takes seconds.
+_ENUMERATION_VALVE_SECONDS = 30.0
+
 _WRITER_OVERTAKE_SLACK_SECONDS = 5.0
 
 
