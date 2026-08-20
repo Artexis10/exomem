@@ -1,6 +1,25 @@
 # Tasks — deterministic edge ingress
 
-## Lane W — worker (deploy/cloudflare-ha)
+## Lane W — worker (deploy/cloudflare-ha) — WITHDRAWN 2026-08-20
+
+`deploy/cloudflare-ha/` has been deleted (#550, #581). This change's premise was
+that the public hostname is served by **two** competing routing layers, the HA
+edge worker and a tunnel-direct connector, and that which one answers is an
+accident of DNS bindings and connector restarts. Retiring the worker removes one
+of the two layers, so the ambiguity these tasks were written to make
+deterministic no longer exists on this deployment.
+
+W1–W4 are therefore withdrawn rather than done. If a two-replica deployment ever
+returns, recover the worker from git history and reinstate them — the design in
+`design.md` still holds, and the origin-side half in Lane P is already shipped
+and unaffected.
+
+**Carry this forward if you do:** `edge_ingress` enforcement fires only when
+writer-lease coordination is enabled. With no stamping edge in front of it,
+turning coordination on would make the origin refuse every Cloudflare-transited
+unsafe-method request. That trade is fail-closed by design, but it is a sharper
+edge now that nothing in-tree stamps.
+
 
 - [ ] W1. Stamp all proxied requests: extract the request-id/HMAC helper, apply
       it in the read fan-out loop and `proxyMutationRequest` (WebCrypto

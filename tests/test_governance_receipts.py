@@ -29,7 +29,7 @@ from exomem.governance import egress, receipts, store
 #: Not a latency assertion -- the operations it guards should take no measurable
 #: time. It is far above any legitimate slowness so that reaching it still means
 #: something is genuinely stuck, rather than that a CI runner was busy.
-_STUCK_SECONDS = 60.0
+_STUCK_SECONDS = 45.0
 
 _PRIOR = "a" * 64
 _TARGET = "b" * 64

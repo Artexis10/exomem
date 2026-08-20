@@ -41,6 +41,33 @@ PINNED_ADAPTER_FIXTURES = {
 }
 
 
+#: The wall-clock shape of every contention test in this file.
+#:
+#: A HOLD parks a thread or process while the test observes an ordering; an
+#: OBSERVATION is how long the test waits for that state to be reached. The gap
+#: between them is the entire discriminating power of these tests -- a hold that
+#: does not outlast its observation lets the ordering pass vacuously, and an
+#: observation sized for an idle laptop fails on a loaded shard while the code
+#: under test behaves correctly.
+#:
+#: A NEGATIVE wait (`assert not x.wait(0.1)`) proves something has NOT happened
+#: yet and stays tight: widening one changes the scenario rather than merely
+#: slowing it, because the product's own timeouts run in the same window.
+#:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 15.0
+
 def test_bundled_checkpoint_module_exists() -> None:
     assert CHECKPOINT_SCRIPT.is_file()
 
@@ -1922,7 +1949,7 @@ def test_os_advisory_lock_times_out_and_releases_when_owner_is_killed(tmp_path: 
             with checkpoint.advisory_lock(lock, timeout=0.05):
                 pass
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
         with checkpoint.advisory_lock(lock, timeout=0.5) as held:
             # Read the sentinel byte through the lock's own descriptor.
             # Windows' `msvcrt.locking` is a *mandatory* byte-range lock, so
@@ -2087,8 +2114,16 @@ def test_tombstone_and_temporary_cleanup_never_materialize_unbounded_children(
             checkpoint._cleanup_temporaries(state)
     elapsed = time.monotonic() - started
 
+    # `inspected <= 32` is the assertion. It proves the enumeration cap held
+    # against a 300,000-entry listing directly and exactly, which is the
+    # property this test exists for.
+    #
+    # The wall-clock bound below was a weaker proxy for the same thing, and the
+    # only one of the two that a loaded runner could fail. It stays as a valve
+    # -- a cap that is honoured but somehow still walks the listing would show
+    # up here -- with a bound that no scheduler hiccup can reach.
     assert inspected <= 32
-    assert elapsed < 0.1
+    assert elapsed < _ENUMERATION_VALVE_SECONDS
     assert (tombstone_path / "foreign.txt").is_file()
 
 
@@ -2624,7 +2659,7 @@ def test_true_multiprocess_older_observation_cannot_replace_newer(tmp_path: Path
         stdout=subprocess.PIPE,
         text=True,
     )
-    assert newer.wait(timeout=10) == 0 and older.wait(timeout=10) == 0
+    assert newer.wait(_OBSERVE_SECONDS) == 0 and older.wait(_OBSERVE_SECONDS) == 0
     state = checkpoint.session_state_dir(home, "codex", "ordered")
     current = checkpoint.load_checkpoint(state / "current.json")
     assert current["structural"]["trigger"] == "auto"
@@ -2650,7 +2685,7 @@ def test_killed_temporary_writer_is_cleaned_by_next_delivery(tmp_path: Path) -> 
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == "temporary"
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
         result = checkpoint.write_checkpoint(
             _event(client="codex", session_id="killed"), home, observed_at_ns=200
         )
@@ -2685,7 +2720,7 @@ def test_true_kill_after_rotation_then_same_id_retry_restores_reinjection(
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == "rotated"
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
     finally:
         if child.poll() is None:
             child.kill()
@@ -2755,7 +2790,7 @@ def test_kill_at_each_storage_stage_preserves_recoverable_state(
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == stage
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
         state = checkpoint.session_state_dir(home, "codex", "kill-stage")
         if stage == "current_to_previous":
             start = _event(
@@ -2841,7 +2876,7 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
             == 0
         )
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
         # `Popen.wait()` reporting an exit does not mean the dead writer's
         # handles are gone: Windows tears them down after `TerminateProcess`
         # returns, and until it does the state directory still holds an open
@@ -2872,6 +2907,11 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
 # Headroom over the prune's lock budget for the writer to land in. Wide enough
 # that a slow runner cannot fail it, narrow enough that a writer which genuinely
 # queued behind the whole prune still does.
+#: Valve for the capped-enumeration tests. The structural assertion
+#: (`inspected <= N`) is what proves the cap; this only has to be small
+#: enough to notice a full 300,000-entry walk, which takes seconds.
+_ENUMERATION_VALVE_SECONDS = 30.0
+
 _WRITER_OVERTAKE_SLACK_SECONDS = 5.0
 
 
@@ -2947,7 +2987,7 @@ def test_many_busy_prune_candidates_do_not_starve_supported_writer(
     )
     prune.start()
     try:
-        assert first_busy.wait(timeout=10), "prune never reached a busy candidate"
+        assert first_busy.wait(_OBSERVE_SECONDS), "prune never reached a busy candidate"
         started = time.monotonic()
         outcome = checkpoint.write_checkpoint(
             _event(client=client, session_id="writer"),
@@ -2956,7 +2996,7 @@ def test_many_busy_prune_candidates_do_not_starve_supported_writer(
         )
         elapsed = time.monotonic() - started
     finally:
-        prune.join(timeout=10)
+        prune.join(timeout=_HOLD_SECONDS)
 
     # The writer has no stake in the prune's work and must land regardless: a
     # failed acquisition surfaces as a non-written status, so this assertion is
@@ -3018,7 +3058,7 @@ def test_prune_respects_total_budget_when_root_lock_is_held(tmp_path: Path) -> N
         assert elapsed < checkpoint.MAX_PRUNE_LOCK_SECONDS + 0.15
     finally:
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
 
 
 def test_prune_bounds_root_enumeration_before_candidate_work(
@@ -3336,7 +3376,7 @@ def test_true_kill_around_portable_catalog_publication_is_recoverable(
         assert child.stdout is not None
         assert child.stdout.readline().strip() == stage.replace("_", "-")
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
     finally:
         if child.poll() is None:
             child.kill()
@@ -3385,7 +3425,7 @@ def test_true_kill_before_catalog_publish_resumes_one_bounded_catalog(
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == "catalog-ready"
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
     finally:
         if child.poll() is None:
             child.kill()
@@ -3719,7 +3759,7 @@ def test_true_kill_between_session_directory_creation_and_manifest_is_prunable(
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == "created"
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
     finally:
         if child.poll() is None:
             child.kill()
@@ -3773,7 +3813,7 @@ def test_true_kill_after_pending_temp_fsync_is_cleaned_boundedly(
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == "pending-temp"
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
     finally:
         if child.poll() is None:
             child.kill()
@@ -3840,7 +3880,7 @@ def test_true_kill_after_pending_publish_before_directory_is_pruned(
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == "pending-published"
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
     finally:
         if child.poll() is None:
             child.kill()
@@ -3893,7 +3933,7 @@ def test_true_kill_after_session_manifest_publish_cleans_redundant_pending(
         assert child.stdout is not None
         assert child.stdout.readline().strip() == "manifest-published"
         child.kill()
-        child.wait(timeout=5)
+        child.wait(_OBSERVE_SECONDS)
     finally:
         if child.poll() is None:
             child.kill()
