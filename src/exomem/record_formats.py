@@ -1176,6 +1176,33 @@ def render_markdown_item_update(
     return bom + rebuilt
 
 
+def _yaml_head_scalar(transition_id: str) -> str:
+    """Render an audit head so YAML reads it back as the string it is.
+
+    The head is 24 characters of `uuid4().hex`, so about one draw in 79,000
+    contains no letter at all. Written bare, YAML types
+    `head: 123456789012345678901234` as an integer, and the reader -- which
+    requires a str -- rejects the manifest with INVALID_COLLECTION_AUDIT. The
+    collection is unreadable from then on. It surfaced as a single product-E2E
+    failure on main that passed on a rerun of the identical tree, because the
+    rerun drew a different id (#549).
+
+    Quoting only the ids that need it keeps the renderer's style contract: a
+    manifest is user-visible, its existing spelling and trailing comments are
+    preserved elsewhere in this function, and quoting all of them would rewrite
+    every manifest in the vault on its next mutation to fix one in 79,000.
+
+    Asking the parser is the check, rather than reasoning about which literals
+    YAML claims. That reasoning is what produced the bug.
+    """
+    try:
+        if vault.yaml.safe_load(f"v: {transition_id}")["v"] == transition_id:
+            return transition_id
+    except (vault.yaml.YAMLError, KeyError, TypeError):
+        pass
+    return f"'{transition_id}'"
+
+
 def render_manifest_audit_head(
     source: str,
     transition_id: str,
@@ -1228,7 +1255,8 @@ def render_manifest_audit_head(
         raise collections.CollectionError("INVALID_RECORD_AUDIT", "audit reader version is invalid")
     if audit_node is None:
         frontmatter += (
-            f"{profile.manifest_audit_property}: {{version: {reader_version or 1}, head: {transition_id}}}{newline}"
+            f"{profile.manifest_audit_property}: "
+            f"{{version: {reader_version or 1}, head: {_yaml_head_scalar(transition_id)}}}{newline}"
         )
     else:
         values = {
@@ -1242,7 +1270,11 @@ def render_manifest_audit_head(
             raise collections.CollectionError(
                 "INVALID_RECORD_AUDIT", "record audit head is invalid"
             )
-        replacements = [(head.start_mark.index, head.end_mark.index, transition_id)]
+        # The marks span any quotes the existing scalar had, so the
+        # replacement has to supply its own.
+        replacements = [
+            (head.start_mark.index, head.end_mark.index, _yaml_head_scalar(transition_id))
+        ]
         if reader_version is not None:
             replacements.append((version.start_mark.index, version.end_mark.index, str(reader_version)))
         for start_index, end_index, replacement in sorted(replacements, reverse=True):
