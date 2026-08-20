@@ -2865,6 +2865,65 @@ def test_windows_replacement_refusal_keeps_the_previous_complete_sidecar(
     assert temporary.read_bytes() == b"new"
 
 
+def test_replacement_refusal_names_what_it_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal has to say more than "an open reader".
+
+    It fired on a Windows CI shard without reproducing locally, and by the time
+    it is raised the code has already spent three in-place attempts behind a 5s
+    busy timeout, under four publication attempts above it -- so something held
+    on for close to a minute. "Has an open reader" is a hypothesis, not an
+    observation, and it cannot be told apart from a permission error that is
+    not a sharing conflict at all. Widening a budget that size again would be
+    guessing; carrying the evidence is not.
+    """
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True)
+    live.write_bytes(b"old")
+    temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
+    temporary.write_bytes(b"new")
+    monkeypatch.setattr(
+        graph_sync.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(PermissionError(13, "sharing violation")),
+    )
+
+    with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable) as raised:
+        graph_sync.replace_sidecar(temporary, live)
+
+    message = str(raised.value)
+    # What os.replace itself said, not a paraphrase of it.
+    assert "PermissionError" in message
+    assert "sharing violation" in message
+    # Every in-place attempt is accounted for, with the error each one hit.
+    assert f"in-place {graph_sync.PUBLISH_IN_PLACE_ATTEMPTS} attempt(s)" in message
+    assert message.count("#") == graph_sync.PUBLISH_IN_PLACE_ATTEMPTS
+    # Elapsed time is the term that separates "a reader held SHARED for the
+    # whole busy timeout" from "this failed instantly and is not a lock at all".
+    assert "s:" in message and "after" in message
+
+
+def test_replacement_refusal_says_when_there_was_nothing_to_publish_into(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An absent live sidecar is a different failure and must read as one."""
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True)
+    temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
+    temporary.write_bytes(b"new")
+    monkeypatch.setattr(
+        graph_sync.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(PermissionError(13, "denied")),
+    )
+
+    with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable) as raised:
+        graph_sync.replace_sidecar(temporary, live)
+
+    assert "live sidecar absent" in str(raised.value)
+
+
 def test_full_rebuild_replacement_refusal_retains_complete_temp_for_later_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
