@@ -35,6 +35,23 @@ from exomem.writer_lease import (
 )
 
 
+#: The wall-clock shape of every contention test in this file.
+#:
+#: A HOLD parks a thread or process while the test observes an ordering; an
+#: OBSERVATION is how long the test waits for that state to be reached. The gap
+#: between them is the entire discriminating power of these tests -- a hold that
+#: does not outlast its observation lets the ordering pass vacuously, and an
+#: observation sized for an idle laptop fails on a loaded shard while the code
+#: under test behaves correctly.
+#:
+#: A NEGATIVE wait (`assert not x.wait(0.1)`) proves something has NOT happened
+#: yet and stays tight: widening one changes the scenario rather than merely
+#: slowing it, because the product's own timeouts run in the same window.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
+_HOLD_SECONDS = 60.0
+_OBSERVE_SECONDS = 15.0
+
 def _boundary(snapshot: dict) -> dict:
     """Drop the additive contention block so the boundary shape stays exact.
 
@@ -917,7 +934,7 @@ class BlockingRejectedRenewalClient(FakeClient):
     def renew(self, fencing_token: int) -> LeaseRecord:
         assert fencing_token == 1
         self.renew_started.set()
-        assert self.resume_renewal.wait(timeout=5)
+        assert self.resume_renewal.wait(_HOLD_SECONDS)
         return LeaseRecord("laptop", 200, 2, False)
 
 
@@ -974,12 +991,12 @@ def test_hosted_reads_never_contact_the_coordinator_or_wait_for_the_boundary(
     def hold_mutation() -> None:
         with coordinator.hold(timeout_seconds=2.0):
             boundary_entered.set()
-            assert release_boundary.wait(2.0)
+            assert release_boundary.wait(_HOLD_SECONDS)
 
     writer = threading.Thread(target=hold_mutation)
     writer.start()
     try:
-        assert boundary_entered.wait(1.0)
+        assert boundary_entered.wait(_OBSERVE_SECONDS)
         # The read returns immediately without waiting for release — it
         # never even attempts to acquire the boundary a concurrent writer
         # is holding.
@@ -993,7 +1010,7 @@ def test_hosted_reads_never_contact_the_coordinator_or_wait_for_the_boundary(
         )
     finally:
         release_boundary.set()
-        writer.join(timeout=2.0)
+        writer.join(timeout=_HOLD_SECONDS)
     assert not writer.is_alive()
 
 
@@ -1008,11 +1025,11 @@ def test_read_only_invocation_bypasses_held_mutation_boundary(tmp_path: Path) ->
     def hold_mutation() -> None:
         with coordinator.hold(timeout_seconds=2.0):
             entered.set()
-            assert release.wait(2.0)
+            assert release.wait(_HOLD_SECONDS)
 
     thread = threading.Thread(target=hold_mutation)
     thread.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_OBSERVE_SECONDS)
     manager = LeaseManager(LeaseConfig(state_dir=state_root))
     try:
         assert (
@@ -1025,7 +1042,7 @@ def test_read_only_invocation_bypasses_held_mutation_boundary(tmp_path: Path) ->
         )
     finally:
         release.set()
-        thread.join(timeout=2.0)
+        thread.join(timeout=_HOLD_SECONDS)
     assert not thread.is_alive()
 
 
@@ -1046,11 +1063,11 @@ def test_hosted_plain_read_bypasses_boundary_held_by_other_manager(
     def hold_boundary() -> None:
         with holder.mutation_guard(vault):
             boundary_held.set()
-            assert release_boundary.wait(timeout=2)
+            assert release_boundary.wait(_HOLD_SECONDS)
 
     worker = threading.Thread(target=hold_boundary, daemon=True)
     worker.start()
-    assert boundary_held.wait(timeout=2)
+    assert boundary_held.wait(_OBSERVE_SECONDS)
     monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
 
     try:
@@ -1064,7 +1081,7 @@ def test_hosted_plain_read_bypasses_boundary_held_by_other_manager(
         )
     finally:
         release_boundary.set()
-        worker.join(timeout=2)
+        worker.join(timeout=_HOLD_SECONDS)
     assert not worker.is_alive()
 
 
@@ -1081,7 +1098,7 @@ def test_write_leaf_is_serialized_for_entire_invocation(tmp_path: Path) -> None:
 
     def first_leaf(_vault: Path) -> str:
         first_entered.set()
-        assert release_first.wait(2.0)
+        assert release_first.wait(_HOLD_SECONDS)
         return "first"
 
     def second_leaf(_vault: Path) -> str:
@@ -1098,14 +1115,14 @@ def test_write_leaf_is_serialized_for_entire_invocation(tmp_path: Path) -> None:
     first_thread = threading.Thread(target=run_first)
     second_thread = threading.Thread(target=run_second)
     first_thread.start()
-    assert first_entered.wait(1.0)
+    assert first_entered.wait(_OBSERVE_SECONDS)
     second_thread.start()
-    assert second_attempting.wait(1.0)
+    assert second_attempting.wait(_OBSERVE_SECONDS)
     assert not second_entered.wait(0.1)
     release_first.set()
-    assert second_entered.wait(1.0)
-    first_thread.join(timeout=2.0)
-    second_thread.join(timeout=2.0)
+    assert second_entered.wait(_OBSERVE_SECONDS)
+    first_thread.join(timeout=_HOLD_SECONDS)
+    second_thread.join(timeout=_HOLD_SECONDS)
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
 
@@ -1308,7 +1325,7 @@ def test_explicit_process_media_hash_yields_global_guard_and_replays_idempotentl
         nonlocal provenance_calls
         provenance_calls += 1
         hash_started.set()
-        assert continue_hash.wait(2.0)
+        assert continue_hash.wait(_HOLD_SECONDS)
         return original_read(*args, **kwargs)
 
     def guarded_batch(*args, **kwargs):  # noqa: ANN002, ANN003
@@ -1340,7 +1357,7 @@ def test_explicit_process_media_hash_yields_global_guard_and_replays_idempotentl
 
     worker = threading.Thread(target=process)
     worker.start()
-    assert hash_started.wait(1.0)
+    assert hash_started.wait(_OBSERVE_SECONDS)
     try:
         with contender.mutation_guard(
             vault,
@@ -1352,7 +1369,7 @@ def test_explicit_process_media_hash_yields_global_guard_and_replays_idempotentl
             )
     finally:
         continue_hash.set()
-        worker.join(timeout=3.0)
+        worker.join(timeout=_HOLD_SECONDS)
 
     assert not worker.is_alive()
     assert errors == []
@@ -1405,11 +1422,11 @@ def test_pathless_process_media_propagates_per_artifact_mutation_busy(
     def hold() -> None:
         with holder.mutation_guard(vault, operation="foreground-holder"):
             held.set()
-            assert release.wait(2.0)
+            assert release.wait(_HOLD_SECONDS)
 
     thread = threading.Thread(target=hold)
     thread.start()
-    assert held.wait(1.0)
+    assert held.wait(_OBSERVE_SECONDS)
     try:
         with pytest.raises(OpError) as raised:
             manager.invoke(
@@ -1420,7 +1437,7 @@ def test_pathless_process_media_propagates_per_artifact_mutation_busy(
             )
     finally:
         release.set()
-        thread.join(timeout=2.0)
+        thread.join(timeout=_HOLD_SECONDS)
 
     assert raised.value.code == "MUTATION_BUSY"
     assert raised.value.details["status"] == "retryable"
@@ -1628,7 +1645,7 @@ def test_superseded_replica_cannot_land_staged_write(
         result = original_create_artifact(workspace, name, content)
         if name.startswith("stage-"):
             staged.set()
-            assert resume.wait(timeout=5)
+            assert resume.wait(_HOLD_SECONDS)
         return result
 
     monkeypatch.setattr(
@@ -1650,11 +1667,11 @@ def test_superseded_replica_cannot_land_staged_write(
 
     worker = threading.Thread(target=run_replica_a)
     worker.start()
-    assert staged.wait(timeout=5)
+    assert staged.wait(_OBSERVE_SECONDS)
     clock.value = 111
     assert replica_b.ensure_writer().fencing_token == 2
     resume.set()
-    worker.join(timeout=5)
+    worker.join(timeout=_HOLD_SECONDS)
 
     assert not worker.is_alive()
     assert len(outcome) == 1
@@ -1679,11 +1696,11 @@ def test_delayed_rejected_renewal_does_not_clear_newer_local_token(tmp_path: Pat
     manager._stop = TwoStepStop()
     renewer = threading.Thread(target=manager._renew_loop)
     renewer.start()
-    assert client.renew_started.wait(timeout=5)
+    assert client.renew_started.wait(_OBSERVE_SECONDS)
 
     assert manager.ensure_writer().fencing_token == 3
     client.resume_renewal.set()
-    renewer.join(timeout=5)
+    renewer.join(timeout=_HOLD_SECONDS)
 
     assert not renewer.is_alive()
     assert manager._fencing_token == 3
@@ -1745,7 +1762,7 @@ def test_identical_inflight_retry_waits_for_original_terminal_result(
     def leaf(_vault: Path, value: int) -> dict[str, object]:
         calls.append(value)
         leaf_started.set()
-        assert release_leaf.wait(timeout=2)
+        assert release_leaf.wait(_HOLD_SECONDS)
         return {"committed": True, "value": value}
 
     command = _command(writes=True, leaf=leaf)
@@ -1771,12 +1788,12 @@ def test_identical_inflight_retry_waits_for_original_terminal_result(
     original = threading.Thread(target=invoke, args=("original",), daemon=True)
     retry = threading.Thread(target=invoke, args=("retry",), daemon=True)
     original.start()
-    assert leaf_started.wait(timeout=2)
+    assert leaf_started.wait(_OBSERVE_SECONDS)
     retry.start()
-    assert pending_seen.wait(timeout=2)
+    assert pending_seen.wait(_OBSERVE_SECONDS)
     release_leaf.set()
-    original.join(timeout=2)
-    retry.join(timeout=2)
+    original.join(timeout=_HOLD_SECONDS)
+    retry.join(timeout=_HOLD_SECONDS)
 
     assert not original.is_alive()
     assert not retry.is_alive()
@@ -2011,7 +2028,7 @@ def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
     def first_leaf() -> str:
         first_calls.append("first")
         leaf_started.set()
-        assert release_leaf.wait(timeout=2)
+        assert release_leaf.wait(_HOLD_SECONDS)
         return "committed"
 
     first = _command(writes=True, leaf=first_leaf)
@@ -2037,7 +2054,7 @@ def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
 
     worker = threading.Thread(target=invoke_first, daemon=True)
     worker.start()
-    assert leaf_started.wait(timeout=2)
+    assert leaf_started.wait(_OBSERVE_SECONDS)
     with pytest.raises(OpError) as busy:
         manager.invoke(
             second,
@@ -2060,7 +2077,7 @@ def test_different_identity_busy_is_precommit(tmp_path: Path) -> None:
     assert busy_wire["request_id"] == busy_payload["request_id"]
     assert second_calls == []
     release_leaf.set()
-    worker.join(timeout=2)
+    worker.join(timeout=_HOLD_SECONDS)
     assert outcome == ["committed"]
     assert first_calls == ["first"]
 
@@ -2250,7 +2267,7 @@ def test_hosted_audit_does_not_hold_mutation_boundary(
 
     def audit_leaf(_vault: Path, *, mode: str = "audit") -> str:  # noqa: ARG001
         audit_started.set()
-        assert release_audit.wait(timeout=2)
+        assert release_audit.wait(_HOLD_SECONDS)
         return "audited"
 
     audit = SimpleNamespace(name="maintain_memory", read_only=False, leaf=audit_leaf)
@@ -2267,10 +2284,10 @@ def test_hosted_audit_does_not_hold_mutation_boundary(
 
     worker = threading.Thread(target=run_audit, daemon=True)
     worker.start()
-    assert audit_started.wait(timeout=2)
+    assert audit_started.wait(_OBSERVE_SECONDS)
     assert manager.invoke(mutation, (tmp_path,), {}) == "committed"
     release_audit.set()
-    worker.join(timeout=2)
+    worker.join(timeout=_HOLD_SECONDS)
 
     assert audit_outcome == ["audited"]
 
@@ -2300,11 +2317,11 @@ def test_hosted_public_audit_routes_bypass_boundary_held_by_other_manager(
     def hold_boundary() -> None:
         with holder.mutation_guard(vault):
             boundary_held.set()
-            assert release_boundary.wait(timeout=2)
+            assert release_boundary.wait(_HOLD_SECONDS)
 
     worker = threading.Thread(target=hold_boundary, daemon=True)
     worker.start()
-    assert boundary_held.wait(timeout=2)
+    assert boundary_held.wait(_OBSERVE_SECONDS)
     monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
     command = SimpleNamespace(
         name=command_name,
@@ -2316,7 +2333,7 @@ def test_hosted_public_audit_routes_bypass_boundary_held_by_other_manager(
         assert auditor.invoke(command, (vault,), kwargs, read_only=True) == "audited"
     finally:
         release_boundary.set()
-        worker.join(timeout=2)
+        worker.join(timeout=_HOLD_SECONDS)
 
     assert not worker.is_alive()
 
@@ -2355,11 +2372,11 @@ def test_hosted_mutation_previews_bypass_boundary_held_by_other_manager(
     def hold_boundary() -> None:
         with holder.mutation_guard(vault):
             boundary_held.set()
-            assert release_boundary.wait(timeout=2)
+            assert release_boundary.wait(_HOLD_SECONDS)
 
     worker = threading.Thread(target=hold_boundary, daemon=True)
     worker.start()
-    assert boundary_held.wait(timeout=2)
+    assert boundary_held.wait(_OBSERVE_SECONDS)
     monkeypatch.setattr(writer_lease_module, "content_private_logging_enabled", lambda: True)
     command = SimpleNamespace(
         name=command_name,
@@ -2371,7 +2388,7 @@ def test_hosted_mutation_previews_bypass_boundary_held_by_other_manager(
         assert previewer.invoke(command, (vault,), kwargs, read_only=True) == "previewed"
     finally:
         release_boundary.set()
-        worker.join(timeout=2)
+        worker.join(timeout=_HOLD_SECONDS)
 
     assert not worker.is_alive()
 
@@ -3298,12 +3315,12 @@ def test_in_flight_mutation_blocks_release_until_it_completes(tmp_path: Path) ->
     def hold_guard() -> None:
         with manager.writer_authority_guard():
             entered.set()
-            assert release_guard.wait(timeout=2)
+            assert release_guard.wait(_HOLD_SECONDS)
 
     worker = threading.Thread(target=hold_guard)
     worker.start()
     try:
-        assert entered.wait(timeout=2)
+        assert entered.wait(_OBSERVE_SECONDS)
         # In flight: idle release must not fire even though activity is stale
         # (writer_authority_guard refreshed it, but force it stale again to
         # prove the mutation-count gate — not just the timestamp — blocks it).
@@ -3311,7 +3328,7 @@ def test_in_flight_mutation_blocks_release_until_it_completes(tmp_path: Path) ->
         assert manager._maybe_idle_release(1) is False
     finally:
         release_guard.set()
-        worker.join(timeout=2)
+        worker.join(timeout=_HOLD_SECONDS)
     assert not worker.is_alive()
 
     # First tick after completion: activity was refreshed on guard exit, so
@@ -3585,7 +3602,7 @@ def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(
     class BlockingReleaseClient(StoreClient):
         def release(self, fencing_token):  # noqa: ANN001, ANN201
             release_entered.set()
-            assert release_unblocked.wait(5.0)
+            assert release_unblocked.wait(_HOLD_SECONDS)
             return super().release(fencing_token)
 
     laptop = LeaseManager(
@@ -3608,7 +3625,7 @@ def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(
 
     releaser = threading.Thread(target=run_release)
     releaser.start()
-    assert release_entered.wait(5.0)
+    assert release_entered.wait(_OBSERVE_SECONDS)
 
     acquired: dict[str, object] = {}
 
@@ -3617,13 +3634,13 @@ def test_ensure_writer_racing_a_live_in_flight_release_gets_a_fresh_token(
 
     acquirer = threading.Thread(target=run_acquire)
     acquirer.start()
-    acquirer.join(0.3)
+    acquirer.join(timeout=_HOLD_SECONDS)
     assert acquirer.is_alive(), "ensure_writer did not wait for the locked release"
     assert "record" not in acquired
 
     release_unblocked.set()
-    releaser.join(5.0)
-    acquirer.join(5.0)
+    releaser.join(timeout=_HOLD_SECONDS)
+    acquirer.join(timeout=_HOLD_SECONDS)
     assert not acquirer.is_alive()
     assert release_result["released"] is True
     record = acquired["record"]

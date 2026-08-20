@@ -32,6 +32,8 @@ CONVERTED = (
     "test_graph_rebuild_availability.py",
     "test_mutation_lock.py",
     "test_epistemic_graph_freshness.py",
+    "test_writer_lease.py",
+    "test_continuation_checkpoint.py",
 )
 
 #: `assert not <event>.wait(0.05)` is a NEGATIVE observation -- it proves
@@ -42,10 +44,16 @@ CONVERTED = (
 #: not. They are exempt by construction, not by allowlist.
 _NEGATIVE = re.compile(r"\bnot\s+[A-Za-z_][A-Za-z0-9_]*\.wait\(")
 
+#: Both the positional and the keyword spelling. An earlier sweep matched only
+#: `.wait(2)` and missed every `.wait(2.0)`; a later one matched only the bare
+#: form and missed every `.wait(timeout=2)`. Each gap shipped and each one came
+#: back as a CI failure, so the detector accepts all four shapes.
 _POSITIVE_LITERAL_WAIT = re.compile(
-    r"\b([A-Za-z_][A-Za-z0-9_]*)\.wait\((\d+(?:\.\d+)?)\)"
+    r"\b([A-Za-z_][A-Za-z0-9_]*)\.wait\((?:timeout=)?(\d+(?:\.\d+)?)\)"
 )
-_LITERAL_JOIN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\.join\(timeout=(\d+(?:\.\d+)?)\)")
+_LITERAL_JOIN = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]*)\.join\((?:timeout=)?(\d+(?:\.\d+)?)\)"
+)
 
 
 def _offenders(source: str) -> list[tuple[int, str]]:
