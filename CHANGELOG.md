@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.57.1](https://github.com/Artexis10/exomem/compare/v0.57.0...v0.57.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **benchmarks:** bound guest service residency so a run cannot OOM the host ([#713](https://github.com/Artexis10/exomem/issues/713)) ([4d8530f](https://github.com/Artexis10/exomem/commit/4d8530f6f55601adb7a752b0ee6fd8319bbbd3bc))
+
+
+### Performance
+
+* **recall:** stop re-resolving the vault root once per ranking candidate ([#712](https://github.com/Artexis10/exomem/issues/712)) ([a1c7fac](https://github.com/Artexis10/exomem/commit/a1c7face11c069c433ff31a7072a322346fb0187))
+
 ## [0.57.0](https://github.com/Artexis10/exomem/compare/v0.56.0...v0.57.0) (2026-08-20)
 
 
