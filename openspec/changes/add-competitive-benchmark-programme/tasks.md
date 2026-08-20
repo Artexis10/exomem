@@ -268,6 +268,17 @@ them. Mission acceptance criteria (§14) close only from this ledger.
       all lock hashes recompute. Final independent FEEDBACK6 recheck: `CLEAR`.
       No competitor/provider/network/model/dataset benchmark, credential,
       metered call, commit, push, or §4.6 work occurred.
+- [x] 4.5a Bound Exomem guest-service residency across staged processes
+      (configurable positive cap, default one); retire LRU process groups and
+      descriptors before replacement; preserve restartable vault state until
+      terminal per-container cleanup; clear finished searches and every
+      question/indexing failure; install idempotent SIGINT/SIGTERM and uncaught
+      failure cleanup that proves absence before re-raising; make absent
+      `clear()` attach-only. Red-first coverage: at least five sequential tags,
+      cross-stage admission, mid-run/indexing failure, both termination signals,
+      in-flight retirement, and absent-clear no-spawn. Keep the existing
+      descriptor/process-group/work-root proof path and full runner cleanup as
+      the orphan backstop.
 - [ ] 4.6a Publish the already-observed guest facts in `memorybench-export.v1`.
       Blocked discovery (2026-08-15): five of the nine BLOCKING equivalence keys
       had no source in the export — `session_normalization`,

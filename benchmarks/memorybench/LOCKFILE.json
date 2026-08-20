@@ -19,11 +19,11 @@
     },
     "src/providers/_guest_transport.ts": {
       "source": "providers/_guest_transport.ts",
-      "sha256": "006b0926d4546a0a4d69477e12c8b96e3ce581fd14bdc7adc6e595049f2dcea6"
+      "sha256": "d338da0d44415a74c2deb0465abf4c971ee31999dd132bb9658a0a0db42a76d8"
     },
     "src/providers/exomem/index.ts": {
       "source": "providers/exomem/index.ts",
-      "sha256": "cdd4b37213379ca8e6b998fdf5f0b764a05aa3b823abca2e5767f72c1ea5b230"
+      "sha256": "da9d3859196828ed8e908061ca62b58188cf810402ed89842af6e7d6a17dba88"
     },
     "src/providers/basic-memory/index.ts": {
       "source": "providers/basic-memory/index.ts",
@@ -35,7 +35,7 @@
     },
     "src/providers/__guest_tests__/guest_transport.test.ts": {
       "source": "providers/tests/guest_transport.test.ts",
-      "sha256": "7389144bad46aca2d1c7753190b7acf832e27e7fa5036b90b9448d0b3c72bd3f"
+      "sha256": "b865393e337240e7d1333be49b0155f778ad511b357eaec16befbcec53b20cf9"
     },
     "src/providers/__guest_tests__/basic_memory.test.ts": {
       "source": "providers/tests/basic_memory.test.ts",
@@ -43,7 +43,7 @@
     },
     "src/providers/__guest_tests__/exomem.test.ts": {
       "source": "providers/tests/exomem.test.ts",
-      "sha256": "08182f03e0e3f42a44cee4a73a38fd9c47812101aeef4c9a6a3e49dd1bf9d40d"
+      "sha256": "41bd5d2d3e4a910b22c496616d01c6b6024029175413dbef1e301abead00adda"
     },
     "src/providers/basic-memory/test_sidecar.py": {
       "source": "providers/basic-memory/test_sidecar.py",

@@ -174,6 +174,54 @@ refused while final absence remains unproved.
 - **THEN** the programme-owned runner calls the transport cleanup, records its
   result, and refuses terminal validity unless final absence is proven
 
+### Requirement: Guest Service Residency Is Bounded Across Stages
+The Exomem MemoryBench guest transport SHALL cap live owned services across the
+whole staged run at `MEMORYBENCH_EXOMEM_MAX_LIVE_SERVICES`, a positive integer
+defaulting to one.  Admission SHALL be serialized across stage processes.  When
+a new container would exceed the cap, the least-recently-used live service
+SHALL be retired first and its owned process group and secure descriptor SHALL
+be proved absent before a replacement is spawned.  Residency retirement MAY
+preserve the owned vault and work root needed by a later stage; terminal
+container cleanup SHALL additionally prove owned guest-process and work-root
+absence.  A completed indexing step SHALL retire its now-idle service, and a
+search attempt SHALL clear its finished container on both success and failure.
+
+Ingest, indexing, and search exceptions SHALL clear every live service owned by
+that stage instance before the exception escapes.  SIGINT, SIGTERM, uncaught
+exceptions, and unhandled rejections SHALL trigger one idempotent cleanup of
+every securely discovered live Exomem service, wait for any retirement already
+in flight, prove absence, and then re-raise the original signal or failure.
+Clearing an absent container SHALL inspect deterministic descriptor and work
+roots without calling the service-creation path.
+
+#### Scenario: Five sequential containers respect the default cap
+- **WHEN** at least five distinct container tags are admitted sequentially,
+  including across separate stage processes
+- **THEN** no observation contains more than one live owned Exomem service and
+  each replacement starts only after the prior process group and descriptor are
+  absent
+
+#### Scenario: Indexing and search retire as they go
+- **WHEN** indexing completes for a container or search returns or throws
+- **THEN** indexing preserves the container corpus but retires its live service,
+  while search performs terminal cleanup and proves the work root absent
+
+#### Scenario: Mid-run failure cannot strand services
+- **WHEN** a question operation, indexing step, or whole run throws
+- **THEN** every live service owned or securely discovered by that process is
+  retired with absence proved before the original failure escapes
+
+#### Scenario: Termination keeps honest process status
+- **WHEN** SIGINT or SIGTERM arrives while services are live or retirement is
+  already in flight
+- **THEN** cleanup runs once without deadlock, every live service is proved
+  absent, and the original signal is re-raised
+
+#### Scenario: Clearing an absent container is attach-only
+- **WHEN** `ExomemProvider.clear(containerTag)` is called with no live or
+  persisted service for that tag
+- **THEN** teardown proves deterministic absence without spawning a service
+
 ### Requirement: Direct Provider Lifecycle Is Independently Observable
 Direct-provider registration SHALL expose an inert immutable specification with
 a factory, static descriptor, namespace derivation, and runner-owned runtime

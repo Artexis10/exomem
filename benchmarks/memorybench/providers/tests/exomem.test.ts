@@ -124,19 +124,56 @@ describe("Exomem guest provider", () => {
       },
       doctor: h.doctor,
       clearService: async (tag) => h.cleared.push(tag),
+      retireService: async () => {},
     })
 
     await provider.ingest(sessions.slice(0, 1), { containerTag: "container-a" })
     await provider.ingest(sessions.slice(1), { containerTag: "container-b" })
     await provider.search("a", { containerTag: "container-a", limit: 1 })
     await provider.search("b", { containerTag: "container-b", limit: 1 })
-    await provider.clear("container-a")
-    await provider.clear("container-b")
 
     expect(new Set(ensured)).toEqual(new Set(["container-a", "container-b"]))
     expect(routed.filter((call) => call.tag === "container-a").every((call) => call.token === "token-a")).toBe(true)
     expect(routed.filter((call) => call.tag === "container-b").every((call) => call.token === "token-b")).toBe(true)
     expect(h.cleared).toEqual(["container-a", "container-b"])
+  })
+
+  test("default residency never exceeds one service across five sequential container tags", async () => {
+    const h = harness()
+    const active = new Set<string>()
+    const retired: string[] = []
+    let peak = 0
+    const provider = new ExomemProvider({
+      ensureService: async (tag) => {
+        active.add(tag)
+        peak = Math.max(peak, active.size)
+        return {
+          ...h.service,
+          container_tag: tag,
+          base_url: `http://127.0.0.1:${41_000 + active.size}`,
+          bearer_token: `token-${tag}`,
+          work_root: `/fixture/work/services/exomem/${tag}`,
+          evidence_root: `/fixture/evidence/exomem/${tag}`,
+        }
+      },
+      post: h.post,
+      doctor: h.doctor,
+      retireService: async (service) => {
+        const tag = service.container_tag!
+        expect(active.has(tag)).toBe(true)
+        active.delete(tag)
+        retired.push(tag)
+      },
+      clearService: async (tag) => { active.delete(tag) },
+    })
+
+    for (const tag of ["container-1", "container-2", "container-3", "container-4", "container-5"]) {
+      await provider.ingest(sessions.slice(0, 1), { containerTag: tag })
+    }
+
+    expect(peak).toBe(1)
+    expect(active).toEqual(new Set(["container-5"]))
+    expect(retired).toEqual(["container-1", "container-2", "container-3", "container-4"])
   })
 
   test("a separate stage instance reattaches the requested container service", async () => {
@@ -174,6 +211,10 @@ describe("Exomem guest provider", () => {
       post: h.post,
       doctor: h.doctor,
       clearService: async (tag) => h.cleared.push(tag),
+      retireService: async (service) => {
+        expect(service).toBe(h.service)
+        h.cleared.push("retired:container")
+      },
     })
     await provider.initialize({ apiKey: "none" })
     const result = await provider.ingest(sessions.slice(0, 1), { containerTag: "container" })
@@ -182,7 +223,43 @@ describe("Exomem guest provider", () => {
     expect(progress).toEqual([
       { completedIds: [sessions[0].sessionId], failedIds: [], total: 1 },
     ])
+    expect(h.cleared).toEqual(["retired:container"])
   })
+
+  test.each(["question", "indexing"] as const)(
+    "%s failure clears every live service before the error escapes",
+    async (phase) => {
+      const h = harness()
+      const active = new Set<string>()
+      const cleanupSnapshots: string[][] = []
+      const provider = new ExomemProvider({
+        ensureService: async (tag) => {
+          active.add(tag)
+          return { ...h.service, container_tag: tag }
+        },
+        post: phase === "question" ? async () => { throw new Error("question exploded") } : h.post,
+        doctor: phase === "indexing" ? async () => { throw new Error("indexing exploded") } : h.doctor,
+        retireService: async () => {},
+        clearService: async (tag) => { active.delete(tag) },
+        clearAllServices: async () => {
+          cleanupSnapshots.push([...active])
+          active.clear()
+        },
+      })
+
+      if (phase === "question") {
+        await expect(provider.search("question", { containerTag: "container", limit: 1 })).rejects.toThrow(
+          "question exploded"
+        )
+      } else {
+        const result = await provider.ingest(sessions.slice(0, 1), { containerTag: "container" })
+        await expect(provider.awaitIndexing(result, "container")).rejects.toThrow("indexing exploded")
+      }
+
+      expect(cleanupSnapshots).toEqual([["container"]])
+      expect(active.size).toBe(0)
+    }
+  )
 
   test.each(["warning", "failure", "missing", "wrong-profile"])(
     "doctor %s refuses indexing",
@@ -251,6 +328,7 @@ describe("Exomem guest provider", () => {
       { content: "body:Knowledge Base/Sources/Sessions/a.md", score: 0.0 },
       { content: "body:Knowledge Base/Sources/Sessions/b.md", score: 0.0 },
     ])
+    expect(h.cleared).toEqual(["container"])
   })
 
   test.each(["warming", "degraded", "overlimit", "missing-path"])(
@@ -279,16 +357,18 @@ describe("Exomem guest provider", () => {
     }
   )
 
-  test("clear tears down only the owned container service", async () => {
+  test("clear on an absent container never creates a service", async () => {
     const h = harness()
+    let ensureCalls = 0
     const provider = new ExomemProvider({
-      ensureService: async () => h.service,
+      ensureService: async () => { ensureCalls += 1; return h.service },
       post: h.post,
       doctor: h.doctor,
       clearService: async (tag) => h.cleared.push(tag),
     })
     await provider.initialize({ apiKey: "none" })
     await provider.clear("container-a")
+    expect(ensureCalls).toBe(0)
     expect(h.cleared).toEqual(["container-a"])
   })
 })

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { once } from "node:events"
+import { EventEmitter, once } from "node:events"
 import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
@@ -46,6 +46,168 @@ describe("guest transport", () => {
     expect(digest).toHaveLength(64)
     expect(digest).not.toContain("_abs")
     expect(await sha256Hex(tagged)).toBe(digest)
+  })
+
+  test("bounded admission stays within the cap across five tags and separate stage passes", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    type ResidencyRecord = { containerTag: string; lastUsed: number; service: Record<string, unknown> }
+    type EnforceResidency = (options: {
+      containerTag: string
+      maxLiveServices: number
+      discover: () => Promise<ResidencyRecord[]>
+      retire: (service: Record<string, unknown>) => Promise<void>
+      launch: () => Promise<Record<string, unknown>>
+      touch: (service: Record<string, unknown>) => Promise<void>
+    }) => Promise<Record<string, unknown>>
+    const enforce = transport.enforceExomemResidency as EnforceResidency | undefined
+    expect(typeof enforce).toBe("function")
+
+    const live = new Map<string, ResidencyRecord>()
+    const events: string[] = []
+    let clock = 0
+    let peak = 0
+    const admit = async (containerTag: string) => enforce!({
+      containerTag,
+      maxLiveServices: 1,
+      discover: async () => [...live.values()],
+      retire: async (service) => {
+        const tag = String(service.container_tag)
+        events.push(`retire:${tag}`)
+        live.delete(tag)
+      },
+      launch: async () => {
+        expect(live.size).toBeLessThan(1)
+        const service = { provider: "exomem", container_tag: containerTag }
+        live.set(containerTag, { containerTag, lastUsed: ++clock, service })
+        peak = Math.max(peak, live.size)
+        events.push(`launch:${containerTag}`)
+        return service
+      },
+      touch: async () => {
+        const record = live.get(containerTag)
+        if (record) record.lastUsed = ++clock
+      },
+    })
+
+    const tags = ["container-1", "container-2", "container-3", "container-4", "container-5"]
+    for (const tag of tags) await admit(tag)
+    // A fresh stage process has no local provider map; descriptor discovery still sees container-5.
+    for (const tag of [...tags].reverse()) await admit(tag)
+
+    expect(peak).toBe(1)
+    expect(live.size).toBe(1)
+    expect(live.has("container-1")).toBe(true)
+    expect(events.indexOf("retire:container-1")).toBeLessThan(events.indexOf("launch:container-2"))
+  })
+
+  test("residency admission evicts the least-recently-used service at a configured cap", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const enforce = transport.enforceExomemResidency as undefined | ((options: Record<string, unknown>) => Promise<unknown>)
+    expect(typeof enforce).toBe("function")
+    const retired: string[] = []
+    const records = [
+      { containerTag: "recent", lastUsed: 20, service: { container_tag: "recent" } },
+      { containerTag: "oldest", lastUsed: 10, service: { container_tag: "oldest" } },
+    ]
+    await enforce!({
+      containerTag: "new",
+      maxLiveServices: 2,
+      discover: async () => records,
+      retire: async (service: { container_tag: string }) => { retired.push(service.container_tag) },
+      launch: async () => ({ container_tag: "new" }),
+      touch: async () => {},
+    })
+    expect(retired).toEqual(["oldest"])
+  })
+
+  test.each(["SIGINT", "SIGTERM"] as const)(
+    "%s handler retires every live service before re-raising",
+    async (signal) => {
+      const transport = await import("../_guest_transport") as Record<string, unknown>
+      type Install = (
+        cleanup: (trigger: string) => Promise<void>,
+        dependencies: { emitter: EventEmitter; rerase: (trigger: string, error?: unknown) => void }
+      ) => () => void
+      const install = transport.installGuestProcessCleanupHandlers as Install | undefined
+      expect(typeof install).toBe("function")
+      const emitter = new EventEmitter()
+      const live = new Set(["one", "two", "three"])
+      let reraised = ""
+      let finish!: () => void
+      const done = new Promise<void>((resolveDone) => { finish = resolveDone })
+      const dispose = install!(
+        async () => { live.clear() },
+        {
+          emitter,
+          rerase: (trigger) => {
+            expect(live.size).toBe(0)
+            reraised = trigger
+            finish()
+          },
+        }
+      )
+      emitter.emit(signal)
+      await done
+      expect(reraised).toBe(signal)
+      dispose()
+    }
+  )
+
+  test("termination cleanup is idempotent while retirement is already in flight", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const install = transport.installGuestProcessCleanupHandlers as undefined | ((
+      cleanup: (trigger: string) => Promise<void>,
+      dependencies: { emitter: EventEmitter; rerase: (trigger: string) => void }
+    ) => () => void)
+    expect(typeof install).toBe("function")
+    const emitter = new EventEmitter()
+    let cleanupCalls = 0
+    let release!: () => void
+    const retiring = new Promise<void>((resolveRetirement) => { release = resolveRetirement })
+    let finish!: () => void
+    const done = new Promise<void>((resolveDone) => { finish = resolveDone })
+    const reraised: string[] = []
+    const dispose = install!(
+      async () => { cleanupCalls += 1; await retiring },
+      { emitter, rerase: (trigger) => { reraised.push(trigger); finish() } }
+    )
+    emitter.emit("SIGINT")
+    emitter.emit("SIGTERM")
+    release()
+    await done
+    expect(cleanupCalls).toBe(1)
+    expect(reraised).toEqual(["SIGINT"])
+    dispose()
+  })
+
+  test("uncaught run failure cleans live services and preserves the original error", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const install = transport.installGuestProcessCleanupHandlers as undefined | ((
+      cleanup: (trigger: string) => Promise<void>,
+      dependencies: { emitter: EventEmitter; rerase: (trigger: string, error?: unknown) => void }
+    ) => () => void)
+    expect(typeof install).toBe("function")
+    const emitter = new EventEmitter()
+    const live = new Set(["one", "two"])
+    const original = new Error("whole run exploded")
+    let observed: unknown
+    let finish!: () => void
+    const done = new Promise<void>((resolveDone) => { finish = resolveDone })
+    const dispose = install!(
+      async () => { live.clear() },
+      {
+        emitter,
+        rerase: (_trigger, error) => {
+          expect(live.size).toBe(0)
+          observed = error
+          finish()
+        },
+      }
+    )
+    emitter.emit("uncaughtException", original)
+    await done
+    expect(observed).toBe(original)
+    dispose()
   })
 
   test("retries only reset refusal and explicit retryable responses with the same bytes", async () => {
@@ -456,8 +618,31 @@ describe("guest transport", () => {
       source.indexOf("export async function postExomem")
     )
     expect(/catch[\s\S]*await retireOwnedProcessGroup/.test(basicLaunch)).toBe(true)
-    expect(/catch[\s\S]*await retireOwnedProcessGroup/.test(exomemLaunch)).toBe(true)
+    expect(/catch[\s\S]*await retireExomemService/.test(exomemLaunch)).toBe(true)
     expect(/AbortError[\s\S]*await retireOwnedProcessGroup/.test(sidecarPost)).toBe(true)
+  })
+
+  test("signal cleanup prevents a launch retry from creating a new live service", async () => {
+    const source = await readFile(new URL("../_guest_transport.ts", import.meta.url), "utf8")
+    const exomemLaunch = source.slice(
+      source.indexOf("export async function ensureExomemService"),
+      source.indexOf("export async function runExomemDoctor")
+    )
+    expect(exomemLaunch).toMatch(/if \(exomemShutdownInProgress\)[\s\S]*const child = spawn/)
+  })
+
+  test("Exomem retirement and terminal cleanup assert every existing absence proof", async () => {
+    const source = await readFile(new URL("../_guest_transport.ts", import.meta.url), "utf8")
+    const retirement = source.slice(
+      source.indexOf("export async function retireExomemService"),
+      source.indexOf("export async function clearExomemService")
+    )
+    const cleanup = source.slice(
+      source.indexOf("export async function clearExomemService"),
+      source.indexOf("export async function finalizeBasicMemoryService")
+    )
+    expect(retirement).toMatch(/retireOwnedProcessGroup[\s\S]*ownedProcessGroupAbsent/)
+    expect(cleanup).toMatch(/ownedProcessGroupAbsent[\s\S]*ownedGuestProcessesAbsent[\s\S]*owned Exomem root still exists/)
   })
 
   test("startup failure and operation abort retirement waits for owned process absence", async () => {
