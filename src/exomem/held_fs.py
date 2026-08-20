@@ -16,7 +16,7 @@ T = TypeVar("T")
 _MISSING = object()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class HeldFsError(Exception):
     """A typed, content-free refusal from a held filesystem operation."""
 
@@ -95,6 +95,21 @@ class HeldDirectory:
         raise NotImplementedError
 
 
+class HeldFile:
+    """A retained regular-file handle and the identity observed from that handle."""
+
+    identity: StableIdentity
+
+    def __enter__(self) -> HeldFile:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
 class HeldFilesystem:
     """A retained vault-root anchor with handle-relative leaf operations."""
 
@@ -110,32 +125,46 @@ class HeldFilesystem:
     def parent(self, relative: str, *, create: bool = False) -> HeldResult[HeldDirectory]:
         raise NotImplementedError
 
-    def identity(self, parent: HeldDirectory, leaf: str) -> HeldResult[StableIdentity]:
+    def file(
+        self,
+        parent: HeldDirectory,
+        leaf: str,
+        *,
+        access: str = "read",
+        create: bool = False,
+        exclusive: bool = False,
+    ) -> HeldResult[HeldFile]:
         raise NotImplementedError
 
-    def read(self, parent: HeldDirectory, leaf: str) -> HeldResult[bytes]:
+    def read(self, file: HeldFile) -> HeldResult[bytes]:
         raise NotImplementedError
 
-    def write(self, parent: HeldDirectory, leaf: str, data: bytes) -> HeldResult[None]:
+    def write(self, file: HeldFile, data: bytes) -> HeldResult[None]:
         raise NotImplementedError
 
     def rename(
-        self, source_parent: HeldDirectory, source_leaf: str, destination_parent: HeldDirectory,
+        self,
+        source: HeldFile,
+        destination_parent: HeldDirectory,
         destination_leaf: str,
     ) -> HeldResult[None]:
         raise NotImplementedError
 
     def link(
-        self, source_parent: HeldDirectory, source_leaf: str, destination_parent: HeldDirectory,
+        self,
+        source: HeldFile,
+        destination_parent: HeldDirectory,
         destination_leaf: str,
     ) -> HeldResult[None]:
         raise NotImplementedError
 
-    def unlink(self, parent: HeldDirectory, leaf: str) -> HeldResult[None]:
+    def unlink(self, file: HeldFile) -> HeldResult[None]:
         raise NotImplementedError
 
     def copy(
-        self, source_parent: HeldDirectory, source_leaf: str, destination_parent: HeldDirectory,
+        self,
+        source: HeldFile,
+        destination_parent: HeldDirectory,
         destination_leaf: str,
     ) -> HeldResult[None]:
         raise NotImplementedError
@@ -178,10 +207,11 @@ def publish_sqlite_identities(
     names = (primary, f"{primary}-wal", f"{primary}-shm")
     identities: dict[str, StableIdentity] = {}
     for name in names:
-        result = filesystem.identity(parent, name)
+        result = filesystem.file(parent, name)
         if not result.ok:
             return HeldResult(error=result.error)
-        identities[name] = result.require()
+        with result.require() as file:
+            identities[name] = file.identity
     try:
         publish(identities)
     except Exception:  # noqa: BLE001 - caller publication must not escape the closed result.

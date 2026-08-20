@@ -1,8 +1,7 @@
 """Native Windows held-handle implementation.
 
-Descendants are always opened with ``NtCreateFile`` relative to a retained
-directory handle.  This deliberately has no ``CreateFileW(child_path)``
-fallback: an unavailable native primitive disables the route.
+Descendants are opened with ``NtCreateFile`` relative to a retained directory
+handle. There is deliberately no reconstructed-descendant-path fallback.
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from ctypes import (
     byref,
     c_byte,
     c_long,
+    c_ubyte,
     c_ulong,
     c_ulonglong,
     c_ushort,
@@ -31,6 +31,7 @@ from pathlib import Path
 from .held_fs import (
     Capabilities,
     HeldDirectory,
+    HeldFile,
     HeldFilesystem,
     HeldFsError,
     HeldResult,
@@ -39,6 +40,7 @@ from .held_fs import (
 )
 
 FILE_OPEN = 1
+FILE_CREATE = 2
 FILE_OPEN_IF = 3
 FILE_DIRECTORY_FILE = 0x00000001
 FILE_NON_DIRECTORY_FILE = 0x00000040
@@ -47,6 +49,9 @@ FILE_OPEN_REPARSE_POINT = 0x00200000
 FILE_ATTRIBUTE_NORMAL = 0x00000080
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+FILE_SHARE_DELETE = 0x00000004
+FILE_SHARE_ALL = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
 FILE_LIST_DIRECTORY = 0x00000001
 FILE_ADD_FILE = 0x00000002
 FILE_ADD_SUBDIRECTORY = 0x00000004
@@ -55,6 +60,7 @@ FILE_WRITE_DATA = 0x00000002
 FILE_READ_ATTRIBUTES = 0x00000080
 DELETE = 0x00010000
 SYNCHRONIZE = 0x00100000
+OBJ_CASE_INSENSITIVE = 0x00000040
 FILE_RENAME_INFORMATION = 10
 FILE_LINK_INFORMATION = 11
 FILE_DISPOSITION_INFORMATION = 4
@@ -110,15 +116,32 @@ class BY_HANDLE_FILE_INFORMATION(Structure):
     ]
 
 
+class FILE_NAME_INFORMATION(Structure):
+    """ABI-derived header shared by native rename and link information."""
+
+    _fields_ = [
+        ("ReplaceIfExists", c_ubyte),
+        ("RootDirectory", c_void_p),
+        ("FileNameLength", c_ulong),
+        ("FileName", c_ushort * 1),
+    ]
+
+
+class FILE_DISPOSITION_INFO(Structure):
+    _fields_ = [("DeleteFile", c_ubyte)]
+
+
 if os.name == "nt":  # pragma: no cover - executed by windows-latest
     NtCreateFile = ctypes.windll.ntdll.NtCreateFile
     NtSetInformationFile = ctypes.windll.ntdll.NtSetInformationFile
     NtQueryDirectoryFile = ctypes.windll.ntdll.NtQueryDirectoryFile
+    RtlNtStatusToDosError = ctypes.windll.ntdll.RtlNtStatusToDosError
     SetFileInformationByHandle = ctypes.windll.kernel32.SetFileInformationByHandle
     GetFileInformationByHandleEx = ctypes.windll.kernel32.GetFileInformationByHandleEx
     GetFileInformationByHandle = ctypes.windll.kernel32.GetFileInformationByHandle
     CreateFileW = ctypes.windll.kernel32.CreateFileW
     CloseHandle = ctypes.windll.kernel32.CloseHandle
+
     NtCreateFile.argtypes = [
         POINTER(c_void_p),
         c_ulong,
@@ -134,7 +157,11 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
     ]
     NtCreateFile.restype = c_long
     NtSetInformationFile.argtypes = [
-        c_void_p, POINTER(IO_STATUS_BLOCK), c_void_p, c_ulong, c_ulong
+        c_void_p,
+        POINTER(IO_STATUS_BLOCK),
+        c_void_p,
+        c_ulong,
+        c_ulong,
     ]
     NtSetInformationFile.restype = c_long
     NtQueryDirectoryFile.argtypes = [
@@ -151,6 +178,8 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
         wintypes.BOOL,
     ]
     NtQueryDirectoryFile.restype = c_long
+    RtlNtStatusToDosError.argtypes = [c_long]
+    RtlNtStatusToDosError.restype = c_ulong
     SetFileInformationByHandle.argtypes = [c_void_p, c_ulong, c_void_p, c_ulong]
     SetFileInformationByHandle.restype = wintypes.BOOL
     GetFileInformationByHandleEx.argtypes = [c_void_p, c_ulong, c_void_p, c_ulong]
@@ -173,6 +202,7 @@ else:  # pragma: no cover - keeps Linux imports syntactically safe
     NtCreateFile = None
     NtSetInformationFile = None
     NtQueryDirectoryFile = None
+    RtlNtStatusToDosError = None
     SetFileInformationByHandle = None
     GetFileInformationByHandleEx = None
     GetFileInformationByHandle = None
@@ -184,11 +214,17 @@ def _invalid() -> HeldFsError:
     return HeldFsError("UNSAFE_PATH", "unsafe filesystem object")
 
 
-def _error(_error: OSError | None = None) -> HeldFsError:
-    if _error is not None and _error.errno == errno.EXDEV:
+def _error(error: OSError | None = None) -> HeldFsError:
+    if error is not None and error.errno in {17, errno.EXDEV}:
         return HeldFsError("CROSS_DEVICE", "operation requires one filesystem")
-    if _error is not None and _error.errno in {errno.ELOOP, errno.ENOTDIR}:
+    if error is not None and error.errno in {errno.ELOOP, errno.ENOTDIR}:
         return _invalid()
+    if error is not None and error.errno == errno.ESTALE:
+        return HeldFsError("IDENTITY_CHANGED", "held filesystem identity changed")
+    if error is not None and error.errno in {2, 3, errno.ENOENT}:
+        return HeldFsError("MISSING", "filesystem object is unavailable")
+    if error is not None and error.errno in {80, 183, errno.EEXIST}:
+        return HeldFsError("DESTINATION_EXISTS", "destination already exists")
     return HeldFsError("IO_REFUSED", "held filesystem operation was refused")
 
 
@@ -204,8 +240,10 @@ def _parts(relative: str) -> tuple[str, ...] | None:
 
 
 def _leaf(name: str) -> bool:
-    return isinstance(name, str) and name not in {"", ".", ".."} and all(
-        marker not in name for marker in ("/", "\\", ":", "\x00")
+    return (
+        isinstance(name, str)
+        and name not in {"", ".", ".."}
+        and all(marker not in name for marker in ("/", "\\", ":", "\x00"))
     )
 
 
@@ -215,14 +253,27 @@ def _native(fd: int) -> int:
     return int(msvcrt.get_osfhandle(fd))
 
 
-def _fd(handle: int) -> int:
+def _fd(handle: int, access: str = "read") -> int:
     import msvcrt
 
-    return msvcrt.open_osfhandle(handle, os.O_BINARY)
+    flags = os.O_BINARY | (os.O_RDWR if access == "write" else os.O_RDONLY)
+    try:
+        return msvcrt.open_osfhandle(handle, flags)
+    except BaseException as error:
+        assert CloseHandle is not None
+        CloseHandle(c_void_p(handle))
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise OSError("native handle could not become a CRT descriptor") from error
 
 
 def _nt_success(status: int) -> bool:
     return status >= 0
+
+
+def _raise_nt(status: int, message: str) -> None:
+    code = int(RtlNtStatusToDosError(status)) if RtlNtStatusToDosError is not None else 1
+    raise OSError(code, message)
 
 
 def _identity(handle: int) -> StableIdentity:
@@ -231,10 +282,15 @@ def _identity(handle: int) -> StableIdentity:
     file_id = FILE_ID_INFO()
     attributes = FILE_ATTRIBUTE_TAG_INFO()
     basic = BY_HANDLE_FILE_INFORMATION()
-    if not GetFileInformationByHandleEx(handle, FILE_ID_INFO_CLASS, byref(file_id), sizeof(file_id)):
+    if not GetFileInformationByHandleEx(
+        handle, FILE_ID_INFO_CLASS, byref(file_id), sizeof(file_id)
+    ):
         raise OSError("FileIdInfo is unavailable")
     if not GetFileInformationByHandleEx(
-        handle, FILE_ATTRIBUTE_TAG_INFO_CLASS, byref(attributes), sizeof(attributes)
+        handle,
+        FILE_ATTRIBUTE_TAG_INFO_CLASS,
+        byref(attributes),
+        sizeof(attributes),
     ):
         raise OSError("FileAttributeTagInfo is unavailable")
     if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
@@ -250,21 +306,35 @@ def _identity(handle: int) -> StableIdentity:
     )
 
 
+def _same_object(left: StableIdentity, right: StableIdentity) -> bool:
+    return (left.device, left.inode, left.kind) == (right.device, right.inode, right.kind)
+
+
 def _unicode(name: str) -> tuple[UNICODE_STRING, object]:
     buffer = create_unicode_buffer(name)
-    value = UNICODE_STRING(len(name.encode("utf-16-le")), (len(name) + 1) * 2, buffer)
+    value = UNICODE_STRING(
+        len(name.encode("utf-16-le")),
+        (len(name) + 1) * 2,
+        ctypes.cast(buffer, wintypes.LPWSTR),
+    )
     return value, buffer
 
 
-def _open_relative(parent_handle: int, name: str, access: int, options: int, disposition: int) -> int:
+def _open_relative(
+    parent_handle: int,
+    name: str,
+    access: int,
+    options: int,
+    disposition: int,
+) -> int:
     """Open exactly one component under ``parent_handle`` through NtCreateFile."""
     assert NtCreateFile is not None
     string, _buffer = _unicode(name)
     attributes = OBJECT_ATTRIBUTES(
         sizeof(OBJECT_ATTRIBUTES),
         c_void_p(parent_handle),
-        byref(string),
-        0,
+        ctypes.pointer(string),
+        OBJ_CASE_INSENSITIVE,
         None,
         None,
     )
@@ -277,14 +347,14 @@ def _open_relative(parent_handle: int, name: str, access: int, options: int, dis
         byref(status),
         None,
         FILE_ATTRIBUTE_NORMAL,
-        FILE_SHARE_READ,
+        FILE_SHARE_ALL,
         disposition,
         options | FILE_OPEN_REPARSE_POINT,
         None,
         0,
     )
     if not _nt_success(result) or handle.value in {None, INVALID_HANDLE_VALUE}:
-        raise OSError("NtCreateFile refused relative handle operation")
+        _raise_nt(result, "NtCreateFile refused relative handle operation")
     try:
         _identity(int(handle.value))
         return int(handle.value)
@@ -294,41 +364,48 @@ def _open_relative(parent_handle: int, name: str, access: int, options: int, dis
         raise
 
 
-def _probe(root: Path) -> Capabilities:
-    if os.name != "nt" or any(
-        primitive is None
-        for primitive in (NtCreateFile, NtSetInformationFile, SetFileInformationByHandle, GetFileInformationByHandleEx)
+def _name_payload(replace: bool, destination_handle: int, leaf: str) -> ctypes.Array[ctypes.c_char]:
+    encoded = leaf.encode("utf-16-le")
+    offset = FILE_NAME_INFORMATION.FileName.offset
+    payload = create_string_buffer(sizeof(FILE_NAME_INFORMATION) + len(encoded))
+    information = FILE_NAME_INFORMATION.from_buffer(payload)
+    information.ReplaceIfExists = replace
+    information.RootDirectory = destination_handle
+    information.FileNameLength = len(encoded)
+    ctypes.memmove(ctypes.addressof(payload) + offset, encoded, len(encoded))
+    return payload
+
+
+def _set_name_information(
+    descriptor: int,
+    destination_handle: int,
+    leaf: str,
+    information_class: int,
+) -> None:
+    assert NtSetInformationFile is not None
+    payload = _name_payload(False, destination_handle, leaf)
+    status = IO_STATUS_BLOCK()
+    result = NtSetInformationFile(
+        _native(descriptor),
+        byref(status),
+        payload,
+        len(payload),
+        information_class,
+    )
+    if not _nt_success(result):
+        _raise_nt(result, "native relative name mutation was refused")
+
+
+def _delete_descriptor(descriptor: int) -> None:
+    assert SetFileInformationByHandle is not None
+    disposition = FILE_DISPOSITION_INFO(True)
+    if not SetFileInformationByHandle(
+        _native(descriptor),
+        FILE_DISPOSITION_INFORMATION,
+        byref(disposition),
+        sizeof(disposition),
     ):
-        return Capabilities.disabled("native Windows handle primitives are unavailable")
-    descriptor = _open_root(root)
-    if descriptor is None:
-        return Capabilities.disabled("root cannot be opened with stable identity")
-    filesystem = WindowsHeldFilesystem(descriptor)
-    source_name = f".exomem-held-probe-{secrets.token_hex(16)}"
-    linked_name = f"{source_name}-link"
-    renamed_name = f"{source_name}-renamed"
-    try:
-        with filesystem.parent(".").require() as parent:
-            if not filesystem.write(parent, source_name, b"probe").ok:
-                return Capabilities.disabled("relative create/write is unavailable")
-            source_identity = filesystem.identity(parent, source_name)
-            if not source_identity.ok or source_identity.require().kind != "file":
-                return Capabilities.disabled("stable final identity is unavailable")
-            if not filesystem.link(parent, source_name, parent, linked_name).ok:
-                return Capabilities.disabled("relative hard link is unavailable")
-            if not filesystem.rename(parent, linked_name, parent, renamed_name).ok:
-                return Capabilities.disabled("same-volume relative rename is unavailable")
-            if not filesystem.unlink(parent, renamed_name).ok:
-                return Capabilities.disabled("relative unlink is unavailable")
-            if not filesystem.unlink(parent, source_name).ok:
-                return Capabilities.disabled("relative cleanup is unavailable")
-    finally:
-        filesystem.close()
-    return Capabilities(True, True, True, True, True)
-
-
-def probe(root: Path) -> Capabilities:
-    return _probe(root)
+        raise OSError(ctypes.get_last_error(), "relative disposition was refused")
 
 
 def _open_root(root: Path) -> int | None:
@@ -336,7 +413,7 @@ def _open_root(root: Path) -> int | None:
     handle = CreateFileW(
         str(root),
         FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ,
+        FILE_SHARE_ALL,
         None,
         3,
         0x02000000 | FILE_OPEN_REPARSE_POINT,
@@ -351,7 +428,7 @@ def _open_root(root: Path) -> int | None:
         return _fd(int(handle))
     except OSError:
         assert CloseHandle is not None
-        CloseHandle(handle)
+        CloseHandle(c_void_p(handle))
         return None
 
 
@@ -363,8 +440,8 @@ class WindowsHeldDirectory(HeldDirectory):
         self.closed = False
 
     def check(self) -> None:
-        if self.closed or _identity(_native(self.descriptor)) != self.identity:
-            raise OSError("held directory changed")
+        if self.closed or not _same_object(_identity(_native(self.descriptor)), self.identity):
+            raise OSError(errno.ESTALE, "held directory changed")
 
     def close(self) -> None:
         if not self.closed:
@@ -372,9 +449,45 @@ class WindowsHeldDirectory(HeldDirectory):
             self.closed = True
 
 
-class WindowsHeldFilesystem(HeldFilesystem):
-    def __init__(self, descriptor: int) -> None:
+class WindowsHeldFile(HeldFile):
+    def __init__(
+        self,
+        filesystem: WindowsHeldFilesystem,
+        parent_descriptor: int,
+        parent_identity: StableIdentity,
+        name: str,
+        descriptor: int,
+        access: str,
+    ) -> None:
+        self.filesystem = filesystem
+        self.parent_descriptor = parent_descriptor
+        self.parent_identity = parent_identity
+        self.name = name
         self.descriptor = descriptor
+        self.access = access
+        self.identity = _identity(_native(descriptor))
+        self.closed = False
+        self.named = True
+
+    def check(self) -> None:
+        if self.closed or self.filesystem.closed:
+            raise OSError(errno.ESTALE, "held file is closed")
+        if _identity(_native(self.descriptor)) != self.identity:
+            raise OSError(errno.ESTALE, "held file changed")
+        if not _same_object(_identity(_native(self.parent_descriptor)), self.parent_identity):
+            raise OSError(errno.ESTALE, "held parent changed")
+
+    def close(self) -> None:
+        if not self.closed:
+            os.close(self.descriptor)
+            os.close(self.parent_descriptor)
+            self.closed = True
+
+
+class WindowsHeldFilesystem(HeldFilesystem):
+    def __init__(self, descriptor: int, capabilities: Capabilities) -> None:
+        self.descriptor = descriptor
+        self.capabilities = capabilities
         self.root_identity = _identity(_native(descriptor))
         self.closed = False
 
@@ -383,193 +496,297 @@ class WindowsHeldFilesystem(HeldFilesystem):
             os.close(self.descriptor)
             self.closed = True
 
-    def _check(self, parent: HeldDirectory) -> WindowsHeldDirectory:
-        if self.closed or not isinstance(parent, WindowsHeldDirectory) or parent.filesystem is not self:
-            raise OSError("held directory is unavailable")
+    def _check_directory(self, parent: HeldDirectory) -> WindowsHeldDirectory:
+        if (
+            self.closed
+            or not isinstance(parent, WindowsHeldDirectory)
+            or parent.filesystem is not self
+        ):
+            raise OSError(errno.ESTALE, "held filesystem is unavailable")
         parent.check()
         return parent
+
+    def _check_file(self, file: HeldFile) -> WindowsHeldFile:
+        if not isinstance(file, WindowsHeldFile) or file.filesystem is not self:
+            raise OSError(errno.ESTALE, "held file is unavailable")
+        file.check()
+        return file
 
     def parent(self, relative: str, *, create: bool = False) -> HeldResult[HeldDirectory]:
         parts = _parts(relative)
         if parts is None:
             return HeldResult(error=_invalid())
+        if self.closed:
+            return HeldResult(error=HeldFsError("IO_REFUSED", "held root is closed"))
         descriptor = os.dup(self.descriptor)
         try:
             for part in parts:
                 handle = _open_relative(
                     _native(descriptor),
                     part,
-                    FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES,
+                    FILE_LIST_DIRECTORY
+                    | FILE_ADD_FILE
+                    | FILE_ADD_SUBDIRECTORY
+                    | FILE_READ_ATTRIBUTES,
                     FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
                     FILE_OPEN_IF if create else FILE_OPEN,
                 )
+                child = _fd(handle)
                 os.close(descriptor)
-                descriptor = _fd(handle)
+                descriptor = child
             return HeldResult(value=WindowsHeldDirectory(self, descriptor))
         except OSError as error:
             os.close(descriptor)
             return HeldResult(error=_error(error))
 
-    def _open_leaf(self, parent: HeldDirectory, leaf: str, write: bool = False, create: bool = False, delete: bool = False) -> int:
-        if not _leaf(leaf):
-            raise OSError(errno.ELOOP, "invalid relative leaf")
-        checked = self._check(parent)
-        access = FILE_READ_DATA | FILE_READ_ATTRIBUTES
-        if write:
-            access |= FILE_WRITE_DATA
-        if delete:
-            access |= DELETE
-        handle = _open_relative(
-            _native(checked.descriptor),
-            leaf,
-            access,
-            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-            FILE_OPEN_IF if create else FILE_OPEN,
-        )
-        return _fd(handle)
-
-    def identity(self, parent: HeldDirectory, leaf: str) -> HeldResult[StableIdentity]:
+    def file(
+        self,
+        parent: HeldDirectory,
+        leaf: str,
+        *,
+        access: str = "read",
+        create: bool = False,
+        exclusive: bool = False,
+    ) -> HeldResult[HeldFile]:
+        if not _leaf(leaf) or access not in {"read", "write", "mutate"}:
+            return HeldResult(error=_invalid())
+        if exclusive and not create:
+            return HeldResult(error=HeldFsError("INVALID_INPUT", "exclusive requires create"))
+        parent_descriptor: int | None = None
+        descriptor: int | None = None
         try:
-            descriptor = self._open_leaf(parent, leaf)
-            try:
-                return HeldResult(value=_identity(_native(descriptor)))
-            finally:
+            checked = self._check_directory(parent)
+            parent_descriptor = os.dup(checked.descriptor)
+            desired = FILE_READ_DATA | FILE_READ_ATTRIBUTES
+            descriptor_access = "read"
+            if access == "write":
+                desired |= FILE_WRITE_DATA
+                descriptor_access = "write"
+            if access == "mutate":
+                desired |= DELETE
+            disposition = FILE_CREATE if exclusive else FILE_OPEN_IF if create else FILE_OPEN
+            handle = _open_relative(
+                _native(parent_descriptor),
+                leaf,
+                desired,
+                FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                disposition,
+            )
+            descriptor = _fd(handle, descriptor_access)
+            return HeldResult(
+                value=WindowsHeldFile(
+                    self,
+                    parent_descriptor,
+                    checked.identity,
+                    leaf,
+                    descriptor,
+                    access,
+                )
+            )
+        except OSError as error:
+            if descriptor is not None:
                 os.close(descriptor)
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
+            return HeldResult(error=_error(error))
+
+    def read(self, file: HeldFile) -> HeldResult[bytes]:
+        try:
+            checked = self._check_file(file)
+            os.lseek(checked.descriptor, 0, os.SEEK_SET)
+            chunks = []
+            while chunk := os.read(checked.descriptor, 65536):
+                chunks.append(chunk)
+            return HeldResult(value=b"".join(chunks))
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def read(self, parent: HeldDirectory, leaf: str) -> HeldResult[bytes]:
-        try:
-            descriptor = self._open_leaf(parent, leaf)
-            try:
-                chunks = []
-                while chunk := os.read(descriptor, 65536):
-                    chunks.append(chunk)
-                return HeldResult(value=b"".join(chunks))
-            finally:
-                os.close(descriptor)
-        except OSError as error:
-            return HeldResult(error=_error(error))
-
-    def write(self, parent: HeldDirectory, leaf: str, data: bytes) -> HeldResult[None]:
+    def write(self, file: HeldFile, data: bytes) -> HeldResult[None]:
         if not isinstance(data, bytes):
             return HeldResult(error=HeldFsError("INVALID_INPUT", "data must be bytes"))
         try:
-            descriptor = self._open_leaf(parent, leaf, write=True, create=True)
+            checked = self._check_file(file)
+            if checked.access != "write":
+                return HeldResult(error=HeldFsError("INVALID_ACCESS", "held file is not writable"))
+            os.ftruncate(checked.descriptor, 0)
+            os.lseek(checked.descriptor, 0, os.SEEK_SET)
+            view = memoryview(data)
+            written = 0
+            while written < len(view):
+                written += os.write(checked.descriptor, view[written:])
+            os.fsync(checked.descriptor)
+            checked.identity = _identity(_native(checked.descriptor))
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def _destination(
+        self, source: WindowsHeldFile, destination: HeldDirectory, destination_leaf: str
+    ) -> WindowsHeldDirectory:
+        if source.access != "mutate" or not _leaf(destination_leaf):
+            raise OSError(errno.ELOOP, "invalid held mutation")
+        if not isinstance(destination, WindowsHeldDirectory):
+            raise OSError(errno.ESTALE, "destination handle is unavailable")
+        destination.check()
+        if source.identity.device != destination.identity.device:
+            raise OSError(errno.EXDEV, "cross-volume operation")
+        if destination.filesystem is not self:
+            raise OSError(errno.ESTALE, "destination belongs to another root")
+        try:
+            handle = _open_relative(
+                _native(destination.descriptor),
+                destination_leaf,
+                FILE_READ_ATTRIBUTES,
+                FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_OPEN,
+            )
+        except OSError as error:
+            if error.errno in {2, 3, errno.ENOENT}:
+                return destination
+            raise
+        else:
+            assert CloseHandle is not None
+            CloseHandle(c_void_p(handle))
+            raise OSError(errno.EEXIST, "destination exists")
+
+    def rename(
+        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str
+    ) -> HeldResult[None]:
+        try:
+            checked = self._check_file(source)
+            destination = self._destination(checked, destination_parent, destination_leaf)
+            _set_name_information(
+                checked.descriptor,
+                _native(destination.descriptor),
+                destination_leaf,
+                FILE_RENAME_INFORMATION,
+            )
+            checked.named = False
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def link(
+        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str
+    ) -> HeldResult[None]:
+        if not self.capabilities.hard_link:
+            return HeldResult(
+                error=HeldFsError("CAPABILITY_UNAVAILABLE", "hard links are unavailable")
+            )
+        try:
+            checked = self._check_file(source)
+            destination = self._destination(checked, destination_parent, destination_leaf)
+            _set_name_information(
+                checked.descriptor,
+                _native(destination.descriptor),
+                destination_leaf,
+                FILE_LINK_INFORMATION,
+            )
+            checked.identity = _identity(_native(checked.descriptor))
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def unlink(self, file: HeldFile) -> HeldResult[None]:
+        try:
+            checked = self._check_file(file)
+            if checked.access != "mutate":
+                return HeldResult(error=HeldFsError("INVALID_ACCESS", "held file is not mutable"))
+            _delete_descriptor(checked.descriptor)
+            checked.named = False
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def copy(
+        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str
+    ) -> HeldResult[None]:
+        temporary = f".exomem-held-{secrets.token_hex(16)}"
+        temporary_file: WindowsHeldFile | None = None
+        temporary_identity: StableIdentity | None = None
+        destination: WindowsHeldDirectory | None = None
+        destination_filesystem: WindowsHeldFilesystem | None = None
+        try:
+            checked = self._check_file(source)
+            if not _leaf(destination_leaf):
+                raise OSError(errno.ELOOP, "invalid destination leaf")
+            if not isinstance(destination_parent, WindowsHeldDirectory):
+                raise OSError(errno.ESTALE, "destination handle is unavailable")
+            destination_parent.check()
+            if destination_parent.filesystem.closed:
+                raise OSError(errno.ESTALE, "destination root is unavailable")
+            destination = destination_parent
+            destination_filesystem = destination.filesystem
             try:
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                os.ftruncate(descriptor, 0)
-                view = memoryview(data)
+                existing = destination_filesystem.file(destination, destination_leaf)
+                if existing.ok:
+                    existing.require().close()
+                    raise OSError(errno.EEXIST, "destination exists")
+                if existing.error is not None and existing.error.code != "MISSING":
+                    raise OSError("destination could not be classified")
+            except HeldFsError as error:
+                raise OSError(str(error)) from error
+
+            created = destination_filesystem.file(
+                destination,
+                temporary,
+                access="write",
+                create=True,
+                exclusive=True,
+            )
+            if not created.ok:
+                raise OSError("destination temporary could not be acquired")
+            temporary_file = created.require()
+            temporary_identity = temporary_file.identity
+            os.lseek(checked.descriptor, 0, os.SEEK_SET)
+            while chunk := os.read(checked.descriptor, 65536):
+                view = memoryview(chunk)
                 written = 0
                 while written < len(view):
-                    written += os.write(descriptor, view[written:])
-                os.fsync(descriptor)
-                return HeldResult(value=None)  # type: ignore[arg-type]
-            finally:
-                os.close(descriptor)
+                    written += os.write(temporary_file.descriptor, view[written:])
+            os.fsync(temporary_file.descriptor)
+
+            # Reopen the exact temporary with DELETE authority, then rename by handle.
+            temporary_file.close()
+            temporary_file = None
+            mutable = destination_filesystem.file(destination, temporary, access="mutate")
+            if not mutable.ok:
+                raise OSError("destination temporary mutation handle was refused")
+            temporary_file = mutable.require()
+            if temporary_file.identity != temporary_identity:
+                raise OSError(errno.ESTALE, "destination temporary changed")
+            _set_name_information(
+                temporary_file.descriptor,
+                _native(destination.descriptor),
+                destination_leaf,
+                FILE_RENAME_INFORMATION,
+            )
+            temporary_file.named = False
+            temporary_file.close()
+            temporary_file = None
+            return HeldResult(value=None)
         except OSError as error:
-            return HeldResult(error=_error(error))
-
-    def _paired(self, source: HeldDirectory, destination: HeldDirectory, source_leaf: str, destination_leaf: str) -> tuple[WindowsHeldDirectory, WindowsHeldDirectory]:
-        if not _leaf(source_leaf) or not _leaf(destination_leaf):
-            raise OSError(errno.ELOOP, "invalid relative leaf")
-        source_parent = self._check(source)
-        if not isinstance(destination, WindowsHeldDirectory):
-            raise OSError("destination handle is unavailable")
-        destination.check()
-        if source_parent.identity.device != destination.identity.device:
-            raise OSError(errno.EXDEV, "cross-volume operation")
-        return source_parent, destination
-
-    def _rename_handle(self, descriptor: int, destination: WindowsHeldDirectory, leaf: str) -> None:
-        assert SetFileInformationByHandle is not None
-        encoded = leaf.encode("utf-16-le")
-        payload = create_string_buffer(20 + len(encoded))
-        payload[0] = 1
-        c_void_p.from_buffer(payload, 8).value = _native(destination.descriptor)
-        c_ulong.from_buffer(payload, 16).value = len(encoded)
-        payload[20 : 20 + len(encoded)] = encoded
-        if not SetFileInformationByHandle(_native(descriptor), FILE_RENAME_INFORMATION, payload, len(payload)):
-            raise OSError("relative rename was refused")
-
-    def rename(self, source_parent: HeldDirectory, source_leaf: str, destination_parent: HeldDirectory, destination_leaf: str) -> HeldResult[None]:
-        try:
-            source, destination = self._paired(source_parent, destination_parent, source_leaf, destination_leaf)
-            descriptor = self._open_leaf(source, source_leaf, delete=True)
-            try:
-                self._rename_handle(descriptor, destination, destination_leaf)
-            finally:
-                os.close(descriptor)
-            return HeldResult(value=None)  # type: ignore[arg-type]
-        except OSError as error:
-            return HeldResult(error=_error(error))
-
-    def link(self, source_parent: HeldDirectory, source_leaf: str, destination_parent: HeldDirectory, destination_leaf: str) -> HeldResult[None]:
-        try:
-            source, destination = self._paired(source_parent, destination_parent, source_leaf, destination_leaf)
-            descriptor = self._open_leaf(source, source_leaf, delete=True)
-            try:
-                assert NtSetInformationFile is not None
-                encoded = destination_leaf.encode("utf-16-le")
-                payload = create_string_buffer(20 + len(encoded))
-                payload[0] = 0
-                c_void_p.from_buffer(payload, 8).value = _native(destination.descriptor)
-                c_ulong.from_buffer(payload, 16).value = len(encoded)
-                payload[20 : 20 + len(encoded)] = encoded
-                status = IO_STATUS_BLOCK()
-                if not _nt_success(NtSetInformationFile(_native(descriptor), byref(status), payload, len(payload), FILE_LINK_INFORMATION)):
-                    raise OSError("relative hard link was refused")
-            finally:
-                os.close(descriptor)
-            return HeldResult(value=None)  # type: ignore[arg-type]
-        except OSError as error:
-            return HeldResult(error=_error(error))
-
-    def unlink(self, parent: HeldDirectory, leaf: str) -> HeldResult[None]:
-        try:
-            descriptor = self._open_leaf(parent, leaf, delete=True)
-            try:
-                assert SetFileInformationByHandle is not None
-                delete = wintypes.BOOL(True)
-                if not SetFileInformationByHandle(_native(descriptor), FILE_DISPOSITION_INFORMATION, byref(delete), sizeof(delete)):
-                    raise OSError("relative disposition was refused")
-            finally:
-                os.close(descriptor)
-            return HeldResult(value=None)  # type: ignore[arg-type]
-        except OSError as error:
-            return HeldResult(error=_error(error))
-
-    def copy(self, source_parent: HeldDirectory, source_leaf: str, destination_parent: HeldDirectory, destination_leaf: str) -> HeldResult[None]:
-        temporary = f".exomem-held-{secrets.token_hex(16)}"
-        try:
-            if not _leaf(source_leaf) or not _leaf(destination_leaf):
-                raise OSError(errno.ELOOP, "invalid relative leaf")
-            source = self._check(source_parent)
-            if not isinstance(destination_parent, WindowsHeldDirectory):
-                raise OSError("destination handle is unavailable")
-            destination_parent.check()
-            destination = destination_parent
-            source_descriptor = self._open_leaf(source, source_leaf)
-            temporary_descriptor = self._open_leaf(destination, temporary, write=True, create=True)
-            try:
-                while chunk := os.read(source_descriptor, 65536):
-                    view = memoryview(chunk)
-                    written = 0
-                    while written < len(view):
-                        written += os.write(temporary_descriptor, view[written:])
-                os.fsync(temporary_descriptor)
-                self._rename_handle(temporary_descriptor, destination, destination_leaf)
-            finally:
-                os.close(source_descriptor)
-                os.close(temporary_descriptor)
-            return HeldResult(value=None)  # type: ignore[arg-type]
-        except OSError as error:
+            if temporary_file is not None:
+                try:
+                    if temporary_file.access == "mutate":
+                        _delete_descriptor(temporary_file.descriptor)
+                except OSError:
+                    pass
+                temporary_file.close()
+            if destination is not None and destination_filesystem is not None:
+                cleanup = destination_filesystem.file(destination, temporary, access="mutate")
+                if cleanup.ok:
+                    with cleanup.require() as file:
+                        if temporary_identity is not None and file.identity == temporary_identity:
+                            try:
+                                _delete_descriptor(file.descriptor)
+                            except OSError:
+                                pass
             return HeldResult(error=_error(error))
 
     def enumerate(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:
-        """Enumerate via ``NtQueryDirectoryFile``; recursive records are name ordered."""
         try:
-            checked = self._check(parent)
+            checked = self._check_directory(parent)
             records: list[SagaRecord] = []
             self._enumerate(checked, "", records)
             return HeldResult(value=tuple(records))
@@ -583,12 +800,24 @@ class WindowsHeldFilesystem(HeldFilesystem):
         restart = True
         names: list[str] = []
         while True:
-            result = NtQueryDirectoryFile(_native(parent.descriptor), None, None, None, byref(status), buffer, len(buffer), FILE_BOTH_DIRECTORY_INFORMATION, False, None, restart)
+            result = NtQueryDirectoryFile(
+                _native(parent.descriptor),
+                None,
+                None,
+                None,
+                byref(status),
+                buffer,
+                len(buffer),
+                FILE_BOTH_DIRECTORY_INFORMATION,
+                False,
+                None,
+                restart,
+            )
             restart = False
             if (int(result) & 0xFFFFFFFF) == STATUS_NO_MORE_FILES:
                 return sorted(names)
             if not _nt_success(result):
-                raise OSError("directory enumeration was refused")
+                _raise_nt(result, "directory enumeration was refused")
             offset = 0
             while True:
                 next_offset = int.from_bytes(buffer.raw[offset : offset + 4], "little")
@@ -600,27 +829,119 @@ class WindowsHeldFilesystem(HeldFilesystem):
                     break
                 offset += next_offset
 
-    def _enumerate(self, parent: WindowsHeldDirectory, prefix: str, records: list[SagaRecord]) -> None:
+    def _enumerate(
+        self, parent: WindowsHeldDirectory, prefix: str, records: list[SagaRecord]
+    ) -> None:
         for name in self._entries(parent):
-            handle = _open_relative(_native(parent.descriptor), name, FILE_READ_ATTRIBUTES, FILE_SYNCHRONOUS_IO_NONALERT, FILE_OPEN)
+            handle = _open_relative(
+                _native(parent.descriptor),
+                name,
+                FILE_LIST_DIRECTORY | FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+                FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_OPEN,
+            )
             descriptor = _fd(handle)
+            identity = _identity(_native(descriptor))
+            relative = f"{prefix}/{name}" if prefix else name
+            records.append(SagaRecord(relative, identity))
+            if identity.kind == "directory":
+                with WindowsHeldDirectory(self, descriptor) as child:
+                    self._enumerate(child, relative, records)
+            else:
+                os.close(descriptor)
+
+
+def _probe(root: Path) -> Capabilities:
+    if os.name != "nt" or any(
+        primitive is None
+        for primitive in (
+            NtCreateFile,
+            NtSetInformationFile,
+            SetFileInformationByHandle,
+            GetFileInformationByHandleEx,
+        )
+    ):
+        return Capabilities.disabled("native Windows handle primitives are unavailable")
+    descriptor = _open_root(root)
+    if descriptor is None:
+        return Capabilities.disabled("root cannot be opened with stable identity")
+
+    provisional = Capabilities(True, True, True, True, True)
+    filesystem = WindowsHeldFilesystem(descriptor, provisional)
+    token = secrets.token_hex(16)
+    source_name = f".exomem-held-probe-{token}"
+    renamed_name = f"{source_name}-renamed"
+    linked_name = f"{source_name}-link"
+    alias_name = f"{source_name}-alias"
+    directory_name = f"{source_name}-directory"
+    directory_alias_name = f"{directory_name}-alias"
+    try:
+        with filesystem.parent(".").require() as parent:
+            with filesystem.file(
+                parent, source_name, access="write", create=True, exclusive=True
+            ).require() as source:
+                if not filesystem.write(source, b"probe").ok:
+                    return Capabilities.disabled("relative create/write is unavailable")
+
+            os.symlink(root / source_name, root / alias_name)
+            alias = filesystem.file(parent, alias_name)
+            if alias.ok:
+                alias.require().close()
+                return Capabilities.disabled("final reparse refusal is unavailable")
+            (root / directory_name).mkdir()
+            os.symlink(
+                root / directory_name,
+                root / directory_alias_name,
+                target_is_directory=True,
+            )
+            alias_parent = filesystem.parent(directory_alias_name)
+            if alias_parent.ok:
+                alias_parent.require().close()
+                return Capabilities.disabled("parent reparse refusal is unavailable")
+
+            with filesystem.file(parent, source_name, access="mutate").require() as source:
+                hard_link = filesystem.link(source, parent, linked_name).ok
+                renamed = filesystem.rename(source, parent, renamed_name)
+                if not renamed.ok:
+                    return Capabilities.disabled("same-volume relative rename is unavailable")
+            with filesystem.file(parent, renamed_name, access="mutate").require() as renamed:
+                if not filesystem.unlink(renamed).ok:
+                    return Capabilities.disabled("relative unlink is unavailable")
+        return Capabilities(True, True, True, True, hard_link)
+    except (HeldFsError, OSError):
+        return Capabilities.disabled("actual-filesystem capability probe failed")
+    finally:
+        filesystem.close()
+        for name in (
+            source_name,
+            renamed_name,
+            linked_name,
+            alias_name,
+            directory_alias_name,
+        ):
             try:
-                identity = _identity(_native(descriptor))
-                relative = f"{prefix}/{name}" if prefix else name
-                records.append(SagaRecord(relative, identity))
-                if identity.kind == "directory":
-                    self._enumerate(WindowsHeldDirectory(self, descriptor), relative, records)
-                    descriptor = -1
-            finally:
-                if descriptor != -1:
-                    os.close(descriptor)
+                (root / name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            (root / directory_name).rmdir()
+        except OSError:
+            pass
+
+
+def probe(root: Path) -> Capabilities:
+    return _probe(root)
 
 
 def acquire(root: Path) -> HeldResult[HeldFilesystem]:
     capability = probe(root)
     if not capability.relative_operations:
-        return HeldResult(error=HeldFsError("CAPABILITY_UNAVAILABLE", "required filesystem primitives are unavailable"))
+        return HeldResult(
+            error=HeldFsError(
+                "CAPABILITY_UNAVAILABLE", "required filesystem primitives are unavailable"
+            )
+        )
     descriptor = _open_root(root)
     if descriptor is None:
         return HeldResult(error=HeldFsError("IO_REFUSED", "root anchor could not be acquired"))
-    return HeldResult(value=WindowsHeldFilesystem(descriptor))
+    return HeldResult(value=WindowsHeldFilesystem(descriptor, capability))

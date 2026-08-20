@@ -212,6 +212,31 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_requires_every_ci_job() -
     assert gate["steps"][0]["env"]["RESULTS"] == "${{ join(needs.*.result, ' ') }}"
 
 
+def test_native_held_filesystem_has_a_required_ntfs_gate() -> None:
+    workflow = _workflow()
+    job = workflow["jobs"]["windows-held-filesystem"]
+
+    assert job["runs-on"] == "windows-latest"
+    assert job["timeout-minutes"] == 12
+    preparation = next(
+        step for step in job["steps"] if step.get("name") == "Require NTFS and 8.3 aliases"
+    )["run"]
+    assert "Get-Volume" in preparation
+    assert 'FileSystem -ne "NTFS"' in preparation
+    assert "at least two writable NTFS volumes" in preparation
+    assert "fsutil.exe 8dot3name set" in preparation
+    assert "$LASTEXITCODE" in preparation
+
+    command = next(
+        step for step in job["steps"] if step.get("name") == "Native held-filesystem gate"
+    )["run"]
+    assert "--python 3.13" in command
+    assert "tests/test_held_fs_contract.py" in command
+    assert "tests/test_held_fs_windows.py" in command
+    assert "--session-timeout=600" in command
+    assert "windows-held-filesystem" in workflow["jobs"]["gate"]["needs"]
+
+
 def test_the_cross_platform_split_count_matches_its_shard_matrix() -> None:
     """A mismatch here loses coverage without losing green.
 
