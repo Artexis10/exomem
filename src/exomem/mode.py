@@ -399,5 +399,23 @@ def start_config_watch(interval: float = 10.0) -> threading.Thread | None:
     return t
 
 
-def stop_config_watch() -> None:
+def stop_config_watch(timeout: float = 5.0) -> None:
+    """Stop the watch and wait for the thread to leave.
+
+    Setting the event alone left "stopped" unobservable, and that is not a
+    cosmetic gap: `start_config_watch` hands back the existing thread whenever
+    one is still alive, so a stop/start cycle inside a single tick returned a
+    thread that was already exiting on the stop flag. The caller held a live
+    `Thread` object, its new interval never took effect, and no watcher was
+    running -- a config-driven mode change would then never be applied, which is
+    the one thing this daemon exists to do.
+
+    Joining is cheap because the loop waits on the event rather than sleeping:
+    the tick returns as soon as the flag is set, whatever the interval.
+    """
+    global _watch_thread
+    thread = _watch_thread
     _watch_stop.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout)
+    _watch_thread = None
