@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
-import { constants as fsConstants } from "node:fs"
+import { constants as fsConstants, type Dirent } from "node:fs"
 import {
   chmod,
   lstat,
@@ -12,6 +12,7 @@ import {
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -92,6 +93,113 @@ export interface GuestEnvelope {
   [key: string]: unknown
 }
 
+export interface ExomemResidencyRecord {
+  containerTag: string
+  lastUsed: number
+  service: ServiceDescriptor
+}
+
+export interface ExomemResidencyOperations {
+  containerTag: string
+  maxLiveServices: number
+  discover: () => Promise<ExomemResidencyRecord[]>
+  retire: (service: ServiceDescriptor) => Promise<void>
+  launch: () => Promise<ServiceDescriptor>
+  touch: (service: ServiceDescriptor) => Promise<void>
+}
+
+export async function enforceExomemResidency({
+  containerTag,
+  maxLiveServices,
+  discover,
+  retire,
+  launch,
+  touch,
+}: ExomemResidencyOperations): Promise<ServiceDescriptor> {
+  if (!Number.isSafeInteger(maxLiveServices) || maxLiveServices <= 0) {
+    throw new Error("Exomem live-service cap must be a positive integer")
+  }
+  const discovered = await discover()
+  if (new Set(discovered.map((record) => record.containerTag)).size !== discovered.length ||
+      discovered.some((record) => !Number.isFinite(record.lastUsed))) {
+    throw new Error("Exomem residency discovery is invalid")
+  }
+  const attached = discovered.find((record) => record.containerTag === containerTag)
+  if (attached) {
+    await touch(attached.service)
+    return attached.service
+  }
+  const leastRecentlyUsed = [...discovered].sort((left, right) =>
+    left.lastUsed - right.lastUsed || left.containerTag.localeCompare(right.containerTag)
+  )
+  while (leastRecentlyUsed.length >= maxLiveServices) {
+    const candidate = leastRecentlyUsed.shift()!
+    await retire(candidate.service)
+  }
+  const service = await launch()
+  await touch(service)
+  return service
+}
+
+export type GuestProcessCleanupTrigger =
+  | "SIGINT"
+  | "SIGTERM"
+  | "uncaughtException"
+  | "unhandledRejection"
+
+interface ProcessCleanupEmitter {
+  on(event: string, listener: (...arguments_: unknown[]) => void): unknown
+  off(event: string, listener: (...arguments_: unknown[]) => void): unknown
+}
+
+interface ProcessCleanupDependencies {
+  emitter?: ProcessCleanupEmitter
+  rerase?: (trigger: GuestProcessCleanupTrigger, error?: unknown) => void
+}
+
+export function installGuestProcessCleanupHandlers(
+  cleanup: (trigger: GuestProcessCleanupTrigger) => Promise<void>,
+  dependencies: ProcessCleanupDependencies = {}
+): () => void {
+  const emitter = dependencies.emitter ?? process
+  let disposed = false
+  let cleanupInFlight: Promise<void> | null = null
+  const listeners = new Map<GuestProcessCleanupTrigger, (...arguments_: unknown[]) => void>()
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    for (const [event, listener] of listeners) emitter.off(event, listener)
+  }
+  const rerase = dependencies.rerase ?? ((trigger: GuestProcessCleanupTrigger, error?: unknown) => {
+    dispose()
+    if (trigger === "SIGINT" || trigger === "SIGTERM") {
+      process.kill(process.pid, trigger)
+      return
+    }
+    const failure = error instanceof Error ? error : new Error(String(error ?? trigger))
+    setImmediate(() => { throw failure })
+  })
+  const begin = (trigger: GuestProcessCleanupTrigger, error?: unknown) => {
+    if (cleanupInFlight !== null) return
+    cleanupInFlight = (async () => {
+      try {
+        await cleanup(trigger)
+      } finally {
+        rerase(trigger, error)
+      }
+    })()
+    void cleanupInFlight.catch(() => {
+      // The original signal or failure retains exit precedence after cleanup was attempted.
+    })
+  }
+  for (const trigger of ["SIGINT", "SIGTERM", "uncaughtException", "unhandledRejection"] as const) {
+    const listener = (error?: unknown) => begin(trigger, error)
+    listeners.set(trigger, listener)
+    emitter.on(trigger, listener)
+  }
+  return dispose
+}
+
 type Fetch = typeof fetch
 
 function requireAbsoluteRoot(name: string, value: string | undefined): string {
@@ -99,6 +207,16 @@ function requireAbsoluteRoot(name: string, value: string | undefined): string {
   const normalized = resolve(value)
   if (normalized !== value) throw new Error(`${name} must be an absolute normalized path`)
   return normalized
+}
+
+export function configuredExomemMaxLiveServices(
+  environment: Record<string, string | undefined> = process.env
+): number {
+  const raw = environment.MEMORYBENCH_EXOMEM_MAX_LIVE_SERVICES ?? "1"
+  if (!/^[1-9]\d*$/.test(raw)) throw new Error("MEMORYBENCH_EXOMEM_MAX_LIVE_SERVICES must be a positive integer")
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value)) throw new Error("MEMORYBENCH_EXOMEM_MAX_LIVE_SERVICES is too large")
+  return value
 }
 
 export async function sha256Hex(value: string | Uint8Array): Promise<string> {
@@ -712,11 +830,129 @@ async function exomemDescriptorExpectation(
     expected_environment: {
       ...EXOMEM_LME_ENV,
       EXOMEM_VAULT_PATH: vault,
+      MEMORYBENCH_GUEST_WORK_ROOT: work,
       MEMORYBENCH_GUEST_PROVIDER: "exomem",
     },
     expected_instance_id: instance,
     require_process_group_leader: true,
   }
+}
+
+const exomemRetirements = new Map<string, Promise<void>>()
+const trackedExomemServices = new Map<string, ServiceDescriptor>()
+let disposeExomemProcessCleanup: (() => void) | null = null
+let exomemShutdownInProgress = false
+
+function exomemProgrammeRoots() {
+  const programmeWork = requireAbsoluteRoot("MEMORYBENCH_GUEST_WORK_ROOT", process.env.MEMORYBENCH_GUEST_WORK_ROOT)
+  const programmeEvidence = requireAbsoluteRoot(
+    "MEMORYBENCH_GUEST_EVIDENCE_ROOT",
+    process.env.MEMORYBENCH_GUEST_EVIDENCE_ROOT
+  )
+  return {
+    programmeWork,
+    programmeEvidence,
+    serviceRoot: join(programmeWork, "services", "exomem"),
+  }
+}
+
+async function readDescriptorIdentity(path: string): Promise<ServiceDescriptor> {
+  let handle
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error("descriptor must be opened no-follow")
+    throw error
+  }
+  try {
+    const metadata = await handle.stat()
+    if (!metadata.isFile() || (metadata.mode & 0o777) !== 0o600) {
+      throw new Error("descriptor discovery requires a mode-0600 regular file")
+    }
+    if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
+      throw new Error("descriptor owner mismatch")
+    }
+    const parsed = JSON.parse(await handle.readFile("utf8")) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("descriptor schema is invalid")
+    }
+    requireExactDescriptorSchema(parsed as Record<string, unknown>)
+    return parsed as ServiceDescriptor
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error("descriptor JSON is invalid")
+    throw error
+  } finally {
+    await handle.close()
+  }
+}
+
+async function expectationForExomemService(service: ServiceDescriptor): Promise<DescriptorExpectation> {
+  if (service.provider !== "exomem" || !service.container_tag || !service.checkout_root || !service.vault_root) {
+    throw new Error("Exomem service descriptor is incomplete")
+  }
+  return exomemDescriptorExpectation(
+    service.container_tag,
+    service.checkout_root,
+    service.checkout_pin,
+    service.work_root,
+    service.evidence_root,
+    service.vault_root,
+    Number(new URL(service.base_url).port)
+  )
+}
+
+async function discoverExomemServices(): Promise<ExomemResidencyRecord[]> {
+  const { programmeEvidence, serviceRoot } = exomemProgrammeRoots()
+  const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
+  const pin = process.env.EXOMEM_COMMIT ?? "owned-checkout"
+  let entries
+  try {
+    entries = await readdir(serviceRoot, { withFileTypes: true })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
+  const discovered: ExomemResidencyRecord[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[0-9a-f]{24}$/.test(entry.name)) continue
+    const work = join(serviceRoot, entry.name)
+    const path = join(work, "service.v1.json")
+    let identity: ServiceDescriptor
+    try {
+      identity = await readDescriptorIdentity(path)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+      throw error
+    }
+    if (identity.provider !== "exomem" || !identity.container_tag ||
+        (await sha256Hex(identity.container_tag)).slice(0, 24) !== entry.name) {
+      throw new Error("Exomem descriptor discovery binding mismatch")
+    }
+    const evidence = join(programmeEvidence, "exomem", entry.name)
+    const vault = join(work, "vault")
+    const expected = await exomemDescriptorExpectation(
+      identity.container_tag, exomemHome, pin, work, evidence, vault
+    )
+    let service: ServiceDescriptor
+    if (await processIsLive(identity.pid)) {
+      service = await readSecureDescriptor(path, expected)
+    } else {
+      exactBound(identity, expected)
+      service = identity
+    }
+    const metadata = await lstat(path)
+    discovered.push({ containerTag: identity.container_tag, lastUsed: metadata.mtimeMs, service })
+  }
+  return discovered
+}
+
+async function touchExomemService(service: ServiceDescriptor): Promise<void> {
+  const expected = await expectationForExomemService(service)
+  const path = join(service.work_root, "service.v1.json")
+  await readSecureDescriptor(path, expected)
+  const now = new Date()
+  await utimes(path, now, now)
+  trackedExomemServices.set(service.work_root, service)
 }
 
 async function waitForReady(
@@ -917,96 +1153,112 @@ export async function ensureExomemService(containerTag: string): Promise<Service
   const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
   const pin = process.env.EXOMEM_COMMIT ?? "owned-checkout"
   const vault = join(roots.work, "vault")
+  installExomemProcessCleanupHandlers()
   await mkdir(roots.work, { recursive: true, mode: 0o700 })
   await mkdir(roots.evidence, { recursive: true, mode: 0o700 })
-  const expected = await exomemDescriptorExpectation(
-    containerTag, exomemHome, pin, roots.work, roots.evidence, vault
-  )
-  const attached = await currentDescriptor(roots.descriptor, expected)
-  if (attached) return attached
-  const release = await acquireLaunchLock(join(roots.work, "launch.lock"))
+  const releaseResidency = await acquireLaunchLock(join(dirname(roots.work), "residency.lock"))
   try {
-    const init = spawnSync("uv", ["run", "--project", exomemHome, "--no-sync", "exomem", "init", "--vault", vault], {
-      cwd: roots.work,
-      env: buildExomemChildEnvironment(process.env, {
-        EXOMEM_VAULT_PATH: vault,
-        MEMORYBENCH_GUEST_PROVIDER: "exomem",
-        MEMORYBENCH_GUEST_INSTANCE_ID: expected.expected_instance_id!,
-      }),
-      encoding: "utf8",
-      timeout: GUEST_TIMEOUTS_MS.startup,
+    const service = await enforceExomemResidency({
+      containerTag,
+      maxLiveServices: configuredExomemMaxLiveServices(),
+      discover: discoverExomemServices,
+      retire: retireExomemService,
+      touch: touchExomemService,
+      launch: async () => {
+        const expected = await exomemDescriptorExpectation(
+          containerTag, exomemHome, pin, roots.work, roots.evidence, vault
+        )
+        const releaseLaunch = await acquireLaunchLock(join(roots.work, "launch.lock"))
+        try {
+          let vaultExists = false
+          try {
+            const metadata = await lstat(vault)
+            if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+              throw new Error("owned Exomem vault must be a no-follow directory")
+            }
+            vaultExists = true
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+          }
+          if (!vaultExists) {
+            const init = spawnSync(
+              "uv",
+              ["run", "--project", exomemHome, "--no-sync", "exomem", "init", "--vault", vault],
+              {
+                cwd: roots.work,
+                env: buildExomemChildEnvironment(process.env, {
+                  EXOMEM_VAULT_PATH: vault,
+                  MEMORYBENCH_GUEST_PROVIDER: "exomem",
+                  MEMORYBENCH_GUEST_INSTANCE_ID: expected.expected_instance_id!,
+                }),
+                encoding: "utf8",
+                timeout: GUEST_TIMEOUTS_MS.startup,
+              }
+            )
+            if (init.status !== 0) throw new Error("Exomem vault initialization failed")
+          }
+          const token = randomBytes(32).toString("base64url")
+          let lastError: unknown
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const port = await reservePort()
+            const baseUrl = `http://127.0.0.1:${port}`
+            if (exomemShutdownInProgress) throw new Error("Exomem cleanup is in progress")
+            const child = spawn(
+              exomemServiceCommand(exomemHome, port)[0],
+              exomemServiceCommand(exomemHome, port).slice(1),
+              {
+                cwd: roots.work,
+                detached: true,
+                env: buildExomemChildEnvironment(process.env, {
+                  EXOMEM_VAULT_PATH: vault,
+                  EXOMEM_REST_API_KEY: token,
+                  MEMORYBENCH_GUEST_WORK_ROOT: roots.work,
+                  MEMORYBENCH_GUEST_PROVIDER: "exomem",
+                  MEMORYBENCH_GUEST_INSTANCE_ID: expected.expected_instance_id!,
+                }),
+                stdio: ["ignore", "ignore", "ignore"],
+              }
+            )
+            let startIdentity: string | null = null
+            let attemptService: ServiceDescriptor | null = null
+            try {
+              if (!child.pid) throw new Error("Exomem service did not expose a pid")
+              startIdentity = await processStartIdentity(child.pid)
+              attemptService = {
+                protocol_version: 1,
+                provider: "exomem",
+                base_url: baseUrl,
+                bearer_token: token,
+                pid: child.pid,
+                process_start_identity: startIdentity,
+                checkout_pin: pin,
+                checkout_root: exomemHome,
+                work_root: roots.work,
+                evidence_root: roots.evidence,
+                container_tag: containerTag,
+                vault_root: vault,
+                instance_id: expected.expected_instance_id,
+              }
+              trackedExomemServices.set(roots.work, attemptService)
+              await waitForExomem(baseUrl, token, child)
+              await serviceProjection(attemptService)
+              await writeSecureDescriptor(roots.descriptor, attemptService)
+              return attemptService
+            } catch (error) {
+              lastError = error
+              if (attemptService) await retireExomemService(attemptService)
+            }
+          }
+          throw lastError instanceof Error ? lastError : new Error("Exomem launch attempts exhausted")
+        } finally {
+          await releaseLaunch()
+        }
+      },
     })
-    if (init.status !== 0) throw new Error("Exomem vault initialization failed")
-    const token = randomBytes(32).toString("base64url")
-    let lastError: unknown
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const port = await reservePort()
-      const baseUrl = `http://127.0.0.1:${port}`
-      const attemptExpected = await exomemDescriptorExpectation(
-        containerTag, exomemHome, pin, roots.work, roots.evidence, vault, port
-      )
-      const child = spawn(
-        exomemServiceCommand(exomemHome, port)[0],
-        exomemServiceCommand(exomemHome, port).slice(1),
-        {
-          cwd: roots.work,
-          detached: true,
-          env: buildExomemChildEnvironment(process.env, {
-            EXOMEM_VAULT_PATH: vault,
-            EXOMEM_REST_API_KEY: token,
-            MEMORYBENCH_GUEST_PROVIDER: "exomem",
-            MEMORYBENCH_GUEST_INSTANCE_ID: expected.expected_instance_id!,
-          }),
-          stdio: ["ignore", "ignore", "ignore"],
-        }
-      )
-      let startIdentity: string | null = null
-      try {
-        if (!child.pid) throw new Error("Exomem service did not expose a pid")
-        startIdentity = await processStartIdentity(child.pid)
-        await waitForExomem(baseUrl, token, child)
-        const descriptor: ServiceDescriptor = {
-          protocol_version: 1,
-          provider: "exomem",
-          base_url: baseUrl,
-          bearer_token: token,
-          pid: child.pid,
-          process_start_identity: startIdentity,
-          checkout_pin: pin,
-          checkout_root: exomemHome,
-          work_root: roots.work,
-          evidence_root: roots.evidence,
-          container_tag: containerTag,
-          vault_root: vault,
-          instance_id: expected.expected_instance_id,
-        }
-        await serviceProjection(descriptor)
-        await writeSecureDescriptor(roots.descriptor, descriptor)
-        return descriptor
-      } catch (error) {
-        lastError = error
-        if (child.pid && startIdentity) {
-          await retireOwnedProcessGroup({
-            protocol_version: 1,
-            provider: "exomem",
-            base_url: baseUrl,
-            bearer_token: token,
-            pid: child.pid,
-            process_start_identity: startIdentity,
-            checkout_pin: pin,
-            checkout_root: exomemHome,
-            work_root: roots.work,
-            evidence_root: roots.evidence,
-            container_tag: containerTag,
-            vault_root: vault,
-            instance_id: expected.expected_instance_id,
-          }, "startup_failure", attemptExpected)
-        }
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error("Exomem launch attempts exhausted")
+    trackedExomemServices.set(service.work_root, service)
+    return service
   } finally {
-    await release()
+    await releaseResidency()
   }
 }
 
@@ -1318,6 +1570,41 @@ export async function retireOwnedProcessGroup(
   }
 }
 
+async function pathAbsent(path: string): Promise<boolean> {
+  try {
+    await lstat(path)
+    return false
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true
+    throw error
+  }
+}
+
+export async function retireExomemService(service: ServiceDescriptor): Promise<void> {
+  if (service.provider !== "exomem") throw new Error("Exomem retirement descriptor mismatch")
+  const existing = exomemRetirements.get(service.work_root)
+  if (existing) return existing
+  const retirement = (async () => {
+    const expected = await expectationForExomemService(service)
+    await retireOwnedProcessGroup(service, "residency_retirement", expected)
+    if (!await ownedProcessGroupAbsent(service)) {
+      throw new Error("owned Exomem process group absence is unproved")
+    }
+    const descriptor = join(service.work_root, "service.v1.json")
+    await rm(descriptor, { force: true })
+    if (!await pathAbsent(descriptor)) throw new Error("owned Exomem descriptor still exists")
+    trackedExomemServices.delete(service.work_root)
+  })()
+  exomemRetirements.set(service.work_root, retirement)
+  try {
+    await retirement
+  } finally {
+    if (exomemRetirements.get(service.work_root) === retirement) {
+      exomemRetirements.delete(service.work_root)
+    }
+  }
+}
+
 export async function clearExomemService(containerTag: string): Promise<void> {
   const roots = await configuredRoots("exomem", containerTag)
   const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
@@ -1326,12 +1613,90 @@ export async function clearExomemService(containerTag: string): Promise<void> {
   const expected = await exomemDescriptorExpectation(
     containerTag, exomemHome, pin, roots.work, roots.evidence, vault
   )
-  const service = await readSecureDescriptor(roots.descriptor, expected)
-  await retireOwnedProcessGroup(service, "cleanup", expected)
-  await rm(roots.work, { recursive: true, force: true })
-  try { await stat(roots.work); throw new Error("owned Exomem root still exists") } catch (error) {
+  let service: ServiceDescriptor | null = null
+  try {
+    service = await readSecureDescriptor(roots.descriptor, expected)
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
   }
+  if (service === null) {
+    const tracked = trackedExomemServices.get(roots.work)
+    if (tracked) {
+      exactBound(tracked, expected)
+      service = tracked
+    }
+  }
+  if (service) await retireExomemService(service)
+  if (!await ownedProcessGroupAbsent(service)) {
+    throw new Error("owned Exomem process group absence is unproved")
+  }
+  if (!await ownedGuestProcessesAbsent({
+    provider: "exomem",
+    provider_checkout_root: exomemHome,
+    memorybench_home: exomemHome,
+    guest_work_root: roots.work,
+  })) {
+    throw new Error("owned Exomem guest process absence is unproved")
+  }
+  await rm(roots.work, { recursive: true, force: true })
+  if (!await pathAbsent(roots.work)) throw new Error("owned Exomem root still exists")
+  trackedExomemServices.delete(roots.work)
+}
+
+export async function clearAllExomemServices(): Promise<void> {
+  const failures: unknown[] = []
+  for (const retirement of [...exomemRetirements.values()]) {
+    try { await retirement } catch (error) { failures.push(error) }
+  }
+  const candidates = new Map<string, ServiceDescriptor>()
+  for (const service of trackedExomemServices.values()) {
+    if (service.container_tag) candidates.set(service.container_tag, service)
+  }
+  try {
+    for (const record of await discoverExomemServices()) candidates.set(record.containerTag, record.service)
+  } catch (error) {
+    failures.push(error)
+  }
+  for (const [containerTag] of candidates) {
+    try { await clearExomemService(containerTag) } catch (error) { failures.push(error) }
+  }
+  try {
+    const { serviceRoot } = exomemProgrammeRoots()
+    const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
+    let entries: Dirent[] = []
+    try {
+      entries = await readdir(serviceRoot, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^[0-9a-f]{24}$/.test(entry.name)) continue
+      const work = join(serviceRoot, entry.name)
+      if (!await pathAbsent(join(work, "service.v1.json"))) continue
+      if (!await ownedGuestProcessesAbsent({
+        provider: "exomem",
+        provider_checkout_root: exomemHome,
+        memorybench_home: exomemHome,
+        guest_work_root: work,
+      })) {
+        failures.push(new Error(`owned Exomem guest process absence is unproved for ${entry.name}`))
+        continue
+      }
+      await rm(work, { recursive: true, force: true })
+      if (!await pathAbsent(work)) failures.push(new Error(`owned Exomem root still exists for ${entry.name}`))
+    }
+  } catch (error) {
+    failures.push(error)
+  }
+  if (failures.length > 0) throw new AggregateError(failures, "Exomem cleanup did not prove complete absence")
+}
+
+export function installExomemProcessCleanupHandlers(): void {
+  if (disposeExomemProcessCleanup !== null) return
+  disposeExomemProcessCleanup = installGuestProcessCleanupHandlers(async () => {
+    exomemShutdownInProgress = true
+    await clearAllExomemServices()
+  })
 }
 
 export async function finalizeBasicMemoryService(service: ServiceDescriptor): Promise<void> {

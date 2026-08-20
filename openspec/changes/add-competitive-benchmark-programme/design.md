@@ -453,6 +453,29 @@
     model the provider is a separate process and its residue is observed, not
     trusted.
 
+16. **MemoryBench guest concurrency also bounds residency.**  Exomem's guest
+    transport admits at most `MEMORYBENCH_EXOMEM_MAX_LIVE_SERVICES` live owned
+    services across the whole staged run, default one to match the already
+    sequential provider.  Admission is serialized across stage processes.  A
+    new container evicts the least-recently-used live service first and proves
+    its owned process group and secure descriptor absent before spawning.
+    Residency eviction preserves the container's owned vault and work root so
+    the later indexing or search process can restart against the same corpus;
+    terminal container cleanup still proves process, descriptor, guest-process,
+    and work-root absence.
+
+    The provider retires the idle service after indexing and clears a container
+    in the search `finally` path, whether search succeeds or throws.  Ingest,
+    indexing, and search failures clear every service the stage instance owns.
+    Transport-level SIGINT, SIGTERM, uncaught-exception, and unhandled-rejection
+    handlers serialize with any retirement already in flight, clean every
+    securely discovered Exomem service, prove absence, and then re-raise the
+    original signal or failure so process status remains honest.  `clear()`
+    attaches only to an existing descriptor or proves the deterministic root
+    already absent; it never creates a service during teardown.  Basic Memory
+    retains its single shared warm sidecar because it has no per-container
+    resident-service map.
+
 ## Execution
 
 fable-delegate discipline: Stage-0 packet → Codex/Claude implementer lanes in
