@@ -2895,7 +2895,9 @@ def replace_sidecar(temporary: Path, live: Path) -> None:
     try:
         os.replace(temporary, live)
     except PermissionError as error:
-        if _publish_sidecar_in_place(temporary, live):
+        started = time.monotonic()
+        attempts: list[str] = []
+        if _publish_sidecar_in_place(temporary, live, attempts_out=attempts):
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
@@ -2903,10 +2905,27 @@ def replace_sidecar(temporary: Path, live: Path) -> None:
                 # the published bytes; the reaper collects it on a later pass.
                 pass
             return
-        raise GraphSidecarReplaceUnavailable("live graph sidecar has an open reader") from error
+        # Carry what the refusal actually observed. This has fired on CI
+        # without reproducing locally, and the message alone -- "has an open
+        # reader" -- cannot distinguish the three things it might be: a reader
+        # that holds a transaction for longer than the whole budget, a
+        # permission problem that is not a sharing conflict at all, or a temp
+        # that never existed. The budget is already generous (three in-place
+        # attempts behind a 5s busy timeout, under four publication attempts
+        # above), so a refusal means something held on for close to a minute
+        # and the useful question is what. Widening a budget that large again
+        # would be guessing; naming the holder is not.
+        raise GraphSidecarReplaceUnavailable(
+            "live graph sidecar has an open reader "
+            f"(os.replace: {error.__class__.__name__}: {error}; "
+            f"in-place {len(attempts)} attempt(s) over {time.monotonic() - started:.1f}s: "
+            f"{'; '.join(attempts) if attempts else 'none ran'})"
+        ) from error
 
 
-def _publish_sidecar_in_place(temporary: Path, live: Path) -> bool:
+def _publish_sidecar_in_place(
+    temporary: Path, live: Path, *, attempts_out: list[str] | None = None
+) -> bool:
     """Copy a proven temp sidecar over the live file without moving the entry.
 
     `sqlite3.Connection.backup` copies the whole source database inside one
@@ -2922,10 +2941,13 @@ def _publish_sidecar_in_place(temporary: Path, live: Path) -> bool:
     was.
     """
     if not live.exists():
+        if attempts_out is not None:
+            attempts_out.append("live sidecar absent")
         return False
     for attempt in range(PUBLISH_IN_PLACE_ATTEMPTS):
         if attempt:
             time.sleep(PUBLISH_IN_PLACE_RETRY_SECONDS)
+        elapsed = time.monotonic()
         try:
             source = sqlite3.connect(temporary)
             try:
@@ -2938,15 +2960,26 @@ def _publish_sidecar_in_place(temporary: Path, live: Path) -> bool:
                     destination.close()
             finally:
                 source.close()
-        except sqlite3.Error:
+        except sqlite3.Error as error:
             logger.debug(
                 "graph sidecar in-place publication attempt %d/%d did not complete",
                 attempt + 1,
                 PUBLISH_IN_PLACE_ATTEMPTS,
                 exc_info=True,
             )
+            if attempts_out is not None:
+                # `sqlite3.OperationalError: database is locked` after roughly
+                # the full busy timeout is a reader holding SHARED across the
+                # window; the same error returned immediately is something
+                # else, and only the elapsed time separates them.
+                attempts_out.append(
+                    f"#{attempt + 1} {error.__class__.__name__}: {error} "
+                    f"after {time.monotonic() - elapsed:.1f}s"
+                )
             continue
-        except OSError:
+        except OSError as error:
+            if attempts_out is not None:
+                attempts_out.append(f"#{attempt + 1} {error.__class__.__name__}: {error}")
             return False
         return True
     return False
