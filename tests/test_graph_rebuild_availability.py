@@ -44,7 +44,7 @@ def _hold_cross_process_rebuild_lock(
 
     assert graph_sync_module.claim_rebuild_owner(Path(vault_root), Path(temporary))
     ready.set()
-    assert release.wait(10)
+    assert release.wait(_HOLD_SECONDS)
     graph_sync_module.release_rebuild_owner(Path(vault_root), Path(temporary))
 
 
@@ -70,6 +70,30 @@ def _forked_graph_lock_state(vault_root: str, temporary: str, result) -> None:  
         if claimed:
             graph_sync_module.release_rebuild_owner(Path(vault_root), Path(temporary))
 
+
+#: Wall-clock shape for every contention test in this file.
+#:
+#: A HOLD keeps a lock or an in-flight rebuild parked while the test observes an
+#: ordering; an OBSERVATION is how long the test will wait for something to
+#: become true. The gap between them is the entire discriminating power of these
+#: tests -- a hold that does not outlast its observation lets the ordering pass
+#: vacuously, and an observation sized for an idle laptop fails on a loaded
+#: shard while the code under test is behaving correctly.
+#:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 30.0
+_ADMIT_SECONDS = 15.0
 
 def _checkpoint(generation: int) -> graph_sync.GraphSyncCheckpoint:
     return graph_sync.GraphSyncCheckpoint.create(
@@ -770,19 +794,19 @@ def test_second_writer_commits_while_first_waits_outside_the_graph_hold(tmp_path
 
     def build(_checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
         entered.set()
-        assert release.wait(2)
+        assert release.wait(_HOLD_SECONDS)
         return graph_sync.GraphBuildOutcome.covering(_checkpoint)
 
     first = coordinator.start_or_join(_checkpoint(1), build)
-    assert entered.wait(1)
+    assert entered.wait(_OBSERVE_SECONDS)
     second = coordinator.start_or_join(_checkpoint(2), build)
 
     assert first.builder_started is True
     assert second.builder_started is False
     assert coordinator.writer_hold_count == 0
     release.set()
-    assert first.wait(2).covers(_checkpoint(1))
-    assert second.wait(2).covers(_checkpoint(2))
+    assert first.wait(_OBSERVE_SECONDS).covers(_checkpoint(1))
+    assert second.wait(_OBSERVE_SECONDS).covers(_checkpoint(2))
 
 
 def test_registered_rebuild_enters_only_after_post_guard_wait(tmp_path: Path) -> None:
@@ -828,11 +852,11 @@ def test_standalone_upsert_joins_registered_rebuild_before_returning(
     def slow_rebuild(index: EpistemicGraphIndex) -> dict[str, int]:
         assert index.path.name.startswith(".graph-rebuild-")
         entered.set()
-        assert release.wait(1)
+        assert release.wait(_HOLD_SECONDS)
         return original(index)
 
     def release_build() -> None:
-        assert entered.wait(1)
+        assert entered.wait(_OBSERVE_SECONDS)
         time.sleep(0.1)
         release.set()
 
@@ -843,7 +867,7 @@ def test_standalone_upsert_joins_registered_rebuild_before_returning(
         result = upsert_after_write(tmp_path, [note], created_paths=[note])
     finally:
         release.set()
-        releaser.join(timeout=1)
+        releaser.join(timeout=_HOLD_SECONDS)
 
     assert result.outcome == "completed"
     assert not list(note.parent.glob(".graph-rebuild-*.sqlite"))
@@ -1338,16 +1362,16 @@ def test_single_flight_retries_for_new_checkpoint_and_never_releases_stale_waite
         observed.append(checkpoint.generation)
         entered.set()
         if checkpoint.generation == 1:
-            assert release.wait(2)
+            assert release.wait(_HOLD_SECONDS)
         return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
     first = coordinator.start_or_join(_checkpoint(1), build)
-    assert entered.wait(1)
+    assert entered.wait(_OBSERVE_SECONDS)
     second = coordinator.start_or_join(_checkpoint(2), build)
     release.set()
 
-    assert first.wait(2).covers(_checkpoint(1))
-    assert second.wait(2).covers(_checkpoint(2))
+    assert first.wait(_OBSERVE_SECONDS).covers(_checkpoint(1))
+    assert second.wait(_OBSERVE_SECONDS).covers(_checkpoint(2))
     assert observed == [1, 2]
 
 
@@ -1394,7 +1418,7 @@ def test_registered_builder_failure_logs_and_chains_a_content_free_state_aware_p
     caplog.set_level("ERROR")
     waiter = coordinator.start_or_join(checkpoint, fail)
     with pytest.raises(graph_sync.GraphRebuildStopped) as stopped:
-        waiter.wait(1)
+        waiter.wait(_OBSERVE_SECONDS)
 
     assert stopped.value.__cause__ is failure
     assert stopped.value.code == "GRAPH_SYNC_REBUILD_STOPPED"
@@ -1450,7 +1474,7 @@ def test_every_classified_failure_escalates_when_the_lineage_is_unavailable(
 
     waiter = coordinator.start_or_join(checkpoint, fail)
     with pytest.raises(graph_sync.GraphRebuildRegistrationError) as stopped:
-        waiter.wait(1)
+        waiter.wait(_OBSERVE_SECONDS)
 
     assert stopped.value.remediation == graph_sync._LINEAGE_UNAVAILABLE_REMEDIATION
     assert stopped.value.code == failure.code
@@ -1479,7 +1503,7 @@ def test_a_classified_failure_keeps_its_own_advice_when_the_lineage_is_intact(
 
     waiter = coordinator.start_or_join(checkpoint, fail)
     with pytest.raises(graph_sync.GraphRebuildRegistrationError) as stopped:
-        waiter.wait(1)
+        waiter.wait(_OBSERVE_SECONDS)
 
     assert stopped.value is failure
     assert stopped.value.remediation == failure.remediation
@@ -1508,7 +1532,7 @@ def test_registered_unavailable_lineage_failure_projects_explicit_reset_without_
     caplog.set_level("ERROR")
     waiter = coordinator.start_or_join(checkpoint, fail)
     with pytest.raises(graph_sync.GraphRebuildRegistrationError) as stopped:
-        waiter.wait(1)
+        waiter.wait(_OBSERVE_SECONDS)
 
     assert type(stopped.value) is graph_sync.GraphRebuildRegistrationError
     assert stopped.value.__cause__ is failure
@@ -1548,17 +1572,17 @@ def test_same_generation_split_flight_fails_original_waiter_promptly(tmp_path: P
 
     def build(checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
         entered.set()
-        assert release.wait(2)
+        assert release.wait(_HOLD_SECONDS)
         return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
     first = coordinator.start_or_join(first_checkpoint, build)
-    assert entered.wait(1)
+    assert entered.wait(_OBSERVE_SECONDS)
     second = coordinator.start_or_join(replacement, build)
 
     with pytest.raises(graph_sync.GraphEpochIncoherent, match="same-generation"):
-        first.wait(1)
+        first.wait(_OBSERVE_SECONDS)
     with pytest.raises(graph_sync.GraphEpochIncoherent, match="same-generation"):
-        second.wait(1)
+        second.wait(_OBSERVE_SECONDS)
     release.set()
 
 
@@ -1987,7 +2011,7 @@ def test_single_flight_caps_waiter_registration(tmp_path: Path, monkeypatch: pyt
     release = threading.Event()
 
     def build(checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
-        assert release.wait(2)
+        assert release.wait(_HOLD_SECONDS)
         return graph_sync.GraphBuildOutcome.covering(checkpoint)
 
     first = coordinator.start_or_join(_checkpoint(1), build)
@@ -1995,7 +2019,7 @@ def test_single_flight_caps_waiter_registration(tmp_path: Path, monkeypatch: pyt
     with pytest.raises(graph_sync.GraphWaiterCapacityError):
         rejected.wait()
     release.set()
-    assert first.wait(2).covers(_checkpoint(1))
+    assert first.wait(_OBSERVE_SECONDS).covers(_checkpoint(1))
 
 
 def test_temp_sidecar_is_private_until_atomic_publication_and_reconcile_sweeps_abandoned(
@@ -2052,12 +2076,12 @@ def test_cross_process_rebuild_lock_rejects_a_second_builder(tmp_path: Path) -> 
     )
     owner.start()
     try:
-        assert ready.wait(5)
+        assert ready.wait(_OBSERVE_SECONDS)
         assert graph_sync.claim_rebuild_owner(tmp_path, second) is False
         assert not (tmp_path / "Knowledge Base/.graph-rebuild.owner").exists()
     finally:
         release.set()
-        owner.join(10)
+        owner.join(_HOLD_SECONDS)
     assert owner.exitcode == 0
 
 
@@ -2127,10 +2151,10 @@ def test_fork_child_drops_inherited_graph_lock_without_unlocking_parent(tmp_path
         args=(str(tmp_path), str(child_temporary), result),
     )
     child.start()
-    child.join(10)
+    child.join(_HOLD_SECONDS)
     try:
         assert child.exitcode == 0
-        assert result.get(timeout=2) == (False, False)
+        assert result.get(timeout=_OBSERVE_SECONDS) == (False, False)
 
         spawn_context = multiprocessing.get_context("spawn")
         competitor_result = spawn_context.Queue()
@@ -2139,9 +2163,9 @@ def test_fork_child_drops_inherited_graph_lock_without_unlocking_parent(tmp_path
             args=(str(tmp_path), str(competitor_temporary), competitor_result),
         )
         competitor.start()
-        competitor.join(10)
+        competitor.join(_HOLD_SECONDS)
         assert competitor.exitcode == 0
-        assert competitor_result.get(timeout=2) is False
+        assert competitor_result.get(timeout=_OBSERVE_SECONDS) is False
     finally:
         graph_sync.release_rebuild_owner(tmp_path, parent_temporary)
 
@@ -2240,9 +2264,6 @@ def test_reconcile_recovers_an_unacknowledged_checkpoint_without_rewriting_markd
 # Deadlock valves for the ordering test below. The hold must outlast both the
 # observation and the admission timeout, or the ordering it pins can resolve
 # itself by expiry and the assertions stop meaning anything.
-_HOLD_SECONDS = 60.0
-_OBSERVE_SECONDS = 30.0
-_ADMIT_SECONDS = 15.0
 
 
 def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
@@ -2461,7 +2482,7 @@ def test_legacy_refresh_releases_canonical_boundary_before_missing_sidecar_rebui
     def slow_rebuild(index: EpistemicGraphIndex) -> dict[str, int]:
         assert index.path.name.startswith(".graph-rebuild-")
         rebuild_started.set()
-        assert release_rebuild.wait(2)
+        assert release_rebuild.wait(_HOLD_SECONDS)
         return original(index)
 
     monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_locked", slow_rebuild)
@@ -2489,13 +2510,13 @@ def test_legacy_refresh_releases_canonical_boundary_before_missing_sidecar_rebui
         target=lambda: reports.append(index.refresh_paths([note]))
     )
     refresh_thread.start()
-    assert rebuild_started.wait(1)
+    assert rebuild_started.wait(_OBSERVE_SECONDS)
     try:
         writer_manager.invoke(writer_command, (tmp_path,), {})
         assert concurrent_writer_admitted.is_set()
     finally:
         release_rebuild.set()
-        refresh_thread.join(timeout=3)
+        refresh_thread.join(timeout=_HOLD_SECONDS)
 
     assert not refresh_thread.is_alive()
     assert reports[0]["indexed_files"] == 1
@@ -2702,14 +2723,14 @@ def test_canonical_handoff_is_non_owned_until_off_boundary_graph_work_completes(
                 operation_guard=Guard,
                 after_canonical_persisted=lambda value: value,
                 after_operation_guard=lambda value: (
-                    release_graph.wait(2) and {**value, "graph_sync": "completed"}
+                    release_graph.wait(_HOLD_SECONDS) and {**value, "graph_sync": "completed"}
                 ),
             )
         )
 
     owner = threading.Thread(target=run_owner)
     owner.start()
-    assert released_guard.wait(1)
+    assert released_guard.wait(_OBSERVE_SECONDS)
     with store._connect() as conn:
         assert conn.execute("SELECT state, owner FROM mutations").fetchone() == (
             "canonically_committed",
@@ -2727,8 +2748,8 @@ def test_canonical_handoff_is_non_owned_until_off_boundary_graph_work_completes(
     )
     replay.start()
     release_graph.set()
-    owner.join(2)
-    replay.join(2)
+    owner.join(_HOLD_SECONDS)
+    replay.join(_HOLD_SECONDS)
 
     assert result == [
         {"state": "committed", "graph_sync": "completed"},
@@ -2809,7 +2830,7 @@ def test_crash_after_canonical_terminal_persistence_never_replays_the_write(tmp_
         target=_crash_after_canonical_terminal, args=(str(database), str(marker))
     )
     child.start()
-    child.join(timeout=10)
+    child.join(timeout=_HOLD_SECONDS)
     assert child.exitcode == 0
     assert marker.read_text(encoding="utf-8") == "committed"
 
@@ -3166,7 +3187,7 @@ def test_live_sidecar_readers_are_registered_and_drained_for_a_publication_hold(
 
     worker = threading.Thread(target=leak_a_reader)
     worker.start()
-    worker.join(10)
+    worker.join(_HOLD_SECONDS)
     assert leaked and leaked[0] is not None
     assert len(epistemic_graph._SIDECAR_READERS.get(key, {})) == 1
 

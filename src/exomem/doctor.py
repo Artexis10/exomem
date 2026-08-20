@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -2270,6 +2271,50 @@ def _check_probe_local(port: int = 8765) -> DoctorCheck:
     )
 
 
+def _check_silent_traffic_payload(body: object) -> DoctorCheck:
+    traffic = body.get("traffic") if isinstance(body, Mapping) else None
+    if not isinstance(traffic, Mapping):
+        return _check(
+            "probe.traffic",
+            "warn",
+            "The origin readiness payload does not report MCP traffic shape.",
+            "Upgrade and restart the origin, then re-run doctor --probe.",
+        )
+    details = dict(traffic)
+    if traffic.get("suspected_silent_outage") is True:
+        seconds = float(traffic.get("probe_window_seconds") or 0.0)
+        probes = int(traffic.get("health_probes_since_last_tool_call") or 0)
+        return _check(
+            "probe.traffic",
+            "warn",
+            f"The origin has answered {probes} health probes across {seconds / 3600:.1f}h "
+            "without a successful MCP tool call.",
+            "Check the edge, tunnel, and route for refusals, misrouting, or auth "
+            "failures before requests reach the origin.",
+            details=details,
+        )
+    return _check(
+        "probe.traffic",
+        "pass",
+        "The origin is not reporting sustained probes without MCP tool traffic.",
+        details=details,
+    )
+
+
+def _check_probe_traffic(port: int = 8765) -> DoctorCheck:
+    url = f"http://127.0.0.1:{port}/health/ready"
+    try:
+        _status, body = _probe_get(url)
+    except Exception as e:  # noqa: BLE001 - transport failure is diagnostic state
+        return _check(
+            "probe.traffic",
+            "fail",
+            f"Could not inspect origin traffic state at {url}: {e}",
+            "Start the server or installed service, then re-run doctor --probe.",
+        )
+    return _check_silent_traffic_payload(body)
+
+
 def _check_probe_oauth_discovery(base_url: str) -> DoctorCheck:
     url = f"{base_url}/.well-known/oauth-authorization-server"
     try:
@@ -2338,7 +2383,7 @@ def _check_probe_protected_resource(base_url: str) -> DoctorCheck:
 
 
 def _check_remote_probes() -> list[DoctorCheck]:
-    checks = [_check_probe_local()]
+    checks = [_check_probe_local(), _check_probe_traffic()]
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     if base_url:
         checks.append(_check_probe_oauth_discovery(base_url))

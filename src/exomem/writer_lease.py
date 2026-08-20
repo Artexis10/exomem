@@ -663,7 +663,7 @@ class LeaseConfig:
     #
     # This is a *share of the edge budget*, not a free parameter. The HA edge
     # worker abandons a mutation-capable request at MCP_TOOL_TIMEOUT_MS
-    # (default 60s, deploy/cloudflare-ha/src/worker.js) and deliberately does
+    # (historically 60s at the retired HA edge worker) and deliberately does
     # not replay it, because the origin may commit after the edge stops
     # waiting. Queueing here spends that same budget: time spent waiting is
     # unavailable to the write itself. A value at or near the edge timeout

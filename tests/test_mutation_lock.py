@@ -32,6 +32,25 @@ def _boundary(snapshot: dict) -> dict:
     return {key: value for key, value in snapshot.items() if key != "contention"}
 
 
+#: How long a holder keeps the mutation boundary, and how long a test will
+#: wait to observe a contender being refused. The gap between them is the
+#: whole discriminating power of the contention assertions: a contender that
+#: waited for the holder instead of honouring its own timeout blows straight
+#: through the observation window.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 15.0
+
+#: A NEGATIVE observation -- how long the test waits to prove something has NOT
+#: happened yet -- is a different animal and stays short. Widening one does not
+#: merely slow the test, it changes the scenario: the product's own acquire
+#: timeout runs during the same window. At 15s the holder in
+#: `test_probe_cleanup_cannot_delete_a_new_holders_metadata` gave up with
+#: MUTATION_BUSY inside the settle period and never entered afterwards, so the
+#: positive assertion that followed failed. A slow runner can only make these
+#: pass vacuously, never fail, which is why they are safe left tight where a
+#: positive wait is not. They are written as literals, deliberately, so nobody
+#: sweeps them along with the constants above.
+
 def test_retained_regular_file_rename_moves_the_pinned_entry(tmp_path: Path) -> None:
     source = tmp_path / "source.sqlite"
     destination = tmp_path / "quarantine" / "source.sqlite"
@@ -418,7 +437,7 @@ def _process_hold(
         holder_kind=holder_kind,
     ):
         entered.set()
-        if not release.wait(5.0):
+        if not release.wait(_HOLD_SECONDS):
             raise RuntimeError("test release signal was not received")
 
 
@@ -434,7 +453,7 @@ def _process_hold_paused_before_publish(
 
     def paused_publish(self, holder):  # noqa: ANN001
         acquired.set()
-        if not publish.wait(5.0):
+        if not publish.wait(_HOLD_SECONDS):
             raise RuntimeError("test publish signal was not received")
         return original(self, holder)
 
@@ -447,7 +466,7 @@ def _process_hold_paused_before_publish(
         holder_kind="command",
     ):
         entered.set()
-        if not release.wait(5.0):
+        if not release.wait(_HOLD_SECONDS):
             raise RuntimeError("test release signal was not received")
 
 
@@ -462,11 +481,11 @@ def _process_crash(state_root: str, vault_root: str, entered) -> None:
 
 def _join_or_terminate(processes: list[multiprocessing.Process]) -> None:
     for process in processes:
-        process.join(timeout=5.0)
+        process.join(timeout=_HOLD_SECONDS)
     for process in processes:
         if process.is_alive():
             process.terminate()
-            process.join(timeout=2.0)
+            process.join(timeout=_HOLD_SECONDS)
 
 
 def test_same_canonical_vault_serializes_competing_threads(tmp_path: Path) -> None:
@@ -484,7 +503,7 @@ def test_same_canonical_vault_serializes_competing_threads(tmp_path: Path) -> No
     def hold_first() -> None:
         with first.hold(timeout_seconds=2.0):
             first_entered.set()
-            assert release_first.wait(2.0)
+            assert release_first.wait(_HOLD_SECONDS)
 
     def enter_second() -> None:
         second_attempting.set()
@@ -494,14 +513,14 @@ def test_same_canonical_vault_serializes_competing_threads(tmp_path: Path) -> No
     first_thread = threading.Thread(target=hold_first)
     second_thread = threading.Thread(target=enter_second)
     first_thread.start()
-    assert first_entered.wait(1.0)
+    assert first_entered.wait(_OBSERVE_SECONDS)
     second_thread.start()
-    assert second_attempting.wait(1.0)
+    assert second_attempting.wait(_OBSERVE_SECONDS)
     assert not second_entered.wait(0.1)
     release_first.set()
-    assert second_entered.wait(1.0)
-    first_thread.join(timeout=2.0)
-    second_thread.join(timeout=2.0)
+    assert second_entered.wait(_OBSERVE_SECONDS)
+    first_thread.join(timeout=_HOLD_SECONDS)
+    second_thread.join(timeout=_HOLD_SECONDS)
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
 
@@ -540,13 +559,13 @@ def test_same_canonical_vault_serializes_competing_processes(tmp_path: Path) -> 
     processes = [first, second]
     try:
         first.start()
-        assert first_attempting.wait(2.0)
-        assert first_entered.wait(2.0)
+        assert first_attempting.wait(_OBSERVE_SECONDS)
+        assert first_entered.wait(_OBSERVE_SECONDS)
         second.start()
-        assert second_attempting.wait(2.0)
+        assert second_attempting.wait(_OBSERVE_SECONDS)
         assert not second_entered.wait(0.2)
         release_first.set()
-        assert second_entered.wait(2.0)
+        assert second_entered.wait(_OBSERVE_SECONDS)
         release_second.set()
     finally:
         release_first.set()
@@ -571,16 +590,16 @@ def test_independent_vaults_can_mutate_concurrently(tmp_path: Path) -> None:
     def hold_first() -> None:
         with first.hold(timeout_seconds=2.0):
             first_entered.set()
-            assert release_first.wait(2.0)
+            assert release_first.wait(_HOLD_SECONDS)
 
     first_thread = threading.Thread(target=hold_first)
     first_thread.start()
-    assert first_entered.wait(1.0)
+    assert first_entered.wait(_OBSERVE_SECONDS)
     with second.hold(timeout_seconds=0.2):
         second_entered.set()
     assert second_entered.is_set()
     release_first.set()
-    first_thread.join(timeout=2.0)
+    first_thread.join(timeout=_HOLD_SECONDS)
     assert not first_thread.is_alive()
 
 
@@ -605,13 +624,13 @@ def test_bounded_timeout_raises_actionable_mutation_busy(tmp_path: Path) -> None
     release = threading.Event()
 
     def hold_lock() -> None:
-        with holder.hold(timeout_seconds=2.0):
+        with holder.hold(timeout_seconds=_HOLD_SECONDS):
             entered.set()
-            assert release.wait(2.0)
+            assert release.wait(_HOLD_SECONDS)
 
     thread = threading.Thread(target=hold_lock)
     thread.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_OBSERVE_SECONDS)
     started = time.monotonic()
     try:
         with pytest.raises(OpError) as raised:
@@ -620,10 +639,16 @@ def test_bounded_timeout_raises_actionable_mutation_busy(tmp_path: Path) -> None
         assert raised.value.code == "MUTATION_BUSY"
         assert raised.value.remediation
         assert "retry" in raised.value.remediation.lower()
-        assert time.monotonic() - started < 0.5
+        # The discriminating assertion: the contender gave up on its own 0.05s
+        # timeout instead of waiting out the holder. That stays provable because
+        # the holder holds for _HOLD_SECONDS, which is far larger -- so this
+        # bound can be generous without going vacuous. At 0.5s it was also
+        # claiming a contended Windows shard schedules two threads within half a
+        # second, which is not a property of this code.
+        assert time.monotonic() - started < _OBSERVE_SECONDS
     finally:
         release.set()
-        thread.join(timeout=2.0)
+        thread.join(timeout=_HOLD_SECONDS)
     assert not thread.is_alive()
 
 
@@ -641,8 +666,8 @@ def test_process_contention_uses_same_bounded_timeout_contract(tmp_path: Path) -
     )
     holder.start()
     try:
-        assert attempting.wait(2.0)
-        assert entered.wait(2.0)
+        assert attempting.wait(_OBSERVE_SECONDS)
+        assert entered.wait(_OBSERVE_SECONDS)
         contender = VaultMutationCoordinator(state_root, vault)
         with pytest.raises(OpError) as raised:
             with contender.hold(timeout_seconds=0.05):
@@ -680,8 +705,8 @@ def test_cross_process_status_and_busy_error_report_verified_current_holder(
     )
     holder.start()
     try:
-        assert attempting.wait(2.0)
-        assert entered.wait(2.0)
+        assert attempting.wait(_OBSERVE_SECONDS)
+        assert entered.wait(_OBSERVE_SECONDS)
         contender = VaultMutationCoordinator(state_root, vault)
         snapshot = contender.snapshot()
         assert _boundary(snapshot) | {"age_seconds": 0.0} == {
@@ -806,13 +831,13 @@ def test_status_waits_out_acquire_to_publish_generation_transition(
         )
     )
     try:
-        assert acquired.wait(2.0)
+        assert acquired.wait(_OBSERVE_SECONDS)
         status_thread.start()
         time.sleep(0.05)
         assert not result
         publish.set()
-        assert entered.wait(2.0)
-        status_thread.join(timeout=2.0)
+        assert entered.wait(_OBSERVE_SECONDS)
+        status_thread.join(timeout=_HOLD_SECONDS)
         assert result
         assert result[0]["state"] == "held"
         assert result[0]["verified"] is True
@@ -820,7 +845,7 @@ def test_status_waits_out_acquire_to_publish_generation_transition(
     finally:
         publish.set()
         release.set()
-        status_thread.join(timeout=2.0)
+        status_thread.join(timeout=_HOLD_SECONDS)
         _join_or_terminate([holder])
     assert holder.exitcode == 0
 
@@ -846,7 +871,7 @@ def test_probe_cleanup_cannot_delete_a_new_holders_metadata(
         if not paused:
             paused = True
             cleanup_started.set()
-            assert continue_cleanup.wait(2.0)
+            assert continue_cleanup.wait(_HOLD_SECONDS)
 
     monkeypatch.setattr(mutation_lock_module, "_clear_holder_metadata", paused_clear)
     status_result: list[dict[str, object]] = []
@@ -865,23 +890,23 @@ def test_probe_cleanup_cannot_delete_a_new_holders_metadata(
             holder_kind="command",
         ):
             holder_entered.set()
-            assert release_holder.wait(2.0)
+            assert release_holder.wait(_HOLD_SECONDS)
 
     status_thread = threading.Thread(target=read_status)
     holder_thread = threading.Thread(target=acquire_after_probe)
     status_thread.start()
-    assert cleanup_started.wait(1.0)
+    assert cleanup_started.wait(_OBSERVE_SECONDS)
     holder_thread.start()
     assert not holder_entered.wait(0.05)
     continue_cleanup.set()
-    status_thread.join(timeout=2.0)
+    status_thread.join(timeout=_HOLD_SECONDS)
     assert [_boundary(entry) for entry in status_result] == [{"state": "free"}]
-    assert holder_entered.wait(1.0)
+    assert holder_entered.wait(_OBSERVE_SECONDS)
     snapshot = status_coordinator.snapshot()
     assert snapshot["verified"] is True
     assert snapshot["request_id"] == "req-after-cleanup"
     release_holder.set()
-    holder_thread.join(timeout=2.0)
+    holder_thread.join(timeout=_HOLD_SECONDS)
     assert not status_thread.is_alive()
     assert not holder_thread.is_alive()
 
@@ -1002,13 +1027,13 @@ def test_mutation_busy_includes_wait_ms_and_dynamic_retry_hint(tmp_path: Path) -
     release = threading.Event()
 
     def hold_lock() -> None:
-        with holder.hold(timeout_seconds=2.0):
+        with holder.hold(timeout_seconds=_HOLD_SECONDS):
             entered.set()
-            assert release.wait(2.0)
+            assert release.wait(_HOLD_SECONDS)
 
     thread = threading.Thread(target=hold_lock)
     thread.start()
-    assert entered.wait(1.0)
+    assert entered.wait(_OBSERVE_SECONDS)
     try:
         time.sleep(0.05)
         with pytest.raises(OpError) as raised:
@@ -1018,7 +1043,7 @@ def test_mutation_busy_includes_wait_ms_and_dynamic_retry_hint(tmp_path: Path) -
         assert 750 <= raised.value.details["retry_after_ms"] <= 15000
     finally:
         release.set()
-        thread.join(timeout=2.0)
+        thread.join(timeout=_HOLD_SECONDS)
 
 
 def test_hold_emits_acquired_and_released_events_with_timing(
@@ -1194,11 +1219,11 @@ def test_process_exit_releases_os_mutation_lock(tmp_path: Path) -> None:
         args=(str(state_root), str(vault), entered),
     )
     crashing.start()
-    assert entered.wait(2.0)
-    crashing.join(timeout=3.0)
+    assert entered.wait(_OBSERVE_SECONDS)
+    crashing.join(timeout=_HOLD_SECONDS)
     if crashing.is_alive():
         crashing.terminate()
-        crashing.join(timeout=2.0)
+        crashing.join(timeout=_HOLD_SECONDS)
     assert crashing.exitcode == 23
 
     recovered = VaultMutationCoordinator(state_root, vault)
