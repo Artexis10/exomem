@@ -10,7 +10,7 @@
 #   codex_task.sh verify <worktree-dir>             run the merge gate in a lane worktree
 #
 # Safety: start/verify refuse to operate on anything that is not a *linked*
-# worktree — the shared primary checkout can never be a Codex workspace.
+# worktree — the shared primary checkout can never be where a Codex lane starts.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -73,9 +73,18 @@ EOF
 # `shutil.rmtree` of its tmpdir dies with WinError 5. Widening `writable_roots`
 # moves the path but not the ACL, so it cannot be configured away.
 #
-# The workers run in linked worktrees under $PARENT, against a repo whose own
-# guardrail is `require_linked_worktree`, and `cmd_verify` gates every diff
-# before it can merge. Full access is the mode that matches that containment.
+# Two more deliverables were structurally impossible under that sandbox, which
+# is why a compliant worker read afterwards like a disobedient one. A linked
+# worktree's gitdir lives under the primary's `.git/worktrees/`, outside the
+# sandbox, so a worker could not create `index.lock` and could not commit the
+# work the brief asked it to commit. And `~/.cache/uv` and every PyPI route
+# were blocked, so an acceptance command naming `uvx` could never pass.
+#
+# The cost, stated rather than implied: full access does NOT confine a worker
+# to its worktree. `require_linked_worktree` decides where a lane may *start*;
+# nothing stops a worker reaching the primary checkout mid-run. The brief's
+# scope allowlist and `cmd_verify` are what catch that, and both run after the
+# fact -- so read the diff before you trust it.
 CODEX_SANDBOX=${CODEX_SANDBOX:-danger-full-access}
 
 # Prove the worker's environment can run one test BEFORE handing it a brief.
