@@ -42,7 +42,7 @@ from pathlib import Path
 from . import corpus_aware, indexes, semantic_contract, semantic_writes, temporal
 from . import find as find_module
 from .cli_ops import OpError
-from .kbdir import kb_prefix
+from .kbdir import kb_page_target, kb_prefix
 from .mutation_timings import MutationTimings, write_timings_enabled
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
@@ -399,6 +399,11 @@ def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
     and never a path that escapes the vault. Extension handling mirrors
     `_resolve` so the two agree on what "the same page" means.
     """
+    # The caller's own text, separators normalised but *not* re-rooted: this
+    # question is precisely "did they name something outside the governed
+    # root?", so it must not go through `kbdir.kb_page_relative_form`, whose
+    # whole job is to supply the prefix `_resolve` wants and this does not.
+    given = given.strip().replace("\\", "/").lstrip("/")
     if given.startswith(kb_prefix()):
         return None  # caller explicitly addressed KB/ — a genuine miss stays one
     rel = given if given.endswith(".md") else given + ".md"
@@ -421,13 +426,9 @@ def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
 def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     if not path or not path.strip():
         raise EditError(code="INVALID_PATH", missing=["path"], reason="path is empty")
-    given = path.strip().replace("\\", "/").lstrip("/")
-    rel = given
-    if not rel.startswith(kb_prefix()):
-        rel = kb_prefix() + rel
-    if not rel.endswith(".md"):
-        rel = rel + ".md"
-    candidate = vault_root / rel
+    # Shared with `replace._resolve_kb_path` and the hosted protected-tree
+    # guard. See `kbdir.kb_relative_form` for why this must not be inlined.
+    candidate, rel = kb_page_target(vault_root, path)
     try:
         resolved = candidate.resolve()
         kb_relative = resolved.relative_to(kb_root(vault_root).resolve())
@@ -447,7 +448,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
         # outside-the-root refusal become indistinguishable (issue #599). Detect
         # that case and refuse honestly; the governance model is intentional, so
         # we still don't write outside the root.
-        outside = _existing_page_outside_kb(vault_root, given)
+        outside = _existing_page_outside_kb(vault_root, path)
         if outside is not None:
             raise EditError(
                 code="OUTSIDE_GOVERNED_ROOT",
