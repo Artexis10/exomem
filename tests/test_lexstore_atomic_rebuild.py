@@ -982,6 +982,57 @@ def test_temp_wal_fold_failure_preserves_live_and_does_not_publish(
     assert any("livecontent" in hit.content for hit in _units_in_category(tmp_path, "config"))
 
 
+def test_await_repairs_idle_waits_for_an_in_flight_repair() -> None:
+    """The seam must report busy while a repair holds the key, idle after."""
+    import threading
+
+    root = Path("nonexistent-vault-for-key-only")
+    key = root.resolve()
+
+    with lexstore._REPAIRS_LOCK:
+        lexstore._REPAIRS_IN_FLIGHT.add(key)
+    try:
+        # Busy: it must not claim idle, and must honour its own timeout rather
+        # than block the suite. This is the property that makes it usable as a
+        # precondition assertion.
+        assert lexstore.await_repairs_idle(root, timeout=0.05) is False
+
+        released = threading.Event()
+
+        def release() -> None:
+            released.wait(30.0)
+            with lexstore._REPAIRS_LOCK:
+                lexstore._REPAIRS_IN_FLIGHT.discard(key)
+
+        worker = threading.Thread(target=release, daemon=True)
+        worker.start()
+        released.set()
+        assert lexstore.await_repairs_idle(root, timeout=30.0) is True
+        worker.join(timeout=30.0)
+        assert not worker.is_alive()
+    finally:
+        with lexstore._REPAIRS_LOCK:
+            lexstore._REPAIRS_IN_FLIGHT.discard(key)
+
+    # Idle on a key nobody ever registered.
+    assert lexstore.await_repairs_idle(root, timeout=30.0) is True
+
+
+def test_await_repairs_idle_keys_on_the_resolved_path(tmp_path: Path) -> None:
+    """`_schedule_repair` keys the in-flight set on `.resolve()`, so this must too.
+
+    On macOS `/var` is a symlink to `/private/var`, so an unresolved and a
+    resolved spelling of the same vault are different dict keys. A seam that
+    disagreed with the scheduler would report idle while a repair ran.
+    """
+    with lexstore._REPAIRS_LOCK:
+        lexstore._REPAIRS_IN_FLIGHT.add(tmp_path.resolve())
+    try:
+        assert lexstore.await_repairs_idle(tmp_path, timeout=0.05) is False
+    finally:
+        with lexstore._REPAIRS_LOCK:
+            lexstore._REPAIRS_IN_FLIGHT.discard(tmp_path.resolve())
+
 def test_live_wal_not_blindly_deleted_and_unsafe_publish_declines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -998,6 +1049,19 @@ def test_live_wal_not_blindly_deleted_and_unsafe_publish_declines(
     # (a) Unsafe: the live WAL cannot be safely folded → decline WITHOUT replacing
     # the live main file (and thus without ever reaching a post-replace unlink of
     # the live -wal/-shm). An os.replace spy proves no main-file swap happened.
+    # The spy below is process-wide, but `_schedule_repair` runs publishes on a
+    # daemon thread that this test did not start. One finishing inside the spied
+    # window is a legitimate publish attributed to this test's declining call --
+    # which is precisely the "data-safety defect vs. a test that spies too
+    # widely" ambiguity the caller list was added to resolve. It resolved it:
+    # the named caller was the normal `os.replace` at the end of
+    # `_build_and_publish`, reachable only when `_quiesce_live_wal` returned
+    # True, i.e. from an instance this test had not patched yet.
+    assert lexstore.await_repairs_idle(tmp_path), (
+        "a background lexical repair was still running; its publish would be "
+        "counted against the declining publish under test"
+    )
+
     replaced = {"n": 0}
     callers: list[str] = []
     real_replace = lexstore.os.replace
