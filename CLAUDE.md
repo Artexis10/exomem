@@ -111,15 +111,19 @@ Routing (orchestrator applies):
 | Standard implementation with tests | `scripts/codex_task.sh start <lane> <brief>` (Terra high) |
 | Design-sensitive / hard lanes | Sol xhigh, or a Claude executor |
 | Mechanical sweeps, docs | `--profile luna-sweep` (Luna medium) |
-| Shared-primary ops, merges, releases | Claude only — see below |
+| Shared-primary ops, merges, releases | Whoever is orchestrating — one owner at a time |
 
-Why that last row is Claude-only is worth stating, because it is not about
-capability. Codex CLI is a peer, not a lesser tool: it has its own MCP servers
-configured, including exomem itself over the shared loopback service. The
-constraint is that **one** actor must own the shared checkout and the merge
-button, or two agents race on uncommitted work and push to `main` concurrently.
-The same rule would apply to a second Claude session. Anything a lane can do
-inside its own worktree, Codex can do.
+That last row is about serialization, not about which tool. Whoever is holding
+the orchestrator role owns the shared checkout and the merge button for as long
+as they hold it; a second actor doing the same thing concurrently races on
+uncommitted work and pushes to `main` at the same time. That is equally true of
+two Claude sessions, two Codex sessions, or one of each — and it is why this
+repo's own CLAUDE.md opens with the shared-checkout rule.
+
+Codex CLI is a peer, not a lesser tool. It has its own MCP servers configured,
+including exomem itself, and it drives merges and releases perfectly well. An
+earlier version of this table read "Claude only — never Codex", which encoded a
+capability claim that was never true and is not what the constraint is.
 
 Lane mechanics: one lane = one sibling worktree (`../exomem-<lane>`, branch
 `codex/<lane>`, from `origin/main`) = one self-contained `.task/TASK.md` brief
