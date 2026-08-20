@@ -1148,6 +1148,68 @@ def test_runtime_process_check_warns_for_multiple_stdio_servers(
     assert check.details["count"] == 2
 
 
+def test_runtime_process_check_recommends_a_lever_the_reader_can_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The remedy has to be reachable from the machine that is running out of memory.
+
+    It used to lead with HTTP service mode, which will not start without
+    EXOMEM_BASE_URL, a GitHub OAuth app and its credentials (#482). So a laptop
+    user with seven sessions and 8 GB resident was told to obtain a public
+    hostname to solve a purely local problem (#597). `mode quiet` needs nothing
+    external and is the policy the old text was gesturing at.
+    """
+    from exomem import mode as mode_module
+
+    monkeypatch.setattr(mode_module, "resolve_mode", lambda: "performance")
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {"pid": 101, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+            {"pid": 102, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert "exomem mode quiet" in check.message
+    assert check.details["mode"] == "performance"
+    # Service mode may still be mentioned, but never without its precondition:
+    # naming it bare is what sent a laptop user after a public hostname.
+    if "HTTP service" in check.message:
+        assert "public base URL" in check.message
+
+
+def test_runtime_process_check_does_not_recommend_the_mode_already_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Telling someone already in quiet mode to switch to it is worse than silence.
+
+    It reads as "you have not tried the fix" when they have, and hides that the
+    remaining cost is per-process and structural rather than a setting.
+    """
+    from exomem import mode as mode_module
+
+    monkeypatch.setattr(mode_module, "resolve_mode", lambda: "quiet")
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {"pid": 101, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+            {"pid": 102, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert "exomem mode quiet" not in check.message
+    assert "already" in check.message
+    assert check.details["mode"] == "quiet"
+
+
 def test_runtime_process_check_names_physical_footprint_when_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1255,3 +1317,200 @@ def test_torch_cuda_escape_hatch_downgrades_the_failure_to_a_warning(
     check = doctor_module._check_torch_cuda()
 
     assert check.status == "warn"
+
+
+# ------------------------------------------ the process census runs everywhere
+
+
+def test_the_process_census_is_not_disabled_on_windows() -> None:
+    """The check exists to surface what per-session servers cost (#597).
+
+    It returned `[]` on Windows unconditionally, so on the platform where the
+    8.1-GB-across-seven measurement was actually taken, the check that reports
+    it never fired. Pinned as a source assertion rather than through a live
+    census because CI's Linux runners cannot exercise the Windows branch.
+    """
+    import inspect
+
+    source = inspect.getsource(doctor_module._list_exomem_processes)
+    assert 'os.name == "nt"' in source
+    assert "return []" not in source, "the Windows branch is back to answering nothing"
+    assert "_windows_process_samples" in source
+
+
+def test_both_platform_censuses_share_one_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lane that selects differently reports a different thing under one name.
+
+    The filter is the check's actual definition of "an exomem session": it has
+    to tell a server from any other python.exe, and a session from a media
+    worker child. Two copies of that would drift, and the drift would be
+    invisible -- each platform would look correct on its own runner.
+    """
+    samples = [
+        (101, 300 * 1024 * 1024, "python -m exomem --transport stdio", None),
+        (102, 50 * 1024 * 1024, "python -m exomem.media_worker_child --parent 101", None),
+        (103, 90 * 1024 * 1024, "python -m http.server", None),
+        (104, 10 * 1024 * 1024, "notepad.exe exomem-notes.txt", None),
+    ]
+
+    seen = []
+    for platform, attribute in (("nt", "_windows_process_samples"), ("posix", "_posix_process_samples")):
+        monkeypatch.setattr(doctor_module.os, "name", platform)
+        monkeypatch.setattr(doctor_module, attribute, lambda: samples)
+        seen.append(doctor_module._list_exomem_processes())
+
+    windows_rows, posix_rows = seen
+    assert windows_rows == posix_rows
+    # Only the session survives: the worker child, the unrelated server, and the
+    # editor that merely has "exomem" in its arguments are all excluded.
+    assert [row["pid"] for row in windows_rows] == [101]
+    assert windows_rows[0]["rss_mb"] == 300.0
+
+
+def _stub_shell_lookup(monkeypatch: pytest.MonkeyPatch, found: str | None) -> None:
+    """Answer only for the shells this census looks for, defer for everything else.
+
+    `doctor_module.shutil` is the global module, and the repo conftest calls
+    `shutil.which("git", path=os.defpath)` while building a failure report -- a
+    stub narrower than that takes down the whole session's teardown, not just
+    this test.
+    """
+    real_which = doctor_module.shutil.which
+
+    def which(name, *args, **kwargs):  # noqa: ANN001, ANN202
+        if name in {"powershell", "pwsh"}:
+            return found
+        return real_which(name, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_module.shutil, "which", which)
+
+
+def test_the_windows_census_parses_pipes_inside_a_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The separator is also a legal character in the thing it separates.
+
+    Splitting with a bound keeps the command intact; splitting without one would
+    truncate any command containing a pipe, and the filter reads the command.
+    """
+    _stub_shell_lookup(monkeypatch, "powershell")
+    monkeypatch.setattr(
+        doctor_module,
+        "_run_process_census",
+        lambda _command, _timeout: (
+            "101|314572800|3900000000|python -m exomem --transport stdio --log 'a|b'\n"
+            "notanumber|1|1|python -m exomem\n"
+            "\n"
+            "103|1048576|2048|\n"
+        ),
+    )
+
+    samples = doctor_module._windows_process_samples()
+
+    assert samples == [
+        (101, 314572800, "python -m exomem --transport stdio --log 'a|b'", 3900000000)
+    ]
+
+
+def test_a_census_that_cannot_answer_is_not_a_doctor_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No shell, a non-zero exit, or a timeout all mean "no reading taken".
+
+    A diagnostic that raises is worse than one that declines: it takes down every
+    other check in the same run.
+    """
+    _stub_shell_lookup(monkeypatch, None)
+    assert doctor_module._windows_process_samples() == []
+
+    _stub_shell_lookup(monkeypatch, "powershell")
+    monkeypatch.setattr(doctor_module, "_run_process_census", lambda _c, _t: None)
+    assert doctor_module._windows_process_samples() == []
+
+
+def test_the_census_command_bounds_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows pays PowerShell startup before the query, so it gets more room.
+
+    Both bounds still exist, because a doctor check may be slow enough to be
+    worth waiting for and must never hang.
+    """
+    recorded: list[float] = []
+
+    def _record(command, timeout):  # noqa: ANN001, ANN202, ARG001
+        recorded.append(timeout)
+        return None
+
+    monkeypatch.setattr(doctor_module, "_run_process_census", _record)
+    _stub_shell_lookup(monkeypatch, "powershell")
+    doctor_module._windows_process_samples()
+    doctor_module._posix_process_samples()
+
+    assert recorded == [
+        doctor_module._WINDOWS_PROCESS_CENSUS_TIMEOUT_SECONDS,
+        doctor_module._PROCESS_CENSUS_TIMEOUT_SECONDS,
+    ]
+    assert 0 < recorded[1] < recorded[0]
+
+
+def test_a_trimmed_working_set_does_not_read_as_a_free_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows reclaims an idle process's working set; its commit does not move.
+
+    Measured on one box while writing this: the same loaded server read 1195.8 MB
+    resident with 3677 MB committed, and minutes later the whole set of three
+    read 310.5 MB resident. A check that reported only the resident figure would
+    tell a user their idle sessions cost nothing, which is the opposite of what
+    this check exists to say (#597).
+    """
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {
+                "pid": 101,
+                "rss_mb": 1.1,
+                "memory_mb": 1.1,
+                "memory_metric": "rss",
+                "private_commit_mb": 3677.0,
+                "command": "python -m exomem --transport stdio",
+            }
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert "3677.0 MB private commit" in check.message
+    assert check.details["processes"][0]["private_commit_mb"] == 3677.0
+
+
+def test_a_platform_without_a_commit_figure_says_nothing_about_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ps` has no portable commit column, and Linux RSS does not evaporate.
+
+    The clause has to be absent rather than zero there, or every POSIX run
+    reports a number it never measured.
+    """
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {
+                "pid": 101,
+                "rss_mb": 300.0,
+                "memory_mb": 300.0,
+                "memory_metric": "rss",
+                "command": "python -m exomem --transport stdio",
+            }
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert "private commit" not in check.message
+    assert "about 300.0 MB RSS total" in check.message

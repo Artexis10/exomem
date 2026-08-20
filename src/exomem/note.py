@@ -497,7 +497,9 @@ def _legacy_note(
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
     try:
-        filename_slug, slug_warnings = resolve_filename_slug(title, slug)
+        filename_slug, slug_warnings = resolve_filename_slug(
+            title, slug, vault_root=vault_root
+        )
     except InvalidSlugError as e:
         raise NoteError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
 
@@ -1596,7 +1598,9 @@ def note(
     write_started = time.perf_counter()
     root = Path(vault_root)
     try:
-        filename_slug, slug_warnings = resolve_filename_slug(title, slug)
+        filename_slug, slug_warnings = resolve_filename_slug(
+            title, slug, vault_root=vault_root
+        )
     except InvalidSlugError as error:
         raise NoteError("INVALID_SLUG", ["slug"], str(error)) from error
     if status is None:

@@ -835,7 +835,7 @@ def test_provisioning_is_idempotent_machine_readable_and_non_destructive(
 
     assert first.status == "provisioned"
     assert second.status == "existing"
-    assert (config.vault_root / "Knowledge Base" / "_Schema" / "SKILL.md").is_file()
+    assert (config.vault_root / ".exomem" / "schema" / "SKILL.md").is_file()
     assert (config.vault_root / "Knowledge Base" / "Sources" / "index.md").is_file()
     assert (config.vault_root / "Knowledge Base" / "Notes" / "index.md").is_file()
     assert (config.vault_root / "Knowledge Base" / "Entities" / "index.md").is_file()

@@ -7638,6 +7638,7 @@ HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset()
 
 HOSTED_ALPHA_AGENT_PROFILE = "hosted-alpha-agent-v1"
 HOSTED_ALPHA_AGENT_V2_PROFILE = "hosted-alpha-agent-v2"
+HOSTED_ALPHA_AGENT_V3_PROFILE = "hosted-alpha-agent-v3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -7695,6 +7696,34 @@ PRODUCT_SURFACE_PROFILES = MappingProxyType(
                 "triage_memory",
                 "connect_memory",
                 "record_memory",
+            ),
+        ),
+        # v3 completes the epistemic loop. v1 and v2 can only accumulate: they
+        # can capture, recall, review and connect, but they cannot supersede a
+        # conclusion, state an intent, or correct a page in place. The three
+        # additions are appended after the full v2 membership so v3's command
+        # order -- and therefore its `command_surface_sha256` -- extends v2's as
+        # a prefix rather than reshuffling it.
+        HOSTED_ALPHA_AGENT_V3_PROFILE: ProductSurfaceProfile(
+            name=HOSTED_ALPHA_AGENT_V3_PROFILE,
+            command_names=(
+                "bootstrap",
+                "ask_memory",
+                "read_memory",
+                "browse_memory",
+                "remember",
+                "observe_memory",
+                "capture_source",
+                "compile_source",
+                "preserve_evidence",
+                "review_memory",
+                "review_item_context",
+                "triage_memory",
+                "connect_memory",
+                "record_memory",
+                "replace_memory",
+                "plan_memory",
+                "edit_memory",
             ),
         ),
     }

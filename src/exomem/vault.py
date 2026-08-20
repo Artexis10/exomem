@@ -59,6 +59,28 @@ log = logging.getLogger(__name__)
 
 
 SLUG_MAX_LENGTH = 100
+#: Characters no derived filename may contain, on any platform.
+#:
+#: The union of what Windows, macOS and Linux forbid, applied everywhere rather
+#: than per host. A vault is a portable artifact synced between machines, so a
+#: name written on Linux containing ':' or '?' would make the vault impossible to
+#: check out on Windows at all -- the failure would land on whoever opened it
+#: next, not on whoever wrote it.
+_RESERVED_FILENAME_CHARS = frozenset(r'<>:"/\|?*')
+#: Names Windows refuses regardless of extension, matched case-insensitively
+#: against the stem.
+_RESERVED_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{digit}" for digit in range(1, 10)}
+    | {f"lpt{digit}" for digit in range(1, 10)}
+)
+#: The two styles a vault may name derived files in. `slug` is the historical
+#: behaviour and stays the default: the filename is the note's identity here
+#: (there is no permalink field), so changing the default would change the
+#: address of every note written after an upgrade in vaults nobody asked.
+FILENAME_STYLES = ("slug", "title")
+DEFAULT_FILENAME_STYLE = "slug"
+_FILENAME_STYLE_ENV = "EXOMEM_FILENAME_STYLE"
 _EXPLICIT_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
@@ -180,6 +202,24 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
     return None
 
 
+#: Where the PRODUCT-owned governance markdown lives in a vault.
+#:
+#: A dot-directory, so it inherits the treatment every other non-note directory
+#: in the vault already gets -- from Obsidian, and from any other indexer the
+#: user runs -- instead of exomem having to ask each of them separately.
+#: `VAULT_SCAN_SKIP_DIRS` already excludes `_Schema` from exomem's own index, but
+#: nothing else honours that, so 265 KB of shipped documentation sat in the note
+#: namespace and ranked above real notes in a second tool's search (#488).
+#:
+#: Per-vault configuration -- the YAML registries, `contracts/`,
+#: `relation-reviews/`, `private-skills/`, the activation manifest -- deliberately
+#: stays under `Knowledge Base/_Schema/`. It belongs to the user, it is small, and
+#: it is not markdown, so it is not what pollutes a note index.
+SHIPPED_SCHEMA_DIRNAME = ".exomem"
+_SHIPPED_SCHEMA_SUBDIR = "schema"
+_SCHEMA_SENTINEL = "SKILL.md"
+
+
 # When scanning the full vault for inbound wikilinks, skip these.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name
@@ -201,6 +241,12 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         "_archive",
         "_trash",
         "_Schema",
+        # The shipped contract's new home (#488). It has to be skipped here for
+        # the same reason `_Schema` is: `find(scope="vault")` reaches through
+        # this walk, and moving 265 KB of product-owned markdown out of the note
+        # namespace would only relocate the pollution if exomem's own vault-wide
+        # search started indexing it at the new path.
+        SHIPPED_SCHEMA_DIRNAME,
         "_Governance",
         "_Adoption",
     }
@@ -337,13 +383,53 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
     if not _is_vault(path):
         raise RuntimeError(
             f"{env_var}={override!r} does not look like a vault "
-            f"(no {kb_prefix()}_Schema/SKILL.md found)"
+            f"(no schema contract in .exomem/schema/ or {kb_prefix()}_Schema/)"
         )
     return path
 
 
+def shipped_schema_target(vault_root: Path) -> Path:
+    """Where shipped governance markdown is WRITTEN. Always the new location.
+
+    Separate from `shipped_schema_root` so a refresh moves the read path forward
+    without deleting anything: after it runs, both locations hold the content and
+    the resolver prefers the new one. Reclaiming the old copy is its own explicit
+    step, because an upgrade that silently deletes 404 KB from inside a user's
+    Obsidian vault is the wrong default even when the bytes are reproducible.
+    """
+    return Path(vault_root) / SHIPPED_SCHEMA_DIRNAME / _SHIPPED_SCHEMA_SUBDIR
+
+
+def legacy_shipped_schema_root(vault_root: Path) -> Path:
+    """The pre-#488 location, still read and still valid."""
+    return Path(vault_root) / kb_dirname() / "_Schema"
+
+
+def shipped_schema_root(vault_root: Path) -> Path:
+    """Where shipped governance markdown is READ from.
+
+    New location when it holds the sentinel, else the legacy one. Preferring the
+    new location matters when both exist: a refresh writes the new one, so
+    reading the old one would serve the bytes the refresh just superseded.
+    """
+    target = shipped_schema_target(vault_root)
+    if (target / _SCHEMA_SENTINEL).exists():
+        return target
+    return legacy_shipped_schema_root(vault_root)
+
+
 def _is_vault(path: Path) -> bool:
-    return (path / kb_dirname() / "_Schema" / "SKILL.md").exists()
+    """Whether this directory is an exomem vault.
+
+    Either sentinel counts. This function decides whether `resolve_vault`,
+    `product_invoke`, `doctor` and the hosted runtime will speak to a directory
+    at all, so a vault has to stay a vault across the move in both directions --
+    one that has migrated, and one that never will.
+    """
+    return (
+        (path / kb_dirname() / "_Schema" / _SCHEMA_SENTINEL).exists()
+        or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
+    )
 
 
 def kb_root(vault: Path) -> Path:
@@ -359,6 +445,82 @@ def content_hash(content: str) -> str:
     so a stale read can't silently clobber another writer's change.
     """
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def sanitize_title_filename(title: str, max_length: int = SLUG_MAX_LENGTH) -> str:
+    """A human title reduced to a filename, or "" when nothing survives.
+
+    Removes rather than transliterates. `Q3: revenue / margin` becomes
+    `Q3 revenue margin`, not `Q3- revenue - margin`: a substitution invents a
+    character the author did not write, and the frontmatter `title` still carries
+    the exact original either way, so an omission loses nothing a reader cannot
+    recover.
+
+    Applies the union of platform restrictions, never the running host's -- see
+    `_RESERVED_FILENAME_CHARS`. NFC because that is what Obsidian and git expect;
+    HFS+ stores NFD and normalising at the boundary keeps one form on disk.
+
+    Returns "" for a title that is entirely reserved characters, which the caller
+    resolves by falling back to the slug style for that note rather than by
+    failing the write.
+    """
+    normalized = unicodedata.normalize("NFC", title)
+    kept: list[str] = []
+    for character in normalized:
+        # Whitespace is classified BEFORE the category filter. A tab is category
+        # Cc, so filtering first would delete it and weld the words on either
+        # side together; it is a word separator and has to survive as a space.
+        if character.isspace() or character in _RESERVED_FILENAME_CHARS:
+            kept.append(" ")
+        elif unicodedata.category(character)[0] == "C":
+            # Everything else in C is invisible: control codes, and format
+            # characters like U+200B that would make two differently-named files
+            # look identical in every listing.
+            continue
+        else:
+            kept.append(character)
+    collapsed = " ".join("".join(kept).split())
+    if max_length and len(collapsed) > max_length:
+        # Word boundary, matching what `slugify_title` does, so a truncated name
+        # still ends on something readable.
+        head = collapsed[: max_length + 1]
+        cut = head.rfind(" ")
+        collapsed = (head[:cut] if cut > 0 else collapsed[:max_length]).strip()
+    # A trailing dot or space is silently dropped by the Windows API, so a name
+    # ending in one is not the name that ends up on disk.
+    collapsed = collapsed.rstrip(". ")
+    if not collapsed:
+        return ""
+    stem = collapsed.split(".")[0].lower()
+    if stem in _RESERVED_DEVICE_NAMES:
+        return ""
+    return collapsed
+
+
+def resolve_filename_style(vault_root: Path | None = None) -> str:
+    """The filename style in force, by documented precedence.
+
+    Environment first so a run can be pinned without editing the vault, then the
+    vault's own key, then the default. An unrecognised value is refused rather
+    than quietly treated as the default -- a typo in a config key that silently
+    means "carry on" is how a user concludes the setting does not work.
+    """
+    configured = os.environ.get(_FILENAME_STYLE_ENV)
+    source = "environment"
+    if configured is None and vault_root is not None:
+        from . import project_keys
+
+        configured = project_keys.filename_style(vault_root)
+        source = "project-keys.yaml"
+    if configured is None:
+        return DEFAULT_FILENAME_STYLE
+    normalized = str(configured).strip().lower()
+    if normalized not in FILENAME_STYLES:
+        raise InvalidSlugError(
+            f"filename style {configured!r} from {source} is not one of "
+            f"{', '.join(FILENAME_STYLES)}"
+        )
+    return normalized
 
 
 def slugify_title(title: str, max_length: int = SLUG_MAX_LENGTH) -> str:
@@ -387,12 +549,20 @@ def slugify_with_truncation_check(
     return slug, None
 
 
-def resolve_filename_slug(title: str, slug: str | None = None) -> tuple[str, list[str]]:
+def resolve_filename_slug(
+    title: str, slug: str | None = None, *, vault_root: Path | None = None
+) -> tuple[str, list[str]]:
     """Resolve a new filename component without conflating it with display title.
 
     Explicit slugs are deliberately strict and portable. Automatic slugging is
     kept for compatibility, including its language-blind transliteration, but
     callers get a warning whenever non-ASCII title text enters that lossy path.
+
+    `vault_root` selects the vault's filename style for the DERIVED branch only.
+    An explicit `slug` keeps its contract under every style, because it is how a
+    caller pins a name it already intends to link to. Omitting `vault_root`
+    resolves the style from the environment alone, which keeps every existing
+    caller on today's behaviour.
     """
     if slug is not None:
         if not isinstance(slug, str) or not _EXPLICIT_SLUG_PATTERN.fullmatch(slug):
@@ -402,6 +572,24 @@ def resolve_filename_slug(title: str, slug: str | None = None) -> tuple[str, lis
         if len(slug) > SLUG_MAX_LENGTH:
             raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
+
+    if resolve_filename_style(vault_root) == "title":
+        readable = sanitize_title_filename(title)
+        if readable:
+            # No transliteration warning here: nothing was transliterated. That
+            # warning exists because the slug path is lossy for non-ASCII text,
+            # and this path is what a vault sets to stop paying that cost.
+            warnings = []
+            if readable != sanitize_title_filename(title, max_length=0):
+                warnings.append(
+                    f"SLUG_TRUNCATED: filename truncated to {readable!r}; link to "
+                    "this note using that name or its frontmatter title -- "
+                    "re-deriving a name from the full title will not resolve."
+                )
+            return readable, warnings
+        # A title that is entirely reserved characters has no readable form, so
+        # fall through to the slug path rather than failing the write. One note
+        # named the old way beats a refused write.
 
     resolved, truncation_warning = slugify_with_truncation_check(title)
     warnings = [truncation_warning] if truncation_warning else []
@@ -440,16 +628,40 @@ def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | s
 
 
 def unique_path(directory: Path, stem: str, suffix: str = ".md") -> Path:
-    """Return a path that doesn't exist yet, appending -2, -3, ... on collision."""
-    candidate = directory / f"{stem}{suffix}"
-    if not candidate.exists():
+    """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
+
+    Collision is tested case-INSENSITIVELY on every platform, not with
+    `Path.exists()`. Windows and default macOS already answer that way, so a
+    `Path.exists()` check produced a vault whose contents depended on where the
+    write happened: on Linux `Budget Review.md` and `budget review.md` are two
+    files, and the same vault opened on Windows is one file with one of the two
+    notes gone. Readable filenames make this reachable -- under slug style
+    everything was lowercased, so two titles differing only by case already
+    landed on the same name and hit the loop below.
+
+    Listing the directory costs one syscall on a write path, against a data-loss
+    class that only appears after a sync to another machine.
+    """
+    try:
+        taken = {entry.name.casefold() for entry in directory.iterdir()}
+    except OSError:
+        # Unlistable, most often because it does not exist yet. `exists()` is
+        # the weaker test -- case-sensitive on Linux -- but it is the only one
+        # available without a listing, and it must still be applied rather than
+        # assumed to pass, or an unlistable-but-populated directory would hand
+        # back a path that already holds another note.
+        candidate = directory / f"{stem}{suffix}"
+        i = 2
+        while candidate.exists():
+            candidate = directory / f"{stem}-{i}{suffix}"
+            i += 1
         return candidate
+    candidate = f"{stem}{suffix}"
     i = 2
-    while True:
-        candidate = directory / f"{stem}-{i}{suffix}"
-        if not candidate.exists():
-            return candidate
+    while candidate.casefold() in taken:
+        candidate = f"{stem}-{i}{suffix}"
         i += 1
+    return directory / candidate
 
 
 @dataclass

@@ -24,6 +24,13 @@ from exomem import audit, delete_directory, delete_file, embeddings, index_sync,
 from exomem import reconcile as reconcile_module
 from exomem.governance import egress, receipts, store
 
+#: How long a deadlock valve waits before declaring a thread stuck.
+#:
+#: Not a latency assertion -- the operations it guards should take no measurable
+#: time. It is far above any legitimate slowness so that reaching it still means
+#: something is genuinely stuck, rather than that a CI runner was busy.
+_STUCK_SECONDS = 60.0
+
 _PRIOR = "a" * 64
 _TARGET = "b" * 64
 _MEMORY_REF = "exomem://memory/12345678-1234-1234-1234-123456789abc"
@@ -434,6 +441,16 @@ def test_receipt_connection_quiesce_closes_descriptors_and_reopens(
 def test_receipt_connection_lru_evicts_and_closes_idle_handles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The connection cache evicts and closes the least recently used handle.
+
+    The timeouts below are deadlock valves, not assertions about speed: this
+    test is about which handle survives eviction, and nothing here should take
+    any measurable time. At five seconds they were close enough to the cost of
+    creating three receipt databases on a loaded Windows runner to fire, and a
+    single late thread breaks the barrier for all of them
+    (`threading.BrokenBarrierError` on CI). They are now far enough above any
+    legitimate slowness that reaching one still means something is stuck.
+    """
     receipts._close_receipt_connections()
     monkeypatch.setattr(receipts, "_RECEIPT_CONNECTIONS_MAX", 2)
     roots = [tmp_path / f"lru-{index}" for index in range(3)]
@@ -446,17 +463,17 @@ def test_receipt_connection_lru_evicts_and_closes_idle_handles(
     def hold(root: Path) -> None:
         with receipts._receipt_connection(root) as connection:
             opened.append(connection)
-            ready.wait(timeout=5)
-            assert release.wait(timeout=5)
+            ready.wait(timeout=_STUCK_SECONDS)
+            assert release.wait(timeout=_STUCK_SECONDS)
 
     threads = [threading.Thread(target=hold, args=(root,)) for root in roots]
     for thread in threads:
         thread.start()
-    ready.wait(timeout=5)
+    ready.wait(timeout=_STUCK_SECONDS)
     assert len(receipts._RECEIPT_CONNECTIONS) == 3
     release.set()
     for thread in threads:
-        thread.join(timeout=5)
+        thread.join(timeout=_STUCK_SECONDS)
         assert not thread.is_alive()
 
     assert len(receipts._RECEIPT_CONNECTIONS) == 2

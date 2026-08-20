@@ -77,12 +77,22 @@ def _first_use_process(
             # unsafe, where a foreign principal had the run of the directory
             # while artifacts landed in it and may still hold a handle no later
             # tightening can take back.
+            observed = mutation_lock._windows_dacl_sddl(path)
             verdict = mutation_lock._windows_private_dacl_verdict(
-                mutation_lock._windows_dacl_sddl(path), sid, directory=True
+                observed, sid, directory=True
             )
             if verdict != mutation_lock._WINDOWS_DACL_INHERITED:
+                # Carry the SDDL and the trustee. This assertion has fired on a
+                # CI runner without reproducing locally, and the previous time
+                # something in this family did (#658) the cause was the DACL the
+                # runner's own %TEMP% hands down, not the code under test -- a
+                # distinction only the observed descriptor can make. Without it
+                # the failure says a security invariant broke and gives nothing
+                # to check that claim against.
                 raise AssertionError(
-                    "runtime root gained a lock artifact before DACL validation"
+                    "runtime root gained a lock artifact before DACL validation; "
+                    f"verdict={verdict!r} sid={sid!r} entries={sorted(p.name for p in root.iterdir())!r} "
+                    f"sddl={observed!r}"
                 )
         if path == root:
             root_dacl_applies += 1

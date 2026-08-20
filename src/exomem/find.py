@@ -172,6 +172,9 @@ def auto_rerank_allowed_by_policy() -> bool:
 # --------------------------------------------------------------------------- #
 _FIND_CACHE: OrderedDict[tuple, list[Hit]] = OrderedDict()
 _FIND_CACHE_LOCK = threading.Lock()
+_FIND_CACHE_CHECKPOINTS: dict[
+    tuple, tuple[tuple[str, freshness.RecallFreshnessCheckpoint], ...]
+] = {}
 _DEFAULT_FIND_CACHE_SIZE = 32
 # A request gets a new FreshnessSnapshot, but a live recall projection changes
 # only when its exact checkpoint moves.  Rebuilding the vault-relative allowset
@@ -185,6 +188,7 @@ _RECALL_PATH_CACHE_LOCK = threading.Lock()
 _RECALL_PATH_CACHE_SIZE = 32
 MAX_RERANK_CANDIDATES = 300
 _FOREGROUND_LEXICAL_REPAIR_PAGE_CAP = 64
+_FIND_CACHE_DELTA_PATH_CAP = 64
 
 
 def _bounded_lexical_repair_allowed(freshness_key: tuple | None) -> bool:
@@ -258,6 +262,143 @@ def _find_cache_size() -> int:
     except ValueError:
         log.warning("EXOMEM_FIND_CACHE_SIZE=%r is not an int; using default", raw)
         return _DEFAULT_FIND_CACHE_SIZE
+
+
+def _trim_find_cache(size: int) -> None:
+    """Trim the hot cache and its delta-validation metadata together.
+
+    Caller holds ``_FIND_CACHE_LOCK``.
+    """
+    while len(_FIND_CACHE) > size:
+        evicted, _hits = _FIND_CACHE.popitem(last=False)
+        _FIND_CACHE_CHECKPOINTS.pop(evicted, None)
+
+
+def _recall_checkpoints_for_cache(
+    snapshot: FreshnessSnapshot,
+    *,
+    scope: str,
+    query_norm: str,
+) -> tuple[tuple[str, freshness.RecallFreshnessCheckpoint], ...]:
+    scopes = ["kb"] if scope in ("kb", "kb-only") else []
+    if scope == "vault" or (scope == "kb" and query_norm):
+        scopes.append("vault")
+    return tuple((item, snapshot.recall_checkpoint(item)) for item in scopes)
+
+
+def _freshness_correctness_fences(key: tuple) -> tuple:
+    """Return the all-or-nothing parts of a query freshness key.
+
+    Recall projections and the keyword catalog may be advanced by the same
+    bounded markdown delta. Everything else remains an unconditional fence:
+    date, access policy, semantic registries, and semantic/graph sidecars.
+    """
+    delta_backed = {"kb", "vault", "lexical"}
+    return tuple(
+        part
+        for part in key
+        if not (
+            isinstance(part, tuple)
+            and part
+            and isinstance(part[0], str)
+            and part[0] in delta_backed
+        )
+    )
+
+
+def _keyword_cache_delta_is_safe(
+    vault_root: Path,
+    *,
+    query_norm: str,
+    cached_hits: list[Hit],
+    cached_freshness: tuple,
+    current_freshness: tuple,
+    checkpoints: tuple[tuple[str, freshness.RecallFreshnessCheckpoint], ...],
+    snapshot: FreshnessSnapshot,
+) -> tuple[bool, tuple[tuple[str, freshness.RecallFreshnessCheckpoint], ...]]:
+    """Prove that a bounded recall delta cannot alter one keyword answer.
+
+    This deliberately supports only the exact keyword contract: all query
+    tokens must occur in a page and matches are ordered by page ``updated``.
+    A changed page already in the answer, any deletion, any newly matching
+    page, a scene-frame dependency, an incomplete delta, or a changed global
+    correctness fence misses. Hybrid/vector results retain their sidecar and
+    whole-projection invalidation because a textually unrelated page may still
+    move semantic or corpus-wide ranking.
+    """
+    if _freshness_correctness_fences(cached_freshness) != _freshness_correctness_fences(
+        current_freshness
+    ):
+        return False, ()
+    if freshness.external_pending(vault_root):
+        return False, ()
+
+    changed: set[str] = set()
+    deleted: set[str] = set()
+    target_signatures: dict[str, freshness.FileSignature] = {}
+    advanced: list[tuple[str, freshness.RecallFreshnessCheckpoint]] = []
+    for scope, checkpoint in checkpoints:
+        current_checkpoint = snapshot.recall_checkpoint(scope)
+        delta = freshness.recall_delta_since(vault_root, scope, checkpoint)
+        if not delta.complete or delta.to != current_checkpoint:
+            return False, ()
+        changed.update(delta.changed)
+        deleted.update(delta.deleted)
+        if len(changed) + len(deleted) > _FIND_CACHE_DELTA_PATH_CAP:
+            return False, ()
+        for path, signature in delta.target_signatures:
+            prior = target_signatures.get(path)
+            if prior is not None and prior != signature:
+                return False, ()
+            target_signatures[path] = signature
+        advanced.append((scope, delta.to))
+
+    # A catalog-only generation change has no recall delta proving what moved.
+    # Keep the in-band sidecar token as the unconditional fallback in that case.
+    if not changed and not deleted:
+        return False, ()
+    # Deleted bytes cannot be inspected for a former scene-frame or other
+    # dependency, so deletion remains conservative.
+    if deleted:
+        return False, ()
+
+    root = vault_root.absolute()
+    cached_paths = {hit.path for hit in cached_hits}
+    for raw_path in changed:
+        expected = target_signatures.get(raw_path)
+        if expected is None:
+            return False, ()
+        path = Path(raw_path)
+        try:
+            rel_path = path.absolute().relative_to(root).as_posix()
+            if freshness.stat_signature(path) != expected:
+                return False, ()
+        except (OSError, ValueError):
+            return False, ()
+        if rel_path in cached_paths:
+            return False, ()
+        if any(part.lower().endswith(".frames") for part in Path(rel_path).parts[:-1]):
+            return False, ()
+        if path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
+        if not recall_policy.is_recall_candidate(vault_root, path):
+            continue
+        page = _CACHE.get(path, vault_root)
+        try:
+            if freshness.stat_signature(path) != expected:
+                return False, ()
+        except OSError:
+            return False, ()
+        if page is None:
+            continue
+        if page.parent_media or _make_excerpt(page, query_norm) is not None:
+            return False, ()
+    if freshness.external_pending(vault_root):
+        return False, ()
+    for scope, checkpoint in advanced:
+        if freshness.recall_checkpoint(vault_root, scope) != checkpoint:
+            return False, ()
+    return True, tuple(advanced)
 
 
 class FreshnessSnapshot:
@@ -395,6 +536,11 @@ def _freshness_key(
       independent of content (spurious misses) and leaves an uncheckpointed commit
       unmoved (STALE hits); the in-band generation changes iff the content did.
       See EmbeddingIndex.cache_token / lexstore.cache_token.
+
+    Plain keyword entries may advance across a complete, bounded recall delta
+    only after ``_keyword_cache_delta_is_safe`` proves that every changed page is
+    non-matching. The full key remains the fallback and every global fence above
+    remains unconditional.
     """
     from . import access
 
@@ -831,9 +977,9 @@ def find(
         if unit_cache_key is not None and not degraded and not failed:
             with _FIND_CACHE_LOCK:
                 _FIND_CACHE[unit_cache_key] = copy.deepcopy(unit_hits)
+                _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
                 _FIND_CACHE.move_to_end(unit_cache_key)
-                while len(_FIND_CACHE) > cache_size:
-                    _FIND_CACHE.popitem(last=False)
+                _trim_find_cache(cache_size)
         return unit_hits
     mixed = effective_result_level == "mixed"
 
@@ -842,6 +988,9 @@ def find(
     # log freshness never has to enter the cache key.
     cache_size = 0 if prefer_used or mixed or retrieval_trace is not None else _find_cache_size()
     cache_key: tuple | None = None
+    cache_checkpoints: tuple[
+        tuple[str, freshness.RecallFreshnessCheckpoint], ...
+    ] | None = None
     if timings is not None:
         timings.cache["enabled"] = cache_size > 0
     if cache_size > 0:
@@ -892,12 +1041,76 @@ def find(
                 ),
                 relation_filter=relation_active,
             )
+        delta_cache_eligible = bool(
+            mode == "keyword"
+            and query_norm
+            and filter_plan.root is None
+            and not relation_active
+            and types is None
+            and projects is None
+            and tags is None
+            and speakers is None
+            and file_types is None
+            and exclude_file_types is None
+            and updated_after is None
+            and updated_before is None
+            and recency_days is None
+        )
+        if delta_cache_eligible:
+            cache_checkpoints = _recall_checkpoints_for_cache(
+                snapshot,
+                scope=scope,
+                query_norm=query_norm,
+            )
         cache_key = (request_key, fresh)
+        prior_key: tuple | None = None
+        prior_hits: list[Hit] | None = None
+        prior_checkpoints: tuple[
+            tuple[str, freshness.RecallFreshnessCheckpoint], ...
+        ] | None = None
         with _span(timings, "cache_lookup"):
             with _FIND_CACHE_LOCK:
                 cached = _FIND_CACHE.get(cache_key)
                 if cached is not None:
                     _FIND_CACHE.move_to_end(cache_key)
+                elif delta_cache_eligible:
+                    for candidate_key in reversed(_FIND_CACHE):
+                        if candidate_key[0] != request_key:
+                            continue
+                        candidate_checkpoints = _FIND_CACHE_CHECKPOINTS.get(candidate_key)
+                        if candidate_checkpoints is None:
+                            continue
+                        prior_key = candidate_key
+                        prior_hits = _FIND_CACHE[candidate_key]
+                        prior_checkpoints = candidate_checkpoints
+                        break
+        if (
+            cached is None
+            and prior_key is not None
+            and prior_hits is not None
+            and prior_checkpoints is not None
+        ):
+            safe, advanced = _keyword_cache_delta_is_safe(
+                vault_root,
+                query_norm=query_norm,
+                cached_hits=prior_hits,
+                cached_freshness=prior_key[1],
+                current_freshness=fresh,
+                checkpoints=prior_checkpoints,
+                snapshot=snapshot,
+            )
+            if safe:
+                with _FIND_CACHE_LOCK:
+                    current = _FIND_CACHE.get(cache_key)
+                    if current is not None:
+                        cached = current
+                        _FIND_CACHE.move_to_end(cache_key)
+                    elif _FIND_CACHE.get(prior_key) is prior_hits:
+                        cached = _FIND_CACHE.pop(prior_key)
+                        _FIND_CACHE_CHECKPOINTS.pop(prior_key, None)
+                        _FIND_CACHE[cache_key] = cached
+                        _FIND_CACHE_CHECKPOINTS[cache_key] = advanced
+                        _FIND_CACHE.move_to_end(cache_key)
         if cached is not None:
             if timings is not None:
                 timings.cache["hit"] = True
@@ -1164,9 +1377,12 @@ def find(
     if cache_key is not None and not degraded and not failed:
         with _FIND_CACHE_LOCK:
             _FIND_CACHE[cache_key] = copy.deepcopy(hits)
+            if cache_checkpoints is not None:
+                _FIND_CACHE_CHECKPOINTS[cache_key] = cache_checkpoints
+            else:
+                _FIND_CACHE_CHECKPOINTS.pop(cache_key, None)
             _FIND_CACHE.move_to_end(cache_key)
-            while len(_FIND_CACHE) > cache_size:
-                _FIND_CACHE.popitem(last=False)
+            _trim_find_cache(cache_size)
     return hits
 
 
@@ -3487,10 +3703,31 @@ def _keyword_match_paths(
     if indexed is not None:
         return indexed
     if lexstore.backend() != "python":
+        # The sidecar declined. `search_substring` documents exactly one meaning
+        # for None -- "fall back" -- and its causes are a retired store, a
+        # catalog that is not on disk, a sqlite error, or a sync that could not
+        # take the publication lock. Every one of those is "I could not check".
+        #
+        # Answering [] said "there is nothing", which is a different claim, and
+        # for a page a governed write has just committed it is a false empty:
+        # the lexical upsert defers while the write holds the vault lock
+        # (#526), so the one moment the catalog is most likely to decline is the
+        # moment right after a write, on exactly the page the caller is most
+        # likely to be looking for. Recall going silently blank on the newest
+        # content is the worst possible failure for a memory system, and the
+        # only evidence was a trace marker nobody reads mid-query.
+        #
+        # So the marker stays -- the lane really did degrade and the counter
+        # should say so -- and the answer comes from the reference scan below
+        # instead of from an empty list. That is not a second implementation of
+        # the contract: `test_keyword_lane_parity_with_reference_scan` asserts
+        # the sidecar and this scan return IDENTICAL ordered lists across 15
+        # query shapes, so falling through costs latency and changes nothing
+        # else. On a healthy sidecar this branch never runs, so no warm read
+        # pays for it.
         if failed_out is not None:
             failed_out.append("keyword_lexical")
         _record_degradation("keyword_lexical")
-        return []
     if scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
@@ -3591,6 +3828,32 @@ _RESOLVER_CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
 _RECALL_RESOLVER_CHECKPOINTS: dict[Path, freshness.RecallFreshnessCheckpoint] = {}
 _RESOLVER_LOCK = threading.Lock()
 
+#: Vaults with a projected-resolver build already running.
+#:
+#: `recall_resolver_snapshot` builds from a full `walk_vault_md` plus a parse
+#: per admitted page -- O(vault), and measured at 30.7s of a 34s `ask_memory`
+#: call on a 2.4k-page vault, which is 90% of that read (#676). Nothing bounded
+#: it: eviction is cheap and asynchronous while the rebuild is expensive and
+#: synchronous, so the whole cost landed on whichever caller asked first, and
+#: on the read path that is a reader.
+#:
+#: Two things use this. Concurrent callers on a cold cache wait for one build
+#: instead of each running their own, and `_evict_recall_resolver` starts a
+#: background rebuild so the gap between an eviction and the next warm cache is
+#: closed by a daemon thread rather than by the next query. Neither changes what
+#: a caller gets -- a build still returns the same resolver, and a caller that
+#: arrives mid-build still waits -- so ranking is untouched.
+_RECALL_RESOLVER_BUILDS: dict[Path, threading.Event] = {}
+#: Its own lock, NOT `_RESOLVER_LOCK`: `_evict_recall_resolver` runs while that
+#: one is held, and the build below must be able to register itself without
+#: holding a lock across a whole-vault walk.
+_RECALL_REBUILD_LOCK = threading.Lock()
+#: Long enough that a follower waits out a real build on a large vault rather
+#: than duplicating it, short enough that a wedged leader cannot hold a reader
+#: indefinitely -- the follower simply builds its own after this.
+_RECALL_RESOLVER_BUILD_WAIT_SECONDS = 120.0
+_RECALL_RESOLVER_REBUILDS: set[Path] = set()
+
 
 def _recall_checkpoint_identity(
     checkpoint: freshness.RecallFreshnessCheckpoint,
@@ -3603,8 +3866,82 @@ def _recall_checkpoint_identity(
 
 
 def _evict_recall_resolver(root: Path) -> None:
+    """Drop the projected resolver, and start rebuilding it off the read path.
+
+    Callers hold `_RESOLVER_LOCK`; the rebuild is scheduled, never run, here.
+
+    Every eviction site in `on_resolver_files_changed` is a correctness refusal
+    -- an incomplete event delta, a moved path guard, a policy identity that
+    advanced -- and each is right to drop the cache. What they cannot do is
+    leave the vault with no resolver and no plan to get one, because the next
+    caller to need it pays a whole-vault walk and parse in the foreground.
+    Scheduling the rebuild here is what makes the eviction cheap for everyone
+    except a daemon thread.
+    """
     _RECALL_RESOLVER_CACHE.pop(root, None)
     _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+    _schedule_recall_resolver_rebuild(root)
+
+
+def _schedule_recall_resolver_rebuild(root: Path) -> None:
+    """Start at most one background projected-resolver build per vault.
+
+    Best-effort and deliberately silent on failure: this exists to make the
+    next reader fast, and a vault that cannot be walked right now will simply
+    be built by whoever needs it, exactly as before. Never blocks the caller,
+    which may be holding `_RESOLVER_LOCK` or serving a request.
+    """
+    if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
+        return
+    key = Path(root)
+    with _RECALL_REBUILD_LOCK:
+        if key in _RECALL_RESOLVER_REBUILDS:
+            return
+        _RECALL_RESOLVER_REBUILDS.add(key)
+
+    def _run() -> None:
+        try:
+            recall_resolver_snapshot(key)
+        except Exception as error:  # noqa: BLE001 - a daemon must not escape
+            log.warning("projected resolver background rebuild skipped (%s)", error)
+        finally:
+            with _RECALL_REBUILD_LOCK:
+                _RECALL_RESOLVER_REBUILDS.discard(key)
+
+    # A literal thread name, like every other exomem thread: names reach the
+    # log through `JsonLinesFormatter`, and hosted-cell redaction blanks a
+    # record's fields rather than rebuilding it from an allowlist, so a vault
+    # path encoded in a thread name would survive that boundary.
+    thread = threading.Thread(
+        target=_run,
+        name="exomem-recall-resolver-warm",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except RuntimeError:
+        with _RECALL_REBUILD_LOCK:
+            _RECALL_RESOLVER_REBUILDS.discard(key)
+
+
+def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
+    """Block until no background projected-resolver build is running.
+
+    A quiesce seam, not a convergence helper: it says nothing about whether a
+    resolver is now cached, only that no daemon thread is still walking a
+    vault. Production is one long-lived process where a warm thread outliving
+    its trigger is the point; a test suite is many vaults in one process,
+    where a thread outliving the tmp vault that started it is a cross-test
+    leak. Mirrors `graph_sync.await_active_rebuild`.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with _RECALL_REBUILD_LOCK:
+            if not _RECALL_RESOLVER_REBUILDS:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
 
 
 def _evict_resolver(root: Path) -> None:
@@ -3716,24 +4053,65 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
         if cached and cached[0] == identity:
             return cached[1].fork()
 
-    entries: list[tuple[str, str | None]] = []
-    for path in walk_vault_md(root):
-        if not recall_policy.is_recall_candidate(root, path):
-            continue
-        page = _CACHE.get(path, root)
-        if page is not None:
-            entries.append((page.rel_path, page.title))
-    resolver = WikilinkResolver.from_entries(root, entries)
-    with _RESOLVER_LOCK:
-        # The supplied freshness key names this immutable resolver snapshot.
-        # A later caller with changed disk/policy identity cannot reuse it;
-        # graph rebuild performs its stronger direct before/after proof around
-        # sidecar publication.
-        _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
-        if checkpoint is not None:
-            _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
-        else:
-            _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+    # Single-flight. The build below is a full vault walk plus a parse per
+    # admitted page, so N callers arriving on a cold cache used to run N of
+    # them concurrently -- each reading the same files, each producing a
+    # resolver N-1 of them would discard. Followers wait on the leader's event
+    # and then re-check the cache, which is where the leader publishes.
+    #
+    # A follower whose wait times out, or whose leader published a different
+    # identity, falls through and builds its own. That is the pre-existing
+    # behaviour and it stays correct; the wait is an optimisation, never a
+    # dependency.
+    leader = False
+    while True:
+        with _RECALL_REBUILD_LOCK:
+            building = _RECALL_RESOLVER_BUILDS.get(root)
+            if building is None:
+                building = threading.Event()
+                _RECALL_RESOLVER_BUILDS[root] = building
+                leader = True
+        if leader:
+            break
+        if not building.wait(_RECALL_RESOLVER_BUILD_WAIT_SECONDS):
+            break
+        with _RESOLVER_LOCK:
+            cached = _RECALL_RESOLVER_CACHE.get(root)
+            if cached and cached[0] == identity:
+                return cached[1].fork()
+        # The leader finished with a different identity, or its result was
+        # evicted before this thread looked. Try to become the leader.
+
+    # The publication is INSIDE the try, so the leader's event is released only
+    # once the cache actually holds the result. Signalling at the end of the
+    # build instead would wake every follower onto a still-empty cache, and each
+    # would then elect itself leader and rebuild -- reintroducing the stampede
+    # this exists to prevent, just narrowed to a race window.
+    try:
+        entries: list[tuple[str, str | None]] = []
+        for path in walk_vault_md(root):
+            if not recall_policy.is_recall_candidate(root, path):
+                continue
+            page = _CACHE.get(path, root)
+            if page is not None:
+                entries.append((page.rel_path, page.title))
+        resolver = WikilinkResolver.from_entries(root, entries)
+        with _RESOLVER_LOCK:
+            # The supplied freshness key names this immutable resolver snapshot.
+            # A later caller with changed disk/policy identity cannot reuse it;
+            # graph rebuild performs its stronger direct before/after proof
+            # around sidecar publication.
+            _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
+            if checkpoint is not None:
+                _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
+            else:
+                _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+    finally:
+        if leader:
+            with _RECALL_REBUILD_LOCK:
+                done = _RECALL_RESOLVER_BUILDS.pop(root, None)
+            if done is not None:
+                done.set()
     return resolver.fork()
 
 
@@ -4063,22 +4441,53 @@ def on_resolver_files_changed(
                 _evict_recall_resolver(root)
 
 
-def unload_ram_caches() -> dict[str, int]:
-    """Evict rebuildable find RAM caches without clearing freshness/inbound metadata."""
+def unload_ram_caches(*, keep_recall_resolver: bool = False) -> dict[str, int]:
+    """Evict rebuildable find RAM caches without clearing freshness/inbound metadata.
+
+    Two callers want different things from this. `epistemic_graph` uses it to
+    force a re-derivation -- a correctness eviction, where keeping a stale
+    resolver would be a wrong answer rather than a slow one. The idle reaper
+    uses it to hand memory back, and should call `release_idle_ram_caches`
+    instead. The default stays the correctness meaning.
+
+    Either way the maps are cleared directly rather than through
+    `_evict_recall_resolver`: that seam schedules a background rebuild, and a
+    caller releasing memory does not want a thread immediately spending it
+    again.
+    """
     page_entries = len(_CACHE.entries)
     _CACHE.clear()
     with _RESOLVER_LOCK:
-        resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
+        resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
-        _RECALL_RESOLVER_CACHE.clear()
         _RESOLVER_CHECKPOINTS.clear()
-        _RECALL_RESOLVER_CHECKPOINTS.clear()
+        if not keep_recall_resolver:
+            resolver_entries += len(_RECALL_RESOLVER_CACHE)
+            _RECALL_RESOLVER_CACHE.clear()
+            _RECALL_RESOLVER_CHECKPOINTS.clear()
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
+        _FIND_CACHE_CHECKPOINTS.clear()
     with _RECALL_PATH_CACHE_LOCK:
         _RECALL_PATH_CACHE.clear()
     return {"pages": page_entries, "resolvers": resolver_entries, "hot_find": hot_entries}
+
+
+def release_idle_ram_caches() -> dict[str, int]:
+    """Hand memory back from an idle process, keeping what is dear to rebuild.
+
+    The recall resolver stays. Measured on a 2,400-page vault it retains
+    3.05 MiB -- 1,334 bytes a page -- while rebuilding it costs a vault walk,
+    an admission pass, and a read of every admitted page: 39 s of page reads
+    alone, charged to whichever reader asks first (#676). Releasing three
+    megabytes from a process that is also holding a roughly one-gigabyte
+    embedding model does not pay for that.
+
+    Everything else still goes: the page cache is the large one, and the hot
+    find cache and recall path cache are cheap to refill.
+    """
+    return unload_ram_caches(keep_recall_resolver=True)
 
 
 def evict_resolver_caches(vault_root: Path) -> int:
@@ -4098,6 +4507,7 @@ def reset_page_and_result_caches() -> dict[str, int]:
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
+        _FIND_CACHE_CHECKPOINTS.clear()
     return {"pages": page_entries, "hot_find": hot_entries}
 
 

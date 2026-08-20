@@ -38,7 +38,10 @@ def test_init_creates_custom_dir(monkeypatch, tmp_path: Path) -> None:
     from exomem import init as init_module
 
     init_module.init_vault(tmp_path)
-    assert (tmp_path / "Brain" / "_Schema" / "SKILL.md").exists()
+    # The shipped contract sits outside the note namespace, so its path does not
+    # follow the note directory that `EXOMEM_KB_DIRNAME` renames.
+    assert (tmp_path / ".exomem" / "schema" / "SKILL.md").exists()
+    assert (tmp_path / "Brain" / "_Schema" / "project-keys.yaml").exists()
     assert not (tmp_path / "Knowledge Base").exists()
 
 

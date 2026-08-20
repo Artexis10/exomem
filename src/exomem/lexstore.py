@@ -92,6 +92,21 @@ _PROBE_LOCK = threading.Lock()
 _STORES: dict[Path, LexicalStore] = {}
 _STORES_LOCK = threading.Lock()
 _REPAIRS_IN_FLIGHT: set[Path] = set()
+#: Paths a CONTENDED foreground upsert declined, awaiting a targeted retry.
+#:
+#: A governed write's incremental upsert cannot take the publication barrier
+#: while the write's own vault lock is held, so it waits 50ms and gives up
+#: (`_PUBLICATION_TIMEOUT_FOREGROUND`). That is right -- a governed write may
+#: not block on the lexical sidecar. What was wrong is the response: a single
+#: deferred page scheduled a full `rebuild_atomic()`, O(vault) work from an O(1)
+#: cause (#526). Contention says nothing about the store's health; the rows are
+#: fine and the writer simply had the lock. Asking again from a background
+#: thread, which may wait the full 30s, is the proportionate answer.
+_DEFERRED_UPSERTS: dict[Path, set[Path]] = {}
+#: Vaults where a full rebuild is genuinely required -- a failed store, a
+#: sqlite error, a noncurrent schema, a source that moved. These are NOT
+#: contention, and none of them is fixed by re-applying rows.
+_FULL_REBUILD_REQUESTED: set[Path] = set()
 _REPAIRS_LOCK = threading.Lock()
 
 
@@ -384,7 +399,7 @@ def clear_stores() -> None:
         _STORES.clear()
 
 
-def _schedule_repair(vault_root: Path) -> None:
+def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = None) -> None:
     """Start at most one best-effort lexical repair per vault.
 
     Foreground retrieval uses this seam after declining stale or missing
@@ -393,20 +408,64 @@ def _schedule_repair(vault_root: Path) -> None:
     the live sidecar in place — so a concurrent query never observes a
     half-built or emptied catalog, and a fatally-retired store can recover.
     Callers return immediately and may retry on a later request.
+
+    `deferred_paths` names the ONE case that does not need that: a foreground
+    upsert the publication barrier was merely too busy to take. The rows are
+    fine and the store is healthy; the writer simply held the lock. The worker
+    re-applies exactly those paths first and escalates to the full rebuild only
+    if they do not land, so a single deferred page stops costing a whole-corpus
+    pass (#526).
+
+    Every other caller passes nothing and still gets the rebuild, so this can
+    only ever do LESS work than before, never less repair: a targeted retry that
+    fails escalates, and a rebuild request queued while a targeted retry is
+    running is honoured on the worker's next pass.
     """
     key = vault_root.resolve()
     with _REPAIRS_LOCK:
+        if deferred_paths:
+            _DEFERRED_UPSERTS.setdefault(key, set()).update(deferred_paths)
+        else:
+            _FULL_REBUILD_REQUESTED.add(key)
         if key in _REPAIRS_IN_FLIGHT:
+            # The running worker re-reads both queues before it exits, so this
+            # request is picked up rather than dropped.
             return
         _REPAIRS_IN_FLIGHT.add(key)
 
     def _run() -> None:
+        rebuild = False
+        paths: list[Path] = []
         try:
-            get_store(vault_root).rebuild_atomic()
+            store = get_store(vault_root)
+            while True:
+                with _REPAIRS_LOCK:
+                    rebuild = key in _FULL_REBUILD_REQUESTED
+                    _FULL_REBUILD_REQUESTED.discard(key)
+                    paths = sorted(_DEFERRED_UPSERTS.pop(key, set()))
+                    if not rebuild and not paths:
+                        # Nothing left, and nothing can arrive between here and
+                        # releasing the flight: a caller that takes this lock
+                        # next sees no flight and starts its own worker.
+                        _REPAIRS_IN_FLIGHT.discard(key)
+                        return
+                if rebuild or not store.retry_deferred_upsert(paths):
+                    store.rebuild_atomic()
+                rebuild = False
+                paths = []
         except Exception as e:  # noqa: BLE001 - daemon must not escape into stderr
             log.warning("lexical background repair skipped (%s)", e)
-        finally:
             with _REPAIRS_LOCK:
+                # Put back what this pass consumed and could not finish. Repair
+                # stays best-effort and nothing here retries on its own, but the
+                # next caller that needs the sidecar should find the request
+                # still pending rather than a queue this thread emptied on its
+                # way out -- which is the same "invalidate cheaply, leave the
+                # cost to whoever asks next" shape this change exists to remove.
+                if rebuild:
+                    _FULL_REBUILD_REQUESTED.add(key)
+                if paths:
+                    _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                 _REPAIRS_IN_FLIGHT.discard(key)
 
     # Static name, deliberately — every other exomem thread name is a literal
@@ -2131,8 +2190,11 @@ class LexicalStore:
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
                 applied = self._upsert_paths_locked(paths)
         except VaultLockError as e:
-            log.info("lexical sidecar upsert deferred (%s); heals on next sync", e)
-            _schedule_repair(self.vault_root)
+            # Contention only: the writer held the vault lock, so the rows are
+            # fine and the store is healthy. Retry exactly these paths in the
+            # background instead of rebuilding the corpus for one page (#526).
+            log.info("lexical sidecar upsert deferred (%s); retrying these paths", e)
+            _schedule_repair(self.vault_root, deferred_paths=list(paths))
             return False
         except sqlite3.Error as e:
             self._note_query_failure(e, "lexical sidecar upsert deferred (%s)")
@@ -2145,6 +2207,33 @@ class LexicalStore:
         if not applied:
             _schedule_repair(self.vault_root)
         return applied
+
+    def retry_deferred_upsert(self, paths: list[Path]) -> bool:
+        """Re-apply rows a CONTENDED foreground upsert declined.
+
+        The foreground wait is 50ms because a governed write may not block on
+        the lexical sidecar. A background thread has no such constraint, so it
+        waits the full background timeout — by which point the write that held
+        the vault lock has almost always finished.
+
+        Returns whether the rows landed. False escalates to `rebuild_atomic`,
+        which is the only correct answer to anything that is not contention: a
+        sqlite error or a moved source says the store or the disk is wrong, and
+        re-applying rows cannot fix either.
+        """
+        if self._failed or not paths:
+            return False
+        from .vault import VaultLockError
+
+        try:
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
+                return self._upsert_paths_locked(paths)
+        except VaultLockError as e:
+            log.info("lexical targeted retry still contended (%s); rebuilding", e)
+            return False
+        except (sqlite3.Error, OSError) as e:
+            log.info("lexical targeted retry failed (%s); rebuilding", e)
+            return False
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
