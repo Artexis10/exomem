@@ -264,6 +264,14 @@ def test_bounded_retrieval_call_stops_blocked_headers_or_body() -> None:
     assert time.monotonic() - started < 0.5
 
 
+# How long the peer waits before closing the socket, and how long the test
+# will accept the cancel taking. The gap between them is the whole
+# discriminating power of the assertion, so the hold stays far larger than
+# the observation.
+_PEER_CLOSE_SECONDS = 30.0
+_CANCEL_OBSERVE_SECONDS = 10.0
+
+
 def test_staging_cancels_real_http_response_before_close_on_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -293,7 +301,12 @@ def test_staging_cancels_real_http_response_before_close_on_deadline(
     client, peer = socket.socketpair()
     peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
     connection = Connection(client)
-    release = threading.Timer(0.2, peer.close)
+    # The peer close is the WRONG way for this read to end, and it exists
+    # only so a broken cancel cannot hang the suite. Keeping it far away
+    # from the deadline is what makes the assertion below discriminating:
+    # the read must end because its own 0.01s deadline fired, not because
+    # the socket went away underneath it.
+    release = threading.Timer(_PEER_CLOSE_SECONDS, peer.close)
     monkeypatch.setattr(client_artifacts, "_RETRIEVAL_DEADLINE_SECONDS", 0.01)
     monkeypatch.setattr(client_artifacts, "resolve_public_addresses", lambda *_args, **_kwargs: ("8.8.8.8",))
     monkeypatch.setattr(client_artifacts, "_PinnedHTTPSConnection", lambda *_args, **_kwargs: connection)
@@ -316,7 +329,12 @@ def test_staging_cancels_real_http_response_before_close_on_deadline(
         release.cancel()
         peer.close()
 
-    assert time.monotonic() - started < 0.1
+    # Not a latency assertion. 0.1s claimed the runner would schedule the
+    # cancel within a tenth of a second of the deadline; a Windows CI shard
+    # took 0.124s while cancelling perfectly correctly. What is under test
+    # is WHICH of the two exits happened, and any value comfortably below
+    # the peer close answers that with room for a contended machine.
+    assert time.monotonic() - started < _CANCEL_OBSERVE_SECONDS
 
 
 def test_staging_routes_headers_and_body_through_the_absolute_deadline_guard(
