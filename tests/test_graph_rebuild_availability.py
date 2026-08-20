@@ -3114,7 +3114,13 @@ def test_publication_refused_by_both_paths_still_fails_closed(
     epistemic_graph.clear_publication_memos()
 
     _refuse_replacement_onto(monkeypatch, index.path)
-    monkeypatch.setattr(graph_sync, "_publish_sidecar_in_place", lambda *_args: False)
+    # Takes **_kwargs so it keeps matching the real signature: the refusal now
+    # collects per-attempt evidence through an `attempts_out` list, and a stub
+    # that only accepts positionals fails with TypeError instead of exercising
+    # the fail-closed path this test is about.
+    monkeypatch.setattr(
+        graph_sync, "_publish_sidecar_in_place", lambda *_args, **_kwargs: False
+    )
 
     with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable):
         index.rebuild_all()
