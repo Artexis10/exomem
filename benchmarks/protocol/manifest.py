@@ -89,10 +89,8 @@ def start_manifest(
         leakage=leakage or LeakageSummary(scanned_cases=0, invalidated_cases=0),
         contamination=contamination, budget=budget,
         preregistration_identity=preregistration_identity,
-        preregistration_lineage=(
-            PreregistrationLineage.from_identity(preregistration_identity)
-            if preregistration_identity.amendments
-            else None
+        preregistration_lineage=PreregistrationLineage.for_manifest(
+            preregistration_identity
         ),
         provider_variant=provider_variant, control_config_sha256=control_config_sha256,
     )

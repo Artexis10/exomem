@@ -75,6 +75,7 @@ if str(HERE) not in sys.path:
 
 from synth_vault import gen_dense_vault  # noqa: E402
 
+from exomem import bm25  # noqa: E402
 from exomem import find as find_module  # noqa: E402
 from exomem import freshness  # noqa: E402
 from exomem.vault import walk_vault_md  # noqa: E402
@@ -292,6 +293,173 @@ def _overlap_at_10(reference: list[list[str]], candidate: list[list[str]]) -> fl
     return sum(fracs) / len(fracs)
 
 
+def measure_bm25_write_cycle(n: int, *, links_per_note: int) -> list[dict]:
+    """Measure the Python BM25 cache across warm, write, and unload states.
+
+    This is deliberately narrower than :func:`measure_size`: it exercises the
+    in-process fallback corpus directly, seeds the freshness registry exactly
+    like the watcher, and refuses to report timings unless all ``n`` generated
+    pages are resident in the BM25 corpus.
+    """
+    root = Path(tempfile.mkdtemp(prefix=f"exomem-bm25-cycle-{n}-"))
+    try:
+        vault = root / "vault"
+        rels = gen_dense_vault(vault, n, links_per_note=links_per_note)
+        find_module.clear_cache()
+        bm25.clear_cache()
+        _apply_lexical_backend("python")
+        _seed_freshness_live(vault)
+
+        query = DEFAULT_QUERIES[0]
+
+        # Build once outside the reported warm measurement.
+        bm25.search(vault, query, k=10, scope="kb")
+        status = bm25.cache_status()
+        if status["documents"] != n:
+            raise RuntimeError(
+                f"BM25 lane is not live: expected {n} documents, got {status['documents']}"
+            )
+
+        rows: list[dict] = []
+
+        def measured(label: str) -> None:
+            started = time.perf_counter()
+            bm25.search(vault, query, k=10, scope="kb")
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            current = bm25.cache_status()
+            if current["documents"] != n:
+                raise RuntimeError(
+                    f"BM25 lane lost documents during {label}: "
+                    f"expected {n}, got {current['documents']}"
+                )
+            rows.append(
+                {
+                    "state": label,
+                    "elapsed_ms": elapsed_ms,
+                    "documents": current["documents"],
+                    "last_tokenized": bm25._INDEX.last_tokenized,
+                    "last_reused": bm25._INDEX.last_reused,
+                }
+            )
+
+        measured("warm read")
+
+        changed = vault / rels[0]
+        changed.write_text(
+            changed.read_text(encoding="utf-8")
+            + "\nOne-write BM25 latency probe.\n",
+            encoding="utf-8",
+        )
+        freshness.on_files_changed(vault, changed=[changed])
+        measured("read after one write")
+
+        bm25.unload_cache()
+        find_module.unload_ram_caches()
+        measured("read after unload_cache()")
+        return rows
+    finally:
+        os.environ.pop("EXOMEM_LEXICAL_BACKEND", None)
+        find_module.clear_cache()
+        bm25.clear_cache()
+        freshness.clear()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def render_bm25_write_cycle(n: int, rows: list[dict]) -> str:
+    lines = [
+        f"Python BM25 write-cycle latency at {n} pages",
+        "",
+        "| state | elapsed ms | documents | last tokenized | last reused |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['state']} | {row['elapsed_ms']:.1f} | {row['documents']} | "
+            f"{row['last_tokenized']} | {row['last_reused']} |"
+        )
+    return "\n".join(lines)
+
+
+def measure_bm25_repair_threshold(
+    n: int, *, delta_sizes: list[int], links_per_note: int
+) -> list[dict]:
+    """Compare forced delta repair with a warm-cache full build at one scale."""
+    root = Path(tempfile.mkdtemp(prefix=f"exomem-bm25-threshold-{n}-"))
+    original_fraction = bm25.MAX_INCREMENTAL_REPAIR_FRACTION
+    try:
+        vault = root / "vault"
+        rels = gen_dense_vault(vault, n, links_per_note=links_per_note)
+        find_module.clear_cache()
+        bm25.clear_cache()
+        _apply_lexical_backend("python")
+        _seed_freshness_live(vault)
+        bm25.search(vault, DEFAULT_QUERIES[0], k=10, scope="kb")
+        if bm25.cache_status()["documents"] != n:
+            raise RuntimeError("BM25 threshold measurement did not load the full corpus")
+
+        # The measurement must reach the crossover rather than being clipped by
+        # the product threshold it is intended to justify.
+        bm25.MAX_INCREMENTAL_REPAIR_FRACTION = 1.0
+        rows: list[dict] = []
+        for trial, delta_size in enumerate(delta_sizes, start=1):
+            if not 1 <= delta_size <= n:
+                raise ValueError(f"delta size must be in [1, {n}], got {delta_size}")
+            changed = [vault / rel for rel in rels[:delta_size]]
+            future = time.time() + trial * 10_000
+            for path in changed:
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + f"\nThreshold probe trial {trial}.\n",
+                    encoding="utf-8",
+                )
+                os.utime(path, (future, future))
+            freshness.on_files_changed(vault, changed=changed)
+
+            target = bm25.corpus_key(vault, "kb")
+            started = time.perf_counter()
+            bm25._INDEX._fresh_corpus(vault, "kb", target)
+            repair_ms = (time.perf_counter() - started) * 1000
+            if bm25.cache_status()["documents"] != n:
+                raise RuntimeError("forced repair lost BM25 documents")
+
+            started = time.perf_counter()
+            _full_bm25, full_paths, _full_tokens = bm25._INDEX._build(vault, "kb")
+            full_build_ms = (time.perf_counter() - started) * 1000
+            if len(full_paths) != n:
+                raise RuntimeError("comparison full build did not load the full corpus")
+            rows.append(
+                {
+                    "changed": delta_size,
+                    "fraction": delta_size / n,
+                    "repair_ms": repair_ms,
+                    "full_build_ms": full_build_ms,
+                }
+            )
+        return rows
+    finally:
+        bm25.MAX_INCREMENTAL_REPAIR_FRACTION = original_fraction
+        os.environ.pop("EXOMEM_LEXICAL_BACKEND", None)
+        find_module.clear_cache()
+        bm25.clear_cache()
+        freshness.clear()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def render_bm25_repair_threshold(n: int, rows: list[dict]) -> str:
+    lines = [
+        f"Python BM25 repair/full-build crossover at {n} pages",
+        "",
+        "| changed paths | corpus fraction | forced repair ms | full build ms |",
+        "|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['changed']} | {row['fraction']:.1%} | "
+            f"{row['repair_ms']:.1f} | {row['full_build_ms']:.1f} |"
+        )
+    return "\n".join(lines)
+
+
 def measure_size(
     n: int,
     *,
@@ -493,6 +661,18 @@ def main() -> int:
              "reuse across runs — embed once, measure many (the 100k-tier contract). "
              "Omit for throwaway temp corpora.",
     )
+    ap.add_argument(
+        "--bm25-write-cycle", action="store_true",
+        help="measure the Python BM25 warm/write/unload cache cycle at each --sizes value",
+    )
+    ap.add_argument(
+        "--bm25-repair-threshold", action="store_true",
+        help="compare forced BM25 delta repair with a full walk at each --sizes value",
+    )
+    ap.add_argument(
+        "--delta-sizes", type=str, default="1,240,480,960,1440,1920,2400",
+        help="comma-separated changed-path counts for --bm25-repair-threshold",
+    )
     args = ap.parse_args()
 
     vec_backends = [b.strip() for b in args.vec_backend.split(",") if b.strip()]
@@ -514,6 +694,40 @@ def main() -> int:
     corpus_cache = Path(args.corpus_cache) if args.corpus_cache else None
 
     sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
+    if args.bm25_write_cycle and args.bm25_repair_threshold:
+        print("choose only one BM25 diagnostic mode", file=sys.stderr)
+        return 1
+    if args.bm25_write_cycle:
+        if args.embeddings or args.rerank:
+            print("--bm25-write-cycle is model-free and cannot use --embeddings/--rerank",
+                  file=sys.stderr)
+            return 1
+        _install_model_free()
+        for size in sizes:
+            print(render_bm25_write_cycle(
+                size,
+                measure_bm25_write_cycle(size, links_per_note=args.links_per_note),
+            ))
+        return 0
+    if args.bm25_repair_threshold:
+        if args.embeddings or args.rerank:
+            print("--bm25-repair-threshold is model-free and cannot use "
+                  "--embeddings/--rerank", file=sys.stderr)
+            return 1
+        delta_sizes = [
+            int(value) for value in args.delta_sizes.split(",") if value.strip()
+        ]
+        _install_model_free()
+        for size in sizes:
+            print(render_bm25_repair_threshold(
+                size,
+                measure_bm25_repair_threshold(
+                    size,
+                    delta_sizes=delta_sizes,
+                    links_per_note=args.links_per_note,
+                ),
+            ))
+        return 0
     if args.embeddings:
         sizes = [s for s in sizes if s <= args.max_embeddings_size]
         if not sizes:

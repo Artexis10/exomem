@@ -183,6 +183,8 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: FTS5 read-after-write visibility regression
+        run: uv run --frozen python -m pytest tests/test_read_after_write_visibility.py -q
       - name: Semantic validate and commit latency scaling gate (2k and 8k)
         # Aggregate timings only: the foreground semantic path must stay bounded
         # after startup warm-up and must not regress to corpus-wide parse/resolver

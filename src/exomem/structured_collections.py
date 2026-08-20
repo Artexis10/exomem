@@ -1510,6 +1510,10 @@ def plan_audit_head(frontmatter: Mapping[str, Any]) -> str | None:
     return _audit_head(frontmatter, "plan_audit")
 
 
+_AUDIT_HEAD_LENGTH = 24
+_AUDIT_HEAD_PATTERN = re.compile(r"[0-9a-f]{24}")
+
+
 def _audit_head(frontmatter: Mapping[str, Any], name: str) -> str | None:
     code = "INVALID_RECORD_AUDIT" if name == "record_audit" else "INVALID_COLLECTION_AUDIT"
     audit = frontmatter.get(name)
@@ -1518,6 +1522,18 @@ def _audit_head(frontmatter: Mapping[str, Any], name: str) -> str | None:
     if not isinstance(audit, Mapping) or set(audit) != {"version", "head"}:
         raise CollectionError(code, "collection audit state is invalid")
     head = audit.get("head")
+    if type(head) is int:
+        # Recover a head written before it was quoted. The id is 24 characters
+        # of uuid4 hex, so about one in 79,000 contains no letter and YAML typed
+        # the bare scalar as an integer -- and the collection has been unreadable
+        # ever since, because the check below requires a str (#549). The width is
+        # fixed at 24, so zero-padding restores the original exactly.
+        #
+        # Not recoverable: an id that began with 0 and used only digits 0-7 was
+        # read as octal, and its decimal rendering is a different string. That is
+        # far rarer still, and it keeps failing here rather than loading a head
+        # that was never written.
+        head = str(head).zfill(_AUDIT_HEAD_LENGTH)
     supported_versions = {1, 2} if name == "record_audit" else {1}
     if (
         type(audit.get("version")) is not int
@@ -1525,7 +1541,7 @@ def _audit_head(frontmatter: Mapping[str, Any], name: str) -> str | None:
         or not isinstance(head, str)
     ):
         raise CollectionError(code, "collection audit state is invalid")
-    if re.fullmatch(r"[0-9a-f]{24}", head) is None:
+    if _AUDIT_HEAD_PATTERN.fullmatch(head) is None:
         raise CollectionError(code, "collection audit head is invalid")
     return head
 

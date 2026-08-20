@@ -839,3 +839,46 @@ def test_deleting_sidecar_is_always_safe(tmp_path):
     lexstore.lexical_path(tmp_path).unlink()
     hits = lexstore.search_bm25(tmp_path, "resilient", k=3, scope="kb")
     assert hits and hits[0][0] == "Knowledge Base/a.md"
+
+
+def test_one_vault_reached_two_ways_shares_a_single_store(tmp_path: Path) -> None:
+    """`_STORES` must key on the same thing repair state keys on.
+
+    `_schedule_repair` has always keyed on `vault_root.resolve()`; `_STORES`
+    keyed on whatever spelling the caller happened to pass. Two spellings of a
+    single vault -- a symlink, a relative path, a `..` segment -- produced two
+    `LexicalStore` objects over one sidecar, against repair state that
+    correctly treated them as one.
+
+    The visible consequence is the scorer token, not just duplicated work.
+    `_failed` lives on the instance, so a store that has fallen back is
+    invisible through the other spelling and the token still advertises the
+    fast backend. Cache keys built from it then collide across two scorers.
+    """
+    lexstore.clear_stores()
+    if not lexstore._catalog_usable():
+        pytest.skip("metadata catalog unavailable, so the token cannot discriminate")
+
+    vault = tmp_path / "vault"
+    (vault / "sub").mkdir(parents=True)
+    detour = vault / "sub" / ".."
+
+    assert detour != vault, "this fixture needs two distinct spellings"
+    assert detour.resolve() == vault.resolve()
+
+    try:
+        direct = lexstore.get_store(vault)
+        via_detour = lexstore.get_store(detour)
+
+        assert via_detour is direct, (
+            "the same vault produced two stores, so they hold independent "
+            "failure state over one sidecar"
+        )
+
+        direct._failed = True
+        assert lexstore.catalog_cache_token(detour) == "unavailable", (
+            "the store had fallen back, but the token reached through the "
+            "other spelling still advertised the exact scorer"
+        )
+    finally:
+        lexstore.clear_stores()

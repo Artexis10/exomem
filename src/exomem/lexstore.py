@@ -170,6 +170,10 @@ class CatalogQueryResult:
     readiness: CatalogReadiness
 
 
+class _DeltaReplayStale(RuntimeError):
+    """The live freshness target moved while a bounded replay was materialized."""
+
+
 def _checkpoint_state(checkpoint) -> tuple | None:
     """Comparable projected state, intentionally excluding local history.
 
@@ -385,12 +389,31 @@ def catalog_semantic_identity(vault_root: Path) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _store_key(vault_root: Path) -> Path:
+    """Canonical `_STORES` key.
+
+    `_schedule_repair` has always keyed its state on `vault_root.resolve()`
+    while `_STORES` keyed on whatever spelling the caller passed. Two spellings
+    of one vault -- a symlinked path, a relative path, a differently-cased drive
+    letter on Windows -- therefore produced two `LexicalStore` objects for a
+    single sidecar, and repair state that correctly treated them as one.
+
+    That is not only duplicated work. `_failed` lives on the instance, so a
+    store that has fallen back to Python scoring is invisible to a lookup made
+    through the other spelling, and `cache_token` then answers "fts5" for a
+    store that is not serving FTS5. Cache keys built from that token collide
+    across two different scorers.
+    """
+    return vault_root.resolve()
+
+
 def get_store(vault_root: Path) -> LexicalStore:
+    key = _store_key(vault_root)
     with _STORES_LOCK:
-        store = _STORES.get(vault_root)
+        store = _STORES.get(key)
         if store is None:
             store = LexicalStore(vault_root)
-            _STORES[vault_root] = store
+            _STORES[key] = store
         return store
 
 
@@ -909,7 +932,7 @@ def cache_token(vault_root: Path) -> str:
     if not _usable():
         return "python"
     with _STORES_LOCK:
-        store = _STORES.get(vault_root)
+        store = _STORES.get(_store_key(vault_root))
     if store is not None and store._failed:
         return "python"
     return "fts5"
@@ -920,7 +943,7 @@ def catalog_cache_token(vault_root: Path) -> str:
     if not _catalog_usable():
         return "python"
     with _STORES_LOCK:
-        store = _STORES.get(vault_root)
+        store = _STORES.get(_store_key(vault_root))
     if store is not None and store._failed:
         return "unavailable"
     return "metadata_only"
@@ -1821,6 +1844,8 @@ class LexicalStore:
             self._rebuild(conn)
             return True
         if self._stored_count_max(conn, scope) != (freshness[0], freshness[1]):
+            if self._try_apply_complete_recall_delta(conn, scope, checkpoint):
+                return True
             if not repair:
                 return False
             self._heal_delta(conn)  # incremental: patch only the drifted rows
@@ -1833,6 +1858,8 @@ class LexicalStore:
         stored = self._meta_checkpoint(conn, scope)
         if stored is not None and _checkpoint_state(stored) == _checkpoint_state(checkpoint):
             self._synced[scope] = _checkpoint_state(checkpoint)
+            return True
+        if self._try_apply_complete_recall_delta(conn, scope, checkpoint):
             return True
         if not repair:
             # Establishing whether an unknown digest is a cheap path-only
@@ -1849,6 +1876,73 @@ class LexicalStore:
             self._rebuild(conn)
         else:
             self._heal_delta(conn)
+        return True
+
+    def _try_apply_complete_recall_delta(
+        self,
+        conn: sqlite3.Connection,
+        scope: str,
+        checkpoint,
+    ) -> bool:
+        """Catch a live catalog up from a small, same-policy projected delta.
+
+        Large-corpus searches deliberately pass ``repair=False`` so a request
+        cannot rebuild or heal the catalog by walking the vault.  A complete
+        watcher delta is different: it proves the exact changed/deleted paths
+        since the catalog's stored checkpoint, so replaying at most the
+        foreground cap is O(change) and may safely precede that repair gate.
+
+        Access-policy identity is an explicit hard boundary.  A policy change
+        can flip admission for the whole corpus, so even a complete retained
+        delta takes the existing full path instead of being replayed here.
+        """
+        from . import freshness as freshness_module
+
+        stored = self._meta_checkpoint(conn, scope)
+        if stored is None or _checkpoint_state(stored) == _checkpoint_state(checkpoint):
+            return False
+        if (
+            stored.policy_version,
+            stored.access_policy_fingerprint,
+        ) != (
+            checkpoint.policy_version,
+            checkpoint.access_policy_fingerprint,
+        ):
+            return False
+
+        captured_identity = catalog_semantic_identity(self.vault_root)
+        if self._meta_catalog_identity(conn) != captured_identity:
+            return False
+        delta = freshness_module.recall_delta_since(self.vault_root, scope, stored)
+        if (
+            not delta.complete
+            or delta.from_ != stored
+            or delta.to != checkpoint
+            or len({*delta.changed, *delta.deleted}) > CATALOG_FOREGROUND_DELTA_CAP
+            or not self._delta_target_still_current(scope, delta)
+        ):
+            return False
+
+        try:
+            with conn:
+                self._apply_delta_rows(conn, delta)
+                if (
+                    catalog_semantic_identity(self.vault_root) != captured_identity
+                    or not self._delta_target_still_current(scope, delta)
+                ):
+                    raise _DeltaReplayStale
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (f"triple:{scope}", repr(tuple(delta.to.triple))),
+                )
+                self._write_checkpoint(conn, scope, delta.to)
+                self._write_catalog_identity(conn, captured_identity)
+        except _DeltaReplayStale:
+            return False
+
+        self._witnessed.pop(scope, None)
+        self._synced[scope] = _checkpoint_state(delta.to)
         return True
 
     def _walk_entries(self):
