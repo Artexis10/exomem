@@ -4225,27 +4225,52 @@ def on_resolver_files_changed(
                 _evict_recall_resolver(root)
 
 
-def unload_ram_caches() -> dict[str, int]:
-    """Evict rebuildable find RAM caches without clearing freshness/inbound metadata."""
+def unload_ram_caches(*, keep_recall_resolver: bool = False) -> dict[str, int]:
+    """Evict rebuildable find RAM caches without clearing freshness/inbound metadata.
+
+    Two callers want different things from this. `epistemic_graph` uses it to
+    force a re-derivation -- a correctness eviction, where keeping a stale
+    resolver would be a wrong answer rather than a slow one. The idle reaper
+    uses it to hand memory back, and should call `release_idle_ram_caches`
+    instead. The default stays the correctness meaning.
+
+    Either way the maps are cleared directly rather than through
+    `_evict_recall_resolver`: that seam schedules a background rebuild, and a
+    caller releasing memory does not want a thread immediately spending it
+    again.
+    """
     page_entries = len(_CACHE.entries)
     _CACHE.clear()
     with _RESOLVER_LOCK:
-        resolver_entries = len(_RESOLVER_CACHE) + len(_RECALL_RESOLVER_CACHE)
-        # Deliberately clears the maps directly rather than going through
-        # `_evict_recall_resolver`: this is the idle reaper handing memory back,
-        # and immediately spending a thread to rebuild what it just released
-        # would defeat the whole point of releasing it. The next caller builds,
-        # single-flighted.
+        resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
-        _RECALL_RESOLVER_CACHE.clear()
         _RESOLVER_CHECKPOINTS.clear()
-        _RECALL_RESOLVER_CHECKPOINTS.clear()
+        if not keep_recall_resolver:
+            resolver_entries += len(_RECALL_RESOLVER_CACHE)
+            _RECALL_RESOLVER_CACHE.clear()
+            _RECALL_RESOLVER_CHECKPOINTS.clear()
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
     with _RECALL_PATH_CACHE_LOCK:
         _RECALL_PATH_CACHE.clear()
     return {"pages": page_entries, "resolvers": resolver_entries, "hot_find": hot_entries}
+
+
+def release_idle_ram_caches() -> dict[str, int]:
+    """Hand memory back from an idle process, keeping what is dear to rebuild.
+
+    The recall resolver stays. Measured on a 2,400-page vault it retains
+    3.05 MiB -- 1,334 bytes a page -- while rebuilding it costs a vault walk,
+    an admission pass, and a read of every admitted page: 39 s of page reads
+    alone, charged to whichever reader asks first (#676). Releasing three
+    megabytes from a process that is also holding a roughly one-gigabyte
+    embedding model does not pay for that.
+
+    Everything else still goes: the page cache is the large one, and the hot
+    find cache and recall path cache are cheap to refill.
+    """
+    return unload_ram_caches(keep_recall_resolver=True)
 
 
 def evict_resolver_caches(vault_root: Path) -> int:
