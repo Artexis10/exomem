@@ -236,7 +236,7 @@ def _message_for(code: str) -> str:
 def _status_for(code: str) -> int:
     if code == "HOSTED_UNAUTHORIZED" or code.startswith("HOSTED_TRANSFER_GRANT_"):
         return 401
-    if code == "HOSTED_CELL_CONTEXT_MISMATCH":
+    if code in {"HOSTED_CELL_CONTEXT_MISMATCH", "HOSTED_PROTECTED_TREE_MUTATION"}:
         return 403
     if code == "HOSTED_PROTOCOL_MISMATCH":
         return 409
@@ -840,6 +840,10 @@ def register_hosted_routes(
         }
         for profile in agent_profiles
     }
+    for profile in agent_profiles:
+        # Refuse to serve a profile whose write surface nobody has triaged, so a
+        # later widening cannot reopen the protected-tree hole by silence.
+        gateway.assert_profile_mutations_are_classified(profile)
     agent_surface_descriptors = {
         profile: gateway.hosted_agent_surface_descriptor(profile) for profile in agent_profiles
     }
@@ -1075,6 +1079,33 @@ def register_hosted_routes(
                 raise gateway.HostedGatewayError(
                     "HOSTED_RECORDS_LIFECYCLE_DISABLED",
                     "Records lifecycle mutations are disabled for this runtime",
+                )
+            # A widened profile hands the tenant broad page mutation. The vault's
+            # own doctrine (`_Schema`) and policy tree (`_Governance`) are not
+            # ordinary content, and on this tier there is no hook, no reviewer,
+            # and no second pair of eyes between a prompt injection and the
+            # write. Refuse here -- before lifecycle admission and before the
+            # leaf -- exactly where the profile is already known. Deliberately
+            # not at the write leaf: a single-user local vault legitimately
+            # customises its own `_Schema`, and this is a property of the hosted
+            # surface, not of the operation.
+            #
+            # Scoped to agent surface profiles, which is what a tenant reaches.
+            # The legacy `private-command-router` descriptor is the
+            # control-plane's own full-registry route, reached with the private
+            # service credential rather than by a tenant's agent; widening or
+            # narrowing that trust boundary is a separate question.
+            protected_argument = (
+                gateway.protected_tree_argument(
+                    command.name, kwargs, vault_root=config.vault_root
+                )
+                if descriptor.profile in commands_module.PRODUCT_SURFACE_PROFILES
+                else None
+            )
+            if protected_argument is not None:
+                raise gateway.HostedGatewayError(
+                    "HOSTED_PROTECTED_TREE_MUTATION",
+                    "hosted agents may not rewrite governed schema or policy",
                 )
             injected = (
                 (config.vault_root, source_schema) if command.needs_schema else (config.vault_root,)

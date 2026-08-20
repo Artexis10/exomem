@@ -535,6 +535,19 @@ def test_supported_audio_event_reconciles_under_writer_authority(
     assert depth == 0
 
 
+# Valves for the ordering test below. The hold has to outlast both the
+# observation and the foreground's acquisition timeout: if the background's
+# hash finishes on its own, it commits before the foreground ever asks for the
+# boundary and the yield this test exists to prove is never exercised.
+_MEDIA_HOLD_SECONDS = 60.0
+_MEDIA_OBSERVE_SECONDS = 30.0
+# How long the foreground waits for the boundary the background is supposed to
+# have yielded. 0.05s asserted that a Windows runner acquires a free file lock
+# within fifty milliseconds, which is not a property of this code. A background
+# that did NOT yield still fails, because it holds until the hold above.
+_MEDIA_FOREGROUND_ACQUIRE_SECONDS = 15.0
+
+
 def test_background_media_hashing_yields_foreground_guard_then_commits_guarded(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -545,7 +558,7 @@ def test_background_media_hashing_yields_foreground_guard_then_commits_guarded(
     binary.write_bytes(b"large-enough-for-a-blocked-provenance-read")
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=vault.parent / "state"),
-        mutation_timeout_seconds=0.05,
+        mutation_timeout_seconds=_MEDIA_FOREGROUND_ACQUIRE_SECONDS,
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     hash_started = threading.Event()
@@ -557,7 +570,7 @@ def test_background_media_hashing_yields_foreground_guard_then_commits_guarded(
 
     def blocked_read(*args, **kwargs):  # noqa: ANN002, ANN003
         hash_started.set()
-        assert continue_hash.wait(2.0)
+        assert continue_hash.wait(_MEDIA_HOLD_SECONDS)
         return original_read(*args, **kwargs)
 
     def guarded_batch(*args, **kwargs):  # noqa: ANN002, ANN003
@@ -578,7 +591,7 @@ def test_background_media_hashing_yields_foreground_guard_then_commits_guarded(
 
     background = threading.Thread(target=reconcile)
     background.start()
-    assert hash_started.wait(1.0)
+    assert hash_started.wait(_MEDIA_OBSERVE_SECONDS)
     with manager.mutation_guard(
         vault,
         request_id="req-foreground",
@@ -587,7 +600,11 @@ def test_background_media_hashing_yields_foreground_guard_then_commits_guarded(
     ):
         assert manager.status(vault)["mutation_boundary"]["request_id"] == "req-foreground"
     continue_hash.set()
-    background.join(timeout=3.0)
+    # A deadlock valve. `is_alive()` below is the assertion -- that the
+    # reconcile finished, having taken the boundary for its commit -- not a
+    # claim that it finishes within three seconds of being released. A Windows
+    # shard exceeded that while completing correctly.
+    background.join(timeout=_MEDIA_HOLD_SECONDS)
 
     assert not background.is_alive()
     assert errors == []
@@ -701,6 +718,11 @@ def test_delete_then_recreate_only_upserts(vault, monkeypatch: pytest.MonkeyPatc
     assert ups == [[p]]
 
 
+# How long a test will wait for a background flush before calling it hung.
+# Generous on purpose: see the note at its use site.
+_FLUSH_VALVE_SECONDS = 30.0
+
+
 def test_dispatch_thread_coalesces_within_debounce(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     ups, _dels = _stub_embeddings(monkeypatch)
     w = file_watcher.FileWatcher(vault, debounce_seconds=0.05)
@@ -714,7 +736,13 @@ def test_dispatch_thread_coalesces_within_debounce(vault, monkeypatch: pytest.Mo
         b.write_text("# B\n", encoding="utf-8")
         w._record(a, deleted=False)
         w._record(b, deleted=False)
-        deadline = time.monotonic() + 2.0
+        # A deadlock valve, not a latency assertion. What is under test is that
+        # the dispatch thread flushes at all and that the two saves coalesce
+        # into one batch -- neither claim is about how quickly a CI runner gets
+        # round to scheduling the thread. Two seconds was tight enough to fire
+        # on a loaded Windows runner, reporting a coalescing defect that was
+        # really a busy machine.
+        deadline = time.monotonic() + _FLUSH_VALVE_SECONDS
         while not ups and time.monotonic() < deadline:
             time.sleep(0.02)
         assert ups, "dispatch thread should flush after the debounce window"

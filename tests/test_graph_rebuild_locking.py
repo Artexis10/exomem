@@ -451,6 +451,14 @@ def test_registered_builder_retains_the_originating_custom_lease_boundary(
     assert observed_roots == [state_root]
 
 
+# Deadlock valves for the ordering test below, sized so the hold outlasts the
+# observation. A whole-vault rebuild on a loaded Windows runner is the thing
+# being waited on, and two seconds does not bound it.
+_HOLD_SECONDS = 60.0
+_OBSERVE_SECONDS = 30.0
+_SWAP_WAIT_SECONDS = 30.0
+
+
 def test_graph_swap_waits_for_a_real_lease_manager_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -461,8 +469,13 @@ def test_graph_swap_waits_for_a_real_lease_manager_writer(
     note = vault_root / "Knowledge Base/Notes/graph-race.md"
     note.parent.mkdir(parents=True)
     note.write_text("# Graph race\n", encoding="utf-8")
+    # How long the graph swap will wait for the writer's lease. It only has to
+    # outlast the gap between the private build finishing and this thread
+    # getting scheduled to release the writer -- microseconds when the machine
+    # is idle, and unbounded when it is not. One second made a busy runner look
+    # like a swap that refused to wait.
     manager = LeaseManager(
-        LeaseConfig(state_dir=state_root), mutation_timeout_seconds=1
+        LeaseConfig(state_dir=state_root), mutation_timeout_seconds=_SWAP_WAIT_SECONDS
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
@@ -475,7 +488,11 @@ def test_graph_swap_waits_for_a_real_lease_manager_writer(
     def hold_writer() -> None:
         with manager.mutation_guard(vault_root):
             writer_entered.set()
-            assert release_writer.wait(2)
+            # The hold has to outlast the observation below. If it expires
+            # first the writer releases on its own, the swap publishes, and
+            # `assert not publish_entered.is_set()` fails -- reporting a
+            # publication that raced the writer when really the test let go.
+            assert release_writer.wait(_HOLD_SECONDS)
 
     def publication_seam(_temporary: Path, _live: Path) -> None:
         publish_entered.set()
@@ -493,16 +510,16 @@ def test_graph_swap_waits_for_a_real_lease_manager_writer(
     )
     writer = threading.Thread(target=hold_writer)
     writer.start()
-    assert writer_entered.wait(1)
+    assert writer_entered.wait(_OBSERVE_SECONDS)
     rebuilder = threading.Thread(target=lambda: rebuilt.append(index.rebuild_all()))
     rebuilder.start()
     try:
-        assert private_build_finished.wait(2)
+        assert private_build_finished.wait(_OBSERVE_SECONDS)
         assert not publish_entered.is_set()
     finally:
         release_writer.set()
-        writer.join(timeout=2)
-        rebuilder.join(timeout=5)
+        writer.join(timeout=_OBSERVE_SECONDS)
+        rebuilder.join(timeout=_HOLD_SECONDS)
     assert not writer.is_alive()
     assert not rebuilder.is_alive()
     assert publish_entered.is_set()

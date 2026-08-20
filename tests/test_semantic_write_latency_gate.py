@@ -6,8 +6,33 @@ scaling bound is anchored to the same run's small-corpus median, so both ends
 moved the wrong way at once and the gate failed a release PR that had touched
 nothing but a version string. A re-run passed with ordinary numbers.
 
-These tests pin that arithmetic (so the sensitivity stays visible rather than
-being rediscovered under time pressure) and pin the confirmation behaviour.
+That was mitigated by re-measuring on failure, and the sensitivity itself was
+pinned here rather than removed. On 2026-08-20 it recurred and the mitigation
+did not hold: both attempts failed on a branch whose only product changes were
+a thread join on shutdown and a hook that does not run on the write path.
+
+Twelve consecutive CI runs sampled at that point put the numbers beyond
+argument. The 8k commit median -- the quantity the scaling rule bounds -- ranged
+265.7-454.7ms. The bound it was compared against ranged 420.6-488.2ms across the
+same runs (excluding one 1238.0ms outlier). The bound sat INSIDE the natural
+spread of the thing it bounds, so which side of it a run landed on was decided
+by the runner, not by the code. Four of the twelve came within 100ms of failing
+and one landed at -3.9ms.
+
+The observed ratio tells the same story: 8k/2k commit ran a median 2.55x against
+a SCALING_RATIO of 2.0, so the rule was already carried entirely by
+SCALING_SLACK_MS. Commit really does scale about 2.5x over a 4x corpus here.
+
+So the bound is now floored at a fraction of each operation's own absolute
+ceiling. That is a deliberate, narrowed claim: on this runner the scaling check
+discriminates only ABOVE the noise floor -- between 600ms and the 750ms ceiling
+for commit -- and the absolute ceilings are the primary bound below that.
+Claiming finer resolution than the measurement supports is what produced two
+false failures.
+
+These tests pin the floor, pin that both historical false-failure sample sets
+now pass, and pin that genuine super-linear growth still fails before the
+absolute ceiling catches it.
 """
 
 from __future__ import annotations
@@ -55,6 +80,22 @@ def result(
 HEALTHY = [result(2_000, commit=51.5), result(8_000, commit=191.7)]
 # The numbers from the 2026-07-27 false failure.
 NOISY = [result(2_000, commit=42.3), result(8_000, commit=365.6)]
+# The 2026-08-20 recurrence, both attempts, measured on a branch that changed
+# nothing on the write path.
+RECURRENCE = [
+    [result(2_000, commit=125.4, validate=37.0), result(8_000, commit=454.7, validate=142.3)],
+    [result(2_000, commit=117.2, validate=40.0), result(8_000, commit=482.7, validate=134.9)],
+]
+# The widest validate spread seen in the same twelve runs: a 253.2ms 8k median
+# against a 38.7ms baseline cleared its bound by 24.2ms. Validate carries the
+# same defect as commit; it had simply not landed on the wrong side yet.
+VALIDATE_MARGIN = [
+    result(2_000, commit=115.9, validate=38.7),
+    result(8_000, commit=287.8, validate=253.2),
+]
+# Genuine super-linear growth: above the floor, still under the absolute
+# ceiling, so only the scaling rule can catch it.
+SUPERLINEAR = [result(2_000, commit=130.0), result(8_000, commit=700.0)]
 
 
 def test_healthy_scaling_passes() -> None:
@@ -89,21 +130,62 @@ def test_missing_new_key_fails_loudly(key: str) -> None:
 
 
 def test_superlinear_scaling_fails() -> None:
+    """Growth the runner cannot explain still fails, and fails on scaling.
+
+    700ms at 8k is under COMMIT_MEDIAN_MS, so the absolute ceiling cannot catch
+    it -- if this passes, the scaling rule has stopped doing anything.
+    """
     with pytest.raises(SystemExit, match="commit scaling"):
-        load_module().check(NOISY)
+        load_module().check(SUPERLINEAR)
 
 
-def test_a_faster_baseline_tightens_the_bound() -> None:
-    """The documented sensitivity: a quick 2k run makes the gate stricter."""
+@pytest.mark.parametrize("sample", [NOISY, *RECURRENCE, VALIDATE_MARGIN])
+def test_measured_false_failures_pass(sample: list[dict[str, float | int]]) -> None:
+    """Every sample set that has ever failed this gate falsely now passes.
 
+    All four came off contended runners on trees with no write-path change.
+    """
+    load_module().check(sample)
+
+
+def test_a_fast_baseline_cannot_tighten_the_bound_below_the_floor() -> None:
+    """The 2026-07-27 sensitivity, now bounded rather than merely documented.
+
+    A quicker small-corpus run still lowers the ratio term -- that part is
+    arithmetic and unchanged -- but it can no longer drag the effective bound
+    underneath what an unregressed large-corpus measurement produces on this
+    runner.
+    """
     module = load_module()
-    bound = lambda small: small * module.SCALING_RATIO + module.SCALING_SLACK_MS  # noqa: E731
 
-    # The real incident: baseline 42.3ms yielded a 284.6ms bound, while the
-    # ordinary 51.5ms baseline would have allowed 303.0ms.
-    assert bound(42.3) == pytest.approx(284.6)
-    assert bound(51.5) == pytest.approx(303.0)
-    assert bound(42.3) < bound(51.5)
+    def ratio_term(small: float) -> float:
+        return small * module.SCALING_RATIO + module.SCALING_SLACK_MS
+
+    def bound(small: float, ceiling: float) -> float:
+        return max(ratio_term(small), ceiling * module.SCALING_BOUND_CEILING_FRACTION)
+
+    # The ratio term still moves with the baseline, as it always did.
+    assert ratio_term(42.3) == pytest.approx(284.6)
+    assert ratio_term(51.5) == pytest.approx(303.0)
+    assert ratio_term(42.3) < ratio_term(51.5)
+
+    # The bound the gate actually applies does not follow it down.
+    floor = module.COMMIT_MEDIAN_MS * module.SCALING_BOUND_CEILING_FRACTION
+    assert bound(42.3, module.COMMIT_MEDIAN_MS) == pytest.approx(floor)
+    assert bound(125.4, module.COMMIT_MEDIAN_MS) == pytest.approx(floor)
+
+    # 454.7ms is the worst 8k commit median observed across twelve runs on an
+    # unregressed tree. The floor has to clear it, or the gate is still inside
+    # its own noise.
+    assert floor > 454.7
+
+    # And the floor must stay strictly under the absolute ceiling, or the
+    # scaling rule has been reduced to a duplicate of it.
+    assert floor < module.COMMIT_MEDIAN_MS
+    assert (
+        module.VALIDATE_MEDIAN_MS * module.SCALING_BOUND_CEILING_FRACTION
+        < module.VALIDATE_MEDIAN_MS
+    )
 
 
 def test_check_failure_is_confirmed_by_a_second_measurement(monkeypatch) -> None:
@@ -114,7 +196,7 @@ def test_check_failure_is_confirmed_by_a_second_measurement(monkeypatch) -> None
 
     def fake_measure_all(sizes, samples, root):
         attempts.append(len(attempts) + 1)
-        return NOISY if len(attempts) == 1 else HEALTHY
+        return SUPERLINEAR if len(attempts) == 1 else HEALTHY
 
     monkeypatch.setattr(module, "measure_all", fake_measure_all)
     assert module.main(["--check"]) == 0
@@ -129,7 +211,7 @@ def test_a_reproducible_failure_still_fails(monkeypatch) -> None:
 
     def fake_measure_all(sizes, samples, root):
         attempts.append(len(attempts) + 1)
-        return NOISY
+        return SUPERLINEAR
 
     monkeypatch.setattr(module, "measure_all", fake_measure_all)
     with pytest.raises(SystemExit, match="commit scaling"):
@@ -143,7 +225,7 @@ def test_attempts_one_disables_confirmation(monkeypatch) -> None:
 
     def fake_measure_all(sizes, samples, root):
         attempts.append(len(attempts) + 1)
-        return NOISY
+        return SUPERLINEAR
 
     monkeypatch.setattr(module, "measure_all", fake_measure_all)
     with pytest.raises(SystemExit, match="commit scaling"):
@@ -153,5 +235,5 @@ def test_attempts_one_disables_confirmation(monkeypatch) -> None:
 
 def test_no_check_flag_never_fails(monkeypatch) -> None:
     module = load_module()
-    monkeypatch.setattr(module, "measure_all", lambda sizes, samples, root: NOISY)
+    monkeypatch.setattr(module, "measure_all", lambda sizes, samples, root: SUPERLINEAR)
     assert module.main([]) == 0

@@ -10,6 +10,13 @@ import pytest
 # copies: the wording is allowed to change, the semantics are not.
 from exomem import graph_sync
 
+#: How long a thread is given to reach a point it should reach immediately.
+#: A deadlock valve, not a latency budget.
+_OBSERVE_SECONDS = 30.0
+#: How long a stage is deliberately held open. Must exceed _OBSERVE_SECONDS, or
+#: the ordering assertion could be satisfied by the hold simply expiring.
+_GRAPH_HOLD_SECONDS = 60.0
+
 
 def _receipt(root: Path, *, digest: str, attempt: object) -> None:
     from exomem import graph_sync
@@ -113,21 +120,27 @@ def test_canonical_result_is_handed_off_before_derived_wait(tmp_path: Path) -> N
                 operation_guard=Guard,
                 after_canonical_persisted=lambda result: result,
                 after_operation_guard=lambda result: (
-                    allow_graph_completion.wait(2) and {**result, "graph_sync": "completed"}
+                    allow_graph_completion.wait(_GRAPH_HOLD_SECONDS)
+                    and {**result, "graph_sync": "completed"}
                 ),
             )
         )
 
     worker = threading.Thread(target=invoke)
     worker.start()
-    assert canonical_guard_released.wait(1)
+    # The property is an ordering, not a latency: the canonical guard must be
+    # released while the graph stage is still blocked. Both waits were budgets
+    # a loaded Windows runner could exhaust -- the outer one did, on CI -- so
+    # they are now far above any legitimate scheduling delay, and the hold
+    # stays longer than the observation so the assertion cannot pass vacuously.
+    assert canonical_guard_released.wait(_OBSERVE_SECONDS)
     with store._connect() as conn:
         assert conn.execute("SELECT state, owner FROM mutations").fetchone() == (
             "canonically_committed",
             None,
         )
     allow_graph_completion.set()
-    worker.join(2)
+    worker.join(_OBSERVE_SECONDS)
     assert results == [{"canonical": "committed", "graph_sync": "completed"}]
 
 
