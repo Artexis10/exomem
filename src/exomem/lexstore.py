@@ -385,12 +385,31 @@ def catalog_semantic_identity(vault_root: Path) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _store_key(vault_root: Path) -> Path:
+    """Canonical `_STORES` key.
+
+    `_schedule_repair` has always keyed its state on `vault_root.resolve()`
+    while `_STORES` keyed on whatever spelling the caller passed. Two spellings
+    of one vault -- a symlinked path, a relative path, a differently-cased drive
+    letter on Windows -- therefore produced two `LexicalStore` objects for a
+    single sidecar, and repair state that correctly treated them as one.
+
+    That is not only duplicated work. `_failed` lives on the instance, so a
+    store that has fallen back to Python scoring is invisible to a lookup made
+    through the other spelling, and `cache_token` then answers "fts5" for a
+    store that is not serving FTS5. Cache keys built from that token collide
+    across two different scorers.
+    """
+    return vault_root.resolve()
+
+
 def get_store(vault_root: Path) -> LexicalStore:
+    key = _store_key(vault_root)
     with _STORES_LOCK:
-        store = _STORES.get(vault_root)
+        store = _STORES.get(key)
         if store is None:
             store = LexicalStore(vault_root)
-            _STORES[vault_root] = store
+            _STORES[key] = store
         return store
 
 
@@ -909,7 +928,7 @@ def cache_token(vault_root: Path) -> str:
     if not _usable():
         return "python"
     with _STORES_LOCK:
-        store = _STORES.get(vault_root)
+        store = _STORES.get(_store_key(vault_root))
     if store is not None and store._failed:
         return "python"
     return "fts5"
@@ -920,7 +939,7 @@ def catalog_cache_token(vault_root: Path) -> str:
     if not _catalog_usable():
         return "python"
     with _STORES_LOCK:
-        store = _STORES.get(vault_root)
+        store = _STORES.get(_store_key(vault_root))
     if store is not None and store._failed:
         return "unavailable"
     return "metadata_only"
