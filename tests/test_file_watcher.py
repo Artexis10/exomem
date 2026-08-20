@@ -539,7 +539,7 @@ def test_supported_audio_event_reconciles_under_writer_authority(
 # observation and the foreground's acquisition timeout: if the background's
 # hash finishes on its own, it commits before the foreground ever asks for the
 # boundary and the yield this test exists to prove is never exercised.
-_MEDIA_HOLD_SECONDS = 60.0
+_MEDIA_HOLD_SECONDS = 45.0
 _MEDIA_OBSERVE_SECONDS = 30.0
 # How long the foreground waits for the boundary the background is supposed to
 # have yielded. 0.05s asserted that a Windows runner acquires a free file lock

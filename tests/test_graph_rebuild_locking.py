@@ -454,7 +454,7 @@ def test_registered_builder_retains_the_originating_custom_lease_boundary(
 # Deadlock valves for the ordering test below, sized so the hold outlasts the
 # observation. A whole-vault rebuild on a loaded Windows runner is the thing
 # being waited on, and two seconds does not bound it.
-_HOLD_SECONDS = 60.0
+_HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 30.0
 _SWAP_WAIT_SECONDS = 30.0
 

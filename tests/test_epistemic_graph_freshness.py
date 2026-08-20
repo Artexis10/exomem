@@ -20,6 +20,29 @@ A = "Knowledge Base/Notes/Insights/a.md"
 B = "Knowledge Base/Notes/Insights/b.md"
 
 
+#: The wall-clock shape of every contention test in this file.
+#:
+#: A HOLD keeps a lock, a process, or an in-flight rebuild parked while the test
+#: observes an ordering. An OBSERVATION is how long the test will wait for that
+#: state to be reached. The gap between them is the entire discriminating power
+#: of these tests: a hold that does not outlast its observation lets the
+#: ordering pass vacuously, and an observation sized for an idle laptop fails on
+#: a loaded shard while the code under test behaves perfectly.
+#:
+#: `join(timeout=N)` followed by `assert t.is_alive()` is the SAME negative
+#: observation in join form, and it is the one shape that consumes its whole
+#: window on every healthy run -- it exists to prove a competitor is still
+#: parked. Widening one from 0.3s to 60s bought nothing and cost a minute a run.
+#:
+#: Both constants stay strictly under pytest's per-test `timeout` (pyproject
+#: `[tool.pytest.ini_options]`). A valve at or above it never gets to fire: the
+#: harness kills the test first and you get a thread dump where a named
+#: assertion should have been. tests/test_timing_assertion_hygiene.py pins that.
+#:
+#: These are not latency claims. Nothing here asserts the product is fast.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 15.0
+
 def _write(vault: Path, rel: str, body: str) -> Path:
     path = vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,7 +204,7 @@ def test_spawned_mutator_commits_while_full_rebuild_is_running(
         if not blocked_once:
             blocked_once = True
             rebuild_entered.set()
-            if not release_rebuild.wait(8.0):
+            if not release_rebuild.wait(_HOLD_SECONDS):
                 raise RuntimeError("test rebuild release signal was not received")
         return real_index_path(*args, **kwargs)
 
@@ -201,24 +224,24 @@ def test_spawned_mutator_commits_while_full_rebuild_is_running(
     )
 
     rebuild_thread.start()
-    assert rebuild_entered.wait(3.0)
+    assert rebuild_entered.wait(_OBSERVE_SECONDS)
     child.start()
     try:
-        assert attempting.wait(5.0)
+        assert attempting.wait(_OBSERVE_SECONDS)
         # The property is that the rebuild does not *block* the mutator, not
         # that the commit is fast. A blocked mutator cannot finish at any
         # budget: the rebuild holds until `release_rebuild`, which is only set
         # in the `finally` below. So the budget just has to stay clear of the
         # 8.0s at which the held rebuild gives up -- and 0.5s was measuring
         # commit latency instead, which a loaded shared runner exceeds.
-        assert completed.wait(5.0)
+        assert completed.wait(_OBSERVE_SECONDS)
     finally:
         release_rebuild.set()
-        rebuild_thread.join(timeout=8.0)
-        child.join(timeout=8.0)
+        rebuild_thread.join(timeout=_HOLD_SECONDS)
+        child.join(timeout=_HOLD_SECONDS)
         if child.is_alive():
             child.terminate()
-            child.join(timeout=3.0)
+            child.join(timeout=_HOLD_SECONDS)
 
     assert not rebuild_thread.is_alive()
     assert rebuild_errors == []
@@ -244,7 +267,7 @@ def test_neighbor_reader_during_rebuild_sees_complete_old_snapshot(
 
     def index_path(*args, **kwargs):
         writer_entered.set()
-        assert release_rebuild.wait(5.0)
+        assert release_rebuild.wait(_HOLD_SECONDS)
         return real_index_path(*args, **kwargs)
 
     def read_neighbors() -> None:
@@ -264,17 +287,17 @@ def test_neighbor_reader_during_rebuild_sees_complete_old_snapshot(
     writer = threading.Thread(target=rebuild)
     try:
         writer.start()
-        assert writer_entered.wait(3.0)
+        assert writer_entered.wait(_OBSERVE_SECONDS)
         reader.start()
-        reader.join(timeout=8.0)
+        reader.join(timeout=_HOLD_SECONDS)
         release_rebuild.set()
-        writer.join(timeout=8.0)
+        writer.join(timeout=_HOLD_SECONDS)
     finally:
         release_rebuild.set()
         if writer.is_alive():
-            writer.join(timeout=3.0)
+            writer.join(timeout=_HOLD_SECONDS)
         if reader.is_alive():
-            reader.join(timeout=3.0)
+            reader.join(timeout=_HOLD_SECONDS)
 
     assert not reader.is_alive()
     assert not writer.is_alive()
@@ -302,7 +325,7 @@ def test_trusted_reads_after_marker_removal_never_expose_partial_rows(
         indexed += 1
         if indexed == 1:
             partial_written.set()
-            if not release_rebuild.wait(5.0):
+            if not release_rebuild.wait(_HOLD_SECONDS):
                 raise RuntimeError("test rebuild release signal was not received")
         return result
 
@@ -316,14 +339,14 @@ def test_trusted_reads_after_marker_removal_never_expose_partial_rows(
     writer = threading.Thread(target=rebuild)
     writer.start()
     try:
-        assert partial_written.wait(3.0)
+        assert partial_written.wait(_OBSERVE_SECONDS)
         assert index.nodes()
         assert index.edges()
         assert index.neighbors_for([A])
         assert epistemic_graph.graph_context(vault, path=A)["available"] is True
     finally:
         release_rebuild.set()
-        writer.join(timeout=8.0)
+        writer.join(timeout=_HOLD_SECONDS)
 
     assert not writer.is_alive()
     assert writer_errors == []

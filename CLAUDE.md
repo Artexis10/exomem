@@ -111,14 +111,32 @@ Routing (orchestrator applies):
 | Standard implementation with tests | `scripts/codex_task.sh start <lane> <brief>` (Terra high) |
 | Design-sensitive / hard lanes | Sol xhigh, or a Claude executor |
 | Mechanical sweeps, docs | `--profile luna-sweep` (Luna medium) |
-| Shared-primary ops, merges, KB writes, MCP-needing tasks | Claude only — never Codex |
+| Shared-primary ops, merges, releases | Claude only — see below |
+
+Why that last row is Claude-only is worth stating, because it is not about
+capability. Codex CLI is a peer, not a lesser tool: it has its own MCP servers
+configured, including exomem itself over the shared loopback service. The
+constraint is that **one** actor must own the shared checkout and the merge
+button, or two agents race on uncommitted work and push to `main` concurrently.
+The same rule would apply to a second Claude session. Anything a lane can do
+inside its own worktree, Codex can do.
 
 Lane mechanics: one lane = one sibling worktree (`../exomem-<lane>`, branch
 `codex/<lane>`, from `origin/main`) = one self-contained `.task/TASK.md` brief
 (`codex_task.sh template`) naming the OpenSpec artifacts as source of truth,
 a scope allowlist, and exact acceptance commands. `codex exec` runs
-`workspace-write`, sandboxed to the worktree — never on the primary checkout
-(the runner enforces this). Results come back as commits on the lane branch
+`danger-full-access`, scoped to the worktree by `-C` and by
+`require_linked_worktree` — never on the primary checkout (the runner enforces
+this). Full access is deliberate, not laziness: on Windows, Codex's
+`sandbox = "unelevated"` restricted token cannot touch the private DACL exomem
+puts on its own state directories, so pytest dies clearing its tmpdir and the
+worker cannot run a single test. Widening `writable_roots` moves the path but
+not the ACL. A lane under `workspace-write` once burned an hour and 18M tokens
+producing zero commits. The runner now proves a worker can run one test before
+handing it a brief, and refuses to launch the lane otherwise; containment comes
+from the worktree, the `.task/` allowlist and `codex_task.sh verify`, not from
+a sandbox mode that also removes the ability to work. `CODEX_SANDBOX=` overrides
+it if a lane genuinely needs less. Results come back as commits on the lane branch
 plus `.task/RESULT.md`; briefs live under `.task/` (git-excluded, never
 committed). Before merging, `scripts/codex_task.sh verify <worktree>` must
 pass: clean tree, diff within the brief's allowlist, guarded files untouched
