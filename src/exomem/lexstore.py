@@ -61,6 +61,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -489,6 +490,49 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
         with _REPAIRS_LOCK:
             _REPAIRS_IN_FLIGHT.discard(key)
         log.warning("lexical background repair could not start for %s", key)
+
+
+#: Deadlock valve for `await_repairs_idle`. Repair is bounded work, so
+#: exceeding this means something is wedged, not that the machine is busy.
+REPAIR_IDLE_TIMEOUT_SECONDS = 120.0
+
+
+def await_repairs_idle(
+    vault_root: Path, timeout: float = REPAIR_IDLE_TIMEOUT_SECONDS
+) -> bool:
+    """Block until no background lexical repair is in flight for `vault_root`.
+
+    `_schedule_repair` runs on a daemon thread and can perform a complete
+    `rebuild_atomic`, live-sidecar `os.replace` included. That is correct in
+    production -- the whole point is that a request does not wait for it -- but
+    it means anything observing live-sidecar mutation is racing a publish it did
+    not start, and will attribute it to itself.
+
+    That is not hypothetical. `test_live_wal_not_blindly_deleted_and_unsafe_publish_declines`
+    spies on `os.replace` process-wide to prove a declining publish never swaps
+    the live main file. A repair thread finishing its own legitimate publish
+    inside that window trips the spy, and the test reports a data-safety defect
+    that did not happen. It fired on a Windows runner, could not be reproduced,
+    and fired again on macOS months later.
+
+    Returns True when idle, False if `timeout` elapsed first -- the caller
+    decides whether that is fatal. Keyed on the resolved path, matching how
+    `_schedule_repair` keys the in-flight set.
+    """
+    key = vault_root.resolve()
+    deadline = time.monotonic() + float(timeout)
+    waiter = threading.Event()
+    while True:
+        with _REPAIRS_LOCK:
+            if key not in _REPAIRS_IN_FLIGHT:
+                return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        # A condition variable would be tidier, but the in-flight set is
+        # discarded under `_REPAIRS_LOCK` from several exit paths including
+        # failure ones; polling cannot miss a wakeup the way a notify can.
+        waiter.wait(min(0.01, remaining))
 
 
 # ------------------------------------------------------------------ policy
