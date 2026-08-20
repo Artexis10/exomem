@@ -26,7 +26,7 @@ The system SHALL define the immutable profile `hosted-alpha-agent-v3` in the can
 
 A Hosted surface profile that exposes a broad page-mutation command SHALL refuse any invocation whose **caller-supplied write target** names the governed schema tree (`_Schema`) or the policy tree (`_Governance`). The refusal MUST happen at the hosted command boundary, before lifecycle admission and before the command leaf, and MUST return a stable machine-readable error.
 
-The property is about the *target*, not about the trees being untouched, and the difference is load-bearing. System-owned artifacts whose location is fixed in code MAY be written inside a protected tree on the ordinary success path: the semantic-write machinery records one relation-review sidecar per committed page create or supersession at a hardcoded path under `_Schema`, on every profile including those that expose no page-mutation command at all. Such a location MUST be fixed in code rather than derived from any caller-supplied value, MUST be enumerated explicitly rather than inferred, and MUST NOT be exempted from the guard — so an agent may cause such an artifact to be created but MUST NOT be able to name one as a target and rewrite it. Assertions that a protected tree is unchanged MUST exclude the enumerated system-owned locations by name, so that the remainder of the tree is genuinely checked rather than the check being skipped.
+The property is about the *target*, not about the trees being untouched, and the difference is load-bearing. Fixed-placement managed writes MAY occur inside a protected tree on the ordinary success path: the semantic-write machinery records relation-review sidecars under `_Schema/relation-reviews/`, while the open source taxonomy and project-key vocabularies update `_Schema/source-taxonomy.yaml` and `_Schema/project-keys.yaml`. The registries remain user-owned per-vault configuration; only their placement is system-managed. Every such location MUST be fixed in code rather than derived from a caller-supplied target, MUST be enumerated explicitly rather than inferred, and MUST NOT be exempted from the guard — so an agent may trigger the owning command but MUST NOT be able to name the same location as an edit or replacement target. Assertions that a protected tree is unchanged MUST exclude only the enumerated managed locations by exact path, so that the remainder of the tree is genuinely checked rather than the check being skipped.
 
 The guard SHALL judge each target according to the leaf that will consume it. A page-write target names a *file*, and the write leaves supply the Markdown suffix when the caller omits it, so the final component of such a target MUST NOT be read as a directory the caller is entering: an extensionless spelling of a legitimate page MUST be treated identically to its suffixed spelling. A collection target names a directory or manifest and receives no suffix, so every component of it counts.
 
@@ -47,7 +47,7 @@ This requirement replaces the protection that `hosted-alpha-agent-v1` obtained f
 
 The guard SHALL be scoped to Hosted surface profiles. Local, CLI, and MCP surfaces on a single-user vault MUST retain the ability to customise that vault's own `_Schema`, and reads of either tree MUST remain unaffected.
 
-Every mutating command a Hosted profile exposes MUST be classified either as guarded or as constrained by its own command leaf, and the cell MUST refuse to serve a profile with an unclassified mutation. Recording a command as leaf-constrained SHALL NOT be a way to wave it through: every caller-supplied argument that can shape where such a command writes MUST be shown to leave both protected trees byte-identical and unchanged in membership, without the guard firing. The set of arguments so checked MUST be derived from the command's published schema rather than from a hand-maintained list, so an argument added later is covered by default rather than certified by omission.
+Every mutating command a Hosted profile exposes MUST be classified either as guarded or as constrained by its own command leaf, and the cell MUST refuse to serve a profile with an unclassified mutation. Recording a command as leaf-constrained SHALL NOT be a way to wave it through: every caller-supplied argument that can shape where such a command writes MUST be shown to leave all non-enumerated protected paths byte-identical and unchanged in membership, without the guard firing. The set of arguments so checked MUST be derived from the command's published schema rather than from a hand-maintained list, so an argument added later is covered by default rather than certified by omission.
 
 #### Scenario: A hosted agent tries to rewrite the schema tree
 
@@ -98,6 +98,13 @@ Every mutating command a Hosted profile exposes MUST be classified either as gua
 - **THEN** the relation-review sidecar is written at its hardcoded location inside `_Schema` and nothing else under either protected tree changes
 - **AND** naming that same sidecar as a write target is refused with the guard's stable error
 
+#### Scenario: An open vocabulary updates its fixed registry
+
+- **WHEN** a Hosted command introduces a valid new source-taxonomy or project key
+- **THEN** the owning command may update its enumerated fixed registry inside `_Schema`
+- **AND** the same registry named as an `edit_memory` or `replace_memory` target is refused identically to every other protected target
+- **AND** no non-enumerated path under either protected tree changes
+
 #### Scenario: A page target is spelled without its extension
 
 - **WHEN** a page-write target names an ordinary page and omits the Markdown suffix the leaf would supply
@@ -117,7 +124,7 @@ Every mutating command a Hosted profile exposes MUST be classified either as gua
 #### Scenario: A leaf-constrained classification is checked rather than trusted
 
 - **WHEN** a mutating command is recorded as constrained by its own command leaf
-- **THEN** every argument in its published schema that could shape a write target is probed against a protected tree, and both protected trees are left byte-identical and unchanged in membership
+- **THEN** every argument in its published schema that could shape a write target is probed against a protected tree, and every non-enumerated protected path is left byte-identical and unchanged in membership
 - **AND** the refusal does not come from the protected-tree guard, which would mean the classification was wrong
 
 #### Scenario: The guard cannot read an argument

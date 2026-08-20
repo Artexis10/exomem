@@ -81,6 +81,7 @@ def _cell(tmp_path: Path, *, profile: str = V3_PROFILE) -> tuple[Any, HostedCell
 
     vault_root = tmp_path / "vault"
     init_vault(vault_root)
+    _seed_user_schema_documents(vault_root)
     factory = _ProfileConfig if profile == V3_PROFILE else HostedCellConfig
     config = factory(
         cell_id="cell-protected-tree",
@@ -136,26 +137,44 @@ def _kb() -> str:
     return kb_dirname()
 
 
-def _schema_doc(vault_root: Path, name: str = "SKILL.md") -> Path:
+def _schema_doc(vault_root: Path, name: str = "tenant-policy.md") -> Path:
     return vault_root / _kb() / "_Schema" / name
+
+
+def _seed_user_schema_documents(vault_root: Path) -> None:
+    """Give guard probes real user-owned files inside the protected tree.
+
+    Product-owned Markdown now lives under ``.exomem/schema``; a fresh vault's
+    visible ``_Schema`` contains only per-vault configuration. The hosted guard
+    still protects anything the user places there, so these are test-owned
+    policy documents rather than stale assumptions about the shipped layout.
+    """
+
+    root = Path(vault_root) / _kb() / "_Schema"
+    (root / "references").mkdir(parents=True, exist_ok=True)
+    _schema_doc(vault_root).write_text("# Tenant policy\n", encoding="utf-8")
+    (root / "references" / "frontmatter.md").write_text(
+        "# Tenant frontmatter policy\n", encoding="utf-8"
+    )
 
 
 def _schema_rel(config: HostedCellConfig, name: str = "SKILL.md") -> str:
     return _schema_doc(config.vault_root, name).relative_to(config.vault_root).as_posix()
 
 
-def _protected_tree_state(vault_root: Path, *, include_system_owned: bool = False) -> dict[str, str]:
+def _protected_tree_state(
+    vault_root: Path, *, include_system_managed: bool = False
+) -> dict[str, str]:
     """Content digest of every file in both protected trees, keyed by path.
 
     Compares membership and bytes in one value, so a write that *adds* a file
     is caught as loudly as one that rewrites an existing one.
 
-    The system-owned review-artifact sidecar is excluded by default, and that
-    exclusion is deliberate rather than incidental: an ordinary successful
-    `remember` or `replace_memory` creates `_Schema/relation-reviews/<id>.json`
-    on every profile including v1. Excluding it by name is what lets every
-    other assertion in this module say "nothing in the protected trees moved"
-    and mean it. Pass `include_system_owned=True` to see the sidecar itself.
+    Fixed-placement managed writes are excluded by default. That includes the
+    relation-review sidecar plus the open source-taxonomy and project-key
+    registries. None is guard-exempt: callers can trigger their owning command,
+    but cannot name them as an edit or replacement target. Excluding them by
+    exact path lets every other assertion say "nothing else moved" and mean it.
     """
 
     state: dict[str, str] = {}
@@ -164,7 +183,7 @@ def _protected_tree_state(vault_root: Path, *, include_system_owned: bool = Fals
         tree = Path(vault_root) / kb / name
         for entry in sorted(tree.rglob("*")):
             key = entry.relative_to(vault_root).as_posix()
-            if not include_system_owned and gateway.is_system_owned_protected_path(
+            if not include_system_managed and gateway.is_system_managed_protected_path(
                 key.removeprefix(f"{kb}/")
             ):
                 continue
@@ -191,7 +210,7 @@ def _compact_note(title: str, body: str = "body.") -> str:
 def test_hosted_v3_refuses_edit_memory_against_the_schema_tree(tmp_path: Path) -> None:
     app, config = _cell(tmp_path)
     target = _schema_doc(config.vault_root)
-    assert target.is_file(), "vault scaffold should ship a governing schema document"
+    assert target.is_file(), "probe setup should create a user-owned schema document"
     before = target.read_bytes()
 
     response = _call(
@@ -242,6 +261,9 @@ def test_hosted_v3_refuses_replace_memory_against_the_schema_tree(tmp_path: Path
         "Knowledge Base/_Schema/",
         "Knowledge Base/_Schema//references/frontmatter.md",
         "Knowledge Base/_Schema/references/page-types.md",
+        "Knowledge Base/_Schema/project-keys.yaml",
+        "Knowledge Base/_Schema/source-taxonomy.yaml",
+        "Knowledge Base/_Schema/relation-reviews/tenant.json",
         "Knowledge Base/Notes/../_Schema/SKILL.md",
         "Knowledge Base\\_Schema\\SKILL.md",
         "./Knowledge Base/_Schema/SKILL.md",
@@ -530,7 +552,9 @@ def test_hosted_v3_still_edits_ordinary_governed_pages(tmp_path: Path) -> None:
     assert _protected_tree_state(config.vault_root) == trees_before
 
 
-def test_an_ordinary_supersession_writes_only_the_system_owned_sidecar(tmp_path: Path) -> None:
+def test_an_ordinary_supersession_writes_only_the_fixed_relation_review_sidecar(
+    tmp_path: Path,
+) -> None:
     """The permitted path our own requirement was false about.
 
     A plain successful `remember` or `replace_memory` -- no attack, no exotic
@@ -546,7 +570,7 @@ def test_an_ordinary_supersession_writes_only_the_system_owned_sidecar(tmp_path:
 
     app, config = _cell(tmp_path)
     root = Path(config.vault_root)
-    everything_before = set(_protected_tree_state(root, include_system_owned=True))
+    everything_before = set(_protected_tree_state(root, include_system_managed=True))
     trees_before = _protected_tree_state(root)
 
     created = _call(
@@ -575,12 +599,12 @@ def test_an_ordinary_supersession_writes_only_the_system_owned_sidecar(tmp_path:
     )
     assert superseded.status_code == 200, superseded.text
 
-    added = set(_protected_tree_state(root, include_system_owned=True)) - everything_before
+    added = set(_protected_tree_state(root, include_system_managed=True)) - everything_before
     assert added, "the sidecar this carve-out exists for was not created"
     for key in added:
-        assert gateway.is_system_owned_protected_path(key.removeprefix(f"{_kb()}/")), key
+        assert gateway.is_system_managed_protected_path(key.removeprefix(f"{_kb()}/")), key
 
-    # Everything outside the system-owned sidecar is byte-identical.
+    # Everything outside the fixed-placement managed paths is byte-identical.
     assert _protected_tree_state(root) == trees_before
 
     # And the tenant can never edit what it caused to be created.
@@ -597,6 +621,64 @@ def test_an_ordinary_supersession_writes_only_the_system_owned_sidecar(tmp_path:
     )
     assert refused.status_code == 403, refused.text
     assert "HOSTED_PROTECTED_TREE_MUTATION" in refused.text
+
+
+def test_open_vocabulary_registries_are_fixed_managed_and_still_guarded(
+    tmp_path: Path,
+) -> None:
+    """Open vocabularies update fixed registries without creating a target bypass."""
+
+    app, config = _cell(tmp_path)
+    root = Path(config.vault_root)
+    trees_before = _protected_tree_state(root)
+    taxonomy = root / _kb() / "_Schema" / "source-taxonomy.yaml"
+    projects = root / _kb() / "_Schema" / "project-keys.yaml"
+    taxonomy_before = taxonomy.read_bytes()
+    projects_before = projects.read_bytes()
+
+    captured = _call(
+        app,
+        config,
+        "capture_source",
+        {
+            "content": "A field observation.",
+            "title": "Field notebook",
+            "source_type": "field-notebook",
+            "domain": "agroforestry",
+        },
+    )
+    assert captured.status_code == 200, captured.text
+    assert taxonomy.read_bytes() != taxonomy_before
+
+    remembered = _call(
+        app,
+        config,
+        "remember",
+        {
+            "content": _compact_note("Vehicle research question"),
+            "title": "Vehicle research question",
+            "note_type": "research-note",
+            "project": "green-vehicles",
+            "project_category": "domain",
+        },
+    )
+    assert remembered.status_code == 200, remembered.text
+    assert projects.read_bytes() != projects_before
+
+    assert _protected_tree_state(root) == trees_before
+    for relative in (taxonomy, projects):
+        refused = _call(
+            app,
+            config,
+            "edit_memory",
+            {
+                "path": relative.relative_to(root).as_posix(),
+                "why": "probe",
+                "operation": {"kind": "replace_body", "new_body": "hijacked"},
+            },
+        )
+        assert refused.status_code == 403, refused.text
+        assert "HOSTED_PROTECTED_TREE_MUTATION" in refused.text
 
 
 def test_the_collection_leaf_join_is_over_approximated_not_under(tmp_path: Path) -> None:
@@ -706,6 +788,7 @@ def test_local_surface_still_customises_its_own_schema(tmp_path: Path) -> None:
 
     vault_root = tmp_path / "local-vault"
     init_vault(vault_root)
+    _seed_user_schema_documents(vault_root)
     target = _schema_doc(vault_root)
     before = target.read_text(encoding="utf-8")
 
@@ -939,9 +1022,11 @@ def test_target_constrained_mutations_are_actually_constrained(tmp_path: Path) -
 
     So the filter is gone. Every string-typed argument in the pinned schema of
     every member is probed with a traversal aimed at the schema tree, and the
-    claim asserted is the one that matters: no protected tree changes, and the
-    gateway guard never fires. The guard not firing is the point -- a refusal
-    from the guard would mean the command belongs in the guarded map instead.
+    claim asserted is the one that matters: no unenumerated protected path
+    changes, and the gateway guard never fires. Fixed-placement registry and
+    sidecar writes are excluded by exact path, never by a blanket tree carve-out.
+    The guard not firing is the point -- a refusal from the guard would mean the
+    command belongs in the guarded map instead.
 
     Honest limit: a probe whose other arguments cannot be made valid (a
     `triage_memory` `ref` has to name a real review item) bounces on argument

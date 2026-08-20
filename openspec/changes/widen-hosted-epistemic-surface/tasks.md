@@ -34,9 +34,9 @@
 - [x] 4.12 Make the spelling reading platform-correct: strip trailing dots and spaces, and segment under both Posix and Windows flavours so drive-qualified, UNC and extended-length spellings are covered.
 - [x] 4.13 Make fail-closed a property of the whole evaluation rather than of individual arms, with a test that an unreadable argument refuses.
 - [x] 4.14 Guard every caller-supplied target argument of a guarded command, adding `plan_memory.collection`.
-- [x] 4.15 Widen the classification sweep from `"path" in key` to every string argument in the pinned schema, asserting both protected trees unchanged in bytes and membership.
+- [x] 4.15 Widen the classification sweep from `"path" in key` to every string argument in the pinned schema, asserting every non-enumerated protected path unchanged in bytes and membership.
 - [x] 4.16 Add a native-NTFS 8.3 test that runs on Windows and skips elsewhere, and state in `design.md` which cases are simulated here.
-- [x] 4.17 Narrow the requirement to caller-supplied write *targets*, enumerate the system-owned relation-review sidecar explicitly without exempting it from the guard, and snapshot the protected trees on the success paths.
+- [x] 4.17 Narrow the requirement to caller-supplied write *targets*, enumerate fixed-placement relation-review and open-vocabulary registry writes explicitly without exempting them from the guard, and snapshot the protected trees on the success paths.
 - [x] 4.18 Evaluate `root / Path(raw)` for collection targets so the reproduction of that leaf's join over-approximates instead of under-approximating on a backslash component.
 - [x] 4.19 Replace the identity-and-grep shared-normaliser assertion with a behavioural one, and show all four re-implementation mutants failing.
 - [x] 4.20 Judge a page target as the file its leaf opens, so an extensionless spelling of a legitimate page is not refused while its `.md` spelling is allowed.

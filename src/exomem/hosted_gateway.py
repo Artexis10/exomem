@@ -169,7 +169,7 @@ def _mcp_tool_contract(
 #: doctrine that governs every later write.
 PROTECTED_TREE_DIRNAMES: frozenset[str] = frozenset({"_Schema", "_Governance"})
 
-#: The one location inside a protected tree that ordinary hosted writes create.
+#: Fixed locations inside a protected tree that ordinary hosted writes manage.
 #:
 #: `relation_review.review_artifact_path` hardcodes
 #: `<KB>/_Schema/relation-reviews/<page-identity>.json`, and the semantic-write
@@ -179,27 +179,32 @@ PROTECTED_TREE_DIRNAMES: frozenset[str] = frozenset({"_Schema", "_Governance"})
 #: inside `_Schema`" was never true and this change did not make it true.
 #:
 #: It is nonetheless not a hole, and the distinction is the one the requirement
-#: now draws: the *location* is system-owned and fixed, never caller-supplied.
-#: Only the sidecar's *content* is tenant-influenced (the slug of their title,
-#: their `old_path`, their review reason). The guard deliberately does not
-#: exempt this subtree, so a tenant-chosen target here is still refused -- an
-#: agent can cause a sidecar to be created but can never edit one.
+#: now draws: the *location* is fixed by the system, never caller-supplied.
+#: The open source taxonomy and project-key registries are the same kind of
+#: fixed-placement side effect: a caller can introduce vocabulary through the
+#: owning command, but cannot choose where the registry lives. They remain
+#: user-owned per-vault configuration; "system-managed" describes only the
+#: write path, not ownership of the bytes.
 #:
-#: The carve-out exists so success-path assertions can say "nothing else in the
-#: protected trees moved" precisely rather than skipping the check. Putting the
-#: review artifacts under `_Schema` at all is a design smell; relocating them is
-#: a data migration with its own blast radius and is recorded as a follow-up
-#: rather than done here.
-SYSTEM_OWNED_PROTECTED_SUBTREES: tuple[str, ...] = ("_Schema/relation-reviews",)
+#: None of these paths is exempt from the guard. A tenant-chosen target is still
+#: refused, so an agent may cause a fixed-path update only through the command
+#: that owns it and can never name the same file as an edit or replacement
+#: target. The enumeration exists so success-path assertions can exclude these
+#: paths by name while checking every other protected byte and directory entry.
+SYSTEM_MANAGED_PROTECTED_PATHS: tuple[str, ...] = (
+    "_Schema/project-keys.yaml",
+    "_Schema/relation-reviews",
+    "_Schema/source-taxonomy.yaml",
+)
 
 
-def is_system_owned_protected_path(kb_relative: str) -> bool:
-    """Whether a KB-relative path is the system-owned review-artifact sidecar."""
+def is_system_managed_protected_path(kb_relative: str) -> bool:
+    """Whether a KB-relative path is a fixed-placement managed write."""
 
     text = str(kb_relative).replace("\\", "/").strip("/")
     return any(
         text == owned or text.startswith(f"{owned}/")
-        for owned in SYSTEM_OWNED_PROTECTED_SUBTREES
+        for owned in SYSTEM_MANAGED_PROTECTED_PATHS
     )
 
 #: Caller-supplied write-target arguments, per command, that the guard inspects.
