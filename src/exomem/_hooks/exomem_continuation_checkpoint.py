@@ -52,6 +52,24 @@ MAX_PRUNE_LOCK_SECONDS = 0.05
 MAX_PRUNE_ENUM_ENTRIES = 16
 MAX_STATE_ENUM_ENTRIES = 32
 MAX_PRUNE_CATALOG_ENTRIES = 512
+
+
+def _over_budget(deadline: float, inspected: int) -> bool:
+    """True once a slice has done some work AND run out of time.
+
+    The `inspected` term is the whole point. A deadline consulted before the
+    first unit of work turns a *bounded* pass into one that can do nothing at
+    all: it inspects zero entries, so the durable cursor does not advance, so
+    the next call starts in the same place and stops just as early. That is not
+    a slow prune, it is no prune -- expired session state accumulates without
+    bound and nothing reports it, because every call returns a perfectly
+    ordinary 0.
+
+    Bounding work has to mean at most N, never fewer than one. A slice may
+    overrun its budget by a single entry; that is the price of forward
+    progress, and it is bounded.
+    """
+    return inspected > 0 and time.monotonic() >= deadline
 MAX_METADATA_LOG_BYTES = 1024 * 1024
 MAX_METADATA_DURATION_MS = 60_000
 TRANSCRIPT_SLICE_BYTES = 64 * 1024
@@ -2599,7 +2617,7 @@ def _linux_directory_window(
         names: list[str] = []
         inspected = 0
         next_cursor = cursor
-        while len(names) < limit and time.monotonic() < deadline:
+        while len(names) < limit and not _over_budget(deadline, inspected):
             count = int(getdents64(scan_fd, ctypes.addressof(buffer), len(buffer)))
             if count < 0:
                 error = ctypes.get_errno()
@@ -2609,7 +2627,7 @@ def _linux_directory_window(
             offset = 0
             raw = buffer.raw
             while offset < count:
-                if time.monotonic() >= deadline:
+                if _over_budget(deadline, inspected):
                     return names, next_cursor, False, inspected
                 record_length = int.from_bytes(raw[offset + 16 : offset + 18], "little")
                 if record_length < 20 or offset + record_length > count:
@@ -2708,7 +2726,7 @@ def _posix_directory_window(
         names: list[str] = []
         inspected = 0
         next_cursor = cursor
-        while inspected < limit and time.monotonic() < deadline:
+        while inspected < limit and not _over_budget(deadline, inspected):
             ctypes.set_errno(0)
             entry = readdir(stream)
             if not entry:
@@ -2776,7 +2794,7 @@ def _directory_window(
     inspected = 0
     with os.scandir(directory.path) as entries:
         for entry in entries:
-            if time.monotonic() >= deadline:
+            if _over_budget(deadline, inspected):
                 return names, 0, False, inspected
             inspected += 1
             names.append(entry.name)
@@ -3088,9 +3106,13 @@ def _delete_tombstone_at(
             for child in children
         ):
             return False
+        # A tombstone is an already-committed decision to delete. Abandoning
+        # one half-unlinked leaves debris AND returns False, so the caller
+        # cannot tell a starving prune from an idle one -- it sees the same
+        # ordinary 0 either way. The deadline decides whether to START
+        # another unit of work, never whether to finish the one in flight,
+        # and `children` is bounded by MAX_STATE_ENUM_ENTRIES above.
         for child in children:
-            if time.monotonic() >= scan_deadline:
-                return False
             _unlink_at(tombstone, child)
         if os.name == "nt":
             _windows_delete_directory_handle(tombstone.windows_handle)
@@ -3501,7 +3523,7 @@ def _prune_catalog_window(
         names: list[str] = []
         inspected = 0
         while inspected < limit and position < MAX_PRUNE_CATALOG_ENTRIES:
-            if time.monotonic() >= deadline:
+            if _over_budget(deadline, inspected):
                 return names, position, False, inspected
             status_value, name = _read_prune_catalog_slot(fd, position)
             inspected += 1
@@ -3727,9 +3749,11 @@ def prune_expired(
                     if _existing_kind(root_handle, name) is not None
                     and name.startswith(".tombstone-")
                 ]
+                pending_done = 0
                 for scanned_name in scanned_names:
-                    if time.monotonic() >= lock_deadline:
+                    if _over_budget(lock_deadline, pending_done):
                         break
+                    pending_done += 1
                     if scanned_name.startswith(".pending-"):
                         _cleanup_pending_root_entry(
                             root_handle,
@@ -3739,9 +3763,11 @@ def prune_expired(
                             scanned_name,
                             now,
                         )
+                recovery_done = 0
                 for recovery_name in recovery_names:
-                    if time.monotonic() >= lock_deadline:
+                    if _over_budget(lock_deadline, recovery_done):
                         break
+                    recovery_done += 1
                     recovered = _authorize_recovery_tombstone(
                         root_handle,
                         home,
@@ -3754,9 +3780,11 @@ def prune_expired(
                         tombstones.append(recovered)
         except (OSError, TimeoutError):
             return 0
+        candidates_done = 0
         for name in entries:
-            if time.monotonic() >= lock_deadline:
+            if _over_budget(lock_deadline, candidates_done):
                 break
+            candidates_done += 1
             try:
                 remaining = max(0.0, lock_deadline - time.monotonic())
                 with _advisory_lock_at(root_handle, ".root.lock", timeout=remaining) as root_lock:
@@ -3774,13 +3802,15 @@ def prune_expired(
                         tombstones.append(tombstone)
             except (OSError, TimeoutError):
                 continue
-            if time.monotonic() >= lock_deadline:
+            if _over_budget(lock_deadline, candidates_done):
                 break
             time.sleep(0.001)
         removed = 0
+        deletions_done = 0
         for item, identity in tombstones:
-            if time.monotonic() >= lock_deadline:
+            if _over_budget(lock_deadline, deletions_done):
                 break
+            deletions_done += 1
             deleted = _delete_tombstone_at(
                 root_handle,
                 item,
