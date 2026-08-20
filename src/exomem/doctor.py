@@ -1436,6 +1436,21 @@ def _list_exomem_processes() -> list[dict[str, object]]:
     return rows
 
 
+
+#: How to run the one shared service that removes a per-process model cost.
+#: Spelled out because the three conditions in `server.local_http_allowed` are
+#: not guessable, and because the previous advice sent people looking for a
+#: public hostname they do not need. Loopback bind means no other machine can
+#: connect; an unset EXOMEM_BASE_URL is what distinguishes this from remote
+#: intent; the API key is the operator saying they want it. Nobody sets a
+#: bearer key by accident.
+_LOOPBACK_SERVICE_HINT = (
+    "For a local-only shared service, no public hostname or GitHub OAuth app is "
+    "needed (#482): leave EXOMEM_BASE_URL unset, set EXOMEM_REST_API_KEY, and run "
+    "`exomem --transport http --host 127.0.0.1 --port 8765`, then point each MCP "
+    "client at that URL instead of launching its own stdio server."
+)
+
 def _check_runtime_processes() -> DoctorCheck | None:
     rows = _list_exomem_processes()
     if not rows:
@@ -1467,12 +1482,20 @@ def _check_runtime_processes() -> DoctorCheck | None:
     if private_total:
         memory_message += f" and {private_total} MB private commit"
     # Name a lever the reader can actually pull. The previous remedy led with
-    # HTTP service mode, which will not start without EXOMEM_BASE_URL, a GitHub
-    # OAuth app and its credentials (#482) -- so a laptop user with seven
-    # sessions and 8 GB resident was told to obtain a public hostname to solve a
-    # purely local memory problem (#597). `mode quiet` is one command, needs
-    # nothing external, and is exactly the policy the old text gestured at:
-    # no boot preload and release models when idle.
+    # HTTP service mode used to be unreachable locally: it would not start
+    # without EXOMEM_BASE_URL, a GitHub OAuth app and its credentials (#482), so
+    # a laptop user with seven sessions and 8 GB resident was told to obtain a
+    # public hostname to solve a purely local memory problem (#597). `mode
+    # quiet` is one command, needs nothing external, and is exactly the policy
+    # the old text gestured at: no boot preload and release models when idle.
+    #
+    # #482 has since shipped `server.local_http_allowed`, so the shared-service
+    # remedy IS now reachable with nothing external -- bind loopback, leave
+    # EXOMEM_BASE_URL unset, set EXOMEM_REST_API_KEY. Keeping the old wording
+    # would leave doctor telling people to go and get a public hostname for a
+    # requirement that no longer exists, which is worse than saying nothing:
+    # this check exists to be acted on, and the one structural fix for a
+    # per-process cost is the one it was steering people away from.
     #
     # Mode-aware, because recommending quiet to someone already in it is worse
     # than saying nothing: it reads as "you have not tried the fix" when they
@@ -1483,16 +1506,15 @@ def _check_runtime_processes() -> DoctorCheck | None:
     if current_mode == "quiet":
         remedy = (
             "Compute mode is already 'quiet' (no boot preload, models released when "
-            "idle), so the remaining cost is per-process: close sessions you are not "
-            "using, or run one shared HTTP service if this machine has a public base "
-            "URL and a GitHub OAuth app."
+            "idle), so the remaining cost is per-process and structural: close "
+            "sessions you are not using, or point every client at one shared "
+            f"service. {_LOOPBACK_SERVICE_HINT}"
         )
     else:
         remedy = (
             f"Compute mode is '{current_mode}'; `exomem mode quiet` drops boot preload "
-            "and releases models when idle, which is the lever that needs nothing "
-            "external. One shared HTTP service also fixes it, but only where a public "
-            "base URL and a GitHub OAuth app are available."
+            "and releases models when idle, and is the smaller change. One shared "
+            f"service removes the per-process cost entirely. {_LOOPBACK_SERVICE_HINT}"
         )
     return _check(
         "runtime.processes",

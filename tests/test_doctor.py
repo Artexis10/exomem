@@ -1487,6 +1487,103 @@ def test_a_trimmed_working_set_does_not_read_as_a_free_process(
     assert check.details["processes"][0]["private_commit_mb"] == 3677.0
 
 
+def test_the_shared_service_advice_matches_the_gate_that_admits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Doctor must not send anyone after a public hostname they do not need.
+
+    This check exists to be acted on, and its one structural remedy for a
+    per-process model cost is a shared service. Before #482 that genuinely did
+    require EXOMEM_BASE_URL and a GitHub OAuth app, so the advice said so --
+    which is how a laptop with seven sessions and 8 GB resident was told to
+    obtain a public hostname for a purely local problem (#597).
+
+    #482 shipped `server.local_http_allowed`. The advice moved with it, and
+    this test is what keeps the two together: the conditions doctor names are
+    asserted against the gate itself, not against a copy of what it used to do.
+    """
+    from exomem import server
+
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {
+                "pid": 101,
+                "rss_mb": 1000.0,
+                "memory_mb": 1000.0,
+                "memory_metric": "rss",
+                "command": "python -m exomem --transport stdio",
+            }
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    # The stale REQUIREMENT must be gone. Assert the wording that made the
+    # claim, not the bare noun -- the new text mentions an OAuth app precisely
+    # to say one is not needed, and a naive substring check would forbid that.
+    assert "only where a public base URL and a GitHub OAuth app are available" not in check.message
+    assert "if this machine has a public base URL and a GitHub OAuth app" not in check.message
+    # And the replacement actually tells the reader what to run.
+    assert "no public hostname or GitHub OAuth app is needed" in check.message
+    assert "EXOMEM_REST_API_KEY" in check.message
+    assert "EXOMEM_BASE_URL unset" in check.message
+    assert "--host 127.0.0.1" in check.message
+
+    # And the gate really does admit exactly what the advice describes.
+    monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "local-key")
+    assert server.local_http_allowed("127.0.0.1") is True
+
+    # Each condition the advice names is load-bearing, so a reader following it
+    # partially gets a refusal rather than a surprise.
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://example.invalid")
+    assert server.local_http_allowed("127.0.0.1") is False
+    monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    assert server.local_http_allowed("127.0.0.1") is False
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "local-key")
+    assert server.local_http_allowed("0.0.0.0") is False
+
+
+def test_the_shared_service_advice_appears_in_quiet_mode_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quiet mode is where the advice matters most.
+
+    Someone already in quiet has taken the cheap lever; what is left is
+    per-process and structural, and the shared service is the only thing that
+    removes it. That branch previously ended on the requirement that no longer
+    exists.
+    """
+    from exomem import mode as mode_module
+
+    monkeypatch.setattr(mode_module, "resolve_mode", lambda: "quiet")
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {
+                "pid": 101,
+                "rss_mb": 1000.0,
+                "memory_mb": 1000.0,
+                "memory_metric": "rss",
+                "command": "python -m exomem --transport stdio",
+            }
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert check.details["mode"] == "quiet"
+    assert "EXOMEM_REST_API_KEY" in check.message
+    assert "127.0.0.1" in check.message
+    assert "run one shared HTTP service if this machine has a public base URL" not in check.message
+
+
 def test_a_platform_without_a_commit_figure_says_nothing_about_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
