@@ -22,6 +22,7 @@ import subprocess
 import sys
 
 import pytest
+from benchmark_capabilities import has_posix_file_modes
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "reviewer_bootstrap.py"
 
@@ -469,4 +470,13 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
 
     written = json.loads((tmp_path / "bootstrap-outcome-final.json").read_text())
     assert written == {"tenantId": "tenant-1", "assignmentId": "assign-1", "generation": 4}
-    assert (tmp_path / "bootstrap-outcome-final.json").stat().st_mode & 0o777 == 0o600
+    # Windows synthesizes st_mode -- a file reports 0o666 whatever chmod was
+    # asked for -- so there the assertion reads a placeholder, not a permission.
+    # The hosted suites get away with the same line only because a POSIX-only
+    # call after theirs (os.geteuid) raises first and conftest converts THAT
+    # into a skip; a bare mode assertion fails instead, and conftest will not
+    # absorb an AssertionError because matching on assertion text would let it
+    # swallow real defects. The Linux lane keeps gating it, which is where the
+    # mode is an access-control fact.
+    if has_posix_file_modes():
+        assert (tmp_path / "bootstrap-outcome-final.json").stat().st_mode & 0o777 == 0o600
