@@ -551,7 +551,8 @@ def test_mutation_timeout_stays_within_the_edge_budget_and_is_tunable() -> None:
     rather than the incident it is.
     """
     # The edge budget this must stay under: MCP_TOOL_TIMEOUT_MS default, in
-    # seconds. Mirrored from deploy/cloudflare-ha/src/worker.js.
+    # seconds. Formerly mirrored from the HA edge worker's MCP_TOOL_TIMEOUT_MS;
+    # that worker is retired, so this value now stands on its own here.
     edge_tool_budget_seconds = 60.0
     default = LeaseConfig.from_env({}).mutation_timeout_seconds
     assert default == 5.0

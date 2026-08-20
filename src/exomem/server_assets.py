@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from pathlib import Path
 
 import mcp.types
@@ -14,6 +15,8 @@ from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 from . import runtime_readiness as runtime_readiness_module
 from . import tool_surface as tool_surface_module
 from .session_oauth import OAUTH_AUTHORIZATION_SCOPES, OAUTH_RESOURCE_SCOPES
+
+log = logging.getLogger(__name__)
 
 _STUDIO_SECURITY_HEADERS = {
     "Content-Security-Policy": (
@@ -84,9 +87,18 @@ def server_icons() -> list[mcp.types.Icon]:
     ]
 
 
-def register_asset_routes(mcp_app: FastMCP) -> None:
+def register_asset_routes(mcp_app: FastMCP, *, traffic_monitor=None) -> None:
     """Serve inert public assets outside MCP auth; vault data stays behind REST."""
     asset_dir = Path(__file__).parent
+    if traffic_monitor is None:
+        traffic_monitor = runtime_readiness_module.get_silent_traffic_monitor()
+
+    def _record_health_probe() -> dict:
+        try:
+            return traffic_monitor.record_health_probe()
+        except Exception:  # noqa: BLE001 - telemetry must never fail a probe
+            log.debug("silent traffic health tracking failed", exc_info=True)
+            return {}
 
     @mcp_app.custom_route("/health", methods=["GET"])
     async def _health(request: Request) -> JSONResponse:  # noqa: ARG001
@@ -99,6 +111,7 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
         manager. Host-identifying detail (interpreter path, checkout location) is
         deliberately withheld here because this route is publicly reachable; use
         the local `provenance` command for that."""
+        _record_health_probe()
         payload: dict[str, object] = {"status": "ok", "service": "exomem"}
         try:
             from . import deploy_provenance
@@ -111,6 +124,7 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
     @mcp_app.custom_route("/health/ready", methods=["GET"])
     async def _runtime_ready(request: Request) -> JSONResponse:  # noqa: ARG001
         """Content-free admission probe; liveness remains the separate /health route."""
+        traffic = _record_health_probe()
         digest = getattr(mcp_app, "_exomem_tool_surface_sha256", None)
         if digest is None:
             try:
@@ -120,7 +134,8 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
             except Exception:  # noqa: BLE001 - readiness must stay structured
                 digest = None
         snapshot = runtime_readiness_module.runtime_readiness(
-            mcp_tool_surface_sha256=digest
+            mcp_tool_surface_sha256=digest,
+            traffic=traffic,
         )
         status_code = 200 if snapshot["status"] == "ready" else 503
         return JSONResponse(

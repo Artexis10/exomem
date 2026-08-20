@@ -1391,18 +1391,21 @@ def _discover_cleanup_targets(plan: MemoryBenchRunPlan) -> list[dict[str, Any]]:
     )
 
 
-def _privacy_forbidden_values(plan: MemoryBenchRunPlan) -> set[str]:
-    forbidden = {
+def _privacy_forbidden_values(plan: MemoryBenchRunPlan) -> tuple[set[str], set[str]]:
+    opaque = {
         plan.privacy_hmac_key_hex,
         "questionId", "containerTag", "groundTruth",
     }
+    content: set[str] = set()
     try:
         _raw, rows = _native_dataset(plan)
         for row in rows:
-            for key in ("question_id", "answer"):
-                value = row.get(key)
-                if isinstance(value, str) and value:
-                    forbidden.add(value)
+            question_id = row.get("question_id")
+            if isinstance(question_id, str) and question_id:
+                opaque.add(question_id)
+            answer = row.get("answer")
+            if isinstance(answer, str) and answer:
+                content.add(answer)
     except Exception:
         pass
     try:
@@ -1410,13 +1413,27 @@ def _privacy_forbidden_values(plan: MemoryBenchRunPlan) -> set[str]:
         if isinstance(checkpoint, dict) and isinstance(checkpoint.get("questions"), list):
             for question in checkpoint["questions"]:
                 if isinstance(question, dict):
-                    for key in ("questionId", "containerTag", "groundTruth", "resultFile"):
+                    for key in ("questionId", "containerTag", "resultFile"):
                         value = question.get(key)
                         if isinstance(value, str) and value:
-                            forbidden.add(value)
+                            opaque.add(value)
+                    ground_truth = question.get("groundTruth")
+                    if isinstance(ground_truth, str) and ground_truth:
+                        content.add(ground_truth)
     except Exception:
         pass
-    return forbidden
+    return opaque, content
+
+
+def _json_string_leaves(value: Any):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _json_string_leaves(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _json_string_leaves(child)
+    elif isinstance(value, str):
+        yield value
 
 
 def _validate_public_privacy(payload: bytes, plan: MemoryBenchRunPlan) -> None:
@@ -1425,7 +1442,12 @@ def _validate_public_privacy(payload: bytes, plan: MemoryBenchRunPlan) -> None:
 
     if _scan_text(text, "memorybench-export.v1.json"):
         raise ValueError("public export failed shared privacy validation")
-    if any(value and value in text for value in _privacy_forbidden_values(plan)):
+    opaque, content = _privacy_forbidden_values(plan)
+    if any(value and value in text for value in opaque):
+        raise ValueError("public export contains private runtime material")
+    # Answers can be quoted by required public question text and retrieved hit
+    # content. Equality still rejects carrying a gold value as a public field.
+    if any(value in content for value in _json_string_leaves(_load_json_bytes(payload, "public export"))):
         raise ValueError("public export contains private runtime material")
 
 

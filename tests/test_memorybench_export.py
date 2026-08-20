@@ -1630,7 +1630,7 @@ def test_symlinked_results_directory_ancestor_cannot_supply_canonical_hits(
 
 @pytest.mark.parametrize(
     "private_value",
-    [HMAC_KEY_HEX, RAW_QID, RAW_TAG, RAW_GOLD, "results/q-01.json", "groundTruth"],
+    [HMAC_KEY_HEX, RAW_QID, RAW_TAG, "results/q-01.json", "groundTruth"],
 )
 def test_runtime_privacy_leak_in_an_otherwise_agreeing_hit_prevents_public_persistence(
     tmp_path: Path, private_value: str,
@@ -1656,6 +1656,79 @@ def test_runtime_privacy_leak_in_an_otherwise_agreeing_hit_prevents_public_persi
     assert not (tmp_path / "output/memorybench-export.v1.json").exists()
     manifest = json.loads((tmp_path / "output/manifest.json").read_text())
     assert manifest["status"] == "started" and manifest["finalized_at"] is None
+
+
+def _privacy_plan(tmp_path: Path, *, gold: str = RAW_GOLD):
+    from protocol.models import MemoryBenchRunPlan
+
+    payload = _plan_payload(tmp_path)
+    dataset_path = Path(payload["dataset_path"])
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    dataset[0]["answer"] = gold
+    dataset_path.write_text(json.dumps(dataset) + "\n", encoding="utf-8")
+    payload["dataset"]["sha256"] = _sha(dataset_path)
+    return MemoryBenchRunPlan.model_validate(payload)
+
+
+def test_public_privacy_rejects_raw_question_id_anywhere_in_payload(tmp_path: Path) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    with pytest.raises(ValueError, match="private runtime material"):
+        _validate_public_privacy(
+            json.dumps({"unexpected": f"prefix-{RAW_QID}-suffix"}).encode(),
+            _privacy_plan(tmp_path),
+        )
+
+
+def test_public_privacy_rejects_gold_answer_as_a_string_leaf(tmp_path: Path) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    with pytest.raises(ValueError, match="private runtime material"):
+        _validate_public_privacy(
+            json.dumps({"unexpected": RAW_GOLD}).encode(),
+            _privacy_plan(tmp_path),
+        )
+
+
+def test_public_privacy_allows_gold_answer_inside_public_question_text(tmp_path: Path) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    _validate_public_privacy(
+        json.dumps({"question": {"text": f"The answer is {RAW_GOLD}."}}).encode(),
+        _privacy_plan(tmp_path),
+    )
+
+
+def test_public_privacy_allows_gold_answer_inside_public_hit_content(tmp_path: Path) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    _validate_public_privacy(
+        json.dumps({"hits": [{"content": f"The answer is {RAW_GOLD}."}]}).encode(),
+        _privacy_plan(tmp_path),
+    )
+
+
+def test_public_privacy_allows_numeric_gold_collisions_in_public_metadata(tmp_path: Path) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    _validate_public_privacy(
+        json.dumps({
+            "case_ordinal": 2,
+            "sha256": "d2" + "0" * 62,
+            "question": {"date": "2026-01-02"},
+        }).encode(),
+        _privacy_plan(tmp_path, gold="2"),
+    )
+
+
+def test_public_privacy_keeps_the_shared_scan_gate(tmp_path: Path) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    with pytest.raises(ValueError, match="shared privacy validation"):
+        _validate_public_privacy(
+            json.dumps({"trace": "/" + "home/private-user/runtime"}).encode(),
+            _privacy_plan(tmp_path),
+        )
 
 
 def test_cleanup_retains_checkpoint_target_after_late_private_projection_write_failure(
