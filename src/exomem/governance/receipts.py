@@ -988,7 +988,17 @@ def _receipt_lock(vault_root: Path):
                 time.sleep(min(0.01, remaining))
             locked = True
         except OSError as exc:
-            raise ReceiptError("receipt append lock is unavailable") from exc
+            # Name the OS failure. Eight concurrent first-users on a Windows CI
+            # shard produced this, and "unavailable" alone cannot say whether it
+            # was a sharing violation on the lock file, a missing parent, or a
+            # permission problem -- three different bugs with three different
+            # fixes. `from exc` keeps the chain for a local traceback, but the
+            # message is all that survives into a subprocess result or a CI
+            # summary, which is exactly where this one was seen.
+            raise ReceiptError(
+                f"receipt append lock is unavailable at {lock_path}: "
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
         depths[lock_path] = 1
         yield
     finally:
