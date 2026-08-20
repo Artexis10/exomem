@@ -4021,6 +4021,7 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     an ordinary note in the graph lane.
     """
     from . import freshness as freshness_module
+    from . import lexstore
     from .vault import WikilinkResolver, walk_vault_md
 
     root = Path(vault_root)
@@ -4088,13 +4089,17 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     # would then elect itself leader and rebuild -- reintroducing the stampede
     # this exists to prevent, just narrowed to a race window.
     try:
-        entries: list[tuple[str, str | None]] = []
-        for path in walk_vault_md(root):
-            if not recall_policy.is_recall_candidate(root, path):
-                continue
-            page = _CACHE.get(path, root)
-            if page is not None:
-                entries.append((page.rel_path, page.title))
+        entries = lexstore.get_store(root).recall_resolver_entries(
+            "vault", checkpoint.triple if checkpoint is not None else None
+        )
+        if entries is None:
+            entries = []
+            for path in walk_vault_md(root):
+                if not recall_policy.is_recall_candidate(root, path):
+                    continue
+                page = _CACHE.get(path, root)
+                if page is not None:
+                    entries.append((page.rel_path, page.title))
         resolver = WikilinkResolver.from_entries(root, entries)
         with _RESOLVER_LOCK:
             # The supplied freshness key names this immutable resolver snapshot.
