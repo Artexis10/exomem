@@ -84,11 +84,16 @@ CODEX_SANDBOX=${CODEX_SANDBOX:-danger-full-access}
 preflight_sandbox() {
   local wt=${1:?} profile=${2:?}
   echo "codex_task: preflight (sandbox=$CODEX_SANDBOX) -- can a worker run one test?"
+  # The success signal is emitted by the shell, never chosen by the model. The
+  # first version grepped for pytest's "N passed" summary and rejected a
+  # WORKING sandbox, because the worker replied with pytest's progress dots
+  # instead. A preflight that blocks a healthy lane costs as much as no
+  # preflight at all, so the gate must not depend on how a reply is phrased.
   local out
   if out=$(codex exec --profile "$profile" -s "$CODEX_SANDBOX" -C "$wt" \
-      "Run exactly this and nothing else, then reply with only its final line: \
-uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q" 2>&1); then
-    if grep -qE "[0-9]+ (passed|skipped)" <<<"$out"; then
+      "Run exactly this one command and nothing else, then reply with its complete output: \
+uv run --frozen python -m pytest tests/test_scaffold_no_leak.py -q; echo PREFLIGHT_EXIT=\$?" 2>&1); then
+    if grep -q "PREFLIGHT_EXIT=0" <<<"$out"; then
       echo "codex_task: preflight OK"
       return 0
     fi
