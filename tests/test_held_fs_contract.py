@@ -163,6 +163,7 @@ def test_held_leaf_survives_name_exchange_and_name_mutation_refuses(tmp_path: Pa
                 ).require() as leaf:
                     assert filesystem.write(leaf, data).ok
 
+            removed_by_handle = False
             with filesystem.file(parent, "reviewed.txt", access="mutate").require() as reviewed:
                 (tmp_path / "retained" / "reviewed.txt").rename(
                     tmp_path / "retained" / "moved-reviewed.txt"
@@ -174,11 +175,15 @@ def test_held_leaf_survives_name_exchange_and_name_mutation_refuses(tmp_path: Pa
                 assert filesystem.read(reviewed).require() == b"reviewed"
                 refused = filesystem.unlink(reviewed)
                 if refused.ok:
-                    assert not (tmp_path / "retained" / "moved-reviewed.txt").exists()
+                    removed_by_handle = True
                 else:
                     assert refused.error is not None
                     assert refused.error.code == "IDENTITY_CHANGED"
 
+            if removed_by_handle:
+                assert not (tmp_path / "retained" / "moved-reviewed.txt").exists()
+            else:
+                assert (tmp_path / "retained" / "moved-reviewed.txt").read_bytes() == b"reviewed"
             assert (tmp_path / "retained" / "reviewed.txt").read_bytes() == b"reserved"
 
 
