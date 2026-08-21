@@ -8,9 +8,9 @@
 
 ## 2. Reconciled fleet inventory
 
-- [ ] 2.1 Define the normalized inventory model for routable observations, tenant bindings, assignments, unfinished operations, capacity claims, provisioner desired state, Kubernetes namespaces/workloads/volumes, ConfigMap-driver Helm releases, and reviewer-purpose state
-- [ ] 2.2 Add red-first pure-logic tests for empty-fleet agreement, ordinary and reviewer cells, mixed releases, multiple legacy releases, out-of-band release divergence, destroyed-cell ghosts, missing bindings, duplicate identities, and stale capacity claims
-- [ ] 2.3 Implement reconciliation and classification with deterministic redacted output and one canonical inventory digest
+- [x] 2.1 Define the normalized inventory model for routable observations, tenant bindings, assignments, unfinished operations, capacity claims, provisioner desired state, Kubernetes namespaces/workloads/volumes, ConfigMap-driver Helm releases, and reviewer-purpose state
+- [x] 2.2 Add red-first pure-logic tests for empty-fleet agreement, ordinary and reviewer cells, mixed releases, multiple legacy releases, out-of-band release divergence, destroyed-cell ghosts, missing bindings, duplicate identities, and stale capacity claims
+- [x] 2.3 Implement reconciliation and classification with deterministic redacted output and one canonical inventory digest
 - [ ] 2.4 Add read-only Substrate, provisioner, and Kubernetes collectors with bounded timeouts and content-free diagnostics
 - [ ] 2.5 Make preflight refuse expand, rollforward, contract, or promotion when authoritative views disagree
 - [ ] 2.6 Record a zero-cell rollout as an explicit no-op only when every collector agrees; otherwise require repair and a fresh inventory
