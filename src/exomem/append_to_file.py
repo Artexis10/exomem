@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import semantic_writes
+from .reserved_paths import ReservedPathLeafError, inspect_generic_file
 from .vault import (
     PathGuardError,
     PlannedWrite,
@@ -77,6 +78,12 @@ def append_to_file(
         )
     except VaultPathError as e:
         raise AppendError(code=e.code, reason=e.reason) from e
+
+    try:
+        inspect_generic_file(vault_root, rel_path)
+    except ReservedPathLeafError as error:
+        code = "RESERVED_PATH" if error.code == "RESERVED_PATH" else "UNSAFE_PATH"
+        raise AppendError(code=code, reason="generic source is unavailable") from error
 
     # Sources/ is fully immutable. Evidence/ allows appends to sidecars and
     # description files (description.md style); the raw artifacts there are

@@ -25,7 +25,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 
@@ -439,7 +439,7 @@ def _hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
 
-def _sample_video_keyframes(path: Path) -> list[tuple[float, object]]:
+def _sample_video_keyframes(path: Path | BinaryIO) -> list[tuple[float, object]]:
     """Seek-sample duration-scaled candidate keyframes → `(timestamp_seconds, PIL image)`.
 
     Candidate count scales with duration (≈ one per `VIDEO_CANDIDATE_INTERVAL_SECS`),
@@ -453,7 +453,8 @@ def _sample_video_keyframes(path: Path) -> list[tuple[float, object]]:
         raise ClipUnavailable(f"PyAV not installed: {e}") from e
     cap = _max_video_keyframes()
     frames: list[tuple[float, object]] = []
-    with av.open(str(path)) as container:
+    av_source = path if hasattr(path, "read") else str(path)
+    with av.open(av_source) as container:
         if not container.streams.video:
             return frames
         stream = container.streams.video[0]
@@ -686,7 +687,7 @@ def _iter_iframe_metrics(path: Path) -> list[tuple[float, int, np.ndarray]]:
     return out
 
 
-def _decode_frames_at(path: Path, ts_list: list[float]) -> list[object]:
+def _decode_frames_at(path: Path | BinaryIO, ts_list: list[float]) -> list[object]:
     """Pass 2 of scene detection: seek+decode ONE full-res frame per timestamp.
 
     Same O(1) seek pattern as `_sample_video_keyframes`. Returns one entry per
@@ -697,7 +698,8 @@ def _decode_frames_at(path: Path, ts_list: list[float]) -> list[object]:
     except ImportError as e:
         raise ClipUnavailable(f"PyAV not installed: {e}") from e
     images: list[object] = []
-    with av.open(str(path)) as container:
+    av_source = path if hasattr(path, "read") else str(path)
+    with av.open(av_source) as container:
         if not container.streams.video:
             return [None] * len(ts_list)
         stream = container.streams.video[0]

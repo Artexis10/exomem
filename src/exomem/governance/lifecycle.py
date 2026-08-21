@@ -8,7 +8,6 @@ their existing user-facing safety checks and derived-index fan-out only.
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
 import os
@@ -22,7 +21,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus, index_paths, media_types, memory_refs, mutation_lock, semantic_index
+from .. import (
+    find_corpus,
+    index_paths,
+    media_types,
+    memory_refs,
+    mutation_lock,
+    reserved_paths,
+    semantic_index,
+)
 from ..kbdir import kb_dirname
 from ..vault import parse_frontmatter
 from . import membership, receipts
@@ -212,21 +219,36 @@ def _capture_manifest(
     trash_rel: str,
 ) -> tuple[ManifestItem, ...]:
     source = Path(vault_root) / source_rel
-    if source.is_file():
-        paths = [source]
-    elif source.is_dir():
-        paths = sorted(
-            (item for item in source.rglob("*") if item.is_file()),
-            key=lambda item: item.relative_to(source).as_posix(),
+    try:
+        if source.is_file():
+            snapshots = (("", reserved_paths.read_generic_bytes(vault_root, source_rel)),)
+            source_is_directory = False
+        elif source.is_dir():
+            snapshots = tuple(
+                (item.relative_path, item.snapshot)
+                for item in reserved_paths.read_generic_tree(vault_root, source_rel)
+            )
+            source_is_directory = True
+        else:
+            raise LifecycleError(
+                "LIFECYCLE_SOURCE_MISSING",
+                "lifecycle source is not a regular file or directory",
+            )
+    except reserved_paths.ReservedPathLeafError as error:
+        code = (
+            "LIFECYCLE_SOURCE_MISSING"
+            if error.code == "MISSING"
+            else "LIFECYCLE_PATH_UNSAFE"
         )
-    else:
-        raise LifecycleError("LIFECYCLE_SOURCE_MISSING", "lifecycle source is not a regular file or directory")
+        raise LifecycleError(
+            code, "lifecycle source could not be acquired safely"
+        ) from None
     items: list[ManifestItem] = []
-    for path in paths:
-        raw = path.read_bytes()
-        rel = path.relative_to(vault_root).as_posix()
-        if source.is_dir():
-            destination = f"{trash_rel.rstrip('/')}/{path.relative_to(source).as_posix()}"
+    for suffix, snapshot in snapshots:
+        raw = snapshot.data
+        rel = f"{source_rel.rstrip('/')}/{suffix}" if suffix else source_rel
+        if source_is_directory:
+            destination = f"{trash_rel.rstrip('/')}/{suffix}"
         else:
             destination = trash_rel
         digest = hashlib.sha256(raw).hexdigest()
@@ -539,30 +561,34 @@ def begin_deletion(vault_root: Path, *, source_rel: str, trash_rel: str) -> Life
     return operation
 
 
-def _device(path: Path) -> int:
-    return path.stat().st_dev
-
-
 def _manifest_matches_source(
     vault_root: Path,
     source_root: Path,
     manifest: tuple[ManifestItem, ...],
 ) -> bool:
     expected = {item.source_path: (item.content_hash, item.size) for item in manifest}
-    if source_root.is_file():
-        actual_paths = [source_root]
-    elif source_root.is_dir():
-        actual_paths = sorted(path for path in source_root.rglob("*") if path.is_file())
-    else:
-        return False
-    actual: dict[str, tuple[str, int]] = {}
-    for path in actual_paths:
-        try:
-            raw = path.read_bytes()
-            rel = path.relative_to(vault_root).as_posix()
-        except (OSError, ValueError):
+    try:
+        source_rel = source_root.relative_to(vault_root).as_posix()
+        if source_root.is_file():
+            snapshot = reserved_paths.read_generic_bytes(vault_root, source_rel)
+            actual = {
+                source_rel: (
+                    hashlib.sha256(snapshot.data).hexdigest(),
+                    len(snapshot.data),
+                )
+            }
+        elif source_root.is_dir():
+            actual = {
+                f"{source_rel.rstrip('/')}/{item.relative_path}": (
+                    hashlib.sha256(item.snapshot.data).hexdigest(),
+                    len(item.snapshot.data),
+                )
+                for item in reserved_paths.read_generic_tree(vault_root, source_rel)
+            }
+        else:
             return False
-        actual[rel] = (hashlib.sha256(raw).hexdigest(), len(raw))
+    except (ValueError, reserved_paths.ReservedPathLeafError):
+        return False
     return actual == expected
 
 
@@ -572,16 +598,7 @@ def atomic_rename(
     destination: Path,
     recovery: bool = False,
 ) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        source_device = _device(source)
-        destination_device = _device(destination.parent)
-    except OSError as exc:
-        raise LifecycleError("ATOMIC_MOVE_PREFLIGHT_FAILED", "could not verify lifecycle move device") from exc
-    if source_device != destination_device:
-        raise LifecycleError("CROSS_DEVICE_MOVE", "lifecycle moves require a same-device atomic rename")
-    if destination.exists():
-        raise LifecycleError("ATOMIC_MOVE_DEST_EXISTS", "atomic lifecycle destination already exists")
+    source_kind = "directory" if source.is_dir() else "file"
     expected = tuple(
         ManifestItem(
             source_path=item.trash_path if recovery else item.source_path,
@@ -596,10 +613,28 @@ def atomic_rename(
     if not _manifest_matches_source(operation.vault_root, source, expected):
         raise LifecycleError("LIFECYCLE_CENSUS_DRIFT", "lifecycle source changed after manifest capture")
     try:
-        os.rename(source, destination)
-    except OSError as exc:
-        code = "CROSS_DEVICE_MOVE" if exc.errno == errno.EXDEV else "ATOMIC_MOVE_FAILED"
-        raise LifecycleError(code, "atomic lifecycle rename failed") from exc
+        reserved_paths.move_generic_path(
+            operation.vault_root,
+            source.relative_to(operation.vault_root).as_posix(),
+            destination.relative_to(operation.vault_root).as_posix(),
+            source_kind=source_kind,
+        )
+    except (ValueError, reserved_paths.ReservedPathLeafError) as error:
+        code = getattr(error, "code", "IO_REFUSED")
+        if code == "CROSS_DEVICE":
+            raise LifecycleError(
+                "CROSS_DEVICE_MOVE",
+                "lifecycle moves require a same-device atomic rename",
+            ) from None
+        if code == "DESTINATION_EXISTS":
+            raise LifecycleError(
+                "ATOMIC_MOVE_DEST_EXISTS",
+                "atomic lifecycle destination already exists",
+            ) from None
+        raise LifecycleError(
+            "LIFECYCLE_PATH_UNSAFE",
+            "atomic lifecycle rename was refused by the held path boundary",
+        ) from None
     try:
         _fsync_directory(source.parent)
         if destination.parent != source.parent:

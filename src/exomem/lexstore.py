@@ -65,11 +65,23 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from . import call_spans
+from . import call_spans, reserved_paths
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
+
+
+def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+    with reserved_paths._subsystem_authority_scope("lexstore"):
+        return _sqlite_connect_owned(database, *args, **kwargs)
+
+
+def _sqlite_connect_owned(
+    database: Any, *args: Any, **kwargs: Any
+) -> sqlite3.Connection:
+    return sqlite3.connect(database, *args, **kwargs)
 
 _NAV_BASENAMES = frozenset({"index.md", "log.md"})
 SCHEMA_VERSION = 7
@@ -253,7 +265,7 @@ def fts5_available() -> bool:
     if _PROBE_RESULT is None:
         with _PROBE_LOCK:
             if _PROBE_RESULT is None:
-                conn = sqlite3.connect(":memory:")
+                conn = _sqlite_connect(":memory:")
                 try:
                     _probe_fts5(conn)
                     _PROBE_RESULT = True
@@ -332,6 +344,23 @@ def classify_sqlite_error(error: BaseException) -> str:
 
 def lexical_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".lexical.sqlite"
+
+
+def _remove_lexical_rebuild_artifact(
+    vault_root: Path,
+    path: Path,
+    *,
+    missing_ok: bool,
+) -> bool:
+    """Remove one exact lexical rebuild member through lexical-owner authority."""
+
+    with reserved_paths._subsystem_authority_scope("lexstore"):
+        return reserved_paths._remove_owner_file(
+            vault_root,
+            path,
+            "lexical-rebuild",
+            missing_ok=missing_ok,
+        )
 
 
 _CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v3"
@@ -1036,9 +1065,50 @@ class LexicalStore:
         `path` targets a build sibling (`rebuild_atomic`); it defaults to the
         live sidecar.
         """
+        with reserved_paths._subsystem_authority_scope("lexstore"):
+            with reserved_paths._identity_coordination_scope(self.vault_root):
+                return self._connect_owned(path)
+
+    def _connect_owned(
+        self,
+        path: Path | None = None,
+        *,
+        publish: bool = True,
+    ) -> sqlite3.Connection:
         target = path if path is not None else self.path
+        try:
+            relative = target.absolute().relative_to(self.vault_root.absolute())
+        except ValueError:
+            descriptor_id = None
+        else:
+            descriptor_id = reserved_paths.classify_logical(
+                relative.as_posix()
+            ).descriptor_id
+        if descriptor_id in {
+            "lexical-store",
+            "lexical-rebuild",
+            "lexical-quarantine",
+        }:
+            with reserved_paths._sqlite_owner_target_scope(
+                self.vault_root,
+                target,
+                descriptor_id,
+                create=True,
+            ) as retained_target:
+                return self._connect_retained(
+                    retained_target,
+                    publish=publish,
+                )
+        return self._connect_retained(target, publish=publish)
+
+    def _connect_retained(
+        self,
+        target: Path,
+        *,
+        publish: bool,
+    ) -> sqlite3.Connection:
         target.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(target)
+        conn = _sqlite_connect_owned(target)
         try:
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -1049,6 +1119,17 @@ class LexicalStore:
             # handle that makes every replacement retry fail forever.
             conn.close()
             raise
+        if publish and target == self.path:
+            try:
+                reserved_paths._publish_sqlite_owner_family(
+                    self.vault_root,
+                    target,
+                    "lexical-store",
+                    conn,
+                )
+            except BaseException:
+                conn.close()
+                raise
         return conn
 
     def _connect_setup(self, path: Path | None = None) -> sqlite3.Connection:
@@ -1058,12 +1139,68 @@ class LexicalStore:
         read-only or journal-hostile filesystem must still build the sidecar —
         a failed negotiation is logged and ignored.
         """
-        conn = self._connect(path)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.Error as e:
-            log.debug("lexical sidecar journal-mode negotiation skipped (%s)", e)
-        return conn
+        target = path if path is not None else self.path
+        with reserved_paths._subsystem_authority_scope("lexstore"):
+            with reserved_paths._identity_coordination_scope(self.vault_root):
+                classification = reserved_paths.classify_logical(
+                    target.relative_to(self.vault_root).as_posix()
+                )
+                descriptor_id = classification.descriptor_id
+                if descriptor_id not in {"lexical-store", "lexical-rebuild"}:
+                    raise RuntimeError("lexical SQLite target is not owner-bound")
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root,
+                    target,
+                    descriptor_id,
+                    create=True,
+                ) as retained_target:
+                    conn = self._connect_retained(retained_target, publish=False)
+                    try:
+                        try:
+                            conn.execute("PRAGMA journal_mode=WAL")
+                        except sqlite3.Error as e:
+                            log.debug(
+                                "lexical sidecar journal-mode negotiation skipped (%s)",
+                                e,
+                            )
+                        conn.execute("BEGIN IMMEDIATE")
+                        conn.execute("COMMIT")
+                        reserved_paths._publish_sqlite_owner_family(
+                            self.vault_root,
+                            target,
+                            descriptor_id,
+                            conn,
+                        )
+                    except BaseException:
+                        conn.close()
+                        raise
+                    return conn
+
+    def _connect_observational_main(self) -> sqlite3.Connection:
+        """Open only the immutable live main for non-mutating classification.
+
+        SQLite may delete an invalid ``-wal`` while closing an ordinary
+        connection to a corrupt database.  Guard/fatality probes must preserve
+        the complete disposable set for quarantine and rollback, so they inspect
+        the last checkpointed main through an immutable read-only URI instead.
+        The callers bind the WAL/SHM separately through the DB-set token; this
+        connection is never used to serve query results or prove WAL contents.
+        """
+        with reserved_paths._subsystem_authority_scope("lexstore"):
+            with reserved_paths._identity_coordination_scope(self.vault_root):
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root,
+                    self.path,
+                    "lexical-store",
+                    create=False,
+                ) as retained_path:
+                    uri = f"{retained_path.as_uri()}?mode=ro&immutable=1"
+                    # This probe exists specifically to classify a broken main
+                    # plus a possibly incomplete WAL family for quarantine.
+                    # The target itself remains retained and revalidated, but a
+                    # deliberately incoherent set cannot publish the complete
+                    # SQLite-family attestation required of normal opens.
+                    return _sqlite_connect_owned(uri, uri=True)
 
     @staticmethod
     def _wal_shm_paths(base: Path) -> tuple[Path, Path]:
@@ -1074,7 +1211,11 @@ class LexicalStore:
         """Remove `base` and its WAL/SHM siblings, ignoring what is absent."""
         for candidate in (base, *self._wal_shm_paths(base)):
             try:
-                candidate.unlink()
+                _remove_lexical_rebuild_artifact(
+                    self.vault_root,
+                    candidate,
+                    missing_ok=True,
+                )
             except OSError:
                 pass
 
@@ -1144,7 +1285,7 @@ class LexicalStore:
             guard["db_set_token"] = self._db_set_generation_token()
             return guard
         try:
-            conn = self._connect()
+            conn = self._connect_observational_main()
         except sqlite3.Error:
             guard["db_set_token"] = self._db_set_generation_token()
             return guard
@@ -1356,7 +1497,7 @@ class LexicalStore:
         returns False, leaving the normal fold path to decide (and decline).
         """
         try:
-            conn = self._connect()
+            conn = self._connect_observational_main()
         except sqlite3.Error as e:
             return classify_sqlite_error(e) == "fatal"
         try:
@@ -1392,7 +1533,15 @@ class LexicalStore:
             )
             return False
         try:
-            os.replace(temp_path, self.path)
+            with reserved_paths._subsystem_authority_scope("lexstore"):
+                reserved_paths._move_owner_file(
+                    self.vault_root,
+                    temp_path,
+                    "lexical-rebuild",
+                    self.path,
+                    "lexical-store",
+                    replace=False,
+                )
         except OSError as e:
             log.warning(
                 "lexical atomic publish failed after quarantine (%s); "
@@ -1417,20 +1566,35 @@ class LexicalStore:
         token = uuid.uuid4().hex
         members = (self.path, *self._wal_shm_paths(self.path))
         moved: list[tuple[Path, Path]] = []
-        for member in members:
-            if not member.exists():
-                continue
-            quarantine = member.with_name(f"{member.name}.quarantine-{token}")
-            try:
-                os.replace(member, quarantine)
-            except OSError:
-                for original, previous in reversed(moved):
-                    try:
-                        os.replace(previous, original)
-                    except OSError:
-                        pass
-                return None
-            moved.append((member, quarantine))
+        with reserved_paths._subsystem_authority_scope("lexstore"):
+            for member in members:
+                quarantine = member.with_name(f"{member.name}.quarantine-{token}")
+                try:
+                    reserved_paths._move_owner_file(
+                        self.vault_root,
+                        member,
+                        "lexical-store",
+                        quarantine,
+                        "lexical-quarantine",
+                        replace=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    for original, previous in reversed(moved):
+                        try:
+                            reserved_paths._move_owner_file(
+                                self.vault_root,
+                                previous,
+                                "lexical-quarantine",
+                                original,
+                                "lexical-store",
+                                replace=False,
+                            )
+                        except OSError:
+                            pass
+                    return None
+                moved.append((member, quarantine))
         return moved
 
     def _restore_quarantined_set(self, quarantined: list[tuple[Path, Path]]) -> None:
@@ -1444,21 +1608,36 @@ class LexicalStore:
         a mixed generation, never a stale WAL attached to a new main.
         """
         restored: list[tuple[Path, Path]] = []
-        for original, quarantine in reversed(quarantined):
-            try:
-                os.replace(quarantine, original)
-            except OSError:
-                for original2, quarantine2 in reversed(restored):
-                    try:
-                        os.replace(original2, quarantine2)
-                    except OSError:
-                        pass
-                log.warning(
-                    "lexical atomic publish could not restore the quarantined set; "
-                    "retaining isolated quarantine files and failing closed"
-                )
-                return
-            restored.append((original, quarantine))
+        with reserved_paths._subsystem_authority_scope("lexstore"):
+            for original, quarantine in reversed(quarantined):
+                try:
+                    reserved_paths._move_owner_file(
+                        self.vault_root,
+                        quarantine,
+                        "lexical-quarantine",
+                        original,
+                        "lexical-store",
+                        replace=False,
+                    )
+                except OSError:
+                    for original2, quarantine2 in reversed(restored):
+                        try:
+                            reserved_paths._move_owner_file(
+                                self.vault_root,
+                                original2,
+                                "lexical-store",
+                                quarantine2,
+                                "lexical-quarantine",
+                                replace=False,
+                            )
+                        except OSError:
+                            pass
+                    log.warning(
+                        "lexical atomic publish could not restore the quarantined set; "
+                        "retaining isolated quarantine files and failing closed"
+                    )
+                    return
+                restored.append((original, quarantine))
 
     def _discard_quarantined_set(self, quarantined: list[tuple[Path, Path]]) -> None:
         """Best-effort removal of the quarantined disposable files after a publish.
@@ -1467,11 +1646,17 @@ class LexicalStore:
         so an unlink failure only leaves an inert isolated file — it never touches
         the freshly published live `-wal`/`-shm`.
         """
-        for _original, quarantine in quarantined:
-            try:
-                quarantine.unlink()
-            except OSError:
-                pass
+        with reserved_paths._subsystem_authority_scope("lexstore"):
+            for _original, quarantine in quarantined:
+                try:
+                    reserved_paths._remove_owner_file(
+                        self.vault_root,
+                        quarantine,
+                        "lexical-quarantine",
+                        missing_ok=True,
+                    )
+                except OSError:
+                    pass
 
     # The current normal-table shape sentinels. An older `pages` table lacks
     # one or more of these, so it must be rebuilt before a new-column INSERT.
@@ -2884,7 +3069,15 @@ class LexicalStore:
             if not self._quiesce_live_wal():
                 log.info("lexical atomic publish declined: live WAL not safely foldable")
                 return False
-            os.replace(temp_path, self.path)
+            with reserved_paths._subsystem_authority_scope("lexstore"):
+                reserved_paths._move_owner_file(
+                    self.vault_root,
+                    temp_path,
+                    "lexical-rebuild",
+                    self.path,
+                    "lexical-store",
+                    replace=True,
+                )
             # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal` before the
             # replace; there is nothing to blindly unlink here.
         return True

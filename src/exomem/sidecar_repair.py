@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .kbdir import kb_dirname
-from .vault import VAULT_SCAN_SKIP_DIRS, parse_frontmatter
+from .vault import parse_frontmatter, walk_vault_md
 
 PRESERVED_HEADING = "## Preserved notes"
 EXTRACTED_HEADING = "## Extracted text"
@@ -154,22 +154,19 @@ def repair_is_safe(original: str, repaired: str) -> bool:
 
 def iter_media_sidecars(vault_root: Path):
     """Yield every `<binary>.md` sidecar under the governed Evidence tree."""
-    evidence = Path(vault_root) / kb_dirname() / "Evidence"
-    if not evidence.is_dir():
-        return
-    stack = [evidence]
-    while stack:
-        current = stack.pop()
+    root = Path(vault_root)
+    evidence_prefix = f"{kb_dirname()}/Evidence/"
+    for entry in walk_vault_md(root):
         try:
-            entries = list(current.iterdir())
-        except OSError:
+            relative = entry.relative_to(root).as_posix()
+        except ValueError:
             continue
-        for entry in entries:
-            if entry.is_dir():
-                if entry.name not in VAULT_SCAN_SKIP_DIRS:
-                    stack.append(entry)
-            elif entry.suffix.lower() == ".md" and entry.with_suffix("").suffix:
-                yield entry
+        if (
+            relative.startswith(evidence_prefix)
+            and entry.suffix.lower() == ".md"
+            and entry.with_suffix("").suffix
+        ):
+            yield entry
 
 
 def _extraction_blocks(body: str) -> list[str]:

@@ -182,14 +182,14 @@ completes its inventory/invariant suite after 4.6, 4.4b adds the registry/leaf/l
 race matrix, and 4.8-4.10 plus 4.2, 4.3, and 4.5 wire dispatcher, leaves,
 and surface parity. 4.11 runs required combined verification. No public security claim is
 made before both PRs and their combined verification are complete.
-- [ ] 4.2 Add red source/destination tests for create/file+directory, edit/observe/replace,
+- [x] 4.2 Add red source/destination tests for create/file+directory, edit/observe/replace,
   append, move/copy, delete, recursive delete, trash, explicit recovery target,
   metadata-derived original recovery target, recursive recovery children, upload,
   download, export, and transfer for every registered internal family. For each newly
   named graph/review/lexical form, exercise its exact pre-create spelling, live name,
   transactional sibling, and stable pre-existing physical alias as both source and
   destination.
-- [ ] 4.3 Add red read/structured tests for get/fetch/list/browse/search, dataset,
+- [x] 4.3 Add red read/structured tests for get/fetch/list/browse/search, dataset,
   walk, `record_memory`, media/process/read/frame, audit/repair, export, and every
   `manage_memory_file` alias variant; assert reads hide and generic writes refuse before
   existence/count/parse/membership effects, including owner/L6 and non-Markdown routes.
@@ -203,7 +203,7 @@ made before both PRs and their combined verification are complete.
   publication under coordination, and runtime capability-probe/fallback-disable results.
   Cover POSIX dirfd/openat2 and Windows `NtCreateFile` RootDirectory-relative plus
   `NtSetInformationFile` fixture contracts.
-- [ ] 4.4b **PR B, after 4.6:** Add barrier-controlled, anchor-observable end-to-end
+- [x] 4.4b **PR B, after 4.6:** Add barrier-controlled, anchor-observable end-to-end
   registry/leaf/lifecycle TOCTOU tests: swap a checked parent to symlink/junction/reparse/
   bind alias; rename/exchange source or destination; add a hard link; change recovery
   metadata/recursive child; race cross-device copy publication; and race DB/WAL/SHM/
@@ -215,11 +215,11 @@ made before both PRs and their combined verification are complete.
   coordination, cross-device move/trash/recovery refusal, destination-atomic copy only,
   and saga/recovery for recursive or multi-entry power loss rather than external same-UID
   zero-effect or all-or-none claims.
-- [ ] 4.5 Add red parity tests in `tests/test_command_surface_retry.py`,
+- [x] 4.5 Add red parity tests in `tests/test_command_surface_retry.py`,
   `tests/test_rest_registry.py`, `tests/test_hosted_private_routes.py`, and CLI coverage
   proving reads are missing and mutations return the same content-free reserved-path
   code across MCP, REST, Hosted, and CLI.
-- [ ] 4.6 Add focused red registry-construction/classifier tests, then implement one
+- [x] 4.6 Add focused red registry-construction/classifier tests, then implement one
   closed versioned internal-state descriptor registry plus pure logical classifier with
   separator, NFKC, casefold, prefix,
   ref, alias, and platform-name normalization plus one secure physical-target check that
@@ -227,7 +227,7 @@ made before both PRs and their combined verification are complete.
   hard-link/bind/physical aliases at protected acquisition, and refuses
   ambiguous/non-canonical or multiply linked reserved targets; fail closed only for drift
   observable against logical/catalogue/registry/identity anchors.
-- [ ] 4.1 **PR B, after 4.6:** Complete the red closed-registry inventory/invariant suite
+- [x] 4.1 **PR B, after 4.6:** Complete the red closed-registry inventory/invariant suite
   in `tests/test_reserved_admin_paths.py` covering `_Governance`, `_Consolidation`,
   governance/embeddings/CLIP/lexical/graph/claims/refs/deferred/media/idempotency SQLite
   names and every WAL/SHM/journal, JSON/lock/legacy spelling, graph rebuild temp, and
@@ -253,13 +253,13 @@ made before both PRs and their combined verification are complete.
   proving relative handles, no-follow/reparse behaviour, and final identity checks;
   disable/refuse an unsupported route rather than using a path fallback. PR B wires this
   primitive into descriptor-bound reads/writes for every leaf and lifecycle.
-- [ ] 4.8 Extend registry metadata with owning subsystem and source/destination/recursive/recovery/dataset/media
+- [x] 4.8 Extend registry metadata with owning subsystem and source/destination/recursive/recovery/dataset/media
   path roles, and add startup tests that enumerate every command and finite selector and
   fail on an unclassified path/ref parameter.
-- [ ] 4.9 Invoke the classifier at the shared dispatcher before existence checks,
+- [x] 4.9 Invoke the classifier at the shared dispatcher before existence checks,
   parsing, counting, planning, or leaf dispatch, while requiring the handle transaction
   as leaf authorization rather than treating preflight as race defense.
-- [ ] 4.10 Give `govern_memory` a private non-serializable `_Governance` authority; reserve
+- [x] 4.10 Give `govern_memory` a private non-serializable `_Governance` authority; reserve
   `_Consolidation` for the future owning command with no public bypass flag and no
   fallback owner until it exists; give each registered database/index only its named
   subsystem token; owning commands still use safe handle traversal and no generic bypass.

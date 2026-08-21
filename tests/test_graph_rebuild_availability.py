@@ -283,10 +283,10 @@ def test_caught_batch_failure_rolls_back_the_checkpoint_with_canonical_bytes(
     prior_checkpoint = graph_sync.checkpoint_path(tmp_path).read_bytes()
     replace = vault_module._BatchWorkspace.replace_artifact
 
-    def fail_checkpoint(workspace, artifact, target):
+    def fail_checkpoint(workspace, artifact, target, **kwargs):
         if target == graph_sync.checkpoint_path(tmp_path):
             raise PermissionError(13, "replacement denied", str(target))
-        return replace(workspace, artifact, target)
+        return replace(workspace, artifact, target, **kwargs)
 
     monkeypatch.setattr(vault_module._BatchWorkspace, "replace_artifact", fail_checkpoint)
     with pytest.raises(PermissionError):
@@ -2873,12 +2873,18 @@ def test_temporary_swap_keeps_an_open_reader_on_the_previous_sidecar(tmp_path: P
 def test_windows_replacement_refusal_keeps_the_previous_complete_sidecar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import epistemic_graph
+
     live = tmp_path / "Knowledge Base/.graph.sqlite"
     live.parent.mkdir(parents=True)
     live.write_bytes(b"old")
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     temporary.write_bytes(b"new")
-    monkeypatch.setattr(graph_sync.os, "replace", lambda *_args: (_ for _ in ()).throw(PermissionError()))
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_move_graph_rebuild_into_store",
+        lambda *_args: (_ for _ in ()).throw(PermissionError()),
+    )
 
     with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable):
         graph_sync.replace_sidecar(temporary, live)
@@ -2889,6 +2895,8 @@ def test_windows_replacement_refusal_keeps_the_previous_complete_sidecar(
 def test_replacement_refusal_names_what_it_observed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import epistemic_graph
+
     """The refusal has to say more than "an open reader".
 
     It fired on a Windows CI shard without reproducing locally, and by the time
@@ -2905,8 +2913,8 @@ def test_replacement_refusal_names_what_it_observed(
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     temporary.write_bytes(b"new")
     monkeypatch.setattr(
-        graph_sync.os,
-        "replace",
+        epistemic_graph,
+        "_move_graph_rebuild_into_store",
         lambda *_args: (_ for _ in ()).throw(PermissionError(13, "sharing violation")),
     )
 
@@ -2914,7 +2922,7 @@ def test_replacement_refusal_names_what_it_observed(
         graph_sync.replace_sidecar(temporary, live)
 
     message = str(raised.value)
-    # What os.replace itself said, not a paraphrase of it.
+    # What the held replacement itself said, not a paraphrase of it.
     assert "PermissionError" in message
     assert "sharing violation" in message
     # Every in-place attempt is accounted for, with the error each one hit.
@@ -2928,14 +2936,16 @@ def test_replacement_refusal_names_what_it_observed(
 def test_replacement_refusal_says_when_there_was_nothing_to_publish_into(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import epistemic_graph
+
     """An absent live sidecar is a different failure and must read as one."""
     live = tmp_path / "Knowledge Base/.graph.sqlite"
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     temporary.write_bytes(b"new")
     monkeypatch.setattr(
-        graph_sync.os,
-        "replace",
+        epistemic_graph,
+        "_move_graph_rebuild_into_store",
         lambda *_args: (_ for _ in ()).throw(PermissionError(13, "denied")),
     )
 
@@ -2965,7 +2975,13 @@ def test_full_rebuild_replacement_refusal_retains_complete_temp_for_later_recove
     retained: list[Path] = []
     original_replace = graph_sync.replace_sidecar
 
-    def refuse_replacement(temporary: Path, _live: Path) -> None:
+    def refuse_replacement(
+        temporary: Path,
+        _live: Path,
+        *,
+        vault_root: Path | None = None,
+    ) -> None:
+        del vault_root
         retained.append(temporary)
         raise graph_sync.GraphSidecarReplaceUnavailable("live graph sidecar has an open reader")
 
@@ -2992,18 +3008,29 @@ def test_full_rebuild_replacement_refusal_retains_complete_temp_for_later_recove
 def test_temp_sweep_preserves_a_sharing_refused_abandoned_temporary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import epistemic_graph
+
     live = tmp_path / "Knowledge Base/.graph.sqlite"
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     temporary.write_bytes(b"complete")
-    original_unlink = Path.unlink
+    original_remove = epistemic_graph._remove_graph_rebuild_artifact
 
-    def sharing_refused(path: Path, *, missing_ok: bool = False) -> None:
+    def sharing_refused(
+        vault_root: Path,
+        path: Path,
+        *,
+        missing_ok: bool,
+    ) -> bool:
         if path == temporary:
             raise PermissionError("reader still holds the temporary")
-        original_unlink(path, missing_ok=missing_ok)
+        return original_remove(vault_root, path, missing_ok=missing_ok)
 
-    monkeypatch.setattr(Path, "unlink", sharing_refused)
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_remove_graph_rebuild_artifact",
+        sharing_refused,
+    )
 
     assert graph_sync.sweep_abandoned_temporaries(tmp_path, live, live_paths=set()) == []
     assert temporary.read_bytes() == b"complete"
@@ -3041,23 +3068,25 @@ def test_temp_sweep_removes_abandoned_sqlite_companions_but_keeps_active_set(
 
 
 def _refuse_replacement_onto(monkeypatch: pytest.MonkeyPatch, live: Path) -> None:
-    """Model Windows refusing `os.replace` onto one open destination only.
+    """Model Windows refusing the held rename onto one open destination only.
 
-    Patching `os.replace` wholesale would also break the vault mutation lock,
-    which uses it for unrelated runtime state.
+    The private graph owner uses the held filesystem substrate; patch that
+    exact owner seam without disturbing unrelated vault mutation state.
     """
-    real_replace = os.replace
+    from exomem import epistemic_graph
 
-    def refuse_for_live(source, destination, *args, **kwargs):
-        try:
-            refused = Path(destination) == live
-        except TypeError:  # pragma: no cover - descriptor-based call
-            refused = False
-        if refused:
+    real_move = epistemic_graph._move_graph_rebuild_into_store
+
+    def refuse_for_live(vault_root: Path, temporary: Path, destination: Path) -> None:
+        if destination == live:
             raise PermissionError("live graph sidecar has an open reader")
-        return real_replace(source, destination, *args, **kwargs)
+        real_move(vault_root, temporary, destination)
 
-    monkeypatch.setattr(graph_sync.os, "replace", refuse_for_live)
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_move_graph_rebuild_into_store",
+        refuse_for_live,
+    )
 
 
 def test_refused_replacement_publishes_in_place_without_moving_the_live_entry(

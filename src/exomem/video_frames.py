@@ -13,10 +13,11 @@ import io
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
 
-from . import access, embeddings
+from . import access, embeddings, reserved_paths
 from .extract import media_type_for
 from .vault import VaultPathError, resolve_under_vault
 
@@ -62,13 +63,14 @@ def _tool_frames_cap() -> int:
     return MAX_TOOL_FRAMES
 
 
-def _probe_duration(path: Path) -> float | None:
+def _probe_duration(source: Path | BinaryIO) -> float | None:
     """Container-metadata duration in seconds, or None when unknown. No decode."""
     try:
         import av
     except ImportError as e:
         raise embeddings.ClipUnavailable(f"PyAV not installed: {e}") from e
-    with av.open(str(path)) as container:
+    av_source = source if hasattr(source, "read") else str(source)
+    with av.open(av_source) as container:
         if not container.streams.video:
             return None
         stream = container.streams.video[0]
@@ -127,13 +129,19 @@ def get_frames(
     # refusal never leaks that the excluded path exists.
     if access.refuse_if_excluded(vault_root, rel_path):
         raise VideoFramesError("NOT_FOUND", f"path does not exist: {rel_path}")
+    try:
+        snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
+    except reserved_paths.ReservedPathLeafError:
+        raise VideoFramesError(
+            "NOT_FOUND", f"path does not exist: {rel_path}"
+        ) from None
     if media_type_for(abs_path) != "video":
         raise VideoFramesError("NOT_A_VIDEO", f"not a video file: {rel_path}")
 
     effective = max(1, min(max_frames, _tool_frames_cap()))
     windowed = start_sec is not None or end_sec is not None
     try:
-        duration = _probe_duration(abs_path)
+        duration = _probe_duration(io.BytesIO(snapshot.data))
         if duration is not None and duration > 0:
             lo = start_sec if start_sec is not None else 0.0
             if lo >= duration:
@@ -144,7 +152,7 @@ def get_frames(
             hi = min(end_sec, duration) if end_sec is not None else duration
             n = CANDIDATE_MULTIPLIER * effective
             ts_list = [lo + (hi - lo) * (k + 0.5) / n for k in range(n)]
-            images = embeddings._decode_frames_at(abs_path, ts_list)
+            images = embeddings._decode_frames_at(io.BytesIO(snapshot.data), ts_list)
             candidates = [
                 (t, img) for t, img in zip(ts_list, images, strict=True) if img is not None
             ]
@@ -155,7 +163,7 @@ def get_frames(
                 "unavailable — retry without start_sec/end_sec",
             )
         else:
-            candidates = embeddings._sample_video_keyframes(abs_path)
+            candidates = embeddings._sample_video_keyframes(io.BytesIO(snapshot.data))
     except VideoFramesError:
         raise
     except embeddings.ClipUnavailable as e:

@@ -8,8 +8,10 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote
 
+from . import reserved_paths
 from . import vault as vault_module
 from .kbdir import kb_dirname
 
@@ -17,6 +19,17 @@ SCHEMA_VERSION = 3
 REF_PREFIX = "exomem://memory/"
 ID_FIELD = "exomem_id"
 _REFERENCE_REBUILD_LOCK = threading.Lock()
+
+
+def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+    with reserved_paths._subsystem_authority_scope("memory_refs"):
+        return _sqlite_connect_owned(database, *args, **kwargs)
+
+
+def _sqlite_connect_owned(
+    database: Any, *args: Any, **kwargs: Any
+) -> sqlite3.Connection:
+    return sqlite3.connect(database, *args, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -77,36 +90,83 @@ class ReferenceIndex:
         self.path = sidecar_path(self.vault_root)
 
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS identities ("
-            "path TEXT PRIMARY KEY, exomem_id TEXT, raw_id TEXT NOT NULL, "
-            "source_hash TEXT NOT NULL, status TEXT NOT NULL)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_identities_exomem_id "
-            "ON identities(exomem_id)"
-        )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS ref_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        return conn
+        with reserved_paths._subsystem_authority_scope("memory_refs"):
+            with reserved_paths._identity_coordination_scope(self.vault_root):
+                return self._connect_owned()
+
+    def _connect_owned(self) -> sqlite3.Connection:
+        with reserved_paths._sqlite_owner_target_scope(
+            self.vault_root,
+            self.path,
+            "refs-store",
+            create=True,
+        ) as retained_path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = _sqlite_connect_owned(retained_path)
+            try:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS identities ("
+                    "path TEXT PRIMARY KEY, exomem_id TEXT, raw_id TEXT NOT NULL, "
+                    "source_hash TEXT NOT NULL, status TEXT NOT NULL)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_identities_exomem_id "
+                    "ON identities(exomem_id)"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS ref_meta "
+                    "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+                )
+                reserved_paths._publish_sqlite_owner_family(
+                    self.vault_root,
+                    self.path,
+                    "refs-store",
+                    conn,
+                )
+                return conn
+            except BaseException:
+                conn.close()
+                raise
 
     def available(self) -> bool:
         if not self.path.exists():
             return False
         try:
-            conn = sqlite3.connect(self.path)
+            conn = self._connect_readonly()
             try:
                 row = conn.execute(
                     "SELECT value FROM ref_meta WHERE key = 'schema_version'"
                 ).fetchone()
             finally:
                 conn.close()
-        except sqlite3.Error:
+        except (OSError, RuntimeError, sqlite3.Error):
             return False
         return bool(row and row[0] == str(SCHEMA_VERSION))
+
+    def _connect_readonly(self) -> sqlite3.Connection:
+        with reserved_paths._subsystem_authority_scope("memory_refs"):
+            with reserved_paths._identity_coordination_scope(self.vault_root):
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root,
+                    self.path,
+                    "refs-store",
+                    create=False,
+                ) as retained_path:
+                    conn = _sqlite_connect_owned(
+                        f"{retained_path.as_uri()}?mode=ro",
+                        uri=True,
+                    )
+                    try:
+                        reserved_paths._publish_sqlite_owner_family(
+                            self.vault_root,
+                            self.path,
+                            "refs-store",
+                            conn,
+                        )
+                        return conn
+                    except BaseException:
+                        conn.close()
+                        raise
 
     def rebuild_all(self) -> dict[str, int]:
         entries = _scan_pages(self.vault_root)
@@ -542,14 +602,14 @@ def drift(vault_root: Path) -> list[dict[str, str]]:
     if not index.available():
         return [{"path": f"{kb_dirname()}/", "reason": "reference sidecar incompatible"}]
     try:
-        conn = sqlite3.connect(index.path)
+        conn = index._connect_readonly()
         try:
             rows = conn.execute(
                 "SELECT path, exomem_id, raw_id, source_hash, status FROM identities"
             ).fetchall()
         finally:
             conn.close()
-    except sqlite3.Error as exc:
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
         return [{"path": f"{kb_dirname()}/", "reason": f"reference sidecar unreadable: {exc}"}]
     indexed = {
         str(path): (

@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import epistemic_graph, freshness, graph_sync, mutation_lock, writer_lease
+from exomem import (
+    epistemic_graph,
+    freshness,
+    graph_sync,
+    mutation_lock,
+    reserved_paths,
+    writer_lease,
+)
 from exomem import vault as vault_module
 from exomem.vault import PlannedWrite
 
@@ -116,11 +123,10 @@ def test_directory_census_allows_a_long_form_write_from_a_short_root_alias(
     notes = root / "Knowledge Base" / "Notes"
     notes.mkdir(parents=True, exist_ok=True)
     short_root = _short_path_name(root)
-    if short_root is None:
-        pytest.skip("8.3 short-name generation is disabled for this volume")
     assert short_root is not None
-    if os.path.normcase(str(short_root)) == os.path.normcase(str(root)):
-        pytest.skip("8.3 short-name generation is disabled for this volume")
+    assert os.path.normcase(str(short_root)) != os.path.normcase(str(root)), (
+        "the required Windows gate must enable 8.3 short-name generation"
+    )
 
     census = vault_module.DirectoryCensusGuard.capture(short_root, "Knowledge Base", max_entries=16)
     first = short_root / "Knowledge Base" / "Notes" / "first.md"
@@ -148,11 +154,10 @@ def test_recall_projection_identity_survives_short_root_restart(
     note.parent.mkdir(parents=True, exist_ok=True)
     note.write_text("# Alias\n", encoding="utf-8")
     short_root = _short_path_name(root)
-    if short_root is None:
-        pytest.skip("8.3 short-name generation is disabled for this volume")
     assert short_root is not None
-    if os.path.normcase(str(short_root)) == os.path.normcase(str(root)):
-        pytest.skip("8.3 short-name generation is disabled for this volume")
+    assert os.path.normcase(str(short_root)) != os.path.normcase(str(root)), (
+        "the required Windows gate must enable 8.3 short-name generation"
+    )
 
     freshness.seed(
         root,
@@ -169,3 +174,52 @@ def test_recall_projection_identity_survives_short_root_restart(
     short_index = epistemic_graph.EpistemicGraphIndex(short_root)
     assert epistemic_graph._incremental_projection_identity(short_root) == long_identity
     assert short_index.available() is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows 8.3 aliases")
+def test_reserved_short_name_junction_and_reparse_races_fail_closed(
+    tmp_path: Path,
+    isolated_windows_writer_state: Path,
+) -> None:
+    """Actual NTFS short names never turn private file/tree identities ordinary."""
+
+    del isolated_windows_writer_state
+    root = tmp_path / "Exomem Reserved Alias Regression"
+    governance = root / "Knowledge Base" / "_Governance"
+    notes = root / "Knowledge Base" / "Notes"
+    governance.mkdir(parents=True)
+    notes.mkdir()
+    private = root / "Knowledge Base" / ".governance.sqlite"
+    private.write_bytes(b"private activation bytes")
+    (governance / "policy.yaml").write_text("version: 1\n", encoding="utf-8")
+
+    short_root = _short_path_name(root)
+    short_private = _short_path_name(private)
+    short_governance = _short_path_name(governance)
+    assert short_root is not None
+    assert short_private is not None
+    assert short_governance is not None
+    private_relative = short_private.relative_to(short_root).as_posix()
+    governance_relative = short_governance.relative_to(short_root).as_posix()
+    assert "~" in private_relative
+    assert "~" in governance_relative
+
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as read_error:
+        reserved_paths.read_generic_bytes(root, private_relative)
+    assert read_error.value.code == "RESERVED_PATH"
+
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as delete_error:
+        reserved_paths.unlink_generic_file(root, private_relative)
+    assert delete_error.value.code == "RESERVED_PATH"
+
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as move_error:
+        reserved_paths.move_generic_path(
+            root,
+            governance_relative,
+            "Knowledge Base/Notes/moved-private",
+            source_kind="directory",
+        )
+    assert move_error.value.code == "RESERVED_PATH"
+    assert private.read_bytes() == b"private activation bytes"
+    assert governance.is_dir()
+    assert not (notes / "moved-private").exists()

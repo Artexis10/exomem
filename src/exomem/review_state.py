@@ -5,8 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import os
-import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +15,7 @@ from .kbdir import kb_dirname
 
 SCHEMA_VERSION = 1
 STATE_FILENAME = ".review-state.json"
+_STATE_READ_LIMIT = 4 * 1024 * 1024
 REVIEW_PREFIX = "exomem://review/"
 VALID_ACTIONS = frozenset({"dismiss", "snooze", "reopen", "competing"})
 VALID_VIEWS = frozenset({"open", "all", "snoozed", "dismissed", "competing"})
@@ -131,18 +130,19 @@ class ReviewStateStore:
         self.path = state_path(vault_root)
 
     def load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {"version": SCHEMA_VERSION, "records": {}}
-        from . import vault
+        from . import reserved_paths
 
         try:
-            # Not `read_text`: on Windows an ordinary open pins this file
-            # against replacement while it is held, so a status poll or a
-            # review-context read overlapping a triage write refused that write
-            # with WinError 32 and surfaced it as a bare 500. Review state is
-            # derived bookkeeping, not a canonical record whose exact bytes a
-            # reader has verified and must hold still.
-            payload = json.loads(vault.read_bytes_without_pinning(self.path).decode("utf-8"))
+            with reserved_paths._subsystem_authority_scope("review_state"):
+                raw = reserved_paths._read_owner_bytes(
+                    self.vault_root,
+                    self.path,
+                    "review-state",
+                    limit=_STATE_READ_LIMIT,
+                )
+            payload = json.loads(raw.decode("utf-8"))
+        except FileNotFoundError:
+            return {"version": SCHEMA_VERSION, "records": {}}
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"REVIEW_STATE_INVALID: cannot read {self.path}: {exc}") from exc
         if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
@@ -257,31 +257,18 @@ class ReviewStateStore:
         }
 
     def _write(self, payload: dict[str, Any]) -> None:
-        from . import vault
+        from . import reserved_paths
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{STATE_FILENAME}.", suffix=".tmp", dir=self.path.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            # A reader that has not yet let go is a wait, not a failure. Only
-            # readers can be concurrent here -- writes to review state run
-            # under the writer lease -- so there is no precondition that the
-            # wait could invalidate, and nothing to re-prove afterwards.
-            vault.replace_tolerating_transient_sharing(
-                lambda: os.replace(temp_name, self.path)
+        encoded = (
+            json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        ).encode("utf-8")
+        with reserved_paths._subsystem_authority_scope("review_state"):
+            reserved_paths._publish_owner_bytes(
+                self.vault_root,
+                self.path,
+                "review-state",
+                encoded,
             )
-        except Exception:
-            try:
-                os.unlink(temp_name)
-            except OSError:
-                pass
-            raise
 
 
 def _record_key(review_id: str, signal_fingerprint: str) -> str:

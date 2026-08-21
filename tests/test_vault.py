@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import vault
+from exomem import held_fs, vault
 
 
 def test_wikilink_resolver_from_entries_matches_disk_resolution(tmp_path: Path) -> None:
@@ -183,6 +183,33 @@ def test_read_guarded_text_preserves_crlf_bytes_on_windows(tmp_path: Path) -> No
     guard.recheck(tmp_path)
 
 
+def test_read_guarded_text_refuses_multiply_linked_private_alias(tmp_path: Path) -> None:
+    governance = tmp_path / "Knowledge Base" / "_Governance"
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    governance.mkdir(parents=True)
+    notes.mkdir()
+    private = governance / "policy.md"
+    private.write_text("private policy", encoding="utf-8")
+    alias = notes / "ordinary.md"
+    try:
+        os.link(private, alias)
+    except OSError:
+        pytest.skip("hard links are unavailable")
+
+    with pytest.raises(vault.PathGuardError) as error:
+        vault.read_guarded_text(tmp_path, alias)
+
+    assert error.value.code == "PATH_GUARD_UNSAFE"
+    assert "private policy" not in error.value.reason
+
+
+def test_read_guarded_text_preserves_missing_file_signal(tmp_path: Path) -> None:
+    missing = tmp_path / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+
+    with pytest.raises(FileNotFoundError):
+        vault.read_guarded_text(tmp_path, missing)
+
+
 def test_missing_parent_swap_cannot_redirect_nested_directory_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -233,7 +260,7 @@ def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
     `pending/` while the first artifact flips, and Windows refuses to
     rename a directory that contains an open file. The setup's own
     `pending_dir.rename(...)` raises `PermissionError [WinError 5]`
-    from inside the patched `os.replace`, where the writer correctly
+    from inside the patched held publication, where the writer correctly
     classifies it as a transient sharing refusal and retries -- so the
     test failed on its own injection rather than on the guard.
 
@@ -262,19 +289,19 @@ def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
             guard=vault.PathGuard.capture(tmp_path, "pending/two.md", leaf_policy="absent"),
         ),
     ]
-    real_replace = os.replace
+    real_publish = held_fs.publish_bytes
     swapped = False
 
-    def swap_after_first(src, dst):
+    def swap_after_first(filesystem, parent, leaf, data, **kwargs):  # noqa: ANN001
         nonlocal swapped
-        result = real_replace(src, dst)
-        if not swapped and Path(dst) == first:
+        result = real_publish(filesystem, parent, leaf, data, **kwargs)
+        if not swapped and leaf == first.name:
             swapped = True
             pending_dir.rename(tmp_path / "pending-old")
             pending_dir.mkdir()
         return result
 
-    monkeypatch.setattr(vault.os, "replace", swap_after_first)
+    monkeypatch.setattr(held_fs, "publish_bytes", swap_after_first)
 
     with pytest.raises(vault.BatchWriteError) as incomplete:
         vault.batch_atomic_write(writes, vault_root=tmp_path)

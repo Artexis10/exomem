@@ -25,6 +25,13 @@ def _leaf(value: object) -> str:
     return Path(os.fspath(value)).name
 
 
+def _is_batch_publication(value: object) -> bool:
+    leaf = _leaf(value)
+    return leaf.startswith("stage-") or leaf.startswith(
+        vault_module.held_fs.PUBLISH_TEMP_PREFIX
+    )
+
+
 def _workspaces(parent: Path) -> list[Path]:
     return sorted(parent.glob(".exomem-batch-*"))
 
@@ -265,14 +272,17 @@ def test_deferred_graph_completion_stages_floor_then_caller_and_returns_exact_to
     checkpoint = graph_sync.checkpoint_path(tmp_path)
     before = checkpoint.read_bytes()
     replacements: list[Path] = []
-    real_replace = vault_module.os.replace
+    real_publish = vault_module.held_fs.publish_bytes
+    destinations = {
+        graph_sync.floor_path(tmp_path).name: graph_sync.floor_path(tmp_path),
+        _graph_write(tmp_path).path.name: _graph_write(tmp_path).path,
+    }
 
-    def observe_replace(source, destination, *args, **kwargs):  # noqa: ANN001
-        if _leaf(source).startswith("stage-"):
-            replacements.append(Path(destination))
-        return real_replace(source, destination, *args, **kwargs)
+    def observe_publish(filesystem, parent, leaf, data, **kwargs):  # noqa: ANN001
+        replacements.append(destinations[leaf])
+        return real_publish(filesystem, parent, leaf, data, **kwargs)
 
-    monkeypatch.setattr(vault_module.os, "replace", observe_replace)
+    monkeypatch.setattr(vault_module.held_fs, "publish_bytes", observe_publish)
     monkeypatch.setattr(graph_sync, "_checkpoint_mutation_id", lambda: "b" * 24)
     _floor, expected_checkpoint = graph_sync.epoch_writes(
         tmp_path, [_graph_write(tmp_path)]
@@ -373,20 +383,30 @@ def test_ordinary_false_fanout_keeps_floor_caller_checkpoint_and_rolls_back(
     before_floor = floor.read_bytes()
     replacements: list[Path] = []
     real_replace = vault_module.os.replace
+    failed = False
+    destinations = {
+        floor.name: floor,
+        target.name: target,
+        checkpoint.name: checkpoint,
+    }
 
     def fail_checkpoint(source, destination, *args, **kwargs):  # noqa: ANN001
-        if _leaf(source).startswith("stage-"):
-            replacements.append(Path(destination))
-            if Path(destination) == checkpoint:
+        nonlocal failed
+        if _is_batch_publication(source) and not failed:
+            destination_path = destinations[_leaf(destination)]
+            replacements.append(destination_path)
+            if destination_path == checkpoint:
+                failed = True
                 raise PermissionError("held graph checkpoint")
         return real_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr(vault_module.os, "replace", fail_checkpoint)
-    with pytest.raises(Exception, match="held graph checkpoint"):
+    with pytest.raises(PermissionError) as refused:
         vault_module.batch_atomic_write(
             [_graph_write(tmp_path)], vault_root=tmp_path, post_commit_fanout=False
         )
 
+    assert refused.value.args == ("held graph checkpoint",)
     assert replacements == [graph_sync.floor_path(tmp_path), target, checkpoint]
     assert target.read_text(encoding="utf-8") == "old sidecar"
     assert floor.read_bytes() == before_floor
@@ -431,17 +451,20 @@ def test_graph_internal_deletion_epoch_keeps_floor_caller_checkpoint_order(
     )
     rel = target.relative_to(tmp_path).as_posix()
     events: list[str] = []
-    original_replace = vault_module.os.replace
+    original_publish = vault_module.held_fs.publish_bytes
 
-    def observe_graph_protocol(source, destination, *args, **kwargs):  # noqa: ANN001
-        if _leaf(source).startswith("stage-"):
-            if Path(destination) == graph_sync.floor_path(tmp_path):
-                events.append("floor")
-            elif Path(destination) == graph_sync.checkpoint_path(tmp_path):
-                events.append("checkpoint")
-        return original_replace(source, destination, *args, **kwargs)
+    def observe_graph_protocol(filesystem, parent, leaf, data, **kwargs):  # noqa: ANN001
+        if leaf == graph_sync.floor_path(tmp_path).name:
+            events.append("floor")
+        elif leaf == graph_sync.checkpoint_path(tmp_path).name:
+            events.append("checkpoint")
+        return original_publish(filesystem, parent, leaf, data, **kwargs)
 
-    monkeypatch.setattr(vault_module.os, "replace", observe_graph_protocol)
+    monkeypatch.setattr(
+        vault_module.held_fs,
+        "publish_bytes",
+        observe_graph_protocol,
+    )
     epoch = graph_sync.prepare_deletion_epoch(tmp_path, [rel])
     assert epoch is not None
     assert events == ["floor"]
@@ -472,7 +495,7 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     report = object()
     real_mkdir = os.mkdir
     real_mkstemp = vault_module.tempfile.mkstemp
-    real_replace = os.replace
+    real_publish = vault_module.held_fs.publish_bytes
 
     def observe_mkdir(path, mode=0o777, *args, **kwargs):
         if _WORKSPACE_RE.fullmatch(_leaf(path)):
@@ -484,10 +507,9 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
             backup_creations.append(str(kwargs))
         return real_mkstemp(*args, **kwargs)
 
-    def observe_flip(src, dst, *args, **kwargs):
-        if _leaf(src).startswith("stage-"):
-            flips.append(_leaf(dst))
-        return real_replace(src, dst, *args, **kwargs)
+    def observe_flip(filesystem, parent, leaf, data, **kwargs):  # noqa: ANN001
+        flips.append(leaf)
+        return real_publish(filesystem, parent, leaf, data, **kwargs)
 
     def register(_root: Path, paths: list[Path]) -> None:
         watcher_calls.append(tuple(paths))
@@ -498,7 +520,7 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
 
     monkeypatch.setattr(vault_module.os, "mkdir", observe_mkdir)
     monkeypatch.setattr(vault_module.tempfile, "mkstemp", reject_named_backup)
-    monkeypatch.setattr(vault_module.os, "replace", observe_flip)
+    monkeypatch.setattr(vault_module.held_fs, "publish_bytes", observe_flip)
     monkeypatch.setattr("exomem.file_watcher.register_self_write", register)
     monkeypatch.setattr("exomem.index_sync.upsert_after_write", index)
 
@@ -538,7 +560,7 @@ def test_batch_rollback_preserves_crlf_bytes_on_windows(
 
     def fail_second_flip(src, dst, *args, **kwargs):
         nonlocal flips
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips += 1
             if flips == 2:
                 raise OSError("injected second flip failure")
@@ -565,7 +587,7 @@ def test_batch_pre_flip_failure_cleans_crlf_stage_on_windows(
     real_replace = os.replace
 
     def fail_before_flip(src, dst, *args, **kwargs):
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             raise OSError("injected pre-flip failure")
         return real_replace(src, dst, *args, **kwargs)
 
@@ -625,7 +647,7 @@ def test_batch_atomic_write_cleans_closed_stage_after_windows_replace_failure(
 
     def fail_second_flip(source, destination, *args, **kwargs):
         nonlocal flips
-        if _leaf(source).startswith("stage-"):
+        if _is_batch_publication(source):
             flips += 1
             if flips == 2:
                 raise OSError("injected Windows replace failure")
@@ -772,7 +794,12 @@ def test_batch_cleanup_outcome_summarizes_commit_order(
     third = tmp_path / "third.md"
     raw = PermissionError("private workspace initialization failure")
 
-    def fail_workspace_create(cls, parent: Path):
+    def fail_workspace_create(
+        cls,
+        parent: Path,
+        *,
+        vault_root: Path | None = None,
+    ):
         raise raw
 
     monkeypatch.setattr(
@@ -827,7 +854,7 @@ def test_batch_atomic_write_restores_exact_bytes_and_supported_metadata(
 
     def fail_second_flip(src, dst, *args, **kwargs):
         nonlocal flips
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips += 1
             if flips == 2:
                 raise OSError("injected second flip failure")
@@ -854,6 +881,50 @@ def test_batch_atomic_write_restores_exact_bytes_and_supported_metadata(
     assert _workspaces(tmp_path) == []
 
 
+def test_held_batch_rollback_restores_exact_bytes_and_supported_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_bytes(b"first-old\x00bytes")
+    second.write_bytes(b"second-old")
+    os.chmod(first, 0o640)
+    first_times = (1_731_111_111_123_456_789, 1_731_222_222_987_654_321)
+    os.utime(first, ns=first_times)
+    _set_descriptor_xattr(first, "user.exomem-held-test", b"before")
+    expected_xattrs = _get_descriptor_xattrs(first)
+    real_replace = os.replace
+    flips = 0
+
+    def fail_second_flip(src, dst, *args, **kwargs):
+        nonlocal flips
+        if _is_batch_publication(src):
+            flips += 1
+            if flips == 2:
+                raise OSError("injected held second flip failure")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "replace", fail_second_flip)
+
+    with pytest.raises(OSError, match="held second flip failure"):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new"),
+                vault_module.PlannedWrite(second, "second-new"),
+            ],
+            vault_root=tmp_path,
+            post_commit_fanout=False,
+        )
+
+    restored_info = first.stat()
+    assert first.read_bytes() == b"first-old\x00bytes"
+    assert second.read_bytes() == b"second-old"
+    assert stat.S_IMODE(restored_info.st_mode) == 0o640
+    assert restored_info.st_mtime_ns == first_times[1]
+    assert _get_descriptor_xattrs(first) == expected_xattrs
+    assert _workspaces(tmp_path) == []
+
+
 def test_batch_atomic_write_uses_path_metadata_fallbacks_after_dir_fd_flip_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -871,7 +942,7 @@ def test_batch_atomic_write_uses_path_metadata_fallbacks_after_dir_fd_flip_error
 
     def fail_after_second_kernel_flip(src, dst, *args, **kwargs):
         nonlocal flips
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips += 1
             assert kwargs.get("src_dir_fd") is not None
             assert kwargs.get("dst_dir_fd") is not None
@@ -929,7 +1000,7 @@ def test_batch_atomic_write_detects_failed_path_mode_fallback(
 
     def fail_second_flip(src, dst, *args, **kwargs):
         nonlocal flips
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips += 1
             if flips == 2:
                 raise OSError("commit failed")
@@ -965,10 +1036,7 @@ def test_batch_atomic_write_detects_failed_path_mode_fallback(
     assert second.read_bytes() == b"second-old"
     retained = _workspaces(tmp_path)
     assert len(retained) == 1
-    assert sorted(path.name for path in retained[0].iterdir()) == [
-        "restore-0.tmp",
-        "stage-1.tmp",
-    ]
+    assert sorted(path.name for path in retained[0].iterdir()) == ["restore-0.tmp"]
 
 
 def test_batch_atomic_write_removes_new_file_on_rollback(
@@ -982,7 +1050,7 @@ def test_batch_atomic_write_removes_new_file_on_rollback(
 
     def fail_second_flip(src, dst, *args, **kwargs):
         nonlocal flips
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips += 1
             if flips == 2:
                 raise OSError("commit failed")
@@ -1003,6 +1071,83 @@ def test_batch_atomic_write_removes_new_file_on_rollback(
     assert _workspaces(tmp_path) == []
 
 
+def test_vault_batch_rollback_unlinks_new_file_through_retained_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = tmp_path / "created.md"
+    existing = tmp_path / "existing.md"
+    existing.write_bytes(b"old")
+    acquired = vault_module.held_fs.acquire(tmp_path)
+    assert acquired.ok
+    filesystem = acquired.require()
+    filesystem_type = type(filesystem)
+    filesystem.close()
+    real_unlink = filesystem_type.unlink
+    unlinked_names: list[str] = []
+
+    def observe_unlink(self, file):  # noqa: ANN001
+        unlinked_names.append(file.name)
+        return real_unlink(self, file)
+
+    real_publish = vault_module.held_fs.publish_bytes
+    publications = 0
+
+    def fail_second_publish(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal publications
+        publications += 1
+        if publications == 2:
+            raise OSError("commit failed")
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(filesystem_type, "unlink", observe_unlink)
+    monkeypatch.setattr(vault_module.held_fs, "publish_bytes", fail_second_publish)
+
+    with pytest.raises(OSError, match="commit failed"):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(created, "new"),
+                vault_module.PlannedWrite(existing, "changed"),
+            ],
+            vault_root=tmp_path,
+            post_commit_fanout=False,
+        )
+
+    assert "created.md" in unlinked_names
+    assert not created.exists()
+    assert existing.read_bytes() == b"old"
+    assert _workspaces(tmp_path) == []
+
+
+def test_vault_batch_binds_and_rolls_back_publish_that_raises_after_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = tmp_path / "created.md"
+    real_publish = vault_module.held_fs.publish_bytes
+
+    def publish_then_raise(*args, **kwargs):  # noqa: ANN002, ANN003
+        result = real_publish(*args, **kwargs)
+        assert result.ok
+        raise OSError("raised after publication")
+
+    monkeypatch.setattr(
+        vault_module.held_fs,
+        "publish_bytes",
+        publish_then_raise,
+    )
+
+    with pytest.raises(OSError, match="raised after publication"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, "new")],
+            vault_root=tmp_path,
+            post_commit_fanout=False,
+        )
+
+    assert not created.exists()
+    assert _workspaces(tmp_path) == []
+
+
 def test_batch_atomic_write_metadata_capture_error_precedes_every_flip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1017,7 +1162,7 @@ def test_batch_atomic_write_metadata_capture_error_precedes_every_flip(
         raise PermissionError("private capture detail")
 
     def observe_flip(src, dst, *args, **kwargs):
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips.append(_leaf(dst))
         return real_replace(src, dst, *args, **kwargs)
 
@@ -1064,7 +1209,7 @@ def test_batch_atomic_write_restores_source_times_when_snapshot_capture_fails(
         raise PermissionError("snapshot capture failed after read")
 
     def observe_flip(src, dst, *args, **kwargs):
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips.append(_leaf(dst))
         return real_replace(src, dst, *args, **kwargs)
 
@@ -1176,7 +1321,7 @@ def test_batch_atomic_write_retries_partial_and_interrupted_stage_and_restore_wr
 
     def fail_second_flip(src, dst, *args, **kwargs):
         nonlocal flips
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips += 1
             if flips == 2:
                 raise OSError("flip failed")
@@ -1351,11 +1496,9 @@ def test_clean_batch_cleanup_preserves_sharing_error_path_attributes(
     real_replace = os.replace
 
     def deny_stage_replace(src, dst, *args, **kwargs):
-        if _leaf(src).startswith("stage-"):
-            workspace = _workspaces(tmp_path)[0]
-            error = PermissionError(13, "Access is denied", str(workspace / _leaf(src)))
+        if _is_batch_publication(src):
+            error = PermissionError(13, "Access is denied")
             error.winerror = 5
-            error.filename2 = str(target)
             captured.append(error)
             raise error
         return real_replace(src, dst, *args, **kwargs)
@@ -1381,6 +1524,7 @@ def test_clean_batch_cleanup_preserves_sharing_error_path_attributes(
     expected_attempts = vault_module._REPLACE_SHARING_ATTEMPTS if os.name == "nt" else 1
     assert len(captured) == expected_attempts
     assert raised.value is captured[-1]
+    assert Path(raised.value.filename).parent == target.parent
     assert raised.value.filename2 == str(target)
     assert media_jobs.is_guarded_sidecar_sharing_violation(raised.value, target)
     assert target.read_bytes() == b"old"
@@ -1399,16 +1543,16 @@ def test_batch_atomic_write_reports_cleanup_incomplete_after_complete_rollback(
     real_cleanup = vault_module._BatchWorkspace.cleanup
     stage_flips = 0
     cleanup_calls = 0
-    replacements: list[tuple[str, str]] = []
+    replacements: list[str] = []
 
     def fail_second_stage(src, dst, *args, **kwargs):
         nonlocal stage_flips
-        source = _leaf(src)
-        if source.startswith("stage-"):
+        if _is_batch_publication(src):
             stage_flips += 1
             if stage_flips == 2:
                 raise OSError("raw commit failure")
-        replacements.append((source, _leaf(dst)))
+        if _is_batch_publication(src):
+            replacements.append(_leaf(dst))
         return real_replace(src, dst, *args, **kwargs)
 
     def retain_workspace_during_cleanup(self):
@@ -1439,7 +1583,7 @@ def test_batch_atomic_write_reports_cleanup_incomplete_after_complete_rollback(
     assert first.read_bytes() == b"first-old"
     assert second.read_bytes() == b"second-old"
     assert cleanup_calls == 1
-    assert replacements == [("stage-0.tmp", "first.md"), ("restore-0.tmp", "first.md")]
+    assert replacements == ["first.md", "first.md"]
     workspace = _workspaces(tmp_path)[0]
     assert (workspace / "unexpected.tmp").read_bytes() == b"retain for reconcile"
 
@@ -1455,14 +1599,15 @@ def test_batch_atomic_write_fans_out_once_before_committed_cleanup_error(
     real_replace = os.replace
     real_cleanup = vault_module._BatchWorkspace.cleanup
     cleanup_calls = 0
-    replacements: list[tuple[str, str]] = []
+    replacements: list[str] = []
     watcher_calls: list[tuple[Path, ...]] = []
     index_calls: list[tuple[Path, ...]] = []
     reports: list[object] = []
     report = object()
 
     def observe_replace(src, dst, *args, **kwargs):
-        replacements.append((_leaf(src), _leaf(dst)))
+        if _is_batch_publication(src):
+            replacements.append(_leaf(dst))
         return real_replace(src, dst, *args, **kwargs)
 
     def retain_workspace_during_cleanup(self):
@@ -1503,7 +1648,7 @@ def test_batch_atomic_write_fans_out_once_before_committed_cleanup_error(
     assert first.read_bytes() == b"first-new"
     assert second.read_bytes() == b"second-new"
     assert cleanup_calls == 1
-    assert replacements == [("stage-0.tmp", "first.md"), ("stage-1.tmp", "second.md")]
+    assert replacements == ["first.md", "second.md"]
     assert watcher_calls == [(first, second)]
     assert index_calls == [(first, second)]
     assert reports == [report]
@@ -1534,7 +1679,7 @@ def test_batch_atomic_write_never_uses_preexisting_user_backup(
         nonlocal flips
         if _leaf(src).endswith(".bak") or _leaf(dst).endswith(".bak"):
             touched_backups.extend([_leaf(src), _leaf(dst)])
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips += 1
             if flips == 2:
                 raise OSError("flip failed")
@@ -1586,6 +1731,7 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
     guarded_target.write_bytes(b"guarded-old")
     pending.write_bytes(b"pending-old")
     real_replace = os.replace
+    real_replace_artifact = vault_module._BatchWorkspace.replace_artifact
     flips = 0
     restore_targets: list[str] = []
     concurrent = guarded / "concurrent"
@@ -1593,15 +1739,23 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
     def inject_census_change(src, dst, *args, **kwargs):
         nonlocal flips
         result = real_replace(src, dst, *args, **kwargs)
-        if _leaf(src).startswith("stage-"):
+        if _is_batch_publication(src):
             flips += 1
             if flips == 2:
                 concurrent.write_bytes(b"concurrent-owned")
-        elif _leaf(src).startswith("restore-"):
-            restore_targets.append(_leaf(dst))
         return result
 
+    def observe_restore(self, artifact, final, **kwargs):  # noqa: ANN001
+        if artifact.name.startswith("restore-"):
+            restore_targets.append(final.name)
+        return real_replace_artifact(self, artifact, final, **kwargs)
+
     monkeypatch.setattr(vault_module.os, "replace", inject_census_change)
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace,
+        "replace_artifact",
+        observe_restore,
+    )
     with pytest.raises(vault_module.BatchWriteError) as incomplete:
         vault_module.batch_atomic_write(
             [
@@ -2268,10 +2422,13 @@ def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
     real_create_artifact = vault_module._BatchWorkspace.create_artifact
 
     def fixed_token_hex(_size: int) -> str:
-        return next(suffixes)
+        try:
+            return next(suffixes)
+        except StopIteration:
+            return "e" * 32
 
-    def observe_workspace_create(cls, parent: Path):
-        workspace = real_create(cls, parent)
+    def observe_workspace_create(cls, parent: Path, *, vault_root: Path | None = None):
+        workspace = real_create(cls, parent, vault_root=vault_root)
         created_workspaces.append(workspace.name)
         return workspace
 
@@ -2279,7 +2436,7 @@ def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
         artifact_workspaces.append((self.name, name))
         return real_create_artifact(self, name, content)
 
-    monkeypatch.setattr(vault_module.secrets, "token_hex", fixed_token_hex)
+    monkeypatch.setattr(vault_module, "_batch_workspace_token", fixed_token_hex)
     monkeypatch.setattr(
         vault_module._BatchWorkspace,
         "create",

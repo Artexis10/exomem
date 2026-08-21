@@ -438,18 +438,17 @@ def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
 ) -> None:
     old_rel = _make_insight(vault, "Atomic Supersession Source")
     before = _markdown_snapshot(vault)
-    real_os_replace = os.replace
+    real_publish = vault_module.held_fs.publish_bytes
     replacements = 0
 
-    def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
+    def injected_replace(*args, **kwargs):  # noqa: ANN002, ANN003
         nonlocal replacements
-        if _leaf(src).startswith("stage-"):
-            replacements += 1
-            if replacements == 2:
-                raise OSError("injected supersession commit failure")
-        return real_os_replace(src, dst, *args, **kwargs)
+        replacements += 1
+        if replacements == 2:
+            raise OSError("injected supersession commit failure")
+        return real_publish(*args, **kwargs)
 
-    monkeypatch.setattr(vault_module.os, "replace", injected_replace)
+    monkeypatch.setattr(vault_module.held_fs, "publish_bytes", injected_replace)
 
     with pytest.raises(replace_module.ReplaceError) as failure:
         _commit_replace(
@@ -497,18 +496,17 @@ def test_replace_failure_does_not_leave_project_registration_or_folder(
     )
     registry_before = _read(registry) if registry_existed else None
     folder_existed = project_folder.exists()
-    real_os_replace = os.replace
+    real_publish = vault_module.held_fs.publish_bytes
     replacements = 0
 
-    def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
+    def injected_replace(*args, **kwargs):  # noqa: ANN002, ANN003
         nonlocal replacements
-        if _leaf(src).startswith("stage-"):
-            replacements += 1
-            if replacements == 2:
-                raise OSError("injected project supersession failure")
-        return real_os_replace(src, dst, *args, **kwargs)
+        replacements += 1
+        if replacements == 2:
+            raise OSError("injected project supersession failure")
+        return real_publish(*args, **kwargs)
 
-    monkeypatch.setattr(vault_module.os, "replace", injected_replace)
+    monkeypatch.setattr(vault_module.held_fs, "publish_bytes", injected_replace)
 
     with pytest.raises(replace_module.ReplaceError) as failure:
         _commit_replace(
@@ -591,19 +589,18 @@ def test_plural_project_registration_creates_folder_only_on_success(
         / "Research"
         / "Successful Plural Project"
     )
-    real_os_replace = os.replace
+    real_publish = vault_module.held_fs.publish_bytes
     replacements = 0
 
-    def injected_replace(src, dst, *args, **kwargs):  # noqa: ANN002, ANN003
+    def injected_replace(*args, **kwargs):  # noqa: ANN002, ANN003
         nonlocal replacements
-        if _leaf(src).startswith("stage-"):
-            replacements += 1
-            if replacements == 2:
-                raise OSError("injected plural project failure")
-        return real_os_replace(src, dst, *args, **kwargs)
+        replacements += 1
+        if replacements == 2:
+            raise OSError("injected plural project failure")
+        return real_publish(*args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(vault_module.os, "replace", injected_replace)
+        patch.setattr(vault_module.held_fs, "publish_bytes", injected_replace)
         with pytest.raises(replace_module.ReplaceError) as failure:
             _commit_replace(
                 vault,

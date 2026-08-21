@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import held_fs, reserved_paths
 from .kbdir import kb_dirname
 
 PENDING = "pending"
@@ -34,6 +35,9 @@ MAX_SHARING_ATTEMPTS = 3
 _SHARING_WINERRORS = frozenset({5, 32})
 _BATCH_WORKSPACE_RE = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$")
 _BATCH_STAGE_RE = re.compile(r"^stage-[0-9]+\.tmp$")
+_HELD_PUBLISH_RE = re.compile(
+    rf"^{re.escape(held_fs.PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}$"
+)
 _QUOTED_PATH = r"(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")"
 _STORED_SHARING_ERROR_RE = re.compile(
     rf"^PermissionError: \[WinError (?P<winerror>5|32)\] .*?: "
@@ -66,6 +70,17 @@ _VALID_BATCH_ROLLBACK_PUBLIC_REMEDIATION = (
 _RECONCILIATION_ACTION = (
     "reconcile this media item's sidecar provenance with the current binary, then use targeted media retry"
 )
+
+
+def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+    with reserved_paths._subsystem_authority_scope("media_jobs"):
+        return _sqlite_connect_owned(database, *args, **kwargs)
+
+
+def _sqlite_connect_owned(
+    database: Any, *args: Any, **kwargs: Any
+) -> sqlite3.Connection:
+    return sqlite3.connect(database, *args, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -222,13 +237,20 @@ def is_guarded_sidecar_sharing_violation(
     _winerror, source_raw, destination_raw = paths
     source = Path(source_raw)
     destination = Path(destination_raw)
+    old_workspace_stage = (
+        _normalized_path(source.parent.parent) == _normalized_path(destination.parent)
+        and _BATCH_WORKSPACE_RE.fullmatch(source.parent.name) is not None
+        and _BATCH_STAGE_RE.fullmatch(source.name) is not None
+    )
+    held_publication = (
+        _normalized_path(source.parent) == _normalized_path(destination.parent)
+        and _HELD_PUBLISH_RE.fullmatch(source.name) is not None
+    )
     if (
         not source.is_absolute()
         or not destination.is_absolute()
         or _normalized_path(destination) != _normalized_path(sidecar_path)
-        or _normalized_path(source.parent.parent) != _normalized_path(destination.parent)
-        or _BATCH_WORKSPACE_RE.fullmatch(source.parent.name) is None
-        or _BATCH_STAGE_RE.fullmatch(source.name) is None
+        or not (old_workspace_stage or held_publication)
     ):
         return False
     return os.path.lexists(destination)
@@ -308,18 +330,52 @@ class MediaJobStore:
             self._initialize()
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+        with reserved_paths._subsystem_authority_scope("media_jobs"):
+            with reserved_paths._identity_coordination_scope(self.vault_root):
+                return self._connect_owned(readonly=readonly)
+
+    def _connect_owned(self, *, readonly: bool = False) -> sqlite3.Connection:
+        with reserved_paths._sqlite_owner_target_scope(
+            self.vault_root,
+            self.path,
+            "media-jobs-store",
+            create=not readonly,
+        ) as retained_path:
+            return self._connect_retained(retained_path, readonly=readonly)
+
+    def _connect_retained(
+        self,
+        path: Path,
+        *,
+        readonly: bool,
+    ) -> sqlite3.Connection:
         if readonly:
-            conn = sqlite3.connect(
-                f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0
+            conn = _sqlite_connect_owned(
+                f"{path.as_uri()}?mode=ro", uri=True, timeout=5.0
             )
         else:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self.path, timeout=5.0)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = _sqlite_connect_owned(path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=5000")
         if not readonly:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            # Make the complete WAL family reachable while the private-owner
+            # coordination boundary is still held.  An empty new database does
+            # not create WAL/SHM merely by negotiating WAL mode.
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("COMMIT")
+        try:
+            reserved_paths._publish_sqlite_owner_family(
+                self.vault_root,
+                self.path,
+                "media-jobs-store",
+                conn,
+            )
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def _initialize(self) -> None:
@@ -954,6 +1010,24 @@ def _sqlite_sidecar_exists(sidecars: tuple[Path, Path]) -> bool:
 def _diagnostic_snapshot_rows(
     path: Path,
 ) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
+    target = Path(os.path.abspath(path))
+    vault_root = target.parent.parent
+    with reserved_paths._subsystem_authority_scope("media_jobs"):
+        with reserved_paths._identity_coordination_scope(vault_root):
+            with reserved_paths._sqlite_owner_target_scope(
+                vault_root,
+                target,
+                "media-jobs-store",
+                create=False,
+            ) as retained_path:
+                return _diagnostic_snapshot_rows_retained(
+                    retained_path,
+                )
+
+
+def _diagnostic_snapshot_rows_retained(
+    path: Path,
+) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
     sidecars = _sqlite_sidecars(path)
     if _sqlite_sidecar_exists(sidecars):
         raise OSError("media job database has live SQLite companions")
@@ -964,8 +1038,8 @@ def _diagnostic_snapshot_rows(
     if _sqlite_file_identity(path) != identity or _sqlite_sidecar_exists(sidecars):
         raise OSError("media job database is not a stable standalone snapshot")
 
-    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
-    conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+    uri = f"{path.as_uri()}?mode=ro&immutable=1"
+    conn = _sqlite_connect_owned(uri, uri=True, timeout=5.0)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")

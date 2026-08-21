@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, privacy_log
+from . import access, privacy_log, reserved_paths
 from .vault import (
     VaultPathError,
     parse_frontmatter,
@@ -72,7 +72,6 @@ def list_directory(
 ) -> ListDirectoryResult:
     # Empty string means vault root.
     if path is None or not str(path).strip():
-        target_abs = vault_root.resolve()
         rel_path = ""
     else:
         try:
@@ -88,21 +87,40 @@ def list_directory(
                 code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
             )
         try:
-            target_abs, rel_path = resolve_under_vault(
+            _target_abs, rel_path = resolve_under_vault(
                 vault_root, path, must_exist=True, must_be_dir=True
             )
         except VaultPathError as e:
             raise ListDirectoryError(code=e.code, reason=e.reason) from e
 
+    try:
+        held_entries = reserved_paths.list_generic_tree(
+            vault_root, rel_path or ".", recursive=recursive
+        )
+    except reserved_paths.ReservedPathLeafError:
+        raise ListDirectoryError(
+            code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
+        ) from None
+
     entries: list[DirectoryEntry] = []
-    for child_abs in _walk(target_abs, recursive=recursive, include_hidden=include_hidden):
-        try:
-            child_rel = child_abs.resolve().relative_to(vault_root.resolve()).as_posix()
-        except ValueError:
+    for held_entry in held_entries:
+        parts = held_entry.relative_path.split("/")
+        if not recursive and len(parts) != 1:
             continue
+        if any(privacy_log.is_reserved_hosted_vault_path(part) for part in parts):
+            continue
+        if not include_hidden and any(
+            part.startswith(".") or part == "_attachments" for part in parts
+        ):
+            continue
+        child_rel = (
+            held_entry.relative_path
+            if not rel_path
+            else f"{rel_path.rstrip('/')}/{held_entry.relative_path}"
+        )
         if access.refuse_if_excluded(vault_root, child_rel):
             continue
-        entries.append(_entry_for(child_abs, child_rel))
+        entries.append(_entry_for_held(held_entry, child_rel))
 
     # Stable ordering: directories first, then files; alpha within each group.
     entries.sort(key=lambda e: (0 if e.type == "directory" else 1, e.path.lower()))
@@ -110,39 +128,19 @@ def list_directory(
     return ListDirectoryResult(path=rel_path, entries=entries)
 
 
-def _walk(directory: Path, *, recursive: bool, include_hidden: bool):
-    try:
-        children = sorted(directory.iterdir(), key=lambda p: p.name.lower())
-    except OSError:
-        return
-    for child in children:
-        name = child.name
-        if privacy_log.is_reserved_hosted_vault_path(name):
-            continue
-        if not include_hidden and (name.startswith(".") or name == "_attachments"):
-            continue
-        yield child
-        if recursive and child.is_dir():
-            yield from _walk(child, recursive=True, include_hidden=include_hidden)
-
-
-def _entry_for(child: Path, rel_path: str) -> DirectoryEntry:
-    is_dir = child.is_dir()
-    size: int | None = None
+def _entry_for_held(
+    entry: reserved_paths.GenericTreeEntry, rel_path: str
+) -> DirectoryEntry:
+    is_dir = entry.identity.kind == "directory"
     updated: str | None = None
     fm_type: str | None = None
 
-    try:
-        st = child.stat()
-        if not is_dir:
-            size = st.st_size
-        updated = dt.datetime.fromtimestamp(st.st_mtime).date().isoformat()
-    except OSError:
-        pass
+    if entry.mtime is not None:
+        updated = dt.datetime.fromtimestamp(entry.mtime).date().isoformat()
 
-    if not is_dir and child.suffix.lower() == ".md":
+    if not is_dir and entry.markdown is not None:
         try:
-            text = child.read_text(encoding="utf-8")
+            text = entry.markdown.decode("utf-8")
             fm, _, _ = parse_frontmatter(text)
             t = fm.get("type")
             if t:
@@ -151,10 +149,10 @@ def _entry_for(child: Path, rel_path: str) -> DirectoryEntry:
             pass
 
     return DirectoryEntry(
-        name=child.name,
+        name=entry.relative_path.rsplit("/", 1)[-1],
         type="directory" if is_dir else "file",
         path=rel_path,
-        size_bytes=size,
+        size_bytes=entry.size_bytes,
         updated=updated,
         frontmatter_type=fm_type,
     )

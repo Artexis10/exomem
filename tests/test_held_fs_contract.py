@@ -67,6 +67,34 @@ def test_public_contract_uses_closed_results_and_content_free_refusals(tmp_path:
 
 
 @_requires_native_route
+def test_acquire_reuses_one_capability_probe_for_the_same_stable_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held_fs = _module()
+    backend = held_fs._backend()
+    original_probe = backend.probe
+    calls = 0
+
+    def counted_probe(root: Path):
+        nonlocal calls
+        calls += 1
+        return original_probe(root)
+
+    held_fs.reset_capability_cache_for_tests()
+    monkeypatch.setattr(backend, "probe", counted_probe)
+    try:
+        first = held_fs.acquire(tmp_path)
+        second = held_fs.acquire(tmp_path)
+        assert first.ok and second.ok
+        first.require().close()
+        second.require().close()
+        assert calls == 1
+    finally:
+        held_fs.reset_capability_cache_for_tests()
+
+
+@_requires_native_route
 def test_relative_leaf_operations_use_held_parents_only(tmp_path: Path) -> None:
     held_fs = _module()
     with held_fs.acquire(tmp_path).require() as filesystem:
@@ -94,6 +122,165 @@ def test_relative_leaf_operations_use_held_parents_only(tmp_path: Path) -> None:
                             destination, "linked.txt", access="mutate"
                         ).require() as linked:
                             assert filesystem.unlink(linked).ok
+
+
+@_requires_native_route
+def test_relative_replace_and_directory_rename_consume_retained_handles(
+    tmp_path: Path,
+) -> None:
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent("source-tree", create=True).require() as source_tree:
+            with filesystem.file(
+                source_tree, "payload.txt", access="write", create=True, exclusive=True
+            ).require() as payload:
+                assert filesystem.write(payload, b"payload").ok
+        with filesystem.parent("destination", create=True).require() as destination:
+            with filesystem.file(
+                destination, "current.txt", access="write", create=True, exclusive=True
+            ).require() as current:
+                assert filesystem.write(current, b"current").ok
+            with filesystem.file(
+                destination, "replacement.txt", access="write", create=True, exclusive=True
+            ).require() as replacement:
+                assert filesystem.write(replacement, b"replacement").ok
+            with filesystem.file(
+                destination, "replacement.txt", access="mutate"
+            ).require() as replacement:
+                assert filesystem.rename(
+                    replacement, destination, "current.txt", replace=True
+                ).ok
+            with filesystem.file(destination, "current.txt").require() as current:
+                assert filesystem.read(current).require() == b"replacement"
+
+            with filesystem.parent("source-tree", access="mutate").require() as source_tree:
+                assert filesystem.rename_directory(
+                    source_tree, destination, "moved-tree"
+                ).ok
+            moved = filesystem.parent("destination/moved-tree")
+            assert moved.ok
+            with moved.require() as moved_tree:
+                with filesystem.file(moved_tree, "payload.txt").require() as payload:
+                    assert filesystem.read(payload).require() == b"payload"
+
+
+@_requires_native_route
+def test_empty_directory_unlink_uses_the_retained_directory_handle(tmp_path: Path) -> None:
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent("empty", create=True, access="mutate").require() as empty:
+            assert filesystem.unlink_directory(empty).ok
+
+    assert not (tmp_path / "empty").exists()
+
+
+@_requires_native_route
+def test_exclusive_directory_creation_refuses_an_existing_final_name(
+    tmp_path: Path,
+) -> None:
+    held_fs = _module()
+    (tmp_path / "existing").mkdir()
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        created = filesystem.parent("fresh", create=True, exclusive=True)
+        assert created.ok
+        with created.require() as fresh:
+            assert fresh.identity.kind == "directory"
+
+        duplicate = filesystem.parent("existing", create=True, exclusive=True)
+        assert not duplicate.ok
+        assert duplicate.error is not None
+        assert duplicate.error.code == "DESTINATION_EXISTS"
+
+        invalid = filesystem.parent("missing/child", create=True, exclusive=True)
+        assert not invalid.ok
+        assert invalid.error is not None
+        assert invalid.error.code == "MISSING"
+
+    assert not (tmp_path / "missing").exists()
+
+
+@_requires_native_route
+def test_retained_directory_name_survives_its_own_child_creation(
+    tmp_path: Path,
+) -> None:
+    held_fs = _module()
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent("container", create=True).require() as container:
+            with filesystem.parent(
+                "container/child",
+                create=True,
+                exclusive=True,
+            ).require():
+                pass
+
+            assert filesystem.validate_directory(container).ok
+
+
+@_requires_native_route
+def test_publish_bytes_is_no_replace_or_expected_identity_replace(tmp_path: Path) -> None:
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent("publish", create=True).require() as parent:
+            created = held_fs.publish_bytes(filesystem, parent, "item.txt", b"one")
+            assert created.ok
+            duplicate = held_fs.publish_bytes(filesystem, parent, "item.txt", b"two")
+            assert not duplicate.ok
+            assert duplicate.error is not None
+            assert duplicate.error.code == "DESTINATION_EXISTS"
+
+            with filesystem.file(parent, "item.txt").require() as current:
+                expected = current.identity
+            replaced = held_fs.publish_bytes(
+                filesystem,
+                parent,
+                "item.txt",
+                b"two",
+                expected_identity=expected,
+            )
+            assert replaced.ok
+            with filesystem.file(parent, "item.txt").require() as current:
+                assert filesystem.read(current).require() == b"two"
+
+
+@_requires_native_route
+def test_create_publish_recovers_when_temporary_unlink_refuses_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held_fs = _module()
+    acquired = held_fs.acquire(tmp_path)
+    assert acquired.ok
+    filesystem = acquired.require()
+    filesystem_type = type(filesystem)
+    real_unlink = filesystem_type.unlink
+    refused = False
+
+    def refuse_first_temporary_unlink(self, file):  # noqa: ANN001
+        nonlocal refused
+        if not refused and file.name.startswith(held_fs.PUBLISH_TEMP_PREFIX):
+            refused = True
+            return held_fs.HeldResult(
+                error=held_fs.HeldFsError("IO_REFUSED", "injected refusal")
+            )
+        return real_unlink(self, file)
+
+    monkeypatch.setattr(
+        filesystem_type,
+        "unlink",
+        refuse_first_temporary_unlink,
+    )
+    with filesystem:
+        with filesystem.parent("publish", create=True).require() as parent:
+            created = held_fs.publish_bytes(filesystem, parent, "item.txt", b"one")
+            assert created.ok
+            with filesystem.file(parent, "item.txt").require() as current:
+                assert current.identity.link_count == 1
+                assert filesystem.read(current).require() == b"one"
+
+    assert refused
+    assert not list((tmp_path / "publish").glob(f"{held_fs.PUBLISH_TEMP_PREFIX}*"))
 
 
 @_requires_native_route
@@ -130,6 +317,27 @@ def test_copy_is_destination_atomic_and_recursive_enumeration_is_ordered(tmp_pat
 
 
 @_requires_native_route
+def test_immediate_children_are_shallow_stable_and_omit_aliases(tmp_path: Path) -> None:
+    held_fs = _module()
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    (directory / "nested.txt").write_text("nested", encoding="utf-8")
+    (tmp_path / "top.txt").write_text("top", encoding="utf-8")
+    alias = tmp_path / "directory-alias"
+    try:
+        alias.symlink_to(directory, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlinks are unavailable")
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent(".").require() as root:
+            records = filesystem.children(root).require()
+
+    assert [record.relative_path for record in records] == ["directory", "top.txt"]
+    assert [record.identity.kind for record in records] == ["directory", "file"]
+
+
+@_requires_native_route
 def test_symlink_parent_and_final_leaf_refuse_without_destination_publication(
     tmp_path: Path,
 ) -> None:
@@ -150,6 +358,22 @@ def test_symlink_parent_and_final_leaf_refuse_without_destination_publication(
             assert leaf.ok is False
             assert leaf.error is not None
             assert leaf.error.code == "UNSAFE_PATH"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO contract")
+def test_held_file_refuses_fifo_without_waiting_for_a_peer(tmp_path: Path) -> None:
+    held_fs = _module()
+    private = tmp_path / "private"
+    private.mkdir()
+    os.mkfifo(private / "control.json")
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent("private").require() as directory:
+            result = filesystem.file(directory, "control.json")
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code == "UNSAFE_PATH"
 
 
 @_requires_native_route

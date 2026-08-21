@@ -13,14 +13,25 @@ import sqlite3
 import sys
 import threading
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
-from . import index_paths, semantic_index, sidecar_store, vecstore
+from . import index_paths, reserved_paths, semantic_index, sidecar_store, vecstore
 from .vector_index_common import vec_gate
 
 log = logging.getLogger(__name__)
+
+
+def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+    with reserved_paths._subsystem_authority_scope("embedding_index"):
+        return _sqlite_connect_owned(database, *args, **kwargs)
+
+
+def _sqlite_connect_owned(
+    database: Any, *args: Any, **kwargs: Any
+) -> sqlite3.Connection:
+    return sqlite3.connect(database, *args, **kwargs)
 
 VECTOR_DIM = 768
 SEMANTIC_UNIT_SCHEMA_VERSION = 3
@@ -192,9 +203,25 @@ class EmbeddingIndex:
         self._vec_failed = False
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
+        with reserved_paths._subsystem_authority_scope("embedding_index"):
+            with reserved_paths._identity_coordination_scope(self.vault_root):
+                return self._connect_owned(path)
+
+    def _connect_owned(self, path: Path | None = None) -> sqlite3.Connection:
         target = path if path is not None else self.path
+        if target == self.path:
+            with reserved_paths._sqlite_owner_target_scope(
+                self.vault_root,
+                target,
+                "embeddings-store",
+                create=True,
+            ) as retained_target:
+                return self._connect_retained(retained_target)
+        return self._connect_retained(target)
+
+    def _connect_retained(self, target: Path) -> sqlite3.Connection:
         sidecar_store.ensure_sidecar_parent(target)
-        conn = sqlite3.connect(target)
+        conn = _sqlite_connect_owned(target)
         sidecar_store.apply_sidecar_pragmas(conn)
         conn.execute(
             """
@@ -251,6 +278,17 @@ class EmbeddingIndex:
                     ("semantic_unit_schema_version", SEMANTIC_UNIT_SCHEMA_VERSION),
                 )
                 sidecar_store.bump_meta(conn, "semantic_unit_generation")
+        if target == self.path:
+            try:
+                reserved_paths._publish_sqlite_owner_family(
+                    self.vault_root,
+                    target,
+                    "embeddings-store",
+                    conn,
+                )
+            except BaseException:
+                conn.close()
+                raise
         return conn
 
     def upsert_file(

@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import re
+import stat
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,9 +66,8 @@ class FrontmatterCache:
         self._signatures.clear()
 
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
+        snapshot = _read_page_snapshot(path, vault_root)
+        if snapshot is None:
             self.entries.pop(path, None)
             self._signatures.pop(path, None)
             return None
@@ -77,28 +77,24 @@ class FrontmatterCache:
                 for cached_path in self.entries
                 if cached_path in self._signatures
             }
-        content = _read_page_bytes(path)
-        if content is None:
-            self.entries.pop(path, None)
-            self._signatures.pop(path, None)
-            return None
+        content = snapshot.data
         # Stat metadata is not content identity: on native Windows ctime is
         # creation time, so a same-size rewrite can preserve this whole tuple.
         # Hash the bytes already needed on a miss and reuse those exact bytes
         # for parsing, keeping the fingerprint and ParsedPage consistent.
         signature = (
-            stat.st_mtime_ns,
-            stat.st_ctime_ns,
-            stat.st_size,
-            stat.st_dev,
-            stat.st_ino,
+            int(snapshot.mtime * 1_000_000_000),
+            0,
+            len(content),
+            snapshot.identity.device,
+            snapshot.identity.inode,
             hashlib.blake2b(content, digest_size=16).digest(),
         )
         cached = self.entries.get(path)
         if cached and self._signatures.get(path) == signature:
             self.entries.move_to_end(path)
             return cached
-        parsed = parse_page(path, stat.st_mtime, vault_root, content=content)
+        parsed = parse_page(path, snapshot.mtime, vault_root, content=content)
         if parsed is not None:
             self.entries[path] = parsed
             self._signatures[path] = signature
@@ -136,30 +132,64 @@ def walk_md(root: Path):
     Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
     duplicates that would otherwise pollute the index and search results.
     """
-    for child in root.iterdir():
-        if child.is_dir():
-            if child.name in EXCLUDED_DIR_NAMES or child.name.startswith(
-                EXCLUDED_DIR_PREFIXES
+    from . import reserved_paths
+
+    anchor = Path(root)
+
+    def walk(current: Path):
+        try:
+            children = tuple(current.iterdir())
+        except OSError:
+            return
+        for child in children:
+            try:
+                relative = child.absolute().relative_to(anchor.absolute()).as_posix()
+            except ValueError:
+                continue
+            if reserved_paths.classify_logical(relative).blocked:
+                continue
+            try:
+                info = child.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode) or bool(
+                getattr(os.path, "isjunction", lambda _path: False)(child)
             ):
                 continue
-            yield from walk_md(child)
-        elif (
-            child.is_file()
-            and child.suffix.lower() == ".md"
-            and ".sync-conflict-" not in child.name
-        ):
-            yield child
+            if stat.S_ISDIR(info.st_mode):
+                if child.name in EXCLUDED_DIR_NAMES or child.name.startswith(
+                    EXCLUDED_DIR_PREFIXES
+                ):
+                    continue
+                yield from walk(child)
+            elif (
+                stat.S_ISREG(info.st_mode)
+                and info.st_nlink == 1
+                and child.suffix.lower() == ".md"
+                and ".sync-conflict-" not in child.name
+            ):
+                yield child
+
+    yield from walk(anchor)
 
 
-def _read_page_bytes(path: Path) -> bytes | None:
+def _read_page_snapshot(path: Path, vault_root: Path):
+    from . import reserved_paths
+
     try:
-        return path.read_bytes()
-    except OSError as e:
+        relative = path.absolute().relative_to(vault_root.absolute()).as_posix()
+        return reserved_paths.read_generic_bytes(vault_root, relative)
+    except (OSError, ValueError, reserved_paths.ReservedPathLeafError) as error:
         if privacy_log.content_private_logging_enabled():
             log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
         else:
-            log.warning("could not read %s: %s", path, e)
+            log.warning("could not read %s: %s", path, error)
         return None
+
+
+def _read_page_bytes(path: Path, vault_root: Path) -> bytes | None:
+    snapshot = _read_page_snapshot(path, vault_root)
+    return snapshot.data if snapshot is not None else None
 
 
 def parse_page(
@@ -171,7 +201,7 @@ def parse_page(
     resolved_relative: str | None = None,
 ) -> ParsedPage | None:
     if content is None:
-        content = _read_page_bytes(path)
+        content = _read_page_bytes(path, vault_root)
         if content is None:
             return None
     try:

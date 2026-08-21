@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import semantic_index, semantic_writes
+from . import reserved_paths, semantic_index, semantic_writes
 from .kbdir import kb_dirname
 from .vault import (
     PathGuard,
@@ -70,6 +70,35 @@ class MoveFileError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
+def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
+    try:
+        reserved_paths.move_generic_path(
+            vault_root,
+            old_rel,
+            new_rel,
+            source_kind="file",
+        )
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "CROSS_DEVICE":
+            raise MoveFileError(
+                "CROSS_DEVICE_MOVE",
+                "file moves require one filesystem",
+            ) from None
+        if error.code == "DESTINATION_EXISTS":
+            raise MoveFileError("DEST_EXISTS", "destination already exists") from None
+        if error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise MoveFileError(
+                "RESERVED_PATH",
+                "path is reserved for its owning subsystem",
+            ) from None
+        raise MoveFileError("MOVE_FAILED", "held file move was refused") from None
+
+
 def move_file(
     vault_root: Path,
     *,
@@ -99,11 +128,44 @@ def move_file(
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
     try:
+        reserved_paths.inspect_generic_file(vault_root, old_rel)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise MoveFileError(
+                "RESERVED_PATH",
+                "path is reserved for its owning subsystem",
+            ) from None
+        raise MoveFileError("MOVE_FAILED", "held file acquisition was refused") from None
+    try:
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
 
-    if new_abs.exists():
+    try:
+        reserved_paths.inspect_generic_path(vault_root, new_rel)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            pass
+        elif error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise MoveFileError(
+                "RESERVED_PATH",
+                "destination is reserved for its owning subsystem",
+            ) from None
+        else:
+            raise MoveFileError(
+                "MOVE_FAILED", "held destination acquisition was refused"
+            ) from None
+    else:
         raise MoveFileError(
             code="DEST_EXISTS",
             reason=(
@@ -328,15 +390,7 @@ def move_file(
                 bound_destination: PathGuard,
             ) -> None:
                 bound_destination.recheck(vault_root)
-                try:
-                    old_abs.rename(new_abs)
-                except OSError as error:
-                    raise MoveFileError(
-                        code="MOVE_FAILED",
-                        reason=(
-                            f"could not rename {old_rel!r} to {new_rel!r}: {error}"
-                        ),
-                    ) from error
+                _held_rename(vault_root, old_rel, new_rel)
                 try:
                     destination_writes = (
                         [PlannedWrite(path=new_abs, content=moved_source)]
@@ -372,8 +426,8 @@ def move_file(
                         new_rel,
                     )
                     try:
-                        new_abs.rename(old_abs)
-                    except OSError as rollback_error:
+                        _held_rename(vault_root, new_rel, old_rel)
+                    except MoveFileError as rollback_error:
                         raise RuntimeError(
                             f"move link rewrite failed ({error}); rename rollback also "
                             f"failed: {rollback_error}"
@@ -389,14 +443,7 @@ def move_file(
         except PathGuardError as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
     else:
-        new_abs.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            old_abs.rename(new_abs)
-        except OSError as e:
-            raise MoveFileError(
-                code="MOVE_FAILED",
-                reason=f"could not rename {old_rel!r} to {new_rel!r}: {e}",
-            ) from e
+        _held_rename(vault_root, old_rel, new_rel)
         try:
             if writes:
                 batch_atomic_write(writes, vault_root=vault_root)
@@ -405,8 +452,8 @@ def move_file(
                 "move_file: link-update batch failed for %s -> %s", old_rel, new_rel
             )
             try:
-                new_abs.rename(old_abs)
-            except OSError as rollback_error:
+                _held_rename(vault_root, new_rel, old_rel)
+            except MoveFileError as rollback_error:
                 raise RuntimeError(
                     f"move link rewrite failed ({e}); rename rollback also failed: "
                     f"{rollback_error}"

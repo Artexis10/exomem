@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import __version__
+from exomem import __version__, reserved_paths
 from exomem import hosted_portability as portability
 
 CREATED_AT = "2026-07-12T12:00:00+00:00"
@@ -144,6 +144,41 @@ def test_versioned_artifact_classification_registry(path: str, expected: str) ->
     assert classification.artifact_class.value == expected
     assert portability.classification_registry()["version"] == 1
     assert portability.classification_registry()["rules"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "Knowledge Base/_Governance/rules/private.yaml",
+        "Knowledge Base/_Consolidation/runs/run.json",
+        "Knowledge Base/.governance.sqlite-journal",
+        "Knowledge Base/.authorization-projections/generation/rows.sqlite",
+        "Knowledge Base/..review-state.json.abc123_4.tmp",
+        "Knowledge Base/.lexical.sqlite.rebuild-"
+        + "1" * 32
+        + ".tmp-wal",
+        "Knowledge Base/.lexical.sqlite-shm.quarantine-" + "2" * 32,
+        "Knowledge Base/.graph-rebuild-" + "3" * 64 + "-" + "4" * 24 + ".sqlite-shm",
+    ],
+)
+def test_portability_consumes_security_registry_and_never_defines_it(
+    path: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+    original = reserved_paths.classify_logical
+
+    def classify(value: object) -> reserved_paths.PathClassification:
+        observed.append(os.fspath(value))
+        return original(value)
+
+    monkeypatch.setattr(reserved_paths, "classify_logical", classify)
+
+    classification = portability.classify_artifact(path)
+
+    assert observed == [path]
+    assert classification.artifact_class is not portability.ArtifactClass.CANONICAL
+    assert portability.classification_registry()["internal_state_registry_version"] == 1
 
 
 def test_graph_commit_receipt_classification_uses_configured_kb_dirname(
@@ -351,6 +386,33 @@ def test_export_rejects_a_symlink_without_following_it(tmp_path: Path) -> None:
 
     assert _error_code(exc) == "UNSAFE_SYMLINK"
     assert not (tmp_path / "artifacts").exists() or not list((tmp_path / "artifacts").glob("*.zip"))
+
+
+def test_export_rejects_private_hardlink_alias_before_manifest_or_archive(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _seed_vault(vault, "safe")
+    private = vault / "Knowledge Base" / ".governance.sqlite"
+    private.write_bytes(b"private governance state")
+    alias = vault / "Knowledge Base" / "Evidence" / "ordinary.bin"
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(private, alias)
+    except OSError:
+        pytest.skip("hard links are unavailable on this platform")
+
+    with pytest.raises(portability.PortabilityError) as exc:
+        portability.export_quiesced_vault(
+            vault,
+            tmp_path / "artifacts",
+            context=_context(),
+        )
+
+    assert _error_code(exc) == "UNSAFE_SOURCE_ENTRY"
+    assert not (tmp_path / "artifacts").exists() or not list(
+        (tmp_path / "artifacts").glob("*.zip")
+    )
 
 
 def test_archive_verification_rejects_tampering(tmp_path: Path) -> None:

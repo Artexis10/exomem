@@ -3544,6 +3544,13 @@ def invoke_command(
     **kwargs: Any,
 ) -> Any:
     from .commands import invocation_is_read_only, validate_process_media_operation
+    from .reserved_paths import (
+        _owner_authority_scope,
+        mutation_remediation,
+        reserved_preflight,
+    )
+
+    reserved_hit = reserved_preflight(command, kwargs)
 
     if command.name == "edit_memory":
         from .edit_operations import normalize_edit_surface_arguments
@@ -3570,12 +3577,23 @@ def invoke_command(
     except SelectorCoverageError as error:
         # Unknown selectors must first take the conservative writer/admission
         # path, but must never execute a leaf that could return an unreceipted
-        # future read representation. process_media already owns a stable
-        # public input error, so preserve it before entering the writer path.
-        if command.name == "process_media":
-            validate_process_media_operation(kwargs.get("operation", "process"))
+        # future read representation.
         selector_error = error
         read_only = False
+
+    if reserved_hit is not None:
+        if read_only:
+            raise OpError("NOT_FOUND", "path does not exist")
+        raise OpError(
+            "RESERVED_PATH",
+            "path is reserved for its owning subsystem",
+            mutation_remediation(reserved_hit.classification.descriptor_id),
+        )
+
+    # process_media already owns a stable public input error. Preserve it once
+    # reserved-path routing has had its required first refusal opportunity.
+    if selector_error is not None and command.name == "process_media":
+        validate_process_media_operation(kwargs.get("operation", "process"))
 
     dispatch_command = command
     if selector_error is not None:
@@ -3589,17 +3607,18 @@ def invoke_command(
         dispatch_command = replace(command, leaf=reject_uncovered_selector)
 
     def _invoke() -> Any:
-        return get_manager().invoke(
-            dispatch_command,
-            injected,
-            kwargs,
-            read_only=read_only,
-            idempotency_key=idempotency_key,
-            public_idempotency_key=public_idempotency_key,
-            idempotency_principal_scope=idempotency_principal_scope,
-            implicit_idempotency_scope=implicit_idempotency_scope,
-            mutation_request_id=mutation_request_id,
-        )
+        with _owner_authority_scope(command.name):
+            return get_manager().invoke(
+                dispatch_command,
+                injected,
+                kwargs,
+                read_only=read_only,
+                idempotency_key=idempotency_key,
+                public_idempotency_key=public_idempotency_key,
+                idempotency_principal_scope=idempotency_principal_scope,
+                implicit_idempotency_scope=implicit_idempotency_scope,
+                mutation_request_id=mutation_request_id,
+            )
 
     if not injected or not is_vault_root(injected[0]):
         return _invoke()

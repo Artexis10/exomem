@@ -32,8 +32,18 @@ _SYS_OPENAT2 = 437
 _DIRECTORY_FLAGS = (
     os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
-_READ_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-_WRITE_FLAGS = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+_WRITE_FLAGS = (
+    os.O_RDWR
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
 
 
 class _OpenHow(Structure):
@@ -61,16 +71,16 @@ def _same_object(left: StableIdentity, right: StableIdentity) -> bool:
 
 def _error(error: OSError) -> HeldFsError:
     if error.errno == errno.EXDEV:
-        return HeldFsError("CROSS_DEVICE", "operation requires one filesystem")
+        return HeldFsError("CROSS_DEVICE", "operation requires one filesystem", error)
     if error.errno in {errno.ELOOP, errno.ENOTDIR}:
-        return HeldFsError("UNSAFE_PATH", "unsafe filesystem object")
+        return HeldFsError("UNSAFE_PATH", "unsafe filesystem object", error)
     if error.errno == errno.ESTALE:
-        return HeldFsError("IDENTITY_CHANGED", "held filesystem identity changed")
+        return HeldFsError("IDENTITY_CHANGED", "held filesystem identity changed", error)
     if error.errno == errno.EEXIST:
-        return HeldFsError("DESTINATION_EXISTS", "destination already exists")
+        return HeldFsError("DESTINATION_EXISTS", "destination already exists", error)
     if error.errno == errno.ENOENT:
-        return HeldFsError("MISSING", "filesystem object is unavailable")
-    return HeldFsError("IO_REFUSED", "held filesystem operation was refused")
+        return HeldFsError("MISSING", "filesystem object is unavailable", error)
+    return HeldFsError("IO_REFUSED", "held filesystem operation was refused", error)
 
 
 def _invalid() -> HeldFsError:
@@ -124,22 +134,55 @@ def _open_relative(parent: int, name: str, flags: int, mode: int = 0o600) -> int
 
 
 class PosixHeldDirectory(HeldDirectory):
-    def __init__(self, filesystem: PosixHeldFilesystem, descriptor: int) -> None:
+    def __init__(
+        self,
+        filesystem: PosixHeldFilesystem,
+        descriptor: int,
+        *,
+        parent_descriptor: int | None = None,
+        parent_identity: StableIdentity | None = None,
+        name: str | None = None,
+        access: str = "read",
+    ) -> None:
         self.filesystem = filesystem
         self.descriptor = descriptor
+        self.parent_descriptor = parent_descriptor
+        self.parent_identity = parent_identity
+        self.name = name
+        self.access = access
         self.identity = _identity(os.fstat(descriptor))
         self.closed = False
+        self.named = name is not None
 
     def check(self) -> None:
-        if self.closed:
+        if self.closed or self.filesystem.closed:
             raise OSError(errno.ESTALE, "held directory is closed")
         current = _identity(os.fstat(self.descriptor))
         if not _same_object(current, self.identity) or current.kind != "directory":
             raise OSError(errno.ESTALE, "held directory changed")
+        if self.parent_descriptor is not None and (
+            self.parent_identity is None
+            or not _same_object(
+                _identity(os.fstat(self.parent_descriptor)), self.parent_identity
+            )
+        ):
+            raise OSError(errno.ESTALE, "held directory parent changed")
+
+    def check_name(self) -> None:
+        self.check()
+        if not self.named or self.parent_descriptor is None or self.name is None:
+            raise OSError(errno.ESTALE, "held directory name is unavailable")
+        current = _identity(
+            os.stat(self.name, dir_fd=self.parent_descriptor, follow_symlinks=False)
+        )
+        if not _same_object(current, self.identity):
+            raise OSError(errno.ESTALE, "held directory name identity changed")
 
     def close(self) -> None:
         if not self.closed:
             os.close(self.descriptor)
+            if self.parent_descriptor is not None:
+                os.close(self.parent_descriptor)
             self.closed = True
 
 
@@ -217,27 +260,67 @@ class PosixHeldFilesystem(HeldFilesystem):
         file.check()
         return file
 
-    def parent(self, relative: str, *, create: bool = False) -> HeldResult[HeldDirectory]:
+    def parent(
+        self,
+        relative: str,
+        *,
+        create: bool = False,
+        exclusive: bool = False,
+        access: str = "read",
+    ) -> HeldResult[HeldDirectory]:
         parts = _parts(relative)
-        if parts is None:
+        if parts is None or access not in {"read", "mutate"}:
+            return HeldResult(error=_invalid())
+        if exclusive and (not create or not parts):
             return HeldResult(error=_invalid())
         if self.closed:
             return HeldResult(error=HeldFsError("IO_REFUSED", "held root is closed"))
         descriptor = os.dup(self.descriptor)
+        parent_descriptor: int | None = None
         try:
-            for part in parts:
-                try:
-                    child = _open_relative(descriptor, part, _DIRECTORY_FLAGS)
-                except FileNotFoundError:
-                    if not create:
-                        raise
+            for index, part in enumerate(parts):
+                final = index == len(parts) - 1
+                if exclusive and final:
                     os.mkdir(part, 0o700, dir_fd=descriptor)
-                    child = _open_relative(descriptor, part, _DIRECTORY_FLAGS)
-                os.close(descriptor)
+                    try:
+                        child = _open_relative(descriptor, part, _DIRECTORY_FLAGS)
+                    except BaseException:
+                        try:
+                            os.rmdir(part, dir_fd=descriptor)
+                        except OSError:
+                            pass
+                        raise
+                else:
+                    try:
+                        child = _open_relative(descriptor, part, _DIRECTORY_FLAGS)
+                    except FileNotFoundError:
+                        if not create or exclusive:
+                            raise
+                        os.mkdir(part, 0o700, dir_fd=descriptor)
+                        child = _open_relative(descriptor, part, _DIRECTORY_FLAGS)
+                if index == len(parts) - 1:
+                    parent_descriptor = descriptor
+                else:
+                    os.close(descriptor)
                 descriptor = child
-            return HeldResult(value=PosixHeldDirectory(self, descriptor))
+            return HeldResult(
+                value=PosixHeldDirectory(
+                    self,
+                    descriptor,
+                    parent_descriptor=parent_descriptor,
+                    parent_identity=(
+                        _identity(os.fstat(parent_descriptor))
+                        if parent_descriptor is not None
+                        else None
+                    ),
+                    name=parts[-1] if parts else None,
+                    access=access,
+                )
+            )
         except OSError as error:
             os.close(descriptor)
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
             return HeldResult(error=_error(error))
 
     def file(
@@ -284,6 +367,20 @@ class PosixHeldFilesystem(HeldFilesystem):
                 os.close(parent_descriptor)
             return HeldResult(error=_error(error))
 
+    def validate_directory(
+        self,
+        directory: HeldDirectory,
+        *,
+        require_name: bool = True,
+    ) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(directory)
+            if require_name:
+                checked.check_name()
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
     def read(self, file: HeldFile) -> HeldResult[bytes]:
         try:
             checked = self._check_file(file)
@@ -315,7 +412,12 @@ class PosixHeldFilesystem(HeldFilesystem):
             return HeldResult(error=_error(error))
 
     def _destination(
-        self, source: PosixHeldFile, destination: HeldDirectory, destination_leaf: str
+        self,
+        source: PosixHeldFile,
+        destination: HeldDirectory,
+        destination_leaf: str,
+        *,
+        replace: bool,
     ) -> PosixHeldDirectory:
         if source.access != "mutate" or not _leaf(destination_leaf):
             raise OSError(errno.ELOOP, "invalid held mutation")
@@ -328,19 +430,80 @@ class PosixHeldFilesystem(HeldFilesystem):
         if destination.filesystem is not self:
             raise OSError(errno.ESTALE, "destination belongs to another root")
         try:
-            os.stat(destination_leaf, dir_fd=destination.descriptor, follow_symlinks=False)
+            existing = os.stat(
+                destination_leaf,
+                dir_fd=destination.descriptor,
+                follow_symlinks=False,
+            )
         except FileNotFoundError:
             pass
         else:
-            raise OSError(errno.EEXIST, "destination exists")
+            if not replace:
+                raise OSError(errno.EEXIST, "destination exists")
+            if not stat.S_ISREG(existing.st_mode):
+                raise OSError(errno.ELOOP, "replacement destination is unsafe")
         return destination
 
     def rename(
-        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str
+        self,
+        source: HeldFile,
+        destination_parent: HeldDirectory,
+        destination_leaf: str,
+        *,
+        replace: bool = False,
     ) -> HeldResult[None]:
         try:
             checked = self._check_file(source)
-            destination = self._destination(checked, destination_parent, destination_leaf)
+            destination = self._destination(
+                checked,
+                destination_parent,
+                destination_leaf,
+                replace=replace,
+            )
+            operation = os.replace if replace else os.rename
+            operation(
+                checked.name,
+                destination_leaf,
+                src_dir_fd=checked.parent_descriptor,
+                dst_dir_fd=destination.descriptor,
+            )
+            checked.named = False
+            os.fsync(checked.parent_descriptor)
+            if destination.descriptor != checked.parent_descriptor:
+                os.fsync(destination.descriptor)
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def rename_directory(
+        self,
+        source: HeldDirectory,
+        destination_parent: HeldDirectory,
+        destination_leaf: str,
+    ) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(source)
+            if (
+                checked.access != "mutate"
+                or not _leaf(destination_leaf)
+                or checked.parent_descriptor is None
+                or checked.name is None
+            ):
+                raise OSError(errno.ELOOP, "invalid held directory mutation")
+            checked.check_name()
+            destination = self._check_directory(destination_parent)
+            if checked.identity.device != destination.identity.device:
+                raise OSError(errno.EXDEV, "parents are on different devices")
+            try:
+                os.stat(
+                    destination_leaf,
+                    dir_fd=destination.descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise OSError(errno.EEXIST, "destination exists")
             os.rename(
                 checked.name,
                 destination_leaf,
@@ -348,6 +511,9 @@ class PosixHeldFilesystem(HeldFilesystem):
                 dst_dir_fd=destination.descriptor,
             )
             checked.named = False
+            os.fsync(checked.parent_descriptor)
+            if destination.descriptor != checked.parent_descriptor:
+                os.fsync(destination.descriptor)
             return HeldResult(value=None)
         except OSError as error:
             return HeldResult(error=_error(error))
@@ -361,7 +527,12 @@ class PosixHeldFilesystem(HeldFilesystem):
             )
         try:
             checked = self._check_file(source)
-            destination = self._destination(checked, destination_parent, destination_leaf)
+            destination = self._destination(
+                checked,
+                destination_parent,
+                destination_leaf,
+                replace=False,
+            )
             os.link(
                 checked.name,
                 destination_leaf,
@@ -382,6 +553,23 @@ class PosixHeldFilesystem(HeldFilesystem):
             checked.check_name()
             os.unlink(checked.name, dir_fd=checked.parent_descriptor)
             checked.named = False
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def unlink_directory(self, directory: HeldDirectory) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(directory)
+            if (
+                checked.access != "mutate"
+                or checked.parent_descriptor is None
+                or checked.name is None
+            ):
+                raise OSError(errno.ELOOP, "invalid held directory mutation")
+            checked.check_name()
+            os.rmdir(checked.name, dir_fd=checked.parent_descriptor)
+            checked.named = False
+            os.fsync(checked.parent_descriptor)
             return HeldResult(value=None)
         except OSError as error:
             return HeldResult(error=_error(error))
@@ -450,6 +638,30 @@ class PosixHeldFilesystem(HeldFilesystem):
             checked = self._check_directory(parent)
             records: list[SagaRecord] = []
             self._enumerate(checked.descriptor, "", records)
+            return HeldResult(value=tuple(records))
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def children(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:
+        try:
+            checked = self._check_directory(parent)
+            with os.scandir(os.dup(checked.descriptor)) as children:
+                names = sorted(child.name for child in children)
+            records: list[SagaRecord] = []
+            for name in names:
+                info = os.stat(name, dir_fd=checked.descriptor, follow_symlinks=False)
+                observed = _identity(info)
+                if observed.kind not in {"file", "directory"}:
+                    continue
+                flags = _DIRECTORY_FLAGS if observed.kind == "directory" else _READ_FLAGS
+                child = _open_relative(checked.descriptor, name, flags)
+                try:
+                    retained = _identity(os.fstat(child))
+                    if retained != observed:
+                        raise OSError(errno.ESTALE, "child identity changed")
+                    records.append(SagaRecord(name, retained))
+                finally:
+                    os.close(child)
             return HeldResult(value=tuple(records))
         except OSError as error:
             return HeldResult(error=_error(error))
@@ -563,8 +775,10 @@ def probe(root: Path) -> Capabilities:
     return _probe(root)
 
 
-def acquire(root: Path) -> HeldResult[HeldFilesystem]:
-    capability = probe(root)
+def acquire(
+    root: Path, *, capability: Capabilities | None = None
+) -> HeldResult[HeldFilesystem]:
+    capability = capability or probe(root)
     if not capability.relative_operations:
         return HeldResult(
             error=HeldFsError(

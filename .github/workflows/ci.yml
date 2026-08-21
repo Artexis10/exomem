@@ -133,16 +133,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "failed to verify per-volume 8.3 alias creation"
           }
-      - name: Native held-filesystem gate
+      - name: Native held-filesystem and reserved-path gate
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           uv run --frozen --python 3.13 python -m pytest -q
           tests/test_held_fs_contract.py
           tests/test_held_fs_windows.py
+          tests/test_reserved_admin_paths.py
+          tests/test_mutation_concurrency.py
+          tests/test_windows_path_alias_guard.py
           --session-timeout=600
 
   tui:

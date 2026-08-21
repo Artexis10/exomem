@@ -23,7 +23,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, privacy_log
+from . import access, privacy_log, reserved_paths
 from . import find as find_module
 from .kbdir import kb_prefix
 from .vault import (
@@ -179,26 +179,27 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
             reason=f"file does not exist: {missing_path}",
         )
     try:
-        snapshot = _read_prepared_snapshot(resolution.resolved)
-    except FileNotFoundError:
-        snapshot = None
-    except _SnapshotChanged as error:
-        raise GetError(code="UNREADABLE", reason=str(error)) from None
-    except OSError as error:
-        raise GetError(code="UNREADABLE", reason=str(error)) from error
-    if snapshot is None:
-        raise GetError(
-            code="NOT_FOUND",
-            reason=f"file does not exist: {missing_path}",
-        )
-    raw, snapshot_stat = snapshot
+        snapshot = reserved_paths.read_generic_bytes(vault_root, resolution.relative)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "MISSING",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise GetError(
+                code="NOT_FOUND",
+                reason=f"file does not exist: {missing_path}",
+            ) from None
+        raise GetError(code="UNREADABLE", reason="file could not be read safely") from None
     return PreparedPageRead(
         target=resolution.resolved,
         path=resolution.relative,
         missing_path=missing_path,
         resolved_relative=resolution.resolved_relative,
-        raw=raw,
-        mtime=snapshot_stat.st_mtime,
+        raw=snapshot.data,
+        mtime=snapshot.mtime,
     )
 
 
