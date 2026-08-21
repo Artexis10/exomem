@@ -1043,6 +1043,10 @@ def _is_sqlite_contention(error: BaseException) -> bool:
     later repair until someone runs a reconcile. A busy sidecar must not buy
     that verdict -- it is the expected state whenever a rebuild is publishing.
     """
+    from . import reserved_paths
+
+    if isinstance(error, reserved_paths.SqliteIdentityBusyError):
+        return True
     if not isinstance(error, sqlite3.OperationalError):
         return False
     text = str(error).lower()

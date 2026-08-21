@@ -159,6 +159,10 @@ class ReservedPathLeafError(Exception):
         return self.code
 
 
+class SqliteIdentityBusyError(RuntimeError):
+    """A live SQLite family changed while its retained identities were sampled."""
+
+
 _OWNER_AUTHORITY_SEAL = object()
 
 
@@ -2001,17 +2005,20 @@ def _publish_sqlite_owner_family(
                             "SQLite identity publication parent changed"
                         )
                     return
-                if (
-                    result.error is None
-                    or result.error.code not in {"MISSING", "IDENTITY_CHANGED"}
-                    or attempt == 2
-                ):
+                if result.error is None or result.error.code not in {
+                    "MISSING",
+                    "IDENTITY_CHANGED",
+                }:
                     raise RuntimeError(
                         "SQLite WAL identity family is not completely reachable"
                     )
                 if not _owner_directory_is_current(filesystem, parent):
                     raise RuntimeError(
                         "SQLite identity publication parent changed"
+                    )
+                if attempt == 2:
+                    raise SqliteIdentityBusyError(
+                        "SQLite WAL identity family changed during publication"
                     )
 
             family: dict[str, held_fs.StableIdentity] = {}
@@ -2567,9 +2574,9 @@ def _remove_owner_file(
                     removed = filesystem.unlink(file)
                     if not removed.ok:
                         raise OSError("private remove was refused")
-                    flushed = filesystem.flush_directory(parent)
-                    if not flushed.ok:
-                        raise OSError("private remove parent flush was refused")
+                flushed = filesystem.flush_directory(parent)
+                if not flushed.ok:
+                    raise OSError("private remove parent flush was refused")
                 current = filesystem.file(parent, relative.name)
                 if current.ok:
                     current.require().close()

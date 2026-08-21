@@ -89,6 +89,58 @@ def _held_directory_probe(
             return type(filesystem), directory.identity
 
 
+def test_windows_private_unlink_closes_delete_pending_handle_before_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = graph_sync.floor_path(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"floor")
+
+    acquired = held_fs.acquire(tmp_path)
+    assert acquired.ok
+    with acquired.require() as filesystem:
+        parent_result = filesystem.parent("Knowledge Base", access="mutate")
+        assert parent_result.ok
+        with parent_result.require() as parent:
+            file_result = filesystem.file(parent, target.name, access="mutate")
+            assert file_result.ok
+            with file_result.require() as file:
+                filesystem_type = type(filesystem)
+                file_type = type(file)
+
+    events: list[str] = []
+    original_unlink = filesystem_type.unlink
+    original_close = file_type.close
+    original_flush = filesystem_type.flush_directory
+
+    def observe_unlink(filesystem, file):  # noqa: ANN001
+        events.append("unlink")
+        return original_unlink(filesystem, file)
+
+    def observe_close(file):  # noqa: ANN001
+        events.append("close")
+        return original_close(file)
+
+    def observe_flush(filesystem, directory):  # noqa: ANN001
+        events.append("flush")
+        return original_flush(filesystem, directory)
+
+    monkeypatch.setattr(filesystem_type, "unlink", observe_unlink)
+    monkeypatch.setattr(file_type, "close", observe_close)
+    monkeypatch.setattr(filesystem_type, "flush_directory", observe_flush)
+
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        assert reserved_paths._remove_owner_file(
+            tmp_path,
+            target,
+            "graph-handoff",
+        )
+
+    assert events == ["unlink", "close", "flush"]
+    assert not target.exists()
+
+
 def _absolute_move_paths(
     vault_root: Path,
     source: object,
