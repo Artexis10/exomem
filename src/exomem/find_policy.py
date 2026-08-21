@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import math
 import re
 from collections.abc import Callable
@@ -103,6 +104,42 @@ def apply_status_demotion(
     return adjusted
 
 
+def multiplier_bounds(
+    config: RankingConfig,
+    *,
+    prefer_compiled: bool,
+    prefer_active: bool,
+    temporal_active: bool,
+    usage_active: bool,
+) -> tuple[float, float]:
+    """(min, max) of the product of every ACTIVE post-RRF multiplier.
+
+    Each factor is bounded by a declared config value, which is what makes the
+    bounded pass below exact rather than approximate:
+
+    * ``type_multiplier``   -> ``compiled_boost`` high, ``source_penalty`` low
+    * ``status_multiplier`` -> 1.0 high, ``superseded_penalty`` low (penalty only)
+    * ``recency_multiplier``-> ``temporal_boost`` at zero days, 1.0 at infinity
+    * ``usage_multiplier``  -> ``usage_boost`` high, 1.0 low (never a penalty)
+
+    An inactive factor contributes exactly 1.0 to both ends.
+    """
+    low = high = 1.0
+    if prefer_compiled:
+        low *= min(config.compiled_boost, config.source_penalty, 1.0)
+        high *= max(config.compiled_boost, config.source_penalty, 1.0)
+    if prefer_active:
+        low *= min(config.superseded_penalty, 1.0)
+        high *= max(config.superseded_penalty, 1.0)
+    if temporal_active:
+        low *= min(config.temporal_boost, 1.0)
+        high *= max(config.temporal_boost, 1.0)
+    if usage_active:
+        low *= min(config.usage_boost, 1.0)
+        high *= max(config.usage_boost, 1.0)
+    return low, high
+
+
 def apply_post_rrf_multipliers(
     fused: list[tuple[str, float]],
     query: str,
@@ -114,8 +151,27 @@ def apply_post_rrf_multipliers(
     page_of: PageOf,
     usage_map: dict[str, float] | None = None,
     evidence_out: dict[str, list[dict[str, float | str]]] | None = None,
+    top_n: int | None = None,
 ) -> list[tuple[str, float]]:
-    """All post-RRF multiplicative boosts in one pass with one final sort."""
+    """All post-RRF multiplicative boosts in one pass with one final sort.
+
+    Every factor needs the candidate's page, and `page_of` on a cold page is a
+    file read plus a policy admission check — so an unbounded pass loads the
+    whole fused set to rank it. On a 2.4k-page vault that measured ~500 pages
+    loaded to return 10 results, and was the single largest read-path term
+    (#283).
+
+    `top_n` bounds that work WITHOUT changing the answer. Candidates arrive in
+    descending RRF order, so once `top_n` results are in hand, a candidate whose
+    best possible adjusted score cannot reach the current `top_n`-th score can
+    be skipped — and so can every candidate after it, because their raw scores
+    are no lower. `multiplier_bounds` supplies "best possible" exactly.
+
+    The first `top_n` entries of the result are therefore byte-identical to an
+    unbounded pass. Entries beyond `top_n` keep raw RRF order and raw scores,
+    since by construction nothing there can enter the top. Pass `top_n=None`
+    (the default) for the full pass — every existing caller keeps its behaviour.
+    """
     temporal_active = temporal and config.temporal_boost != 1.0 and is_temporal_query(query)
     usage_active = bool(usage_map)
     if not (prefer_compiled or prefer_active or temporal_active or usage_active):
@@ -123,8 +179,33 @@ def apply_post_rrf_multipliers(
     if usage_active:
         from . import usage as usage_module
     today = date.today() if temporal_active else None
+    # Evidence must describe every candidate a trace will show, so an explain
+    # request takes the full pass. Bounding it would leave the tail with no
+    # multiplier chain and make the trace lie by omission.
+    bounded = top_n is not None and top_n > 0 and evidence_out is None
+    low_mult = high_mult = 1.0
+    if bounded:
+        low_mult, high_mult = multiplier_bounds(
+            config,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            temporal_active=temporal_active,
+            usage_active=usage_active,
+        )
+    cutoff: list[float] = []  # min-heap of the best `top_n` adjusted scores
     adjusted: list[tuple[str, float]] = []
-    for path, score in fused:
+    for index, (path, score) in enumerate(fused):
+        if bounded and len(cutoff) >= top_n:
+            # Upper bound of `score * m` over m in [low, high]. Written as a max
+            # of both products rather than `score * high` so a negative raw
+            # score (a negative lane weight would produce one) bounds correctly
+            # instead of inverting.
+            reachable = max(score * low_mult, score * high_mult)
+            # Strict `<` only: on equality the loser could still win the
+            # `(-score, path)` tie-break, so an equal candidate must be scored.
+            if reachable < cutoff[0]:
+                adjusted.sort(key=lambda t: (-t[1], t[0]))
+                return adjusted + list(fused[index:])
         page = page_of(path)
         chain: list[dict[str, float | str]] | None = (
             [] if evidence_out is not None else None
@@ -205,6 +286,15 @@ def apply_post_rrf_multipliers(
             assert chain is not None
             evidence_out[path] = chain
         adjusted.append((path, score))
+        if bounded:
+            # `cutoff[0]` is the weakest of the best `top_n` adjusted scores
+            # seen so far. It only ever rises, which is what makes the early
+            # return above safe for every remaining candidate rather than only
+            # the next one.
+            if len(cutoff) < top_n:
+                heapq.heappush(cutoff, score)
+            elif score > cutoff[0]:
+                heapq.heapreplace(cutoff, score)
     adjusted.sort(key=lambda t: (-t[1], t[0]))
     return adjusted
 
