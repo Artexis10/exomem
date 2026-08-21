@@ -3445,6 +3445,29 @@ def _read_bounded_guarded_snapshot(
             os.close(descriptor)
 
 
+def _read_bounded_guarded_snapshot_tolerating_transient_sharing(
+    vault_root: Path, target: str, limit: int
+) -> tuple[bytes, PathGuard]:
+    """Retry a fresh Windows snapshot after a short-lived sharing refusal."""
+    for attempt in range(_REPLACE_SHARING_ATTEMPTS):
+        try:
+            return _read_bounded_guarded_snapshot(vault_root, target, limit)
+        except PathGuardError as error:
+            cause = error.__cause__
+            if (
+                not _uses_windows_guarded_reader()
+                or error.code != "PATH_GUARD_IO"
+                or not isinstance(cause, PermissionError)
+                or getattr(cause, "winerror", None) not in _WINDOWS_SHARING_ERRORS
+                or attempt == _REPLACE_SHARING_ATTEMPTS - 1
+            ):
+                raise
+            # The failed snapshot has already closed its entire descriptor
+            # chain. Reacquire from the vault root; never reuse a stale guard.
+            time.sleep(_REPLACE_SHARING_SLEEP_SECONDS)
+    raise AssertionError("unreachable: the final attempt re-raises")  # pragma: no cover
+
+
 def _uses_windows_guarded_reader() -> bool:
     """Small dispatch seam that tests can override without mutating global ``os.name``."""
     return os.name == "nt"
@@ -3573,7 +3596,9 @@ def read_bounded_guarded_bytes(
     """Read one bounded regular vault file and bind its exact descriptor snapshot."""
     if type(limit) is not int or limit < 0:
         raise PathGuardError("PATH_GUARD_INVALID", "guarded read limit is invalid")
-    data, guard = _read_bounded_guarded_snapshot(Path(vault_root), target, limit)
+    data, guard = _read_bounded_guarded_snapshot_tolerating_transient_sharing(
+        Path(vault_root), target, limit
+    )
     if expected_hash is not None and guard.expected_content_hash != expected_hash:
         raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
     guard.recheck(Path(vault_root))

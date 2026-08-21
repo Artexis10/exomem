@@ -157,6 +157,43 @@ def test_preparing_a_bounded_content_guard_preserves_its_read_limit(
         prepared[0].recheck(tmp_path)
 
 
+def test_guarded_reader_retries_a_transient_windows_sharing_refusal_from_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "guarded.md"
+    target.write_bytes(b"bounded bytes")
+    expected = vault._read_bounded_guarded_snapshot(tmp_path, "guarded.md", 64)
+    attempts = 0
+
+    def transient_snapshot(
+        vault_root: Path, relative: str, limit: int
+    ) -> tuple[bytes, vault.PathGuard]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            sharing = PermissionError("transient Windows sharing refusal")
+            sharing.winerror = 32
+            raise vault.PathGuardError(
+                "PATH_GUARD_IO", "guarded content could not be opened"
+            ) from sharing
+        assert vault_root == tmp_path
+        assert relative == "guarded.md"
+        assert limit == 64
+        return expected
+
+    monkeypatch.setattr(vault, "_uses_windows_guarded_reader", lambda: True)
+    monkeypatch.setattr(vault, "_read_bounded_guarded_snapshot", transient_snapshot)
+    monkeypatch.setattr(vault.time, "sleep", lambda _seconds: None)
+
+    data, guard = vault._read_bounded_guarded_snapshot_tolerating_transient_sharing(
+        tmp_path, "guarded.md", 64
+    )
+
+    assert data == b"bounded bytes"
+    assert guard is expected[1]
+    assert attempts == 2
+
+
 def test_batch_write_refuses_portably_colliding_destinations(tmp_path: Path) -> None:
     with pytest.raises(vault.PathGuardError) as raised:
         vault.batch_atomic_write(

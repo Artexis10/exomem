@@ -12,10 +12,14 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+
+from exomem import vault
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows NTFS")
 
@@ -459,6 +463,40 @@ def test_windows_live_wal_identity_publication_uses_compatible_share_modes(
         assert set(published[0]) == {"state.sqlite", "state.sqlite-wal", "state.sqlite-shm"}
     finally:
         connection.close()
+
+
+def test_windows_guarded_reader_waits_for_transient_parent_mutation_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    knowledge_base = tmp_path / "Knowledge Base"
+    knowledge_base.mkdir()
+    record = knowledge_base / "record.md"
+    record.write_bytes(b"record")
+    opening_knowledge_base = threading.Event()
+    real_open_directory = vault._open_directory_path
+
+    def observe_directory_open(path: Path, **kwargs: object) -> int:
+        if Path(path) == knowledge_base:
+            opening_knowledge_base.set()
+        return real_open_directory(path, **kwargs)
+
+    monkeypatch.setattr(vault, "_open_directory_path", observe_directory_open)
+    held_fs = _held_fs()
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with filesystem.parent("Knowledge Base", access="mutate").require():
+                future = executor.submit(
+                    vault.read_bounded_guarded_bytes,
+                    tmp_path,
+                    "Knowledge Base/record.md",
+                    limit=16,
+                )
+                assert opening_knowledge_base.wait(5)
+                time.sleep(0.03)
+            data, guard = future.result(timeout=5)
+
+    assert data == b"record"
+    guard.recheck(tmp_path)
 
 
 def test_windows_native_information_buffers_use_abi_offsets() -> None:
