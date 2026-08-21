@@ -906,14 +906,14 @@ def test_compile_documents_matches_live_fingerprint_order_across_kinds(
 
 
 def test_compile_prospective_returns_a_bound_authoring_snapshot(vault: Path) -> None:
-    _write(vault, "scopes", "client", _SCOPE_A)
+    source = _write(vault, "scopes", "client", _SCOPE_A)
 
     prospective = policy.compile_prospective(vault, {})
 
     assert isinstance(prospective, policy.ProspectiveCompile)
     assert prospective.policy.scopes["01ARZ3NDEKTSV4RRFFQ69G5FAV"].name == "client-confidential"
     assert prospective.snapshot.source_fingerprint == prospective.policy.fingerprint
-    assert dict(prospective.snapshot.documents)["scopes/client.yaml"] == _SCOPE_A.encode()
+    assert dict(prospective.snapshot.documents)["scopes/client.yaml"] == source.read_bytes()
     assert prospective.snapshot.conflict_set_digest
     assert prospective.snapshot.guard_generation
     assert prospective.snapshot.file_identities[0].path == "scopes/client.yaml"
