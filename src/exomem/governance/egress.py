@@ -1588,6 +1588,29 @@ def _excerpt_of(body: str, limit: int = 600) -> str:
     return text[:limit].rsplit(" ", 1)[0] + " …"
 
 
+def _attach_raw_content(
+    page: Mapping[str, Any], snapshot_content: str | bytes | None
+) -> dict[str, Any]:
+    """Attach exact raw text only when the terminal parser finds no secret."""
+    if snapshot_content is None:
+        raise ValueError("SECRET_BLOCKED: raw content is unavailable")
+    try:
+        raw_text = (
+            snapshot_content
+            if isinstance(snapshot_content, str)
+            else bytes(snapshot_content).decode("utf-8")
+        )
+    except UnicodeDecodeError as error:
+        raise ValueError("SECRET_BLOCKED: raw content is unavailable") from error
+    _cleaned, blocked = scrubber.scrub_text(raw_text)
+    if blocked:
+        _record_credential_block()
+        raise ValueError("SECRET_BLOCKED: raw content contains protected material")
+    out = dict(page)
+    out["content"] = raw_text
+    return out
+
+
 def annotate_page(
     vault_root: Path,
     page: dict[str, Any],
@@ -1596,12 +1619,14 @@ def annotate_page(
     purpose: str | None = None,
     snapshot_content: str | bytes | None = None,
     stable_ref: str | None = None,
+    include_raw: bool = False,
 ) -> dict[str, Any] | None:
     """Render one page at its release decision's level, or `None` below notice.
 
     `None` is the caller's signal to answer byte-identically to a missing
     path — an item released below notice must be indistinguishable from one
-    that never existed.
+    that never existed. Raw text is assembled only after an L6 decision and
+    only when the terminal secret parser accepts the exact snapshot.
     """
     vault_root = Path(vault_root)
     rel_path = str(page.get("path") or stable_ref or "")
@@ -1611,7 +1636,7 @@ def annotate_page(
     who = principal if principal is not None else effective_principal()
 
     if policy.empty:
-        return page
+        return _attach_raw_content(page, snapshot_content) if include_raw else page
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
         return None
@@ -1795,6 +1820,22 @@ def annotate_page(
             or ref_decision.level < RELEASE_FLOOR
         )
     )
+    if level == LEVEL_EXCERPT:
+        body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
+        excerpt = {
+            "path": rel_path,
+            "body": _excerpt_of(body),
+            "body_truncated": True,
+            "release_level": level,
+        }
+        if decision.release_strip:
+            excerpt = bridges.strip_provenance(
+                excerpt,
+                decision.release_strip,
+                direct_page=True,
+            )
+        return excerpt
+
     out = _strip_page_provenance(dict(page), withheld)
     if decision.release_strip:
         out = bridges.strip_provenance(
@@ -1802,14 +1843,7 @@ def annotate_page(
             decision.release_strip,
             direct_page=True,
         )
-    if level == LEVEL_EXCERPT and isinstance(out.get("body"), str):
-        out["body"] = _excerpt_of(out["body"])
-        out["body_truncated"] = True
-        # Marked only BELOW full disclosure. A page released at L6 must be
-        # byte-identical to its ungoverned response — a `release_level: 6`
-        # marker would itself tell an audience that governance is in effect.
-        out["release_level"] = level
-    return out
+    return _attach_raw_content(out, snapshot_content) if include_raw else out
 
 
 

@@ -2562,7 +2562,8 @@ def op_get(
 
     Errors:
         INVALID_PATH (path escapes vault root or empty);
-        NOT_FOUND (no such file); UNREADABLE (parse failure).
+        NOT_FOUND (no such file); UNREADABLE (parse failure);
+        SECRET_BLOCKED (opt-in raw content contains protected material).
     """
     path = _resolve_memory_identifier(vault_root, path)
     try:
@@ -2586,7 +2587,7 @@ def op_get(
             "has_frontmatter": vault.parse_frontmatter(result.content)[2] is not None,
         }
     else:
-        out = result.as_dict(include_raw=include_raw)
+        out = result.as_dict(include_raw=False)
     if max_body_chars is not None and max_body_chars < 0:
         raise ValueError("get: max_body_chars must be non-negative")
     query_log.log_get_call(
@@ -2609,6 +2610,7 @@ def op_get(
         out,
         snapshot_content=result.content,
         stable_ref=snapshot_ref,
+        include_raw=include_raw,
     )
     if released is None:
         # `result.missing_path` — the EXACT value the genuinely-absent branch
