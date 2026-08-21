@@ -2374,6 +2374,7 @@ class LeaseManager:
                     request_id=request_id,
                     operation=operation_label,
                     holder_kind=holder_kind,
+                    publish_holder_metadata=False,
                 )
             )
 
