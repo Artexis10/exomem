@@ -132,19 +132,31 @@ class ReferenceIndex:
                 raise
 
     def available(self) -> bool:
-        if not self.path.exists():
+        conn = self._current_readonly_connection()
+        if conn is None:
             return False
+        conn.close()
+        return True
+
+    def _current_readonly_connection(self) -> sqlite3.Connection | None:
+        """Open one verified current sidecar snapshot, or report it unavailable."""
+
+        if not self.path.exists():
+            return None
+        conn: sqlite3.Connection | None = None
         try:
             conn = self._connect_readonly()
-            try:
-                row = conn.execute(
-                    "SELECT value FROM ref_meta WHERE key = 'schema_version'"
-                ).fetchone()
-            finally:
+            row = conn.execute(
+                "SELECT value FROM ref_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if not row or row[0] != str(SCHEMA_VERSION):
                 conn.close()
+                return None
+            return conn
         except (OSError, RuntimeError, sqlite3.Error):
-            return False
-        return bool(row and row[0] == str(SCHEMA_VERSION))
+            if conn is not None:
+                conn.close()
+            return None
 
     def _connect_readonly(self) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("memory_refs"):
@@ -321,18 +333,29 @@ class ReferenceIndex:
         if not wanted:
             return {}
 
-        if not self.available():
+        conn = self._current_readonly_connection()
+        if conn is None:
             # Schema upgrades and first use rebuild once. The lock prevents a
             # burst of concurrent reads from all scanning the corpus together.
             with _REFERENCE_REBUILD_LOCK:
-                if not self.available():
+                conn = self._current_readonly_connection()
+                if conn is None:
                     try:
                         self.rebuild_all()
                     except (OSError, sqlite3.Error):
                         # A read-only vault still works, with one scan per batch.
                         return _refs_for_paths_from_scan(self.vault_root, wanted)
-
-        resolved, indexed_paths = self._refs_from_index(wanted)
+                    resolved, indexed_paths = self._refs_from_index(wanted)
+                else:
+                    try:
+                        resolved, indexed_paths = self._refs_from_connection(conn, wanted)
+                    finally:
+                        conn.close()
+        else:
+            try:
+                resolved, indexed_paths = self._refs_from_connection(conn, wanted)
+            finally:
+                conn.close()
         # Try the caller's own spelling first and canonicalize only on a miss:
         # `canonical_vault_rel` costs a `resolve()` syscall per path, and the
         # hit path is the common one. A miss may be a new external file whose
@@ -359,33 +382,40 @@ class ReferenceIndex:
     def _refs_from_index(
         self, wanted: list[str]
     ) -> tuple[dict[str, str | None], set[str]]:
-        placeholders = ",".join("?" for _ in wanted)
         conn = self._connect()
         try:
-            db_rows = conn.execute(
-                f"SELECT path, exomem_id, status FROM identities "  # noqa: S608
-                f"WHERE path IN ({placeholders})",
-                wanted,
-            ).fetchall()
-            ids = {
-                str(row[1])
-                for row in db_rows
-                if str(row[2]) == "valid" and row[1] is not None
-            }
-            duplicate_ids: set[str] = set()
-            if ids:
-                id_placeholders = ",".join("?" for _ in ids)
-                duplicate_ids = {
-                    str(row[0])
-                    for row in conn.execute(
-                        f"SELECT exomem_id FROM identities "  # noqa: S608 - placeholders only
-                        f"WHERE status = 'valid' AND exomem_id IN ({id_placeholders}) "
-                        "GROUP BY exomem_id HAVING COUNT(*) > 1",
-                        sorted(ids),
-                    ).fetchall()
-                }
+            return self._refs_from_connection(conn, wanted)
         finally:
             conn.close()
+
+    def _refs_from_connection(
+        self,
+        conn: sqlite3.Connection,
+        wanted: list[str],
+    ) -> tuple[dict[str, str | None], set[str]]:
+        placeholders = ",".join("?" for _ in wanted)
+        db_rows = conn.execute(
+            f"SELECT path, exomem_id, status FROM identities "  # noqa: S608
+            f"WHERE path IN ({placeholders})",
+            wanted,
+        ).fetchall()
+        ids = {
+            str(row[1])
+            for row in db_rows
+            if str(row[2]) == "valid" and row[1] is not None
+        }
+        duplicate_ids: set[str] = set()
+        if ids:
+            id_placeholders = ",".join("?" for _ in ids)
+            duplicate_ids = {
+                str(row[0])
+                for row in conn.execute(
+                    f"SELECT exomem_id FROM identities "  # noqa: S608 - placeholders only
+                    f"WHERE status = 'valid' AND exomem_id IN ({id_placeholders}) "
+                    "GROUP BY exomem_id HAVING COUNT(*) > 1",
+                    sorted(ids),
+                ).fetchall()
+            }
         indexed_paths = {str(row[0]) for row in db_rows}
         id_by_path = {
             str(path): str(exomem_id)

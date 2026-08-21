@@ -95,6 +95,11 @@ def _read_replace_source(
             missing=["old_path"],
             reason="old page is unreadable",
         ) from error
+    # ``Path.read_text`` historically supplied logical text to replace: on
+    # Windows its universal-newline layer converted CRLF before the CAS hash
+    # was computed. The retained byte reader must preserve that public hash
+    # contract while the raw bytes remain available for identity guards.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     return snapshot.data, text, snapshot.mtime
 
 

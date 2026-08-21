@@ -168,6 +168,27 @@ def test_replace_writes_new_and_flips_old(vault: Path) -> None:
     assert old_rel.removesuffix(".md") in str(supersedes)
 
 
+def test_legacy_replace_uses_logical_hash_for_crlf_predecessor(vault: Path) -> None:
+    old_rel = _make_insight(vault, "CRLF predecessor")
+    old_abs = vault / old_rel
+    old_abs.write_bytes(
+        old_abs.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8")
+    )
+
+    result = replace_module._legacy_replace(
+        vault,
+        old_path=old_rel,
+        content=_compact_content("CRLF successor", body="revised body."),
+        note_type="insight",
+        title="CRLF successor",
+        suggestions=False,
+        today=TODAY,
+    )
+
+    assert result.old_path == old_rel
+    assert _fm(old_abs)["status"] == "superseded"
+
+
 def test_replace_renders_supersession_links_for_kb_rooted_obsidian(vault: Path) -> None:
     (vault / "Knowledge Base" / ".obsidian").mkdir()
     old_rel = _make_insight(vault, "Nested Root Old")

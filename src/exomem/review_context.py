@@ -40,6 +40,28 @@ _SAFE_FRONTMATTER = frozenset(
 _EVIDENCE_FIELDS = ("evidence", "evidences", "evidence_paths", "evidence_file")
 
 
+class _ReferenceResolver:
+    """Request-local reference lookup cache over one vault sidecar."""
+
+    def __init__(self, vault_root: Path):
+        self._index = memory_refs.ReferenceIndex(vault_root)
+        self._cache: dict[str, str] = {}
+
+    def for_path(self, path: str) -> str:
+        cached = self._cache.get(path)
+        if cached is not None:
+            return cached
+        ref = self._index.ref_for_path(path)
+        if ref is None:
+            ref = (
+                context_refs.source_ref(path)
+                if path.startswith("Knowledge Base/Sources/")
+                else context_refs.vault_ref(path)
+            )
+        self._cache[path] = ref
+        return ref
+
+
 def assemble(
     vault_root: Path,
     *,
@@ -81,7 +103,7 @@ def assemble(
     if parsed is None:
         raise ValueError(f"NOT_FOUND: no readable page at {page_result.path}")
 
-    ref_index = memory_refs.ReferenceIndex(vault_root)
+    ref_resolver = _ReferenceResolver(vault_root)
     truncation: list[str] = []
     body, body_truncated = _bounded(page_result.body, limits["max_body_chars"])
     if body_truncated:
@@ -90,7 +112,7 @@ def assemble(
         )
     target = {
         "path": page_result.path,
-        "ref": item.target_ref or _reference_for_path(ref_index, page_result.path),
+        "ref": item.target_ref or _reference_for_path(ref_resolver, page_result.path),
         "title": parsed.title,
         "type": parsed.page_type,
         "status": parsed.status,
@@ -109,7 +131,7 @@ def assemble(
     graph = _graph_section(
         vault_root,
         path=page_result.path,
-        ref_index=ref_index,
+        ref_resolver=ref_resolver,
         max_nodes=limits["max_graph_nodes"],
         max_edges=limits["max_graph_edges"],
     )
@@ -119,7 +141,7 @@ def assemble(
         item=item,
         target_path=page_result.path,
         graph=graph,
-        ref_index=ref_index,
+        ref_resolver=ref_resolver,
         limit=limits["max_related_pages"],
     )
     if related["truncated"]:
@@ -130,7 +152,7 @@ def assemble(
     provenance = _provenance_section(
         vault_root,
         page_result.frontmatter,
-        ref_index=ref_index,
+        ref_resolver=ref_resolver,
     )
     history = _history_section(
         vault_root,
@@ -145,7 +167,7 @@ def assemble(
     evolution_section = _evolution_section(
         vault_root,
         parsed,
-        ref_index=ref_index,
+        ref_resolver=ref_resolver,
         max_versions=limits["max_evolution_versions"],
     )
     truncation.extend(str(value) for value in evolution_section.get("truncation", []))
@@ -207,7 +229,7 @@ def _graph_section(
     vault_root: Path,
     *,
     path: str,
-    ref_index: memory_refs.ReferenceIndex,
+    ref_resolver: _ReferenceResolver,
     max_nodes: int,
     max_edges: int,
 ) -> dict[str, Any]:
@@ -255,7 +277,7 @@ def _graph_section(
             )
         }
         if node_path:
-            safe["ref"] = _reference_for_path(ref_index, node_path)
+            safe["ref"] = _reference_for_path(ref_resolver, node_path)
         nodes.append(safe)
         if safe.get("node_key"):
             allowed_keys.add(str(safe["node_key"]))
@@ -281,7 +303,7 @@ def _graph_section(
     for edge in edges[:max_edges]:
         source_path = str(edge.get("source_path") or "")
         if source_path:
-            edge["source_ref"] = _reference_for_path(ref_index, source_path)
+            edge["source_ref"] = _reference_for_path(ref_resolver, source_path)
         safe_edges.append(edge)
     return {
         "available": True,
@@ -315,7 +337,7 @@ def _related_section(
     item,
     target_path: str,
     graph: dict[str, Any],
-    ref_index: memory_refs.ReferenceIndex,
+    ref_resolver: _ReferenceResolver,
     limit: int,
 ) -> dict[str, Any]:
     candidates: list[str] = []
@@ -346,7 +368,7 @@ def _related_section(
         rows.append(
             {
                 "path": result.path,
-                "ref": _reference_for_path(ref_index, result.path),
+                "ref": _reference_for_path(ref_resolver, result.path),
                 "title": parsed.title,
                 "type": parsed.page_type,
                 "status": parsed.status,
@@ -366,12 +388,12 @@ def _provenance_section(
     vault_root: Path,
     frontmatter: dict[str, Any],
     *,
-    ref_index: memory_refs.ReferenceIndex,
+    ref_resolver: _ReferenceResolver,
 ) -> dict[str, Any]:
     sources = _provenance_rows(
         vault_root,
         _link_values(frontmatter.get("sources")),
-        ref_index=ref_index,
+        ref_resolver=ref_resolver,
     )
     evidence_values: list[str] = []
     for field in _EVIDENCE_FIELDS:
@@ -379,7 +401,7 @@ def _provenance_section(
     evidence = _provenance_rows(
         vault_root,
         _dedupe(evidence_values),
-        ref_index=ref_index,
+        ref_resolver=ref_resolver,
     )
     return {"available": bool(sources or evidence), "sources": sources, "evidence": evidence}
 
@@ -388,7 +410,7 @@ def _provenance_rows(
     vault_root: Path,
     values: Iterable[str],
     *,
-    ref_index: memory_refs.ReferenceIndex,
+    ref_resolver: _ReferenceResolver,
 ) -> list[dict[str, Any]]:
     rows = []
     for value in values:
@@ -399,7 +421,7 @@ def _provenance_rows(
         rows.append(
             {
                 "path": path,
-                "ref": _reference_for_path(ref_index, path),
+                "ref": _reference_for_path(ref_resolver, path),
                 "exists": exists,
             }
         )
@@ -422,7 +444,7 @@ def _evolution_section(
     vault_root: Path,
     page,
     *,
-    ref_index: memory_refs.ReferenceIndex,
+    ref_resolver: _ReferenceResolver,
     max_versions: int,
 ) -> dict[str, Any]:
     try:
@@ -444,16 +466,12 @@ def _evolution_section(
         for version in timeline.get("versions", []):
             version_path = str(version.get("path") or "")
             if version_path:
-                version["ref"] = _reference_for_path(ref_index, version_path)
+                version["ref"] = _reference_for_path(ref_resolver, version_path)
     return {"available": True, "reason": None, **result}
 
 
-def _reference_for_path(ref_index: memory_refs.ReferenceIndex, path: str) -> str:
-    if ref := ref_index.ref_for_path(path):
-        return ref
-    if path.startswith("Knowledge Base/Sources/"):
-        return context_refs.source_ref(path)
-    return context_refs.vault_ref(path)
+def _reference_for_path(ref_resolver: _ReferenceResolver, path: str) -> str:
+    return ref_resolver.for_path(path)
 
 
 def _link_values(value: Any) -> list[str]:

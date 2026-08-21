@@ -226,3 +226,25 @@ def test_review_context_default_latency_and_target_read_budget(
     assert reads.count(TARGET) == 5
     assert len(reads) <= 5 * (1 + 8), reads
     assert statistics.median(samples) < 500, samples
+
+
+def test_review_context_resolves_each_reference_path_once_per_assembly(
+    review_item_vault: tuple[Path, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, item = review_item_vault
+    calls: list[str] = []
+    ref_for_path = review_context.memory_refs.ReferenceIndex.ref_for_path
+
+    def counted_ref_for_path(self, path: str):
+        calls.append(path)
+        return ref_for_path(self, path)
+
+    monkeypatch.setattr(
+        review_context.memory_refs.ReferenceIndex,
+        "ref_for_path",
+        counted_ref_for_path,
+    )
+
+    review_context.assemble(vault, ref=item.ref)
+
+    assert len(calls) == len(set(calls)), calls
