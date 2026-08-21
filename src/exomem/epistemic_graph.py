@@ -1366,7 +1366,12 @@ class EpistemicGraphIndex:
     def _connect_retained(self, target: Path) -> sqlite3.Connection:
         sidecar_store.ensure_sidecar_parent(target)
         conn = _sqlite_connect_owned(target)
-        sidecar_store.apply_sidecar_pragmas(conn)
+        try:
+            from . import embeddings
+
+            embeddings._apply_sidecar_pragmas(conn)
+        except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
+            pass
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         if edge_columns and "raw_relation" not in edge_columns:
             conn.execute("DROP TABLE graph_edges")

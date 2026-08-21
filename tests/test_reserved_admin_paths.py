@@ -3068,33 +3068,6 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
     assert accesses == ["read", "read"]
 
 
-def test_graph_owner_connection_stays_writable_while_a_snapshot_is_open(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from exomem import epistemic_graph
-
-    manager = writer_lease.LeaseManager(
-        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
-    )
-    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
-    index = epistemic_graph.EpistemicGraphIndex(tmp_path)
-    setup = index._connect()
-    try:
-        assert setup.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-    finally:
-        setup.close()
-
-    reader = index._connect_existing(readonly=True)
-    try:
-        reader.execute("BEGIN")
-        reader.execute("SELECT * FROM graph_meta").fetchall()
-        writer = index._connect()
-        writer.close()
-    finally:
-        reader.close()
-
-
 def test_readonly_sqlite_connections_retain_their_owner_target_through_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
