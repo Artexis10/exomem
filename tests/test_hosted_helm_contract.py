@@ -167,6 +167,40 @@ def test_platform_rejects_mutable_or_partial_deployment_lock_overrides(
         assert "deployment lock" in result.stderr
 
 
+def test_platform_requires_cross_repository_trust_in_runtime_upgrade_metadata(
+    tmp_path: Path,
+) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock = json.loads(values["provisioner"]["deploymentLockJson"])
+    lock["runtimeUpgrade"] = {
+        "compatibilityDigest": "c" * 64,
+        "migrationMode": "none",
+        "substrateConsumerCommit": "d" * 40,
+        "substrateTrustSha256": "e" * 64,
+    }
+    accepted = _lock_override(tmp_path / "trusted", lock)
+    _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(accepted)),
+    )
+
+    del lock["runtimeUpgrade"]["substrateTrustSha256"]
+    rejected = _lock_override(tmp_path / "untrusted", lock)
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+        extra_args=("--values", str(rejected)),
+    )
+    assert result.returncode != 0
+    assert "runtime upgrade is invalid" in result.stderr
+
+
 def test_platform_rejects_deployment_lock_hash_drift(
     tmp_path: Path,
 ) -> None:

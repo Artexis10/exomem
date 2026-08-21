@@ -51,10 +51,12 @@
     "runtimeUpgrade": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["compatibilityDigest", "migrationMode"],
+      "required": ["compatibilityDigest", "migrationMode", "substrateConsumerCommit", "substrateTrustSha256"],
       "properties": {
         "compatibilityDigest": {"$ref": "#/$defs/sha256"},
-        "migrationMode": {"enum": ["none", "binding-v1-to-v2"]}
+        "migrationMode": {"enum": ["none", "binding-v1-to-v2"]},
+        "substrateConsumerCommit": {"$ref": "#/$defs/commit"},
+        "substrateTrustSha256": {"$ref": "#/$defs/sha256"}
       }
     },
     "runtimeComponent": {

@@ -132,14 +132,20 @@ def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(tmp_path:
     value["runtimeUpgrade"] = {
         "compatibilityDigest": "9" * 64,
         "migrationMode": "binding-v1-to-v2",
+        "substrateConsumerCommit": "8" * 40,
+        "substrateTrustSha256": "7" * 64,
     }
     path = tmp_path / "selected-lock.json"
     path.write_text(json.dumps(value), encoding="utf-8")
 
-    selected = load_deployment_lock(path).selected_runtime("active")
+    lock = load_deployment_lock(path)
+    selected = lock.selected_runtime("active")
 
     assert selected.compatibilityDigest == "9" * 64
     assert selected.migrationMode == "binding-v1-to-v2"
+    assert lock.runtimeUpgrade is not None
+    assert lock.runtimeUpgrade.substrateConsumerCommit == "8" * 40
+    assert lock.runtimeUpgrade.substrateTrustSha256 == "7" * 64
 
     value["runtimeUpgrade"]["migrationMode"] = "arbitrary-script"  # type: ignore[index]
     path.write_text(json.dumps(value), encoding="utf-8")

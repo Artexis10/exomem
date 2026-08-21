@@ -26,6 +26,17 @@ _RUNTIME_IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$")
 _PROVISIONER_IMAGE = re.compile(
     r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$"
 )
+_SUBSTRATE_RUNTIME_TRUST_SITES = [
+    "admin-catalog",
+    "agent-canaries",
+    "agent-contract-store",
+    "client-artifacts",
+    "gateway-store",
+    "lifecycle-store",
+    "oauth-bootstrap",
+    "platform-cohort",
+    "reviewer-operator",
+]
 _RUNTIME_CLOSURE = ("Dockerfile", ".dockerignore", "pyproject.toml", "uv.lock", "README.md", "LICENSE", "src/**")
 _PROVISIONER_CLOSURE = (
     "infra/provisioner/Dockerfile",
@@ -93,6 +104,7 @@ class CompositionRequest:
     records_compatibility: HashedInput | None = None
     rollback_runtime: CandidateInput | None = None
     runtime_upgrade: HashedInput | None = None
+    substrate_trust: HashedInput | None = None
 
 
 def _canonical(value: object) -> bytes:
@@ -186,12 +198,80 @@ def _runtime_upgrade(value: object) -> dict[str, object]:
     upgrade = _exact_object(
         value,
         label="runtime upgrade",
-        fields={"compatibilityDigest", "migrationMode"},
+        fields={
+            "compatibilityDigest",
+            "migrationMode",
+            "substrateConsumerCommit",
+            "substrateTrustSha256",
+        },
     )
     _sha256(upgrade["compatibilityDigest"], label="runtime upgrade compatibility")
     if upgrade["migrationMode"] not in {"none", "binding-v1-to-v2"}:
         _error("runtime upgrade migration mode is invalid")
+    _commit(upgrade["substrateConsumerCommit"], label="runtime upgrade Substrate consumer")
+    _sha256(upgrade["substrateTrustSha256"], label="runtime upgrade Substrate trust")
     return cast(dict[str, object], upgrade)
+
+
+def _substrate_trust(
+    value: object,
+    *,
+    upgrade: dict[str, object],
+    runtime_target: dict[str, str],
+    runtime_image: str,
+    runtime_source: str,
+    runtime_candidate_sha256: str,
+) -> None:
+    report = _exact_object(
+        value,
+        label="Substrate runtime trust",
+        fields={
+            "artifact",
+            "schemaVersion",
+            "consumerCommit",
+            "target",
+            "pinnedSites",
+            "fixtureSha256s",
+        },
+    )
+    if (
+        report["artifact"] != "exomem-hosted-substrate-runtime-trust"
+        or report["schemaVersion"] != 1
+    ):
+        _error("Substrate runtime trust identity is invalid")
+    consumer = _commit(report["consumerCommit"], label="Substrate runtime trust consumer")
+    if consumer != upgrade["substrateConsumerCommit"]:
+        _error("Substrate runtime trust consumer differs from runtime upgrade")
+    target = _exact_object(
+        report["target"],
+        label="Substrate runtime trust target",
+        fields={
+            *_target_fields(),
+            "runtimeImage",
+            "sourceCommit",
+            "runtimeCandidateSha256",
+            "compatibilityDigest",
+        },
+    )
+    expected_target: dict[str, object] = {
+        **runtime_target,
+        "runtimeImage": runtime_image,
+        "sourceCommit": runtime_source,
+        "runtimeCandidateSha256": runtime_candidate_sha256,
+        "compatibilityDigest": upgrade["compatibilityDigest"],
+    }
+    if target != expected_target:
+        _error("Substrate runtime trust target differs from verified release")
+    sites = report["pinnedSites"]
+    if sites != _SUBSTRATE_RUNTIME_TRUST_SITES:
+        _error("Substrate runtime trust pinned sites are incomplete or invalid")
+    fixtures = _exact_object(
+        report["fixtureSha256s"],
+        label="Substrate runtime trust fixture digests",
+        fields={"agent", "gateway"},
+    )
+    _sha256(fixtures["agent"], label="Substrate agent fixture")
+    _sha256(fixtures["gateway"], label="Substrate gateway fixture")
 
 
 def _commit(value: object, *, label: str) -> str:
@@ -818,6 +898,23 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
     release = runtime_candidate.get("release")
     if not isinstance(release, dict) or release.get("version") != runtime_target["releaseVersion"]:
         _error("runtime candidate release does not match forward contract")
+    if (request.runtime_upgrade is None) != (request.substrate_trust is None):
+        _error("runtime upgrade composition requires Substrate trust evidence")
+    runtime_upgrade: dict[str, object] | None = None
+    if request.runtime_upgrade is not None and request.substrate_trust is not None:
+        upgrade_evidence, _ = _load_hashed(request.runtime_upgrade, label="runtime upgrade")
+        runtime_upgrade = _runtime_upgrade(upgrade_evidence)
+        trust_evidence, _ = _load_hashed(request.substrate_trust, label="Substrate runtime trust")
+        if request.substrate_trust.sha256 != runtime_upgrade["substrateTrustSha256"]:
+            _error("Substrate runtime trust digest differs from runtime upgrade")
+        _substrate_trust(
+            trust_evidence,
+            upgrade=runtime_upgrade,
+            runtime_target=runtime_target,
+            runtime_image=runtime_image,
+            runtime_source=runtime_source,
+            runtime_candidate_sha256=runtime_candidate_sha,
+        )
     authority, _ = _load_hashed(request.authoritative_legacy_release_set, label="authoritative legacy release set")
     catalog, _ = _load_hashed(request.legacy_catalog, label="legacy catalog")
     legacy_catalog, release_set_sha = _legacy_catalog(catalog, authority, request.legacy_contracts)
@@ -913,9 +1010,8 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
     }
     if records_compatibility is not None:
         common["recordsCompatibility"] = records_compatibility
-    if request.runtime_upgrade is not None:
-        upgrade, _ = _load_hashed(request.runtime_upgrade, label="runtime upgrade")
-        common["runtimeUpgrade"] = _runtime_upgrade(upgrade)
+    if runtime_upgrade is not None:
+        common["runtimeUpgrade"] = runtime_upgrade
     expand = {**copy.deepcopy(common), "admissionMode": "expand"}
     contract = {**copy.deepcopy(common), "admissionMode": "contract"}
     pair = {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": schema_version, "locks": [expand, contract]}
@@ -960,6 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rollback", type=_hashed_argument, required=True)
     parser.add_argument("--records-compatibility", type=_hashed_argument)
     parser.add_argument("--runtime-upgrade", type=_hashed_argument)
+    parser.add_argument("--substrate-trust", type=_hashed_argument)
     _optional_candidate_arguments(parser, "rollback-runtime")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -1002,6 +1099,7 @@ def main(argv: list[str] | None = None) -> int:
         records_compatibility=args.records_compatibility,
         rollback_runtime=rollback_runtime,
         runtime_upgrade=args.runtime_upgrade,
+        substrate_trust=args.substrate_trust,
     )
     try:
         compose_locks(request)

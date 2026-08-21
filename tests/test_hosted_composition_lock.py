@@ -250,14 +250,37 @@ def test_composer_binds_runtime_upgrade_compatibility_and_migration(
 ) -> None:
     composer = _module()
     request = _request(composer, tmp_path)
+    consumer_commit = "3" * 40
+    trust = tmp_path / "substrate-trust.json"
+    trust_digest = _write_json(
+        trust,
+        {
+            "artifact": "exomem-hosted-substrate-runtime-trust",
+            "schemaVersion": 1,
+            "consumerCommit": consumer_commit,
+            "target": {
+                **_contract(f"ghcr.io/artexis10/exomem@sha256:{DIGEST}"),
+                "runtimeCandidateSha256": request.runtime.sha256,
+                "compatibilityDigest": "9" * 64,
+            },
+            "pinnedSites": composer._SUBSTRATE_RUNTIME_TRUST_SITES,
+            "fixtureSha256s": {"agent": "4" * 64, "gateway": "5" * 64},
+        },
+    )
     evidence = tmp_path / "runtime-upgrade.json"
     digest = _write_json(
         evidence,
-        {"compatibilityDigest": "9" * 64, "migrationMode": "none"},
+        {
+            "compatibilityDigest": "9" * 64,
+            "migrationMode": "none",
+            "substrateConsumerCommit": consumer_commit,
+            "substrateTrustSha256": trust_digest,
+        },
     )
     request = replace(
         request,
         runtime_upgrade=composer.HashedInput(evidence, digest),
+        substrate_trust=composer.HashedInput(trust, trust_digest),
     )
     monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -273,9 +296,80 @@ def test_composer_binds_runtime_upgrade_compatibility_and_migration(
     pair = composer.compose_locks(request)
 
     assert [lock["runtimeUpgrade"] for lock in pair["locks"]] == [
-        {"compatibilityDigest": "9" * 64, "migrationMode": "none"},
-        {"compatibilityDigest": "9" * 64, "migrationMode": "none"},
+        {
+            "compatibilityDigest": "9" * 64,
+            "migrationMode": "none",
+            "substrateConsumerCommit": consumer_commit,
+            "substrateTrustSha256": trust_digest,
+        },
+        {
+            "compatibilityDigest": "9" * 64,
+            "migrationMode": "none",
+            "substrateConsumerCommit": consumer_commit,
+            "substrateTrustSha256": trust_digest,
+        },
     ]
+
+
+@pytest.mark.parametrize("tamper", ("missing", "target", "commit", "digest", "sites"))
+def test_runtime_upgrade_composition_requires_exact_substrate_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    consumer_commit = "3" * 40
+    target = {
+        **_contract(f"ghcr.io/artexis10/exomem@sha256:{DIGEST}"),
+        "runtimeCandidateSha256": request.runtime.sha256,
+        "compatibilityDigest": "9" * 64,
+    }
+    trust_value = {
+        "artifact": "exomem-hosted-substrate-runtime-trust",
+        "schemaVersion": 1,
+        "consumerCommit": consumer_commit,
+        "target": target,
+        "pinnedSites": composer._SUBSTRATE_RUNTIME_TRUST_SITES,
+        "fixtureSha256s": {"agent": "4" * 64, "gateway": "5" * 64},
+    }
+    if tamper == "target":
+        target["schemaDigest"] = "0" * 64
+    elif tamper == "commit":
+        trust_value["consumerCommit"] = "6" * 40
+    elif tamper == "sites":
+        trust_value["pinnedSites"] = ["agent-store", "gateway-store", "renamed-site"]
+    trust = tmp_path / "substrate-trust.json"
+    trust_digest = _write_json(trust, trust_value)
+    evidence = tmp_path / "runtime-upgrade.json"
+    upgrade_trust_digest = "7" * 64 if tamper == "digest" else trust_digest
+    digest = _write_json(
+        evidence,
+        {
+            "compatibilityDigest": "9" * 64,
+            "migrationMode": "none",
+            "substrateConsumerCommit": consumer_commit,
+            "substrateTrustSha256": upgrade_trust_digest,
+        },
+    )
+    request = replace(
+        request,
+        runtime_upgrade=composer.HashedInput(evidence, digest),
+        substrate_trust=(
+            None if tamper == "missing" else composer.HashedInput(trust, trust_digest)
+        ),
+    )
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        composer,
+        "verify_source_closure",
+        lambda _repository, candidate, composition, paths: {
+            "candidateCommit": candidate,
+            "compositionCommit": composition,
+            "paths": list(paths),
+        },
+    )
+
+    with pytest.raises(composer.CompositionError):
+        composer.compose_locks(request)
 
 
 @pytest.mark.parametrize(
