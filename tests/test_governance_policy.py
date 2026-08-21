@@ -785,15 +785,12 @@ def test_policy_document_without_either_conflict_marker_compiles_clean(
 
 
 def test_a_sync_conflict_copy_refuses_policy_AUTHORING_not_reading(vault: Path) -> None:
-    """The other half of conflict handling, and a regression this branch caused.
+    """The authoring half of conflict handling, kept separate from live reading.
 
-    Filtering conflict copies out of discovery also filtered them out of
-    `compile_prospective`, so a mutation compiled a CLEAN prospective tree while
-    the live compile still saw the conflict. Both gates passed, the mutation was
-    accepted and receipted, and whichever document the next real compile picked
-    silently decided the outcome. On main the copy reached the temp tree and a
-    `duplicate_id` error refused the mutation by accident; widening detection
-    removed that accident, so the refusal is now deliberate.
+    A conflict copy must remain visible to the guarded prospective snapshot even
+    though it is never a compilable policy document. Otherwise a mutation can be
+    accepted and receipted while the unresolved sibling still decides which
+    bytes a later live compile sees.
 
     Reads must NOT be refused: flooring a warm vault to L0 because a sync tool
     dropped a sibling file would be worse than the defect it prevents.
@@ -873,6 +870,195 @@ def test_the_authoring_gate_creates_no_state_when_it_refuses(vault: Path) -> Non
             duration="standing",
         )
     assert _snapshot() == before, "the refused authoring gate mutated the vault"
+
+
+def _workspace_files(vault: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in sorted(vault.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def test_compile_documents_uses_only_the_supplied_pinned_bytes(vault: Path) -> None:
+    source = _write(vault, "scopes", "client", _SCOPE_A)
+    pinned = {"scopes/client.yaml": source.read_bytes()}
+    source.write_text(_SCOPE_A.replace("client-confidential", "changed-live"), encoding="utf-8")
+
+    compiled = policy.compile_documents(pinned)
+
+    assert compiled.scopes["01ARZ3NDEKTSV4RRFFQ69G5FAV"].name == "client-confidential"
+    assert compiled.fingerprint != policy.load(vault).fingerprint
+
+
+def test_compile_documents_matches_live_fingerprint_order_across_kinds(
+    vault: Path,
+) -> None:
+    _write(vault, "scopes", "client", _SCOPE_A)
+    _write(vault, "rules", "external", _RULE_A)
+    root = policy.governance_root(vault)
+    pinned = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for _kind, path in policy._iter_policy_files(root)
+    }
+
+    assert policy.compile_documents(pinned).fingerprint == policy.load(vault).fingerprint
+
+
+def test_compile_prospective_returns_a_bound_authoring_snapshot(vault: Path) -> None:
+    source = _write(vault, "scopes", "client", _SCOPE_A)
+
+    prospective = policy.compile_prospective(vault, {})
+
+    assert isinstance(prospective, policy.ProspectiveCompile)
+    assert prospective.policy.scopes["01ARZ3NDEKTSV4RRFFQ69G5FAV"].name == "client-confidential"
+    assert prospective.snapshot.source_fingerprint == prospective.policy.fingerprint
+    assert dict(prospective.snapshot.documents)["scopes/client.yaml"] == source.read_bytes()
+    assert prospective.snapshot.conflict_set_digest
+    assert prospective.snapshot.guard_generation
+    assert prospective.snapshot.file_identities[0].path == "scopes/client.yaml"
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "client (conflicted copy 2026-08-21).yaml",
+        "client.sync-conflict-20260821-120000-ABCDEFG.yaml",
+    ),
+)
+def test_compile_prospective_refuses_every_supported_preexisting_conflict_without_state(
+    vault: Path,
+    name: str,
+) -> None:
+    _write(vault, "scopes", "client", _SCOPE_A)
+    conflict = vault / "Knowledge Base" / "_Governance" / "scopes" / name
+    conflict.write_text(_SCOPE_A, encoding="utf-8")
+    before = _workspace_files(vault)
+
+    assert policy.compile_prospective(vault, {}) is None
+    assert _workspace_files(vault) == before
+    assert not store.sidecar_path(vault).exists()
+
+
+@pytest.mark.parametrize("transition", ("appear", "disappear"))
+def test_compile_prospective_refuses_a_conflict_set_change_between_probes(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transition: str,
+) -> None:
+    _write(vault, "scopes", "client", _SCOPE_A)
+    conflict = (
+        vault
+        / "Knowledge Base"
+        / "_Governance"
+        / "scopes"
+        / "client.sync-conflict-20260821-120000-ABCDEFG.yaml"
+    )
+    if transition == "disappear":
+        conflict.write_text(_SCOPE_A, encoding="utf-8")
+    changed = False
+
+    def barrier(phase: str, _path: str | None = None) -> None:
+        nonlocal changed
+        if phase != "after_before" or changed:
+            return
+        changed = True
+        if transition == "appear":
+            conflict.write_text(_SCOPE_A, encoding="utf-8")
+        else:
+            conflict.unlink()
+
+    monkeypatch.setattr(policy, "_authoring_snapshot_barrier", barrier, raising=False)
+
+    assert policy.compile_prospective(vault, {}) is None
+    assert changed
+    assert conflict.exists() is (transition == "appear")
+    assert not store.sidecar_path(vault).exists()
+
+
+@pytest.mark.parametrize("change", ("replace-bytes", "add-file", "delete-file"))
+def test_compile_prospective_refuses_policy_tree_changes_between_read_and_after_probe(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    source = _write(vault, "scopes", "client", _SCOPE_A)
+    changed = False
+
+    def barrier(phase: str, _path: str | None = None) -> None:
+        nonlocal changed
+        if phase != "after_read" or changed:
+            return
+        changed = True
+        if change == "replace-bytes":
+            before = source.stat()
+            source.write_text(
+                _SCOPE_A.replace("client-confidential", "client-classified"),
+                encoding="utf-8",
+            )
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        elif change == "add-file":
+            _write(vault, "rules", "external", _RULE_A)
+        else:
+            source.unlink()
+
+    monkeypatch.setattr(policy, "_authoring_snapshot_barrier", barrier, raising=False)
+
+    assert policy.compile_prospective(vault, {}) is None
+    assert changed
+    assert not store.sidecar_path(vault).exists()
+
+
+def test_compile_prospective_refuses_pending_guard_generation_drift(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(vault, "scopes", "client", _SCOPE_A)
+    probes = iter(
+        (
+            {"state": "clear", "generation": "guard-before", "event_ids": ()},
+            {"state": "clear", "generation": "guard-after", "event_ids": ()},
+        )
+    )
+    monkeypatch.setattr(store, "guard_generation_probe", lambda _vault: next(probes))
+
+    assert policy.compile_prospective(vault, {}) is None
+
+
+def test_compile_prospective_refuses_a_symlinked_policy_document(vault: Path) -> None:
+    outside = vault / "outside.yaml"
+    outside.write_text(_SCOPE_A, encoding="utf-8")
+    link = vault / "Knowledge Base" / "_Governance" / "scopes" / "client.yaml"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - host capability dependent
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    assert policy.compile_prospective(vault, {}) is None
+    assert not store.sidecar_path(vault).exists()
+
+
+def test_compile_prospective_refuses_a_hard_linked_policy_document(vault: Path) -> None:
+    source = _write(vault, "scopes", "client", _SCOPE_A)
+    alias = source.with_name("client-alias.yaml")
+    try:
+        os.link(source, alias)
+    except OSError as exc:  # pragma: no cover - host capability dependent
+        pytest.skip(f"hard-link creation unavailable: {exc}")
+
+    assert policy.compile_prospective(vault, {}) is None
+    assert not store.sidecar_path(vault).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO fixture")
+def test_compile_prospective_refuses_a_non_regular_policy_document(vault: Path) -> None:
+    fifo = vault / "Knowledge Base" / "_Governance" / "scopes" / "client.yaml"
+    fifo.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(fifo)
+
+    assert policy.compile_prospective(vault, {}) is None
+    assert not store.sidecar_path(vault).exists()
 
 
 # ---------------------------------------------------------------------------
