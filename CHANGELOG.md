@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.57.2](https://github.com/Artexis10/exomem/compare/v0.57.1...v0.57.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **ci:** floor the O(N) scaling bounds so a faster small corpus cannot fail the build ([#719](https://github.com/Artexis10/exomem/issues/719)) ([7eb65e0](https://github.com/Artexis10/exomem/commit/7eb65e0f5c7719531880f655efde8a381799778e))
+* **governance:** add held filesystem substrate ([#715](https://github.com/Artexis10/exomem/issues/715)) ([2d40a8b](https://github.com/Artexis10/exomem/commit/2d40a8b2b6c7e04933d4a0460149f5dadecef19d))
+
+
+### Performance
+
+* **recall:** stop loading the whole candidate set to rank ten results ([#718](https://github.com/Artexis10/exomem/issues/718)) ([2a749c8](https://github.com/Artexis10/exomem/commit/2a749c843dfbaeaecb54960e5adc3eb9e3fc91fd))
+
 ## [0.57.1](https://github.com/Artexis10/exomem/compare/v0.57.0...v0.57.1) (2026-08-20)
 
 
