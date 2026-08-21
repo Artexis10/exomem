@@ -201,6 +201,10 @@ class V2HealthRequest(V2TargetRequest):
     pass
 
 
+class V2RollforwardRequest(V2TargetRequest):
+    compatibilityDigest: Sha256
+
+
 class V2QuiesceRequest(V2TargetRequest):
     pass
 
@@ -398,6 +402,7 @@ V1_FINAL_MODELS: Mapping[str, type[StrictSchema] | None] = MappingProxyType(dict
 V2_REQUEST_MODELS: dict[str, type[StrictSchema]] = {
     "provision": V2ProvisionRequest,
     "health": V2HealthRequest,
+    "rollforward": V2RollforwardRequest,
     "rotate-credential": V2RotateCredentialRequest,
     "quiesce": V2QuiesceRequest,
     "resume": V2ResumeRequest,
@@ -426,9 +431,19 @@ class V2HealthResponse(StrictSchema):
     code: ShortLabel
 
 
+class RollforwardPreservationResult(StrictSchema):
+    """Encrypted internal proof; validated by the API but never returned on the wire."""
+
+    code: Literal["rollforward_preserved"]
+    beforeVaultSha256: Sha256
+    afterVaultSha256: Sha256
+    evidenceSha256: Sha256
+
+
 V2_FINAL_MODELS: dict[str, type[StrictSchema] | None] = {
     **FINAL_MODELS,
     "health": V2HealthResponse,
+    "rollforward": None,
 }
 
 

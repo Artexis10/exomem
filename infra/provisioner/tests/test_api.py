@@ -152,6 +152,19 @@ def test_target_request_excludes_provision_only_mode() -> None:
 def _body_for(action: str) -> dict[str, Any]:
     if action == "provision":
         return _base_body()
+    if action == "rollforward":
+        body = _target_body(compatibilityDigest="e" * 64)
+        body.pop("releaseVersion")
+        body.pop("protocolVersion")
+        body["runtimeTarget"] = {
+            "releaseVersion": "0.35.1",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "a" * 64,
+            "commandFingerprint": "c" * 64,
+            "schemaDigest": "d" * 64,
+        }
+        return body
     if action == "rotate-credential":
         return _target_body(
             phase="stage",
@@ -394,6 +407,73 @@ async def test_exact_header_selects_v2_models_before_operation_creation(
 
 
 @pytest.mark.asyncio
+async def test_rollforward_is_v2_only_strict_and_idempotently_persisted(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+    target = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+    }
+    body = {
+        "operationId": "rollforward-api",
+        "checkpoint": "requested",
+        "fenceGeneration": 2,
+        "tenantId": "tenant-api-alpha",
+        "cellId": "cell-api-alpha",
+        "providerRef": "provider-cell-api-alpha",
+        "serviceCredential": _SERVICE_CREDENTIAL,
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": target,
+        "compatibilityDigest": "e" * 64,
+    }
+    headers = _headers("rollforward-api")
+    headers["X-Exomem-Provisioner-Protocol"] = WIRE_PROTOCOL_V2
+
+    accepted = await client.post("/cells/rollforward", headers=headers, json=body)
+    replay = await client.post("/cells/rollforward", headers=headers, json=body)
+
+    assert accepted.status_code == replay.status_code == 202
+    operation = await repository.get("rollforward", "rollforward-api")
+    assert operation is not None and operation.wire_protocol == WIRE_PROTOCOL_V2
+    claim = await repository.claim_next("rollforward-api-worker")
+    assert claim is not None and claim.id == operation.id and claim.claim_token is not None
+    await repository.complete(
+        operation.id,
+        {
+            "code": "rollforward_preserved",
+            "beforeVaultSha256": "e" * 64,
+            "afterVaultSha256": "e" * 64,
+            "evidenceSha256": "f" * 64,
+        },
+        worker_id="rollforward-api-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+    )
+    completed = await client.post("/cells/rollforward", headers=headers, json=body)
+
+    assert completed.status_code == 204
+    assert completed.content == b""
+    v1 = await client.post(
+        "/cells/rollforward",
+        headers=_headers("rollforward-v1"),
+        json=_target_body(compatibilityDigest="e" * 64),
+    )
+    assert v1.status_code == 422
+    assert await repository.get("rollforward", "rollforward-v1") is None
+    changed = await client.post(
+        "/cells/rollforward",
+        headers=headers,
+        json={**body, "compatibilityDigest": "f" * 64},
+    )
+    assert changed.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_serving_requires_a_selected_lock_and_locked_health_advertises_v2(tmp_path: Path) -> None:
     no_lock = ProvisionerSettings(
         bearer=_BEARER,
@@ -467,13 +547,14 @@ async def _complete_as_worker(
 
 
 @pytest.mark.asyncio
-async def test_api_exposes_exact_fourteen_post_paths_and_strict_pending_union(
+async def test_api_exposes_exact_fifteen_post_paths_and_strict_pending_union(
     api: tuple[httpx.AsyncClient, OperationRepository, Path],
 ) -> None:
     client, _, _ = api
     actions = (
         "provision",
         "health",
+        "rollforward",
         "rotate-credential",
         "quiesce",
         "resume",
@@ -499,9 +580,12 @@ async def test_api_exposes_exact_fourteen_post_paths_and_strict_pending_union(
         body = _body_for(action)
         body["operationId"] = f"operation-{index}"
         body["fenceGeneration"] = index
+        headers = _headers(f"idempotency-{index}")
+        if action == "rollforward":
+            headers["X-Exomem-Provisioner-Protocol"] = WIRE_PROTOCOL_V2
         response = await client.post(
             f"/cells/{action}",
-            headers=_headers(f"idempotency-{index}"),
+            headers=headers,
             content=json.dumps(body),
         )
         assert response.status_code == 202, (action, response.text)

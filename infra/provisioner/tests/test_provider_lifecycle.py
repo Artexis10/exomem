@@ -293,6 +293,175 @@ async def test_v2_runtime_identity_is_rechecked_immediately_before_routes_open()
     assert plane.routes_enabled(_metadata()) == (False, False)
 
 
+@pytest.mark.asyncio
+async def test_rollforward_preserves_same_cell_volume_and_vault_before_reopening_routes() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    await plane.seed_ready_cell(_metadata(), _request(), _config())
+    before_volume = plane.bound_handle(_metadata())
+    before_fingerprint = plane.vault_fingerprint(_metadata())
+    target = _runtime_target(releaseVersion="0.57.2", gatewayContractDigest="e" * 64)
+    config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "f" * 64,
+        release_version="0.57.2",
+        contract_digest="e" * 64,
+        runtime_target=target,
+        compatibility_digest="9" * 64,
+        migration_mode="none",
+    )
+    request = _v2_request(
+        operationId="rollforward-alpha",
+        fenceGeneration=8,
+        runtimeTarget=target,
+        compatibilityDigest="9" * 64,
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+
+    final, checkpoints = await _run_action(
+        driver,
+        "rollforward",
+        request,
+        _context(
+            operation_id="database-rollforward-alpha",
+            provider_operation_id="rollforward-alpha",
+            fence_generation=8,
+            wire_protocol=WIRE_PROTOCOL_V2,
+        ),
+    )
+
+    assert final.result["code"] == "rollforward_preserved"
+    assert final.result["beforeVaultSha256"] == before_fingerprint
+    assert final.result["afterVaultSha256"] == before_fingerprint
+    assert len(final.result["evidenceSha256"]) == 64
+    assert checkpoints[:3] == ["maintenance-acquired", "routes-closed", "runtime-drained"]
+    assert checkpoints[3].startswith("vault-fingerprinted-")
+    assert checkpoints[4].startswith("migration-skipped-")
+    assert checkpoints[5].startswith("target-confirmed-")
+    assert plane.bound_handle(_metadata()) == before_volume
+    assert plane.vault_fingerprint(_metadata()) == before_fingerprint
+    assert plane.helm_values(_metadata())["image"] == config.image
+    assert plane.helm_values(_metadata())["expectedRelease"] == "0.57.2"
+    assert plane.routes_enabled(_metadata()) == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_rollforward_rejects_compatibility_drift_before_provider_effect() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    target = _runtime_target(releaseVersion="0.57.2")
+    config = replace(
+        _config(),
+        runtime_target=target,
+        compatibility_digest="9" * 64,
+        migration_mode="none",
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_RELEASE_UNIT_MISMATCH"):
+        await driver.execute(
+            "rollforward",
+            _v2_request(runtimeTarget=target, compatibilityDigest="8" * 64),
+            _context(wire_protocol=WIRE_PROTOCOL_V2),
+        )
+
+    assert plane._cells == {}
+    assert plane._tenant_fences == {}
+
+
+@pytest.mark.asyncio
+async def test_rollforward_restores_prior_runtime_when_vault_preservation_fails() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    await plane.seed_ready_cell(_metadata(), _request(), _config())
+    old_values = plane.helm_values(_metadata()).copy()
+    plane.mutate_vault_on_upgrade_once()
+    target = _runtime_target(releaseVersion="0.57.2", gatewayContractDigest="e" * 64)
+    config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "f" * 64,
+        release_version="0.57.2",
+        contract_digest="e" * 64,
+        runtime_target=target,
+        compatibility_digest="9" * 64,
+        migration_mode="none",
+    )
+    request = _v2_request(
+        operationId="rollforward-corrupt",
+        fenceGeneration=8,
+        runtimeTarget=target,
+        compatibilityDigest="9" * 64,
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    context = _context(
+        operation_id="database-rollforward-corrupt",
+        provider_operation_id="rollforward-corrupt",
+        fence_generation=8,
+        wire_protocol=WIRE_PROTOCOL_V2,
+    )
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_VAULT_PRESERVATION_MISMATCH"):
+        for _ in range(8):
+            outcome = await driver.execute("rollforward", request, context)
+            assert isinstance(outcome, DriverPending)
+            context = replace(context, checkpoint=outcome.checkpoint)
+
+    assert plane.helm_values(_metadata()) == old_values
+    assert plane.routes_enabled(_metadata()) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_rollforward_does_not_downgrade_after_target_confirmation_failure() -> None:
+    class PostConfirmationFailurePlane(HighFidelityProviderPlane):
+        rollback_calls = 0
+        fail_route_enable = False
+
+        async def enable_routes(self, metadata, request):
+            if self.fail_route_enable:
+                raise MetadataConflict("route publication failed after target confirmation")
+            await super().enable_routes(metadata, request)
+
+        async def rollback_runtime(self, metadata, operation_id):
+            self.rollback_calls += 1
+            await super().rollback_runtime(metadata, operation_id)
+
+    plane = PostConfirmationFailurePlane(location="fsn1")
+    await plane.seed_ready_cell(_metadata(), _request(), _config())
+    plane.fail_route_enable = True
+    target = _runtime_target(releaseVersion="0.57.2", gatewayContractDigest="e" * 64)
+    config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "f" * 64,
+        release_version="0.57.2",
+        contract_digest="e" * 64,
+        runtime_target=target,
+        compatibility_digest="9" * 64,
+        migration_mode="none",
+    )
+    request = _v2_request(
+        operationId="rollforward-post-confirmation",
+        fenceGeneration=8,
+        runtimeTarget=target,
+        compatibilityDigest="9" * 64,
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    context = _context(
+        operation_id="database-rollforward-post-confirmation",
+        provider_operation_id="rollforward-post-confirmation",
+        fence_generation=8,
+        wire_protocol=WIRE_PROTOCOL_V2,
+    )
+
+    while not context.checkpoint.startswith("target-confirmed-"):
+        outcome = await driver.execute("rollforward", request, context)
+        assert isinstance(outcome, DriverPending)
+        context = replace(context, checkpoint=outcome.checkpoint)
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_PROVIDER_METADATA_CONFLICT"):
+        await driver.execute("rollforward", request, context)
+
+    assert plane.rollback_calls == 0
+    assert plane.helm_values(_metadata())["image"] == config.image
+    assert plane.routes_enabled(_metadata()) == (False, False)
+
+
 def _metadata(**overrides: object) -> OpaqueProviderMetadata:
     values: dict[str, object] = {
         "tenant_id": "tenant-alpha",

@@ -239,6 +239,29 @@ class ResourceSnapshot:
     provider_fence_generation: int
 
 
+@dataclass(frozen=True, slots=True)
+class FleetOperationSnapshot:
+    """Content-free operation identity used by the fleet observation command."""
+
+    external_operation_id: str
+    action: OperationAction
+    state: OperationState
+    cell_id: str
+    runtime_identity: dict[str, str] | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RollforwardEvidenceSnapshot:
+    """Content-free proof returned for one completed runtime rollforward."""
+
+    external_operation_id: str
+    cell_id: str
+    before_vault_sha256: str
+    after_vault_sha256: str
+    evidence_sha256: str
+
+
 def _operation_snapshot(operation: Operation) -> OperationSnapshot:
     return OperationSnapshot(
         id=operation.id,
@@ -674,6 +697,109 @@ class OperationRepository:
             return self._codec.decrypt_json(
                 operation.request_ciphertext,
                 purpose=(f"operation-request:{operation.action.value}:{operation.idempotency_key}"),
+            )
+
+    async def list_fleet_operation_observations(
+        self,
+    ) -> tuple[FleetOperationSnapshot, ...]:
+        """Decrypt requests internally and return no credential-bearing fields."""
+
+        observations: list[FleetOperationSnapshot] = []
+        async with self._sessions() as session:
+            operations = await session.scalars(
+                select(Operation)
+                .where(Operation.cell_id.is_not(None))
+                .order_by(Operation.created_at, Operation.id)
+            )
+            for operation in operations:
+                if operation.cell_id is None:  # pragma: no cover - narrowed by SQL
+                    continue
+                request = self._codec.decrypt_json(
+                    operation.request_ciphertext,
+                    purpose=(
+                        f"operation-request:{operation.action.value}:{operation.idempotency_key}"
+                    ),
+                )
+                runtime_identity: dict[str, str] | None = None
+                target = request.get("runtimeTarget")
+                if isinstance(target, dict) and all(
+                    isinstance(key, str) and isinstance(value, str)
+                    for key, value in target.items()
+                ):
+                    runtime_identity = dict(target)
+                elif isinstance(request.get("releaseVersion"), str) and isinstance(
+                    request.get("protocolVersion"), str
+                ):
+                    runtime_identity = {
+                        "releaseVersion": request["releaseVersion"],
+                        "protocolVersion": request["protocolVersion"],
+                    }
+                observations.append(
+                    FleetOperationSnapshot(
+                        external_operation_id=operation.external_operation_id,
+                        action=operation.action,
+                        state=operation.state,
+                        cell_id=operation.cell_id,
+                        runtime_identity=runtime_identity,
+                        created_at=operation.created_at,
+                    )
+                )
+        return tuple(observations)
+
+    async def load_rollforward_evidence(
+        self,
+        external_operation_id: str,
+    ) -> RollforwardEvidenceSnapshot:
+        """Return only the fixed digest proof for one completed rollforward."""
+
+        async with self._sessions() as session:
+            operations = tuple(
+                await session.scalars(
+                    select(Operation).where(
+                        Operation.action == OperationAction.ROLLFORWARD,
+                        Operation.external_operation_id == external_operation_id,
+                    )
+                )
+            )
+            if len(operations) != 1:
+                raise KeyError(external_operation_id)
+            operation = operations[0]
+            if (
+                operation.state is not OperationState.FINAL
+                or operation.cell_id is None
+                or operation.result_ciphertext is None
+            ):
+                raise ValueError("rollforward evidence is unavailable")
+            result = self._codec.decrypt_json(
+                operation.result_ciphertext,
+                purpose=f"operation-result:{operation.id}",
+            )
+            required = {
+                "code",
+                "beforeVaultSha256",
+                "afterVaultSha256",
+                "evidenceSha256",
+            }
+            if set(result) != required or result.get("code") != "rollforward_preserved":
+                raise ValueError("rollforward evidence is invalid")
+            digests = (
+                result["beforeVaultSha256"],
+                result["afterVaultSha256"],
+                result["evidenceSha256"],
+            )
+            if any(
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                for digest in digests
+            ):
+                raise ValueError("rollforward evidence is invalid")
+            return RollforwardEvidenceSnapshot(
+                external_operation_id=operation.external_operation_id,
+                cell_id=operation.cell_id,
+                before_vault_sha256=digests[0],
+                after_vault_sha256=digests[1],
+                evidence_sha256=digests[2],
             )
 
     async def load_result(self, operation_id: str) -> dict[str, Any] | None:

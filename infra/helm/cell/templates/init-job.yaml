@@ -1,4 +1,4 @@
-{{- if eq .Values.workloadMode "initialize" }}
+{{- if or (eq .Values.workloadMode "initialize") (eq .Values.workloadMode "migrate") }}
 apiVersion: batch/v1
 kind: Job
 metadata:

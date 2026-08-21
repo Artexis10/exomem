@@ -1841,6 +1841,8 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     variables = tenant_admission["spec"]["variables"]
     assert [variable["name"] for variable in variables] == [
         "storageInit",
+        "vaultFingerprint",
+        "lifecycleJob",
         "tenantNamespace",
         "restoreCandidate",
         "inScope",
@@ -1849,7 +1851,9 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "controllerJobFinalizerTransition",
     ]
     assert "exomem-storage-init" in variables[0]["expression"]
-    assert "exomem.io/tenant-cell" in variables[1]["expression"]
+    assert "exomem.io/vault-fingerprint" in variables[1]["expression"]
+    assert "storageInit" in variables[2]["expression"]
+    assert "exomem.io/tenant-cell" in variables[3]["expression"]
     assert all(
         "!variables.inScope" in validation["expression"]
         for validation in tenant_admission["spec"]["validations"]
@@ -1883,6 +1887,9 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     )
     assert "batch.kubernetes.io/job-tracking" in admission_text
     assert "size(object.spec.containers[0].env) == 24" in admission_text
+    assert "object.spec.containers[0].args == ['hosted-fingerprint']" in admission_text
+    assert "object.spec.containers[0].volumeMounts[0].readOnly == true" in admission_text
+    assert "variables.lifecycleJob" in admission_text
     assert "EXOMEM_HOSTED_RECORDS_READER_VERSION" in admission_text
     assert "exomem.io/records-reader-version" in admission_text
     assert "EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED" in admission_text
@@ -2420,7 +2427,14 @@ def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
     assert properties["memoryLimit"]["const"] == "1536Mi"
     assert properties["embeddingThreads"]["const"] == 1
     assert properties["embeddingThreads"]["const"] <= int(properties["cpuLimit"]["const"])
-    assert schema["properties"]["workloadMode"]["enum"] == ["initialize", "restore", "serve"]
+    assert properties["runtimeUpgrade"]["additionalProperties"] is False
+    assert properties["runtimeUpgrade"]["properties"]["priorRevision"]["minimum"] == 1
+    assert schema["properties"]["workloadMode"]["enum"] == [
+        "initialize",
+        "migrate",
+        "restore",
+        "serve",
+    ]
     assert schema["properties"]["provisionMode"]["enum"] == ["serve", "restore-candidate"]
     assert '"transferHostname"' not in json.dumps(schema["properties"]["routes"])
 
@@ -2459,6 +2473,35 @@ def test_cell_chart_restore_mode_is_an_empty_offline_storage_shell() -> None:
         "IngressRoute",
     }
     assert not [document for document in documents if document.get("kind") in forbidden]
+
+
+def test_cell_chart_migrate_mode_renders_only_the_bounded_init_job() -> None:
+    documents = _render(
+        CELL,
+        CELL / "values.initialize.yaml",
+        namespace="cell-alpha-test",
+        extra_args=("--set", "workloadMode=migrate"),
+    )
+
+    job = _find(documents, "Job", "cell-alpha-init")
+    assert _find(documents, "ConfigMap", "cell-alpha-init-request")
+    assert not any(document.get("kind") == "StatefulSet" for document in documents)
+    assert not any(document.get("kind") == "IngressRoute" for document in documents)
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    assert container["args"] == [
+        "hosted",
+        "init",
+        "--contract-version",
+        "1",
+        "--request-file",
+        "/run/exomem/operator-requests/init.json",
+    ]
+    assert container["securityContext"]["capabilities"]["add"] == [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+    ]
+    assert not any(document.get("kind") == "Service" for document in documents)
 
 
 def test_cell_chart_rejects_mismatched_runtime_and_provider_cell_ids(tmp_path: Path) -> None:

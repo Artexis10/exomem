@@ -11,32 +11,32 @@
 - [x] 2.1 Define the normalized inventory model for routable observations, tenant bindings, assignments, unfinished operations, capacity claims, provisioner desired state, Kubernetes namespaces/workloads/volumes, ConfigMap-driver Helm releases, and reviewer-purpose state
 - [x] 2.2 Add red-first pure-logic tests for empty-fleet agreement, ordinary and reviewer cells, mixed releases, multiple legacy releases, out-of-band release divergence, destroyed-cell ghosts, missing bindings, duplicate identities, and stale capacity claims
 - [x] 2.3 Implement reconciliation and classification with deterministic redacted output and one canonical inventory digest
-- [ ] 2.4 Add read-only Substrate, provisioner, and Kubernetes collectors with bounded timeouts and content-free diagnostics
-- [ ] 2.5 Make preflight refuse expand, rollforward, contract, or promotion when authoritative views disagree
-- [ ] 2.6 Record a zero-cell rollout as an explicit no-op only when every collector agrees; otherwise require repair and a fresh inventory
+- [x] 2.4 Add read-only Substrate, provisioner, and Kubernetes collectors with bounded timeouts and content-free diagnostics
+- [x] 2.5 Make preflight refuse expand, rollforward, contract, or promotion when authoritative views disagree
+- [x] 2.6 Record a zero-cell rollout as an explicit no-op only when every collector agrees; otherwise require repair and a fresh inventory
 
 ## 3. Substrate per-cell rollforward companion
 
-- [ ] 3.1 Reconcile the existing `add-hosted-cell-rollforward` artifacts with this design: operator-created assignment, explicit per-cell initiation, sequential fleet ownership, forward-only targets, and no reverse-rollforward recovery
-- [ ] 3.2 Add the `rollforward` lifecycle operation kind and any database constraint/migration updates with leased, checkpointed, idempotent state
-- [ ] 3.3 Activate an exact target assignment from a rollforward operation without requiring a successor cell while preserving every existing target and generation equality check
-- [ ] 3.4 Fail routing closed for a cell from quiescence through verified completion without affecting other tenants
-- [ ] 3.5 Upsert the routable contract observation for the same cell identity only after exact target and preservation confirmation
-- [ ] 3.6 Reject older, absent-lock, changed-digest, mismatched-assignment, or self-asserted targets before trusted identity changes
-- [ ] 3.7 Clear the routable observation atomically when an authorized tenant destruction reaches its terminal checkpoint
-- [ ] 3.8 Add PostgreSQL and unit coverage for operation leases/replay, assignment activation, same-cell observation, forward-only refusal, mid-roll routing, destroy-path cleanup, and routable-set digest movement
+- [x] 3.1 Reconcile the existing `add-hosted-cell-rollforward` artifacts with this design: operator-created assignment, explicit per-cell initiation, sequential fleet ownership, forward-only targets, and no reverse-rollforward recovery
+- [x] 3.2 Add the `rollforward` lifecycle operation kind and any database constraint/migration updates with leased, checkpointed, idempotent state
+- [x] 3.3 Activate an exact target assignment from a rollforward operation without requiring a successor cell while preserving every existing target and generation equality check
+- [x] 3.4 Fail routing closed for a cell from quiescence through verified completion without affecting other tenants
+- [x] 3.5 Upsert the routable contract observation for the same cell identity only after exact target and preservation confirmation
+- [x] 3.6 Reject older, absent-lock, changed-digest, mismatched-assignment, or self-asserted targets before trusted identity changes
+- [x] 3.7 Clear the routable observation atomically when an authorized tenant destruction reaches its terminal checkpoint
+- [x] 3.8 Add PostgreSQL and unit coverage for operation leases/replay, assignment activation, same-cell observation, forward-only refusal, mid-roll routing, destroy-path cleanup, and routable-set digest movement
 
 ## 4. Exomem provisioner and cell rollforward
 
-- [ ] 4.1 Extend the strict provisioner wire models with the authorized `rollforward` action, target assignment identity, checkpoints, prior revision, and content-free result codes
-- [ ] 4.2 Add red-first provisioner tests for quiesce/drain, idempotent checkpoints, target fencing, unauthorized drift, exact confirmation, preservation failure, Helm atomic recovery, and post-record stop behavior
-- [ ] 4.3 Implement the live and in-memory provider rollforward action against the deployment lock's target while retaining unauthorized fixed-value drift protection
-- [ ] 4.4 Add a `migrate` workload mode to the cell chart using a bounded TTL job with the existing minimal root filesystem capabilities and no serving-container privilege change
-- [ ] 4.5 Bind privileged migration necessity to signed target metadata and prove no migration job renders for a plain image transition
-- [ ] 4.6 Quiesce the selected cell, drain admitted work, and capture a canonical vault fingerprint plus prior Helm revision before mutation
-- [ ] 4.7 Run migration when declared, perform `helm upgrade --atomic --wait`, and require authenticated private readiness to match every authorized runtime identity field
-- [ ] 4.8 Recompute the canonical vault fingerprint, exclude only the declared rebuildable derived indexes, and refuse completion on any other byte loss or change
-- [ ] 4.9 Return a pre-record failure to the prior Helm revision and identity; after target observation, stop and require explicit recovery rather than downgrading or relabelling
+- [x] 4.1 Extend the strict provisioner wire models with the authorized `rollforward` action and exact target/compatibility identity; persist checkpoints and prior Helm revision as provisioner-owned evidence; return only a bounded content-free completion
+- [x] 4.2 Add red-first provisioner tests for quiesce/drain, idempotent checkpoints, target fencing, unauthorized drift, exact confirmation, preservation failure, Helm atomic recovery, and post-record stop behavior
+- [x] 4.3 Implement the live and in-memory provider rollforward action against the deployment lock's target while retaining unauthorized fixed-value drift protection
+- [x] 4.4 Add a `migrate` workload mode to the cell chart using a bounded TTL job with the existing minimal root filesystem capabilities and no serving-container privilege change
+- [x] 4.5 Bind privileged migration necessity to signed target metadata and prove no migration job renders for a plain image transition
+- [x] 4.6 Quiesce the selected cell, drain admitted work, and capture a canonical vault fingerprint plus prior Helm revision before mutation
+- [x] 4.7 Run migration when declared, perform `helm upgrade --atomic --wait`, and require authenticated private readiness to match every authorized runtime identity field
+- [x] 4.8 Recompute the canonical vault fingerprint, exclude only the declared rebuildable derived indexes, and refuse completion on any other byte loss or change
+- [x] 4.9 Return a pre-record failure to the prior Helm revision and identity; after target observation, stop and require explicit recovery rather than downgrading or relabelling
 - [ ] 4.10 Add cross-language contract fixtures and K3s acceptance proving same-cell/same-volume operation, bounded unavailability, vault preservation, runtime confirmation, and replay safety
 
 ## 5. Generic expand, drain, and contract orchestration

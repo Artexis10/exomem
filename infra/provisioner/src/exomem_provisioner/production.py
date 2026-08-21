@@ -12,6 +12,7 @@ from .adapters import (
     HelmCliAdapter,
     KubernetesCellAdapter,
     KubernetesMaintenanceLeaseAdapter,
+    KubernetesVaultFingerprintAdapter,
     PrivateCellApiAdapter,
     TraefikRoutingAdapter,
 )
@@ -157,6 +158,8 @@ def build_live_provider_components(
         },
         records_reader_version=selected.recordsReaderVersion,
         lifecycle_actions_enabled=selected.lifecycleActionsEnabled,
+        compatibility_digest=selected.compatibilityDigest,
+        migration_mode=selected.migrationMode,
     )
     cell = KubernetesCellAdapter(
         core_v1=core_v1,
@@ -201,6 +204,11 @@ def build_live_provider_components(
         capacity=capacity,
         identity_verifier=identity_verifier,
         config=lifecycle_config,
+        fingerprint=KubernetesVaultFingerprintAdapter(
+            core_v1=core_v1,
+            batch_v1=batch_v1,
+            image=selected.image,
+        ),
     )
     return LiveProviderComponents(
         lock=lock,

@@ -14,6 +14,9 @@
 {{- $v2Keys := list "artifact" "schemaVersion" "admissionMode" "components" "runtimeTarget" "composition" "rollback" -}}
 {{- $v3Keys := append $v2Keys "recordsCompatibility" -}}
 {{- $lockKeys := ternary $v3Keys $v2Keys (eq (toJson $lock.schemaVersion) "3") -}}
+{{- if hasKey $lock "runtimeUpgrade" -}}
+{{- $lockKeys = append $lockKeys "runtimeUpgrade" -}}
+{{- end -}}
 {{- if ne (len $lock) (len $lockKeys) -}}
 {{- fail "deployment lock fields are incomplete or unknown" -}}
 {{- end -}}
@@ -51,6 +54,12 @@
 {{- end -}}
 {{- if or (not (regexMatch "^[0-9a-f]{64}$" $target.gatewayContractDigest)) (not (regexMatch "^[0-9a-f]{64}$" $target.commandFingerprint)) (not (regexMatch "^[0-9a-f]{64}$" $target.schemaDigest)) -}}
 {{- fail "deployment lock runtime target digest is invalid" -}}
+{{- end -}}
+{{- if hasKey $lock "runtimeUpgrade" -}}
+{{- $upgrade := $lock.runtimeUpgrade -}}
+{{- if or (not (kindIs "map" $upgrade)) (ne (len $upgrade) 2) (not (hasKey $upgrade "compatibilityDigest")) (not (hasKey $upgrade "migrationMode")) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.compatibilityDigest)) (not (has $upgrade.migrationMode (list "none" "binding-v1-to-v2"))) -}}
+{{- fail "deployment lock runtime upgrade is invalid" -}}
+{{- end -}}
 {{- end -}}
 {{- $composition := $lock.composition -}}
 {{- $compositionKeys := list "commit" "sourceClosure" "forwardContractSha256" "authoritativeLegacyReleaseSetSha256" "legacyCatalog" "legacyReleaseSetSha256" -}}

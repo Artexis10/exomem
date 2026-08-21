@@ -92,6 +92,7 @@ class CompositionRequest:
     output: Path
     records_compatibility: HashedInput | None = None
     rollback_runtime: CandidateInput | None = None
+    runtime_upgrade: HashedInput | None = None
 
 
 def _canonical(value: object) -> bytes:
@@ -163,6 +164,34 @@ def _exact_object(value: object, *, label: str, fields: set[str]) -> dict[str, A
     if not isinstance(value, dict) or set(value) != fields:
         _error(f"{label} fields are incomplete or unknown")
     return cast(dict[str, Any], value)
+
+
+def _object_with_optional(
+    value: object,
+    *,
+    label: str,
+    required: set[str],
+    optional: set[str],
+) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or not required.issubset(value)
+        or not set(value).issubset(required | optional)
+    ):
+        _error(f"{label} fields are incomplete or unknown")
+    return cast(dict[str, Any], value)
+
+
+def _runtime_upgrade(value: object) -> dict[str, object]:
+    upgrade = _exact_object(
+        value,
+        label="runtime upgrade",
+        fields={"compatibilityDigest", "migrationMode"},
+    )
+    _sha256(upgrade["compatibilityDigest"], label="runtime upgrade compatibility")
+    if upgrade["migrationMode"] not in {"none", "binding-v1-to-v2"}:
+        _error("runtime upgrade migration mode is invalid")
+    return cast(dict[str, object], upgrade)
 
 
 def _commit(value: object, *, label: str) -> str:
@@ -577,16 +606,19 @@ def validate_deployment_lock(value: object) -> None:
     if isinstance(value, dict) and value.get("schemaVersion") == 3:
         _validate_deployment_lock_v3(value)
         return
-    lock = _exact_object(
+    lock = _object_with_optional(
         value,
         label="deployment lock",
-        fields={"artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget", "composition", "rollback"},
+        required={"artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget", "composition", "rollback"},
+        optional={"runtimeUpgrade"},
     )
     if lock["artifact"] != "exomem-hosted-deployment-lock" or lock["schemaVersion"] != 2:
         _error("deployment lock identity is invalid")
     if lock["admissionMode"] not in {"expand", "contract"}:
         _error("deployment lock admission mode is invalid")
     target = _target(lock["runtimeTarget"], label="deployment lock runtime target")
+    if "runtimeUpgrade" in lock:
+        _runtime_upgrade(lock["runtimeUpgrade"])
     components = _exact_object(lock["components"], label="deployment lock components", fields={"runtime", "provisioner"})
     runtime = _exact_object(
         components["runtime"], label="runtime component", fields={"image", "sourceCommit", "candidateSha256"}
@@ -678,13 +710,14 @@ def validate_deployment_lock(value: object) -> None:
 
 
 def _validate_deployment_lock_v3(value: dict[str, Any]) -> None:
-    lock = _exact_object(
+    lock = _object_with_optional(
         value,
         label="deployment lock",
-        fields={
+        required={
             "artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget",
             "composition", "rollback", "recordsCompatibility",
         },
+        optional={"runtimeUpgrade"},
     )
     v2 = dict(lock)
     compatibility = cast(dict[str, Any], v2.pop("recordsCompatibility"))
@@ -880,6 +913,9 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
     }
     if records_compatibility is not None:
         common["recordsCompatibility"] = records_compatibility
+    if request.runtime_upgrade is not None:
+        upgrade, _ = _load_hashed(request.runtime_upgrade, label="runtime upgrade")
+        common["runtimeUpgrade"] = _runtime_upgrade(upgrade)
     expand = {**copy.deepcopy(common), "admissionMode": "expand"}
     contract = {**copy.deepcopy(common), "admissionMode": "contract"}
     pair = {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": schema_version, "locks": [expand, contract]}
@@ -923,6 +959,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--legacy-contract", type=_hashed_argument, action="append", required=True)
     parser.add_argument("--rollback", type=_hashed_argument, required=True)
     parser.add_argument("--records-compatibility", type=_hashed_argument)
+    parser.add_argument("--runtime-upgrade", type=_hashed_argument)
     _optional_candidate_arguments(parser, "rollback-runtime")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -964,6 +1001,7 @@ def main(argv: list[str] | None = None) -> int:
         output=args.output,
         records_compatibility=args.records_compatibility,
         rollback_runtime=rollback_runtime,
+        runtime_upgrade=args.runtime_upgrade,
     )
     try:
         compose_locks(request)

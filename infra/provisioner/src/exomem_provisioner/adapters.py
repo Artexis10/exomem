@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .credentials import validate_machine_credential
 from .lifecycle import (
@@ -595,6 +596,273 @@ class KubernetesCellAdapter:
             metadata.resource_name,
             {"spec": {"replicas": replicas}},
         )
+
+
+class KubernetesVaultFingerprintAdapter:
+    """Run one fixed, read-only target-runtime fingerprint Job per phase."""
+
+    _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+    def __init__(
+        self,
+        *,
+        core_v1: Any,
+        batch_v1: Any,
+        image: str,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        poll_attempts: int = 150,
+    ) -> None:
+        self._core = core_v1
+        self._batch = batch_v1
+        self._image = image
+        self._sleep = sleep
+        self._poll_attempts = poll_attempts
+
+    @staticmethod
+    def _name(metadata: OpaqueProviderMetadata) -> str:
+        # Reuse the already signed fixed init-Job provider reference. The
+        # initial install Job is terminal and TTL-cleaned before upgrades.
+        return metadata.resource_name + "-init"
+
+    async def _pause(self) -> None:
+        result = self._sleep(1.0)
+        if inspect.isawaitable(result):
+            await result
+
+    def _body(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+        phase: Literal["before", "after"],
+        recovery_envelope: str,
+    ) -> dict[str, Any]:
+        annotations = {
+            **metadata.kubernetes_annotations,
+            "exomem.io/recovery-envelope": recovery_envelope,
+            "exomem.io/vault-fingerprint-phase": phase,
+            "exomem.io/vault-fingerprint-operation": hashlib.sha256(
+                operation_id.encode("utf-8")
+            ).hexdigest(),
+        }
+        labels = {
+            "app.kubernetes.io/name": "exomem-cell",
+            "exomem.io/cell": metadata.resource_name,
+            "exomem.io/vault-fingerprint": "true",
+        }
+        return {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": self._name(metadata),
+                "namespace": metadata.resource_name,
+                "labels": labels,
+                "annotations": annotations,
+            },
+            "spec": {
+                "backoffLimit": 0,
+                "activeDeadlineSeconds": 600,
+                "ttlSecondsAfterFinished": 300,
+                "template": {
+                    "metadata": {"labels": labels, "annotations": annotations},
+                    "spec": {
+                        "serviceAccountName": metadata.resource_name,
+                        "automountServiceAccountToken": False,
+                        "restartPolicy": "Never",
+                        "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                        "containers": [
+                            {
+                                "name": "exomem",
+                                "image": self._image,
+                                "imagePullPolicy": "IfNotPresent",
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "args": ["hosted-fingerprint"],
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "128Mi"},
+                                    "limits": {"cpu": "1", "memory": "1Gi"},
+                                },
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": False,
+                                    "readOnlyRootFilesystem": True,
+                                    "runAsNonRoot": True,
+                                    "runAsUser": 10001,
+                                    "runAsGroup": 10001,
+                                    "capabilities": {"drop": ["ALL"]},
+                                },
+                                "volumeMounts": [
+                                    {
+                                        "name": "data",
+                                        "mountPath": "/var/lib/exomem/vault",
+                                        "subPath": "vault",
+                                        "readOnly": True,
+                                    }
+                                ],
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "name": "data",
+                                "persistentVolumeClaim": {
+                                    "claimName": metadata.resource_name + "-data"
+                                },
+                            }
+                        ],
+                    },
+                },
+            },
+        }
+
+    @staticmethod
+    def _duplicates_rejected(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON member")
+            value[key] = item
+        return value
+
+    def _require_job(
+        self,
+        job: Any,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+        phase: Literal["before", "after"],
+        recovery_envelope: str,
+    ) -> None:
+        annotations = dict(getattr(job.metadata, "annotations", None) or {})
+        _require_annotations(annotations, metadata)
+        if (
+            annotations.get("exomem.io/recovery-envelope") != recovery_envelope
+            or annotations.get("exomem.io/vault-fingerprint-phase") != phase
+            or annotations.get("exomem.io/vault-fingerprint-operation")
+            != hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+        ):
+            raise MetadataConflict("vault fingerprint Job identity differs")
+        containers = getattr(job.spec.template.spec, "containers", None) or ()
+        if (
+            len(containers) != 1
+            or getattr(containers[0], "image", None) != self._image
+            or list(getattr(containers[0], "args", None) or ()) != ["hosted-fingerprint"]
+        ):
+            raise MetadataConflict("vault fingerprint Job runtime differs")
+
+    async def _read(self, metadata: OpaqueProviderMetadata) -> Any | None:
+        try:
+            return await asyncio.to_thread(
+                self._batch.read_namespaced_job,
+                self._name(metadata),
+                metadata.resource_name,
+            )
+        except Exception as error:
+            if _api_status(error) == 404:
+                return None
+            raise
+
+    async def _delete(self, metadata: OpaqueProviderMetadata) -> None:
+        try:
+            await asyncio.to_thread(
+                self._batch.delete_namespaced_job,
+                self._name(metadata),
+                metadata.resource_name,
+                {"propagationPolicy": "Foreground"},
+            )
+        except Exception as error:
+            if _api_status(error) != 404:
+                raise
+
+    async def _result(self, metadata: OpaqueProviderMetadata, job: Any) -> str | None:
+        status = getattr(job, "status", None)
+        if int(getattr(status, "failed", 0) or 0) > 0:
+            raise MetadataConflict("vault fingerprint Job failed")
+        if int(getattr(status, "succeeded", 0) or 0) != 1:
+            return None
+        pods = await asyncio.to_thread(
+            self._core.list_namespaced_pod,
+            metadata.resource_name,
+            label_selector=f"job-name={self._name(metadata)}",
+        )
+        items = list(getattr(pods, "items", None) or ())
+        if len(items) != 1:
+            raise MetadataConflict("vault fingerprint result is unavailable")
+        statuses = list(getattr(items[0].status, "container_statuses", None) or ())
+        terminated = (
+            getattr(getattr(statuses[0], "state", None), "terminated", None)
+            if len(statuses) == 1
+            else None
+        )
+        message = getattr(terminated, "message", None)
+        if getattr(terminated, "exit_code", None) != 0 or not isinstance(message, str):
+            raise MetadataConflict("vault fingerprint result is invalid")
+        try:
+            value = json.loads(message, object_pairs_hook=self._duplicates_rejected)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise MetadataConflict("vault fingerprint result is invalid") from error
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"artifact", "schemaVersion", "sha256"}
+            or value.get("artifact") != "exomem-hosted-vault-fingerprint"
+            or value.get("schemaVersion") != 1
+            or not isinstance(value.get("sha256"), str)
+            or self._SHA256.fullmatch(value["sha256"]) is None
+        ):
+            raise MetadataConflict("vault fingerprint result is invalid")
+        return value["sha256"]
+
+    async def fingerprint(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+        phase: Literal["before", "after"],
+        recovery_envelope: str,
+    ) -> str:
+        expected_annotations = self._body(
+            metadata,
+            operation_id=operation_id,
+            phase=phase,
+            recovery_envelope=recovery_envelope,
+        )["metadata"]["annotations"]
+        for _ in range(self._poll_attempts):
+            job = await self._read(metadata)
+            if job is None:
+                try:
+                    await asyncio.to_thread(
+                        self._batch.create_namespaced_job,
+                        metadata.resource_name,
+                        self._body(
+                            metadata,
+                            operation_id=operation_id,
+                            phase=phase,
+                            recovery_envelope=recovery_envelope,
+                        ),
+                    )
+                except Exception as error:
+                    if _api_status(error) != 409:
+                        raise
+                await self._pause()
+                continue
+            annotations = dict(getattr(job.metadata, "annotations", None) or {})
+            if any(annotations.get(key) != value for key, value in expected_annotations.items()):
+                if int(getattr(getattr(job, "status", None), "succeeded", 0) or 0) == 1:
+                    await self._delete(metadata)
+                    await self._pause()
+                    continue
+                raise MetadataConflict("another cell lifecycle Job owns the fixed slot")
+            self._require_job(
+                job,
+                metadata,
+                operation_id=operation_id,
+                phase=phase,
+                recovery_envelope=recovery_envelope,
+            )
+            digest = await self._result(metadata, job)
+            if digest is not None:
+                await self._delete(metadata)
+                return digest
+            await self._pause()
+        raise MetadataConflict("vault fingerprint Job did not complete within its bound")
 
 
 class KubernetesMaintenanceLeaseAdapter:
@@ -1382,12 +1650,7 @@ class HelmCliAdapter:
         if self._has_secret_key(values):
             raise MetadataConflict("Helm values must not carry plaintext credentials")
         environment = {"HELM_DRIVER": "configmap"}
-        version = await self._runner(
-            (self._binary, "version", "--template", "{{.Version}}"),
-            environment,
-        )
-        if version.returncode != 0 or version.stdout.strip() != f"v{self._expected_version}":
-            raise MetadataConflict("installed Helm CLI does not match the pinned version")
+        await self._require_version(environment)
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -1434,6 +1697,171 @@ class HelmCliAdapter:
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    async def _require_version(self, environment: dict[str, str]) -> None:
+        version = await self._runner(
+            (self._binary, "version", "--template", "{{.Version}}"),
+            environment,
+        )
+        if version.returncode != 0 or version.stdout.strip() != f"v{self._expected_version}":
+            raise MetadataConflict("installed Helm CLI does not match the pinned version")
+
+    async def _current_values(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+    ) -> dict[str, Any]:
+        result = await self._runner(
+            (
+                self._binary,
+                "get",
+                "values",
+                metadata.resource_name,
+                "--namespace",
+                metadata.resource_name,
+                "--output",
+                "json",
+            ),
+            environment,
+        )
+        if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
+            raise MetadataConflict("current Helm values are unavailable")
+        try:
+            value = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MetadataConflict("current Helm values are invalid") from error
+        if not isinstance(value, dict) or self._has_secret_key(value):
+            raise MetadataConflict("current Helm values are invalid")
+        return value
+
+    async def _deployed_revision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+    ) -> int:
+        result = await self._runner(
+            (
+                self._binary,
+                "history",
+                metadata.resource_name,
+                "--namespace",
+                metadata.resource_name,
+                "--output",
+                "json",
+                "--max",
+                "20",
+            ),
+            environment,
+        )
+        if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
+            raise MetadataConflict("Helm release history is unavailable")
+        try:
+            history = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MetadataConflict("Helm release history is invalid") from error
+        revisions = [
+            item.get("revision")
+            for item in history
+            if isinstance(item, dict) and item.get("status") == "deployed"
+        ] if isinstance(history, list) else []
+        if (
+            len(revisions) != 1
+            or isinstance(revisions[0], bool)
+            or not isinstance(revisions[0], int)
+            or revisions[0] < 1
+        ):
+            raise MetadataConflict("Helm deployed revision is ambiguous")
+        return revisions[0]
+
+    @staticmethod
+    def _operation_digest(operation_id: str) -> str:
+        return hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+
+    async def _transition_context(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+    ) -> tuple[dict[str, Any], int]:
+        environment = {"HELM_DRIVER": "configmap"}
+        await self._require_version(environment)
+        current = await self._current_values(metadata, environment)
+        marker = current.get("runtimeUpgrade")
+        digest = self._operation_digest(operation_id)
+        if isinstance(marker, dict) and marker.get("operationDigest") == digest:
+            if (
+                set(marker) != {"schemaVersion", "operationDigest", "priorRevision"}
+                or marker.get("schemaVersion") != 1
+                or isinstance(marker.get("priorRevision"), bool)
+                or not isinstance(marker.get("priorRevision"), int)
+                or marker["priorRevision"] < 1
+            ):
+                raise MetadataConflict("Helm runtime upgrade marker is invalid")
+            return current, marker["priorRevision"]
+        return current, await self._deployed_revision(metadata, environment)
+
+    async def transition_release(
+        self,
+        metadata: OpaqueProviderMetadata,
+        values: dict[str, Any],
+        *,
+        operation_id: str,
+    ) -> None:
+        if "runtimeUpgrade" in values:
+            raise MetadataConflict("runtime upgrade marker is provisioner-owned")
+        current, prior_revision = await self._transition_context(
+            metadata, operation_id=operation_id
+        )
+        desired = json.loads(json.dumps(values))
+        desired["runtimeUpgrade"] = {
+            "schemaVersion": 1,
+            "operationDigest": self._operation_digest(operation_id),
+            "priorRevision": prior_revision,
+        }
+        if current == desired:
+            return
+        await self.ensure_release(metadata, desired)
+
+    async def rollback_release(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+    ) -> None:
+        environment = {"HELM_DRIVER": "configmap"}
+        await self._require_version(environment)
+        current = await self._current_values(metadata, environment)
+        marker = current.get("runtimeUpgrade")
+        if not isinstance(marker, dict) or marker.get("operationDigest") != self._operation_digest(
+            operation_id
+        ):
+            return
+        prior = marker.get("priorRevision")
+        if (
+            set(marker) != {"schemaVersion", "operationDigest", "priorRevision"}
+            or marker.get("schemaVersion") != 1
+            or isinstance(prior, bool)
+            or not isinstance(prior, int)
+            or prior < 1
+        ):
+            raise MetadataConflict("Helm runtime upgrade marker is invalid")
+        result = await self._runner(
+            (
+                self._binary,
+                "rollback",
+                metadata.resource_name,
+                str(prior),
+                "--namespace",
+                metadata.resource_name,
+                "--wait",
+                "--cleanup-on-fail",
+                "--timeout",
+                "5m",
+            ),
+            environment,
+        )
+        if result.returncode != 0:
+            raise MetadataConflict("Helm runtime rollback failed")
 
 
 Probe = Callable[[str, str, dict[str, str]], Awaitable[int]]

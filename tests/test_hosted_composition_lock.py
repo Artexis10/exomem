@@ -245,6 +245,39 @@ def test_composer_verifies_candidates_and_writes_deterministic_lock_pair(
     ).hexdigest()
 
 
+def test_composer_binds_runtime_upgrade_compatibility_and_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    evidence = tmp_path / "runtime-upgrade.json"
+    digest = _write_json(
+        evidence,
+        {"compatibilityDigest": "9" * 64, "migrationMode": "none"},
+    )
+    request = replace(
+        request,
+        runtime_upgrade=composer.HashedInput(evidence, digest),
+    )
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        composer,
+        "verify_source_closure",
+        lambda _repository, candidate, composition, paths: {
+            "candidateCommit": candidate,
+            "compositionCommit": composition,
+            "paths": list(paths),
+        },
+    )
+
+    pair = composer.compose_locks(request)
+
+    assert [lock["runtimeUpgrade"] for lock in pair["locks"]] == [
+        {"compatibilityDigest": "9" * 64, "migrationMode": "none"},
+        {"compatibilityDigest": "9" * 64, "migrationMode": "none"},
+    ]
+
+
 @pytest.mark.parametrize(
     "failure",
     [

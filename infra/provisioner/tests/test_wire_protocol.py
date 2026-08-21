@@ -80,8 +80,39 @@ def test_v2_cell_requests_require_only_a_strict_six_field_runtime_target() -> No
 def test_v2_has_one_closed_model_per_action_and_explicit_target_free_actions() -> None:
     request_models = REQUEST_MODELS_BY_PROTOCOL[WIRE_PROTOCOL_V2]
 
-    assert len(request_models) == 14
-    assert len(set(request_models.values())) == 14
+    assert len(request_models) == 15
+    assert len(set(request_models.values())) == 15
+    assert set(request_models["rollforward"].model_fields) == {
+        "operationId",
+        "checkpoint",
+        "fenceGeneration",
+        "tenantId",
+        "cellId",
+        "serviceCredential",
+        "workerPolicy",
+        "runtimeTarget",
+        "providerRef",
+        "compatibilityDigest",
+    }
+    rollforward = request_models["rollforward"].model_validate(
+        {
+            "operationId": "operation-v2-alpha",
+            "checkpoint": "requested",
+            "fenceGeneration": 1,
+            "tenantId": "tenant-v2-alpha",
+            "cellId": "cell-v2-alpha",
+            "serviceCredential": _ACTIVE_CREDENTIAL,
+            "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+            "runtimeTarget": _runtime_target(),
+            "providerRef": "provider-cell-v2-alpha",
+            "compatibilityDigest": "d" * 64,
+        }
+    )
+    assert rollforward.compatibilityDigest == "d" * 64
+    with pytest.raises(ValidationError):
+        request_models["rollforward"].model_validate(
+            {**rollforward.model_dump(mode="python"), "compatibilityDigest": "D" * 64}
+        )
     assert set(request_models["export-delete"].model_fields) == {
         "operationId",
         "checkpoint",

@@ -170,6 +170,10 @@ def _run_cli(argv: list[str] | None = None) -> int:
 
 
 def _dispatch_main(raw: list[str]) -> int:
+    if raw and raw[0] == "hosted-fingerprint":
+        from .hosted_fingerprint import main as hosted_fingerprint_main
+
+        return hosted_fingerprint_main(raw[1:])
     if raw and raw[0] == "hosted":
         from .hosted_operator import main as hosted_operator_main
 

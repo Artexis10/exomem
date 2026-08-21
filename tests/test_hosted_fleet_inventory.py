@@ -39,6 +39,18 @@ def _runtime(release: str, marker: str) -> dict[str, str]:
     }
 
 
+def _control_runtime(runtime: dict[str, str]) -> dict[str, str]:
+    """Substrate owns contract identity, not the deployed OCI image."""
+
+    return {key: value for key, value in runtime.items() if key != "runtimeImage"}
+
+
+def _deployment_runtime(runtime: dict[str, str]) -> dict[str, str]:
+    """Provisioner/Kubernetes own deployed bytes, not promotion compatibility."""
+
+    return {key: value for key, value in runtime.items() if key != "compatibilityDigest"}
+
+
 def _empty_sources() -> dict[str, dict[str, object]]:
     return {
         "substrate": {
@@ -81,7 +93,9 @@ def _add_live_cell(
     reviewer: bool = False,
 ) -> None:
     substrate = sources["substrate"]
-    substrate["routableCells"].append({"cellId": cell_id, "runtime": runtime})
+    substrate["routableCells"].append(
+        {"cellId": cell_id, "runtime": _control_runtime(runtime)}
+    )
     substrate["tenantBindings"].append({"cellId": cell_id, "status": "active"})
     substrate["capacityClaims"].append({"cellId": cell_id})
     substrate["capacityActiveCellCount"] += 1
@@ -90,11 +104,16 @@ def _add_live_cell(
         substrate["reviewerTenants"].append({"cellId": cell_id})
 
     sources["provisioner"]["desiredCells"].append(
-        {"cellId": cell_id, "runtime": runtime, "state": "ready"}
+        {"cellId": cell_id, "runtime": _deployment_runtime(runtime), "state": "ready"}
     )
     sources["kubernetes"]["namespaces"].append({"cellId": cell_id})
     sources["kubernetes"]["helmReleases"].append(
-        {"cellId": cell_id, "runtime": runtime, "driver": "configmap", "status": "deployed"}
+        {
+            "cellId": cell_id,
+            "runtime": _deployment_runtime(runtime),
+            "driver": "configmap",
+            "status": "deployed",
+        }
     )
     sources["kubernetes"]["workloads"].append(
         {"cellId": cell_id, "runtimeImage": runtime["runtimeImage"], "ready": True}
@@ -157,6 +176,33 @@ def test_reconciles_ordinary_and_reviewer_cells(
     assert module.zero_fleet_noop(inventory) is False
 
 
+def test_substrate_cannot_assert_or_be_required_to_know_the_runtime_image() -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    sources = _empty_sources()
+    _add_live_cell(sources, cell_id="cell_1809ce5c", runtime=target)
+
+    control_runtime = sources["substrate"]["routableCells"][0]["runtime"]
+    assert "runtimeImage" not in control_runtime
+    inventory = module.reconcile_inventory(sources, target=target)
+
+    assert inventory["status"] == "consistent"
+    assert inventory["cells"][0]["runtime"] == target
+
+
+def test_substrate_contract_drift_still_disagrees_with_image_authorities() -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    sources = _empty_sources()
+    _add_live_cell(sources, cell_id="cell_1809ce5c", runtime=target)
+    sources["substrate"]["routableCells"][0]["runtime"]["schemaDigest"] = "b" * 64
+
+    inventory = module.reconcile_inventory(sources, target=target)
+
+    assert inventory["status"] == "inconsistent"
+    assert "runtime_identity_divergence" in inventory["issues"]
+
+
 def test_mixed_and_multiple_legacy_releases_are_retained_deterministically() -> None:
     module = _module()
     target = _runtime("0.57.2", "a")
@@ -184,8 +230,8 @@ def test_mixed_and_multiple_legacy_releases_are_retained_deterministically() -> 
     ("mutation", "issue"),
     [
         (
-            lambda sources, target: sources["provisioner"]["desiredCells"][0].update(
-                {"runtime": target}
+                lambda sources, target: sources["provisioner"]["desiredCells"][0].update(
+                {"runtime": _deployment_runtime(target)}
             ),
             "runtime_identity_divergence",
         ),
@@ -248,7 +294,7 @@ def test_contract_gate_requires_zero_legacy_and_no_unfinished_authority() -> Non
             "assignmentId": "assignment_1",
             "cellId": "cell_1809ce5c",
             "status": "active",
-            "targetRuntime": target,
+            "targetRuntime": _control_runtime(target),
         }
     )
     target_sources["substrate"]["unfinishedOperations"].append(
@@ -257,7 +303,7 @@ def test_contract_gate_requires_zero_legacy_and_no_unfinished_authority() -> Non
             "cellId": "cell_1809ce5c",
             "kind": "rollforward",
             "status": "running",
-            "targetRuntime": target,
+            "targetRuntime": _control_runtime(target),
         }
     )
     pending = module.reconcile_inventory(target_sources, target=target)

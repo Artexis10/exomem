@@ -117,6 +117,72 @@ async def test_submit_replays_exact_request_and_conflicts_changed_body(
 
 
 @pytest.mark.asyncio
+async def test_fleet_operation_projection_never_returns_request_secrets(
+    repository: OperationRepository,
+) -> None:
+    request = _request()
+    await repository.submit("provision", "fleet-observation", request)
+
+    [observation] = await repository.list_fleet_operation_observations()
+
+    assert observation.runtime_identity == {
+        "releaseVersion": "0.22.0",
+        "protocolVersion": "exomem-hosted.v1",
+    }
+    assert request["serviceCredential"] not in repr(observation)
+    assert request["tenantId"] not in repr(observation)
+
+
+@pytest.mark.asyncio
+async def test_completed_rollforward_evidence_projection_is_content_free(
+    repository: OperationRepository,
+) -> None:
+    request = _request(
+        operationId="rollforward-alpha",
+        runtimeTarget={
+            "releaseVersion": "0.57.2",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "a" * 64,
+            "commandFingerprint": "b" * 64,
+            "schemaDigest": "c" * 64,
+        },
+        compatibilityDigest="d" * 64,
+    )
+    operation = await repository.submit(
+        "rollforward",
+        "rollforward-evidence",
+        request,
+        wire_protocol=WIRE_PROTOCOL_V2,
+    )
+    claim = await repository.claim_next("rollforward-worker")
+    assert claim is not None and claim.id == operation.id and claim.claim_token is not None
+    result = {
+        "code": "rollforward_preserved",
+        "beforeVaultSha256": "e" * 64,
+        "afterVaultSha256": "e" * 64,
+        "evidenceSha256": "f" * 64,
+    }
+    await repository.complete(
+        operation.id,
+        result,
+        worker_id="rollforward-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+    )
+
+    evidence = await repository.load_rollforward_evidence("rollforward-alpha")
+
+    assert evidence.external_operation_id == "rollforward-alpha"
+    assert evidence.cell_id == "cell-alpha"
+    assert evidence.before_vault_sha256 == "e" * 64
+    assert evidence.after_vault_sha256 == "e" * 64
+    assert evidence.evidence_sha256 == "f" * 64
+    assert request["serviceCredential"] not in repr(evidence)
+    assert request["tenantId"] not in repr(evidence)
+
+
+@pytest.mark.asyncio
 async def test_submission_admission_is_atomic_and_protocol_bound(
     repository: OperationRepository,
 ) -> None:

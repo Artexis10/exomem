@@ -18,6 +18,7 @@ from exomem_provisioner.config import (
 from exomem_provisioner.driver import DriverPending, EffectContext
 from exomem_provisioner.lifecycle import (
     CellLifecycleDriver,
+    LifecycleConfig,
     MetadataConflict,
     OpaqueProviderMetadata,
 )
@@ -466,6 +467,126 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
     assert components.driver._plane is components.plane
     assert components.driver._volumes is None
     assert components.capacity is components.plane._capacity
+
+
+@pytest.mark.asyncio
+async def test_live_rollforward_uses_target_fingerprint_and_original_helm_authority() -> None:
+    current = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "rollforward-alpha", 8)
+    owner = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "original-provision", 7)
+    target = {
+        "releaseVersion": "0.57.2",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v2",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+    }
+    config = LifecycleConfig(
+        image="ghcr.io/artexis10/exomem@sha256:" + "d" * 64,
+        chart_path="chart",
+        chart_version="0.1.0",
+        helm_version="3.19.4",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        browser_origin="https://substratesystems.io",
+        release_version="0.57.2",
+        protocol_version="1",
+        contract_digest="a" * 64,
+        location="fsn1",
+        runtime_target=target,
+        compatibility_digest="e" * 64,
+        migration_mode="binding-v1-to-v2",
+    )
+    original_request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": {
+            **target,
+            "releaseVersion": "0.54.1",
+            "protocolVersion": "legacy-protocol",
+        },
+        "_providerRecoveryEnvelopes": {"initJob": "original-init-envelope"},
+    }
+    request = {
+        "serviceCredential": "credential-current",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": target,
+        "compatibilityDigest": "e" * 64,
+    }
+    fingerprints: list[tuple[OpaqueProviderMetadata, str, str]] = []
+    transitions: list[tuple[OpaqueProviderMetadata, dict[str, object], str]] = []
+    rollbacks: list[tuple[OpaqueProviderMetadata, str]] = []
+    quiesced_protocols: list[str] = []
+
+    class Fingerprint:
+        async def fingerprint(self, metadata, *, operation_id, phase, recovery_envelope):
+            assert recovery_envelope == "current-init-envelope"
+            fingerprints.append((metadata, operation_id, phase))
+            return "f" * 64
+
+    class Helm:
+        async def transition_release(self, metadata, values, *, operation_id):
+            transitions.append((metadata, values, operation_id))
+
+        async def rollback_release(self, metadata, *, operation_id):
+            rollbacks.append((metadata, operation_id))
+
+    class Registry:
+        async def inspect(self, current_metadata, owner_metadata):
+            assert (current_metadata, owner_metadata) == (current, owner)
+            return SimpleNamespace(routes=(False, False))
+
+    class Runtime:
+        async def quiesce(self, metadata, *, credential, protocol_version, operation_id):
+            assert metadata == owner
+            assert credential == "credential-current"
+            assert operation_id == "rollforward-alpha"
+            quiesced_protocols.append(protocol_version)
+
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=Runtime(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=config,
+        fingerprint=Fingerprint(),  # type: ignore[arg-type]
+    )
+    key = plane._key(current)
+    plane._owned[key] = owner
+    plane._helm_requests[key] = original_request
+    plane._recovery_envelopes[key] = {"initJob": "current-init-envelope"}
+
+    assert await plane.canonical_vault_fingerprint(
+        current, request, "rollforward-alpha", phase="before"
+    ) == "f" * 64
+    await plane.quiesce(current, request, "rollforward-alpha")
+    await plane.run_runtime_migration(
+        current, request, config, "rollforward-alpha"
+    )
+    await plane.upgrade_runtime(current, request, config, "rollforward-alpha")
+    await plane.rollback_runtime(current, "rollforward-alpha")
+
+    assert fingerprints == [(current, "rollforward-alpha", "before")]
+    assert quiesced_protocols == ["legacy-protocol"]
+    assert [values["workloadMode"] for _owner, values, _operation in transitions] == [
+        "migrate",
+        "serve",
+    ]
+    for transition_owner, values, operation in transitions:
+        assert transition_owner == owner
+        assert operation == "rollforward-alpha"
+        assert values["image"] == config.image
+        assert values["providerRecoveryEnvelopes"] == {
+            "initJob": "original-init-envelope"
+        }
+        assert values["routes"]["enabled"] is False
+    assert transitions[0][1]["initOperationId"] == "rollforward-alpha"
+    assert rollbacks == [(owner, "rollforward-alpha")]
 
 
 @pytest.mark.asyncio

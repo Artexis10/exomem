@@ -127,6 +127,26 @@ def test_selected_deployment_lock_is_strict_and_exposes_admission_inputs(tmp_pat
         load_deployment_lock(path)
 
 
+def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(tmp_path: Path) -> None:
+    value = _deployment_lock()
+    value["runtimeUpgrade"] = {
+        "compatibilityDigest": "9" * 64,
+        "migrationMode": "binding-v1-to-v2",
+    }
+    path = tmp_path / "selected-lock.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    selected = load_deployment_lock(path).selected_runtime("active")
+
+    assert selected.compatibilityDigest == "9" * 64
+    assert selected.migrationMode == "binding-v1-to-v2"
+
+    value["runtimeUpgrade"]["migrationMode"] = "arbitrary-script"  # type: ignore[index]
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_deployment_lock(path)
+
+
 @pytest.mark.parametrize("tamper", ("contract", "release_set", "catalog_order"))
 def test_selected_lock_rejects_forged_or_noncanonical_legacy_admission_evidence(
     tmp_path: Path, tamper: str

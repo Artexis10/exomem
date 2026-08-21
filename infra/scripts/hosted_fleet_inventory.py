@@ -35,6 +35,8 @@ _RUNTIME_FIELDS = {
     "schemaDigest",
     "compatibilityDigest",
 }
+_CONTROL_RUNTIME_FIELDS = _RUNTIME_FIELDS - {"runtimeImage"}
+_DEPLOYMENT_RUNTIME_FIELDS = _RUNTIME_FIELDS - {"compatibilityDigest"}
 _SUBSTRATE_FIELDS = {
     "artifact",
     "schemaVersion",
@@ -169,6 +171,45 @@ def _runtime(value: object, *, label: str) -> dict[str, str]:
     return {field: cast(str, runtime[field]) for field in _RUNTIME_FIELDS}
 
 
+def _control_runtime(value: object, *, label: str) -> dict[str, str]:
+    """Validate the contract identity owned by Substrate, which has no image authority."""
+
+    runtime = _closed(value, _CONTROL_RUNTIME_FIELDS, label=label)
+    validated = _runtime(
+        {**runtime, "runtimeImage": "ghcr.io/artexis10/exomem@sha256:" + "0" * 64},
+        label=label,
+    )
+    return {field: validated[field] for field in _CONTROL_RUNTIME_FIELDS}
+
+
+def _deployment_runtime(value: object, *, label: str) -> dict[str, str]:
+    """Validate image-bearing desired/observed runtime state outside Substrate."""
+
+    runtime = _closed(value, _DEPLOYMENT_RUNTIME_FIELDS, label=label)
+    validated = _runtime(
+        {**runtime, "compatibilityDigest": "0" * 64},
+        label=label,
+    )
+    return {field: validated[field] for field in _DEPLOYMENT_RUNTIME_FIELDS}
+
+
+def _runtime_contract(runtime: dict[str, str]) -> dict[str, str]:
+    return {field: runtime[field] for field in _CONTROL_RUNTIME_FIELDS}
+
+
+def _runtime_deployment(runtime: dict[str, str]) -> dict[str, str]:
+    return {field: runtime[field] for field in _DEPLOYMENT_RUNTIME_FIELDS}
+
+
+def _join_runtime(
+    control: dict[str, str], deployment: dict[str, str]
+) -> dict[str, str] | None:
+    shared = _CONTROL_RUNTIME_FIELDS & _DEPLOYMENT_RUNTIME_FIELDS
+    if any(control[field] != deployment[field] for field in shared):
+        return None
+    return {**control, **deployment}
+
+
 def _list(value: object, *, label: str) -> list[object]:
     if not isinstance(value, list) or len(value) > 4096:
         _error(f"{label} must be a bounded list")
@@ -204,6 +245,8 @@ def _new_cell() -> dict[str, Any]:
     return {
         "bindingStatuses": [],
         "runtimes": [],
+        "runtimeClaims": [],
+        "runtimeDeployments": [],
         "workloadImages": [],
         "routable": False,
         "capacityClaim": False,
@@ -698,6 +741,7 @@ def reconcile_inventory(
     cells: dict[str, dict[str, Any]] = {}
     issues: set[str] = set()
     referenced_runtimes: dict[bytes, dict[str, str]] = {}
+    referenced_claims: list[tuple[dict[str, Any], dict[str, str]]] = []
     assignment_ids: set[str] = set()
     operation_ids: set[str] = set()
 
@@ -713,10 +757,10 @@ def reconcile_inventory(
             cell=current,
             issues=issues,
         )
-        runtime = _runtime(item["runtime"], label="routable runtime")
+        runtime = _control_runtime(item["runtime"], label="routable runtime")
         current["routable"] = True
-        current["runtimes"].append(runtime)
-        referenced_runtimes[_canonical(runtime)] = runtime
+        current["runtimeClaims"].append(runtime)
+        referenced_claims.append((current, runtime))
 
     seen = set()
     for raw in substrate["tenantBindings"]:
@@ -752,8 +796,10 @@ def reconcile_inventory(
             issues=issues,
         )
         status = _code(item["status"], label="assignment status")
-        assignment_runtime = _runtime(item["targetRuntime"], label="assignment target")
-        referenced_runtimes[_canonical(assignment_runtime)] = assignment_runtime
+        assignment_runtime = _control_runtime(
+            item["targetRuntime"], label="assignment target"
+        )
+        referenced_claims.append((current, assignment_runtime))
         if status == "active":
             current["assignmentIds"].add(assignment_id)
             assignment_ids.add(assignment_id)
@@ -781,8 +827,15 @@ def reconcile_inventory(
             )
             _code(item["kind"], label="operation kind")
             _code(item["status"], label="operation status")
-            operation_runtime = _runtime(item["targetRuntime"], label="operation target")
-            referenced_runtimes[_canonical(operation_runtime)] = operation_runtime
+            operation_runtime = (
+                _control_runtime(item["targetRuntime"], label="operation target")
+                if source_name == "substrate"
+                else _deployment_runtime(item["targetRuntime"], label="operation target")
+            )
+            if source_name == "substrate":
+                referenced_claims.append((current, operation_runtime))
+            else:
+                current["runtimeDeployments"].append(operation_runtime)
             current["unfinishedOperationIds"].add(operation_id)
             operation_ids.add(operation_id)
 
@@ -832,10 +885,9 @@ def reconcile_inventory(
             cell=current,
             issues=issues,
         )
-        desired_runtime = _runtime(item["runtime"], label="desired runtime")
-        referenced_runtimes[_canonical(desired_runtime)] = desired_runtime
+        desired_runtime = _deployment_runtime(item["runtime"], label="desired runtime")
         current["desiredState"] = True
-        current["runtimes"].append(desired_runtime)
+        current["runtimeDeployments"].append(desired_runtime)
         if _code(item["state"], label="desired state") != "ready":
             current["issues"].add("provisioner_not_ready")
             issues.add("provisioner_not_ready")
@@ -870,10 +922,9 @@ def reconcile_inventory(
             cell=current,
             issues=issues,
         )
-        helm_runtime = _runtime(item["runtime"], label="Helm runtime")
-        referenced_runtimes[_canonical(helm_runtime)] = helm_runtime
+        helm_runtime = _deployment_runtime(item["runtime"], label="Helm runtime")
         current["helmRelease"] = True
-        current["runtimes"].append(helm_runtime)
+        current["runtimeDeployments"].append(helm_runtime)
         if item["driver"] != "configmap" or item["status"] != "deployed":
             current["issues"].add("helm_release_not_deployed")
             issues.add("helm_release_not_deployed")
@@ -933,6 +984,34 @@ def reconcile_inventory(
         for identifier in capacity_ids ^ active_binding_ids:
             cells[identifier]["issues"].add("stale_capacity_claim")
 
+    # Join Substrate's contract authority to provisioner/Kubernetes image authority.
+    # Neither source is allowed to invent the field owned by the other.
+    for current in cells.values():
+        for control in current["runtimeClaims"]:
+            for deployment in current["runtimeDeployments"]:
+                joined = _join_runtime(control, deployment)
+                if joined is not None:
+                    current["runtimes"].append(joined)
+                    referenced_runtimes[_canonical(joined)] = joined
+
+    # Resolve assignment/unfinished-operation claims against a joined live runtime or
+    # the exact selected target for a not-yet-applied transition.
+    runtime_catalog = [selected_target, *referenced_runtimes.values()]
+    by_contract: dict[bytes, list[dict[str, str]]] = {}
+    for runtime in runtime_catalog:
+        by_contract.setdefault(_canonical(_runtime_contract(runtime)), []).append(runtime)
+    for current, claim in referenced_claims:
+        matches = {
+            _canonical(runtime): runtime
+            for runtime in by_contract.get(_canonical(claim), [])
+        }
+        if len(matches) != 1:
+            current["issues"].add("runtime_identity_unresolved")
+            issues.add("runtime_identity_unresolved")
+            continue
+        resolved = next(iter(matches.values()))
+        referenced_runtimes[_canonical(resolved)] = resolved
+
     output_cells: list[dict[str, Any]] = []
     target_count = 0
     legacy_count = 0
@@ -984,6 +1063,14 @@ def reconcile_inventory(
         if live_other and not runtime_by_bytes:
             current["issues"].add("missing_runtime_identity")
         if len(runtime_by_bytes) > 1:
+            current["issues"].add("runtime_identity_divergence")
+        if runtime is not None and (
+            any(claim != _runtime_contract(runtime) for claim in current["runtimeClaims"])
+            or any(
+                deployment != _runtime_deployment(runtime)
+                for deployment in current["runtimeDeployments"]
+            )
+        ):
             current["issues"].add("runtime_identity_divergence")
         if current["workloadImages"] and (
             len(set(current["workloadImages"])) > 1

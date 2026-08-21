@@ -297,6 +297,15 @@ class SelectedDeploymentRuntime(BaseModel):
     runtimeTarget: DeploymentRuntimeTarget
     recordsReaderVersion: Literal[2] | None = None
     lifecycleActionsEnabled: bool = False
+    compatibilityDigest: str | None = Field(default=None, pattern=_SHA256)
+    migrationMode: Literal["none", "binding-v1-to-v2"] = "none"
+
+
+class DeploymentRuntimeUpgrade(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    compatibilityDigest: str = Field(pattern=_SHA256)
+    migrationMode: Literal["none", "binding-v1-to-v2"]
 
 
 class DeploymentLock(BaseModel):
@@ -309,6 +318,7 @@ class DeploymentLock(BaseModel):
     admissionMode: Literal["expand", "contract"]
     components: DeploymentComponents
     runtimeTarget: DeploymentRuntimeTarget
+    runtimeUpgrade: DeploymentRuntimeUpgrade | None = None
     composition: DeploymentComposition
     rollback: DeploymentRollback
     recordsCompatibility: DeploymentRecordsCompatibility | None = None
@@ -347,6 +357,10 @@ class DeploymentLock(BaseModel):
             return SelectedDeploymentRuntime(
                 image=self.components.runtime.image,
                 runtimeTarget=self.runtimeTarget,
+                compatibilityDigest=(
+                    self.runtimeUpgrade.compatibilityDigest if self.runtimeUpgrade else None
+                ),
+                migrationMode=(self.runtimeUpgrade.migrationMode if self.runtimeUpgrade else "none"),
             )
         if selection not in {"active", "rollback"}:
             raise ValueError("deployment lock v3 requires an explicit runtime selection")
@@ -357,6 +371,10 @@ class DeploymentLock(BaseModel):
                 runtimeTarget=self.runtimeTarget,
                 recordsReaderVersion=self.recordsCompatibility.minimum_records_reader_version,
                 lifecycleActionsEnabled=self.recordsCompatibility.activeLifecycleActionsEnabled,
+                compatibilityDigest=(
+                    self.runtimeUpgrade.compatibilityDigest if self.runtimeUpgrade else None
+                ),
+                migrationMode=(self.runtimeUpgrade.migrationMode if self.runtimeUpgrade else "none"),
             )
         rollback = self.recordsCompatibility.rollbackRuntime
         return SelectedDeploymentRuntime(

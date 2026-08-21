@@ -14,6 +14,7 @@ from exomem_provisioner.adapters import (
     HelmCliAdapter,
     KubernetesCellAdapter,
     KubernetesMaintenanceLeaseAdapter,
+    KubernetesVaultFingerprintAdapter,
     KubernetesVolumeAdapter,
     PrivateCellApiAdapter,
     TraefikRoutingAdapter,
@@ -545,6 +546,65 @@ async def test_helm_cli_rejects_secret_values_and_version_drift(tmp_path: Path) 
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.asyncio
+async def test_helm_runtime_transition_replays_and_rolls_back_the_original_revision(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    current_values: dict[str, object] = {"workloadMode": "serve", "image": "old"}
+
+    async def runner(argv: tuple[str, ...], environment: dict[str, str]) -> SimpleNamespace:
+        nonlocal current_values
+        calls.append(argv)
+        assert environment == {"HELM_DRIVER": "configmap"}
+        if argv[1] == "version":
+            return SimpleNamespace(returncode=0, stdout="v3.19.4\n", stderr="")
+        if argv[1:3] == ("get", "values"):
+            return SimpleNamespace(returncode=0, stdout=json.dumps(current_values), stderr="")
+        if argv[1] == "history":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"revision": 1, "status": "deployed"}]),
+                stderr="",
+            )
+        if argv[1] == "upgrade":
+            values_path = Path(argv[argv.index("--values") + 1])
+            current_values = json.loads(values_path.read_text(encoding="utf-8"))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[1] == "rollback":
+            assert argv[3] == "1"
+            current_values = {"workloadMode": "serve", "image": "old"}
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    adapter = HelmCliAdapter(
+        binary="helm",
+        expected_version="3.19.4",
+        chart_path="chart",
+        chart_version="0.1.0",
+        runner=runner,
+        temporary_directory=tmp_path,
+    )
+    desired = {"workloadMode": "serve", "image": "target"}
+
+    await adapter.transition_release(_metadata(), desired, operation_id="rollforward-alpha")
+    await adapter.transition_release(_metadata(), desired, operation_id="rollforward-alpha")
+
+    assert current_values["runtimeUpgrade"] == {
+        "schemaVersion": 1,
+        "operationDigest": hashlib.sha256(b"rollforward-alpha").hexdigest(),
+        "priorRevision": 1,
+    }
+    assert sum(call[1] == "upgrade" for call in calls) == 1
+
+    await adapter.rollback_release(_metadata(), operation_id="rollforward-alpha")
+
+    assert current_values == {"workloadMode": "serve", "image": "old"}
+    rollback = next(call for call in calls if call[1] == "rollback")
+    assert rollback[2:4] == (_metadata().resource_name, "1")
+    assert "--wait" in rollback and "--cleanup-on-fail" in rollback
+
+
 class _CustomObjects:
     def __init__(self) -> None:
         self.applied: list[dict[str, object]] = []
@@ -703,6 +763,188 @@ async def test_kubernetes_cell_adapter_scales_and_writes_atomic_bundle_shape() -
 
     with pytest.raises(MetadataConflict):
         await adapter.write_credential_bundle(_metadata(), {"3": "a" * 43})
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free() -> None:
+    metadata = _metadata()
+    image = "registry.example/exomem@sha256:" + "a" * 64
+    created: list[dict[str, object]] = []
+
+    class Batch:
+        def read_namespaced_job(self, name: str, namespace: str):
+            if not created:
+                raise _ApiNotFound()
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations=created[0]["metadata"]["annotations"],  # type: ignore[index]
+                    deletion_timestamp=None,
+                ),
+                spec=SimpleNamespace(
+                    template=SimpleNamespace(
+                        spec=SimpleNamespace(
+                            containers=[
+                                SimpleNamespace(
+                                    image=image,
+                                    args=["hosted-fingerprint"],
+                                )
+                            ]
+                        )
+                    )
+                ),
+                status=SimpleNamespace(succeeded=1, failed=0),
+            )
+
+        def create_namespaced_job(self, namespace: str, body: dict[str, object]) -> None:
+            assert namespace == metadata.resource_name
+            created.append(body)
+
+        def delete_namespaced_job(self, name: str, namespace: str, body: object) -> None:
+            assert name == metadata.resource_name + "-init"
+            assert namespace == metadata.resource_name
+            assert body == {"propagationPolicy": "Foreground"}
+
+    record = json.dumps(
+        {
+            "artifact": "exomem-hosted-vault-fingerprint",
+            "schemaVersion": 1,
+            "sha256": "b" * 64,
+        },
+        separators=(",", ":"),
+    )
+
+    class Core:
+        def list_namespaced_pod(self, namespace: str, *, label_selector: str):
+            assert namespace == metadata.resource_name
+            assert label_selector == f"job-name={metadata.resource_name}-init"
+            terminated = SimpleNamespace(exit_code=0, message=record)
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        status=SimpleNamespace(
+                            container_statuses=[
+                                SimpleNamespace(state=SimpleNamespace(terminated=terminated))
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    adapter = KubernetesVaultFingerprintAdapter(
+        core_v1=Core(),
+        batch_v1=Batch(),
+        image=image,
+        sleep=lambda _seconds: None,
+    )
+
+    digest = await adapter.fingerprint(
+        metadata,
+        operation_id="rollforward-alpha",
+        phase="before",
+        recovery_envelope="signed-init-job-envelope",
+    )
+
+    assert digest == "b" * 64
+    job = created[0]
+    assert job["metadata"]["name"] == metadata.resource_name + "-init"  # type: ignore[index]
+    assert job["metadata"]["annotations"]["exomem.io/recovery-envelope"] == (  # type: ignore[index]
+        "signed-init-job-envelope"
+    )
+    pod = job["spec"]["template"]["spec"]  # type: ignore[index]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["restartPolicy"] == "Never"
+    container = pod["containers"][0]
+    assert container["image"] == image
+    assert container["args"] == ["hosted-fingerprint"]
+    assert container["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "runAsNonRoot": True,
+        "runAsUser": 10001,
+        "runAsGroup": 10001,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    assert container["volumeMounts"] == [
+        {
+            "name": "data",
+            "mountPath": "/var/lib/exomem/vault",
+            "subPath": "vault",
+            "readOnly": True,
+        }
+    ]
+    assert pod["volumes"] == [
+        {
+            "name": "data",
+            "persistentVolumeClaim": {"claimName": metadata.resource_name + "-data"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_fingerprint_rejects_untrusted_or_leaky_result() -> None:
+    metadata = _metadata()
+    image = "registry.example/exomem@sha256:" + "a" * 64
+
+    class Batch:
+        def read_namespaced_job(self, name: str, namespace: str):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": "signed",
+                        "exomem.io/vault-fingerprint-phase": "before",
+                        "exomem.io/vault-fingerprint-operation": hashlib.sha256(
+                            b"rollforward-alpha"
+                        ).hexdigest(),
+                    },
+                    deletion_timestamp=None,
+                ),
+                spec=SimpleNamespace(
+                    template=SimpleNamespace(
+                        spec=SimpleNamespace(
+                            containers=[SimpleNamespace(image=image, args=["hosted-fingerprint"])]
+                        )
+                    )
+                ),
+                status=SimpleNamespace(succeeded=1, failed=0),
+            )
+
+        def delete_namespaced_job(self, name: str, namespace: str, body: object) -> None:
+            raise AssertionError("invalid result must not be accepted or deleted")
+
+    class Core:
+        def list_namespaced_pod(self, namespace: str, *, label_selector: str):
+            leaked = json.dumps(
+                {
+                    "artifact": "exomem-hosted-vault-fingerprint",
+                    "schemaVersion": 1,
+                    "sha256": "b" * 64,
+                    "path": "private.md",
+                }
+            )
+            terminated = SimpleNamespace(exit_code=0, message=leaked)
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        status=SimpleNamespace(
+                            container_statuses=[
+                                SimpleNamespace(state=SimpleNamespace(terminated=terminated))
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    adapter = KubernetesVaultFingerprintAdapter(
+        core_v1=Core(), batch_v1=Batch(), image=image, sleep=lambda _seconds: None
+    )
+    with pytest.raises(MetadataConflict, match="fingerprint result"):
+        await adapter.fingerprint(
+            metadata,
+            operation_id="rollforward-alpha",
+            phase="before",
+            recovery_envelope="signed",
+        )
 
 
 class _Response:

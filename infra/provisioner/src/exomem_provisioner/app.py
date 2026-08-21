@@ -14,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
-from .config import PROVISIONER_PROTOCOL, ProvisionerSettings
+from .config import ProvisionerSettings
 from .models import OperationState
 from .provider_identity import (
     ProviderRecoveryIdentityCodec,
@@ -33,6 +33,7 @@ from .schemas import (
     FailureCode,
     FailureResponse,
     PendingResponse,
+    RollforwardPreservationResult,
     request_plaintext,
 )
 from .wire_protocol import FINAL_MODELS_BY_PROTOCOL, REQUEST_MODELS_BY_PROTOCOL, runtime_identity
@@ -55,6 +56,12 @@ def _validated_final(
 ) -> Response:
     model = FINAL_MODELS_BY_PROTOCOL[wire_protocol][action]
     if model is None:
+        if action == "rollforward":
+            try:
+                RollforwardPreservationResult.model_validate(result)
+            except ValidationError:
+                return _failure("PROVISIONER_RESPONSE_INVALID", 500)
+            return Response(status_code=204)
         if result:
             return _failure("PROVISIONER_RESPONSE_INVALID", 500)
         return Response(status_code=204)
@@ -211,7 +218,10 @@ def create_app(
             wire_protocol = request.state.wire_protocol
             try:
                 raw = json.loads((await request.body()).decode("utf-8"))
-                model = REQUEST_MODELS_BY_PROTOCOL[wire_protocol][action].model_validate(raw)
+                request_model = REQUEST_MODELS_BY_PROTOCOL[wire_protocol].get(action)
+                if request_model is None:
+                    return _failure("PROVISIONER_REJECTED", 422)
+                model = request_model.model_validate(raw)
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError):
                 return _failure("PROVISIONER_REJECTED", 422)
             try:
@@ -270,7 +280,14 @@ def create_app(
         endpoint.__name__ = f"post_{action.replace('-', '_')}"
         return endpoint
 
-    for action in REQUEST_MODELS_BY_PROTOCOL[PROVISIONER_PROTOCOL]:
+    actions = sorted(
+        {
+            action
+            for request_models in REQUEST_MODELS_BY_PROTOCOL.values()
+            for action in request_models
+        }
+    )
+    for action in actions:
         app.add_api_route(
             f"/cells/{action}",
             endpoint_for(action),

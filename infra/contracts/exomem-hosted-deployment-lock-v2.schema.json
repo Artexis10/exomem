@@ -26,6 +26,7 @@
           "properties": {"runtime": {"$ref": "#/$defs/runtimeComponent"}, "provisioner": {"$ref": "#/$defs/provisionerComponent"}}
         },
         "runtimeTarget": {"$ref": "#/$defs/runtimeTarget"},
+        "runtimeUpgrade": {"$ref": "#/$defs/runtimeUpgrade"},
         "composition": {"$ref": "#/$defs/composition"},
         "rollback": {"$ref": "#/$defs/rollback"}
       }
@@ -45,6 +46,15 @@
         "gatewayContractDigest": {"$ref": "#/$defs/sha256"},
         "commandFingerprint": {"$ref": "#/$defs/sha256"},
         "schemaDigest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "runtimeUpgrade": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compatibilityDigest", "migrationMode"],
+      "properties": {
+        "compatibilityDigest": {"$ref": "#/$defs/sha256"},
+        "migrationMode": {"enum": ["none", "binding-v1-to-v2"]}
       }
     },
     "runtimeComponent": {
