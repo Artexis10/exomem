@@ -167,6 +167,24 @@ def test_prose_only_sidecar_is_repaired_without_losing_notes(vault: Path) -> Non
     assert media_jobs.status(vault)["counts"]["pending"] == 1
 
 
+def test_crlf_sidecar_reconciliation_uses_text_hash_semantics(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "windows-lines.m4a")
+    sidecar = binary.with_name(binary.name + ".md")
+    sidecar.write_bytes(
+        b"Waiting for transcription.\r\n"
+        b"Keep the original cassette label: Side B.\r\n"
+    )
+
+    result = media_processing.reconcile_media(vault, binary)
+
+    assert result is not None
+    assert result.state == "pending"
+    assert "Keep the original cassette label: Side B." in sidecar.read_text(
+        encoding="utf-8"
+    )
+
+
 def _handle_stat(path: Path) -> os.stat_result:
     """Stat through an open handle, the way `_read_provenance` does.
 

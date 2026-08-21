@@ -61,6 +61,7 @@ FILE_READ_DATA = 0x00000001
 FILE_WRITE_DATA = 0x00000002
 FILE_READ_ATTRIBUTES = 0x00000080
 FILE_WRITE_ATTRIBUTES = 0x00000100
+GENERIC_WRITE = 0x40000000
 DELETE = 0x00010000
 SYNCHRONIZE = 0x00100000
 OBJ_CASE_INSENSITIVE = 0x00000040
@@ -151,6 +152,7 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
     GetFileInformationByHandle = ctypes.windll.kernel32.GetFileInformationByHandle
     CreateFileW = ctypes.windll.kernel32.CreateFileW
     CloseHandle = ctypes.windll.kernel32.CloseHandle
+    FlushFileBuffers = ctypes.windll.kernel32.FlushFileBuffers
 
     NtCreateFile.argtypes = [
         POINTER(c_void_p),
@@ -208,6 +210,8 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
     CreateFileW.restype = c_void_p
     CloseHandle.argtypes = [c_void_p]
     CloseHandle.restype = wintypes.BOOL
+    FlushFileBuffers.argtypes = [c_void_p]
+    FlushFileBuffers.restype = wintypes.BOOL
 else:  # pragma: no cover - keeps Linux imports syntactically safe
     NtCreateFile = None
     NtSetInformationFile = None
@@ -218,6 +222,7 @@ else:  # pragma: no cover - keeps Linux imports syntactically safe
     GetFileInformationByHandle = None
     CreateFileW = None
     CloseHandle = None
+    FlushFileBuffers = None
 
 
 def _invalid() -> HeldFsError:
@@ -613,7 +618,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
                     | FILE_READ_ATTRIBUTES
                 )
                 if index == len(parts) - 1 and access == "mutate":
-                    desired |= DELETE
+                    desired |= DELETE | GENERIC_WRITE
                 handle = _open_relative(
                     _native(descriptor),
                     part,
@@ -746,6 +751,16 @@ class WindowsHeldFilesystem(HeldFilesystem):
                 written += os.write(checked.descriptor, view[written:])
             os.fsync(checked.descriptor)
             checked.identity = _identity(_native(checked.descriptor))
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def flush_directory(self, directory: HeldDirectory) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(directory)
+            assert FlushFileBuffers is not None
+            if not FlushFileBuffers(c_void_p(_native(checked.descriptor))):
+                raise OSError(ctypes.get_last_error(), "directory flush was refused")
             return HeldResult(value=None)
         except OSError as error:
             return HeldResult(error=_error(error))

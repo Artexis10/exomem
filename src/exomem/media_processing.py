@@ -959,7 +959,7 @@ def _read_sidecar_text(vault: Path, sidecar: Path) -> str | None:
             "media sidecar does not exist",
         ) from None
     try:
-        return snapshot.data.decode("utf-8")
+        return snapshot.data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError as error:
         raise MediaProcessingError(
             "MEDIA_SIDECAR_INVALID",

@@ -2567,6 +2567,9 @@ def _remove_owner_file(
                     removed = filesystem.unlink(file)
                     if not removed.ok:
                         raise OSError("private remove was refused")
+                    flushed = filesystem.flush_directory(parent)
+                    if not flushed.ok:
+                        raise OSError("private remove parent flush was refused")
                 current = filesystem.file(parent, relative.name)
                 if current.ok:
                     current.require().close()

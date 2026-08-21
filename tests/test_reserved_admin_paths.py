@@ -2641,6 +2641,35 @@ def test_owner_move_and_remove_require_exact_named_authority(tmp_path: Path) -> 
     assert not live.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retained-directory durability probe")
+def test_owner_remove_flushes_the_retained_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import _held_fs_posix, held_fs
+
+    target = tmp_path / "Knowledge Base" / ".graph-sync.json"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"checkpoint")
+    flushed: list[int] = []
+
+    capabilities = held_fs.probe(tmp_path)
+    assert capabilities.relative_operations
+    reserved_paths._baseline_identity_catalogue(tmp_path)
+
+    monkeypatch.setattr(_held_fs_posix, "_fsync", flushed.append)
+
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        assert reserved_paths._remove_owner_file(
+            tmp_path,
+            target,
+            "graph-handoff",
+        )
+
+    assert len(flushed) == 1
+    assert not target.exists()
+
+
 def test_lexical_publication_refuses_parent_exchange_after_destination_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

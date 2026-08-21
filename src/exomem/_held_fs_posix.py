@@ -436,6 +436,14 @@ class PosixHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
+    def flush_directory(self, directory: HeldDirectory) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(directory)
+            _fsync(checked.descriptor)
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
     def _destination(
         self,
         source: PosixHeldFile,

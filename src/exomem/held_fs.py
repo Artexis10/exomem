@@ -175,6 +175,9 @@ class HeldFilesystem:
     def write(self, file: HeldFile, data: bytes) -> HeldResult[None]:
         raise NotImplementedError
 
+    def flush_directory(self, directory: HeldDirectory) -> HeldResult[None]:
+        raise NotImplementedError
+
     def rename(
         self,
         source: HeldFile,

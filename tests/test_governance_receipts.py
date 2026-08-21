@@ -91,7 +91,10 @@ def _receipt_records(vault: Path) -> list[dict[str, object]]:
     ] if root.exists() else []
 
 
-def _recursive_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes | None]]:
+def _recursive_snapshot(
+    *roots: Path,
+    skip_private_coordination: bool = False,
+) -> dict[tuple[int, str], tuple[str, bytes | None]]:
     snapshot: dict[tuple[int, str], tuple[str, bytes | None]] = {}
     for index, root in enumerate(roots):
         if not root.exists():
@@ -100,6 +103,12 @@ def _recursive_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes 
         snapshot[(index, ".")] = ("directory", None)
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root).as_posix()
+            if (
+                skip_private_coordination
+                and relative.startswith("idempotency-owners/")
+                and relative.endswith(".lock")
+            ):
+                continue
             snapshot[(index, relative)] = (
                 ("directory", None) if path.is_dir() else ("file", path.read_bytes())
             )
@@ -107,10 +116,13 @@ def _recursive_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes 
 
 
 def _semantic_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes | None]]:
-    """Snapshot evidence/data, excluding SQLite's empty lock coordination files."""
+    """Snapshot evidence/data, excluding non-semantic coordination files."""
     return {
         key: value
-        for key, value in _recursive_snapshot(*roots).items()
+        for key, value in _recursive_snapshot(
+            *roots,
+            skip_private_coordination=True,
+        ).items()
         if not key[1].endswith(".sqlite-shm")
         and not (key[1].endswith(".sqlite-wal") and value == ("file", b""))
     }
