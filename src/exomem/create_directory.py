@@ -14,14 +14,13 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access
+from . import access, held_fs, reserved_paths
 from .vault import (
     VaultPathError,
     in_curated_tree,
     resolve_under_vault,
     write_log_entry,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -53,8 +52,16 @@ def create_directory(
     allow_curated: bool = False,
     today: dt.date | None = None,
 ) -> CreateDirectoryResult:
+    if (
+        reserved_paths.classify_logical(path).disposition
+        is reserved_paths.PathDisposition.RESERVED
+    ):
+        raise CreateDirectoryError(
+            code="RESERVED_PATH",
+            reason="path is reserved for its owning subsystem",
+        )
     try:
-        abs_path, rel_path = resolve_under_vault(vault_root, path)
+        _abs_path, rel_path = resolve_under_vault(vault_root, path)
     except VaultPathError as e:
         raise CreateDirectoryError(code=e.code, reason=e.reason) from e
 
@@ -89,29 +96,67 @@ def create_directory(
         operation="directory_create_commit",
         holder_kind="command",
     ):
-        already_existed = abs_path.exists()
-        if already_existed and not abs_path.is_dir():
-            raise CreateDirectoryError(
-                code="NOT_A_DIR",
-                reason=f"{rel_path} exists but is not a directory",
-            )
-
-        if not already_existed:
-            try:
-                abs_path.mkdir(parents=parents, exist_ok=False)
-            except FileNotFoundError as e:
+        with reserved_paths._generic_identity_catalogue_scope(
+            vault_root,
+            rel_path,
+        ) as identities:
+            acquired = held_fs.acquire(Path(vault_root))
+            if not acquired.ok:
                 raise CreateDirectoryError(
-                    code="MISSING_PARENT",
-                    reason=(
-                        f"intermediate folders missing for {rel_path}; "
-                        f"call with parents=true or create them first ({e})"
-                    ),
-                ) from e
-            except OSError as e:
-                raise CreateDirectoryError(
-                    code="MKDIR_FAILED",
-                    reason=f"could not create {rel_path}: {e}",
-                ) from e
+                    code="RESERVED_PATH",
+                    reason="directory route is unavailable on this filesystem",
+                )
+            with acquired.require() as filesystem:
+                components = tuple(rel_path.split("/"))
+                already_existed = False
+                for index in range(len(components)):
+                    current_rel = "/".join(components[: index + 1])
+                    final = index == len(components) - 1
+                    current = filesystem.parent(
+                        current_rel,
+                        access="mutate" if final else "read",
+                    )
+                    if current.ok:
+                        with current.require() as directory:
+                            if identities.descriptor_for(directory.identity) is not None:
+                                raise CreateDirectoryError(
+                                    code="RESERVED_PATH",
+                                    reason="directory target belongs to private state",
+                                )
+                        if final:
+                            already_existed = True
+                        continue
+                    if current.error is None or current.error.code != "MISSING":
+                        code = "NOT_A_DIR" if final else "RESERVED_PATH"
+                        raise CreateDirectoryError(
+                            code=code,
+                            reason="directory target could not be acquired safely",
+                        )
+                    if not final and not parents:
+                        raise CreateDirectoryError(
+                            code="MISSING_PARENT",
+                            reason=(
+                                f"intermediate folders missing for {rel_path}; "
+                                "call with parents=true or create them first"
+                            ),
+                        )
+                    created = filesystem.parent(
+                        current_rel,
+                        create=True,
+                        exclusive=True,
+                        access="mutate" if final else "read",
+                    )
+                    if not created.ok:
+                        raise CreateDirectoryError(
+                            code=(
+                                "MISSING_PARENT"
+                                if created.error is not None
+                                and created.error.code == "MISSING"
+                                else "RESERVED_PATH"
+                            ),
+                            reason="directory creation was refused safely",
+                        )
+                    created.require().close()
 
         # The log.md entry is governed shared state — written under the same
         # boundary hold as the mkdir it records.

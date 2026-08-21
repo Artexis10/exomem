@@ -11,6 +11,7 @@ import hashlib
 import logging
 import os
 import re
+import stat
 import threading
 import time
 from collections.abc import Callable
@@ -18,7 +19,15 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, media_jobs, media_types, memory_refs, recall_policy
+from . import (
+    access,
+    held_fs,
+    media_jobs,
+    media_types,
+    memory_refs,
+    recall_policy,
+    reserved_paths,
+)
 from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .vault import (
@@ -220,7 +229,6 @@ def reconcile_media(
     binary = Path(os.path.abspath(binary))
     if not explicit and not _is_automatic_media_candidate(vault, binary):
         return None
-    resolved_binary = _confine_to_knowledge_base(vault, binary)
 
     media_type = classify_media(binary)
     if media_type is None:
@@ -231,7 +239,30 @@ def reconcile_media(
             f"unsupported media type for {binary.name!r}",
         )
 
-    rel_binary = binary.relative_to(vault).as_posix()
+    try:
+        lexical_relative = binary.relative_to(vault).as_posix()
+    except ValueError as error:
+        raise MediaProcessingError(
+            "MEDIA_PATH_OUTSIDE_KB",
+            f"media path must resolve inside {kb_dirname()}: {binary}",
+        ) from error
+    if (
+        reserved_paths.classify_logical(lexical_relative).disposition
+        is reserved_paths.PathDisposition.RESERVED
+    ):
+        raise MediaProcessingError(
+            "MEDIA_NOT_FOUND", "media artifact does not exist"
+        )
+    rel_binary = lexical_relative
+    try:
+        retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code not in {"MISSING", "RESERVED_PATH"}:
+            _confine_to_knowledge_base(vault, binary)
+        raise MediaProcessingError(
+            "MEDIA_NOT_FOUND", "media artifact does not exist"
+        ) from None
+    resolved_binary = _confine_to_knowledge_base(vault, binary)
     tier = access.access_tier(vault, rel_binary)
     if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
         if not explicit:
@@ -241,10 +272,15 @@ def reconcile_media(
             f"media path is {tier} under _access.yaml: {rel_binary}",
         )
 
-    provenance = _read_provenance(vault, binary, resolved_binary)
     sidecar = binary.with_name(binary.name + ".md")
     _confine_sidecar(vault, sidecar)
-    original = sidecar.read_text(encoding="utf-8") if sidecar.exists() else None
+    original = _read_sidecar_text(vault, sidecar)
+    provenance = _read_provenance(
+        vault,
+        binary,
+        resolved_binary,
+        retained_identity,
+    )
 
     completed = original is not None and _completed_provenance_state(
         original, media_type=media_type, provenance=provenance
@@ -308,7 +344,7 @@ def reconcile_media(
             )
         _confine_sidecar(vault, sidecar)
         _verify_binary_identity(binary, resolved_binary, provenance)
-        current = sidecar.read_text(encoding="utf-8") if sidecar.exists() else None
+        current = _read_sidecar_text(vault, sidecar)
         if current != original:
             raise MediaProcessingError(
                 "MEDIA_CHANGED_DURING_RECONCILIATION",
@@ -362,7 +398,12 @@ def reconcile_media(
             if unavailable is not None:
                 reason, next_action = unavailable
                 store.mark(job_id, media_jobs.BLOCKED, reason)
-                current_sidecar = sidecar.read_text(encoding="utf-8")
+                current_sidecar = _read_sidecar_text(vault, sidecar)
+                if current_sidecar is None:
+                    raise MediaProcessingError(
+                        "MEDIA_CHANGED_DURING_RECONCILIATION",
+                        "media sidecar disappeared after publication",
+                    )
                 if not _has_runtime_unavailable_state(
                     current_sidecar, reason=reason, next_action=next_action
                 ):
@@ -492,11 +533,24 @@ def _iter_governed_media(vault: Path, kb_root: Path):
             if child.name.startswith("."):
                 continue
             try:
-                if child.is_dir():
-                    if not child.is_symlink() and child.name not in VAULT_SCAN_SKIP_DIRS:
+                rel = child.relative_to(vault).as_posix()
+                if reserved_paths.classify_logical(rel).blocked:
+                    continue
+                info = child.lstat()
+                if stat.S_ISLNK(info.st_mode) or bool(
+                    getattr(os.path, "isjunction", lambda _path: False)(child)
+                ):
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    if child.name not in VAULT_SCAN_SKIP_DIRS:
                         directories.append(child)
-                elif child.is_file() and not child.is_symlink() and classify_media(child):
-                    rel = child.relative_to(vault).as_posix()
+                elif stat.S_ISREG(info.st_mode) and classify_media(child):
+                    try:
+                        if info.st_nlink != 1:
+                            continue
+                        reserved_paths.inspect_generic_file(vault, rel)
+                    except (OSError, reserved_paths.ReservedPathLeafError):
+                        continue
                     if (
                         _is_automatic_media_candidate(vault, child)
                         and access.access_tier(vault, rel) not in {
@@ -517,8 +571,10 @@ def _needs_reconciliation(
 ) -> bool:
     sidecar = binary.with_name(binary.name + ".md")
     try:
-        original = sidecar.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError, UnicodeError):
+        original = _read_sidecar_text(vault, sidecar)
+    except MediaProcessingError:
+        return True
+    if original is None:
         return True
 
     media_type = classify_media(binary)
@@ -883,18 +939,67 @@ def _confine_sidecar(vault: Path, sidecar: Path) -> None:
         ) from exc
 
 
+def _read_sidecar_text(vault: Path, sidecar: Path) -> str | None:
+    """Read one ordinary sidecar without turning private aliases into an oracle."""
+
+    try:
+        relative = sidecar.relative_to(vault).as_posix()
+    except ValueError as error:
+        raise MediaProcessingError(
+            "MEDIA_PATH_OUTSIDE_KB",
+            "media sidecar is outside the vault",
+        ) from error
+    try:
+        snapshot = reserved_paths.read_generic_bytes(vault, relative)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            return None
+        raise MediaProcessingError(
+            "MEDIA_NOT_FOUND",
+            "media sidecar does not exist",
+        ) from None
+    try:
+        return snapshot.data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError as error:
+        raise MediaProcessingError(
+            "MEDIA_SIDECAR_INVALID",
+            "media sidecar is not UTF-8 text",
+        ) from error
+
+
 def _read_provenance(
-    vault: Path, binary: Path, resolved_binary: Path
+    vault: Path,
+    binary: Path,
+    resolved_binary: Path,
+    expected_identity: held_fs.StableIdentity | None = None,
 ) -> _BinaryProvenance:
+    if expected_identity is None:
+        try:
+            relative = binary.relative_to(vault).as_posix()
+            expected_identity = reserved_paths.inspect_generic_file(vault, relative)
+        except (ValueError, reserved_paths.ReservedPathLeafError):
+            raise MediaProcessingError(
+                "MEDIA_NOT_FOUND", "media artifact does not exist"
+            ) from None
     digest = hashlib.sha256()
     with resolved_binary.open("rb") as stream:
         before = os.fstat(stream.fileno())
+        if (
+            before.st_dev != expected_identity.device
+            or before.st_ino != expected_identity.inode
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+        ):
+            raise MediaProcessingError(
+                "MEDIA_CHANGED_DURING_RECONCILIATION",
+                "media changed while provenance was being recorded",
+            )
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
         after = os.fstat(stream.fileno())
     identity_before = (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
     identity_after = (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-    if identity_after != identity_before:
+    if identity_after != identity_before or after.st_nlink != 1:
         raise MediaProcessingError(
             "MEDIA_CHANGED_DURING_RECONCILIATION",
             f"media changed while provenance was being recorded: {binary}",
@@ -941,7 +1046,7 @@ def _verify_binary_identity(
         provenance.mtime_ns,
         provenance.ctime_ns,
     )
-    if current_identity != expected_identity:
+    if current_identity != expected_identity or current.st_nlink != 1:
         raise MediaProcessingError(
             "MEDIA_CHANGED_DURING_RECONCILIATION",
             f"media changed while provenance was being recorded: {binary}",

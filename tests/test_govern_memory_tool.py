@@ -14,7 +14,7 @@ from types import MappingProxyType
 
 import pytest
 
-from exomem import commands
+from exomem import commands, reserved_paths
 from exomem.command_surface import Command
 from exomem.governance import store
 from exomem.governance.principal import RequestPrincipal, owner_principal
@@ -22,6 +22,12 @@ from exomem.governance.principal import RequestPrincipal, owner_principal
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 PATTERN_GLOB = "Knowledge Base/Notes/Patterns/**"
+
+
+@pytest.fixture(autouse=True)
+def _governance_dispatcher_authority():
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        yield
 
 
 def test_recovery_imports_cleanly_before_the_governance_tool() -> None:

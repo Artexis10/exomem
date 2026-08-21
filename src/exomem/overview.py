@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import access
+from . import access, reserved_paths
 from .governance.policy import GOVERNANCE_DIRNAME, is_governance_path
 from .kbdir import kb_dirname
 
@@ -95,6 +96,11 @@ class _DirStat:
 
 def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
     rel = (path or "").replace("\\", "/").strip("/")
+    if rel == ".":
+        # Product CLI callers conventionally spell the selected vault root as
+        # ``.``.  Normalize that selector before the closed path classifier;
+        # dot components remain forbidden everywhere below the root.
+        rel = ""
     if rel:
         if Path(rel).is_absolute() or rel.startswith(".."):
             raise OverviewError("INVALID_PATH", f"path escapes the vault: {path!r}")
@@ -112,7 +118,10 @@ def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
     # NOT_FOUND shape the withheld-subtree probe uses, and ordered before
     # `exists()` so a present-but-excluded tree cannot answer differently from
     # an absent one.
-    if rel and is_governance_path(rel):
+    if rel and (
+        is_governance_path(rel)
+        or reserved_paths.classify_logical(rel).blocked
+    ):
         raise OverviewError("NOT_FOUND", f"no such vault path: {rel}")
     # …and again on the RESOLVED root, because a symlink launders the name:
     # `Notes/gov-link -> _Governance` carries no `_Governance` component in
@@ -121,7 +130,11 @@ def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
     # descent, not the starting point.
     try:
         resolved = scan.resolve()
-        if is_governance_path(str(resolved.relative_to(root.resolve()))):
+        resolved_relative = str(resolved.relative_to(root.resolve()))
+        if rel and (
+            is_governance_path(resolved_relative)
+            or reserved_paths.classify_logical(resolved_relative).blocked
+        ):
             raise OverviewError("NOT_FOUND", f"no such vault path: {rel}")
     except (OSError, ValueError):
         # Unresolvable or outside the root — the checks below own that case.
@@ -207,6 +220,17 @@ def overview(
             # "hidden N" marker (either would itself leak the subtree's
             # existence/size). They simply never entered the walk.
             child_rel = f"{root_rp}/{d}" if root_rp else d
+            if reserved_paths.classify_logical(child_rel).blocked:
+                continue
+            child_path = Path(dirpath) / d
+            try:
+                child_info = child_path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(child_info.st_mode) or bool(
+                getattr(os.path, "isjunction", lambda _path: False)(child_path)
+            ):
+                continue
             if access.access_tier(root, child_rel) == access.TIER_EXCLUDED:
                 continue
             kept.append(d)
@@ -222,6 +246,8 @@ def overview(
             if not include_hidden and fn.startswith("."):
                 continue
             child_rel = f"{root_rp}/{fn}" if root_rp else fn
+            if reserved_paths.classify_logical(child_rel).blocked:
+                continue
             # Excluded-tier files never enter the walk (access.py contract) …
             if access.access_tier(root, child_rel) == access.TIER_EXCLUDED:
                 continue
@@ -232,16 +258,35 @@ def overview(
                 continue
             fpath = Path(dirpath) / fn
             try:
-                fst = fpath.stat()
+                fst = fpath.lstat()
             except OSError:
                 continue
+            if (
+                not stat.S_ISREG(fst.st_mode)
+                or fst.st_nlink != 1
+                or bool(getattr(os.path, "isjunction", lambda _path: False)(fpath))
+            ):
+                continue
             frel = f"{rp}/{fn}" if rp else fn
+            text: str | None = None
+            if fn.lower().endswith(".md") and fst.st_size <= CONTENT_READ_CAP:
+                try:
+                    snapshot = reserved_paths.read_generic_bytes(root, child_rel)
+                except reserved_paths.ReservedPathLeafError:
+                    continue
+                fst_size = len(snapshot.data)
+                fst_mtime = snapshot.mtime
+                if fst_size <= CONTENT_READ_CAP:
+                    text = snapshot.data.decode("utf-8", errors="replace")
+            else:
+                fst_size = fst.st_size
+                fst_mtime = fst.st_mtime
             st.files_direct += 1
             st.names.append(fn)
-            total_bytes += fst.st_size
-            sizes.append((fst.st_size, frel))
-            mtimes.append((fst.st_mtime, frel))
-            if fst.st_size == 0:
+            total_bytes += fst_size
+            sizes.append((fst_size, frel))
+            mtimes.append((fst_mtime, frel))
+            if fst_size == 0:
                 zero_byte.append(frel)
             m = _CONFLICT_NAME.match(fn)
             low = fn.lower()
@@ -251,12 +296,10 @@ def overview(
                 conflicts.append(frel)
             if low.endswith(".md"):
                 st.md_direct += 1
-                if fst.st_size > CONTENT_READ_CAP:
+                if fst_size > CONTENT_READ_CAP:
                     oversized += 1
                     continue
-                try:
-                    text = fpath.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+                if text is None:
                     continue
                 st.fm_total += 1
                 if text.lstrip("﻿").startswith("---"):

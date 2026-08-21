@@ -16,7 +16,6 @@ from textwrap import dedent
 
 import pytest
 
-
 _DIGEST = "d" * 64
 
 
@@ -41,14 +40,13 @@ def _run_cut(tmp_path: Path, cut: str) -> tuple[Path, Path, Path, subprocess.Com
         vault, state, marker = map(Path, sys.argv[1:4])
         cut = sys.argv[4]
         note = vault / "Knowledge Base/Notes/cut.md"
-        original_replace = vault_module.os.replace
         if cut == "after_caller_files":
-            def exit_after_caller(source, destination, *args, **kwargs):
-                result = original_replace(source, destination, *args, **kwargs)
+            original_published = vault_module._after_batch_destination_published
+            def exit_after_caller(destination):
+                original_published(destination)
                 if Path(destination) == note:
                     os._exit(42)
-                return result
-            vault_module.os.replace = exit_after_caller
+            vault_module._after_batch_destination_published = exit_after_caller
         if cut == "after_checkpoint":
             original_phase = writer_lease_module.log_active_mutation_phase
             def exit_after_checkpoint(phase, **fields):

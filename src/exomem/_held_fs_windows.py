@@ -13,10 +13,12 @@ import secrets
 from ctypes import (
     POINTER,
     Structure,
+    Union,
     byref,
     c_byte,
     c_long,
     c_ubyte,
+    c_uint32,
     c_ulong,
     c_ulonglong,
     c_ushort,
@@ -46,6 +48,7 @@ FILE_DIRECTORY_FILE = 0x00000001
 FILE_NON_DIRECTORY_FILE = 0x00000040
 FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 FILE_OPEN_REPARSE_POINT = 0x00200000
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_ATTRIBUTE_NORMAL = 0x00000080
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 FILE_SHARE_READ = 0x00000001
@@ -58,10 +61,15 @@ FILE_ADD_SUBDIRECTORY = 0x00000004
 FILE_READ_DATA = 0x00000001
 FILE_WRITE_DATA = 0x00000002
 FILE_READ_ATTRIBUTES = 0x00000080
+FILE_WRITE_ATTRIBUTES = 0x00000100
+GENERIC_WRITE = 0x40000000
 DELETE = 0x00010000
 SYNCHRONIZE = 0x00100000
 OBJ_CASE_INSENSITIVE = 0x00000040
 FILE_RENAME_INFORMATION = 10
+FILE_RENAME_INFORMATION_EX = 65
+FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001
+FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 FILE_LINK_INFORMATION = 11
 FILE_DISPOSITION_INFORMATION = 4
 FILE_BOTH_DIRECTORY_INFORMATION = 3
@@ -116,13 +124,17 @@ class BY_HANDLE_FILE_INFORMATION(Structure):
     ]
 
 
+class FILE_NAME_OPTIONS(Union):
+    _fields_ = [("ReplaceIfExists", c_ubyte), ("Flags", c_uint32)]
+
+
 class FILE_NAME_INFORMATION(Structure):
     """ABI-derived header shared by native rename and link information."""
 
     _fields_ = [
-        ("ReplaceIfExists", c_ubyte),
+        ("Options", FILE_NAME_OPTIONS),
         ("RootDirectory", c_void_p),
-        ("FileNameLength", c_ulong),
+        ("FileNameLength", c_uint32),
         ("FileName", c_ushort * 1),
     ]
 
@@ -141,6 +153,7 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
     GetFileInformationByHandle = ctypes.windll.kernel32.GetFileInformationByHandle
     CreateFileW = ctypes.windll.kernel32.CreateFileW
     CloseHandle = ctypes.windll.kernel32.CloseHandle
+    FlushFileBuffers = ctypes.windll.kernel32.FlushFileBuffers
 
     NtCreateFile.argtypes = [
         POINTER(c_void_p),
@@ -198,6 +211,8 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
     CreateFileW.restype = c_void_p
     CloseHandle.argtypes = [c_void_p]
     CloseHandle.restype = wintypes.BOOL
+    FlushFileBuffers.argtypes = [c_void_p]
+    FlushFileBuffers.restype = wintypes.BOOL
 else:  # pragma: no cover - keeps Linux imports syntactically safe
     NtCreateFile = None
     NtSetInformationFile = None
@@ -208,6 +223,7 @@ else:  # pragma: no cover - keeps Linux imports syntactically safe
     GetFileInformationByHandle = None
     CreateFileW = None
     CloseHandle = None
+    FlushFileBuffers = None
 
 
 def _invalid() -> HeldFsError:
@@ -216,16 +232,16 @@ def _invalid() -> HeldFsError:
 
 def _error(error: OSError | None = None) -> HeldFsError:
     if error is not None and error.errno in {17, errno.EXDEV}:
-        return HeldFsError("CROSS_DEVICE", "operation requires one filesystem")
+        return HeldFsError("CROSS_DEVICE", "operation requires one filesystem", error)
     if error is not None and error.errno in {errno.ELOOP, errno.ENOTDIR}:
-        return _invalid()
+        return HeldFsError("UNSAFE_PATH", "unsafe filesystem object", error)
     if error is not None and error.errno == errno.ESTALE:
-        return HeldFsError("IDENTITY_CHANGED", "held filesystem identity changed")
+        return HeldFsError("IDENTITY_CHANGED", "held filesystem identity changed", error)
     if error is not None and error.errno in {2, 3, errno.ENOENT}:
-        return HeldFsError("MISSING", "filesystem object is unavailable")
+        return HeldFsError("MISSING", "filesystem object is unavailable", error)
     if error is not None and error.errno in {80, 183, errno.EEXIST}:
-        return HeldFsError("DESTINATION_EXISTS", "destination already exists")
-    return HeldFsError("IO_REFUSED", "held filesystem operation was refused")
+        return HeldFsError("DESTINATION_EXISTS", "destination already exists", error)
+    return HeldFsError("IO_REFUSED", "held filesystem operation was refused", error)
 
 
 def _parts(relative: str) -> tuple[str, ...] | None:
@@ -364,12 +380,25 @@ def _open_relative(
         raise
 
 
-def _name_payload(replace: bool, destination_handle: int, leaf: str) -> ctypes.Array[ctypes.c_char]:
+def _name_payload(
+    replace: bool,
+    destination_handle: int,
+    leaf: str,
+    *,
+    information_class: int = FILE_RENAME_INFORMATION,
+) -> ctypes.Array[ctypes.c_char]:
     encoded = leaf.encode("utf-16-le")
     offset = FILE_NAME_INFORMATION.FileName.offset
     payload = create_string_buffer(sizeof(FILE_NAME_INFORMATION) + len(encoded))
     information = FILE_NAME_INFORMATION.from_buffer(payload)
-    information.ReplaceIfExists = replace
+    if information_class == FILE_RENAME_INFORMATION_EX:
+        information.Options.Flags = (
+            FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS
+            if replace
+            else 0
+        )
+    else:
+        information.Options.ReplaceIfExists = replace
     information.RootDirectory = destination_handle
     information.FileNameLength = len(encoded)
     ctypes.memmove(ctypes.addressof(payload) + offset, encoded, len(encoded))
@@ -381,9 +410,16 @@ def _set_name_information(
     destination_handle: int,
     leaf: str,
     information_class: int,
+    *,
+    replace: bool = False,
 ) -> None:
     assert NtSetInformationFile is not None
-    payload = _name_payload(False, destination_handle, leaf)
+    payload = _name_payload(
+        replace,
+        destination_handle,
+        leaf,
+        information_class=information_class,
+    )
     status = IO_STATUS_BLOCK()
     result = NtSetInformationFile(
         _native(descriptor),
@@ -416,7 +452,7 @@ def _open_root(root: Path) -> int | None:
         FILE_SHARE_ALL,
         None,
         3,
-        0x02000000 | FILE_OPEN_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_OPEN_REPARSE_POINT,
         None,
     )
     if handle in {None, INVALID_HANDLE_VALUE}:
@@ -433,19 +469,64 @@ def _open_root(root: Path) -> int | None:
 
 
 class WindowsHeldDirectory(HeldDirectory):
-    def __init__(self, filesystem: WindowsHeldFilesystem, descriptor: int) -> None:
+    def __init__(
+        self,
+        filesystem: WindowsHeldFilesystem,
+        descriptor: int,
+        *,
+        parent_descriptor: int | None = None,
+        parent_identity: StableIdentity | None = None,
+        name: str | None = None,
+        access: str = "read",
+    ) -> None:
         self.filesystem = filesystem
         self.descriptor = descriptor
+        self.parent_descriptor = parent_descriptor
+        self.parent_identity = parent_identity
+        self.name = name
+        self.access = access
         self.identity = _identity(_native(descriptor))
         self.closed = False
+        self.named = name is not None
 
     def check(self) -> None:
-        if self.closed or not _same_object(_identity(_native(self.descriptor)), self.identity):
+        if (
+            self.closed
+            or self.filesystem.closed
+            or not _same_object(_identity(_native(self.descriptor)), self.identity)
+        ):
             raise OSError(errno.ESTALE, "held directory changed")
+        if self.parent_descriptor is not None and (
+            self.parent_identity is None
+            or not _same_object(
+                _identity(_native(self.parent_descriptor)), self.parent_identity
+            )
+        ):
+            raise OSError(errno.ESTALE, "held directory parent changed")
+
+    def check_name(self) -> None:
+        self.check()
+        if not self.named or self.parent_descriptor is None or self.name is None:
+            raise OSError(errno.ESTALE, "held directory name is unavailable")
+        handle = _open_relative(
+            _native(self.parent_descriptor),
+            self.name,
+            FILE_READ_ATTRIBUTES,
+            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+            FILE_OPEN,
+        )
+        try:
+            if not _same_object(_identity(handle), self.identity):
+                raise OSError(errno.ESTALE, "held directory name identity changed")
+        finally:
+            assert CloseHandle is not None
+            CloseHandle(c_void_p(handle))
 
     def close(self) -> None:
         if not self.closed:
             os.close(self.descriptor)
+            if self.parent_descriptor is not None:
+                os.close(self.parent_descriptor)
             self.closed = True
 
 
@@ -512,31 +593,82 @@ class WindowsHeldFilesystem(HeldFilesystem):
         file.check()
         return file
 
-    def parent(self, relative: str, *, create: bool = False) -> HeldResult[HeldDirectory]:
+    def parent(
+        self,
+        relative: str,
+        *,
+        create: bool = False,
+        exclusive: bool = False,
+        access: str = "read",
+    ) -> HeldResult[HeldDirectory]:
         parts = _parts(relative)
-        if parts is None:
+        if parts is None or access not in {"read", "flush", "mutate"}:
+            return HeldResult(error=_invalid())
+        if exclusive and (not create or not parts):
             return HeldResult(error=_invalid())
         if self.closed:
             return HeldResult(error=HeldFsError("IO_REFUSED", "held root is closed"))
-        descriptor = os.dup(self.descriptor)
+        if not parts and access != "read":
+            return HeldResult(
+                error=HeldFsError(
+                    "INVALID_INPUT", "elevated root directory access is unsupported"
+                )
+            )
+        descriptor: int | None = None
+        parent_descriptor: int | None = None
         try:
-            for part in parts:
-                handle = _open_relative(
-                    _native(descriptor),
-                    part,
+            descriptor = os.dup(self.descriptor)
+            for index, part in enumerate(parts):
+                desired = (
                     FILE_LIST_DIRECTORY
                     | FILE_ADD_FILE
                     | FILE_ADD_SUBDIRECTORY
-                    | FILE_READ_ATTRIBUTES,
+                    | FILE_READ_ATTRIBUTES
+                )
+                if index == len(parts) - 1 and access in {"flush", "mutate"}:
+                    desired |= GENERIC_WRITE
+                if index == len(parts) - 1 and access == "mutate":
+                    desired |= DELETE
+                handle = _open_relative(
+                    _native(descriptor),
+                    part,
+                    desired,
                     FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-                    FILE_OPEN_IF if create else FILE_OPEN,
+                    (
+                        FILE_CREATE
+                        if exclusive and index == len(parts) - 1
+                        else FILE_OPEN
+                        if exclusive
+                        else FILE_OPEN_IF
+                        if create
+                        else FILE_OPEN
+                    ),
                 )
                 child = _fd(handle)
-                os.close(descriptor)
+                if index == len(parts) - 1:
+                    parent_descriptor = descriptor
+                else:
+                    os.close(descriptor)
                 descriptor = child
-            return HeldResult(value=WindowsHeldDirectory(self, descriptor))
+            return HeldResult(
+                value=WindowsHeldDirectory(
+                    self,
+                    descriptor,
+                    parent_descriptor=parent_descriptor,
+                    parent_identity=(
+                        _identity(_native(parent_descriptor))
+                        if parent_descriptor is not None
+                        else None
+                    ),
+                    name=parts[-1] if parts else None,
+                    access=access,
+                )
+            )
         except OSError as error:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
             return HeldResult(error=_error(error))
 
     def file(
@@ -560,7 +692,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
             desired = FILE_READ_DATA | FILE_READ_ATTRIBUTES
             descriptor_access = "read"
             if access == "write":
-                desired |= FILE_WRITE_DATA
+                desired |= FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES
                 descriptor_access = "write"
             if access == "mutate":
                 desired |= DELETE
@@ -588,6 +720,20 @@ class WindowsHeldFilesystem(HeldFilesystem):
                 os.close(descriptor)
             if parent_descriptor is not None:
                 os.close(parent_descriptor)
+            return HeldResult(error=_error(error))
+
+    def validate_directory(
+        self,
+        directory: HeldDirectory,
+        *,
+        require_name: bool = True,
+    ) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(directory)
+            if require_name:
+                checked.check_name()
+            return HeldResult(value=None)
+        except OSError as error:
             return HeldResult(error=_error(error))
 
     def read(self, file: HeldFile) -> HeldResult[bytes]:
@@ -620,8 +766,29 @@ class WindowsHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
+    def flush_directory(self, directory: HeldDirectory) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(directory)
+            if checked.access not in {"flush", "mutate"}:
+                return HeldResult(
+                    error=HeldFsError(
+                        "INVALID_ACCESS", "held directory is not flush-capable"
+                    )
+                )
+            assert FlushFileBuffers is not None
+            if not FlushFileBuffers(c_void_p(_native(checked.descriptor))):
+                raise OSError(ctypes.get_last_error(), "directory flush was refused")
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
     def _destination(
-        self, source: WindowsHeldFile, destination: HeldDirectory, destination_leaf: str
+        self,
+        source: WindowsHeldFile,
+        destination: HeldDirectory,
+        destination_leaf: str,
+        *,
+        replace: bool,
     ) -> WindowsHeldDirectory:
         if source.access != "mutate" or not _leaf(destination_leaf):
             raise OSError(errno.ELOOP, "invalid held mutation")
@@ -637,7 +804,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
                 _native(destination.descriptor),
                 destination_leaf,
                 FILE_READ_ATTRIBUTES,
-                FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
                 FILE_OPEN,
             )
         except OSError as error:
@@ -647,14 +814,69 @@ class WindowsHeldFilesystem(HeldFilesystem):
         else:
             assert CloseHandle is not None
             CloseHandle(c_void_p(handle))
-            raise OSError(errno.EEXIST, "destination exists")
+            if not replace:
+                raise OSError(errno.EEXIST, "destination exists")
+            return destination
 
     def rename(
-        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str
+        self,
+        source: HeldFile,
+        destination_parent: HeldDirectory,
+        destination_leaf: str,
+        *,
+        replace: bool = False,
     ) -> HeldResult[None]:
         try:
             checked = self._check_file(source)
-            destination = self._destination(checked, destination_parent, destination_leaf)
+            destination = self._destination(
+                checked,
+                destination_parent,
+                destination_leaf,
+                replace=replace,
+            )
+            _set_name_information(
+                checked.descriptor,
+                _native(destination.descriptor),
+                destination_leaf,
+                # The legacy class refuses replacement while the caller retains
+                # the exact old target. POSIX semantics keeps that handle valid.
+                FILE_RENAME_INFORMATION_EX if replace else FILE_RENAME_INFORMATION,
+                replace=replace,
+            )
+            checked.named = False
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def rename_directory(
+        self,
+        source: HeldDirectory,
+        destination_parent: HeldDirectory,
+        destination_leaf: str,
+    ) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(source)
+            if checked.access != "mutate" or not _leaf(destination_leaf):
+                raise OSError(errno.ELOOP, "invalid held directory mutation")
+            checked.check_name()
+            destination = self._check_directory(destination_parent)
+            if checked.identity.device != destination.identity.device:
+                raise OSError(errno.EXDEV, "cross-volume operation")
+            try:
+                existing = _open_relative(
+                    _native(destination.descriptor),
+                    destination_leaf,
+                    FILE_READ_ATTRIBUTES,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                    FILE_OPEN,
+                )
+            except OSError as error:
+                if error.errno not in {2, 3, errno.ENOENT}:
+                    raise
+            else:
+                assert CloseHandle is not None
+                CloseHandle(c_void_p(existing))
+                raise OSError(errno.EEXIST, "destination exists")
             _set_name_information(
                 checked.descriptor,
                 _native(destination.descriptor),
@@ -675,7 +897,12 @@ class WindowsHeldFilesystem(HeldFilesystem):
             )
         try:
             checked = self._check_file(source)
-            destination = self._destination(checked, destination_parent, destination_leaf)
+            destination = self._destination(
+                checked,
+                destination_parent,
+                destination_leaf,
+                replace=False,
+            )
             _set_name_information(
                 checked.descriptor,
                 _native(destination.descriptor),
@@ -692,6 +919,18 @@ class WindowsHeldFilesystem(HeldFilesystem):
             checked = self._check_file(file)
             if checked.access != "mutate":
                 return HeldResult(error=HeldFsError("INVALID_ACCESS", "held file is not mutable"))
+            _delete_descriptor(checked.descriptor)
+            checked.named = False
+            return HeldResult(value=None)
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def unlink_directory(self, directory: HeldDirectory) -> HeldResult[None]:
+        try:
+            checked = self._check_directory(directory)
+            if checked.access != "mutate":
+                raise OSError(errno.ELOOP, "invalid held directory mutation")
+            checked.check_name()
             _delete_descriptor(checked.descriptor)
             checked.named = False
             return HeldResult(value=None)
@@ -793,6 +1032,32 @@ class WindowsHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
+    def children(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:
+        try:
+            checked = self._check_directory(parent)
+            records: list[SagaRecord] = []
+            for name in self._entries(checked):
+                try:
+                    handle = _open_relative(
+                        _native(checked.descriptor),
+                        name,
+                        FILE_LIST_DIRECTORY | FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+                        FILE_SYNCHRONOUS_IO_NONALERT,
+                        FILE_OPEN,
+                    )
+                except OSError as error:
+                    if error.errno == errno.ELOOP:
+                        continue
+                    raise
+                descriptor = _fd(handle)
+                try:
+                    records.append(SagaRecord(name, _identity(_native(descriptor))))
+                finally:
+                    os.close(descriptor)
+            return HeldResult(value=tuple(records))
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
     def _entries(self, parent: WindowsHeldDirectory) -> list[str]:
         assert NtQueryDirectoryFile is not None
         buffer = create_string_buffer(65536)
@@ -872,6 +1137,8 @@ def _probe(root: Path) -> Capabilities:
     source_name = f".exomem-held-probe-{token}"
     renamed_name = f"{source_name}-renamed"
     linked_name = f"{source_name}-link"
+    replacement_source_name = f"{source_name}-replacement-source"
+    replacement_target_name = f"{source_name}-replacement-target"
     alias_name = f"{source_name}-alias"
     directory_name = f"{source_name}-directory"
     directory_alias_name = f"{directory_name}-alias"
@@ -907,6 +1174,39 @@ def _probe(root: Path) -> Capabilities:
             with filesystem.file(parent, renamed_name, access="mutate").require() as renamed:
                 if not filesystem.unlink(renamed).ok:
                     return Capabilities.disabled("relative unlink is unavailable")
+
+            for name, data in (
+                (replacement_source_name, b"replacement"),
+                (replacement_target_name, b"prior"),
+            ):
+                with filesystem.file(
+                    parent,
+                    name,
+                    access="write",
+                    create=True,
+                    exclusive=True,
+                ).require() as file:
+                    if not filesystem.write(file, data).ok:
+                        return Capabilities.disabled("relative replacement setup is unavailable")
+            with filesystem.file(parent, replacement_target_name).require() as prior:
+                with filesystem.file(
+                    parent,
+                    replacement_source_name,
+                    access="mutate",
+                ).require() as replacement:
+                    if not filesystem.rename(
+                        replacement,
+                        parent,
+                        replacement_target_name,
+                        replace=True,
+                    ).ok:
+                        return Capabilities.disabled("relative replacement is unavailable")
+                os.lseek(prior.descriptor, 0, os.SEEK_SET)
+                if os.read(prior.descriptor, 5) != b"prior":
+                    return Capabilities.disabled("open-target replacement is unavailable")
+            with filesystem.file(parent, replacement_target_name).require() as installed:
+                if filesystem.read(installed).value != b"replacement":
+                    return Capabilities.disabled("relative replacement identity is unavailable")
         return Capabilities(True, True, True, True, hard_link)
     except (HeldFsError, OSError):
         return Capabilities.disabled("actual-filesystem capability probe failed")
@@ -916,6 +1216,8 @@ def _probe(root: Path) -> Capabilities:
             source_name,
             renamed_name,
             linked_name,
+            replacement_source_name,
+            replacement_target_name,
             alias_name,
             directory_alias_name,
         ):
@@ -933,8 +1235,10 @@ def probe(root: Path) -> Capabilities:
     return _probe(root)
 
 
-def acquire(root: Path) -> HeldResult[HeldFilesystem]:
-    capability = probe(root)
+def acquire(
+    root: Path, *, capability: Capabilities | None = None
+) -> HeldResult[HeldFilesystem]:
+    capability = capability or probe(root)
     if not capability.relative_operations:
         return HeldResult(
             error=HeldFsError(

@@ -10,9 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import graph_sync, vault
+from exomem import graph_sync, vault, writer_lease
 from exomem import hosted_portability as portability
-from exomem import writer_lease
 
 
 def _checkpoint_payload(**changes: object) -> str:
@@ -554,7 +553,7 @@ def test_protocol_artifact_reader_rejects_fifo_without_blocking(
 def test_protocol_artifact_reader_rejects_replace_during_guarded_read(
     tmp_path: Path, artifact: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import vault as vault_module
+    from exomem import held_fs
 
     token = "0123456789abcdef01234567"
     path = {
@@ -566,16 +565,23 @@ def test_protocol_artifact_reader_rejects_replace_during_guarded_read(
     path.write_text(_valid_protocol_artifact(artifact), encoding="utf-8")
     replacement = path.with_suffix(".replacement")
     replacement.write_text(_valid_protocol_artifact(artifact), encoding="utf-8")
-    original = vault_module._read_bounded_guarded_snapshot
+    acquired = held_fs.acquire(tmp_path)
+    assert acquired.ok
+    filesystem = acquired.require()
+    filesystem_type = type(filesystem)
+    filesystem.close()
+    original = filesystem_type.read
+    replaced = False
 
-    def replace_after_snapshot(
-        root: Path, target: str, limit: int
-    ) -> tuple[bytes, vault_module.PathGuard]:
-        data, guard = original(root, target, limit)
-        replacement.replace(path)
-        return data, guard
+    def replace_after_snapshot(self, file):  # noqa: ANN001
+        nonlocal replaced
+        result = original(self, file)
+        if not replaced:
+            replacement.replace(path)
+            replaced = True
+        return result
 
-    monkeypatch.setattr(vault_module, "_read_bounded_guarded_snapshot", replace_after_snapshot)
+    monkeypatch.setattr(filesystem_type, "read", replace_after_snapshot)
     if artifact == "floor":
         assert graph_sync.floor_state(tmp_path) == ("malformed", None)
     elif artifact == "checkpoint":

@@ -22,9 +22,11 @@ import numpy as np
 
 from exomem.speaker_attribution import Profile
 
+from . import reserved_paths
 from .kbdir import kb_dirname
 
 DEFAULT_THRESHOLD = 0.40
+_STORE_READ_LIMIT = 16 * 1024 * 1024
 
 
 def voice_profiles_path(vault_root: Path) -> Path:
@@ -35,7 +37,18 @@ def voice_profiles_path(vault_root: Path) -> Path:
 def load_store(path: Path) -> dict[str, dict[str, Any]]:
     """Raw store dict. Missing or corrupt/unreadable file → empty dict (never raises)."""
     try:
-        text = path.read_text(encoding="utf-8")
+        if path.name == ".voice_profiles.json" and path.parent.name == kb_dirname():
+            vault_root = path.parent.parent
+            with reserved_paths._subsystem_authority_scope("voice_profiles"):
+                raw = reserved_paths._read_owner_bytes(
+                    vault_root,
+                    path,
+                    "voice-profile-store",
+                    limit=_STORE_READ_LIMIT,
+                )
+            text = raw.decode("utf-8")
+        else:
+            text = path.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
         return {}
     try:
@@ -61,8 +74,19 @@ def load_profiles(path: Path) -> dict[str, Profile]:
 
 
 def _write_store(path: Path, store: dict[str, dict[str, Any]]) -> None:
+    encoded = json.dumps(store, indent=2, sort_keys=True).encode("utf-8")
+    if path.name == ".voice_profiles.json" and path.parent.name == kb_dirname():
+        vault_root = path.parent.parent
+        with reserved_paths._subsystem_authority_scope("voice_profiles"):
+            reserved_paths._publish_owner_bytes(
+                vault_root,
+                path,
+                "voice-profile-store",
+                encoded,
+            )
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_bytes(encoded)
 
 
 def save_profile(

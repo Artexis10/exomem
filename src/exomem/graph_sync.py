@@ -968,15 +968,16 @@ def write_graph_commit_receipt(vault_root: Path, receipt: GraphCommitReceipt) ->
     receipt cut outcome-unknown until the later idempotency protocol writes the
     receipt marker and advances its retry row.
     """
-    from .vault import PlannedWrite, batch_atomic_write
+    from . import reserved_paths
 
     path = graph_commit_receipt_path(vault_root, receipt.commit_token)
-    batch_atomic_write(
-        [PlannedWrite(path, receipt.render())],
-        vault_root=vault_root,
-        post_commit_fanout=False,
-        commit_point=False,
-    )
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        reserved_paths._publish_owner_bytes(
+            vault_root,
+            path,
+            "graph-receipts",
+            receipt.render().encode("utf-8"),
+        )
     return path
 
 
@@ -1042,6 +1043,10 @@ def _is_sqlite_contention(error: BaseException) -> bool:
     later repair until someone runs a reconcile. A busy sidecar must not buy
     that verdict -- it is the expected state whenever a rebuild is publishing.
     """
+    from . import reserved_paths
+
+    if isinstance(error, reserved_paths.SqliteIdentityBusyError):
+        return True
     if not isinstance(error, sqlite3.OperationalError):
         return False
     text = str(error).lower()
@@ -1056,20 +1061,19 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
     made a concurrent write project `GRAPH_SYNC_LINEAGE_CONFLICT` and told the
     caller to reconcile a graph that was perfectly intact.
     """
-    from .epistemic_graph import sidecar_path
+    from .epistemic_graph import _connect_existing_owner_target, sidecar_path
 
     path = sidecar_path(vault_root)
-    if not path.exists():
-        return "absent", None
     try:
         # `closing`, not the connection's own context manager: that one is a
         # transaction scope and leaves the handle open. A leaked read handle
         # here is what makes the next publication's `os.replace` fail on
         # Windows, and this reader is on the graph read path.
         with contextlib.closing(
-            sqlite3.connect(
-                f"{path.resolve().as_uri()}?mode=ro",
-                uri=True,
+            _connect_existing_owner_target(
+                vault_root,
+                path,
+                readonly=True,
                 timeout=_ACK_READ_BUSY_TIMEOUT_SECONDS,
             )
         ) as conn:
@@ -1109,7 +1113,9 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
         ):
             return "malformed", None
         return "valid", GraphBuildOutcome.covering(checkpoint)
-    except (KeyError, OSError, sqlite3.Error, ValueError) as error:
+    except FileNotFoundError:
+        return "absent", None
+    except (KeyError, OSError, RuntimeError, sqlite3.Error, ValueError) as error:
         if _is_sqlite_contention(error):
             return "busy", None
         return "malformed", None
@@ -1117,16 +1123,15 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
 
 def _malformed_acknowledgement_generation(vault_root: Path) -> int | None:
     """Return only a canonical generation hint from an otherwise malformed ack."""
-    from .epistemic_graph import sidecar_path
+    from .epistemic_graph import _connect_existing_owner_target, sidecar_path
 
     path = sidecar_path(vault_root)
-    if not path.exists():
-        return None
     try:
         with contextlib.closing(
-            sqlite3.connect(
-                f"{path.resolve().as_uri()}?mode=ro",
-                uri=True,
+            _connect_existing_owner_target(
+                vault_root,
+                path,
+                readonly=True,
                 timeout=_ACK_READ_BUSY_TIMEOUT_SECONDS,
             )
         ) as conn:  # `closing` for the reason given in `acknowledgement_state`.
@@ -1144,7 +1149,7 @@ def _malformed_acknowledgement_generation(vault_root: Path) -> int | None:
             return None
         generation = int(value)
         return generation if generation >= 1 else None
-    except (OSError, sqlite3.Error, ValueError):
+    except (OSError, RuntimeError, sqlite3.Error, ValueError):
         return None
 
 
@@ -1518,25 +1523,27 @@ def reconcile_checkpoint(vault_root: Path) -> GraphSyncCheckpoint:
 
 
 def _write_floor(vault_root: Path, floor: GraphSyncGenerationFloor) -> None:
-    from .vault import PlannedWrite, batch_atomic_write
+    from . import reserved_paths
 
-    batch_atomic_write(
-        [PlannedWrite(floor_path(vault_root), floor.render())],
-        vault_root=vault_root,
-        post_commit_fanout=False,
-        commit_point=False,
-    )
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        reserved_paths._publish_owner_bytes(
+            vault_root,
+            floor_path(vault_root),
+            "graph-handoff",
+            floor.render().encode("utf-8"),
+        )
 
 
 def _write_checkpoint(vault_root: Path, checkpoint: GraphSyncCheckpoint) -> None:
-    from .vault import PlannedWrite, batch_atomic_write
+    from . import reserved_paths
 
-    batch_atomic_write(
-        [PlannedWrite(checkpoint_path(vault_root), checkpoint.render())],
-        vault_root=vault_root,
-        post_commit_fanout=False,
-        commit_point=False,
-    )
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        reserved_paths._publish_owner_bytes(
+            vault_root,
+            checkpoint_path(vault_root),
+            "graph-handoff",
+            checkpoint.render().encode("utf-8"),
+        )
 
 
 def _prior_artifact_bytes(path: Path) -> bytes | None:
@@ -1559,9 +1566,34 @@ def _epoch_artifacts_changed(
 
 def _read_bounded_bytes(path: Path, *, limit: int, vault_root: Path | None = None) -> bytes:
     """Read one stable in-vault regular protocol artifact without following links."""
-    from .vault import PathGuardError, read_bounded_guarded_bytes
+    from . import reserved_paths
 
     root = Path(vault_root) if vault_root is not None else Path(path).parent
+    try:
+        relative = Path(path).absolute().relative_to(root.absolute()).as_posix()
+    except ValueError:
+        relative = ""
+    classification = reserved_paths.classify_logical(relative)
+    if classification.descriptor_id in {"graph-handoff", "graph-receipts"}:
+        descriptor_id = classification.descriptor_id
+        assert descriptor_id is not None
+        try:
+            with reserved_paths._subsystem_authority_scope("graph_sync"):
+                return reserved_paths._read_owner_bytes(
+                    root,
+                    path,
+                    descriptor_id,
+                    limit=limit,
+                )
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise OSError(
+                "graph protocol artifact could not be safely read"
+            ) from error
+
+    from .vault import PathGuardError, read_bounded_guarded_bytes
+
     try:
         target = Path(path).absolute().relative_to(root.absolute()).as_posix()
     except ValueError as error:
@@ -1677,48 +1709,29 @@ def _restore_epoch_artifacts(
     vault_root: Path, prior_floor_bytes: bytes | None, prior_checkpoint_bytes: bytes | None
 ) -> None:
     """Restore exact internal epoch bytes without invoking a caller commit point."""
-    from .vault import PlannedWrite, batch_atomic_write
+    from . import reserved_paths
 
     restores = (
         (checkpoint_path(vault_root), prior_checkpoint_bytes),
         (floor_path(vault_root), prior_floor_bytes),
     )
-    writes = [
-        PlannedWrite(path, raw.decode("utf-8"))
-        for path, raw in restores
-        if raw is not None
-    ]
-    if writes:
-        batch_atomic_write(
-            writes,
-            vault_root=vault_root,
-            post_commit_fanout=False,
-            commit_point=False,
-        )
-    windows_flushes: list[Path] = []
-    for path, raw in restores:
-        if raw is None and path.exists():
-            path.unlink()
-            if os.name == "nt":
-                if path.parent not in windows_flushes:
-                    windows_flushes.append(path.parent)
-                continue
-            try:
-                directory_fd = os.open(
-                    path.parent,
-                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        for path, raw in restores:
+            if raw is not None:
+                reserved_paths._publish_owner_bytes(
+                    vault_root,
+                    path,
+                    "graph-handoff",
+                    raw,
                 )
-            except OSError:
-                raise
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-    if windows_flushes:
-        from . import mutation_lock
-
-        for path in windows_flushes:
-            mutation_lock._windows_flush_directory(path)
+        for path, raw in restores:
+            if raw is None:
+                reserved_paths._remove_owner_file(
+                    vault_root,
+                    path,
+                    "graph-handoff",
+                    missing_ok=True,
+                )
 
 
 def publish_deletion_checkpoint(
@@ -2870,61 +2883,76 @@ PUBLISH_IN_PLACE_BUSY_TIMEOUT_SECONDS = 5.0
 PUBLISH_IN_PLACE_RETRY_SECONDS = 0.25
 
 
-def replace_sidecar(temporary: Path, live: Path) -> None:
+def replace_sidecar(
+    temporary: Path,
+    live: Path,
+    *,
+    vault_root: Path | None = None,
+) -> None:
     """Publish the proven temporary as the live sidecar.
 
-    The fast path is the platform's atomic replacement primitive, which Linux
-    always grants and which Windows grants once no handle is open on the
-    destination. Windows refuses it while any reader keeps the live SQLite file
-    open, and a resident service makes that a routine condition rather than a
-    rare one, so a refusal must not be the end of the road: fall back to
-    publishing the same proven bytes *into* the existing file with SQLite's
-    backup API, which leaves the directory entry untouched and so does not care
-    how many handles are open on it.
+    An existing live graph runs in WAL mode. Replacing only its main SQLite
+    file leaves the predecessor ``-wal`` at the same pathname, so a new reader
+    can replay predecessor pages over the proven replacement. Publish into an
+    existing live database with SQLite's backup API instead: the destination
+    transaction preserves old/new snapshot atomicity without splitting the WAL
+    family or moving its directory entry.
 
-    That fallback covers open *handles*, not open read *transactions*. This
-    sidecar runs in rollback-journal mode, where a reader inside `BEGIN` holds a
-    SHARED lock that blocks the backup's EXCLUSIVE one — so a reader that holds
-    a transaction across the whole window still defeats both paths. Bounded
-    retries absorb the ordinary case where the reader commits and lets go.
-
-    Only when both fail is the publication genuinely unavailable. Leaving the
-    complete old sidecar in place is fail-closed; the checkpoint remains
-    unacknowledged and the graph's own recovery path retries later.
+    A first publication has no live database to back up into. Only that exact
+    absence takes the held atomic-move path. Any other backup refusal leaves the
+    complete old sidecar and proven temporary intact and fails closed; the
+    checkpoint remains unacknowledged and the graph recovery path retries later.
     """
-    try:
-        os.replace(temporary, live)
-    except PermissionError as error:
-        started = time.monotonic()
-        attempts: list[str] = []
-        if _publish_sidecar_in_place(temporary, live, attempts_out=attempts):
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                # A retained temp is inert once the live file already carries
-                # the published bytes; the reaper collects it on a later pass.
-                pass
-            return
-        # Carry what the refusal actually observed. This has fired on CI
-        # without reproducing locally, and the message alone -- "has an open
-        # reader" -- cannot distinguish the three things it might be: a reader
-        # that holds a transaction for longer than the whole budget, a
-        # permission problem that is not a sharing conflict at all, or a temp
-        # that never existed. The budget is already generous (three in-place
-        # attempts behind a 5s busy timeout, under four publication attempts
-        # above), so a refusal means something held on for close to a minute
-        # and the useful question is what. Widening a budget that large again
-        # would be guessing; naming the holder is not.
+    from . import epistemic_graph
+
+    root = Path(vault_root) if vault_root is not None else live.parent.parent
+    started = time.monotonic()
+    attempts: list[str] = []
+    if _publish_sidecar_in_place(
+        temporary,
+        live,
+        vault_root=root,
+        attempts_out=attempts,
+    ):
+        try:
+            epistemic_graph._remove_graph_rebuild_artifact(
+                root,
+                temporary,
+                missing_ok=True,
+            )
+        except OSError:
+            # A retained temp is inert once the live file already carries the
+            # published bytes; the reaper collects it on a later pass.
+            pass
+        return
+
+    if attempts == ["temporary sidecar absent"]:
+        raise FileNotFoundError(temporary)
+    if attempts != ["live sidecar absent"]:
         raise GraphSidecarReplaceUnavailable(
-            "live graph sidecar has an open reader "
-            f"(os.replace: {error.__class__.__name__}: {error}; "
-            f"in-place {len(attempts)} attempt(s) over {time.monotonic() - started:.1f}s: "
+            "live graph sidecar could not accept the proven rebuild "
+            f"(in-place {len(attempts)} attempt(s) over "
+            f"{time.monotonic() - started:.1f}s: "
             f"{'; '.join(attempts) if attempts else 'none ran'})"
+        )
+
+    try:
+        epistemic_graph._move_graph_rebuild_into_store(root, temporary, live)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise GraphSidecarReplaceUnavailable(
+            "live sidecar absent; held graph publication failed "
+            f"({error.__class__.__name__}: {error})"
         ) from error
 
 
 def _publish_sidecar_in_place(
-    temporary: Path, live: Path, *, attempts_out: list[str] | None = None
+    temporary: Path,
+    live: Path,
+    *,
+    vault_root: Path | None = None,
+    attempts_out: list[str] | None = None,
 ) -> bool:
     """Copy a proven temp sidecar over the live file without moving the entry.
 
@@ -2932,34 +2960,36 @@ def _publish_sidecar_in_place(
     destination transaction, so a concurrent reader either sees the complete
     old content or the complete new content — never a half-written file.
 
-    The sidecar is a rollback-journal database (nothing sets `journal_mode`), so
-    a reader inside `BEGIN` holds a SHARED lock and the backup's EXCLUSIVE lock
-    waits on it. The busy timeout absorbs that once the connection is open; a
-    failure raised at *open* time returns immediately, so the attempts are also
-    spaced, or all three would burn in microseconds and prove nothing. A reader
-    that never yields exhausts them and leaves the live sidecar exactly as it
-    was.
+    The private rebuild is a single rollback-journal file; the live destination
+    is WAL. A live read transaction can therefore retain its predecessor
+    snapshot while the backup transaction publishes the new generation. The
+    busy timeout and spaced retries cover a competing live writer; exhaustion
+    leaves both the old live database and proven temporary intact.
     """
-    if not live.exists():
-        if attempts_out is not None:
-            attempts_out.append("live sidecar absent")
-        return False
+    from . import epistemic_graph
+
+    root = Path(vault_root) if vault_root is not None else live.parent.parent
     for attempt in range(PUBLISH_IN_PLACE_ATTEMPTS):
         if attempt:
             time.sleep(PUBLISH_IN_PLACE_RETRY_SECONDS)
         elapsed = time.monotonic()
         try:
-            source = sqlite3.connect(temporary)
-            try:
-                destination = sqlite3.connect(
-                    live, timeout=PUBLISH_IN_PLACE_BUSY_TIMEOUT_SECONDS
-                )
-                try:
-                    source.backup(destination)
-                finally:
-                    destination.close()
-            finally:
-                source.close()
+            epistemic_graph._backup_graph_rebuild_into_store(
+                root,
+                temporary,
+                live,
+                timeout=PUBLISH_IN_PLACE_BUSY_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError as error:
+            if attempts_out is not None:
+                missing = Path(error.args[0]) if error.args else None
+                if missing == live:
+                    attempts_out.append("live sidecar absent")
+                elif missing == temporary:
+                    attempts_out.append("temporary sidecar absent")
+                else:
+                    attempts_out.append("live or temporary sidecar absent")
+            return False
         except sqlite3.Error as error:
             logger.debug(
                 "graph sidecar in-place publication attempt %d/%d did not complete",
@@ -3353,8 +3383,23 @@ def sweep_abandoned_temporaries(
                             # only evidence that a build is still in flight.
                             continue
                     try:
-                        candidate.unlink(missing_ok=True)
-                    except PermissionError:
+                        if matches_name is vault_module.is_graph_rebuild_runtime_file_name:
+                            from . import epistemic_graph
+
+                            epistemic_graph._remove_graph_rebuild_artifact(
+                                vault_root,
+                                candidate,
+                                missing_ok=True,
+                            )
+                        else:
+                            from . import lexstore
+
+                            lexstore._remove_lexical_rebuild_artifact(
+                                vault_root,
+                                candidate,
+                                missing_ok=True,
+                            )
+                    except (OSError, RuntimeError):
                         # Windows readers hold delete-sharing authority. A
                         # retained complete temp is recoverable state, so
                         # leave it for the next sweep after that reader

@@ -739,6 +739,44 @@ def test_op_error_json_envelope(vault: Path, capsys) -> None:
     assert payload["error"]["code"] == "NOT_FOUND"
 
 
+def test_reserved_path_cli_outcomes_are_presence_independent(
+    vault: Path,
+    capsys,
+) -> None:
+    read_argv = ["read_memory", "Knowledge Base/.governance.sqlite", "--json"]
+    write_argv = [
+        "manage_memory_file",
+        "--operation",
+        "create",
+        "--path",
+        "Knowledge Base/_Consolidation/runs/run.json",
+        "--content",
+        "secret",
+        "--json",
+    ]
+
+    absent_read_code, absent_read_out, _ = _run(read_argv, capsys)
+    absent_write_code, absent_write_out, _ = _run(write_argv, capsys)
+    (vault / "Knowledge Base" / ".governance.sqlite").write_bytes(b"private")
+    private_run = vault / "Knowledge Base" / "_Consolidation" / "runs" / "run.json"
+    private_run.parent.mkdir(parents=True)
+    private_run.write_text("private", encoding="utf-8")
+    present_read_code, present_read_out, _ = _run(read_argv, capsys)
+    present_write_code, present_write_out, _ = _run(write_argv, capsys)
+
+    absent_read = json.loads(absent_read_out.strip().splitlines()[-1])
+    absent_write = json.loads(absent_write_out.strip().splitlines()[-1])
+    present_read = json.loads(present_read_out.strip().splitlines()[-1])
+    present_write = json.loads(present_write_out.strip().splitlines()[-1])
+    assert absent_read_code == present_read_code == 1
+    assert absent_read == present_read
+    assert absent_read["error"]["code"] == "NOT_FOUND"
+    assert absent_write_code == present_write_code == 1
+    assert absent_write == present_write
+    assert absent_write["error"]["code"] == "RESERVED_PATH"
+    assert private_run.read_text(encoding="utf-8") == "private"
+
+
 def test_process_media_cli_process_status_and_retry(vault: Path, capsys) -> None:
     binary = vault / "Knowledge Base/Evidence/Audio/cli-contract.m4a"
     binary.parent.mkdir(parents=True, exist_ok=True)

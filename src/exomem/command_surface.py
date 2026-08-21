@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
 
-from . import call_spans, capabilities
+from . import call_spans, capabilities, reserved_paths
 from .call_spans import (  # noqa: F401 - re-exported for existing importers
     pop_call_spans,
     record_span,
@@ -299,6 +299,7 @@ class Command:
     first_run_safe: bool = False
     routes: tuple[str, ...] = ()
     response_detail: ResponseDetail | None = None
+    path_roles: tuple[reserved_paths.PathRole, ...] = ()
     mcp_meta: Mapping[str, tuple[str, ...]] = field(
         default_factory=lambda: types.MappingProxyType({}), hash=False
     )

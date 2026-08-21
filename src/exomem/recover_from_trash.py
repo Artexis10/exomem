@@ -17,7 +17,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import graph_sync, relation_review, semantic_index, semantic_writes
+from . import (
+    graph_sync,
+    relation_review,
+    reserved_paths,
+    semantic_index,
+    semantic_writes,
+)
 from .governance import lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -98,32 +104,77 @@ def recover_from_trash(
             ),
         )
 
+    # Bind and classify the complete source before reading its sidecar, parsing
+    # Markdown, counting children, or allocating lifecycle state. The later
+    # lifecycle manifest performs the immediate pre-rename recheck.
+    try:
+        if trash_abs.is_file():
+            reserved_paths.read_generic_bytes(vault_root, trash_rel)
+        elif trash_abs.is_dir():
+            reserved_paths.read_generic_tree(vault_root, trash_rel)
+        else:
+            raise reserved_paths.ReservedPathLeafError("UNSAFE_PATH")
+    except reserved_paths.ReservedPathLeafError as error:
+        code = "NOT_FOUND" if error.code == "MISSING" else "RESERVED_PATH"
+        raise RecoverError(
+            code=code,
+            reason="trash source could not be acquired through the generic boundary",
+        ) from None
+
     # Determine restore_path: explicit > sidecar's original_path.
     sidecar = trash_abs.parent / f"{trash_abs.name}.meta.json"
     meta: dict = {}
     sidecar_guard: PathGuard
     sidecar_proof_guard: PathGuard | None = None
     sidecar_source: str | None = None
+    sidecar_identity = None
     sidecar_rel = sidecar.relative_to(vault_root).as_posix()
     try:
-        sidecar_source, sidecar_guard = read_guarded_text(vault_root, sidecar)
-        meta = relation_review.parse_exact_json_object(sidecar_source)
-        sidecar_proof_guard = sidecar_guard
-    except FileNotFoundError:
-        try:
-            sidecar_guard = PathGuard.capture(
-                vault_root, sidecar_rel, leaf_policy="absent"
-            )
-        except PathGuardError as error:
+        sidecar_snapshot = reserved_paths.read_generic_bytes(vault_root, sidecar_rel)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            try:
+                sidecar_guard = PathGuard.capture(
+                    vault_root, sidecar_rel, leaf_policy="absent"
+                )
+            except PathGuardError as guard_error:
+                raise RecoverError(
+                    code="TRASH_SIDECAR_INVALID",
+                    reason="trash sidecar absence could not be bound safely",
+                ) from guard_error
+        elif error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise RecoverError(
+                code="RESERVED_PATH",
+                reason="trash sidecar is unavailable through the generic boundary",
+            ) from None
+        else:
             raise RecoverError(
                 code="TRASH_SIDECAR_INVALID",
-                reason="trash sidecar absence could not be bound safely",
+                reason="trash sidecar could not be read safely",
+            ) from None
+    else:
+        try:
+            sidecar_identity = sidecar_snapshot.identity
+            sidecar_source = sidecar_snapshot.data.decode("utf-8")
+            meta = relation_review.parse_exact_json_object(sidecar_source)
+            sidecar_guard = PathGuard.capture(
+                vault_root,
+                sidecar_rel,
+                leaf_policy="content",
+                expected_content_hash=content_hash(sidecar_source),
+                expected_content_size=len(sidecar_snapshot.data),
+            )
+            sidecar_proof_guard = sidecar_guard
+        except (UnicodeDecodeError, ValueError, PathGuardError) as error:
+            raise RecoverError(
+                code="TRASH_SIDECAR_INVALID",
+                reason="trash sidecar must be one exact strict UTF-8 JSON object",
             ) from error
-    except (OSError, ValueError) as error:
-        raise RecoverError(
-            code="TRASH_SIDECAR_INVALID",
-            reason="trash sidecar must be one exact strict UTF-8 JSON object",
-        ) from error
 
     if restore_path is None or not str(restore_path).strip():
         original = meta.get("original_path")
@@ -142,6 +193,12 @@ def recover_from_trash(
         restore_abs, restore_rel = resolve_under_vault(vault_root, restore_path)
     except VaultPathError as e:
         raise RecoverError(code=e.code, reason=e.reason) from e
+
+    if reserved_paths.classify_logical(restore_rel).blocked:
+        raise RecoverError(
+            code="RESERVED_PATH",
+            reason="restore destination is reserved for its owning subsystem",
+        )
 
     try:
         lifecycle.assert_not_protected(vault_root, restore_rel)
@@ -179,7 +236,27 @@ def recover_from_trash(
             ),
         )
 
-    if restore_abs.exists():
+    try:
+        reserved_paths.inspect_generic_path(vault_root, restore_rel)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            pass
+        elif error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise RecoverError(
+                code="RESERVED_PATH",
+                reason="restore destination is reserved for its owning subsystem",
+            ) from None
+        else:
+            raise RecoverError(
+                code="RECOVER_FAILED",
+                reason="restore destination could not be acquired safely",
+            ) from None
+    else:
         raise RecoverError(
             code="DEST_EXISTS",
             reason=(
@@ -442,8 +519,12 @@ def recover_from_trash(
     if sidecar_guard.leaf_policy == "content":
         try:
             sidecar_guard.recheck(vault_root)
-            sidecar.unlink()
-        except (OSError, PathGuardError) as e:
+            reserved_paths.unlink_generic_file(
+                vault_root,
+                sidecar_rel,
+                expected_identity=sidecar_identity,
+            )
+        except (PathGuardError, reserved_paths.ReservedPathLeafError) as e:
             warnings.append(
                 f"recovered file ok but trash sidecar changed or could not be "
                 f"removed safely: {sidecar.name!r}: {e}"

@@ -44,14 +44,25 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
-from . import embeddings, index_paths, semantic_units, sidecar_store
+from . import embeddings, index_paths, reserved_paths, semantic_units, sidecar_store
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
+
+
+def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+    with reserved_paths._subsystem_authority_scope("claims"):
+        return _sqlite_connect_owned(database, *args, **kwargs)
+
+
+def _sqlite_connect_owned(
+    database: Any, *args: Any, **kwargs: Any
+) -> sqlite3.Connection:
+    return sqlite3.connect(database, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +348,28 @@ class ClaimIndex:
         self._lock = threading.RLock()
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
+        with reserved_paths._subsystem_authority_scope("claims"):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("claims-store",),
+            ):
+                return self._connect_owned(path)
+
+    def _connect_owned(self, path: Path | None = None) -> sqlite3.Connection:
         target = path if path is not None else self.path
+        if target == self.path:
+            with reserved_paths._sqlite_owner_target_scope(
+                self.vault_root,
+                target,
+                "claims-store",
+                create=True,
+            ) as retained_target:
+                return self._connect_retained(retained_target)
+        return self._connect_retained(target)
+
+    def _connect_retained(self, target: Path) -> sqlite3.Connection:
         sidecar_store.ensure_sidecar_parent(target)
-        conn = sqlite3.connect(target)
+        conn = _sqlite_connect_owned(target)
         sidecar_store.apply_sidecar_pragmas(conn)
         conn.execute(
             """
@@ -364,6 +394,17 @@ class ClaimIndex:
             "policy_version TEXT NOT NULL, access_fingerprint TEXT NOT NULL, "
             "complete INTEGER NOT NULL)"
         )
+        if target == self.path:
+            try:
+                reserved_paths._publish_sqlite_owner_family(
+                    self.vault_root,
+                    target,
+                    "claims-store",
+                    conn,
+                )
+            except BaseException:
+                conn.close()
+                raise
         return conn
 
     def checksums(self) -> dict[str, str]:
@@ -576,7 +617,10 @@ class ClaimIndex:
         """
         if not self.path.exists():
             return False
-        conn = sqlite3.connect(self.path)
+        try:
+            conn = self._connect_readonly()
+        except (OSError, RuntimeError, sqlite3.Error):
+            return False
         try:
             exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recall_identity'"
@@ -598,6 +642,34 @@ class ClaimIndex:
         return bool(row[2]) and (str(row[0]), str(row[1])) == recall_policy.recall_policy_identity(
             self.vault_root
         )
+
+    def _connect_readonly(self) -> sqlite3.Connection:
+        with reserved_paths._subsystem_authority_scope("claims"):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("claims-store",),
+            ):
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root,
+                    self.path,
+                    "claims-store",
+                    create=False,
+                ) as retained_path:
+                    conn = _sqlite_connect_owned(
+                        f"{retained_path.as_uri()}?mode=ro",
+                        uri=True,
+                    )
+                    try:
+                        reserved_paths._publish_sqlite_owner_family(
+                            self.vault_root,
+                            self.path,
+                            "claims-store",
+                            conn,
+                        )
+                        return conn
+                    except BaseException:
+                        conn.close()
+                        raise
 
     @staticmethod
     def _invalidate_recall_identity(conn: sqlite3.Connection) -> bool:

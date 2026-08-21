@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote, unquote
 
-from . import memory_refs, vault
+from . import memory_refs, reserved_paths, vault
 from .collection_profiles import profile_for
 
 COLLECTION_VERSION = 1
@@ -825,30 +825,21 @@ def discover_collections(
         return ()
     authorize = authorize_path or (lambda _path: True)
     manifests: list[CollectionManifest] = []
-    if authorize_path is None:
-        candidates = list(itertools.islice(kb.rglob("_collection.md"), max_raw_candidates + 1))
+    candidates = []
+    for candidate in kb.rglob("_collection.md"):
+        safe = _safe_candidate_rel(root, candidate)
+        if safe is None or not authorize(safe[1]):
+            continue
+        candidates.append(candidate)
         if len(candidates) > max_raw_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
             )
-    else:
-        candidates = []
-        for candidate in kb.rglob("_collection.md"):
-            safe = _safe_candidate_rel(root, candidate)
-            if safe is None or not authorize(safe[1]):
-                continue
-            candidates.append(candidate)
-            if len(candidates) > max_raw_candidates:
-                raise CollectionError(
-                    "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
-                )
     for candidate in sorted(candidates):
         safe = _safe_candidate_rel(root, candidate)
         if safe is None:
             continue
         _candidate_path, rel = safe
-        if authorize_path is None and not authorize(rel):
-            continue
         if len(manifests) >= max_candidates:
             raise CollectionError(
                 "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
@@ -875,17 +866,14 @@ def discover_legacy_trackers(
     if not records_root.is_dir():
         return (), False
     authorize = authorize_path or (lambda _path: True)
-    if authorize_path is None:
-        candidates = list(itertools.islice(records_root.rglob("*.md"), max_raw_candidates + 1))
-    else:
-        candidates = []
-        for candidate in records_root.rglob("*.md"):
-            safe = _safe_candidate_rel(root, candidate)
-            if safe is None or not authorize(safe[1]):
-                continue
-            candidates.append(candidate)
-            if len(candidates) > max_raw_candidates:
-                break
+    candidates = []
+    for candidate in records_root.rglob("*.md"):
+        safe = _safe_candidate_rel(root, candidate)
+        if safe is None or not authorize(safe[1]):
+            continue
+        candidates.append(candidate)
+        if len(candidates) > max_raw_candidates:
+            break
     truncated = len(candidates) > max_raw_candidates
     trackers: list[LegacyCollection] = []
     for candidate in sorted(candidates[:max_raw_candidates]):
@@ -895,8 +883,6 @@ def discover_legacy_trackers(
         if safe is None:
             continue
         _safe_path, relative = safe
-        if authorize_path is None and not authorize(relative):
-            continue
         try:
             tracker = inspect_legacy_tracker(root, candidate, authorize_path=authorize)
         except CollectionError:
@@ -2098,15 +2084,24 @@ def _safe_candidate_rel(root: Path, candidate: Path) -> tuple[Path, str] | None:
         return None
     if not rel.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(rel):
         return None
+    if reserved_paths.classify_logical(rel).blocked:
+        return None
     current = root
     try:
-        for part in Path(rel).parts:
+        parts = Path(rel).parts
+        for index, part in enumerate(parts):
             current /= part
             info = current.lstat()
-            if stat.S_ISLNK(info.st_mode):
+            attributes = getattr(info, "st_file_attributes", 0)
+            if stat.S_ISLNK(info.st_mode) or attributes & getattr(
+                stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+            ):
                 return None
-        if not stat.S_ISREG(current.stat().st_mode):
-            return None
+            if index < len(parts) - 1:
+                if not stat.S_ISDIR(info.st_mode):
+                    return None
+            elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                return None
     except OSError:
         return None
     return candidate, rel

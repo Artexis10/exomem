@@ -3792,17 +3792,21 @@ def test_prepare_page_read_refuses_a_target_replaced_while_binding(
     replacement = target.with_name("preparation-race-replacement.md")
     replacement.write_text("---\ntype: source\n---\nreplacement-body\n", encoding="utf-8")
 
-    original_open = get_page_module.os.open
+    original_read = get_page_module.reserved_paths.read_generic_bytes
     replaced = False
 
-    def _replace_then_open(path: object, flags: int, *args: object) -> int:
+    def _replace_then_read(root: Path, path: object, **kwargs: object):
         nonlocal replaced
-        if not replaced and Path(path) == target:
+        if not replaced:
             replacement.replace(target)
             replaced = True
-        return original_open(path, flags, *args)
+        return original_read(root, path, **kwargs)
 
-    monkeypatch.setattr(get_page_module.os, "open", _replace_then_open)
+    monkeypatch.setattr(
+        get_page_module.reserved_paths,
+        "read_generic_bytes",
+        _replace_then_read,
+    )
 
     with pytest.raises(get_page_module.GetError) as exc:
         get_page_module.prepare_page_read(vault, path=rel)

@@ -336,8 +336,8 @@ def _plan_sidecar_repairs(
             report.skipped_readonly += 1
             continue
         try:
-            original = sidecar.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            original, _guard = read_guarded_text(vault_root, sidecar)
+        except (OSError, UnicodeDecodeError, PathGuardError):
             continue
         damage = sidecar_repair.analyze(original, sidecar)
         if damage is None:

@@ -34,6 +34,7 @@ from . import (
     temporal,
 )
 from . import vault as vault_module
+from .reserved_paths import ReservedPathLeafError, inspect_generic_path
 from .vault import (
     EXCLUDED_FIELD_CODE,
     PlannedWrite,
@@ -117,6 +118,13 @@ def create_file(
         )
     except VaultPathError as e:
         raise CreateFileError(code=e.code, reason=e.reason) from e
+
+    try:
+        inspect_generic_path(vault_root, rel_path)
+    except ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            code = "RESERVED_PATH" if error.code == "RESERVED_PATH" else "UNSAFE_PATH"
+            raise CreateFileError(code=code, reason="generic destination is unavailable") from error
 
     append_only = in_append_only_tree(rel_path)
     if append_only:
