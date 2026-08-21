@@ -9,6 +9,7 @@ import os
 import pickle
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -3127,6 +3128,184 @@ def test_live_graph_closes_connection_when_retained_target_exit_refuses(
     assert len(connections) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         connections[0].execute("SELECT 1")
+
+
+def test_graph_rebuild_backup_releases_identity_lock_after_complete_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import epistemic_graph
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    graph = epistemic_graph.EpistemicGraphIndex(
+        tmp_path,
+        mutation_coordinator=SimpleNamespace(),
+    )
+    live = graph._connect()
+    live.close()
+    temporary = tmp_path / "Knowledge Base" / (
+        f".graph-rebuild-{'a' * 64}-{'b' * 24}.sqlite"
+    )
+    rebuild = graph._connect(temporary)
+    rebuild.close()
+
+    real_target_scope = reserved_paths._sqlite_owner_target_scope
+    real_connect = epistemic_graph._sqlite_connect_owned
+    retained: set[str] = set()
+    observations: list[tuple[bool, bool, frozenset[str]]] = []
+
+    @contextmanager
+    def observe_target_scope(
+        vault_root: Path,
+        database: Path,
+        descriptor_id: str,
+        *,
+        create: bool,
+    ):
+        with real_target_scope(
+            vault_root,
+            database,
+            descriptor_id,
+            create=create,
+        ) as retained_path:
+            retained.add(descriptor_id)
+            try:
+                yield retained_path
+            finally:
+                retained.remove(descriptor_id)
+
+    class ObservedConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def __getattr__(self, name: str):  # noqa: ANN204
+            return getattr(self.connection, name)
+
+        def backup(self, destination: ObservedConnection) -> None:
+            family = tuple(
+                tmp_path / "Knowledge Base" / f".graph.sqlite{suffix}"
+                for suffix in ("", "-wal", "-shm")
+            )
+            catalogue = reserved_paths._published_identity_catalogue(tmp_path)
+            observations.append(
+                (
+                    reserved_paths._identity_coordination_active(
+                        tmp_path,
+                        "graph-store",
+                    ),
+                    all(
+                        catalogue.descriptor_for(
+                            reserved_paths._lstat_identity(path)
+                        )
+                        == "graph-store"
+                        for path in family
+                    )
+                    and catalogue.descriptor_for(
+                        reserved_paths._lstat_identity(temporary)
+                    )
+                    == "graph-rebuild",
+                    frozenset(retained),
+                )
+            )
+            self.connection.backup(destination.connection)
+
+    def observe_connect(*args: object, **kwargs: object) -> ObservedConnection:
+        return ObservedConnection(real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(
+        reserved_paths,
+        "_sqlite_owner_target_scope",
+        observe_target_scope,
+    )
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_sqlite_connect_owned",
+        observe_connect,
+    )
+
+    epistemic_graph._backup_graph_rebuild_into_store(
+        tmp_path,
+        temporary,
+        graph.path,
+        timeout=0.1,
+    )
+
+    assert observations == [
+        (False, True, frozenset({"graph-rebuild", "graph-store"}))
+    ]
+
+
+def test_contending_graph_writer_does_not_hold_global_identity_coordination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import epistemic_graph
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    graph = epistemic_graph.EpistemicGraphIndex(
+        tmp_path,
+        mutation_coordinator=SimpleNamespace(),
+    )
+    live = graph._connect()
+    live.close()
+    temporary = tmp_path / "Knowledge Base" / (
+        f".graph-rebuild-{'a' * 64}-{'b' * 24}.sqlite"
+    )
+    rebuild = graph._connect(temporary)
+    rebuild.close()
+
+    blocker = sqlite3.connect(graph.path)
+    blocker.execute("BEGIN IMMEDIATE")
+    prepare_entered = threading.Event()
+    real_prepare = epistemic_graph._prepare_live_graph_wal_family
+    errors: list[BaseException] = []
+
+    def observe_prepare(
+        vault_root: Path,
+        target: Path,
+        connection: sqlite3.Connection,
+    ) -> None:
+        prepare_entered.set()
+        real_prepare(vault_root, target, connection)
+
+    def publish() -> None:
+        try:
+            epistemic_graph._backup_graph_rebuild_into_store(
+                tmp_path,
+                temporary,
+                graph.path,
+                timeout=0.2,
+            )
+        except BaseException as error:  # noqa: BLE001 - asserted below
+            errors.append(error)
+
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_prepare_live_graph_wal_family",
+        observe_prepare,
+    )
+    worker = threading.Thread(target=publish)
+    worker.start()
+    try:
+        assert prepare_entered.wait(timeout=2.0)
+        started = time.monotonic()
+        with reserved_paths._identity_coordination_scope(tmp_path):
+            pass
+        identity_wait = time.monotonic() - started
+    finally:
+        blocker.rollback()
+        blocker.close()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert identity_wait < 1.0
 
 
 def test_sqlite_owner_target_scope_rejects_symlink_and_hardlink_aliases(

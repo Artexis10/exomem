@@ -377,6 +377,74 @@ def _move_graph_rebuild_into_store(
         )
 
 
+def _set_sqlite_busy_timeout(
+    connection: sqlite3.Connection,
+    timeout_seconds: float,
+) -> None:
+    timeout_ms = max(0, min(2_147_483_647, round(timeout_seconds * 1000)))
+    connection.execute(f"PRAGMA busy_timeout={timeout_ms}")
+
+
+def _published_live_graph_wal_family_complete(
+    vault_root: Path,
+    target: Path,
+) -> bool:
+    catalogue = reserved_paths._published_identity_catalogue(vault_root)
+    for suffix in ("", "-wal", "-shm"):
+        path = target.with_name(f"{target.name}{suffix}")
+        try:
+            identity = reserved_paths._lstat_identity(path)
+        except OSError:
+            return False
+        if catalogue.descriptor_for(identity) != "graph-store":
+            return False
+    return True
+
+
+def _prepare_live_graph_wal_family(
+    vault_root: Path,
+    target: Path,
+    connection: sqlite3.Connection,
+) -> None:
+    """Fail-fast establish, pin, and publish the live SQLite family."""
+
+    # Identity coordination must never inherit the ordinary five-second SQLite
+    # wait. If another graph writer exists, its WAL family is already reachable
+    # and can be published without taking the write reservation below.
+    _set_sqlite_busy_timeout(connection, 0)
+    sidecar_store.apply_sidecar_pragmas(connection)
+    _set_sqlite_busy_timeout(connection, 0)
+    journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+    if (
+        journal_mode is None
+        or not journal_mode
+        or str(journal_mode[0]).lower() != "wal"
+    ):
+        raise RuntimeError("live graph store could not establish WAL mode")
+    reserved_paths._publish_sqlite_owner_family(
+        vault_root,
+        target,
+        "graph-store",
+        connection,
+    )
+    if _published_live_graph_wal_family_complete(vault_root, target):
+        return
+
+    # A brand-new WAL database has no companions yet. This reservation creates
+    # them without changing graph data. It is deliberately fail-fast; an active
+    # writer implies the family should have been publishable above.
+    connection.execute("BEGIN IMMEDIATE")
+    connection.rollback()
+    reserved_paths._publish_sqlite_owner_family(
+        vault_root,
+        target,
+        "graph-store",
+        connection,
+    )
+    if not _published_live_graph_wal_family_complete(vault_root, target):
+        raise RuntimeError("live graph WAL identity family is incomplete")
+
+
 def _backup_graph_rebuild_into_store(
     vault_root: Path,
     temporary: Path,
@@ -384,50 +452,53 @@ def _backup_graph_rebuild_into_store(
     *,
     timeout: float,
 ) -> None:
-    """Back up a retained rebuild into a retained live graph SQLite leaf."""
+    """Back up a retained rebuild without holding the global identity domain.
+
+    SQLite's backup may wait for the destination busy timeout.  Both exact
+    leaves and the live WAL family are retained and published first, so that
+    wait does not need to starve unrelated generic operations taking a private
+    identity snapshot.
+    """
 
     root = Path(vault_root)
     with reserved_paths._subsystem_authority_scope("epistemic_graph"):
-        with reserved_paths._identity_coordination_scope(
-            root,
-            descriptor_ids=("graph-rebuild", "graph-store"),
-        ):
-            with reserved_paths._sqlite_owner_target_scope(
+        with ExitStack() as retained:
+            with reserved_paths._identity_coordination_scope(
                 root,
-                temporary,
-                "graph-rebuild",
-                create=False,
-            ) as retained_temporary:
-                with reserved_paths._sqlite_owner_target_scope(
-                    root,
-                    live,
-                    "graph-store",
-                    create=False,
-                ) as retained_live:
-                    source = _sqlite_connect_owned(
-                        f"{retained_temporary.as_uri()}?mode=ro",
-                        uri=True,
+                descriptor_ids=("graph-rebuild", "graph-store"),
+            ):
+                retained_temporary = retained.enter_context(
+                    reserved_paths._sqlite_owner_target_scope(
+                        root,
+                        temporary,
+                        "graph-rebuild",
+                        create=False,
                     )
-                    try:
-                        destination = _sqlite_connect_owned(retained_live, timeout=timeout)
-                        try:
-                            source.backup(destination)
-                            reserved_paths._publish_sqlite_owner_family(
-                                root,
-                                temporary,
-                                "graph-rebuild",
-                                source,
-                            )
-                            reserved_paths._publish_sqlite_owner_family(
-                                root,
-                                live,
-                                "graph-store",
-                                destination,
-                            )
-                        finally:
-                            destination.close()
-                    finally:
-                        source.close()
+                )
+                retained_live = retained.enter_context(
+                    reserved_paths._sqlite_owner_target_scope(
+                        root,
+                        live,
+                        "graph-store",
+                        create=False,
+                    )
+                )
+                source = _sqlite_connect_owned(
+                    f"{retained_temporary.as_uri()}?mode=ro",
+                    uri=True,
+                )
+                retained.callback(source.close)
+                destination = _sqlite_connect_owned(retained_live, timeout=timeout)
+                retained.callback(destination.close)
+                _prepare_live_graph_wal_family(root, live, destination)
+                reserved_paths._publish_sqlite_owner_family(
+                    root,
+                    temporary,
+                    "graph-rebuild",
+                    source,
+                )
+            _set_sqlite_busy_timeout(destination, timeout)
+            source.backup(destination)
 
 
 def _remove_graph_rebuild_artifact(
@@ -1356,6 +1427,7 @@ class EpistemicGraphIndex:
             if connection is None:  # pragma: no cover - context entered or raised
                 raise RuntimeError("live graph store did not open a connection")
             try:
+                _set_sqlite_busy_timeout(connection, 5.0)
                 return self._initialize_graph_schema(connection)
             except BaseException:
                 connection.close()
@@ -1390,24 +1462,9 @@ class EpistemicGraphIndex:
         sidecar_store.ensure_sidecar_parent(target)
         conn = _sqlite_connect_owned(target)
         try:
-            sidecar_store.apply_sidecar_pragmas(conn)
-            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()
-            if (
-                journal_mode is None
-                or not journal_mode
-                or str(journal_mode[0]).lower() != "wal"
-            ):
-                raise RuntimeError("live graph store could not establish WAL mode")
-            # WAL negotiation persists the mode but does not materialize the
-            # companion files on a fresh database.  A write reservation creates
-            # and pins WAL/SHM without changing graph data, so the complete
-            # physical family can be published before coordination is released.
-            conn.execute("BEGIN IMMEDIATE")
-            conn.rollback()
-            reserved_paths._publish_sqlite_owner_family(
+            _prepare_live_graph_wal_family(
                 self.vault_root,
                 target,
-                "graph-store",
                 conn,
             )
         except BaseException:
