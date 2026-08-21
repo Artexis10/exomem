@@ -21,6 +21,7 @@ from exomem import create_directory as create_directory_module
 from exomem import create_file as create_file_module
 from exomem import mutation_lock
 from exomem.append_to_file import append_to_file
+from exomem.cli_ops import OpError
 from exomem.create_directory import create_directory
 from exomem.create_file import CreateFileError, create_file
 
@@ -68,8 +69,9 @@ def test_concurrent_non_markdown_creates_do_not_clobber(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two concurrent creates of the same non-``.md`` path: exactly one wins,
-    and the loser gets FILE_EXISTS from the under-boundary re-check instead of
-    silently clobbering the winner's bytes (the reproduced review defect)."""
+    and the loser gets an honest refusal instead of silently clobbering the
+    winner's bytes (the reproduced review defect). A saturated outer mutation
+    boundary may return retryable MUTATION_BUSY before the leaf re-check."""
     real_write = create_file_module.batch_atomic_write
     a_in_boundary = threading.Event()
     a_release = threading.Event()
@@ -94,7 +96,7 @@ def test_concurrent_non_markdown_creates_do_not_clobber(
                 content=f'{{"writer": "{name}"}}\n',
             )
             results[name] = "ok"
-        except CreateFileError as error:
+        except (CreateFileError, OpError) as error:
             results[name] = error.code
 
     thread_a = threading.Thread(target=writer, args=("A",))
@@ -112,6 +114,14 @@ def test_concurrent_non_markdown_creates_do_not_clobber(
     assert not thread_a.is_alive() and not thread_b.is_alive()
 
     assert results["A"] == "ok"
-    assert results["B"] == "FILE_EXISTS"
+    assert results["B"] in {"FILE_EXISTS", "MUTATION_BUSY"}
+    if results["B"] == "MUTATION_BUSY":
+        with pytest.raises(CreateFileError) as retry:
+            create_file(
+                vault,
+                path="Knowledge Base/race.json",
+                content='{"writer": "B"}\n',
+            )
+        assert retry.value.code == "FILE_EXISTS"
     content = (vault / "Knowledge Base" / "race.json").read_text(encoding="utf-8")
     assert content == '{"writer": "A"}\n'
