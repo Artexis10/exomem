@@ -42,6 +42,12 @@ _BOILERPLATE_RE = re.compile(
 )
 
 
+def _logical_text(content: str) -> str:
+    """Match ``Path.read_text`` universal-newline semantics on guarded bytes."""
+
+    return content.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _segments(body: str) -> list[tuple[str, str]]:
     """Split `body` into (prose-before-extraction, extraction) per nesting level.
 
@@ -85,6 +91,7 @@ class SidecarDamage:
 
 def analyze(content: str, path: Path) -> SidecarDamage | None:
     """Describe the duplication in `content`, or None when it is clean."""
+    content = _logical_text(content)
     _frontmatter, body, raw = parse_frontmatter(content)
     body = body if raw is not None else content
     if PRESERVED_HEADING not in body:
@@ -117,6 +124,7 @@ def repair(content: str) -> str:
     Keeps frontmatter verbatim so a still-`pending` sidecar stays queued for a
     real re-extraction.
     """
+    content = _logical_text(content)
     frontmatter_text, body = _split_frontmatter(content)
     if PRESERVED_HEADING not in body:
         return content
@@ -178,6 +186,7 @@ def _extraction_blocks(body: str) -> list[str]:
 
 
 def _longest_extraction(content: str) -> int:
+    content = _logical_text(content)
     blocks = _extraction_blocks(content)
     return len(max(blocks, key=len)) if blocks else 0
 
