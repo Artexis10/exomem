@@ -59,6 +59,48 @@ function Get-Provenance {
     try { return $raw | ConvertFrom-Json } catch { return $null }
 }
 
+# Name -> version for everything installed, so a deploy can SAY what it changed.
+# The torch gate below proves the general case matters: it exists because an
+# upgrade silently swapped an accelerated build for a CPU one, and torch is not
+# the only dependency that can move without anyone asking.
+function Get-PackageSnapshot {
+    param([string]$PythonPath)
+    $raw = & uv pip list --python $PythonPath --format json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
+    $map = @{}
+    try {
+        foreach ($pkg in ($raw | ConvertFrom-Json)) { $map[$pkg.name] = $pkg.version }
+    } catch { return $null }
+    return $map
+}
+
+# Report every version that moved, with `exomem` itself excluded: it is the
+# thing being deployed, so listing it as drift is noise.
+function Write-DependencyDrift {
+    param($Before, $After)
+    if (-not $Before -or -not $After) {
+        Write-Host "Dependency drift: unavailable (could not snapshot both sides)." -ForegroundColor Yellow
+        return
+    }
+    $moved = @()
+    foreach ($name in $After.Keys) {
+        if ($name -ieq "exomem") { continue }
+        $old = $Before[$name]
+        if ($null -eq $old) { $moved += "  + $name $($After[$name]) (new)" }
+        elseif ($old -ne $After[$name]) { $moved += "  ~ $name $old -> $($After[$name])" }
+    }
+    foreach ($name in $Before.Keys) {
+        if ($name -ieq "exomem") { continue }
+        if ($null -eq $After[$name]) { $moved += "  - $name $($Before[$name]) (removed)" }
+    }
+    if ($moved.Count -eq 0) {
+        Write-Host "Dependency drift: none (only exomem changed)." -ForegroundColor Green
+        return
+    }
+    Write-Host "Dependency drift ($($moved.Count) package(s) moved):" -ForegroundColor Yellow
+    $moved | Sort-Object | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
+}
+
 # The accelerator baseline comes from torch's own distribution metadata, not
 # from `install-info --json`. That payload has never carried `accelerated` or
 # `torch`: the property read $null, `[bool]$null` is $false, and so the gate at
@@ -80,9 +122,31 @@ if ($DryRun) {
 }
 
 # --- 2. Upgrade that environment ---------------------------------------------
+# Deliberately NOT `--upgrade`. `==$Version` pins exomem; `--upgrade` ADDITIONALLY
+# floats every transitive to its newest compatible release, which is not what a
+# version-pinned deploy is asking for. `sentence-transformers` is declared
+# `>=2.7` with no upper bound, so that flag walked it 5.7.0 -> 6.0.0 (a major
+# bump) on two separate deploys of unrelated patch releases, while the lockfile
+# CI tests against pins 5.5.1 -- meaning the combination running in production
+# was one nothing had ever validated.
+#
+# Without the flag uv still upgrades a dependency when the new exomem's own
+# constraints REQUIRE it, so a genuine floor bump is honoured; it just stops
+# rewriting the ML stack as a side effect. A patch release changes exomem.
+#
+# Deploying the lockfile instead would be worse, not better: it pins torch
+# 2.12.0, and this host runs an accelerated build the lock cannot express (see
+# the cu132 note in the gate below). Lock-exact would downgrade the GPU away.
+$packagesBefore = Get-PackageSnapshot -PythonPath $servicePython
 Write-Host "`nUpgrading to exomem[$Extras]==$Version ..." -ForegroundColor Cyan
-& uv pip install --python $servicePython --upgrade "exomem[$Extras]==$Version"
+& uv pip install --python $servicePython "exomem[$Extras]==$Version"
 if ($LASTEXITCODE -ne 0) { Fail "uv pip install returned $LASTEXITCODE." }
+
+# Whatever did move, say so. Silent drift is how both incidents stayed invisible
+# until a gate happened to trip on an unrelated check.
+$packagesAfter = Get-PackageSnapshot -PythonPath $servicePython
+Write-Host ""
+Write-DependencyDrift -Before $packagesBefore -After $packagesAfter
 
 # --- 3. Accelerator regression gate ------------------------------------------
 # The cu132 pin lives in the repo's [tool.uv.sources], which a PyPI-backed venv
