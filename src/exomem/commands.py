@@ -3440,6 +3440,14 @@ def op_query_data(
             date_from=date_from,
             date_to=date_to,
             date_column=date_column,
+            authorize_path=lambda rel_path: (
+                egress_module.release_level_for_path_only(
+                    vault_root,
+                    rel_path,
+                    receipt_decision="released",
+                )
+                >= egress_module.LEVEL_FULL
+            ),
         )
     except query_data_module.QueryDataError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
