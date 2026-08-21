@@ -71,14 +71,14 @@
   semantic sibling, and a valid explicitly empty companion. The empty fixture must carry
   `state: classified`, all four explicit empty semantic lists, and the complete class-
   specific immutable binding tuple; missing semantic keys/descriptor must stay unresolved.
-- [ ] 2.4 Add exact red legacy/backfill fixtures for `preserve.py` minimal media stubs,
+- [x] 2.4 Add exact red legacy/backfill fixtures for `preserve.py` minimal media stubs,
   pending and completed media sidecars, ordinary binaries, dataset cards, and persisted
   scene frames. Require owner-authenticated receipt-first version-1 input with exact
   artifact/companion identities, complete explicit semantics, and class binding fields.
   Assert page tags/projects/type/classes are never inferred, pre-descriptor semantic-only
   classification is unresolved, exact retries are idempotent, and drift/crash/ambiguity
   leaves no partial descriptor or rewritten body/page metadata.
-- [ ] 2.5 Add red legacy scene-frame fixtures for finite, negative, non-finite, half-way,
+- [x] 2.5 Add red legacy scene-frame fixtures for finite, negative, non-finite, half-way,
   and out-of-range `frame_ts`; filename/index/parent agreement and disagreement; and
   canonical `int(round(binary64(frame_ts) * 1000))` ties-to-even conversion. Require
   exact bounded `frame_timestamp_ms` in `0..4_294_967_295` or atomic refusal.
@@ -92,7 +92,7 @@
   `projects`/`tags`/`types`/`classes` string lists
   distinct from companion-page metadata. Make all reads immutable, canonical, regular,
   no-follow snapshots.
-- [ ] 2.8 Implement `backfill_companion` preview/commit through trusted local-owner
+- [x] 2.8 Implement `backfill_companion` preview/commit through trusted local-owner
   context and receipt-first no-follow held-parent/descriptor-bound transaction. Validate
   the exact version-1 input, preserve all non-descriptor bytes, persist prior/target
   identities and owner/event evidence, and prohibit every metadata-inference path.
