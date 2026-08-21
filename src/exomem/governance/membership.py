@@ -20,11 +20,15 @@ from typing import Literal
 from .. import find_corpus
 from ..find_types import ParsedPage
 from ..kbdir import kb_dirname
+from . import companions
 from .policy import Policy, Scope
 
 _MEMO_MAX = 4096
 _MEMO: OrderedDict[tuple[str, str, int, int], frozenset[str]] = OrderedDict()
 _SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str], frozenset[str]] = OrderedDict()
+_PATH_MEMO: OrderedDict[
+    tuple[str, str, tuple[companions.BoundSnapshot, ...]], MembershipOutcome
+] = OrderedDict()
 
 
 class MembershipUnresolved(Exception):
@@ -45,17 +49,28 @@ class MembershipOutcome:
 
     state: Literal["classified", "unresolved"]
     scope_ids: frozenset[str]
-    reason: Literal["companion_required"] | None = None
+    reason: Literal[
+        "companion_required",
+        "artifact_unsafe",
+        "companion_unsafe",
+        "descriptor_missing",
+        "descriptor_invalid",
+        "artifact_mismatch",
+        "companion_ambiguous",
+    ] | None = None
 
     def require_classified(self) -> frozenset[str]:
         if self.state == "classified":
             return self.scope_ids
-        raise MembershipUnresolved("non-Markdown membership requires a companion")
+        raise MembershipUnresolved(
+            f"non-Markdown membership is unresolved: {self.reason or 'unknown'}"
+        )
 
 
 def clear_memo() -> None:
     _MEMO.clear()
     _SNAPSHOT_MEMO.clear()
+    _PATH_MEMO.clear()
 
 
 def _kb_relative(rel_path: str) -> str:
@@ -144,6 +159,26 @@ def _needs_frontmatter(scope: Scope) -> bool:
     return bool(scope.projects or scope.tags or scope.types or scope.classes)
 
 
+def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) -> bool:
+    projects = {value.casefold() for value in companion.projects}
+    tags = {value.casefold() for value in companion.tags}
+    types = {value.casefold() for value in companion.types}
+    classes = {value.casefold() for value in companion.classes}
+    positive = (
+        any(value.casefold() in projects for value in scope.projects)
+        or any(value.casefold() in tags for value in scope.tags)
+        or any(value.casefold() in types for value in scope.types)
+        or any(value.casefold() in classes for value in scope.classes)
+    )
+    excluded = (
+        any(value.casefold() in projects for value in scope.exclude_projects)
+        or any(value.casefold() in tags for value in scope.exclude_tags)
+        or any(value.casefold() in types for value in scope.exclude_types)
+        or any(value.casefold() in classes for value in scope.exclude_classes)
+    )
+    return positive and not excluded
+
+
 def evaluate_path_only(
     vault_root: Path, rel_path: str, policy: Policy
 ) -> MembershipOutcome:
@@ -159,15 +194,15 @@ def evaluate_path_only(
     including the owner).
 
     A path/ref exclusion proves exclusion and a path/ref positive proves
-    membership.  A selector requiring artifact semantics cannot be decided in
-    this compatibility slice: descriptor-like legacy companions deliberately
-    stay unresolved until the closed companion registry lands.
+    membership. A still-undecided semantic selector is evaluated only from the
+    closed, byte-bound companion registry. Missing, stale, ambiguous, or unsafe
+    companion state remains unresolved instead of becoming an empty scope set.
     """
     if policy.empty or not policy.scopes:
         return MembershipOutcome("classified", frozenset())
 
     matched: set[str] = set()
-    unresolved = False
+    undecided: list[tuple[str, Scope]] = []
     for scope_id, scope in policy.scopes.items():
         if _path_ref_excludes(scope, rel_path):
             continue
@@ -175,9 +210,26 @@ def evaluate_path_only(
             matched.add(scope_id)
             continue
         if _needs_frontmatter(scope):
-            unresolved = True
-    if unresolved:
-        return MembershipOutcome("unresolved", frozenset(matched), "companion_required")
+            undecided.append((scope_id, scope))
+    if undecided:
+        try:
+            companion = companions.classify(vault_root, rel_path)
+        except companions.CompanionClassificationError as error:
+            return MembershipOutcome("unresolved", frozenset(matched), error.reason)
+        memo_key = (policy.fingerprint, rel_path, companion.identities)
+        cached = _PATH_MEMO.get(memo_key)
+        if cached is not None:
+            _PATH_MEMO.move_to_end(memo_key)
+            return cached
+        for scope_id, scope in undecided:
+            if _semantic_scope_matches(scope, companion):
+                matched.add(scope_id)
+        result = MembershipOutcome("classified", frozenset(matched))
+        _PATH_MEMO[memo_key] = result
+        _PATH_MEMO.move_to_end(memo_key)
+        while len(_PATH_MEMO) > _MEMO_MAX:
+            _PATH_MEMO.popitem(last=False)
+        return result
     return MembershipOutcome("classified", frozenset(matched))
 
 
