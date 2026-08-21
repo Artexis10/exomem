@@ -19,6 +19,7 @@ import pytest
 
 from exomem import commands
 from exomem import find as find_module
+from exomem import query_data as query_data_module
 from exomem.find_types import GraphProvenance, Hit
 from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
@@ -1978,6 +1979,66 @@ def test_query_data_csv_rows_are_gated_and_receipted(vault: Path) -> None:
     assert "Alice" not in json.dumps(record)
 
 
+def test_unresolved_dataset_is_missing_before_rows_are_loaded(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = "Knowledge Base/Data/private.csv"
+    target = vault / dataset
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("name,value\nAlice,42\n", encoding="utf-8")
+    card = vault / "Knowledge Base/Notes/Datasets/private.md"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_text(
+        "---\n"
+        "type: dataset\n"
+        f"data_file: {dataset}\n"
+        "format: csv\n"
+        "tags: [confidential]\n"
+        "---\n\nLegacy dataset card without a governance companion descriptor.\n",
+        encoding="utf-8",
+    )
+    scope = _gov_dir(vault) / "scopes" / "patterns.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Confidential\n"
+        'tags: ["confidential"]\n',
+        encoding="utf-8",
+    )
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _reset_caches()
+
+    def forbidden_load(*_args: object, **_kwargs: object):
+        raise AssertionError("unresolved dataset reached the row parser")
+
+    monkeypatch.setattr(query_data_module, "load_generic_rows", forbidden_load)
+    with request_scope(_external()):
+        with egress.disclosure_boundary(vault, "query_data") as collector:
+            with pytest.raises(ValueError, match="NOT_FOUND"):
+                commands.op_query_data(vault, path=dataset)
+            egress.emit_boundary_receipt(collector)
+    assert _receipt_records(vault)[0]["outcomes"][0]["decision"] == "withheld"
+
+
+def test_l5_dataset_is_missing_before_rows_are_loaded(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = "Knowledge Base/Data/private.csv"
+    target = vault / dataset
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("name,value\nAlice,42\n", encoding="utf-8")
+    write_scope(vault, paths="Data/**")
+    write_rule(vault, ceiling=egress.LEVEL_EXCERPT)
+    _reset_caches()
+
+    def forbidden_load(*_args: object, **_kwargs: object):
+        raise AssertionError("L5 dataset reached the row parser")
+
+    monkeypatch.setattr(query_data_module, "load_generic_rows", forbidden_load)
+    with request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_query_data(vault, path=dataset)
+
+
 def test_receipt_conflict_never_turns_a_committed_mutation_into_a_retry_error(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_FULL)
@@ -2736,6 +2797,16 @@ def test_withheld_media_download_is_still_denied(vault: Path) -> None:
 
     with request_scope(_external()):
         assert egress.release_allows_download(vault, rel) is False
+        assert egress.release_allows_frames(vault, rel) is False
+
+
+def test_excerpt_level_never_authorizes_raw_video_frames(vault: Path) -> None:
+    rel = _media(vault, "Knowledge Base/Notes/Patterns/recording.mp4")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_EXCERPT)
+    _reset_caches()
+
+    with request_scope(_external()):
         assert egress.release_allows_frames(vault, rel) is False
 
 

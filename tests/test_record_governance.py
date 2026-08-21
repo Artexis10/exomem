@@ -145,6 +145,37 @@ def test_log_and_dataset_source_require_full_release_before_read(
     assert calls == []
 
 
+def test_unresolved_dataset_source_never_reaches_records_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = copy_dataset_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    semantic_scope = (
+        tmp_path
+        / "Knowledge Base"
+        / "_Governance"
+        / "scopes"
+        / "semantic-source.yaml"
+    )
+    semantic_scope.write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FZZ\n"
+        "name: Semantic sources\n"
+        'types: ["source"]\n',
+        encoding="utf-8",
+    )
+
+    def forbidden_read(_self: record_formats.DatasetAdapter):
+        raise AssertionError("unresolved dataset reached the Records adapter")
+
+    monkeypatch.setattr(record_formats.DatasetAdapter, "read", forbidden_read)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        with pytest.raises(collections.CollectionError) as raised:
+            record_governance.query_collection(tmp_path, manifest, aggregate="count")
+    assert raised.value.code == "COLLECTION_NOT_FOUND"
+
+
 @pytest.mark.parametrize(
     "aggregate",
     (
