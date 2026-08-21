@@ -732,6 +732,13 @@ def collect_candidates(
             page_of=page_of,
             usage_map=usage_map,
             evidence_out=multiplier_chain_by_path,
+            # Bound the pass at the depth this system already says it needs.
+            # `candidate_k` is at least `limit * 5` and at least the 50-entry
+            # floor, while the consumer in `_find_semantic` stops building hits
+            # at `limit * 3` — so the exact prefix always covers what is read,
+            # with headroom for the candidates that loop skips. Without this the
+            # pass loads every fused page from disk purely to rank them (#283).
+            top_n=candidate_k,
         )
         adjusted_score_by_path = dict(fused) if capture_trace else {}
 
