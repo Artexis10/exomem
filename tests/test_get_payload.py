@@ -252,6 +252,85 @@ def test_l5_projection_omits_every_exact_provenance_channel(vault: Path) -> None
     assert "private" not in str(result)
 
 
+@pytest.mark.parametrize("ceiling", range(1, 6))
+def test_below_l6_projection_redacts_forward_reverse_and_wire_provenance(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, ceiling: int
+) -> None:
+    rel = _page(vault)
+    private_rel = "Knowledge Base/Private/private-source.md"
+    private = vault / private_rel
+    private.parent.mkdir(parents=True, exist_ok=True)
+    private.write_text("# Private source\n", encoding="utf-8")
+    (vault / rel).write_text(
+        "---\n"
+        "type: research-note\n"
+        f'sources: ["[[{private_rel.removesuffix(".md")}]]"]\n'
+        f'ingested_into: ["[[{private_rel.removesuffix(".md")}]]"]\n'
+        f'supersedes: ["[[{private_rel.removesuffix(".md")}]]"]\n'
+        f'superseded_by: ["[[{private_rel.removesuffix(".md")}]]"]\n'
+        f"parent_media: {private_rel}\n"
+        "---\n\n"
+        f"Public sentence citing [[{private_rel.removesuffix('.md')}]].\n",
+        encoding="utf-8",
+    )
+    scopes = vault / "Knowledge Base" / "_Governance" / "scopes"
+    scopes.mkdir(parents=True, exist_ok=True)
+    (scopes / "private.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FC2\n"
+        'paths: ["Private/**"]\n'
+        "default_deny: true\n",
+        encoding="utf-8",
+    )
+    _govern(
+        vault,
+        ceiling=ceiling,
+        options=(
+            "options:\n"
+            "  notice: approved notice\n"
+            "  constraint: approved constraint\n"
+            "  abstract: approved abstract\n"
+            "  bridge: approved bridge abstraction\n"
+        ),
+    )
+    monkeypatch.setattr(
+        commands.vault,
+        "read_log_entries",
+        lambda *_args, **_kwargs: [{"path": private_rel, "reason": "private"}],
+    )
+    monkeypatch.setattr(
+        commands,
+        "_link_summary",
+        lambda *_args, **_kwargs: {
+            "inbound": [{"path": private_rel}],
+            "outbound": [private_rel],
+        },
+    )
+
+    with request_scope(_external()):
+        result = commands.op_get(
+            vault,
+            path=rel,
+            include_raw=True,
+            include_history=True,
+            links=True,
+        )
+
+    if ceiling == egress.LEVEL_EXCERPT:
+        assert set(result) == {"path", "body", "body_truncated", "release_level"}
+    else:
+        assert not {
+            "path",
+            "content",
+            "content_hash",
+            "frontmatter",
+            "history",
+            "links",
+        }.intersection(result)
+    assert private_rel.casefold() not in str(result).casefold()
+    assert "private-source" not in str(result).casefold()
+
+
 def test_l4_direct_read_returns_only_the_approved_bridge_abstraction(
     vault: Path,
 ) -> None:

@@ -1829,6 +1829,12 @@ def annotate_page(
     )
     if level == LEVEL_EXCERPT:
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
+        body = redact_withheld_references(
+            vault_root,
+            body,
+            principal=who,
+            purpose=declared_purpose,
+        )
         excerpt = {
             "path": rel_path,
             "body": _excerpt_of(body),
