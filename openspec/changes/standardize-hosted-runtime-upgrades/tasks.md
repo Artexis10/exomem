@@ -37,7 +37,7 @@
 - [x] 4.7 Run migration when declared, perform `helm upgrade --atomic --wait`, and require authenticated private readiness to match every authorized runtime identity field
 - [x] 4.8 Recompute the canonical vault fingerprint, exclude only the declared rebuildable derived indexes, and refuse completion on any other byte loss or change
 - [x] 4.9 Return a pre-record failure to the prior Helm revision and identity; after target observation, stop and require explicit recovery rather than downgrading or relabelling
-- [ ] 4.10 Add cross-language contract fixtures and K3s acceptance proving same-cell/same-volume operation, bounded unavailability, vault preservation, runtime confirmation, and replay safety
+- [x] 4.10 Add cross-language contract fixtures and K3s acceptance proving same-cell/same-volume operation, bounded unavailability, vault preservation, runtime confirmation, and replay safety
 
 ## 5. Generic expand, drain, and contract orchestration
 
