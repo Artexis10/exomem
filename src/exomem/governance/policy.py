@@ -24,16 +24,17 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import hashlib
+import json
 import re
 import stat
-import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .. import memory_refs
+from .. import held_fs, memory_refs
 from ..kbdir import kb_dirname
 from . import store as store_module
 
@@ -82,6 +83,10 @@ def is_valid_document_id(value: object) -> bool:
 # (`find_corpus`, `vault`, `lexstore`, `freshness`, `media_worker`); this is the
 # one place where missing it is a disclosure bug rather than a stale read.
 _CONFLICT_MARKERS = ("conflicted copy", ".sync-conflict-")
+_DOCUMENT_KINDS = ("scopes", "rules", "grants")
+_DOCUMENT_KIND_ORDER = {
+    kind: index for index, kind in enumerate(_DOCUMENT_KINDS)
+}
 
 
 def is_conflict_copy(name: str) -> bool:
@@ -340,9 +345,8 @@ class Policy:
         keep SERVING the last good policy — flooring every read to L0 because a
         sync tool dropped a sibling file would be worse than the defect. What it
         must not do is let policy be AUTHORED, because the author cannot see
-        which of the two documents will win, and `compile_prospective` filters
-        conflict copies out of its temp tree — so a mutation would be accepted
-        and receipted while the conflict silently decides the live outcome.
+        which of the two documents will win. The authoring gate and guarded
+        prospective snapshot both refuse every supported conflict-copy shape.
 
         Before conflict detection was widened, a conflict alongside its original
         produced a `duplicate_id` error that refused the mutation by accident.
@@ -350,6 +354,45 @@ class Policy:
         it deliberately and for the right reason.
         """
         return any(f.get("code") == "conflicted_copy" for f in self.findings)
+
+
+@dataclass(frozen=True)
+class AuthoringFileIdentity:
+    """One no-follow regular-file identity captured from the workspace."""
+
+    path: str
+    identity: held_fs.StableIdentity
+    sha256: str
+
+
+@dataclass(frozen=True)
+class AuthoringSnapshot:
+    """Stable source state that a prospective policy was compiled from."""
+
+    documents: tuple[tuple[str, bytes], ...]
+    source_fingerprint: str
+    conflict_set_digest: str
+    guard_generation: str
+    file_identities: tuple[AuthoringFileIdentity, ...]
+    governance_root_identity: held_fs.StableIdentity | None
+
+
+@dataclass(frozen=True)
+class ProspectiveCompile:
+    """A compiled target bound to the exact live authoring snapshot."""
+
+    snapshot: AuthoringSnapshot
+    target_documents: tuple[tuple[str, bytes], ...]
+    policy: Policy
+
+
+@dataclass(frozen=True)
+class _AuthoringTreeProbe:
+    root_identity: held_fs.StableIdentity | None
+    documents: tuple[tuple[str, bytes], ...]
+    file_identities: tuple[AuthoringFileIdentity, ...]
+    directory_identities: tuple[tuple[str, held_fs.StableIdentity], ...]
+    conflict_paths: tuple[str, ...]
 
 
 EMPTY_POLICY = Policy(fingerprint="missing")
@@ -402,19 +445,168 @@ def has_conflict_copy(vault_root: Path) -> bool:
 def _is_operational_state(root: Path, path: Path) -> bool:
     """Receipt evidence is governed state, never a policy input or warning."""
     try:
-        parts = path.relative_to(root).parts
+        relative = path.relative_to(root).as_posix()
     except ValueError:
         return False
+    return _is_operational_relative(relative)
+
+
+def _is_operational_relative(relative: str) -> bool:
+    parts = tuple(part for part in relative.replace("\\", "/").split("/") if part)
     return bool(parts) and (
         parts[0] in {"events", "deletion-tombstones", "archives"}
         or parts == (".policy-mutation.pending.json",)
     )
 
 
+def _document_kind(relative: str) -> str | None:
+    parts = relative.replace("\\", "/").split("/")
+    if (
+        len(parts) == 2
+        and parts[0] in _DOCUMENT_KIND_ORDER
+        and parts[1].endswith(".yaml")
+        and not is_conflict_copy(parts[1])
+    ):
+        return parts[0]
+    return None
+
+
+def _document_fingerprint(documents: Mapping[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    recognized = [
+        (kind, relative, raw)
+        for relative, raw in documents.items()
+        if (kind := _document_kind(relative)) is not None
+    ]
+    for _kind, relative, raw in sorted(
+        recognized, key=lambda item: (_DOCUMENT_KIND_ORDER[item[0]], item[1])
+    ):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(raw)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _path_set_digest(domain: bytes, paths: tuple[str, ...]) -> str:
+    digest = hashlib.sha256(domain + b"\0")
+    for path in paths:
+        encoded = path.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _clear_guard_generation(
+    vault_root: Path,
+    *,
+    expected_pending_event_id: str | None = None,
+) -> str | None:
+    probe = store_module.guard_generation_probe(vault_root)
+    marker_generation, marker_present, marker_event_id = _marker_probe(vault_root)
+    event_ids = tuple(str(value) for value in probe.get("event_ids", ()))
+    if expected_pending_event_id is None:
+        if probe.get("state") != "clear" or marker_present:
+            return None
+    else:
+        if (
+            probe.get("state") != "pending"
+            or event_ids != (expected_pending_event_id,)
+        ):
+            return None
+        if marker_present and marker_event_id != expected_pending_event_id:
+            return None
+    generation = str(probe.get("generation", ""))
+    return _path_set_digest(
+        b"exomem.governance-authoring-guard.v1",
+        (str(probe.get("state")), generation, marker_generation, *event_ids),
+    )
+
+
+def _authoring_snapshot_barrier(_phase: str, _path: str | None = None) -> None:
+    """Deterministic test seam around the three live workspace probes."""
+
+
+def _probe_authoring_tree(vault_root: Path) -> _AuthoringTreeProbe | None:
+    base = f"{kb_dirname()}/{GOVERNANCE_DIRNAME}"
+    acquired = held_fs.acquire(vault_root)
+    if not acquired.ok:
+        return None
+    try:
+        with acquired.require() as filesystem:
+            root_result = filesystem.parent(base)
+            if not root_result.ok:
+                if root_result.error is not None and root_result.error.code == "MISSING":
+                    return _AuthoringTreeProbe(None, (), (), (), ())
+                return None
+            with root_result.require() as root:
+                records_result = filesystem.enumerate(root)
+                if not records_result.ok:
+                    return None
+                records = tuple(
+                    record
+                    for record in records_result.require()
+                    if not _is_operational_relative(record.relative_path)
+                )
+                directories = tuple(
+                    (record.relative_path, record.identity)
+                    for record in records
+                    if record.identity.kind == "directory"
+                )
+                documents: list[tuple[str, bytes]] = []
+                identities: list[AuthoringFileIdentity] = []
+                for record in records:
+                    if record.identity.kind == "directory":
+                        continue
+                    if record.identity.kind != "file" or record.identity.link_count != 1:
+                        return None
+                    relative = record.relative_path
+                    path = Path(relative)
+                    parent_relative = Path(base, path.parent).as_posix()
+                    parent_result = filesystem.parent(parent_relative)
+                    if not parent_result.ok:
+                        return None
+                    with parent_result.require() as parent:
+                        file_result = filesystem.file(parent, path.name)
+                        if not file_result.ok:
+                            return None
+                        with file_result.require() as file:
+                            if file.identity != record.identity:
+                                return None
+                            raw_result = filesystem.read(file)
+                            if not raw_result.ok:
+                                return None
+                            raw = raw_result.require()
+                        if not filesystem.validate_directory(parent).ok:
+                            return None
+                    documents.append((relative, raw))
+                    identities.append(
+                        AuthoringFileIdentity(
+                            path=relative,
+                            identity=record.identity,
+                            sha256=hashlib.sha256(raw).hexdigest(),
+                        )
+                    )
+                if not filesystem.validate_directory(root).ok:
+                    return None
+                conflicts = tuple(
+                    relative for relative, _raw in documents if is_conflict_copy(Path(relative).name)
+                )
+                return _AuthoringTreeProbe(
+                    root.identity,
+                    tuple(documents),
+                    tuple(identities),
+                    directories,
+                    conflicts,
+                )
+    except held_fs.HeldFsError:
+        return None
+
+
 def _iter_policy_files(root: Path) -> list[tuple[str, Path]]:
     """`(kind, path)` for every recognized `*.yaml` under scopes/rules/grants."""
     out: list[tuple[str, Path]] = []
-    for kind in ("scopes", "rules", "grants"):
+    for kind in _DOCUMENT_KINDS:
         sub = root / kind
         if not sub.is_dir():
             continue
@@ -539,19 +731,33 @@ def _load_unguarded(vault_root: Path) -> Policy:
     return compiled
 
 
-def _marker_generation(vault_root: Path) -> tuple[str, bool]:
+def _marker_probe(vault_root: Path) -> tuple[str, bool, str | None]:
     marker = governance_root(vault_root) / ".policy-mutation.pending.json"
     try:
         stat_result = marker.lstat()
         if not stat.S_ISREG(stat_result.st_mode):
-            return f"invalid:{stat_result.st_mode}", True
+            return f"invalid:{stat_result.st_mode}", True, None
         raw = marker.read_bytes()
     except FileNotFoundError:
-        return "absent", False
+        return "absent", False, None
     except OSError as exc:
-        return f"unreadable:{type(exc).__name__}", True
+        return f"unreadable:{type(exc).__name__}", True, None
     digest = hashlib.sha256(raw).hexdigest()
-    return f"{stat_result.st_ino}:{stat_result.st_size}:{digest}", True
+    try:
+        value = json.loads(raw)
+        event_id = value.get("event_id") if isinstance(value, dict) else None
+    except (UnicodeError, json.JSONDecodeError):
+        event_id = None
+    return (
+        f"{stat_result.st_ino}:{stat_result.st_size}:{digest}",
+        True,
+        event_id if isinstance(event_id, str) else None,
+    )
+
+
+def _marker_generation(vault_root: Path) -> tuple[str, bool]:
+    generation, present, _event_id = _marker_probe(vault_root)
+    return generation, present
 
 
 def _guarded_policy(vault_root: Path, code: str, detail: str) -> Policy:
@@ -636,7 +842,34 @@ def load(vault_root: Path) -> Policy:
 
 
 def _compile(
-    root: Path, files: list[tuple[str, Path]]
+    root: Path, _files: list[tuple[str, Path]]
+) -> tuple[
+    list[dict[str, str]],
+    dict[str, Scope],
+    tuple[Rule, ...],
+    tuple[StandingGrant, ...],
+    tuple[ReleaseGrant, ...],
+]:
+    documents: dict[str, bytes] = {}
+    findings: list[dict[str, str]] = []
+    for path in _iter_all_files(root):
+        relative = path.relative_to(root).as_posix()
+        try:
+            documents[relative] = path.read_bytes()
+        except OSError as error:
+            findings.append(_finding("read_error", relative, str(error)))
+    compiled = _compile_document_bytes(documents)
+    return (
+        [*findings, *compiled[0]],
+        compiled[1],
+        compiled[2],
+        compiled[3],
+        compiled[4],
+    )
+
+
+def _compile_document_bytes(
+    documents: Mapping[str, bytes],
 ) -> tuple[
     list[dict[str, str]],
     dict[str, Scope],
@@ -652,25 +885,30 @@ def _compile(
     rule_ids: set[str] = set()
     grant_ids: set[str] = set()
 
-    recognized = {path for _kind, path in files}
-    for p in _iter_all_files(root):
-        if p in recognized or is_conflict_copy(p.name):
+    recognized: list[tuple[str, str, bytes]] = []
+    for relative, raw in sorted(documents.items()):
+        kind = _document_kind(relative)
+        if kind is not None:
+            recognized.append((kind, relative, raw))
+            continue
+        if is_conflict_copy(Path(relative).name):
             continue
         findings.append(
             _finding(
                 "unknown_file",
-                p.relative_to(root).as_posix(),
+                relative,
                 "not a recognized governance document; ignored",
                 severity="warning",
             )
         )
 
-    for kind, path in files:
-        rel = path.relative_to(root).as_posix()
+    recognized.sort(key=lambda item: (_DOCUMENT_KIND_ORDER[item[0]], item[1]))
+
+    for kind, rel, encoded in recognized:
         try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError as error:
-            findings.append(_finding("read_error", rel, str(error)))
+            raw = encoded.decode("utf-8")
+        except UnicodeError as error:
+            findings.append(_finding("invalid_yaml", rel, str(error)))
             continue
         try:
             data = yaml.safe_load(raw)
@@ -732,49 +970,92 @@ def _compile(
     return findings, scopes, tuple(rules), tuple(grants), tuple(release_grants)
 
 
-def compile_prospective(
-    vault_root: Path, documents: dict[str, str | None]
-) -> Policy:
-    """Compile the complete policy produced by overlaying proposed documents.
+def compile_documents(documents: Mapping[str, bytes]) -> Policy:
+    """Compile only the supplied immutable workspace bytes."""
 
-    This deliberately uses the same strict parser as the live loader.  The
-    temporary tree contains policy inputs only, so operational receipts and
-    mutation markers cannot accidentally become proposal warnings.
-    """
-    live_root = governance_root(Path(vault_root))
-    with tempfile.TemporaryDirectory(prefix="exomem-governance-") as temporary:
-        root = Path(temporary)
-        for _kind, source in _iter_policy_files(live_root):
-            rel = source.relative_to(live_root).as_posix()
-            if rel in documents:
-                continue
-            target = root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(source.read_bytes())
-        for rel, content in documents.items():
-            if content is None:
-                continue
-            target = root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # `write_bytes`, matching the carried-over files six lines above
-            # and the live commit's `_durable_bytes(..., content.encode())`.
-            # This tree exists to predict the fingerprint the live tree will
-            # have after the commit, and `_content_fingerprint` hashes raw
-            # bytes -- so a text-mode write made the prediction wrong on
-            # Windows for exactly the documents being proposed.
-            target.write_bytes(content.encode("utf-8"))
-        files = _iter_policy_files(root)
-        findings, scopes, rules, grants, release_grants = _compile(root, files)
-        fingerprint = _content_fingerprint(root, files)
+    pinned: dict[str, bytes] = {}
+    for relative, raw in documents.items():
+        if not isinstance(relative, str) or not isinstance(raw, bytes):
+            raise TypeError("policy documents must map relative string paths to bytes")
+        pinned[relative.replace("\\", "/")] = raw
+    findings, scopes, rules, grants, release_grants = _compile_document_bytes(pinned)
     if any(finding["severity"] == "error" for finding in findings):
         return _blocked(tuple(findings))
     return Policy(
-        fingerprint=fingerprint,
+        fingerprint=_document_fingerprint(pinned),
         scopes=scopes,
         rules=rules,
         grants=grants,
         release_grants=release_grants,
         findings=tuple(findings),
+    )
+
+
+def compile_prospective(
+    vault_root: Path,
+    documents: dict[str, str | None],
+    *,
+    _expected_pending_event_id: str | None = None,
+) -> ProspectiveCompile | None:
+    """Compile an overlay only after a stable no-follow workspace acquisition."""
+
+    vault_root = Path(vault_root)
+    guard_before = _clear_guard_generation(
+        vault_root,
+        expected_pending_event_id=_expected_pending_event_id,
+    )
+    if guard_before is None:
+        return None
+    before = _probe_authoring_tree(vault_root)
+    if before is None:
+        return None
+
+    _authoring_snapshot_barrier("after_before")
+    read = _probe_authoring_tree(vault_root)
+    if read is None:
+        return None
+
+    _authoring_snapshot_barrier("after_read")
+    after = _probe_authoring_tree(vault_root)
+    guard_after = _clear_guard_generation(
+        vault_root,
+        expected_pending_event_id=_expected_pending_event_id,
+    )
+    if (
+        after is None
+        or before.conflict_paths
+        or read.conflict_paths
+        or after.conflict_paths
+        or guard_after is None
+        or guard_before != guard_after
+        or before != read
+        or read != after
+    ):
+        return None
+
+    current_documents = dict(read.documents)
+    snapshot = AuthoringSnapshot(
+        documents=read.documents,
+        source_fingerprint=_document_fingerprint(current_documents),
+        conflict_set_digest=_path_set_digest(
+            b"exomem.governance-conflict-set.v1", read.conflict_paths
+        ),
+        guard_generation=guard_before,
+        file_identities=read.file_identities,
+        governance_root_identity=read.root_identity,
+    )
+    target_documents = dict(current_documents)
+    for relative, content in documents.items():
+        normalized = relative.replace("\\", "/")
+        if content is None:
+            target_documents.pop(normalized, None)
+        else:
+            target_documents[normalized] = content.encode("utf-8")
+    target = tuple(sorted(target_documents.items()))
+    return ProspectiveCompile(
+        snapshot=snapshot,
+        target_documents=target,
+        policy=compile_documents(target_documents),
     )
 
 
