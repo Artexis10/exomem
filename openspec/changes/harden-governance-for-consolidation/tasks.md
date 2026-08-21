@@ -422,7 +422,7 @@ made before both PRs and their combined verification are complete.
 
 ## 7. Governed Raw Direct-Read Projection
 
-- [x] 7.1 Add red `tests/test_get_payload.py` cases at L0-L6 for default,
+- [ ] 7.1 Add red `tests/test_get_payload.py` cases at L0-L6 for default,
   `frontmatter_only`, `include_raw=false`, and `include_raw=true`; assert exact bytes/hash
   only at L6, identical true/false projection at L1-L5, and same-input present-L0 versus
   absent byte equality. Add secret-free and secret/canonical-bearer L6 fixtures in both
