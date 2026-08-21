@@ -92,7 +92,10 @@ the exact signed runtime/provisioner inputs, and both coupled trust inputs:
 ```
 
 The composer requires exact agreement on target, Substrate consumer commit,
-trust-report digest, and all pinned sites. Verify the pair with
+trust-report digest, and all pinned sites. The signed runtime closes at its own
+candidate source commit; the provisioner closes through the platform composition
+commit. Never widen the runtime closure to a later source revision merely to make an
+older immutable release appear current. Verify the pair with
 `verify_hosted_release.py` and deploy only its `expand` member through `deploy.md`.
 
 Collect a second inventory with the same runtime catalog. Expansion is accepted only
@@ -158,7 +161,10 @@ infra/scripts/hosted_runtime_upgrade_orchestrator.py record-cell \
 Completion requires the same cell, binding, assignment, operation, volume, exact
 target identity, and equal pre/post canonical vault fingerprint. The first failed or
 post-record recovery-required checkpoint stops selection and changes the next safe
-action to `hold_expand_and_recover`.
+action to `hold_expand_and_recover`. Fingerprints come from the fixed
+`exomem-provisioner-vault-fingerprint` command in the pinned provisioner image, not
+from the tenant runtime; admission permits only that image, command, restricted
+identity, bounded resources, and read-only canonical-vault mount.
 
 ## Drain and contract
 

@@ -113,7 +113,9 @@ spec:
         !variables.inScope ||
         (
         object.spec.containers[0].name == 'exomem' &&
-        object.spec.containers[0].image in {{ $runtimeImages | toJson }} &&
+        (variables.vaultFingerprint
+          ? object.spec.containers[0].image == '{{ $provisionerImage }}'
+          : object.spec.containers[0].image in {{ $runtimeImages | toJson }}) &&
         object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
         object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
         object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
@@ -221,7 +223,7 @@ spec:
         object.metadata.ownerReferences[0].name == object.metadata.labels['job-name'] &&
         object.metadata.ownerReferences[0].controller == true &&
         !has(object.spec.containers[0].command) &&
-        object.spec.containers[0].args == ['hosted-fingerprint'] &&
+        object.spec.containers[0].args == ['exomem-provisioner-vault-fingerprint'] &&
         (!has(object.spec.containers[0].env) || size(object.spec.containers[0].env) == 0) &&
         (!has(object.spec.containers[0].envFrom) || size(object.spec.containers[0].envFrom) == 0) &&
         (!has(object.spec.containers[0].ports) || size(object.spec.containers[0].ports) == 0) &&
@@ -229,7 +231,7 @@ spec:
         !has(object.spec.containers[0].livenessProbe) &&
         !has(object.spec.containers[0].readinessProbe) &&
         !has(object.spec.containers[0].startupProbe))
-      message: Vault fingerprinting must use the exact offline content-free runtime command.
+      message: Vault fingerprinting must use the exact offline content-free provisioner command.
     - expression: >-
         !variables.inScope || !variables.vaultFingerprint ||
         (

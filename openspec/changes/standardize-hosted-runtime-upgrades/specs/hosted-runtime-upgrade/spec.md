@@ -2,7 +2,7 @@
 
 ### Requirement: Runtime upgrades bind one exact published target across repositories
 
-The upgrade workflow SHALL select one exact stable runtime from its release tag commit, immutable architecture-specific OCI digest, signed runtime-candidate bytes, source-closure proof, contract artifacts, and allowed workflow attestations. Substrate SHALL trust the exact agent and gateway contracts at every release-pinned production site before Exomem composes an expand/contract deployment-lock pair naming that immutable consumer commit. Mutable tags, regenerated head artifacts, null or stale mappings, unsigned candidates, architecture drift, and digest mismatch MUST be rejected before deployment.
+The upgrade workflow SHALL select one exact stable runtime from its release tag commit, immutable architecture-specific OCI digest, signed runtime-candidate bytes, source-closure proof, contract artifacts, and allowed workflow attestations. The runtime source closure SHALL be anchored exactly at the signed runtime candidate commit, while the provisioner source closure SHALL extend from its signed candidate commit to the platform composition commit. Substrate SHALL trust the exact agent and gateway contracts at every release-pinned production site before Exomem composes an expand/contract deployment-lock pair naming that immutable consumer commit. Mutable tags, regenerated head artifacts, null or stale mappings, unsigned candidates, architecture drift, and digest mismatch MUST be rejected before deployment.
 
 #### Scenario: Exact target is trusted completely
 
@@ -19,6 +19,12 @@ The upgrade workflow SHALL select one exact stable runtime from its release tag 
 
 - **WHEN** the source revision, OCI subject, architecture, candidate bytes, attestation, protocol, profile, or contract digest differs from the reviewed target
 - **THEN** composition or deployment fails before the image is assignable to a cell
+
+#### Scenario: A later platform composes an older stable runtime
+
+- **WHEN** the runtime candidate remains signed and immutable while the provisioner and platform composition are newer
+- **THEN** the runtime closure remains anchored to its own candidate source and the provisioner closure reaches the platform composition commit
+- **AND** the lock does not claim that later runtime-source changes produced the older image
 
 ### Requirement: Every upgrade has a durable redacted execution record
 

@@ -229,7 +229,9 @@ class KubernetesVolumeAdapter:
                     fence_generation=metadata.fence_generation,
                 )
             except ProviderIdentityConflict as error:
-                raise MetadataConflict("PV provider recovery identity did not authenticate") from error
+                raise MetadataConflict(
+                    "PV provider recovery identity did not authenticate"
+                ) from error
         return BoundVolumeRecoveryObservation(
             recorded=recorded,
             stability_digest=hashlib.sha256(
@@ -599,7 +601,7 @@ class KubernetesCellAdapter:
 
 
 class KubernetesVaultFingerprintAdapter:
-    """Run one fixed, read-only target-runtime fingerprint Job per phase."""
+    """Run one fixed, read-only provisioner fingerprint Job per phase."""
 
     _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -677,7 +679,7 @@ class KubernetesVaultFingerprintAdapter:
                                 "imagePullPolicy": "IfNotPresent",
                                 "terminationMessagePath": "/dev/termination-log",
                                 "terminationMessagePolicy": "File",
-                                "args": ["hosted-fingerprint"],
+                                "args": ["exomem-provisioner-vault-fingerprint"],
                                 "resources": {
                                     "requests": {"cpu": "100m", "memory": "128Mi"},
                                     "limits": {"cpu": "1", "memory": "1Gi"},
@@ -740,11 +742,12 @@ class KubernetesVaultFingerprintAdapter:
             != hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
         ):
             raise MetadataConflict("vault fingerprint Job identity differs")
-        containers = getattr(job.spec.template.spec, "containers", None) or ()
+        containers: list[Any] = list(getattr(job.spec.template.spec, "containers", None) or ())
         if (
             len(containers) != 1
             or getattr(containers[0], "image", None) != self._image
-            or list(getattr(containers[0], "args", None) or ()) != ["hosted-fingerprint"]
+            or list(getattr(containers[0], "args", None) or ())
+            != ["exomem-provisioner-vault-fingerprint"]
         ):
             raise MetadataConflict("vault fingerprint Job runtime differs")
 
@@ -766,7 +769,7 @@ class KubernetesVaultFingerprintAdapter:
                 self._batch.delete_namespaced_job,
                 self._name(metadata),
                 metadata.resource_name,
-                {"propagationPolicy": "Foreground"},
+                body={"propagationPolicy": "Foreground"},
             )
         except Exception as error:
             if _api_status(error) != 404:
@@ -1131,8 +1134,12 @@ class PrivateCellApiAdapter:
             if agent_response.status_code != 200:
                 raise MetadataConflict("private cell agent contract request failed")
             agent_contract = agent_response.json()
-            agent_metadata = agent_contract.get("agent_profile") if isinstance(agent_contract, dict) else None
-            agent_digest = agent_contract.get("digest") if isinstance(agent_contract, dict) else None
+            agent_metadata = (
+                agent_contract.get("agent_profile") if isinstance(agent_contract, dict) else None
+            )
+            agent_digest = (
+                agent_contract.get("digest") if isinstance(agent_contract, dict) else None
+            )
             if (
                 not isinstance(agent_metadata, dict)
                 or not isinstance(agent_digest, dict)
@@ -1193,9 +1200,12 @@ class PrivateCellApiAdapter:
                 if reader_response.status_code != 200:
                     raise MetadataConflict("private cell reader status request failed")
                 reader_envelope = reader_response.json()
-                reader_status = reader_envelope.get("data") if isinstance(reader_envelope, dict) else None
+                reader_status = (
+                    reader_envelope.get("data") if isinstance(reader_envelope, dict) else None
+                )
                 if not isinstance(reader_status, dict) or set(reader_status) != {
-                    "records_reader_version", "lifecycle_actions_enabled"
+                    "records_reader_version",
+                    "lifecycle_actions_enabled",
                 }:
                     raise MetadataConflict("private cell reader status is incomplete")
                 version = reader_status["records_reader_version"]
@@ -1520,7 +1530,9 @@ class HCloudVolumeAdapter:
                     fence_generation=metadata.fence_generation,
                 )
             except ProviderIdentityConflict as error:
-                raise MetadataConflict("HCloud provider recovery identity did not authenticate") from error
+                raise MetadataConflict(
+                    "HCloud provider recovery identity did not authenticate"
+                ) from error
         return await self.verify_volume(handle, metadata, location)
 
     async def delete_volume(self, handle: str) -> None:
@@ -1759,11 +1771,15 @@ class HelmCliAdapter:
             history = json.loads(result.stdout)
         except (TypeError, json.JSONDecodeError) as error:
             raise MetadataConflict("Helm release history is invalid") from error
-        revisions = [
-            item.get("revision")
-            for item in history
-            if isinstance(item, dict) and item.get("status") == "deployed"
-        ] if isinstance(history, list) else []
+        revisions = (
+            [
+                item.get("revision")
+                for item in history
+                if isinstance(item, dict) and item.get("status") == "deployed"
+            ]
+            if isinstance(history, list)
+            else []
+        )
         if (
             len(revisions) != 1
             or isinstance(revisions[0], bool)

@@ -154,7 +154,7 @@ async def test_kubernetes_adapter_discovers_csi_handle_then_labels_with_full_ide
                     "annotations": {
                         **metadata.kubernetes_annotations,
                         "exomem.io/recovery-envelope": "sealed-pv-envelope",
-                    }
+                    },
                 }
             },
         )
@@ -768,7 +768,7 @@ async def test_kubernetes_cell_adapter_scales_and_writes_atomic_bundle_shape() -
 @pytest.mark.asyncio
 async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free() -> None:
     metadata = _metadata()
-    image = "registry.example/exomem@sha256:" + "a" * 64
+    image = "registry.example/exomem-provisioner@sha256:" + "a" * 64
     created: list[dict[str, object]] = []
 
     class Batch:
@@ -786,7 +786,7 @@ async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free(
                             containers=[
                                 SimpleNamespace(
                                     image=image,
-                                    args=["hosted-fingerprint"],
+                                    args=["exomem-provisioner-vault-fingerprint"],
                                 )
                             ]
                         )
@@ -799,7 +799,7 @@ async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free(
             assert namespace == metadata.resource_name
             created.append(body)
 
-        def delete_namespaced_job(self, name: str, namespace: str, body: object) -> None:
+        def delete_namespaced_job(self, name: str, namespace: str, *, body: object) -> None:
             assert name == metadata.resource_name + "-init"
             assert namespace == metadata.resource_name
             assert body == {"propagationPolicy": "Foreground"}
@@ -855,7 +855,7 @@ async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free(
     assert pod["restartPolicy"] == "Never"
     container = pod["containers"][0]
     assert container["image"] == image
-    assert container["args"] == ["hosted-fingerprint"]
+    assert container["args"] == ["exomem-provisioner-vault-fingerprint"]
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "readOnlyRootFilesystem": True,
@@ -883,7 +883,7 @@ async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free(
 @pytest.mark.asyncio
 async def test_kubernetes_fingerprint_rejects_untrusted_or_leaky_result() -> None:
     metadata = _metadata()
-    image = "registry.example/exomem@sha256:" + "a" * 64
+    image = "registry.example/exomem-provisioner@sha256:" + "a" * 64
 
     class Batch:
         def read_namespaced_job(self, name: str, namespace: str):
@@ -902,7 +902,12 @@ async def test_kubernetes_fingerprint_rejects_untrusted_or_leaky_result() -> Non
                 spec=SimpleNamespace(
                     template=SimpleNamespace(
                         spec=SimpleNamespace(
-                            containers=[SimpleNamespace(image=image, args=["hosted-fingerprint"])]
+                            containers=[
+                                SimpleNamespace(
+                                    image=image,
+                                    args=["exomem-provisioner-vault-fingerprint"],
+                                )
+                            ]
                         )
                     )
                 ),
@@ -1093,7 +1098,9 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
 
 
 @pytest.mark.asyncio
-async def test_private_cell_api_derives_release_independent_schema_digest_from_agent_contract() -> None:
+async def test_private_cell_api_derives_release_independent_schema_digest_from_agent_contract() -> (
+    None
+):
     calls: list[str] = []
     agent_contract_base = {
         "schema_version": 1,
@@ -1110,11 +1117,7 @@ async def test_private_cell_api_derives_release_independent_schema_digest_from_a
     ).hexdigest()
     published_schema_digest = hashlib.sha256(
         json.dumps(
-            {
-                key: value
-                for key, value in agent_contract_base.items()
-                if key != "exomem_release"
-            },
+            {key: value for key, value in agent_contract_base.items() if key != "exomem_release"},
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")

@@ -36,6 +36,7 @@ exomem-provisioner-database-validate = "exomem_provisioner.database_bootstrap:ru
 exomem-provisioner-recover-init-retry = "exomem_provisioner.operation_recovery:main"
 exomem-provisioner-fleet-observe = "exomem_provisioner.fleet_observation:run_fleet_observe"
 exomem-provisioner-rollforward-evidence = "exomem_provisioner.rollforward_evidence:run_rollforward_evidence"
+exomem-provisioner-vault-fingerprint = "exomem_provisioner.vault_fingerprint:main"
 
 [dependency-groups]
 dev = [

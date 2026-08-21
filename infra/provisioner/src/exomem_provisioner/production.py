@@ -207,7 +207,7 @@ def build_live_provider_components(
         fingerprint=KubernetesVaultFingerprintAdapter(
             core_v1=core_v1,
             batch_v1=batch_v1,
-            image=selected.image,
+            image=lock.components.provisioner.image,
         ),
     )
     return LiveProviderComponents(

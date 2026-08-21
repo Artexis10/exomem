@@ -14,26 +14,22 @@ PREPARE = ROOT / "infra/scripts/prepare_hosted_release.py"
 VERIFIER = ROOT / "infra/scripts/verify_hosted_release.py"
 V1_CORPUS = ROOT / "infra/provisioner/tests/fixtures/provisioner-wire-v1.json"
 LEGACY_CONTRACT = (
-    ROOT
-    / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.39.2.json"
+    ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.39.2.json"
 )
 RETAINED_CONTRACT_049 = (
-    ROOT
-    / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.49.0.json"
+    ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.49.0.json"
 )
 # 0.50.0 is the release the live alpha cell runs. It is retained so that cell
 # keeps passing admission while the runtime target moves to 0.54.1; without it
 # the expand phase would refuse the only tenant currently deployed.
 RETAINED_CONTRACT_050 = (
-    ROOT
-    / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.50.0.json"
+    ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-contract-0.50.0.json"
 )
 FORWARD_CONTRACT = (
     ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/forward-contract.json"
 )
 LEGACY_MANIFEST = (
-    ROOT
-    / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-manifest-0.39.2.json"
+    ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/legacy-manifest-0.39.2.json"
 )
 LOCK_PAIR = ROOT / "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
 
@@ -122,8 +118,14 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
             assert evidence_path.read_bytes() == _canonical(expected_contract)
             assert unit["contract"] == expected_contract
             assert unit["contractSha256"] == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
-        assert unit_by_identity[("0.39.2", "1")]["contract"]["gatewayContractDigest"] == private_gateway_digest
-        assert unit_by_identity[("0.39.2", "1")]["contract"]["gatewayContractDigest"] != agent_gateway_digest
+        assert (
+            unit_by_identity[("0.39.2", "1")]["contract"]["gatewayContractDigest"]
+            == private_gateway_digest
+        )
+        assert (
+            unit_by_identity[("0.39.2", "1")]["contract"]["gatewayContractDigest"]
+            != agent_gateway_digest
+        )
         assert member["runtimeTarget"] == {
             key: forward_contract[key]
             for key in (
@@ -135,9 +137,10 @@ def test_canonical_lock_pair_embeds_the_corrected_retained_legacy_contract() -> 
                 "schemaDigest",
             )
         }
-        assert member["rollback"]["legacyManifestSha256"] == hashlib.sha256(
-            LEGACY_MANIFEST.read_bytes()
-        ).hexdigest()
+        assert (
+            member["rollback"]["legacyManifestSha256"]
+            == hashlib.sha256(LEGACY_MANIFEST.read_bytes()).hexdigest()
+        )
 
 
 def _member(mode: str) -> dict[str, object]:
@@ -159,7 +162,11 @@ def _member(mode: str) -> dict[str, object]:
         "schemaVersion": 2,
         "admissionMode": mode,
         "components": {
-            "runtime": {"image": runtime_image, "sourceCommit": commit, "candidateSha256": "d" * 64},
+            "runtime": {
+                "image": runtime_image,
+                "sourceCommit": commit,
+                "candidateSha256": "d" * 64,
+            },
             "provisioner": {
                 "image": provisioner_image,
                 "sourceCommit": commit,
@@ -181,12 +188,30 @@ def _member(mode: str) -> dict[str, object]:
                 "runtime": {
                     "candidateCommit": commit,
                     "compositionCommit": commit,
-                    "paths": ["Dockerfile", ".dockerignore", "pyproject.toml", "uv.lock", "README.md", "LICENSE", "src/**"],
+                    "paths": [
+                        "Dockerfile",
+                        ".dockerignore",
+                        "pyproject.toml",
+                        "uv.lock",
+                        "README.md",
+                        "LICENSE",
+                        "src/**",
+                    ],
                 },
                 "provisioner": {
                     "candidateCommit": commit,
                     "compositionCommit": commit,
-                    "paths": ["infra/provisioner/Dockerfile", "infra/provisioner/pyproject.toml", "infra/provisioner/uv.lock", "infra/provisioner/README.md", "infra/provisioner/alembic.ini", "infra/provisioner/src/**", "infra/provisioner/alembic/**", "infra/helm/cell/**", ".dockerignore"],
+                    "paths": [
+                        "infra/provisioner/Dockerfile",
+                        "infra/provisioner/pyproject.toml",
+                        "infra/provisioner/uv.lock",
+                        "infra/provisioner/README.md",
+                        "infra/provisioner/alembic.ini",
+                        "infra/provisioner/src/**",
+                        "infra/provisioner/alembic/**",
+                        "infra/helm/cell/**",
+                        ".dockerignore",
+                    ],
                 },
             },
             "forwardContractSha256": "3" * 64,
@@ -219,7 +244,11 @@ def _pair() -> dict[str, object]:
     expand = _member("expand")
     contract = deepcopy(expand)
     contract["admissionMode"] = "contract"
-    return {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 2, "locks": [expand, contract]}
+    return {
+        "artifact": "exomem-hosted-deployment-lock-pair",
+        "schemaVersion": 2,
+        "locks": [expand, contract],
+    }
 
 
 def _v3_member() -> dict[str, object]:
@@ -269,7 +298,11 @@ def _write_evidence(lock: dict[str, object], directory: Path) -> None:
     directory.mkdir()
     runtime = lock["components"]["runtime"]  # type: ignore[index]
     composition = lock["composition"]  # type: ignore[index]
-    forward = {**lock["runtimeTarget"], "runtimeImage": runtime["image"], "sourceCommit": runtime["sourceCommit"]}  # type: ignore[index]
+    forward = {
+        **lock["runtimeTarget"],
+        "runtimeImage": runtime["image"],
+        "sourceCommit": runtime["sourceCommit"],
+    }  # type: ignore[index]
     authority = {
         "artifact": "exomem-hosted-authoritative-legacy-v1-release-set",
         "schemaVersion": 1,
@@ -324,7 +357,9 @@ def test_fixed_lock_evidence_revalidates_all_reviewed_inputs(tmp_path: Path) -> 
     evidence = tmp_path / "evidence"
     _write_evidence(lock, evidence)
 
-    verifier._verify_lock_evidence(lock, evidence, verifier._load_script("hosted_composition_lock.py"))
+    verifier._verify_lock_evidence(
+        lock, evidence, verifier._load_script("hosted_composition_lock.py")
+    )
 
 
 def test_fixed_lock_evidence_rejects_a_noncanonical_v1_corpus(tmp_path: Path) -> None:
@@ -338,7 +373,9 @@ def test_fixed_lock_evidence_rejects_a_noncanonical_v1_corpus(tmp_path: Path) ->
     lock["rollback"]["v1CorpusSha256"] = hashlib.sha256(forged).hexdigest()  # type: ignore[index]
 
     with pytest.raises(ValueError, match="frozen v1 corpus digest"):
-        verifier._verify_lock_evidence(lock, evidence, verifier._load_script("hosted_composition_lock.py"))
+        verifier._verify_lock_evidence(
+            lock, evidence, verifier._load_script("hosted_composition_lock.py")
+        )
 
 
 def test_frozen_v1_corpus_is_validated_through_the_strict_wire_models() -> None:
@@ -357,7 +394,9 @@ def test_fixed_lock_evidence_rejects_duplicate_digest_matches(tmp_path: Path) ->
     (evidence / "duplicate.json").write_bytes(forward.read_bytes())
 
     with pytest.raises(ValueError, match="exactly one"):
-        verifier._verify_lock_evidence(lock, evidence, verifier._load_script("hosted_composition_lock.py"))
+        verifier._verify_lock_evidence(
+            lock, evidence, verifier._load_script("hosted_composition_lock.py")
+        )
 
 
 def test_candidate_selection_uses_the_candidate_verifier_bounded_reader(tmp_path: Path) -> None:
@@ -380,9 +419,12 @@ def test_candidate_selection_uses_the_candidate_verifier_bounded_reader(tmp_path
         def load_candidate(path: Path) -> dict[str, str]:
             return {"path": str(path)}
 
-    assert verifier._one_candidate(
-        [candidate], hashlib.sha256(candidate.read_bytes()).hexdigest(), CandidateLoader
-    ) == candidate
+    assert (
+        verifier._one_candidate(
+            [candidate], hashlib.sha256(candidate.read_bytes()).hexdigest(), CandidateLoader
+        )
+        == candidate
+    )
     assert CandidateLoader.reads == [candidate]
 
 
@@ -457,7 +499,9 @@ def test_inline_descriptor_data_must_equal_the_blob_it_names() -> None:
         )
 
 
-def test_runtime_candidate_listing_rejects_unbounded_assets(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_candidate_listing_rejects_unbounded_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     verifier = _module(VERIFIER)
     monkeypatch.setattr(
         verifier,
@@ -571,6 +615,12 @@ def test_selected_v3_lock_requires_and_reverifies_the_rollback_runtime_artifacts
 ) -> None:
     verifier = _module(VERIFIER)
     selected = _v3_member()
+    runtime_source = "f" * 40
+    selected["components"]["runtime"]["sourceCommit"] = runtime_source  # type: ignore[index]
+    selected["composition"]["sourceClosure"]["runtime"].update(  # type: ignore[index]
+        candidateCommit=runtime_source,
+        compositionCommit=runtime_source,
+    )
     candidate = tmp_path / "rollback.candidate-v1.json"
     image_bundle = tmp_path / "rollback.sigstore.json"
     candidate_bundle = tmp_path / "rollback.candidate.sigstore.json"
@@ -582,15 +632,29 @@ def test_selected_v3_lock_requires_and_reverifies_the_rollback_runtime_artifacts
         _load_pair=lambda _path: {},
         _select_member=lambda _pair, **_kwargs: (selected, "a" * 64),
     )
-    composer = SimpleNamespace(verify_source_closure=lambda *_args: None)
+    source_closures: list[tuple[str, str, tuple[str, ...]]] = []
+    composer = SimpleNamespace(
+        verify_source_closure=lambda _repository, candidate, composition, paths: (
+            source_closures.append((candidate, composition, paths))
+        )
+    )
     candidate_tool = SimpleNamespace(
-        load_candidate=lambda _path: {"kind": "runtime", "image": {"reference": selected["components"]["runtime"]["image"]}, "source": {"commit": selected["components"]["runtime"]["sourceCommit"]}, "release": {"tag": "v0.35.1"}},
+        load_candidate=lambda _path: {
+            "kind": "runtime",
+            "image": {"reference": selected["components"]["runtime"]["image"]},
+            "source": {"commit": selected["components"]["runtime"]["sourceCommit"]},
+            "release": {"tag": "v0.35.1"},
+        },
         verify_candidate=lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         verifier,
         "_load_script",
-        lambda name: {"prepare_hosted_release.py": prepare, "hosted_composition_lock.py": composer, "hosted_image_candidate.py": candidate_tool}[name],
+        lambda name: {
+            "prepare_hosted_release.py": prepare,
+            "hosted_composition_lock.py": composer,
+            "hosted_image_candidate.py": candidate_tool,
+        }[name],
     )
     monkeypatch.setattr(verifier, "_verify_lock_evidence", lambda *_args: None)
     monkeypatch.setattr(
@@ -622,6 +686,18 @@ def test_selected_v3_lock_requires_and_reverifies_the_rollback_runtime_artifacts
         "image_bundle": image_bundle,
         "candidate_bundle": candidate_bundle,
     }
+    assert source_closures == [
+        (
+            runtime_source,
+            runtime_source,
+            tuple(selected["composition"]["sourceClosure"]["runtime"]["paths"]),  # type: ignore[index]
+        ),
+        (
+            selected["components"]["provisioner"]["sourceCommit"],  # type: ignore[index]
+            selected["composition"]["commit"],  # type: ignore[index]
+            tuple(selected["composition"]["sourceClosure"]["provisioner"]["paths"]),  # type: ignore[index]
+        ),
+    ]
 
 
 def test_selected_lock_cli_passes_v3_rollback_artifacts_without_changing_v2_invocation(
@@ -630,15 +706,28 @@ def test_selected_lock_cli_passes_v3_rollback_artifacts_without_changing_v2_invo
     verifier = _module(VERIFIER)
     paths = [tmp_path / name for name in ("candidate", "image-bundle", "candidate-bundle")]
     calls: list[dict[str, object]] = []
-    monkeypatch.setattr(verifier, "verify_selected_deployment_lock", lambda **kwargs: calls.append(kwargs) or {})
+    monkeypatch.setattr(
+        verifier, "verify_selected_deployment_lock", lambda **kwargs: calls.append(kwargs) or {}
+    )
 
     assert verifier.main(["--phase", "expand", "--repository", str(tmp_path)]) == 0
-    assert verifier.main([
-        "--phase", "expand", "--repository", str(tmp_path),
-        "--rollback-runtime-candidate", str(paths[0]),
-        "--rollback-runtime-image-bundle", str(paths[1]),
-        "--rollback-runtime-candidate-bundle", str(paths[2]),
-    ]) == 0
+    assert (
+        verifier.main(
+            [
+                "--phase",
+                "expand",
+                "--repository",
+                str(tmp_path),
+                "--rollback-runtime-candidate",
+                str(paths[0]),
+                "--rollback-runtime-image-bundle",
+                str(paths[1]),
+                "--rollback-runtime-candidate-bundle",
+                str(paths[2]),
+            ]
+        )
+        == 0
+    )
     assert calls[0] == {"phase": "expand", "repository": tmp_path, "oras_binary": "oras"}
     assert calls[1] == {
         **calls[0],
@@ -649,10 +738,21 @@ def test_selected_lock_cli_passes_v3_rollback_artifacts_without_changing_v2_invo
 
     pair = tmp_path / "pair.json"
     evidence = tmp_path / "evidence"
-    assert verifier.main([
-        "--phase", "contract", "--repository", str(tmp_path),
-        "--lock-pair", str(pair), "--lock-evidence", str(evidence),
-    ]) == 0
+    assert (
+        verifier.main(
+            [
+                "--phase",
+                "contract",
+                "--repository",
+                str(tmp_path),
+                "--lock-pair",
+                str(pair),
+                "--lock-evidence",
+                str(evidence),
+            ]
+        )
+        == 0
+    )
     assert calls[2] == {
         "phase": "contract",
         "repository": tmp_path,
@@ -703,9 +803,10 @@ def test_selected_v3_lock_discovers_the_signed_rollback_candidate_from_its_relea
     monkeypatch.setattr(
         verifier,
         "_download_release_runtime_candidate",
-        lambda **kwargs: discovered.append(
-            (kwargs["release"], kwargs["expected_sha256"])
-        ) or (candidate, image_bundle, candidate_bundle),
+        lambda **kwargs: (
+            discovered.append((kwargs["release"], kwargs["expected_sha256"]))
+            or (candidate, image_bundle, candidate_bundle)
+        ),
     )
     monkeypatch.setattr(verifier, "_verified_provisioner_candidate", lambda **_kwargs: None)
     monkeypatch.setattr(verifier, "_verify_substrate_v1_consumer", lambda *_args: None)
@@ -748,9 +849,9 @@ def test_v3_rollback_runtime_verification_accepts_an_exact_claim_after_compositi
     }
     expected_claim = {**rollback["readerStatusProof"], "runtimeTarget": rollback["runtimeTarget"]}
     candidate_module = SimpleNamespace(
-        validate_records_compatibility_claim=lambda _candidate, **kwargs: freshness.append(
-            kwargs["require_fresh"]
-        ) or expected_claim
+        validate_records_compatibility_claim=lambda _candidate, **kwargs: (
+            freshness.append(kwargs["require_fresh"]) or expected_claim
+        )
     )
     composer = SimpleNamespace(
         CandidateInput=lambda *_args: object(),
@@ -802,29 +903,45 @@ def test_prepare_v2_derives_all_deploy_inputs_from_one_exact_pair_member(tmp_pat
     }
 
 
-def test_prepare_v3_requires_runtime_selection_and_emits_only_the_operator_value(tmp_path: Path) -> None:
+def test_prepare_v3_requires_runtime_selection_and_emits_only_the_operator_value(
+    tmp_path: Path,
+) -> None:
     prepare = _module()
     pair_path = tmp_path / "pair.json"
     member = _v3_member()
     contract = deepcopy(member)
     contract["admissionMode"] = "contract"
-    pair = {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": 3, "locks": [member, contract]}
+    pair = {
+        "artifact": "exomem-hosted-deployment-lock-pair",
+        "schemaVersion": 3,
+        "locks": [member, contract],
+    }
     pair_path.write_bytes(_canonical(pair))
     member_sha256 = hashlib.sha256(_canonical(member)).hexdigest()
 
     with pytest.raises(prepare.ReleaseManifestError, match="requires runtime selection"):
         prepare.prepare_v2(
-            lock_pair_path=pair_path, values_path=tmp_path / "values.json", phase="expand",
-            member_sha256=member_sha256, control_hostname="control.example.test",
+            lock_pair_path=pair_path,
+            values_path=tmp_path / "values.json",
+            phase="expand",
+            member_sha256=member_sha256,
+            control_hostname="control.example.test",
             transfer_hostname="transfer.example.test",
         )
 
     prepare.prepare_v2(
-        lock_pair_path=pair_path, values_path=tmp_path / "values.json", phase="expand",
-        member_sha256=member_sha256, runtime_selection="rollback",
-        control_hostname="control.example.test", transfer_hostname="transfer.example.test",
+        lock_pair_path=pair_path,
+        values_path=tmp_path / "values.json",
+        phase="expand",
+        member_sha256=member_sha256,
+        runtime_selection="rollback",
+        control_hostname="control.example.test",
+        transfer_hostname="transfer.example.test",
     )
-    assert json.loads((tmp_path / "values.json").read_text())["provisioner"]["runtimeSelection"] == "rollback"
+    assert (
+        json.loads((tmp_path / "values.json").read_text())["provisioner"]["runtimeSelection"]
+        == "rollback"
+    )
 
 
 def test_prepare_v2_refuses_rollback_selection(tmp_path: Path) -> None:
@@ -834,9 +951,13 @@ def test_prepare_v2_refuses_rollback_selection(tmp_path: Path) -> None:
 
     with pytest.raises(prepare.ReleaseManifestError, match="v2"):
         prepare.prepare_v2(
-            lock_pair_path=pair_path, values_path=tmp_path / "values.json", phase="expand",
-            member_sha256=member_sha256, runtime_selection="rollback",
-            control_hostname="control.example.test", transfer_hostname="transfer.example.test",
+            lock_pair_path=pair_path,
+            values_path=tmp_path / "values.json",
+            phase="expand",
+            member_sha256=member_sha256,
+            runtime_selection="rollback",
+            control_hostname="control.example.test",
+            transfer_hostname="transfer.example.test",
         )
 
 

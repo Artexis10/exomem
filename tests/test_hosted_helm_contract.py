@@ -198,6 +198,7 @@ def test_platform_requires_cross_repository_trust_in_runtime_upgrade_metadata(
         extra_args=("--values", str(rejected)),
     )
     assert result.returncode != 0
+    assert "deployment lock" in result.stderr
     assert "runtime upgrade is invalid" in result.stderr
 
 
@@ -282,11 +283,13 @@ def _lock_override(tmp_path: Path, lock: dict[str, object]) -> Path:
     override = tmp_path / "lock.yaml"
     override.write_text(
         yaml.safe_dump(
-            {"provisioner": {
-                "deploymentLockJson": raw,
-                "deploymentLockSha256": hashlib.sha256(raw.encode()).hexdigest(),
-                **({"runtimeSelection": "active"} if lock["schemaVersion"] == 3 else {}),
-            }}
+            {
+                "provisioner": {
+                    "deploymentLockJson": raw,
+                    "deploymentLockSha256": hashlib.sha256(raw.encode()).hexdigest(),
+                    **({"runtimeSelection": "active"} if lock["schemaVersion"] == 3 else {}),
+                }
+            }
         ),
         encoding="utf-8",
     )
@@ -352,7 +355,30 @@ def test_platform_fully_validates_v2_inherited_and_v3_records_lock_shapes(
         extra_args=("--values", str(_lock_override(tmp_path, invalid))),
     )
     assert result.returncode != 0
-    assert "deployment lock" in result.stderr
+
+
+def test_platform_accepts_runtime_source_closure_at_the_signed_candidate_anchor(
+    tmp_path: Path,
+) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock = json.loads(values["provisioner"]["deploymentLockJson"])
+    runtime_commit = "f" * 40
+    lock["components"]["runtime"]["sourceCommit"] = runtime_commit
+    lock["composition"]["sourceClosure"]["runtime"].update(
+        candidateCommit=runtime_commit,
+        compositionCommit=runtime_commit,
+    )
+
+    result = _render_process(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(_lock_override(tmp_path, lock))),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_platform_admission_policies_admit_each_governed_legacy_runtime_image(
@@ -569,8 +595,14 @@ def test_platform_renders_real_provisioner_composition() -> None:
         if rule.get("apiGroups") == [""] and "persistentvolumes" in rule.get("resources", [])
     )
     assert persistent_volume_rule["verbs"] == ["get", "list", "watch"]
+    fingerprint_result_rule = next(
+        rule
+        for rule in provisioner_role["rules"]
+        if rule.get("apiGroups") == [""] and rule.get("resources") == ["pods"]
+    )
+    assert fingerprint_result_rule["verbs"] == ["get", "list"]
     assert not any(
-        resource in {"pods", "pods/exec"}
+        resource in {"pods/exec", "pods/log"}
         for rule in provisioner_role["rules"]
         for resource in rule.get("resources", [])
     )
@@ -626,15 +658,23 @@ def test_platform_uses_the_selected_v3_rollback_runtime_everywhere(tmp_path: Pat
         env = {item["name"]: item for item in pod["spec"]["containers"][0]["env"]}
         assert pod["metadata"]["annotations"]["exomem.io/runtime-selection"] == "rollback"
         assert env["EXOMEM_PROVISIONER_RUNTIME_SELECTION"]["value"] == "rollback"
-    worker_env = {item["name"]: item for item in worker["spec"]["template"]["spec"]["containers"][0]["env"]}
-    assert json.loads(worker_env["EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON"]["value"]) == rollback_target
+    worker_env = {
+        item["name"]: item for item in worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert (
+        json.loads(worker_env["EXOMEM_PROVISIONER_RUNTIME_TARGET_JSON"]["value"]) == rollback_target
+    )
 
     deletion_job = json.loads(
         _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"]["job-template.json"]
     )
     workloads = {
-        "actions": _find(documents, "CronJob", "exomem-durability-actions")["spec"]["jobTemplate"]["spec"]["template"]["spec"],
-        "backup": _find(documents, "CronJob", "exomem-durability-backup")["spec"]["jobTemplate"]["spec"]["template"]["spec"],
+        "actions": _find(documents, "CronJob", "exomem-durability-actions")["spec"]["jobTemplate"][
+            "spec"
+        ]["template"]["spec"],
+        "backup": _find(documents, "CronJob", "exomem-durability-backup")["spec"]["jobTemplate"][
+            "spec"
+        ]["template"]["spec"],
         "deletion": deletion_job["spec"]["template"]["spec"],
     }
     for name, pod in workloads.items():
@@ -695,6 +735,8 @@ def test_platform_refuses_an_invalid_runtime_selection(
     )
     assert result.returncode != 0
     assert message in result.stderr
+
+
 def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
 
@@ -725,7 +767,10 @@ def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
     )
     runbook = (ROOT / "docs/runbooks/hosted/cell.md").read_text(encoding="utf-8")
     assert "exomem-init-retry-recovery" in runbook
-    assert "spec:\n  enableServiceLinks: false\n  serviceAccountName: exomem-init-retry-recovery" in runbook
+    assert (
+        "spec:\n  enableServiceLinks: false\n  serviceAccountName: exomem-init-retry-recovery"
+        in runbook
+    )
     assert 'exomem-provisioner-recover-init-retry "$mode" --stdin < "$recovery_identity"' in runbook
     assert 'kubectl -n exomem-platform exec -i "$operator_pod" --' in runbook
     assert "--identity-file" not in runbook
@@ -1485,7 +1530,10 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
             f"exomem-hosted-deployment-lock-v{version}-"
             f"{hashlib.sha256((json.dumps(lock, separators=(',', ':')) + chr(10)).encode()).hexdigest()[:16]}"
         )
-        assert f'{container}.env[14].value == "/etc/exomem/deployment-lock/{lock_file}"' in variant_expressions
+        assert (
+            f'{container}.env[14].value == "/etc/exomem/deployment-lock/{lock_file}"'
+            in variant_expressions
+        )
         assert f'volumes[1].configMap.name == "{lock_name}"' in variant_expressions
         assert f'volumes[1].configMap.items[0].key == "{lock_file}"' in variant_expressions
         assert f'volumes[1].configMap.items[0].path == "{lock_file}"' in variant_expressions
@@ -1910,6 +1958,12 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         for validation in tenant_admission["spec"]["validations"]
     )
     admission_text = json.dumps(tenant_admission)
+    lock = json.loads(
+        yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))[
+            "provisioner"
+        ]["deploymentLockJson"]
+    )
+    provisioner_image = lock["components"]["provisioner"]["image"]
     assert "namespaceObject.metadata.annotations['exomem.io/approved-image']" not in admission_text
     assert "ghcr.io/artexis10/exomem@sha256:" + "a" * 64 in admission_text
     assert "runAsUser == 10001" in admission_text
@@ -1938,7 +1992,18 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     )
     assert "batch.kubernetes.io/job-tracking" in admission_text
     assert "size(object.spec.containers[0].env) == 24" in admission_text
-    assert "object.spec.containers[0].args == ['hosted-fingerprint']" in admission_text
+    normalized_admission = " ".join(
+        "\n".join(
+            validation["expression"] for validation in tenant_admission["spec"]["validations"]
+        ).split()
+    )
+    assert (
+        f"variables.vaultFingerprint ? object.spec.containers[0].image == "
+        f"'{provisioner_image}' : object.spec.containers[0].image in"
+    ) in normalized_admission
+    assert (
+        "object.spec.containers[0].args == ['exomem-provisioner-vault-fingerprint']"
+    ) in admission_text
     assert "object.spec.containers[0].volumeMounts[0].readOnly == true" in admission_text
     assert "variables.lifecycleJob" in admission_text
     assert "EXOMEM_HOSTED_RECORDS_READER_VERSION" in admission_text
@@ -2007,6 +2072,17 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
 
     provisioner_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-provisioner-scope")
     provisioner_scope_text = json.dumps(provisioner_scope)
+    normalized_provisioner_scope = " ".join(
+        "\n".join(
+            [
+                *(variable["expression"] for variable in provisioner_scope["spec"]["variables"]),
+                *(
+                    validation["expression"]
+                    for validation in provisioner_scope["spec"]["validations"]
+                ),
+            ]
+        ).split()
+    )
     for exact_guard in (
         "request.namespace",
         "exomem.io/cell",
@@ -2033,6 +2109,19 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         not in provisioner_scope_text
     )
     assert "NetworkPolicy deletion is reserved for namespace destruction" in provisioner_scope_text
+    for fingerprint_job_guard in (
+        "variables.labels['exomem.io/vault-fingerprint'] == 'true'",
+        "variables.annotations['exomem.io/vault-fingerprint-phase'] in ['before', 'after']",
+        "variables.annotations['exomem.io/vault-fingerprint-operation'].matches('^[a-f0-9]{64}$')",
+        f"variables.target.spec.template.spec.containers[0].image == '{provisioner_image}'",
+        "variables.target.spec.template.spec.containers[0].args == ['exomem-provisioner-vault-fingerprint']",
+        "variables.target.spec.template.spec.containers[0].volumeMounts[0].readOnly == true",
+        "variables.target.spec.template.spec.volumes[0].persistentVolumeClaim.claimName == request.namespace + '-data'",
+        "variables.target.spec.backoffLimit == 0",
+        "variables.target.spec.activeDeadlineSeconds == 600",
+        "variables.target.spec.ttlSecondsAfterFinished == 300",
+    ):
+        assert fingerprint_job_guard in normalized_provisioner_scope
     action_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-durability-actions-scope")
     for scope in (provisioner_scope, action_scope):
         scope_text = json.dumps(scope)

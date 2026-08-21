@@ -80,6 +80,7 @@
 {{- end -}}
 {{- range $kind, $component := dict "runtime" $runtime "provisioner" $provisioner -}}
 {{- $closure := index $sourceClosure $kind -}}
+{{- $closureAnchor := ternary $component.sourceCommit $composition.commit (eq $kind "runtime") -}}
 {{- $closureKeys := list "candidateCommit" "compositionCommit" "paths" -}}
 {{- if or (not (kindIs "map" $closure)) (ne (len $closure) (len $closureKeys)) -}}
 {{- fail (printf "deployment lock %s source closure is invalid" $kind) -}}
@@ -89,7 +90,7 @@
 {{- fail (printf "deployment lock %s source closure is missing %s" $kind $key) -}}
 {{- end -}}
 {{- end -}}
-{{- if or (not (kindIs "string" $closure.candidateCommit)) (ne $closure.candidateCommit $component.sourceCommit) (not (kindIs "string" $closure.compositionCommit)) (ne $closure.compositionCommit $composition.commit) (not (kindIs "slice" $closure.paths)) (lt (len $closure.paths) 1) -}}
+{{- if or (not (kindIs "string" $closure.candidateCommit)) (ne $closure.candidateCommit $component.sourceCommit) (not (kindIs "string" $closure.compositionCommit)) (ne $closure.compositionCommit $closureAnchor) (not (kindIs "slice" $closure.paths)) (lt (len $closure.paths) 1) -}}
 {{- fail (printf "deployment lock %s source closure is invalid" $kind) -}}
 {{- end -}}
 {{- range $path := $closure.paths -}}

@@ -71,7 +71,7 @@ Relying only on the routable table was rejected because prior out-of-band upgrad
 
 Substrate imports the target's exact signed agent and gateway fixtures into every release-pinned mapping before Exomem composes a deployment lock naming the reviewed consumer commit. The expand lock's legacy catalog contains every release/protocol unit referenced by a routable cell, active assignment, or unfinished legacy operation at preflight—not merely the immediately previous release.
 
-The target is the exact release tag commit, immutable OCI digest, candidate bytes, source-closure proof, and attestations. Mutable tags, regenerated head artifacts, null mappings, architecture mismatch, or digest drift fail before deployment.
+The target is the exact release tag commit, immutable OCI digest, candidate bytes, source-closure proof, and attestations. Source closure is component-scoped: the already published runtime closes at its signed candidate source commit, while the provisioner closes from its candidate source through the platform composition commit. This lets a later platform composition consume an older immutable stable runtime without pretending that unrelated post-release runtime-source changes built those bytes. Mutable tags, regenerated head artifacts, null mappings, architecture mismatch, or digest drift fail before deployment.
 
 ### 5. Roll one explicitly assigned cell at a time
 
@@ -79,11 +79,11 @@ The operator creates a target rollout assignment for one cell, then creates the 
 
 1. confirm the cell is bound, ready, entitled, and currently represented by the inventory;
 2. quiesce routing and drain admitted work;
-3. fingerprint canonical vault bytes and record the prior Helm revision and control-plane identity;
+3. run the fixed provisioner-owned, read-only fingerprint job from the immutable provisioner image, fingerprint canonical vault bytes, and record the prior Helm revision and control-plane identity;
 4. run a declared privileged migration job when the target requires one;
 5. perform the atomic Helm transition using the deployment lock's target;
 6. require private readiness to advertise the exact authorized release, protocol, profile, command fingerprint, schema digest, and compatibility digest;
-7. fingerprint the canonical vault again, allowing only declared rebuildable derived indexes to differ;
+7. run the same provisioner-owned fingerprint job again, allowing only declared rebuildable derived indexes to differ;
 8. upsert the routable observation for the same cell identity and complete the assignment;
 9. restore routing only after desired state and readiness are green.
 
@@ -133,6 +133,7 @@ The generic specification contains target/current roles and invariants. A releas
 - **[A target needs a privileged filesystem migration]** → Declare it in signed release metadata, run a bounded TTL job with the existing minimal capability set, and leave the serving container unprivileged.
 - **[A cell is unavailable during rollforward]** → Route fails closed for only that tenant; sequence cells so there is no global maintenance window.
 - **[Vault content changes during comparison]** → Quiesce and drain before the first fingerprint; exclude only named rebuildable indexes, never arbitrary paths.
+- **[The selected stable runtime predates the upgrade evidence command]** → Run canonical fingerprinting from the immutable provisioner image under an exact admission policy, and prove its classification remains byte-for-byte equivalent to the runtime portability contract.
 - **[A rollforward verifies but fails later]** → Keep expand active, stop the fleet, retain the target cell and its vault, and require explicit recovery.
 - **[Legacy catalog is incomplete]** → Derive it from the reconciled authoritative inventory and refuse both composition and deployment on a missing referenced unit.
 - **[Reviewer authority expires mid-run]** → Resolve all free prerequisites before starting the clock and issue sibling credentials immediately after OAuth.

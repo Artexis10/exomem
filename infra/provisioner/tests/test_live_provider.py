@@ -67,27 +67,52 @@ def _deployment_lock(tmp_path: Path) -> Path:
         "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
         "sourceCommit": commit,
     }
-    legacy_release_set = [
-        {"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}
-    ]
+    legacy_release_set = [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}]
     payload = {
         "artifact": "exomem-hosted-deployment-lock",
         "schemaVersion": 2,
         "admissionMode": "expand",
         "components": {
-            "runtime": {"image": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "candidateSha256": digest},
-            "provisioner": {"image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "sourceCommit": commit, "candidateSha256": "e" * 64, "wireProtocol": "exomem-cell-provisioner.v2"},
+            "runtime": {
+                "image": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+                "sourceCommit": commit,
+                "candidateSha256": digest,
+            },
+            "provisioner": {
+                "image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
+                "sourceCommit": commit,
+                "candidateSha256": "e" * 64,
+                "wireProtocol": "exomem-cell-provisioner.v2",
+            },
         },
         "runtimeTarget": target,
         "composition": {
             "commit": commit,
-            "sourceClosure": {name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]} for name in ("runtime", "provisioner")},
+            "sourceClosure": {
+                name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]}
+                for name in ("runtime", "provisioner")
+            },
             "forwardContractSha256": digest,
             "authoritativeLegacyReleaseSetSha256": "f" * 64,
-            "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": _canonical_sha256(legacy_contract), "contract": legacy_contract}],
+            "legacyCatalog": [
+                {
+                    "releaseVersion": "0.22.0",
+                    "protocolVersion": "exomem-hosted.v1",
+                    "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+                    "sourceCommit": commit,
+                    "contractSha256": _canonical_sha256(legacy_contract),
+                    "contract": legacy_contract,
+                }
+            ],
             "legacyReleaseSetSha256": _canonical_sha256(legacy_release_set),
         },
-        "rollback": {"provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "provisionerSourceCommit": commit, "v1CorpusSha256": digest, "legacyManifestSha256": digest, "substrateV1ConsumerCommit": commit},
+        "rollback": {
+            "provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
+            "provisionerSourceCommit": commit,
+            "v1CorpusSha256": digest,
+            "legacyManifestSha256": digest,
+            "substrateV1ConsumerCommit": commit,
+        },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -167,7 +192,9 @@ def test_live_worker_settings_require_one_selected_lock_and_bound_internal_origi
         _settings()
 
 
-def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(tmp_path: Path) -> None:
+def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(
+    tmp_path: Path,
+) -> None:
     settings = _settings(
         capacity_contract_path=str(_capacity_contract(tmp_path)),
         deployment_lock_path=str(_deployment_lock(tmp_path)),
@@ -182,7 +209,9 @@ def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(tmp
         _ = missing.deployment_lock
 
 
-def test_deployment_lock_requires_exact_legacy_v1_or_exact_forward_v2_target(tmp_path: Path) -> None:
+def test_deployment_lock_requires_exact_legacy_v1_or_exact_forward_v2_target(
+    tmp_path: Path,
+) -> None:
     path = _deployment_lock(tmp_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["runtimeTarget"]["releaseVersion"] = "0.39.2"
@@ -467,6 +496,7 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
     assert components.driver._plane is components.plane
     assert components.driver._volumes is None
     assert components.capacity is components.plane._capacity
+    assert components.plane._fingerprint._image == components.lock.components.provisioner.image
 
 
 @pytest.mark.asyncio
@@ -561,13 +591,14 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
     plane._helm_requests[key] = original_request
     plane._recovery_envelopes[key] = {"initJob": "current-init-envelope"}
 
-    assert await plane.canonical_vault_fingerprint(
-        current, request, "rollforward-alpha", phase="before"
-    ) == "f" * 64
-    await plane.quiesce(current, request, "rollforward-alpha")
-    await plane.run_runtime_migration(
-        current, request, config, "rollforward-alpha"
+    assert (
+        await plane.canonical_vault_fingerprint(
+            current, request, "rollforward-alpha", phase="before"
+        )
+        == "f" * 64
     )
+    await plane.quiesce(current, request, "rollforward-alpha")
+    await plane.run_runtime_migration(current, request, config, "rollforward-alpha")
     await plane.upgrade_runtime(current, request, config, "rollforward-alpha")
     await plane.rollback_runtime(current, "rollforward-alpha")
 
@@ -581,9 +612,7 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
         assert transition_owner == owner
         assert operation == "rollforward-alpha"
         assert values["image"] == config.image
-        assert values["providerRecoveryEnvelopes"] == {
-            "initJob": "original-init-envelope"
-        }
+        assert values["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
         assert values["routes"]["enabled"] is False
     assert transitions[0][1]["initOperationId"] == "rollforward-alpha"
     assert rollbacks == [(owner, "rollforward-alpha")]
@@ -771,9 +800,15 @@ async def test_legacy_credential_promotion_uses_the_catalog_unit_after_mutation(
         "gatewayContractDigest": "e" * 64,
     }
     plane = LiveLifecyclePlane(
-        repository=SimpleNamespace(), registry=SimpleNamespace(), cell=Cell(), helm=SimpleNamespace(),
-        runtime=Runtime(), routes=SimpleNamespace(), maintenance=SimpleNamespace(),
-        capacity=SimpleNamespace(), identity_verifier=IDENTITY_CODEC.verifier(),
+        repository=SimpleNamespace(),
+        registry=SimpleNamespace(),
+        cell=Cell(),
+        helm=SimpleNamespace(),
+        runtime=Runtime(),
+        routes=SimpleNamespace(),
+        maintenance=SimpleNamespace(),
+        capacity=SimpleNamespace(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
         config=SimpleNamespace(runtime_target_for=lambda _request, **_kwargs: target),  # type: ignore[arg-type]
     )
     request = {
@@ -1092,7 +1127,9 @@ async def test_recovery_reader_authenticates_init_job_and_stabilizes_helm_record
         await registry.authenticate_recovery_record(metadata)
 
 
-def _init_snapshot(*, present: bool, complete: bool = False, failed: bool = False, serving: bool = False):
+def _init_snapshot(
+    *, present: bool, complete: bool = False, failed: bool = False, serving: bool = False
+):
     return SimpleNamespace(
         namespace=True,
         release=True,
@@ -1187,12 +1224,8 @@ async def test_initialize_replays_absent_init_job_with_original_authenticated_re
     assert [owner for owner, _values in helm_calls] == [original_owner, original_owner]
     assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize", "serve"]
     assert helm_calls[0][1]["workerPolicyDigest"] == helm_calls[1][1]["workerPolicyDigest"]
-    assert helm_calls[0][1]["providerRecoveryEnvelopes"] == {
-        "initJob": "original-init-envelope"
-    }
-    assert helm_calls[1][1]["providerRecoveryEnvelopes"] == {
-        "initJob": "original-init-envelope"
-    }
+    assert helm_calls[0][1]["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
+    assert helm_calls[1][1]["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
 
 
 @pytest.mark.asyncio
@@ -1202,7 +1235,9 @@ async def test_initialize_keeps_present_running_init_job_pending_without_helm_re
     )
 
     initialized = await plane.initialize(
-        metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+        metadata,
+        _init_recovery_request(envelope="current-envelope"),
+        _init_recovery_config(),  # type: ignore[arg-type]
     )
 
     assert initialized is False
@@ -1216,7 +1251,9 @@ async def test_initialize_keeps_replayed_pending_init_job_pending_without_servin
     )
 
     initialized = await plane.initialize(
-        metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+        metadata,
+        _init_recovery_request(envelope="current-envelope"),
+        _init_recovery_config(),  # type: ignore[arg-type]
     )
 
     assert initialized is False
@@ -1231,7 +1268,9 @@ async def test_initialize_raises_for_failed_replayed_init_job_without_serving() 
 
     with pytest.raises(MetadataConflict, match="cell storage initialization failed"):
         await plane.initialize(
-            metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+            metadata,
+            _init_recovery_request(envelope="current-envelope"),
+            _init_recovery_config(),  # type: ignore[arg-type]
         )
 
     assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize"]
@@ -1283,7 +1322,9 @@ async def test_initializing_checkpoint_recovers_deleted_init_job_without_looping
     plane._repository = Repository()  # type: ignore[assignment]
     plane._cell = Cell()  # type: ignore[assignment]
     driver = CellLifecycleDriver(
-        plane=plane, volume_worker=None, config=_init_recovery_config()  # type: ignore[arg-type]
+        plane=plane,
+        volume_worker=None,
+        config=_init_recovery_config(),  # type: ignore[arg-type]
     )
 
     outcome = await driver.execute(

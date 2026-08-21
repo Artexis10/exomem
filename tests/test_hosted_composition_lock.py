@@ -233,16 +233,96 @@ def test_composer_verifies_candidates_and_writes_deterministic_lock_pair(
 
     pair = json.loads(first)
     expand, contract = pair["locks"]
-    assert [path.name for path in verified] == [request.runtime.candidate.name, request.provisioner.candidate.name] * 2
+    assert [path.name for path in verified] == [
+        request.runtime.candidate.name,
+        request.provisioner.candidate.name,
+    ] * 2
     assert request.output.read_bytes() == first
     assert expand["admissionMode"] == "expand"
     assert contract["admissionMode"] == "contract"
     assert {key: value for key, value in expand.items() if key != "admissionMode"} == {
         key: value for key, value in contract.items() if key != "admissionMode"
     }
-    assert expand["components"]["runtime"]["candidateSha256"] == hashlib.sha256(
-        request.runtime.candidate.read_bytes()
-    ).hexdigest()
+    assert (
+        expand["components"]["runtime"]["candidateSha256"]
+        == hashlib.sha256(request.runtime.candidate.read_bytes()).hexdigest()
+    )
+
+
+def test_composer_closes_each_immutable_component_at_its_own_source_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    runtime_commit = "f" * 40
+    candidate = json.loads(request.runtime.candidate.read_text())
+    candidate["source"]["commit"] = runtime_commit
+    candidate["image"]["discoveryTag"] = (
+        candidate["image"]["repository"] + ":" + runtime_commit + "-hosted"
+    )
+    candidate["workflow"]["oidcSourceCommit"] = runtime_commit
+    runtime_sha = _write_json(request.runtime.candidate, candidate)
+    forward = json.loads(request.forward_contract.path.read_text())
+    forward["sourceCommit"] = runtime_commit
+    forward_sha = _write_json(request.forward_contract.path, forward)
+    request = replace(
+        request,
+        runtime=replace(request.runtime, sha256=runtime_sha),
+        forward_contract=replace(request.forward_contract, sha256=forward_sha),
+    )
+    closures: list[tuple[str, str, tuple[str, ...]]] = []
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_a, **_k: None)
+
+    def verify(
+        _repository: Path, candidate_commit: str, composition_commit: str, paths: tuple[str, ...]
+    ) -> dict[str, object]:
+        closures.append((candidate_commit, composition_commit, paths))
+        return {
+            "candidateCommit": candidate_commit,
+            "compositionCommit": composition_commit,
+            "paths": list(paths),
+        }
+
+    monkeypatch.setattr(composer, "verify_source_closure", verify)
+
+    pair = composer.compose_locks(request)
+
+    assert closures == [
+        (runtime_commit, runtime_commit, composer._RUNTIME_CLOSURE),
+        (COMMIT, COMMIT, composer._PROVISIONER_CLOSURE),
+    ]
+    assert pair["locks"][0]["composition"]["sourceClosure"]["runtime"] == {
+        "candidateCommit": runtime_commit,
+        "compositionCommit": runtime_commit,
+        "paths": list(composer._RUNTIME_CLOSURE),
+    }
+
+
+def test_lock_validation_accepts_runtime_source_anchor_independent_of_platform_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        composer,
+        "verify_source_closure",
+        lambda _repository, candidate, composition, paths: {
+            "candidateCommit": candidate,
+            "compositionCommit": composition,
+            "paths": list(paths),
+        },
+    )
+    composer.compose_locks(request)
+    lock = json.loads(request.output.read_text())["locks"][0]
+    runtime_commit = "f" * 40
+    lock["components"]["runtime"]["sourceCommit"] = runtime_commit
+    lock["composition"]["sourceClosure"]["runtime"].update(
+        candidateCommit=runtime_commit,
+        compositionCommit=runtime_commit,
+    )
+
+    composer.validate_deployment_lock(lock)
 
 
 def test_composer_binds_runtime_upgrade_compatibility_and_migration(
@@ -461,8 +541,18 @@ def test_runtime_upgrade_composition_requires_exact_substrate_trust(
 @pytest.mark.parametrize(
     "failure",
     [
-        "valid", "missing", "unverified", "reader", "profile", "lifecycle", "claim_reader",
-        "claim_profile", "claim_action", "claim_signer", "claim_substitution", "claim_stale",
+        "valid",
+        "missing",
+        "unverified",
+        "reader",
+        "profile",
+        "lifecycle",
+        "claim_reader",
+        "claim_profile",
+        "claim_action",
+        "claim_signer",
+        "claim_substitution",
+        "claim_stale",
     ],
 )
 def test_v3_composition_requires_an_explicit_verified_reader_two_rollback_runtime(
@@ -533,7 +623,9 @@ def test_v3_composition_requires_an_explicit_verified_reader_two_rollback_runtim
         composer,
         "verify_source_closure",
         lambda _repository, candidate, composition, paths: {
-            "candidateCommit": candidate, "compositionCommit": composition, "paths": list(paths)
+            "candidateCommit": candidate,
+            "compositionCommit": composition,
+            "paths": list(paths),
         },
     )
     if failure == "missing":
@@ -542,7 +634,9 @@ def test_v3_composition_requires_an_explicit_verified_reader_two_rollback_runtim
         monkeypatch.setattr(
             composer.hosted_image_candidate,
             "verify_candidate",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(composer.CompositionError("unverified")),
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                composer.CompositionError("unverified")
+            ),
         )
 
     if failure == "valid":
@@ -584,7 +678,9 @@ def test_composer_rejects_untrusted_catalog_evidence_before_writing(
 ) -> None:
     composer = _module()
     request = _request(composer, tmp_path)
-    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         composer,
         "verify_source_closure",
@@ -652,7 +748,9 @@ def test_composer_requires_the_caller_pinned_candidate_bytes(
         request,
         runtime=replace(request.runtime, sha256="0" * 64),
     )
-    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None
+    )
 
     with pytest.raises(composer.CompositionError, match="candidate SHA-256"):
         composer.compose_locks(request)
@@ -677,7 +775,9 @@ def test_lock_validation_rejects_tampered_lineage(
 ) -> None:
     composer = _module()
     request = _request(composer, tmp_path)
-    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         composer,
         "verify_source_closure",
@@ -698,30 +798,51 @@ def test_lock_validation_rejects_tampered_lineage(
 def test_source_closure_rejects_changed_input_but_allows_unrelated_change(tmp_path: Path) -> None:
     composer = _module()
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.invalid"], check=True
+    )
     subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "runtime.py").write_text("one\n")
     (tmp_path / "notes.md").write_text("one\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
-    base = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+    base = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
     (tmp_path / "notes.md").write_text("two\n")
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-am", "docs", "-q"], check=True)
-    head = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
 
     composer.verify_source_closure(tmp_path, base, head, ("src/**",))
     (tmp_path / "src" / "runtime.py").write_text("two\n")
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-am", "runtime", "-q"], check=True)
-    changed = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+    changed = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
     with pytest.raises(composer.CompositionError, match="source closure"):
         composer.verify_source_closure(tmp_path, base, changed, ("src/**",))
 
 
-def test_atomic_failure_leaves_no_new_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_atomic_failure_leaves_no_new_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     composer = _module()
     request = _request(composer, tmp_path)
-    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         composer,
         "verify_source_closure",
@@ -731,7 +852,9 @@ def test_atomic_failure_leaves_no_new_output(tmp_path: Path, monkeypatch: pytest
             "paths": list(paths),
         },
     )
-    monkeypatch.setattr(composer.os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")))
+    monkeypatch.setattr(
+        composer.os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk"))
+    )
 
     with pytest.raises(composer.CompositionError, match="write"):
         composer.compose_locks(request)
@@ -742,14 +865,21 @@ def test_atomic_failure_leaves_no_new_output(tmp_path: Path, monkeypatch: pytest
 def test_source_closure_rejects_add_delete_and_rename(tmp_path: Path, change: str) -> None:
     composer = _module()
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.invalid"], check=True
+    )
     subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
     (tmp_path / "src").mkdir()
     source = tmp_path / "src" / "runtime.py"
     source.write_text("one\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
-    base = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+    base = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
     if change == "add":
         (tmp_path / "src" / "new.py").write_text("new\n")
     elif change == "delete":
@@ -758,7 +888,12 @@ def test_source_closure_rejects_add_delete_and_rename(tmp_path: Path, change: st
         source.rename(tmp_path / "src" / "renamed.py")
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", change], check=True)
-    head = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
 
     with pytest.raises(composer.CompositionError, match="source closure"):
         composer.verify_source_closure(tmp_path, base, head, ("src/**",))
@@ -780,7 +915,9 @@ def test_source_closure_fails_closed_when_git_proof_is_incomplete(
             return subprocess.CompletedProcess(arguments, 1, b"", b"")
         if failure == "git-error" and command == "diff":
             return subprocess.CompletedProcess(arguments, 128, b"", b"fatal")
-        return subprocess.CompletedProcess(arguments, 0, b"false\n" if command == "rev-parse" else b"", b"")
+        return subprocess.CompletedProcess(
+            arguments, 0, b"false\n" if command == "rev-parse" else b"", b""
+        )
 
     monkeypatch.setattr(composer, "_git", fake_git)
     with pytest.raises(composer.CompositionError):
@@ -807,7 +944,9 @@ def test_hashed_evidence_rejects_unsafe_bytes(tmp_path: Path, failure: str) -> N
         composer._load_hashed(composer.HashedInput(path, digest), label="evidence")
 
 
-def test_atomic_failure_preserves_existing_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_atomic_failure_preserves_existing_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     composer = _module()
     output = tmp_path / "lock-pair.json"
     output.write_bytes(b"old pair\n")
@@ -842,7 +981,9 @@ def test_pair_validator_rejects_duplicate_or_divergent_members(
 ) -> None:
     composer = _module()
     request = _request(composer, tmp_path)
-    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         composer,
         "verify_source_closure",
@@ -863,7 +1004,9 @@ def test_pair_validator_rejects_duplicate_or_divergent_members(
         composer.validate_deployment_lock_pair(divergent)
 
 
-def test_authoritative_release_set_rejects_catalog_omission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_authoritative_release_set_rejects_catalog_omission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     composer = _module()
     request = _request(composer, tmp_path)
     authority = json.loads(request.authoritative_legacy_release_set.path.read_text())
@@ -875,7 +1018,9 @@ def test_authoritative_release_set_rejects_catalog_omission(tmp_path: Path, monk
             sha256=_write_json(request.authoritative_legacy_release_set.path, authority),
         ),
     )
-    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        composer.hosted_image_candidate, "verify_candidate", lambda *_args, **_kwargs: None
+    )
     with pytest.raises(composer.CompositionError, match="authoritative"):
         composer.compose_locks(request)
     assert not request.output.exists()
