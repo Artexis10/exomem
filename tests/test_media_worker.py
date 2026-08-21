@@ -187,7 +187,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     original_add_full = deferred_index.add_full
     original_batch = preserve.batch_atomic_write
     original_read_artifact = media_worker.read_bounded_guarded_bytes
-    original_replace = vault_module.os.replace
+    original_publish_hook = vault_module._after_batch_destination_published
     token = None
     postlude_reads: list[str] = []
     checkpoint_replaced = False
@@ -222,15 +222,13 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
             postlude_reads.append("floor" if Path(path) == floor_path else "predecessor")
         return original_read_artifact(root, target, *args, **kwargs)
 
-    def replace_checkpoint_inside_postlude(source, destination, *args, **kwargs):  # noqa: ANN001
+    def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_published, checkpoint_replaced
-        if Path(destination) == checkpoint_path and len(manager.guard_metadata) >= 2:
+        original_publish_hook(destination)
+        if destination == checkpoint_path and len(manager.guard_metadata) >= 2:
             assert manager.depth > 0
             checkpoint_replaced = True
-            result = original_replace(source, destination, *args, **kwargs)
             checkpoint_published = True
-            return result
-        return original_replace(source, destination, *args, **kwargs)
 
     def completed_fanout(root, *_args, **_kwargs):  # noqa: ANN001
         assert manager.depth == 0
@@ -246,7 +244,11 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     )
     monkeypatch.setattr(preserve, "batch_atomic_write", capture_token)
     monkeypatch.setattr(media_worker, "read_bounded_guarded_bytes", read_postlude_artifact)
-    monkeypatch.setattr(vault_module.os, "replace", replace_checkpoint_inside_postlude)
+    monkeypatch.setattr(
+        vault_module,
+        "_after_batch_destination_published",
+        observe_checkpoint_inside_postlude,
+    )
     monkeypatch.setattr(
         media_worker, "post_commit_batch_fanout", completed_fanout
     )
@@ -335,7 +337,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     floor = graph_sync.floor_path(vault)
     checkpoint = graph_sync.checkpoint_path(vault)
     original_read_artifact = media_worker.read_bounded_guarded_bytes
-    original_replace = vault_module.os.replace
+    original_publish_hook = vault_module._after_batch_destination_published
     postlude_reads: list[str] = []
     checkpoint_replaced = False
     fanout_depths: list[int] = []
@@ -356,12 +358,12 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
             postlude_reads.append("floor" if Path(path) == floor else "predecessor")
         return original_read_artifact(root, target, *args, **kwargs)
 
-    def replace_checkpoint_inside_postlude(source, destination, *args, **kwargs):  # noqa: ANN001
+    def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_replaced
-        if Path(destination) == checkpoint and len(manager.guard_metadata) >= 2:
+        original_publish_hook(destination)
+        if destination == checkpoint and len(manager.guard_metadata) >= 2:
             assert manager.depth > 0
             checkpoint_replaced = True
-        return original_replace(source, destination, *args, **kwargs)
 
     def fanout_after_postlude(*_args, **_kwargs):
         assert manager.depth == 0
@@ -371,7 +373,11 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     monkeypatch.setattr(
         media_worker, "read_bounded_guarded_bytes", read_artifact_inside_postlude
     )
-    monkeypatch.setattr(vault_module.os, "replace", replace_checkpoint_inside_postlude)
+    monkeypatch.setattr(
+        vault_module,
+        "_after_batch_destination_published",
+        observe_checkpoint_inside_postlude,
+    )
     monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout_after_postlude)
 
     media_worker.MediaWorker(vault, execution_mode="inline")._process(
@@ -522,7 +528,7 @@ def _assert_media_postlude_mismatch_retains_receipt(
     checkpoint_path = graph_sync.checkpoint_path(vault)
     original_update = preserve.update_sidecar_extraction
     original_add_full = deferred_index.add_full
-    original_replace = vault_module.os.replace
+    original_publish_hook = vault_module._after_batch_destination_published
     published: list[Path] = []
     fanout_calls: list[object] = []
     clear_calls: list[object] = []
@@ -559,10 +565,10 @@ def _assert_media_postlude_mismatch_retains_receipt(
             )
         return handoff
 
-    def observe_checkpoint_publication(source, destination, *args, **kwargs):  # noqa: ANN001
-        if Path(destination) == checkpoint_path:
-            published.append(Path(destination))
-        return original_replace(source, destination, *args, **kwargs)
+    def observe_checkpoint_publication(destination: Path) -> None:
+        original_publish_hook(destination)
+        if destination == checkpoint_path:
+            published.append(destination)
 
     monkeypatch.setattr(
         extract,
@@ -575,7 +581,11 @@ def _assert_media_postlude_mismatch_retains_receipt(
         deferred_index, "add_full_receipts", admit_full_receipts, raising=False
     )
     monkeypatch.setattr(preserve, "update_sidecar_extraction", commit_then_mismatch)
-    monkeypatch.setattr(vault_module.os, "replace", observe_checkpoint_publication)
+    monkeypatch.setattr(
+        vault_module,
+        "_after_batch_destination_published",
+        observe_checkpoint_publication,
+    )
     monkeypatch.setattr(
         media_worker,
         "post_commit_batch_fanout",
@@ -925,7 +935,7 @@ def test_checkpoint_publication_failure_keeps_completed_media_and_durable_receip
     result = _preserve_media_stub(vault, filename="checkpoint-failure.m4a")
     sidecar = vault / result.sidecar_path
     checkpoint = graph_sync.checkpoint_path(vault)
-    original_replace = vault_module.os.replace
+    original_replace_artifact = vault_module._BatchWorkspace.replace_artifact
     extraction_calls = 0
 
     def transcribe(*_args, **_kwargs):
@@ -935,13 +945,21 @@ def test_checkpoint_publication_failure_keeps_completed_media_and_durable_receip
             text="transcript survives checkpoint failure", media_type="audio", engine="test"
         )
 
-    def deny_checkpoint_replace(source, destination, *args, **kwargs):  # noqa: ANN001
-        if Path(destination) == checkpoint:
+    def deny_checkpoint_replace(
+        workspace: vault_module._BatchWorkspace,
+        artifact: vault_module._WorkspaceArtifact,
+        destination: Path,
+    ):
+        if destination == checkpoint:
             raise PermissionError("held graph checkpoint")
-        return original_replace(source, destination, *args, **kwargs)
+        return original_replace_artifact(workspace, artifact, destination)
 
     monkeypatch.setattr(extract, "extract_text", transcribe)
-    monkeypatch.setattr(vault_module.os, "replace", deny_checkpoint_replace)
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace,
+        "replace_artifact",
+        deny_checkpoint_replace,
+    )
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(
         media_jobs.MediaJob(

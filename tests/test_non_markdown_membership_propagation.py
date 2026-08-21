@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import reserved_paths
 from exomem.governance import egress, lifecycle, policy
 from exomem.governance.principal import RequestPrincipal, owner_principal
 from exomem.governance.tool import GovernanceError, op_govern_memory
@@ -14,6 +15,12 @@ from exomem.governance.tool import GovernanceError, op_govern_memory
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 ASSET = "Knowledge Base/Notes/asset.bin"
+
+
+@pytest.fixture(autouse=True)
+def _governance_dispatcher_authority():
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        yield
 
 
 def _write_semantic_scope(vault: Path, *, default_deny: bool = False) -> None:

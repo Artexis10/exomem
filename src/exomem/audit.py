@@ -96,6 +96,7 @@ from . import (
     indexes,
     logging_config,
     relation_registry,
+    reserved_paths,
     semantic_language_registry,
     semantic_units,
     temporal,
@@ -578,8 +579,8 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     for sidecar in sidecar_repair.iter_media_sidecars(vault_root):
         try:
-            content = sidecar.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
+            content, _guard = vault_module.read_guarded_text(vault_root, sidecar)
+        except (OSError, UnicodeError, vault_module.PathGuardError):
             continue
         damage = sidecar_repair.analyze(content, sidecar)
         if damage is None:
@@ -1627,7 +1628,7 @@ def _check_wikilinks(
     titles_to_paths: dict[str, list[str]] = {}  # lower(frontmatter title) → paths
     for md_path in _walk_vault_md(vault_root):
         try:
-            rel = md_path.resolve().relative_to(vault_root.resolve()).as_posix()
+            rel = md_path.relative_to(vault_root).as_posix()
         except ValueError:
             continue
         no_ext = rel.removesuffix(".md")
@@ -1637,8 +1638,8 @@ def _check_wikilinks(
         # Title fallback: lets `[[North-Led Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
         try:
-            text = md_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            text, _guard = vault_module.read_guarded_text(vault_root, md_path)
+        except (OSError, UnicodeDecodeError, vault_module.PathGuardError):
             continue
         fm, _, _ = parse_frontmatter(text)
         title = fm.get("title") if isinstance(fm, dict) else None
@@ -1689,9 +1690,9 @@ def _check_wikilinks(
             suffix = Path(target_for_resolve).suffix.lower()
             if suffix and suffix != ".md":
                 rel = target_for_resolve.lstrip("/")
-                if (vault_root / rel).exists() or (
-                    vault_root / kb_dirname() / normalized
-                ).exists():
+                if _ordinary_file_exists(vault_root, vault_root / rel) or _ordinary_file_exists(
+                    vault_root, vault_root / kb_dirname() / normalized
+                ):
                     continue
 
             non_markdown_collision = (
@@ -1758,25 +1759,39 @@ def _has_non_markdown_collision(
     vault_root: Path, vault_relative: str, kb_relative: str
 ) -> bool:
     """Whether an extensionless note link names an existing non-note file."""
-    resolved_root = vault_root.resolve()
     for candidate in (
         vault_root / vault_relative,
         vault_root / kb_dirname() / kb_relative,
     ):
         try:
-            resolved_parent = candidate.parent.resolve()
-            resolved_parent.relative_to(resolved_root)
-            siblings = tuple(resolved_parent.iterdir())
-        except (OSError, ValueError):
+            parent_rel = candidate.parent.relative_to(vault_root).as_posix()
+            siblings = reserved_paths.list_generic_tree(
+                vault_root,
+                parent_rel if parent_rel != "." else ".",
+                recursive=False,
+            )
+        except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
             continue
         for sibling in siblings:
             if (
-                sibling.is_file()
-                and sibling.stem == candidate.name
-                and sibling.suffix.lower() != ".md"
+                sibling.identity.kind == "file"
+                and "/" not in sibling.relative_path
+                and Path(sibling.relative_path).stem == candidate.name
+                and Path(sibling.relative_path).suffix.lower() != ".md"
             ):
                 return True
     return False
+
+
+def _ordinary_file_exists(vault_root: Path, candidate: Path) -> bool:
+    """Whether one direct attachment target is an ordinary retained file."""
+
+    try:
+        rel = candidate.relative_to(vault_root).as_posix()
+        reserved_paths.inspect_generic_file(vault_root, rel)
+        return True
+    except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
+        return False
 
 
 def _walk_vault_md(vault_root: Path):
@@ -1786,19 +1801,7 @@ def _walk_vault_md(vault_root: Path):
     Knowledge Base/ only. Compiled notes can link to curated parent trees
     (per SKILL.md rule 1), so we need a full-vault existence set.
     """
-    def walk(d: Path):
-        try:
-            children = list(d.iterdir())
-        except OSError:
-            return
-        for child in children:
-            if child.is_dir():
-                if child.name in VAULT_WALK_SKIP_DIRS:
-                    continue
-                yield from walk(child)
-            elif child.is_file() and child.suffix.lower() == ".md":
-                yield child
-    yield from walk(vault_root)
+    yield from vault_module.walk_vault_md(vault_root)
 
 
 # ---------------- check: orphan_entity ----------------
@@ -1956,10 +1959,10 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     kb = kb_root(vault_root)
     top_index = kb / "index.md"
-    if not top_index.exists():
+    try:
+        text, _guard = vault_module.read_guarded_text(vault_root, top_index)
+    except (OSError, UnicodeDecodeError, vault_module.PathGuardError):
         return findings
-
-    text = top_index.read_text(encoding="utf-8")
     declared: dict[str, int] = {}
     for m in _COUNTS_ROW_PATTERN.finditer(text):
         label, subcat, count = m.group(1), (m.group(2) or "").strip().lower(), int(m.group(3))

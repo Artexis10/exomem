@@ -138,11 +138,41 @@ jobs:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           uv run --frozen --python 3.13 python -m pytest -q
           tests/test_held_fs_contract.py
           tests/test_held_fs_windows.py
+          tests/test_reserved_admin_paths.py
+          tests/test_mutation_concurrency.py
+          tests/test_windows_path_alias_guard.py
+          --session-timeout=600
+      - name: Native reserved-path compatibility gate
+        env:
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state-compat
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python -m pytest -q
+          tests/test_governance_receipts.py
+          tests/test_graph_lifecycle_windows.py
+          tests/test_media_processing.py
+          -k "test_reconcile_dry_run_keeps_evidence_and_operational_files_byte_identical
+          or test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refusal
+          or test_windows_deletion_post_rename_flush_refusal_durably_inverse_restores_prior_truth
+          or test_windows_deletion_inverse_move_failure_retains_epoch_and_marker_for_reconcile
+          or test_windows_recovery_post_rename_flush_refusal_durably_inverse_restores_prior_truth
+          or test_windows_recovery_inverse_move_failure_retains_epoch_and_marker_for_reconcile
+          or test_prose_only_sidecar_is_repaired_without_losing_notes
+          or test_partial_pending_sidecar_is_canonically_repaired_with_prose
+          or test_completed_sidecar_with_invalid_cheap_provenance_is_reconciled
+          or test_legacy_completed_sidecar_without_any_provenance_is_preserved
+          or test_legacy_completed_mp4_backfills_partial_provenance_without_rewriting_transcript
+          or test_caller_supplied_completed_text_backfills_missing_provenance_in_place
+          or test_bounded_reconcile_skips_converged_prefix_and_advances_later_work"
           --session-timeout=600
 
   tui:

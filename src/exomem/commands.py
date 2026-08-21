@@ -89,6 +89,7 @@ from . import recover_from_trash as recover_from_trash_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
+from . import reserved_paths as reserved_paths_module
 from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
@@ -1531,9 +1532,12 @@ def _citation_url(_path: str) -> str:
 
 def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
     try:
-        return memory_refs_module.resolve_identifier(vault_root, value)
+        resolved = memory_refs_module.resolve_identifier(vault_root, value)
     except memory_refs_module.ReferenceError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
+    if reserved_paths_module.classify_logical(resolved).blocked:
+        raise ValueError("NOT_FOUND: memory identifier is unavailable")
+    return resolved
 
 
 def _snapshot_memory_ref(
@@ -5232,8 +5236,6 @@ def op_process_media(
         ) from exc
     if media_processing.classify_media(binary) is None:
         raise OpError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
-    if not binary.exists():
-        raise OpError("MEDIA_NOT_FOUND", f"media artifact does not exist: {path}")
 
     try:
         if operation == "process":
@@ -7255,6 +7257,7 @@ def _build_commands() -> tuple[Command, ...]:
                 product_surface=meta.get("surface", "advanced"),
                 product_actions=tuple(meta.get("actions", ())),
                 first_run_safe=bool(meta.get("first_run_safe", False)),
+                path_roles=reserved_paths_module.path_roles_for_command(name),
             )
         )
     return tuple(cmds)
@@ -7733,6 +7736,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 routes=tuple(routes),
                 response_detail=response_detail,
+                path_roles=reserved_paths_module.path_roles_for_command(name),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
             )
         )

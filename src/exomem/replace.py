@@ -26,7 +26,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import find as find_module
-from . import indexes, memory_refs, relation_review, semantic_writes, temporal
+from . import (
+    indexes,
+    memory_refs,
+    relation_review,
+    reserved_paths,
+    semantic_writes,
+    temporal,
+)
 from . import note as note_module
 from .kbdir import kb_page_target, kb_prefix
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
@@ -47,6 +54,53 @@ from .vault import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _read_replace_source(
+    vault_root: Path,
+    relative: str,
+) -> tuple[bytes, str, float]:
+    """Read one replacement source through the retained generic leaf."""
+
+    try:
+        snapshot = reserved_paths.read_generic_bytes(vault_root, relative)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            raise ReplaceError(
+                code="OLD_NOT_FOUND",
+                missing=["old_path"],
+                reason=f"file does not exist: {relative}",
+            ) from None
+        if error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise ReplaceError(
+                code="RESERVED_PATH",
+                missing=["old_path"],
+                reason="path is reserved for its owning subsystem",
+            ) from None
+        raise ReplaceError(
+            code="UNREADABLE",
+            missing=["old_path"],
+            reason="old page could not be read safely",
+        ) from None
+    try:
+        text = snapshot.data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReplaceError(
+            code="UNREADABLE",
+            missing=["old_path"],
+            reason="old page is unreadable",
+        ) from error
+    # ``Path.read_text`` historically supplied logical text to replace: on
+    # Windows its universal-newline layer converted CRLF before the CAS hash
+    # was computed. The retained byte reader must preserve that public hash
+    # contract while the raw bytes remain available for identity guards.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return snapshot.data, text, snapshot.mtime
 
 
 @dataclass
@@ -118,20 +172,10 @@ def _legacy_replace(
         )
 
     # Load one content version of the old page for both eligibility and CAS.
-    try:
-        old_text = old_resolved.read_text(encoding="utf-8")
-    except FileNotFoundError as e:
-        raise ReplaceError(
-            code="OLD_NOT_FOUND",
-            missing=["old_path"],
-            reason=str(e),
-        ) from e
-    except (OSError, UnicodeDecodeError) as e:
-        raise ReplaceError(
-            code="UNREADABLE",
-            missing=["old_path"],
-            reason=str(e),
-        ) from e
+    _old_bytes, old_text, _old_mtime = _read_replace_source(
+        vault_root,
+        rel_old_with_ext,
+    )
     old_frontmatter, _old_body, _old_frontmatter_text = parse_frontmatter(old_text)
     old_expected_hash = content_hash(old_text)
 
@@ -488,12 +532,17 @@ def replace(
             ["old_path"],
             f"{rel_old_with_ext} is in an append-only tree",
         )
-    try:
-        old_bytes = old_resolved.read_bytes()
-        old_text = old_bytes.decode("utf-8")
-        old_parsed = find_module._parse_page(old_resolved, old_resolved.stat().st_mtime, root)
-    except (OSError, UnicodeDecodeError) as error:
-        raise ReplaceError("UNREADABLE", ["old_path"], "old page is unreadable") from error
+    old_bytes, old_text, old_mtime = _read_replace_source(
+        root,
+        rel_old_with_ext,
+    )
+    old_parsed = find_module._parse_page(
+        old_resolved,
+        old_mtime,
+        root,
+        content=old_bytes,
+        resolved_relative=rel_old_with_ext,
+    )
     if old_parsed is None:
         raise ReplaceError("UNREADABLE", ["old_path"], "old page is unreadable")
 
@@ -505,6 +554,7 @@ def replace(
             rel_old_with_ext,
             leaf_policy="content",
             expected_content_hash=predecessor_hash,
+            expected_content_size=len(old_bytes),
         )
     except PathGuardError as error:
         raise ReplaceError(error.code, ["old_path"], error.reason) from error

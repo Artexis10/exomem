@@ -1865,8 +1865,21 @@ class VaultMutationCoordinator:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "unknown",
+        publish_holder_metadata: bool = True,
     ) -> Iterator[None]:
-        """Hold both the local and OS mutation guards for the bounded interval."""
+        """Hold both the local and OS mutation guards for the bounded interval.
+
+        Synthetic reserved-state locks may omit the diagnostic holder sidecar:
+        their high-frequency filesystem-identity coordination needs the OS lock,
+        not a durable attribution record for every short hold. Command and
+        lifecycle mutation boundaries remain attributable.
+        """
+        if type(publish_holder_metadata) is not bool:
+            raise TypeError("holder metadata publication flag must be boolean")
+        if not publish_holder_metadata and holder_kind != "reserved-state":
+            raise ValueError(
+                "metadata-free holds are limited to reserved-state coordination"
+            )
         timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         if timeout < 0:
             raise ValueError("mutation lock timeout must be non-negative")
@@ -1896,6 +1909,7 @@ class VaultMutationCoordinator:
                 self._acquire_boundary(
                     handle, metadata_handle, deadline, request_id, operation, holder_kind,
                     wait_start=wait_start,
+                    publish_holder_metadata=publish_holder_metadata,
                 )
             except Exception:
                 handle.close()
@@ -2108,6 +2122,7 @@ class VaultMutationCoordinator:
         holder_kind: str,
         *,
         wait_start: float,
+        publish_holder_metadata: bool,
     ) -> None:
         """Acquire and publish with the metadata mutex held for one generation."""
         while True:
@@ -2126,17 +2141,20 @@ class VaultMutationCoordinator:
                 except OSError as exc:
                     raise self._lock_unavailable(exc) from None
                 if acquired:
-                    holder = {
-                        "schema": _HOLDER_SCHEMA,
-                        "generation": uuid.uuid4().hex,
-                        "request_id": _safe_label(request_id, fallback="untracked"),
-                        "operation": _safe_label(operation, fallback="unknown"),
-                        "holder_kind": _safe_label(holder_kind, fallback="unknown"),
-                        "acquired_at": time.time(),
-                        "long_holder_seconds": self.long_holder_seconds,
-                    }
                     try:
-                        self._publish_holder_metadata(holder)
+                        if publish_holder_metadata:
+                            holder = {
+                                "schema": _HOLDER_SCHEMA,
+                                "generation": uuid.uuid4().hex,
+                                "request_id": _safe_label(request_id, fallback="untracked"),
+                                "operation": _safe_label(operation, fallback="unknown"),
+                                "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+                                "acquired_at": time.time(),
+                                "long_holder_seconds": self.long_holder_seconds,
+                            }
+                            self._publish_holder_metadata(holder)
+                        else:
+                            _clear_holder_metadata(self.metadata_path)
                     except OSError as exc:
                         _clear_holder_metadata(self.metadata_path)
                         try:

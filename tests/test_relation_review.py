@@ -201,19 +201,16 @@ def _crash_commit_worker(
         *(write.path for write in planned),
         root / _PAGE_B,
     }
-    real_replace = os.replace
     replacements = 0
 
-    def crash_on_boundary(src, dst):
+    def crash_on_boundary(destination: Path) -> None:
         nonlocal replacements
-        result = real_replace(src, dst)
-        if Path(dst) in targets and str(src).endswith(".tmp"):
+        if destination in targets:
             replacements += 1
             if replacements == crash_after:
                 os._exit(91)
-        return result
 
-    vault.os.replace = crash_on_boundary
+    vault._after_batch_destination_published = crash_on_boundary
     relation_review.commit_creation_draft(
         root,
         path=_PAGE_B,

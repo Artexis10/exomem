@@ -39,7 +39,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, indexes, semantic_contract, semantic_writes, temporal
+from . import (
+    corpus_aware,
+    indexes,
+    reserved_paths,
+    semantic_contract,
+    semantic_writes,
+    temporal,
+)
 from . import find as find_module
 from .cli_ops import OpError
 from .kbdir import kb_page_target, kb_prefix
@@ -544,11 +551,38 @@ def load_editable(
         )
 
     try:
-        mtime = abs_path.stat().st_mtime
-    except OSError as e:
-        raise EditError(code="NOT_FOUND", missing=["path"], reason=str(e)) from e
+        snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            raise EditError(
+                code="NOT_FOUND",
+                missing=["path"],
+                reason=f"file does not exist: {rel_path}",
+            ) from None
+        if error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise EditError(
+                code="RESERVED_PATH",
+                missing=["path"],
+                reason="path is reserved for its owning subsystem",
+            ) from None
+        raise EditError(
+            code="UNREADABLE",
+            missing=["path"],
+            reason="page could not be read safely",
+        ) from None
 
-    parsed = find_module._parse_page(abs_path, mtime, vault_root)
+    parsed = find_module._parse_page(
+        abs_path,
+        snapshot.mtime,
+        vault_root,
+        content=snapshot.data,
+        resolved_relative=rel_path,
+    )
     if parsed is None:
         raise EditError(
             code="UNREADABLE",
@@ -567,8 +601,8 @@ def load_editable(
         )
 
     try:
-        raw_text = abs_path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeError) as error:
+        raw_text = snapshot.data.decode("utf-8")
+    except UnicodeError as error:
         raise EditError(code="UNREADABLE", missing=["path"], reason=str(error)) from error
     # Edit reasons about logical Markdown with LF newlines, matching
     # `Path.read_text(newline=None)` and the body `get` returns.

@@ -26,7 +26,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_types
+from . import media_types, reserved_paths
 from .governance import lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -105,6 +105,22 @@ def delete_file(
         )
     except VaultPathError as e:
         raise DeleteFileError(code=e.code, reason=e.reason) from e
+    try:
+        reserved_paths.inspect_generic_file(vault_root, rel_path)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise DeleteFileError(
+                "RESERVED_PATH",
+                "path is reserved for its owning subsystem",
+            ) from None
+        raise DeleteFileError(
+            "DELETE_FAILED", "held file acquisition was refused"
+        ) from None
 
     try:
         lifecycle.assert_not_protected(vault_root, rel_path)
@@ -147,7 +163,8 @@ def delete_file(
     fm_warn: str | None = None
     if rel_path.endswith(".md"):
         try:
-            text = abs_path.read_text(encoding="utf-8")
+            snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
+            text = snapshot.data.decode("utf-8")
             fm, _, _ = parse_frontmatter(text)
             if fm.get("superseded_by") and not force_superseded:
                 raise DeleteFileError(
@@ -163,7 +180,27 @@ def delete_file(
                     f"trashed active entity {rel_path!r} — consider "
                     f"archiving via supersession instead."
                 )
-        except (OSError, UnicodeDecodeError):
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code == "MISSING":
+                raise DeleteFileError(
+                    "NOT_FOUND",
+                    "path disappeared before it could be parsed",
+                ) from None
+            if error.code in {
+                "CAPABILITY_UNAVAILABLE",
+                "IDENTITY_CHANGED",
+                "RESERVED_PATH",
+                "UNSAFE_PATH",
+            }:
+                raise DeleteFileError(
+                    "RESERVED_PATH",
+                    "path is reserved for its owning subsystem",
+                ) from None
+            raise DeleteFileError(
+                "DELETE_FAILED",
+                "held file acquisition was refused",
+            ) from None
+        except UnicodeDecodeError:
             pass
 
     # Normalize expected_dead_inbound for filtering.
@@ -216,11 +253,33 @@ def delete_file(
     sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
     trash_filename = f"{time_prefix}-{sanitized}"
     trash_dir = kb_root(vault_root) / TRASH_SUBPATH / date_dir
-    trash_dir.mkdir(parents=True, exist_ok=True)
     trash_abs = trash_dir / trash_filename
 
-    # Collision: never overwrite an existing trash entry.
-    if trash_abs.exists():
+    def trash_destination_exists(candidate: Path) -> bool:
+        relative = candidate.relative_to(vault_root).as_posix()
+        try:
+            reserved_paths.inspect_generic_path(vault_root, relative)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code == "MISSING":
+                return False
+            if error.code in {
+                "CAPABILITY_UNAVAILABLE",
+                "IDENTITY_CHANGED",
+                "RESERVED_PATH",
+                "UNSAFE_PATH",
+            }:
+                raise DeleteFileError(
+                    "RESERVED_PATH",
+                    "trash destination is reserved for its owning subsystem",
+                ) from None
+            raise DeleteFileError(
+                "DELETE_FAILED", "trash destination could not be acquired safely"
+            ) from None
+        return True
+
+    # Collision: never overwrite an existing ordinary trash entry, and never
+    # route around a private physical alias by selecting a different suffix.
+    if trash_destination_exists(trash_abs):
         i = 2
         while True:
             stem, dot, ext = trash_filename.rpartition(".")
@@ -229,13 +288,38 @@ def delete_file(
             else:
                 alt = f"{trash_filename}-{i}"
             alt_abs = trash_dir / alt
-            if not alt_abs.exists():
+            if not trash_destination_exists(alt_abs):
                 trash_abs = alt_abs
                 trash_filename = alt
                 break
             i += 1
 
     trash_rel = trash_abs.relative_to(vault_root).as_posix()
+    meta_abs = trash_dir / f"{trash_filename}.meta.json"
+    meta_rel = meta_abs.relative_to(vault_root).as_posix()
+    try:
+        meta_expected_identity = reserved_paths.inspect_generic_file(
+            vault_root,
+            meta_rel,
+        )
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            meta_expected_identity = None
+        elif error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise DeleteFileError(
+                "RESERVED_PATH",
+                "trash metadata destination is reserved for its owning subsystem",
+            ) from None
+        else:
+            raise DeleteFileError(
+                "DELETE_FAILED",
+                "trash metadata destination could not be acquired safely",
+            ) from None
     from . import graph_sync
 
     try:
@@ -382,12 +466,14 @@ def delete_file(
         "allow_curated_used": bool(curated and allow_curated),
         "frontmatter_snapshot": _make_json_safe(fm),
     }
-    meta_abs = trash_dir / f"{trash_filename}.meta.json"
     try:
-        meta_abs.write_text(
-            json.dumps(meta, indent=2, default=str), encoding="utf-8"
+        reserved_paths.publish_generic_bytes(
+            vault_root,
+            meta_rel,
+            json.dumps(meta, indent=2, default=str).encode("utf-8"),
+            expected_identity=meta_expected_identity,
         )
-    except OSError as e:
+    except (OSError, reserved_paths.ReservedPathLeafError) as e:
         warnings.append(f"trashed file ok but meta sidecar write failed: {e}")
 
     if not lifecycle.finish_deletion(

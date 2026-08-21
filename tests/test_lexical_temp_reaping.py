@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import graph_sync, lexstore, vault
+from exomem import epistemic_graph, graph_sync, lexstore, vault
 
 
 def _lexical_temp(vault_root: Path) -> Path:
@@ -212,16 +212,20 @@ def test_a_family_level_unlink_failure_does_not_starve_the_other_family(
     lexical_stale.write_bytes(b"stale abandoned lexical rebuild temp")
     _age_file(lexical_stale, minutes_ago=_STALE_MINUTES)
 
-    original_unlink = Path.unlink
+    original_remove = epistemic_graph._remove_graph_rebuild_artifact
 
     def _fail_like_ebusy_for_graph_candidate(
-        self: Path, *, missing_ok: bool = False
-    ) -> None:
-        if self == graph_abandoned:
+        root: Path, candidate: Path, *, missing_ok: bool
+    ) -> bool:
+        if candidate == graph_abandoned:
             raise OSError(16, "simulated device-or-resource-busy failure")  # EBUSY
-        original_unlink(self, missing_ok=missing_ok)
+        return original_remove(root, candidate, missing_ok=missing_ok)
 
-    monkeypatch.setattr(Path, "unlink", _fail_like_ebusy_for_graph_candidate)
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_remove_graph_rebuild_artifact",
+        _fail_like_ebusy_for_graph_candidate,
+    )
 
     removed = graph_sync.sweep_abandoned_temporaries(vault_root, live, live_paths=set())
 

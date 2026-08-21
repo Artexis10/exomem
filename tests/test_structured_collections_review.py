@@ -156,12 +156,17 @@ def test_discovery_stops_after_cap_plus_one_candidates(
     vault = tmp_path / "vault"
     kb = vault / "Knowledge Base"
     kb.mkdir(parents=True)
+    candidates = []
+    for number in range(3):
+        candidate = kb / f"candidate-{number}" / "_collection.md"
+        candidate.parent.mkdir()
+        candidate.write_text("candidate\n", encoding="utf-8")
+        candidates.append(candidate)
 
     def bounded_candidates(self: Path, pattern: str):
         assert self == kb
         assert pattern == "_collection.md"
-        for number in range(3):
-            yield kb / f"candidate-{number}" / "_collection.md"
+        yield from candidates
         raise AssertionError("discovery read past its cap probe")
 
     monkeypatch.setattr(Path, "rglob", bounded_candidates)

@@ -1165,6 +1165,22 @@ def test_mutation_guard_is_reentrant_and_revalidates_writer_authority(tmp_path: 
     assert client.acquisitions == 2
 
 
+def test_reserved_identity_guard_does_not_fsync_diagnostic_holder_metadata(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    state_dir = tmp_path / "state"
+    manager = LeaseManager(LeaseConfig(state_dir=state_dir))
+
+    with manager.reserved_identity_guard(
+        vault,
+        domains={"graph-store"},
+        exclusive=False,
+    ):
+        assert list((state_dir / "mutation-locks").glob("*.holder.json")) == []
+
+
 def test_direct_mutation_guard_threads_fence_to_atomic_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -34,6 +34,7 @@ from . import (
     mutation_lock,
     recall_policy,
     relation_registry,
+    reserved_paths,
     semantic_blocks,
     semantic_index,
     semantic_language_registry,
@@ -48,6 +49,17 @@ from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
 log = logging.getLogger(__name__)
+
+
+def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+    with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+        return _sqlite_connect_owned(database, *args, **kwargs)
+
+
+def _sqlite_connect_owned(
+    database: Any, *args: Any, **kwargs: Any
+) -> sqlite3.Connection:
+    return sqlite3.connect(database, *args, **kwargs)
 
 SCHEMA_VERSION = 8
 UNIT_SEED_MAX_BATCHES = 4
@@ -298,6 +310,212 @@ def graph_scheduling_enabled() -> bool:
 
 def sidecar_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".graph.sqlite"
+
+
+def _connect_existing_owner_target(
+    vault_root: Path,
+    path: Path,
+    *,
+    readonly: bool,
+    **kwargs: Any,
+) -> sqlite3.Connection:
+    """Open one existing graph SQLite target through its retained owner leaf."""
+
+    root = Path(vault_root)
+    target = Path(path)
+    try:
+        relative = target.absolute().relative_to(root.absolute())
+    except ValueError as error:
+        raise RuntimeError("graph SQLite target is outside the vault") from error
+    descriptor_id = reserved_paths.classify_logical(relative.as_posix()).descriptor_id
+    if descriptor_id not in {"graph-store", "graph-rebuild"}:
+        raise RuntimeError("graph SQLite target is not owner-bound")
+    with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+        with reserved_paths._identity_coordination_scope(
+            root,
+            descriptor_ids=(descriptor_id,),
+        ):
+            with reserved_paths._sqlite_owner_target_scope(
+                root,
+                target,
+                descriptor_id,
+                create=False,
+            ) as retained_path:
+                database: Any = retained_path
+                if readonly:
+                    database = f"{retained_path.as_uri()}?mode=ro"
+                    kwargs["uri"] = True
+                conn = _sqlite_connect_owned(database, **kwargs)
+                try:
+                    reserved_paths._publish_sqlite_owner_family(
+                        root,
+                        target,
+                        descriptor_id,
+                        conn,
+                    )
+                    return conn
+                except BaseException:
+                    conn.close()
+                    raise
+
+
+def _move_graph_rebuild_into_store(
+    vault_root: Path,
+    temporary: Path,
+    live: Path,
+) -> None:
+    """Publish the first graph rebuild through an absent-target held move."""
+
+    with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+        reserved_paths._move_owner_file(
+            vault_root,
+            temporary,
+            "graph-rebuild",
+            live,
+            "graph-store",
+            replace=False,
+        )
+
+
+def _set_sqlite_busy_timeout(
+    connection: sqlite3.Connection,
+    timeout_seconds: float,
+) -> None:
+    timeout_ms = max(0, min(2_147_483_647, round(timeout_seconds * 1000)))
+    connection.execute(f"PRAGMA busy_timeout={timeout_ms}")
+
+
+def _published_live_graph_wal_family_complete(
+    vault_root: Path,
+    target: Path,
+) -> bool:
+    catalogue = reserved_paths._published_identity_catalogue(vault_root)
+    for suffix in ("", "-wal", "-shm"):
+        path = target.with_name(f"{target.name}{suffix}")
+        try:
+            identity = reserved_paths._lstat_identity(path)
+        except OSError:
+            return False
+        if catalogue.descriptor_for(identity) != "graph-store":
+            return False
+    return True
+
+
+def _prepare_live_graph_wal_family(
+    vault_root: Path,
+    target: Path,
+    connection: sqlite3.Connection,
+) -> None:
+    """Fail-fast establish, pin, and publish the live SQLite family."""
+
+    # Identity coordination must never inherit the ordinary five-second SQLite
+    # wait. If another graph writer exists, its WAL family is already reachable
+    # and can be published without taking the write reservation below.
+    _set_sqlite_busy_timeout(connection, 0)
+    sidecar_store.apply_sidecar_pragmas(connection)
+    _set_sqlite_busy_timeout(connection, 0)
+    journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+    if (
+        journal_mode is None
+        or not journal_mode
+        or str(journal_mode[0]).lower() != "wal"
+    ):
+        raise RuntimeError("live graph store could not establish WAL mode")
+    reserved_paths._publish_sqlite_owner_family(
+        vault_root,
+        target,
+        "graph-store",
+        connection,
+    )
+    if _published_live_graph_wal_family_complete(vault_root, target):
+        return
+
+    # A brand-new WAL database has no companions yet. This reservation creates
+    # them without changing graph data. It is deliberately fail-fast; an active
+    # writer implies the family should have been publishable above.
+    connection.execute("BEGIN IMMEDIATE")
+    connection.rollback()
+    reserved_paths._publish_sqlite_owner_family(
+        vault_root,
+        target,
+        "graph-store",
+        connection,
+    )
+    if not _published_live_graph_wal_family_complete(vault_root, target):
+        raise RuntimeError("live graph WAL identity family is incomplete")
+
+
+def _backup_graph_rebuild_into_store(
+    vault_root: Path,
+    temporary: Path,
+    live: Path,
+    *,
+    timeout: float,
+) -> None:
+    """Back up a retained rebuild without holding the global identity domain.
+
+    SQLite's backup may wait for the destination busy timeout.  Both exact
+    leaves and the live WAL family are retained and published first, so that
+    wait does not need to starve unrelated generic operations taking a private
+    identity snapshot.
+    """
+
+    root = Path(vault_root)
+    with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+        with ExitStack() as retained:
+            with reserved_paths._identity_coordination_scope(
+                root,
+                descriptor_ids=("graph-rebuild", "graph-store"),
+            ):
+                retained_temporary = retained.enter_context(
+                    reserved_paths._sqlite_owner_target_scope(
+                        root,
+                        temporary,
+                        "graph-rebuild",
+                        create=False,
+                    )
+                )
+                retained_live = retained.enter_context(
+                    reserved_paths._sqlite_owner_target_scope(
+                        root,
+                        live,
+                        "graph-store",
+                        create=False,
+                    )
+                )
+                source = _sqlite_connect_owned(
+                    f"{retained_temporary.as_uri()}?mode=ro",
+                    uri=True,
+                )
+                retained.callback(source.close)
+                destination = _sqlite_connect_owned(retained_live, timeout=timeout)
+                retained.callback(destination.close)
+                _prepare_live_graph_wal_family(root, live, destination)
+                reserved_paths._publish_sqlite_owner_family(
+                    root,
+                    temporary,
+                    "graph-rebuild",
+                    source,
+                )
+            _set_sqlite_busy_timeout(destination, timeout)
+            source.backup(destination)
+
+
+def _remove_graph_rebuild_artifact(
+    vault_root: Path,
+    path: Path,
+    *,
+    missing_ok: bool,
+) -> bool:
+    """Remove one exact graph rebuild member through graph-owner authority."""
+
+    with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+        return reserved_paths._remove_owner_file(
+            vault_root,
+            path,
+            "graph-rebuild",
+            missing_ok=missing_ok,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -939,7 +1157,11 @@ def _reap_unowned_temporaries(live: Path, *, keep: int) -> list[Path]:
     for base in ordered[max(0, keep) :]:
         for path in groups[base]:
             try:
-                path.unlink(missing_ok=True)
+                _remove_graph_rebuild_artifact(
+                    live.parent.parent,
+                    path,
+                    missing_ok=True,
+                )
             except OSError:
                 # A reader still holds delete-sharing authority on Windows.
                 continue
@@ -1171,15 +1393,113 @@ class EpistemicGraphIndex:
         return self._mutation_coordinator
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
-        target = path if path is not None else self.path
-        sidecar_store.ensure_sidecar_parent(target)
-        conn = sqlite3.connect(target)
-        try:
-            from . import embeddings
+        with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+            return self._connect_owned(path)
 
-            embeddings._apply_sidecar_pragmas(conn)
-        except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
-            pass
+    def _connect_owned(self, path: Path | None = None) -> sqlite3.Connection:
+        target = path if path is not None else self.path
+        try:
+            relative = target.absolute().relative_to(self.vault_root.absolute())
+        except ValueError:
+            descriptor_id = None
+        else:
+            descriptor_id = reserved_paths.classify_logical(
+                relative.as_posix()
+            ).descriptor_id
+        if descriptor_id == "graph-store":
+            connection: sqlite3.Connection | None = None
+            try:
+                with reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=(descriptor_id,),
+                ):
+                    with reserved_paths._sqlite_owner_target_scope(
+                        self.vault_root,
+                        target,
+                        descriptor_id,
+                        create=True,
+                    ) as retained_target:
+                        connection = self._open_live_graph_store(retained_target)
+            except BaseException:
+                if connection is not None:
+                    connection.close()
+                raise
+            if connection is None:  # pragma: no cover - context entered or raised
+                raise RuntimeError("live graph store did not open a connection")
+            try:
+                _set_sqlite_busy_timeout(connection, 5.0)
+                return self._initialize_graph_schema(connection)
+            except BaseException:
+                connection.close()
+                raise
+        if descriptor_id == "graph-rebuild":
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=(descriptor_id,),
+            ):
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root,
+                    target,
+                    descriptor_id,
+                    create=True,
+                ) as retained_target:
+                    return self._connect_retained(
+                        retained_target,
+                        descriptor_id=descriptor_id,
+                    )
+        with reserved_paths._identity_coordination_scope(self.vault_root):
+            return self._connect_retained(target, descriptor_id=None)
+
+    def _open_live_graph_store(self, target: Path) -> sqlite3.Connection:
+        """Publish the WAL family before leaving owner coordination.
+
+        Schema setup can wait on another SQLite connection for the configured
+        busy timeout.  The live primary/WAL/SHM identities are already stable
+        by then, so keeping the graph identity domain locked across that wait
+        only starves unrelated public mutations that need a catalogue snapshot.
+        """
+
+        sidecar_store.ensure_sidecar_parent(target)
+        conn = _sqlite_connect_owned(target)
+        try:
+            _prepare_live_graph_wal_family(
+                self.vault_root,
+                target,
+                conn,
+            )
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def _connect_retained(
+        self,
+        target: Path,
+        *,
+        descriptor_id: str | None,
+    ) -> sqlite3.Connection:
+        sidecar_store.ensure_sidecar_parent(target)
+        conn = _sqlite_connect_owned(target)
+        if descriptor_id == "graph-store":
+            # Live graph readers hold explicit snapshots while semantic writers
+            # converge in parallel. WAL keeps those reads from starving the
+            # writer that owns this exact private store.
+            sidecar_store.apply_sidecar_pragmas(conn)
+        elif descriptor_id == "graph-rebuild":
+            # Publication moves exactly one proven SQLite file into place.
+            # Keeping private rebuilds in rollback-journal mode prevents
+            # authoritative rows from remaining in a detached WAL companion.
+            conn.execute("PRAGMA journal_mode=DELETE")
+        try:
+            return self._initialize_graph_schema(conn)
+        except BaseException:
+            conn.close()
+            raise
+
+    def _initialize_graph_schema(
+        self,
+        conn: sqlite3.Connection,
+    ) -> sqlite3.Connection:
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         if edge_columns and "raw_relation" not in edge_columns:
             conn.execute("DROP TABLE graph_edges")
@@ -1254,6 +1574,21 @@ class EpistemicGraphIndex:
         )
         return conn
 
+    def _connect_existing(
+        self,
+        path: Path | None = None,
+        *,
+        readonly: bool,
+        **kwargs: Any,
+    ) -> sqlite3.Connection:
+        target = path if path is not None else self.path
+        return _connect_existing_owner_target(
+            self.vault_root,
+            target,
+            readonly=readonly,
+            **kwargs,
+        )
+
     def available(self) -> bool:
         conn = self._open_read_snapshot()
         if conn is None:
@@ -1307,9 +1642,10 @@ class EpistemicGraphIndex:
         registry_key = _sidecar_registry_key(self.path)
         _await_publication_hold(registry_key)
         try:
-            uri = f"{self.path.resolve().as_uri()}?mode=ro"
-            conn = sqlite3.connect(
-                uri, uri=True, factory=_TrackedSidecarConnection, check_same_thread=False
+            conn = self._connect_existing(
+                readonly=True,
+                factory=_TrackedSidecarConnection,
+                check_same_thread=False,
             )
             conn.__dict__["_exomem_registry_key"] = registry_key
             _register_sidecar_reader(registry_key, conn)
@@ -1619,7 +1955,11 @@ class EpistemicGraphIndex:
             owner_claimed = False
             preserve_temporary = False
             try:
-                temporary.unlink(missing_ok=True)
+                _remove_graph_rebuild_artifact(
+                    self.vault_root,
+                    temporary,
+                    missing_ok=True,
+                )
                 graph_sync.register_temporary(temporary)
                 registered_temporary = temporary.resolve()
                 registered = True
@@ -1741,7 +2081,11 @@ class EpistemicGraphIndex:
                         if not self._publication_ticket_matches(ticket):
                             continue
                         try:
-                            graph_sync.replace_sidecar(temporary, live)
+                            graph_sync.replace_sidecar(
+                                temporary,
+                                live,
+                                vault_root=self.vault_root,
+                            )
                         except graph_sync.GraphSidecarReplaceUnavailable:
                             # Neither the atomic replacement nor the in-place
                             # publication could land. The complete private
@@ -1771,7 +2115,17 @@ class EpistemicGraphIndex:
                     assert registered_temporary is not None
                     graph_sync.unregister_temporary(registered_temporary)
                 if not preserve_temporary:
-                    temporary.unlink(missing_ok=True)
+                    try:
+                        _remove_graph_rebuild_artifact(
+                            self.vault_root,
+                            temporary,
+                            missing_ok=True,
+                        )
+                    except OSError:
+                        # An unsafe/raced private alias is never followed or
+                        # removed. Retaining it must not mask the classified
+                        # publication refusal that made this cleanup run.
+                        pass
                 # Owner release is the other moment the retained set can be
                 # bounded safely: no attempt of ours is registered any more, and
                 # the reaper can take the claim it needs.
@@ -1828,7 +2182,7 @@ class EpistemicGraphIndex:
     ) -> _GraphPublicationTicket | None:
         """Finish and verify every temp-sidecar proof before canonical authority."""
         try:
-            conn = sqlite3.connect(temporary)
+            conn = self._connect_existing(temporary, readonly=False)
             try:
                 if required is not None:
                     self._write_graph_sync_acknowledgement(conn, required)
@@ -1885,7 +2239,7 @@ class EpistemicGraphIndex:
                         _GRAPH_SYNC_CHECKPOINT_KEY: prior_acknowledgement.render(),
                     }
                 )
-            check = sqlite3.connect(f"{temporary.resolve().as_uri()}?mode=ro", uri=True)
+            check = self._connect_existing(temporary, readonly=True)
             try:
                 graph_sync.limit_graph_metadata_read(check)
                 metadata = dict(
@@ -1912,7 +2266,7 @@ class EpistemicGraphIndex:
                     for key, value in expected_meta.items()
                 )
             ):
-                conn = sqlite3.connect(temporary)
+                conn = self._connect_existing(temporary, readonly=False)
                 try:
                     with conn:
                         self._publish_available_marker_in_transaction(
@@ -1926,7 +2280,7 @@ class EpistemicGraphIndex:
                         return None
                 finally:
                     conn.close()
-                check = sqlite3.connect(f"{temporary.resolve().as_uri()}?mode=ro", uri=True)
+                check = self._connect_existing(temporary, readonly=True)
                 try:
                     graph_sync.limit_graph_metadata_read(check)
                     metadata = dict(
@@ -1968,7 +2322,7 @@ class EpistemicGraphIndex:
         if not self.path.exists():
             return None
         try:
-            conn = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+            conn = self._connect_existing(readonly=True)
             try:
                 graph_sync.limit_graph_metadata_read(conn)
                 values = dict(
@@ -2331,7 +2685,7 @@ class EpistemicGraphIndex:
     def _mark_unavailable(self) -> None:
         if not self.path.exists():
             return
-        conn = sqlite3.connect(self.path)
+        conn = self._connect_existing(readonly=False)
         try:
             with conn:
                 conn.execute("DELETE FROM graph_meta WHERE key = 'schema_version'")
@@ -2366,7 +2720,7 @@ class EpistemicGraphIndex:
             operation="epistemic_graph_suspend_reads",
             holder_kind="graph",
         ):
-            conn = sqlite3.connect(self.path)
+            conn = self._connect_existing(readonly=False)
             try:
                 with conn:
                     conn.execute(
@@ -2382,8 +2736,7 @@ class EpistemicGraphIndex:
             return False
         conn: sqlite3.Connection | None = None
         try:
-            uri = f"{self.path.resolve().as_uri()}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True)
+            conn = self._connect_existing(readonly=True)
             return (
                 conn.execute(
                     "SELECT 1 FROM graph_meta WHERE key = ?",
@@ -2404,7 +2757,7 @@ class EpistemicGraphIndex:
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
     ) -> None:
-        conn = sqlite3.connect(self.path)
+        conn = self._connect_existing(readonly=False)
         try:
             with conn:
                 self._publish_available_marker_in_transaction(

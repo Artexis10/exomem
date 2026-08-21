@@ -259,6 +259,10 @@ def test_upload_parses_before_guard_and_preserves_inside_it(
             events.append("legacy-ensure")
 
         @contextmanager
+        def reserved_identity_guard(self, _vault, **_kwargs):
+            yield
+
+        @contextmanager
         def mutation_guard(self, guarded_vault):
             assert guarded_vault == vault
             events.append("guard-enter")
@@ -301,6 +305,10 @@ def test_upload_media_reconciliation_uses_writer_authority(
     depth = 0
 
     class Manager:
+        @contextmanager
+        def reserved_identity_guard(self, _vault, **_kwargs):
+            yield
+
         @contextmanager
         def mutation_guard(self, guarded_vault):
             nonlocal depth
