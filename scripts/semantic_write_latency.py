@@ -100,6 +100,44 @@ READ_AFTER_WRITE_P95_MS = 75_000.0
 READ_AFTER_WRITE_SCALING_RATIO = 8.0
 READ_AFTER_WRITE_SCALING_SLACK_MS = 2_000.0
 
+# --- Scaling-bound floors for the three O(N) rows.
+#
+# SCALING_BOUND_CEILING_FRACTION above floors validate and commit and is
+# explicitly withheld here: "only the two operations expected to stay FLAT with
+# corpus size get this; the read/cold rows are deliberately O(N) and carry their
+# own ratios."  That reasoning covers ratio MAGNITUDE.  It does not cover
+# baseline NOISE, and noise is what fails the build -- the bound is anchored to
+# the small sample either way, so a lucky-fast or a genuinely-improved 2k
+# measurement drags it down exactly as it did for commit.
+#
+# MEASURED BASIS (nine consecutive Linux CI runs on main, 2026-08-21 -- the
+# authoritative platform this lane actually gates on, not the contended Windows
+# box the ceilings above were calibrated from):
+#   read_after_write_median_ms  2k  671.8-2736.0 (4.1x spread)  8k  6578.7-19305.3
+#   cold_read_after_write_ms    2k 1633.8-3398.2               8k  5427.9-11614.9
+#   cold_preflight_ms           2k 2669.3-7540.7               8k  8630.8-22738.5
+# The read row's 2k baseline alone moves its bound by 16.5s across those runs,
+# while the 8k value it bounds spans 12.7s: the ruler is noisier than the thing
+# it measures, which is the commit-row finding restated one row down.
+#
+# The ratio itself is the runner-invariant statistic and stayed 6.6-8.3x across
+# seven of the nine -- a slow runner inflates both ends together.  It then read
+# 12.3-12.5x on the two most recent, because #715 and #718 made the SMALL corpus
+# disproportionately faster (#718's post-RRF early exit fires hard at 2k and
+# barely at 8k, since candidate_k grows with the eligible set).  Both 8k numbers
+# were at or below the running median.  Nothing regressed; the denominator
+# shrank, and a ratio rule cannot tell those apart.
+#
+# So floor each bound just clear of the worst UNREGRESSED large-corpus figure
+# observed on this runner, and keep every floor strictly below its own absolute
+# ceiling so the scaling rule still fails a real super-linear regression before
+# the ceiling does.  Runner spread is ~3x in absolute terms, so a floor that
+# clears the slow-runner normal cannot also be tight -- that is a real limit of
+# same-run anchoring, not a slack choice.  Re-measure rather than hand-tune.
+READ_AFTER_WRITE_SCALING_BOUND_FLOOR_MS = 22_000.0
+COLD_READ_AFTER_WRITE_SCALING_BOUND_FLOOR_MS = 14_000.0
+COLD_PREFLIGHT_SCALING_BOUND_FLOOR_MS = 26_000.0
+
 # --- Cold/evicted scenario (the row the upcoming #510 fix must move a cost
 # onto). `reset_corpus_context_cache()` drops the semantic-contract
 # corpus-context cache; `freshness.clear()` drops freshness liveness (only
@@ -402,9 +440,10 @@ def check(results: list[dict[str, float | int]]) -> None:
                     f"({small['pages']} -> {large['pages']} pages)"
                 )
         read_key = "read_after_write_median_ms"
-        read_bound = (
+        read_bound = max(
             float(small[read_key]) * READ_AFTER_WRITE_SCALING_RATIO
-            + READ_AFTER_WRITE_SCALING_SLACK_MS
+            + READ_AFTER_WRITE_SCALING_SLACK_MS,
+            READ_AFTER_WRITE_SCALING_BOUND_FLOOR_MS,
         )
         if float(large[read_key]) >= read_bound:
             failures.append(
@@ -415,9 +454,10 @@ def check(results: list[dict[str, float | int]]) -> None:
         # faster than headroom allows means the "next caller" bill is
         # scaling with corpus size, not staying flat.
         cold_key = "cold_read_after_write_ms"
-        cold_bound = (
+        cold_bound = max(
             float(small[cold_key]) * COLD_READ_AFTER_WRITE_SCALING_RATIO
-            + COLD_READ_AFTER_WRITE_SCALING_SLACK_MS
+            + COLD_READ_AFTER_WRITE_SCALING_SLACK_MS,
+            COLD_READ_AFTER_WRITE_SCALING_BOUND_FLOOR_MS,
         )
         if float(large[cold_key]) >= cold_bound:
             failures.append(
@@ -428,9 +468,10 @@ def check(results: list[dict[str, float | int]]) -> None:
         # relocated corpus rebuild lands, so this is the row that would
         # actually catch the ~70s walk moving back in.
         cold_preflight_key = "cold_preflight_ms"
-        cold_preflight_bound = (
+        cold_preflight_bound = max(
             float(small[cold_preflight_key]) * COLD_PREFLIGHT_SCALING_RATIO
-            + COLD_PREFLIGHT_SCALING_SLACK_MS
+            + COLD_PREFLIGHT_SCALING_SLACK_MS,
+            COLD_PREFLIGHT_SCALING_BOUND_FLOOR_MS,
         )
         if float(large[cold_preflight_key]) >= cold_preflight_bound:
             failures.append(
