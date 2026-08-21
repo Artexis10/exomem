@@ -3423,6 +3423,43 @@ def test_owner_identity_is_published_before_wal_temp_index_or_receipt_reachabili
     ]
 
 
+def test_sqlite_owner_publication_retries_a_transient_wal_family_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import held_fs, media_jobs
+
+    publish_sqlite_identities = held_fs.publish_sqlite_identities
+    attempts = 0
+
+    def transient_family_change(
+        filesystem: held_fs.HeldFilesystem,
+        parent: held_fs.HeldDirectory,
+        primary: str,
+        publish,
+    ) -> held_fs.HeldResult[None]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return held_fs.HeldResult(
+                error=held_fs.HeldFsError(
+                    "MISSING",
+                    "WAL family changed between probe and held acquisition",
+                )
+            )
+        return publish_sqlite_identities(filesystem, parent, primary, publish)
+
+    monkeypatch.setattr(
+        held_fs,
+        "publish_sqlite_identities",
+        transient_family_change,
+    )
+
+    media_jobs.MediaJobStore(tmp_path)
+
+    assert attempts == 2
+
+
 def test_primary_sqlite_owners_publish_under_exact_authority_and_coordination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1973,16 +1973,18 @@ def _publish_sqlite_owner_family(
                     {f"{prefix}{name}": identity for name, identity in family.items()},
                 )
 
-            wal_or_shm_reachable = False
-            for suffix in ("-wal", "-shm"):
-                probe = filesystem.file(parent, f"{relative.name}{suffix}")
-                if probe.ok:
-                    probe.require().close()
-                    wal_or_shm_reachable = True
-                elif probe.error is None or probe.error.code != "MISSING":
-                    raise RuntimeError("SQLite identity family is unavailable")
+            for attempt in range(3):
+                wal_or_shm_reachable = False
+                for suffix in ("-wal", "-shm"):
+                    probe = filesystem.file(parent, f"{relative.name}{suffix}")
+                    if probe.ok:
+                        probe.require().close()
+                        wal_or_shm_reachable = True
+                    elif probe.error is None or probe.error.code != "MISSING":
+                        raise RuntimeError("SQLite identity family is unavailable")
 
-            if wal_or_shm_reachable:
+                if not wal_or_shm_reachable:
+                    break
                 if not _owner_directory_is_current(filesystem, parent):
                     raise RuntimeError(
                         "SQLite identity publication parent changed"
@@ -1993,7 +1995,17 @@ def _publish_sqlite_owner_family(
                     relative.name,
                     publish,
                 )
-                if not result.ok:
+                if result.ok:
+                    if not _owner_directory_is_current(filesystem, parent):
+                        raise RuntimeError(
+                            "SQLite identity publication parent changed"
+                        )
+                    return
+                if (
+                    result.error is None
+                    or result.error.code not in {"MISSING", "IDENTITY_CHANGED"}
+                    or attempt == 2
+                ):
                     raise RuntimeError(
                         "SQLite WAL identity family is not completely reachable"
                     )
@@ -2001,7 +2013,6 @@ def _publish_sqlite_owner_family(
                     raise RuntimeError(
                         "SQLite identity publication parent changed"
                     )
-                return
 
             family: dict[str, held_fs.StableIdentity] = {}
             for suffix in ("", "-journal", "-wal", "-shm"):
