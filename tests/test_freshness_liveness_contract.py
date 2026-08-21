@@ -477,7 +477,13 @@ def refuse_graph_publication(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     """
     refused: list[Path] = []
 
-    def refuse_replacement(temporary: Path, _live: Path) -> None:
+    def refuse_replacement(
+        temporary: Path,
+        _live: Path,
+        *,
+        vault_root: Path | None = None,
+    ) -> None:
+        del vault_root
         refused.append(temporary)
         raise graph_sync.GraphSidecarReplaceUnavailable("live graph sidecar has an open reader")
 

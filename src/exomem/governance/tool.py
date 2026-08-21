@@ -30,6 +30,7 @@ from .. import (
     lexstore,
     media_jobs,
     memory_refs,
+    reserved_paths,
     review_state,
 )
 from ..kbdir import kb_dirname
@@ -2523,6 +2524,11 @@ def op_govern_memory(vault_root: Path, operation: str, **kwargs: Any) -> dict[st
     if spec is None:
         raise GovernanceError(
             "UNKNOWN_GOVERNANCE_OPERATION", f"unsupported operation {operation!r}"
+        )
+    if not reserved_paths.owner_authorized("governance-tree"):
+        raise GovernanceError(
+            "GOVERNANCE_AUTHORITY_REQUIRED",
+            "governance operations require dispatcher-issued owner authority",
         )
     root = Path(vault_root)
     selection = _selected_variant(operation, spec, kwargs)

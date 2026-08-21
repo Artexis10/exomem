@@ -238,6 +238,40 @@ def test_product_review_connection_dataset_and_file_routes_exist(
         assert r.status_code != 404, f"/api/{name} missing"
 
 
+def test_reserved_path_rest_outcomes_are_presence_independent(
+    vault,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    read_request = {"path": "Knowledge Base/.governance.sqlite"}
+    write_request = {
+        "operation": "create",
+        "path": "Knowledge Base/_Consolidation/runs/run.json",
+        "content": "secret",
+    }
+
+    absent_read = client.post("/api/read_memory", json=read_request, headers=_auth())
+    absent_write = client.post(
+        "/api/manage_memory_file", json=write_request, headers=_auth()
+    )
+    (vault / "Knowledge Base" / ".governance.sqlite").write_bytes(b"private")
+    private_run = vault / "Knowledge Base" / "_Consolidation" / "runs" / "run.json"
+    private_run.parent.mkdir(parents=True)
+    private_run.write_text("private", encoding="utf-8")
+    present_read = client.post("/api/read_memory", json=read_request, headers=_auth())
+    present_write = client.post(
+        "/api/manage_memory_file", json=write_request, headers=_auth()
+    )
+
+    assert absent_read.status_code == present_read.status_code
+    assert absent_read.json() == present_read.json()
+    assert absent_read.json()["error"]["code"] == "NOT_FOUND"
+    assert absent_write.status_code == present_write.status_code
+    assert absent_write.json() == present_write.json()
+    assert absent_write.json()["error"]["code"] == "RESERVED_PATH"
+    assert private_run.read_text(encoding="utf-8") == "private"
+
+
 def test_success_uses_envelope(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(

@@ -44,7 +44,6 @@ import os
 import sqlite3
 import threading
 import time
-import traceback
 import uuid
 from pathlib import Path
 from typing import Any
@@ -52,7 +51,7 @@ from typing import Any
 import pytest
 
 from exomem import find as find_module
-from exomem import freshness, lexstore
+from exomem import freshness, lexstore, reserved_paths
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -266,10 +265,10 @@ def test_atomic_publish_failure_preserves_live(
     store = lexstore.get_store(tmp_path)
     before = store.catalog_checkpoint("kb")
 
-    def boom(src: Any, dst: Any) -> None:
+    def boom(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("simulated atomic rename failure")
 
-    monkeypatch.setattr(lexstore.os, "replace", boom)
+    monkeypatch.setattr(reserved_paths, "_move_owner_file", boom)
     assert store.rebuild_atomic() is False
     monkeypatch.undo()
 
@@ -1092,27 +1091,19 @@ def test_live_wal_not_blindly_deleted_and_unsafe_publish_declines(
     )
 
     replaced = {"n": 0}
-    callers: list[str] = []
-    real_replace = lexstore.os.replace
+    real_move = reserved_paths._move_owner_file
 
-    def _spy_replace(src: Any, dst: Any) -> Any:
-        replaced["n"] += 1
-        # Named, not just counted. This fired once on a Windows CI runner and
-        # could not be reproduced locally; with only a count there was no way to
-        # tell an unsafe live-main swap from some unrelated rename inside the
-        # build, which is the difference between a data-safety defect and a
-        # test that spies too widely. `rebuild_atomic` has two publish paths --
-        # the quarantine branch replaces before `_quiesce_live_wal` is ever
-        # consulted -- so the caller is exactly what the next failure needs.
-        frame = traceback.extract_stack()[-2]
-        callers.append(f"{frame.filename}:{frame.lineno} in {frame.name} -> {dst}")
-        return real_replace(src, dst)
+    def _spy_move(*args: Any, **kwargs: Any) -> Any:
+        destination = Path(args[3])
+        if destination == store.path:
+            replaced["n"] += 1
+        return real_move(*args, **kwargs)
 
-    monkeypatch.setattr(lexstore.os, "replace", _spy_replace)
+    monkeypatch.setattr(reserved_paths, "_move_owner_file", _spy_move)
     monkeypatch.setattr(store, "_quiesce_live_wal", lambda: False)
     assert store.rebuild_atomic() is False
     # live main never replaced; live -wal/-shm never touched
-    assert replaced["n"] == 0, callers
+    assert replaced["n"] == 0
     monkeypatch.undo()
     assert store.catalog_checkpoint("kb") == before
     assert any("livecontent" in hit.content for hit in _units_in_category(tmp_path, "config"))
@@ -1662,6 +1653,40 @@ def test_fatal_corrupt_main_with_wal_recovers_by_whole_set_replacement(
     )
 
 
+def test_fatal_probe_preserves_live_wal_for_quarantine(tmp_path: Path) -> None:
+    """Classifying a fatal main must not let SQLite delete its WAL first."""
+    a = _kb_file(tmp_path, "a.md", "- [config] preservewal ^u1")
+    _seed(tmp_path, [a])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    wal, _shm = store._wal_shm_paths(store.path)
+    store.path.write_bytes(b"not a database at all")
+    wal.write_bytes(b"old wal bytes")
+
+    assert store._live_main_proven_fatal() is True
+    assert wal.read_bytes() == b"old wal bytes"
+
+
+def test_live_publication_guard_preserves_fatal_wal_for_quarantine(
+    tmp_path: Path,
+) -> None:
+    """The pre-build guard is observational even for a corrupt main+WAL set."""
+    a = _kb_file(tmp_path, "a.md", "- [config] guardwal ^u1")
+    _seed(tmp_path, [a])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    wal, _shm = store._wal_shm_paths(store.path)
+    store.path.write_bytes(b"not a database at all")
+    wal.write_bytes(b"old wal bytes")
+
+    guard = store._live_publication_guard()
+
+    assert guard["schema_current"] is False
+    assert wal.read_bytes() == b"old wal bytes"
+
+
 def test_quarantine_install_failure_restores_or_isolates_without_mixing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1690,17 +1715,19 @@ def test_quarantine_install_failure_restores_or_isolates_without_mixing(
     )
 
     installs = {"n": 0}
-    real_replace = lexstore.os.replace
+    owner_moves: list[tuple[str, str]] = []
+    real_move = reserved_paths._move_owner_file
 
-    def fail_live_install(src: Any, dst: Any) -> Any:
+    def fail_live_install(*args: Any, **kwargs: Any) -> Any:
+        owner_moves.append((Path(args[1]).name, Path(args[3]).name))
         # Fail ONLY the temp -> live-main install; quarantine/restore moves (which
         # target quarantine names, not the live main) still succeed.
-        if Path(dst) == store.path:
+        if Path(args[3]) == store.path and args[2] == "lexical-rebuild":
             installs["n"] += 1
             raise OSError("simulated temp install failure")
-        return real_replace(src, dst)
+        return real_move(*args, **kwargs)
 
-    monkeypatch.setattr(lexstore.os, "replace", fail_live_install)
+    monkeypatch.setattr(reserved_paths, "_move_owner_file", fail_live_install)
     assert store.rebuild_atomic() is False
     monkeypatch.undo()
 
@@ -1714,7 +1741,7 @@ def test_quarantine_install_failure_restores_or_isolates_without_mixing(
     if store.path.exists():
         # Fully restored to the live names; nothing left isolated.
         assert store.path.read_bytes() == corrupt_main
-        assert wal.exists() and wal.read_bytes() == old_wal
+        assert wal.exists() and wal.read_bytes() == old_wal, owner_moves
         assert not q_files
     else:
         # Fail-closed isolation: live names empty, the old disposable set retained
@@ -1760,11 +1787,17 @@ def test_healthy_busy_wal_declines_without_quarantine_or_eviction(
         monkeypatch.setattr(store, "_quiesce_live_wal", lambda: False)
 
         replaced = {"n": 0}
-        real_replace = lexstore.os.replace
+        real_move = reserved_paths._move_owner_file
         monkeypatch.setattr(
-            lexstore.os,
-            "replace",
-            lambda s, d: (replaced.__setitem__("n", replaced["n"] + 1), real_replace(s, d))[1],
+            reserved_paths,
+            "_move_owner_file",
+            lambda *args, **kwargs: (
+                replaced.__setitem__(
+                    "n",
+                    replaced["n"] + (1 if Path(args[3]) == store.path else 0),
+                ),
+                real_move(*args, **kwargs),
+            )[1],
         )
 
         assert store.rebuild_atomic() is False

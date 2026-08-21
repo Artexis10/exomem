@@ -25,8 +25,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -2337,6 +2337,71 @@ class LeaseManager:
             yield mutation
 
     @contextmanager
+    def reserved_identity_guard(
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        domains: Iterable[str],
+        exclusive: bool,
+        request_id: str | None = None,
+        operation: str | None = None,
+        holder_kind: str = "reserved-state",
+    ) -> Iterator[None]:
+        """Coordinate one owner's identities without serializing other owners."""
+
+        ordered_domains = tuple(sorted(set(domains)))
+        if not ordered_domains or any(
+            type(domain) is not str
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", domain) is None
+            for domain in ordered_domains
+        ):
+            raise ValueError("reserved identity domains must be registered labels")
+        vault_identity = canonical_mutation_identity(vault_root)
+        deadline = time.monotonic() + self._mutation_timeout_seconds
+        gate = self._mutation_coordinator_for(
+            f"reserved-identity-v1:gate:{vault_identity}"
+        )
+
+        def enter(
+            stack: ExitStack,
+            mutation: VaultMutationCoordinator,
+            *,
+            operation_label: str | None = operation,
+        ) -> None:
+            stack.enter_context(
+                mutation.hold(
+                    timeout_seconds=max(0.0, deadline - time.monotonic()),
+                    request_id=request_id,
+                    operation=operation_label,
+                    holder_kind=holder_kind,
+                    publish_holder_metadata=False,
+                )
+            )
+
+        def enter_domains(stack: ExitStack) -> None:
+            for domain in ordered_domains:
+                identity = f"reserved-identity-v1:{domain}:{vault_identity}"
+                mutation = self._mutation_coordinator_for(identity)
+                label = f"{operation}:{domain}" if operation is not None else domain
+                enter(stack, mutation, operation_label=label)
+
+        if exclusive:
+            with ExitStack() as gate_stack:
+                gate_label = f"{operation}:gate" if operation is not None else "gate"
+                enter(gate_stack, gate, operation_label=gate_label)
+                with ExitStack() as domains_stack:
+                    enter_domains(domains_stack)
+                    yield
+            return
+
+        with ExitStack() as domains_stack:
+            with ExitStack() as gate_stack:
+                gate_label = f"{operation}:gate" if operation is not None else "gate"
+                enter(gate_stack, gate, operation_label=gate_label)
+                enter_domains(domains_stack)
+            yield
+
+    @contextmanager
     def mutation_guard(
         self,
         vault_root: os.PathLike[str] | str,
@@ -2716,17 +2781,31 @@ class LeaseManager:
             if command.name == "reconcile" or (
                 command.name == "maintain_memory" and kwargs.get("mode") == "reconcile"
             ):
-                try:
-                    from . import audit as audit_module
-                    from .epistemic_graph import EpistemicGraphIndex
+                from . import audit as audit_module
+                from .epistemic_graph import EpistemicGraphIndex
 
-                    graph_current = (
+                def graph_is_current() -> bool:
+                    return (
                         graph_sync.status(root)["state"] == "current"
                         and EpistemicGraphIndex(
                             root, mutation_coordinator=self._mutation_coordinator_for(root)
                         ).available()
                         and not audit_module._check_graph_drift(root)
                     )
+
+                try:
+                    graph_current = graph_is_current()
+                    if not graph_current and not has_reconcile_handoff:
+                        # A startup/background mutation can supersede the exact
+                        # checkpoint reconcile joined while its canonical guard
+                        # is still held. Reconcile is the one command whose
+                        # terminal promises graph currency, so close that final
+                        # post-guard drift here instead of returning
+                        # ``unavailable`` while the drain rebuilds moments later.
+                        EpistemicGraphIndex(
+                            root, mutation_coordinator=self._mutation_coordinator_for(root)
+                        ).rebuild_all()
+                        graph_current = graph_is_current()
                 except Exception:  # noqa: BLE001 - preserve a failed graph terminal
                     graph_current = False
                 terminal_result = finish_reconcile_graph_status(
@@ -3544,6 +3623,13 @@ def invoke_command(
     **kwargs: Any,
 ) -> Any:
     from .commands import invocation_is_read_only, validate_process_media_operation
+    from .reserved_paths import (
+        _owner_authority_scope,
+        mutation_remediation,
+        reserved_preflight,
+    )
+
+    reserved_hit = reserved_preflight(command, kwargs)
 
     if command.name == "edit_memory":
         from .edit_operations import normalize_edit_surface_arguments
@@ -3570,12 +3656,23 @@ def invoke_command(
     except SelectorCoverageError as error:
         # Unknown selectors must first take the conservative writer/admission
         # path, but must never execute a leaf that could return an unreceipted
-        # future read representation. process_media already owns a stable
-        # public input error, so preserve it before entering the writer path.
-        if command.name == "process_media":
-            validate_process_media_operation(kwargs.get("operation", "process"))
+        # future read representation.
         selector_error = error
         read_only = False
+
+    if reserved_hit is not None:
+        if read_only:
+            raise OpError("NOT_FOUND", "path does not exist")
+        raise OpError(
+            "RESERVED_PATH",
+            "path is reserved for its owning subsystem",
+            mutation_remediation(reserved_hit.classification.descriptor_id),
+        )
+
+    # process_media already owns a stable public input error. Preserve it once
+    # reserved-path routing has had its required first refusal opportunity.
+    if selector_error is not None and command.name == "process_media":
+        validate_process_media_operation(kwargs.get("operation", "process"))
 
     dispatch_command = command
     if selector_error is not None:
@@ -3589,17 +3686,18 @@ def invoke_command(
         dispatch_command = replace(command, leaf=reject_uncovered_selector)
 
     def _invoke() -> Any:
-        return get_manager().invoke(
-            dispatch_command,
-            injected,
-            kwargs,
-            read_only=read_only,
-            idempotency_key=idempotency_key,
-            public_idempotency_key=public_idempotency_key,
-            idempotency_principal_scope=idempotency_principal_scope,
-            implicit_idempotency_scope=implicit_idempotency_scope,
-            mutation_request_id=mutation_request_id,
-        )
+        with _owner_authority_scope(command.name):
+            return get_manager().invoke(
+                dispatch_command,
+                injected,
+                kwargs,
+                read_only=read_only,
+                idempotency_key=idempotency_key,
+                public_idempotency_key=public_idempotency_key,
+                idempotency_principal_scope=idempotency_principal_scope,
+                implicit_idempotency_scope=implicit_idempotency_scope,
+                mutation_request_id=mutation_request_id,
+            )
 
     if not injected or not is_vault_root(injected[0]):
         return _invoke()

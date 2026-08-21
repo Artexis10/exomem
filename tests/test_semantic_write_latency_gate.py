@@ -430,3 +430,39 @@ def test_no_check_flag_never_fails(monkeypatch) -> None:
         module, "measure_all", lambda sizes, samples, root, **_kwargs: SUPERLINEAR
     )
     assert module.main([]) == 0
+
+
+def test_activation_warmup_drains_the_initial_graph_before_samples(monkeypatch) -> None:
+    """The cold whole-vault graph build must not race the timed write burst."""
+    module = load_module()
+    events: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        module,
+        "_transition",
+        lambda root, rel_path, version: events.append(
+            ("transition", (root, rel_path, version))
+        ),
+    )
+    monkeypatch.setattr(
+        module.graph_sync,
+        "drain_active_rebuilds",
+        lambda: events.append(("drain", None)) or True,
+    )
+
+    root = Path("/synthetic-vault")
+    module._warm_activation_boundary(root, "Knowledge Base/target.md")
+
+    assert events == [
+        ("transition", (root, "Knowledge Base/target.md", 1)),
+        ("drain", None),
+    ]
+
+
+def test_activation_warmup_refuses_to_sample_an_unsettled_graph(monkeypatch) -> None:
+    module = load_module()
+    monkeypatch.setattr(module, "_transition", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module.graph_sync, "drain_active_rebuilds", lambda: False)
+
+    with pytest.raises(RuntimeError, match="initial graph rebuild did not finish"):
+        module._warm_activation_boundary(Path("/synthetic-vault"), "Knowledge Base/target.md")

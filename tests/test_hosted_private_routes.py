@@ -1693,6 +1693,74 @@ def test_hosted_call_traces_and_errors_omit_query_path_and_arguments(
     assert SENSITIVE_PATH not in caplog.text
 
 
+def test_hosted_reserved_path_outcomes_are_presence_independent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-reserved-paths",
+        credential="reserved-paths-private-service-credential-0001",
+        invoker=writer_lease.invoke_command,
+        expose_tier2=True,
+    )
+    headers = _headers(config)
+    read_request = {"path": "Knowledge Base/.governance.sqlite"}
+    write_request = {
+        "operation": "create",
+        "path": "Knowledge Base/_Consolidation/runs/run.json",
+        "content": "secret",
+    }
+
+    try:
+        absent_read = client.post(
+            "/private/exomem/v1/command/read_memory",
+            headers=headers,
+            json=read_request,
+        )
+        absent_write = client.post(
+            "/private/exomem/v1/command/manage_memory_file",
+            headers=headers,
+            json=write_request,
+        )
+        (config.vault_root / "Knowledge Base" / ".governance.sqlite").write_bytes(
+            b"private"
+        )
+        private_run = (
+            config.vault_root
+            / "Knowledge Base"
+            / "_Consolidation"
+            / "runs"
+            / "run.json"
+        )
+        private_run.parent.mkdir(parents=True)
+        private_run.write_text("private", encoding="utf-8")
+        present_read = client.post(
+            "/private/exomem/v1/command/read_memory",
+            headers=headers,
+            json=read_request,
+        )
+        present_write = client.post(
+            "/private/exomem/v1/command/manage_memory_file",
+            headers=headers,
+            json=write_request,
+        )
+    finally:
+        writer_lease.reset_managers_for_tests()
+
+    assert absent_read.status_code == present_read.status_code
+    assert absent_read.json() == present_read.json()
+    assert absent_read.json()["error"]["code"] == "NOT_FOUND"
+    assert absent_write.status_code == present_write.status_code
+    assert absent_write.json() == present_write.json()
+    assert absent_write.json()["error"]["code"] == "RESERVED_PATH"
+    assert private_run.read_text(encoding="utf-8") == "private"
+
+
 def test_hosted_core_logs_omit_paths_and_malformed_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

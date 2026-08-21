@@ -69,6 +69,38 @@ def test_bulk_reference_lookup_uses_index_and_refreshes_only_missing_paths(tmp_p
     }
 
 
+def test_hot_bulk_reference_lookup_uses_one_readonly_sidecar_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    page_path = "Knowledge Base/Notes/current.md"
+    page = vault / page_path
+    page.parent.mkdir(parents=True)
+    identity = memory_refs.new_id()
+    page.write_text(_page(identity), encoding="utf-8")
+
+    index = memory_refs.ReferenceIndex(vault)
+    index.rebuild_all()
+    readonly_connections = 0
+    connect_readonly = index._connect_readonly
+
+    def counted_readonly():
+        nonlocal readonly_connections
+        readonly_connections += 1
+        return connect_readonly()
+
+    def refuse_write_connection():
+        raise AssertionError("a current reference lookup opened the writable sidecar")
+
+    monkeypatch.setattr(index, "_connect_readonly", counted_readonly)
+    monkeypatch.setattr(index, "_connect", refuse_write_connection)
+
+    assert index.refs_for_paths([page_path]) == {
+        page_path: memory_refs.memory_ref(identity)
+    }
+    assert readonly_connections == 1
+
+
 def test_bulk_reference_lookup_answers_phantom_casing_in_the_callers_form(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -130,6 +130,11 @@ jobs:
       # asserts a 3.0x ratio against its own prescan-only cost and measured
       # 4.91x. Both stay gating on the Linux lane they are calibrated for;
       # neither is the platform behaviour this lane exists to expose.
+      # The required native-NTFS job in ci.yml owns the held-filesystem,
+      # reserved-path, mutation-race, and Windows-alias modules. Running those
+      # same modules again in this Windows matrix pushed a shard past its 45m
+      # session cap; macOS still gets them here, and Linux keeps its ordinary
+      # CI coverage.
       - name: Run tests (lean — BM25/keyword, server media extraction off)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
@@ -145,6 +150,7 @@ jobs:
           tests/test_governance_overhead.py::test_governed_receipt_append_overhead_under_budget
           --deselect
           tests/test_governance_overhead.py::test_scrubber_throughput_under_budget
+          ${{ startsWith(matrix.os, 'windows') && '--ignore=tests/test_held_fs_contract.py --ignore=tests/test_held_fs_windows.py --ignore=tests/test_reserved_admin_paths.py --ignore=tests/test_mutation_concurrency.py --ignore=tests/test_windows_path_alias_guard.py' || '' }}
           --splits=4
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration

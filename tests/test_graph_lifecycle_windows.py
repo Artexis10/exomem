@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import delete_file, graph_sync, mutation_lock, recall_policy, recover_from_trash
+from exomem import (
+    delete_file,
+    graph_sync,
+    held_fs,
+    recall_policy,
+    recover_from_trash,
+    reserved_paths,
+)
 from exomem.governance import lifecycle
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows lifecycle contract")
@@ -69,6 +76,82 @@ def _marker_snapshot(vault: Path) -> dict[str, bytes]:
     } if root.exists() else {}
 
 
+def _held_directory_probe(
+    vault: Path,
+    relative: str,
+) -> tuple[type[held_fs.HeldFilesystem], held_fs.StableIdentity]:
+    acquired = held_fs.acquire(vault)
+    assert acquired.ok
+    with acquired.require() as filesystem:
+        retained = filesystem.parent(relative)
+        assert retained.ok
+        with retained.require() as directory:
+            return type(filesystem), directory.identity
+
+
+def test_windows_private_unlink_closes_delete_pending_handle_before_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = graph_sync.floor_path(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"floor")
+
+    acquired = held_fs.acquire(tmp_path)
+    assert acquired.ok
+    with acquired.require() as filesystem:
+        parent_result = filesystem.parent("Knowledge Base", access="mutate")
+        assert parent_result.ok
+        with parent_result.require() as parent:
+            file_result = filesystem.file(parent, target.name, access="mutate")
+            assert file_result.ok
+            with file_result.require() as file:
+                filesystem_type = type(filesystem)
+                file_type = type(file)
+
+    events: list[str] = []
+    original_unlink = filesystem_type.unlink
+    original_close = file_type.close
+    original_flush = filesystem_type.flush_directory
+
+    def observe_unlink(filesystem, file):  # noqa: ANN001
+        events.append("unlink")
+        return original_unlink(filesystem, file)
+
+    def observe_close(file):  # noqa: ANN001
+        events.append("close")
+        return original_close(file)
+
+    def observe_flush(filesystem, directory):  # noqa: ANN001
+        events.append("flush")
+        return original_flush(filesystem, directory)
+
+    monkeypatch.setattr(filesystem_type, "unlink", observe_unlink)
+    monkeypatch.setattr(file_type, "close", observe_close)
+    monkeypatch.setattr(filesystem_type, "flush_directory", observe_flush)
+
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        assert reserved_paths._remove_owner_file(
+            tmp_path,
+            target,
+            "graph-handoff",
+        )
+
+    assert events == ["unlink", "close", "flush"]
+    assert not target.exists()
+
+
+def _absolute_move_paths(
+    vault_root: Path,
+    source: object,
+    destination: object,
+) -> tuple[Path, Path]:
+    return (
+        Path(vault_root) / Path(os.fspath(source)),
+        Path(vault_root) / Path(os.fspath(destination)),
+    )
+
+
 @pytest.mark.parametrize("refusal", ["cross-device", "census-drift"])
 def test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
@@ -79,6 +162,8 @@ def test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refus
     flushed: list[Path] = []
     armed = False
     original_open = graph_sync.os.open
+    filesystem_type, kb_identity = _held_directory_probe(tmp_path, "Knowledge Base")
+    original_flush = filesystem_type.flush_directory
 
     def reject_crt_epoch_directory(path, *args, **kwargs):  # noqa: ANN001
         if Path(path) == graph_sync.floor_path(tmp_path).parent:
@@ -87,11 +172,13 @@ def test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refus
 
     monkeypatch.setattr(graph_sync.os, "open", reject_crt_epoch_directory)
 
-    def flush_epoch_directory(path: Path) -> None:
-        if armed and path == graph_sync.floor_path(tmp_path).parent:
-            flushed.append(path)
+    def flush_epoch_directory(filesystem, directory):  # noqa: ANN001
+        result = original_flush(filesystem, directory)
+        if armed and directory.identity == kb_identity:
+            flushed.append(graph_sync.floor_path(tmp_path).parent)
+        return result
 
-    monkeypatch.setattr(mutation_lock, "_windows_flush_directory", flush_epoch_directory)
+    monkeypatch.setattr(filesystem_type, "flush_directory", flush_epoch_directory)
     if refusal == "cross-device":
         devices = iter((10, 11))
 
@@ -139,13 +226,18 @@ def test_windows_epoch_restore_flush_failure_remains_graph_rollback_failed(
     _govern(tmp_path, relative)
     flushed: list[Path] = []
     armed = False
-    original_flush = mutation_lock._windows_flush_directory
+    filesystem_type, kb_identity = _held_directory_probe(tmp_path, "Knowledge Base")
+    original_flush = filesystem_type.flush_directory
 
-    def refuse_epoch_flush(path: Path) -> None:
-        if armed and path == graph_sync.floor_path(tmp_path).parent:
-            flushed.append(path)
-            raise OSError("injected epoch flush refusal")
-        original_flush(path)
+    def refuse_epoch_flush(filesystem, directory):  # noqa: ANN001
+        if armed and directory.identity == kb_identity:
+            flushed.append(graph_sync.floor_path(tmp_path).parent)
+            return held_fs.HeldResult(
+                error=held_fs.HeldFsError(
+                    "IO_REFUSED", "injected epoch flush refusal"
+                )
+            )
+        return original_flush(filesystem, directory)
 
     devices = iter((10, 11))
 
@@ -157,7 +249,7 @@ def test_windows_epoch_restore_flush_failure_remains_graph_rollback_failed(
         return value
 
     monkeypatch.setattr(lifecycle, "_device", device)
-    monkeypatch.setattr(mutation_lock, "_windows_flush_directory", refuse_epoch_flush)
+    monkeypatch.setattr(filesystem_type, "flush_directory", refuse_epoch_flush)
 
     with pytest.raises(delete_file.DeleteFileError) as error:
         delete_file.delete_file(tmp_path, path=relative, confirm=True)
@@ -229,13 +321,15 @@ def test_windows_deletion_post_rename_flush_refusal_durably_inverse_restores_pri
     prior_markers = _marker_snapshot(tmp_path)
     events = _fail_first_post_rename_flush(source, monkeypatch)
     rename_calls: list[tuple[Path, Path]] = []
-    original_rename = lifecycle.os.rename
+    original_move = reserved_paths.move_generic_path
     original_restore = graph_sync.restore_deletion_epoch
     original_abort = lifecycle.abort_deletion
 
-    def rename(source_path, destination_path):  # noqa: ANN001
-        rename_calls.append((Path(source_path), Path(destination_path)))
-        original_rename(source_path, destination_path)
+    def rename(vault_root, source_path, destination_path, **kwargs):  # noqa: ANN001
+        rename_calls.append(
+            _absolute_move_paths(Path(vault_root), source_path, destination_path)
+        )
+        return original_move(vault_root, source_path, destination_path, **kwargs)
 
     def restore(epoch: graph_sync.GraphDeletionEpoch) -> None:
         events.append(("restore_epoch", None))
@@ -245,7 +339,7 @@ def test_windows_deletion_post_rename_flush_refusal_durably_inverse_restores_pri
         events.append(("restore_marker", None))
         original_abort(operation)
 
-    monkeypatch.setattr(lifecycle.os, "rename", rename)
+    monkeypatch.setattr(reserved_paths, "move_generic_path", rename)
     monkeypatch.setattr(graph_sync, "restore_deletion_epoch", restore)
     monkeypatch.setattr(lifecycle, "abort_deletion", abort)
 
@@ -281,16 +375,18 @@ def test_windows_deletion_inverse_move_failure_retains_epoch_and_marker_for_reco
     _govern(tmp_path, relative)
     prior_floor, _prior_checkpoint = _epoch_snapshot(tmp_path)
     _fail_first_post_rename_flush(source, monkeypatch)
-    original_rename = lifecycle.os.rename
+    original_move = reserved_paths.move_generic_path
     rename_calls: list[tuple[Path, Path]] = []
 
-    def refuse_inverse(source_path, destination_path):  # noqa: ANN001
-        rename_calls.append((Path(source_path), Path(destination_path)))
+    def refuse_inverse(vault_root, source_path, destination_path, **kwargs):  # noqa: ANN001
+        rename_calls.append(
+            _absolute_move_paths(Path(vault_root), source_path, destination_path)
+        )
         if len(rename_calls) == 2:
-            raise OSError("injected inverse move refusal")
-        original_rename(source_path, destination_path)
+            raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
+        return original_move(vault_root, source_path, destination_path, **kwargs)
 
-    monkeypatch.setattr(lifecycle.os, "rename", refuse_inverse)
+    monkeypatch.setattr(reserved_paths, "move_generic_path", refuse_inverse)
 
     with pytest.raises(delete_file.DeleteFileError) as error:
         delete_file.delete_file(
@@ -330,13 +426,15 @@ def test_windows_recovery_post_rename_flush_refusal_durably_inverse_restores_pri
     prior_markers = _marker_snapshot(tmp_path)
     events = _fail_first_post_rename_flush(trash, monkeypatch)
     rename_calls: list[tuple[Path, Path]] = []
-    original_rename = lifecycle.os.rename
+    original_move = reserved_paths.move_generic_path
     original_restore = graph_sync.restore_deletion_epoch
     original_abort = lifecycle.abort_recovery
 
-    def rename(source_path, destination_path):  # noqa: ANN001
-        rename_calls.append((Path(source_path), Path(destination_path)))
-        original_rename(source_path, destination_path)
+    def rename(vault_root, source_path, destination_path, **kwargs):  # noqa: ANN001
+        rename_calls.append(
+            _absolute_move_paths(Path(vault_root), source_path, destination_path)
+        )
+        return original_move(vault_root, source_path, destination_path, **kwargs)
 
     def restore(epoch: graph_sync.GraphDeletionEpoch) -> None:
         events.append(("restore_epoch", None))
@@ -346,7 +444,7 @@ def test_windows_recovery_post_rename_flush_refusal_durably_inverse_restores_pri
         events.append(("restore_marker", None))
         original_abort(operation)
 
-    monkeypatch.setattr(lifecycle.os, "rename", rename)
+    monkeypatch.setattr(reserved_paths, "move_generic_path", rename)
     monkeypatch.setattr(graph_sync, "restore_deletion_epoch", restore)
     monkeypatch.setattr(lifecycle, "abort_recovery", abort)
 
@@ -378,16 +476,18 @@ def test_windows_recovery_inverse_move_failure_retains_epoch_and_marker_for_reco
     trash = tmp_path / deleted.trash_path
     prior_floor, _prior_checkpoint = _epoch_snapshot(tmp_path)
     _fail_first_post_rename_flush(trash, monkeypatch)
-    original_rename = lifecycle.os.rename
+    original_move = reserved_paths.move_generic_path
     rename_calls: list[tuple[Path, Path]] = []
 
-    def refuse_inverse(source_path, destination_path):  # noqa: ANN001
-        rename_calls.append((Path(source_path), Path(destination_path)))
+    def refuse_inverse(vault_root, source_path, destination_path, **kwargs):  # noqa: ANN001
+        rename_calls.append(
+            _absolute_move_paths(Path(vault_root), source_path, destination_path)
+        )
         if len(rename_calls) == 2:
-            raise OSError("injected inverse move refusal")
-        original_rename(source_path, destination_path)
+            raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
+        return original_move(vault_root, source_path, destination_path, **kwargs)
 
-    monkeypatch.setattr(lifecycle.os, "rename", refuse_inverse)
+    monkeypatch.setattr(reserved_paths, "move_generic_path", refuse_inverse)
 
     with pytest.raises(recover_from_trash.RecoverError) as error:
         recover_from_trash.recover_from_trash(tmp_path, trash_path=deleted.trash_path)

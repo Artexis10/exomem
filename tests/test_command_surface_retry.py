@@ -51,6 +51,67 @@ _HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 15.0
 
 
+@pytest.mark.parametrize(
+    ("command_name", "kwargs", "code"),
+    [
+        ("get", {"path": "Knowledge Base/.governance.sqlite"}, "NOT_FOUND"),
+        (
+            "create_file",
+            {"path": "Knowledge Base/_Consolidation/run.json", "content": "secret"},
+            "RESERVED_PATH",
+        ),
+        (
+            "manage_memory_file",
+            {
+                "operation": "future-operation",
+                "path": "Knowledge Base/.embeddings.sqlite",
+            },
+            "RESERVED_PATH",
+        ),
+        (
+            "get",
+            {"path": "Knowledge Base/Notes/../_Governance/rules/private.yaml"},
+            "NOT_FOUND",
+        ),
+        (
+            "create_file",
+            {
+                "path": "Knowledge Base/Notes/../_Governance/rules/private.yaml",
+                "content": "secret",
+            },
+            "RESERVED_PATH",
+        ),
+    ],
+)
+def test_reserved_path_preflight_precedes_retry_and_leaf_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    kwargs: dict[str, object],
+    code: str,
+) -> None:
+    from exomem.commands import COMMANDS, PRODUCT_COMMANDS
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    command = next(
+        command
+        for command in (*COMMANDS, *PRODUCT_COMMANDS)
+        if command.name == command_name
+    )
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("reserved preflight reached lease/idempotency dispatch"),
+    )
+
+    with pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(command, vault, **kwargs)
+
+    assert raised.value.code == code
+    assert list(vault.rglob("*")) == [vault / "Knowledge Base"]
+
+
 def _write_editable_note(vault: Path, *, body: str = "Before") -> str:
     relative = "Knowledge Base/Notes/Insights/retry-safe-edit.md"
     target = vault / relative
