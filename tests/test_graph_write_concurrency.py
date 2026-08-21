@@ -8,15 +8,11 @@ background rebuild, deferred drains) could reach it before that change.
 
 Two halves of that conflict are guarded here.
 
-The census half: a rebuild creates, replaces and removes its scratch sidecars
-inside the very directory a canonical write takes a guarded census of, so
-without an exclusion an in-flight rebuild turns an unrelated write into
-`PATH_GUARD_CHANGED` and then `STALE_RECORD`. The exclusion is deliberately
-narrow, and the narrowness is the part worth testing: `.graph-sync.json` and
-`.graph-sync-floor.json` are written by the canonical batch *itself*, so a
-change to them under a write is exactly what the guard must still refuse. An
-over-broad "ignore anything starting with .graph" would silently disarm the
-guard against the batch writer's own artifacts.
+The census half: graph/index owners create, replace and remove private state
+inside the very directory a canonical write takes a guarded census of. The
+closed reserved-path registry is the one authority for excluding that state;
+otherwise an in-flight owner turns an unrelated write into
+`PATH_GUARD_CHANGED` and then `STALE_RECORD`.
 
 The sharing half: on Windows a reader that holds a page open refuses a
 concurrent replacement of it. A derived-index reader has no business taking
@@ -32,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import deferred_index, graph_sync
+from exomem import graph_sync
 from exomem import vault as vault_module
 
 
@@ -48,27 +44,6 @@ def _census(path: Path) -> tuple[str, ...]:
     return tuple(entry.relative_path for entry in entries)
 
 
-def test_the_census_exclusion_tracks_graph_syncs_own_artifact_names() -> None:
-    """`vault` spells these literally to avoid an import cycle; bind them anyway.
-
-    A rename of the rebuild temp prefix or the live sidecar in `graph_sync`
-    would otherwise leave `vault`'s copy stale, and the census would start
-    counting rebuild residue again -- reintroducing the exact failure this
-    exclusion exists to prevent, silently and far from either definition.
-    """
-    assert vault_module._DERIVED_INDEX_PREFIXES == (
-        graph_sync._TEMP_PREFIX,
-        graph_sync._RESET_PREFIX,
-    )
-
-    # The reset manifest enumerates every file a reset moves. Its graph-sidecar
-    # members are derived; its checkpoint and floor members are canonical-batch
-    # output and must stay censused.
-    canonical_batch_members = {graph_sync._CHECKPOINT_FILENAME, graph_sync._FLOOR_FILENAME}
-    derived_members = set(graph_sync._RESET_MEMBERS) - canonical_batch_members
-    assert vault_module._DERIVED_INDEX_NAMES == derived_members
-
-
 @pytest.mark.parametrize(
     "name",
     [
@@ -76,9 +51,9 @@ def test_the_census_exclusion_tracks_graph_syncs_own_artifact_names() -> None:
         ".graph.sqlite-journal",
         ".graph.sqlite-wal",
         ".graph.sqlite-shm",
-        ".graph-rebuild-0123456789abcdef.sqlite",
-        ".graph-rebuild-0123456789abcdef.sqlite-wal",
-        ".graph-reset-0123456789abcdef",
+        f".graph-rebuild-{'0' * 64}-{'1' * 24}.sqlite",
+        f".graph-rebuild-{'0' * 64}-{'1' * 24}.sqlite-wal",
+        f".graph-reset-{'2' * 24}",
     ],
 )
 def test_a_rebuilds_residue_does_not_move_the_census(tmp_path: Path, name: str) -> None:
@@ -130,31 +105,18 @@ def test_the_dirty_path_queues_database_does_not_move_the_census(
     assert _census(guarded) == before
 
 
-def test_the_census_exclusion_tracks_the_deferred_indexs_own_database_name() -> None:
-    """Bind the literal, for the reason the graph_sync names are bound.
-
-    `vault` cannot import `deferred_index` at module scope without a cycle, so
-    it spells the basename. A rename there would otherwise leave this copy
-    stale and quietly start counting the queue again.
-    """
-    assert deferred_index.store_path(Path("vault")).name == vault_module._DEFERRED_INDEX_BASENAME
-
-
 @pytest.mark.parametrize("name", [".graph-sync.json", ".graph-sync-floor.json"])
-def test_the_canonical_batchs_own_graph_artifacts_stay_censused(
+def test_graph_handoff_private_state_does_not_move_the_census(
     tmp_path: Path, name: str
 ) -> None:
-    """The narrow half: these are batch output, so the guard must still see them."""
+    """Graph handoff state is private even when a canonical batch writes it."""
     guarded = tmp_path / "Knowledge Base"
     guarded.mkdir()
     (guarded / "page.md").write_text("body\n", encoding="utf-8")
 
     before = _census(guarded)
     (guarded / name).write_bytes(b"{}")
-    after = _census(guarded)
-
-    assert after != before
-    assert any(entry.endswith(name) for entry in after)
+    assert _census(guarded) == before
 
 
 #: Replacements to drive against a continuously re-opening reader. Far more

@@ -2248,6 +2248,43 @@ def test_directory_census_ignores_valid_residue_lifecycle_but_fails_unsafe(
     assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
 
 
+def test_directory_census_ignores_registered_internal_state_churn(
+    tmp_path: Path,
+) -> None:
+    knowledge_base = tmp_path / "Knowledge Base"
+    knowledge_base.mkdir()
+    (knowledge_base / "page.md").write_text("body\n", encoding="utf-8")
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path,
+        "Knowledge Base",
+        max_entries=2,
+    )
+
+    lexical_wal = knowledge_base / ".lexical.sqlite-wal"
+    lexical_wal.write_bytes(b"private index state")
+    census.recheck(tmp_path)
+    lexical_wal.unlink()
+    census.recheck(tmp_path)
+
+
+def test_directory_census_keeps_nested_internal_name_lookalikes_canonical(
+    tmp_path: Path,
+) -> None:
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path,
+        "Knowledge Base/Notes",
+        max_entries=1,
+    )
+
+    (notes / ".lexical.sqlite-wal").write_bytes(b"user content")
+
+    with pytest.raises(vault_module.PathGuardError) as changed:
+        census.recheck(tmp_path)
+    assert changed.value.code == "PATH_GUARD_CHANGED"
+
+
 def test_bounded_census_path_fallback_rejects_substituted_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

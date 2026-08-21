@@ -2879,70 +2879,11 @@ def read_bytes_without_pinning(path: Path) -> bytes:
         return stream.read()
 
 
-#: Derived-index operational artifacts that live beside canonical content in a
-#: vault directory. A graph rebuild creates, replaces and removes these for its
-#: whole run; none of it is a change to the canonical namespace this census
-#: exists to pin.
-#:
-#: Counting them made an unrelated canonical write fail purely because a rebuild
-#: happened to be in flight — `PATH_GUARD_CHANGED: guarded directory census
-#: changed`, surfaced to the caller as `STALE_RECORD`, and on Windows also as
-#: `WinError 32` when the open sidecar refuses replacement. Nothing hit it while
-#: every write joined its own rebuild and the two could never overlap: the join
-#: was hiding a genuine conflict between the rebuild and concurrent writes
-#: (#576). It is the same reasoning as `_BATCH_RESIDUE_PREFIX` directly below —
-#: exomem's own operational residue is not canonical content.
-#:
-#: Deliberately narrow. `.graph-sync.json` and `.graph-sync-floor.json` stay
-#: censused: those are written by the canonical batch itself, so a change to
-#: them under a write is exactly what this guard must still refuse.
-#:
-#: Literals rather than an import, to avoid a `vault` <-> `graph_sync` cycle;
-#: `test_graph_artifacts_are_excluded_from_the_canonical_census` binds them to
-#: their definitions in `graph_sync` so the two cannot drift apart.
-_DERIVED_INDEX_PREFIXES = (".graph-rebuild-", ".graph-reset-")
-_DERIVED_INDEX_NAMES = frozenset(
-    {
-        ".graph.sqlite",
-        ".graph.sqlite-journal",
-        ".graph.sqlite-wal",
-        ".graph.sqlite-shm",
-    }
-)
-
-
-#: The deferred-index queue database, which lives beside canonical content for
-#: the same reason the graph sidecar does. It earns its own set rather than
-#: joining `_DERIVED_INDEX_NAMES` because that one is bound to `graph_sync`'s
-#: reset manifest, and this one is bound to `deferred_index.store_path`.
-#:
-#: The graph dirty-path enqueue (`converge-graph-incrementally`) writes this
-#: database *before* the canonical batch commits, so that a crash between the
-#: markdown and the enqueue cannot lose the dirty set. That ordering is
-#: deliberate -- over-enqueueing costs a redundant re-index, under-enqueueing
-#: is unrecoverable without the whole-vault rebuild being removed -- and it
-#: puts the file's creation and journalling inside the guarded window. Counting
-#: it made the first write to a fresh vault invalidate its own census and fail
-#: as `STALE_RECORD: canonical record changed before commit`, with nothing
-#: concurrent involved.
-#:
-#: Same narrowness rule as above: a dirty-path queue is exomem's own
-#: bookkeeping and never canonical content, so excluding it removes no
-#: guarantee. Two writers racing to append their own debt is precisely the
-#: monotone behaviour the queue exists to provide, not a canonical conflict.
-_DEFERRED_INDEX_BASENAME = ".deferred-index.sqlite"
-_DEFERRED_INDEX_NAMES = frozenset(
-    {_DEFERRED_INDEX_BASENAME}
-    | {f"{_DEFERRED_INDEX_BASENAME}-{suffix}" for suffix in ("journal", "wal", "shm")}
-)
-
-
-def _is_derived_index_artifact(name: str) -> bool:
-    """Whether a directory entry is derived-index residue, not canonical content."""
+def _is_registered_internal_state_artifact(relative: str) -> bool:
+    """Whether one full vault-relative entry is private Exomem state."""
     return (
-        name in _DERIVED_INDEX_NAMES
-        or name in _DEFERRED_INDEX_NAMES
-        or name.startswith(_DERIVED_INDEX_PREFIXES)
+        reserved_paths.classify_logical(relative).disposition
+        is reserved_paths.PathDisposition.RESERVED
     )
 
 
@@ -3187,13 +3128,17 @@ def _bounded_directory_entries(
         ordinary_names: list[str] = []
         for entry in iterator:
             name = entry.name
-            if name in ignored_names or _is_derived_index_artifact(name):
+            if name in ignored_names:
                 continue
             if name.startswith(_BATCH_RESIDUE_PREFIX):
                 residue_names.append(name)
                 if len(residue_names) > _BATCH_RESIDUE_WORKSPACE_LIMIT:
                     raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
-            elif len(ordinary_names) <= max_entries:
+                continue
+            entry_relative = f"{relative}/{name}" if relative else name
+            if _is_registered_internal_state_artifact(entry_relative):
+                continue
+            if len(ordinary_names) <= max_entries:
                 ordinary_names.append(name)
         iterator.close()
         iterator = None
