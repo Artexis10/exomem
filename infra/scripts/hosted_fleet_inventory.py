@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import hashlib
 import json
@@ -10,6 +11,8 @@ import os
 import re
 import stat
 import subprocess
+import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
@@ -1214,3 +1217,190 @@ def require_inventory_gate(inventory: dict[str, Any], *, action: str) -> dict[st
         if counts.get("activeAssignments"):
             _error(f"active assignments block {action}")
     return inventory
+
+
+def execution_inventory_facts(inventory: dict[str, Any]) -> dict[str, object]:
+    """Project one safe reconciled inventory into execution-phase facts."""
+
+    require_inventory_gate(inventory, action="rollforward")
+    counts = cast(dict[str, int], inventory["counts"])
+    target = _runtime(inventory.get("target"), label="inventory target")
+    raw_cells = inventory.get("cells")
+    if not isinstance(raw_cells, list) or len(raw_cells) != counts["cells"]:
+        _error("inventory cells do not match counts")
+    cells: list[dict[str, object]] = []
+    for index, raw in enumerate(raw_cells):
+        item = _closed(
+            raw,
+            {"cellId", "classification", "runtime", "surfaces", "issues"},
+            label=f"inventory cell {index}",
+        )
+        if item["issues"] != [] or item["classification"] == "inconsistent":
+            _error("inventory contains an inconsistent cell")
+        runtime = _runtime(item["runtime"], label=f"inventory cell {index} runtime")
+        surfaces = _closed(
+            item["surfaces"],
+            {
+                "bindingStatus",
+                "routable",
+                "capacityClaim",
+                "desiredState",
+                "namespace",
+                "helmRelease",
+                "workload",
+                "volume",
+                "reviewerAuthority",
+                "reviewerPurpose",
+                "assignmentIds",
+                "unfinishedOperationIds",
+            },
+            label=f"inventory cell {index} surfaces",
+        )
+        assignment_ids = surfaces["assignmentIds"]
+        operation_ids = surfaces["unfinishedOperationIds"]
+        if (
+            not isinstance(assignment_ids, list)
+            or len(assignment_ids) > 1
+            or not isinstance(operation_ids, list)
+            or len(operation_ids) > 1
+        ):
+            _error("inventory cell authority is ambiguous")
+        classification = item["classification"]
+        if classification not in {"target", "legacy", "reviewer", "terminal"}:
+            _error("inventory cell classification is invalid")
+        target_cell = runtime == target
+        cells.append(
+            {
+                "cellId": _opaque_id(item["cellId"], label="inventory cellId"),
+                "class": classification,
+                "releaseVersion": runtime["releaseVersion"],
+                "assignmentId": assignment_ids[0] if assignment_ids else None,
+                "operationId": operation_ids[0] if operation_ids else None,
+                "status": "no_op" if target_cell or classification == "terminal" else "pending",
+                "beforeVaultSha256": None,
+                "afterVaultSha256": None,
+                "evidenceSha256": None,
+            }
+        )
+    digest = inventory_sha256(inventory)
+    return {
+        "inventoryStatus": inventory["status"],
+        "inventorySha256": digest,
+        "cellCount": counts["cells"],
+        "legacyCellCount": counts["legacyCells"],
+        "inventoryEvidenceSha256": digest,
+        "cells": cells,
+    }
+
+
+def _load_operator_json(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        information = path.lstat()
+        if stat.S_ISLNK(information.st_mode) or not stat.S_ISREG(information.st_mode):
+            _error(f"{label} must be a regular file")
+        if information.st_size > _MAX_COLLECTOR_BYTES:
+            _error(f"{label} is too large")
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise InventoryError(f"cannot read {label}") from exc
+    return _decode_json(raw, label=label)
+
+
+def _write_private_json(path: Path, value: object) -> None:
+    if path.exists() or path.is_symlink():
+        _error("inventory output already exists")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(_canonical(value))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    collect = commands.add_parser("collect", help="collect and reconcile the live fleet")
+    collect.add_argument("--substrate-endpoint", required=True)
+    collect.add_argument("--substrate-token-file", type=Path, required=True)
+    collect.add_argument("--runtime-catalog", type=Path, required=True)
+    collect.add_argument("--target", type=Path, required=True)
+    collect.add_argument("--observed-at", required=True)
+    collect.add_argument("--inventory-output", type=Path, required=True)
+    collect.add_argument("--facts-output", type=Path, required=True)
+    collect.add_argument("--timeout-seconds", type=float, default=15)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        target = _runtime(
+            _load_operator_json(args.target, label="target"),
+            label="target runtime",
+        )
+        catalog_document = _load_operator_json(args.runtime_catalog, label="runtime catalog")
+        if set(catalog_document) != {"runtimes"} or not isinstance(
+            catalog_document["runtimes"], list
+        ):
+            _error("runtime catalog fields are incomplete or unknown")
+        runtime_catalog = [
+            _runtime(value, label=f"runtime catalog item {index}")
+            for index, value in enumerate(catalog_document["runtimes"])
+        ]
+        if target not in runtime_catalog:
+            _error("runtime catalog does not contain the exact target")
+        sources = {
+            "substrate": collect_substrate(
+                args.substrate_endpoint,
+                token_file=args.substrate_token_file,
+                timeout_seconds=args.timeout_seconds,
+            ),
+            "provisioner": collect_provisioner(timeout_seconds=args.timeout_seconds),
+            "kubernetes": collect_kubernetes(
+                runtime_catalog=runtime_catalog,
+                observed_at=args.observed_at,
+                timeout_seconds=args.timeout_seconds,
+            ),
+        }
+        inventory = reconcile_inventory(sources, target=target)
+        facts = execution_inventory_facts(inventory)
+        if args.inventory_output == args.facts_output:
+            _error("inventory and facts outputs must be distinct")
+        _write_private_json(args.inventory_output, inventory)
+        try:
+            _write_private_json(args.facts_output, facts)
+        except Exception:
+            try:
+                args.inventory_output.unlink()
+            except OSError:
+                pass
+            raise
+        print(
+            json.dumps(
+                {
+                    "cellCount": facts["cellCount"],
+                    "inventorySha256": facts["inventorySha256"],
+                    "legacyCellCount": facts["legacyCellCount"],
+                    "status": facts["inventoryStatus"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    except InventoryError as exc:
+        print(f"hosted fleet inventory: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

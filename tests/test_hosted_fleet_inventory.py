@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -535,6 +536,109 @@ def test_kubernetes_collector_reconciles_configmap_helm_state_without_secrets() 
     }
     assert len(calls) == 4
     assert all("get" in command and "-o" in command for command in calls)
+    assert calls[1].count("statefulsets") == 1
+
+
+def test_execution_facts_are_derived_from_the_exact_gated_inventory() -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    legacy = _runtime("0.54.1", "b")
+    sources = _empty_sources()
+    _add_live_cell(sources, cell_id="cell_legacy", runtime=legacy)
+    _add_live_cell(sources, cell_id="cell_target", runtime=target)
+
+    inventory = module.reconcile_inventory(sources, target=target)
+    facts = module.execution_inventory_facts(inventory)
+    digest = module.inventory_sha256(inventory)
+
+    assert facts == {
+        "inventoryStatus": "consistent",
+        "inventorySha256": digest,
+        "cellCount": 2,
+        "legacyCellCount": 1,
+        "inventoryEvidenceSha256": digest,
+        "cells": [
+            {
+                "cellId": "cell_legacy",
+                "class": "legacy",
+                "releaseVersion": "0.54.1",
+                "assignmentId": None,
+                "operationId": None,
+                "status": "pending",
+                "beforeVaultSha256": None,
+                "afterVaultSha256": None,
+                "evidenceSha256": None,
+            },
+            {
+                "cellId": "cell_target",
+                "class": "target",
+                "releaseVersion": "0.57.2",
+                "assignmentId": None,
+                "operationId": None,
+                "status": "no_op",
+                "beforeVaultSha256": None,
+                "afterVaultSha256": None,
+                "evidenceSha256": None,
+            },
+        ],
+    }
+
+
+def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    sources = _empty_sources()
+    _add_live_cell(sources, cell_id="cell_target", runtime=target)
+    token = tmp_path / "operator-token"
+    token.write_text("not-a-real-token", encoding="utf-8")
+    token.chmod(0o600)
+    target_path = tmp_path / "target.json"
+    target_path.write_text(json.dumps(target), encoding="utf-8")
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(json.dumps({"runtimes": [target]}), encoding="utf-8")
+    inventory_path = tmp_path / "inventory.json"
+    facts_path = tmp_path / "facts.json"
+
+    monkeypatch.setattr(module, "collect_substrate", lambda *_args, **_kwargs: sources["substrate"])
+    monkeypatch.setattr(module, "collect_provisioner", lambda **_kwargs: sources["provisioner"])
+    monkeypatch.setattr(module, "collect_kubernetes", lambda **_kwargs: sources["kubernetes"])
+
+    assert (
+        module.main(
+            [
+                "collect",
+                "--substrate-endpoint",
+                "https://substratesystems.io/api/exomem/admin/fleet",
+                "--substrate-token-file",
+                os.fspath(token),
+                "--runtime-catalog",
+                os.fspath(catalog_path),
+                "--target",
+                os.fspath(target_path),
+                "--observed-at",
+                "2026-08-21T12:00:00Z",
+                "--inventory-output",
+                os.fspath(inventory_path),
+                "--facts-output",
+                os.fspath(facts_path),
+            ]
+        )
+        == 0
+    )
+    summary = json.loads(capsys.readouterr().out)
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    facts = json.loads(facts_path.read_text(encoding="utf-8"))
+    assert summary == {
+        "cellCount": 1,
+        "inventorySha256": module.inventory_sha256(inventory),
+        "legacyCellCount": 0,
+        "status": "consistent",
+    }
+    assert facts == module.execution_inventory_facts(inventory)
+    assert stat.S_IMODE(inventory_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(facts_path.stat().st_mode) == 0o600
 
 
 def test_collector_failures_never_echo_tokens_paths_or_remote_output(tmp_path: Path) -> None:
