@@ -1559,11 +1559,14 @@ def guard_referents(
         return None
     vault_root = Path(vault_root)
     guarded = copy.deepcopy(payload)
-    policy = policy_module.load(vault_root)
+    policy, release_gate_active = gate_state(vault_root)
     who = principal if principal is not None else effective_principal()
     if policy.blocked or (not policy.empty and not who.resolved):
         _record_blocked_outcome(who.audience_id)
         return None
+    if release_gate_active:
+        guarded.pop("reasons", None)
+        guarded.pop("omitted_candidate_count", None)
 
     tombstoned: set[str] = set()
     for section in ("resolved", "candidates"):

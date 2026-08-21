@@ -32,11 +32,6 @@ def cue_for_find(*, query: str, mode: str) -> ReferentCue | None:
     return detect_cue(query)
 
 
-def should_resolve_for_find(*, query: str, mode: str) -> bool:
-    """Cheap trigger used before opening the optional timing span."""
-    return cue_for_find(query=query, mode=mode) is not None
-
-
 def _hit_facts(hits: list[Any]) -> tuple[HitFact, ...]:
     return tuple(
         HitFact(

@@ -62,6 +62,10 @@ audience. It independently sweeps candidate and evidence paths for lifecycle
 tombstones before the empty-policy fast path, then combines those paths with
 the release result's withheld paths. This is required because registry/name/
 graph candidates may not have passed through `annotate_hits` as hits.
+When the release gate is active, the guard removes registry-wide reason and
+omission counters unconditionally. Key presence follows gate state rather than
+whether this query withheld a match, preventing the counters from becoming an
+existence oracle for governed or tombstoned entities.
 
 ## Validation against the real case
 

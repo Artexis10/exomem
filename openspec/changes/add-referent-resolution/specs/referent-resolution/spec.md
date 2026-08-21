@@ -35,6 +35,11 @@ The resolver SHALL emit resolved at exact count, partial with an unresolved coun
 - **THEN** each list contains its first 25 paths in deterministic order
 - **AND** omitted_candidate_count reports the total omitted remainder
 
+#### Scenario: Active release gate hides vault-wide counters
+- **WHEN** policy or lifecycle tombstones activate the release gate
+- **THEN** the referents block carries neither reasons nor omitted_candidate_count
+- **AND** those keys remain absent regardless of whether this query withheld a match
+
 ### Requirement: Referents Never Reorder Or Alter Hits
 The referent stage SHALL run after release annotation, SHALL never enter the hit cache, and SHALL omit itself without changing hits on disablement or error.
 

@@ -2547,6 +2547,10 @@ def _print_human(result, *, op: str | None = None) -> None:
         isinstance(result, dict)
         and isinstance(result.get("hits"), list)
         and isinstance(result.get("referents"), dict)
+        and not (
+            set(result)
+            - {"hits", "referents", "timings", "pack", "warming", "degraded"}
+        )
     ):
         _print_human(result["hits"], op=op)
         referents = result["referents"]

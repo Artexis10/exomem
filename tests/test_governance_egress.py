@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, referent_runtime
+from exomem import commands, referent_resolution, referent_runtime
 from exomem import find as find_module
 from exomem.find_types import GraphProvenance, Hit
 from exomem.governance import bridges, egress, receipts
@@ -870,6 +870,128 @@ def test_referents_honour_release_strip_decisions(
     assert guarded["resolved"][0]["title"] == "Open"
     assert "ref" not in guarded["resolved"][0]
     assert guarded["resolved"][0]["evidence"] == []
+
+
+def test_referents_block_is_byte_identical_for_withheld_and_absent_entities(
+    tmp_path: Path,
+) -> None:
+    withheld_vault = tmp_path / "withheld"
+    absent_vault = tmp_path / "absent"
+    for candidate_vault in (withheld_vault, absent_vault):
+        write_scope(candidate_vault, paths="Entities/People/**", name="People")
+        write_rule(candidate_vault, ceiling=0)
+
+    candidates = [
+        {
+            "path": f"Knowledge Base/Entities/People/synthetic-{index:02d}.md",
+            "title": f"Synthetic {index:02d}",
+            "entity_type": "person",
+            "evidence": [{"kind": "attribute", "matched": ["friend"]}],
+        }
+        for index in range(referent_resolution.REFERENT_CANDIDATE_CAP)
+    ]
+    withheld_block = {
+        "status": "unresolved",
+        "entity_type": "person",
+        "resolved": [],
+        "candidates": candidates,
+        "reasons": {"inactive": 1, "type_mismatch": 0},
+        "expected_count": 2,
+        "unresolved_count": 2,
+        "omitted_candidate_count": 1,
+    }
+    absent_block = {
+        "status": "unresolved",
+        "entity_type": "person",
+        "resolved": [],
+        "candidates": [],
+        "reasons": {"inactive": 0, "type_mismatch": 0},
+        "expected_count": 2,
+        "unresolved_count": 2,
+    }
+
+    with request_scope(_external()):
+        guarded_withheld = egress.guard_referents(
+            withheld_vault,
+            withheld_block,
+            egress.AnnotatedHits(hits=[], active=True),
+        )
+        guarded_absent = egress.guard_referents(
+            absent_vault,
+            absent_block,
+            egress.AnnotatedHits(hits=[], active=True),
+        )
+
+    assert guarded_withheld is not None
+    assert guarded_absent is not None
+    assert json.dumps(guarded_withheld, sort_keys=True) == json.dumps(
+        guarded_absent, sort_keys=True
+    )
+
+
+def test_referents_block_drops_counters_when_only_tombstones_activate_the_gate(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        egress.lifecycle,
+        "tombstoned_paths",
+        lambda _vault: {"Knowledge Base/Entities/People/deleted.md"},
+    )
+    block = {
+        "status": "unresolved",
+        "entity_type": "person",
+        "resolved": [],
+        "candidates": [],
+        "reasons": {"inactive": 1, "type_mismatch": 0},
+        "expected_count": 2,
+        "unresolved_count": 2,
+        "omitted_candidate_count": 4,
+    }
+
+    guarded = egress.guard_referents(
+        vault,
+        block,
+        egress.AnnotatedHits(hits=[], active=True),
+    )
+
+    assert guarded is not None
+    assert "reasons" not in guarded
+    assert "omitted_candidate_count" not in guarded
+
+
+def test_referents_counters_present_on_ungoverned_vault_without_tombstones(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate_calls = 0
+    original_gate_state = egress.gate_state
+
+    def counted_gate_state(vault_root: Path):
+        nonlocal gate_calls
+        gate_calls += 1
+        return original_gate_state(vault_root)
+
+    monkeypatch.setattr(egress, "gate_state", counted_gate_state)
+    block = {
+        "status": "unresolved",
+        "entity_type": "person",
+        "resolved": [],
+        "candidates": [],
+        "reasons": {"inactive": 2, "type_mismatch": 0},
+        "expected_count": 2,
+        "unresolved_count": 2,
+        "omitted_candidate_count": 3,
+    }
+
+    guarded = egress.guard_referents(
+        vault,
+        block,
+        egress.AnnotatedHits(hits=[], active=False),
+    )
+
+    assert guarded is not None
+    assert guarded["reasons"] == {"inactive": 2, "type_mismatch": 0}
+    assert guarded["omitted_candidate_count"] == 3
+    assert gate_calls == 1
 
 
 def test_purpose_never_enters_the_find_cache_key(vault: Path) -> None:

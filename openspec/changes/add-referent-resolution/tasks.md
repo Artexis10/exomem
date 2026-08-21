@@ -52,6 +52,10 @@
 - [x] 2.18 test_referents_honour_release_strip_decisions: bridge stripping removes detail without dropping the released identity.
 - [x] 2.19 test_resolver_exception_is_logged_and_soft_fails: additive resolver failures warn once and preserve hits.
 - [x] 2.20 test_ask_cli_lists_hits_and_summarises_referents_for_cue_queries: human CLI output keeps hit listings and adds a referent summary.
+- [x] 2.21 test_referents_block_is_byte_identical_for_withheld_and_absent_entities: active governance cannot expose withheld registry counts.
+- [x] 2.22 test_referents_block_drops_counters_when_only_tombstones_activate_the_gate: lifecycle-only gating removes registry-wide counters.
+- [x] 2.23 test_referents_counters_present_on_ungoverned_vault_without_tombstones: fully releasable vaults retain bounded diagnostics.
+- [x] 2.24 test_ask_cli_explain_without_json_keeps_explanation_envelope_on_cue_queries: explained human CLI queries retain the complete envelope.
 
 ## 3. Benchmark, performance, and guidance
 
