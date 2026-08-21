@@ -394,6 +394,9 @@ jobs:
           src/exomem/call_spans.py
           src/exomem/source_taxonomy.py
           src/exomem/reclassify_source.py
+          src/exomem/referent_resolution.py
+          src/exomem/entity_registry.py
+          src/exomem/referent_runtime.py
           scripts/e2e_product_loop.py
           scripts/e2e_http_server.py
           scripts/smoke-media-pipeline.py
@@ -407,6 +410,10 @@ jobs:
           tests/test_call_spans.py
           tests/test_source_taxonomy.py
           tests/test_reclassify_source.py
+          tests/test_referent_resolution.py
+          tests/test_entity_registry.py
+          tests/test_find_referents_envelope.py
+          tests/test_referent_resolution_benchmark.py
           --select E,F,I,B,UP,BLE
       - name: Targeted contract type check
         run: >-
@@ -421,6 +428,9 @@ jobs:
           src/exomem/epistemic_graph.py
           src/exomem/source_taxonomy.py
           src/exomem/reclassify_source.py
+          src/exomem/referent_resolution.py
+          src/exomem/entity_registry.py
+          src/exomem/referent_runtime.py
 
   gate:
     name: required CI gate

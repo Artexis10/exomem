@@ -1545,6 +1545,87 @@ def guard_graph_context(
     return payload
 
 
+def guard_referents(
+    vault_root: Path,
+    payload: dict[str, Any],
+    release: AnnotatedHits,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, Any] | None:
+    """Apply release decisions to entity candidates and their evidence paths."""
+    import copy
+
+    if release.blocked:
+        return None
+    vault_root = Path(vault_root)
+    guarded = copy.deepcopy(payload)
+    policy = policy_module.load(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.blocked or (not policy.empty and not who.resolved):
+        _record_blocked_outcome(who.audience_id)
+        return None
+
+    withheld = set(release.withheld_paths)
+    if not policy.empty:
+        grants_hash = _grants_hash(policy)
+        declared_purpose = _declared_purpose(vault_root, who, purpose)
+        candidate_paths = {
+            str(item.get("path") or "")
+            for section in ("resolved", "candidates")
+            for item in guarded.get(section, [])
+            if isinstance(item, Mapping) and item.get("path")
+        }
+        for rel_path in candidate_paths:
+            decision = _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+            )
+            if decision is None or decision.level < RELEASE_FLOOR:
+                withheld.add(rel_path)
+
+    frozen_withheld = frozenset(withheld)
+    for section in ("resolved", "candidates"):
+        kept: list[dict[str, Any]] = []
+        for raw_item in guarded.get(section, []):
+            if not isinstance(raw_item, Mapping):
+                continue
+            item = dict(raw_item)
+            if _names_withheld(item.get("path"), frozen_withheld):
+                continue
+            evidence = item.get("evidence")
+            if isinstance(evidence, list):
+                item["evidence"] = [
+                    value
+                    for value in evidence
+                    if not _names_withheld(value, frozen_withheld, reference_field=True)
+                ]
+            kept.append(item)
+        guarded[section] = kept
+
+    expected = guarded.get("expected_count")
+    resolved_count = len(guarded.get("resolved") or [])
+    if isinstance(expected, int):
+        if resolved_count > expected:
+            guarded["status"] = "ambiguous"
+            guarded.pop("unresolved_count", None)
+        elif resolved_count == expected:
+            guarded["status"] = "resolved"
+            guarded.pop("unresolved_count", None)
+        else:
+            guarded["status"] = "partial" if resolved_count else "unresolved"
+            guarded["unresolved_count"] = expected - resolved_count
+    else:
+        guarded["status"] = "resolved" if resolved_count else "unresolved"
+        guarded.pop("unresolved_count", None)
+    return guarded
+
+
 # ---------------------------------------------------------------------------
 # Direct reads (get / read_memory) — D3 applied to a whole page
 # ---------------------------------------------------------------------------
