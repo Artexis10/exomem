@@ -2017,8 +2017,12 @@ def _publish_sqlite_owner_family(
                         "SQLite identity publication parent changed"
                     )
                 if attempt == 2:
-                    raise SqliteIdentityBusyError(
-                        "SQLite WAL identity family changed during publication"
+                    if result.error.code == "IDENTITY_CHANGED":
+                        raise SqliteIdentityBusyError(
+                            "SQLite WAL identity family changed during publication"
+                        )
+                    raise RuntimeError(
+                        "SQLite WAL identity family is not completely reachable"
                     )
 
             family: dict[str, held_fs.StableIdentity] = {}

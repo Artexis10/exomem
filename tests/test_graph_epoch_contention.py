@@ -122,6 +122,21 @@ def test_a_transient_wal_identity_snapshot_reads_busy_rather_than_malformed(
     assert acknowledgement is None
 
 
+def test_a_stably_incomplete_wal_family_reads_malformed_not_busy(
+    tmp_path: Path,
+) -> None:
+    """A persistent missing family member is damage, not live contention."""
+    root = _kb(tmp_path)
+    path = epistemic_graph.sidecar_path(root)
+    path.write_bytes(b"not a sqlite database")
+    path.with_name(f"{path.name}-wal").write_bytes(b"not a sqlite wal")
+
+    status, acknowledgement = graph_sync.acknowledgement_state(root)
+
+    assert status == "malformed"
+    assert acknowledgement is None
+
+
 def test_a_final_wal_identity_failure_rechecks_the_retained_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

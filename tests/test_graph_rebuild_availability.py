@@ -682,17 +682,22 @@ def test_unavailable_reset_rolls_back_a_partial_move(tmp_path: Path, monkeypatch
     original = mutation_lock.rename_retained_regular_file
     calls = 0
 
-    def fail_second(source, destination):  # noqa: ANN001
+    def fail_second(source, destination, *, destination_directory=None):  # noqa: ANN001
         nonlocal calls
         calls += 1
         if calls == 2:
             raise PermissionError("move denied")
-        return original(source, destination)
+        return original(
+            source,
+            destination,
+            destination_directory=destination_directory,
+        )
 
     monkeypatch.setattr(mutation_lock, "rename_retained_regular_file", fail_second)
     with pytest.raises(graph_sync.GraphResetFailed, match="GRAPH_SYNC_RESET_REFUSED"):
         graph_sync.isolate_unavailable_graph_lineage(tmp_path)
 
+    assert calls == 3
     assert (kb / ".graph.sqlite").read_bytes() == b"main"
     assert (kb / ".graph.sqlite-wal").read_bytes() == b"wal"
 
