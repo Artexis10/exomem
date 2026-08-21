@@ -34,6 +34,17 @@ Checks (all read-only; no writes ever):
   `#fragment` and so cannot address a unit. Measurement-only at `info`, ordered
   most-overdue-first, partitioned per unit by fingerprint so each due prediction
   is its own review item; never judges whether the prediction held.
+- `question_aging`: a governed question unit on an active page whose authored
+  date is at least `QUESTION_AGING_DAYS` old, carrying no `verdict` and no
+  answering relation ON THE UNIT (same unit-local rule `prediction_window`
+  uses). Reported at `info` as a review CANDIDATE, never a defect, and kept out
+  of the default attention union — its threshold is the system's invention, not
+  something an author declared.
+- `supersession_integrity`: a `supersedes`/`superseded_by` pointer that does not
+  resolve, and a supersession component with more than one current head. Both
+  are `warn` DEFECTS in authored state with no threshold anywhere, which is why
+  this one does join the default attention union. Parked statuses are NOT
+  excluded: a `superseded` page is exactly where a rotted forward pointer lives.
 - `derivation_double_counting` (optional): walks `sources:` (`derived_from`)
   chains for two failures ordinary checks cannot see. Support collapse: a
   compiled page cites two or more sources as independent support that
@@ -111,6 +122,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "relation_debt", "governance_receipts", "bridge_review",
     "duplicated_sidecar", "semantic_recall_isolation",
     "unfinished_experiments", "prediction_window",
+    "question_aging", "supersession_integrity",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -148,6 +160,14 @@ TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
 # opt-in only hides the queue from the people it exists for.
 EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     "unfinished_experiments",
+    # Same exclusion, a different reason for it, and the difference matters.
+    # `unfinished_experiments` is held back by a grandfathered POPULATION;
+    # `question_aging` is held back because its trigger is a THRESHOLD THIS
+    # SYSTEM CHOSE (`QUESTION_AGING_DAYS`) rather than one an author declared.
+    # A queue that fires on a date a human wrote down has earned the daily
+    # surface; a queue that fires on a number the product picked has not, and
+    # admitting one would let a tuning decision quietly displace authored work.
+    "question_aging",
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset(
     {"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES}
@@ -445,6 +465,10 @@ def audit(
         findings.extend(_check_unfinished_experiments(vault_root, pages, today=today))
     if "prediction_window" in selected:
         findings.extend(_check_prediction_window(vault_root, pages, today=today))
+    if "question_aging" in selected:
+        findings.extend(_check_question_aging(vault_root, pages, today=today))
+    if "supersession_integrity" in selected:
+        findings.extend(_check_supersession_integrity(vault_root, pages))
     if "corpus_contradictions" in selected:
         findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
     if "relation_registry" in selected:
@@ -3411,6 +3435,400 @@ def _check_prediction_window(
     # urgency. Path then fingerprint keep it deterministic.
     rows.sort(key=lambda row: (-row[0], row[1], row[2]))
     return [finding for _, _, _, finding in rows]
+
+
+# ---------------- check: question_aging ----------------
+
+#: How old a page's authored date has to be before an unanswered question on it
+#: is worth raising. PROVISIONAL: unlike `check_by` (a date the author chose) and
+#: `duration` (a window the author declared), nothing here was authored — the
+#: number is the system's invention, and it is the whole reason this category is
+#: registered but kept OUT of the default attention union. Tune it from observed
+#: behaviour, not from taste, and remember that raising it only ever hides work.
+QUESTION_AGING_DAYS = 30
+
+#: The canonical registry-resolved category a governed question unit carries.
+#: `## Open Question`, `## Open Questions` and an explicit `- category: question`
+#: all normalise here (`semantic_language_registry` core category `question`),
+#: so matching the resolved value rather than the authored heading is what makes
+#: the check alias-proof.
+_QUESTION_CATEGORY = "question"
+
+#: Authoring one of these on the unit is the signal that SOMEBODY ANSWERED the
+#: question. Deliberately the same set `_check_prediction_window` clears on, so
+#: one resolution rule governs every unit-scoped due-state category instead of
+#: two that drift apart. A question and a prediction are the same shape of open
+#: loop; only the threshold that opens them differs.
+_QUESTION_ANSWERING_RELATIONS = _PREDICTION_RESOLVING_RELATIONS
+
+#: Cheap prefilter, deliberately looser than the exact heading — a page that has
+#: never authored a question cannot match, so a vault that does not use the
+#: primitive pays one regex scan and no parse. Same trade `_CHECK_BY_PREFILTER`
+#: makes: over-matching costs a parse, under-matching loses a real obligation.
+_QUESTION_PREFILTER = re.compile(r"question", re.IGNORECASE)
+
+#: A unit inherits its page's standing, so a question on a parked page is not
+#: outstanding work. Same inactive set the sibling lifecycle queues use.
+_QUESTION_PARKED_STATUSES = _PREDICTION_PARKED_STATUSES
+
+
+def _check_question_aging(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    today: dt.date | None = None,
+) -> list[AuditFinding]:
+    """Surface governed question units that have sat unanswered for a while.
+
+    This is the softest of the four due-state consumers and it is deliberately
+    labelled as such in its own finding text. `prediction_window` fires on a date
+    the author wrote down and `unfinished_experiments` on a window the author
+    declared; nobody ever declared that a question goes stale after
+    `QUESTION_AGING_DAYS`. The threshold is the system's, so the finding reports a
+    review CANDIDATE and never a defect, and the category stays out of the default
+    attention union — the same backlog-profile discipline that keeps
+    `unfinished_experiments` opt-in, applied to an invented threshold rather than
+    to a grandfathered field.
+
+    "Unanswered" is UNIT-LOCAL for the same forced reason the prediction predicate
+    is: relation targets still lose their `#fragment`, so an inbound edge cannot
+    address a unit, and a page-level test would let any answering relation
+    anywhere on the page silently close every question on it. Only a `verdict` or
+    an answering relation authored ON THE UNIT clears it.
+
+    The age is the PAGE's authored date, because a unit has no date of its own.
+    That is honest rather than approximate: a question written into a page is as
+    old as the page said it was, and a page with no parseable date is skipped
+    rather than assigned an invented one.
+    """
+    today = today or dt.date.today()
+    relations = relation_registry.load_registry(vault_root)
+    language = semantic_language_registry.load_registry(vault_root)
+
+    rows: list[tuple[int, str, str, AuditFinding]] = []
+    for page in pages:
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if (page.status or "") in _QUESTION_PARKED_STATUSES:
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        if not _QUESTION_PREFILTER.search(page.body):
+            continue
+
+        authored = _parse_fm_date(
+            page.frontmatter.get("created") or page.frontmatter.get("updated")
+        )
+        if authored is None:
+            continue  # no authored date → no age to measure; never invent one
+        age_days = (today - authored).days
+        if age_days < QUESTION_AGING_DAYS:
+            continue
+
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            page_type=page.page_type,
+        )
+        for unit in document.rich_units:
+            if unit.category != _QUESTION_CATEGORY:
+                continue
+            if unit.verdict:
+                continue
+            if any(
+                relations.resolve(
+                    relation.kind, origin="semantic_relation"
+                ).canonical in _QUESTION_ANSWERING_RELATIONS
+                for relation in unit.relations
+            ):
+                continue
+
+            fingerprint = unit.fingerprint or ""
+            label = unit.title or unit.anchor or unit.kind
+            rows.append((
+                age_days,
+                page.rel_path,
+                fingerprint,
+                AuditFinding(
+                    category="question_aging",
+                    severity="info",
+                    path=page.rel_path,
+                    detail=(
+                        f"Open question {label!r} has stood unanswered for "
+                        f"{age_days}d (page authored {authored.isoformat()}) with no "
+                        f"verdict and no answering relation on the unit. A review "
+                        f"candidate, never a defect — nothing here is overdue by "
+                        f"anyone's declaration."
+                    ),
+                    proposed_fix=(
+                        "Surfaced for REVIEW only, and on a threshold this system "
+                        "chose rather than one you declared. Answer it by recording "
+                        "a categorical `verdict:` on the unit or attaching what "
+                        "settles it with a `supports`/`contradicts`/`resolves`/"
+                        "`evidenced_by` relation, or leave it open — an open "
+                        "question is a legitimate long-lived state."
+                    ),
+                    meta={
+                        # The UNIT's fingerprint, as `prediction_window` uses:
+                        # editing this question must resurface it rather than
+                        # inherit a decision recorded against different words.
+                        "signal_version": fingerprint,
+                        "review_partition": fingerprint,
+                        "unit_ref": unit.unit_ref,
+                        "anchor": unit.anchor,
+                        "kind": unit.kind,
+                        "authored": authored.isoformat(),
+                        "age_days": age_days,
+                        "threshold_days": QUESTION_AGING_DAYS,
+                        # The day this became a candidate. The due-state
+                        # projection buckets on this rather than re-deriving it,
+                        # so a day boundary is a date comparison and not a rescan.
+                        "due_since": (
+                            authored + dt.timedelta(days=QUESTION_AGING_DAYS)
+                        ).isoformat(),
+                    },
+                ),
+            ))
+
+    # Oldest-first: the context a question needs to be answered decays with time,
+    # so raw age is the right signal here (as with experiments) rather than
+    # distance past a chosen date (as with predictions).
+    rows.sort(key=lambda row: (-row[0], row[1], row[2]))
+    return [finding for _, _, _, finding in rows]
+
+
+# ---------------- check: supersession_integrity ----------------
+
+#: The two authored supersession pointers. `superseded_by` runs old -> new,
+#: `supersedes` runs new -> old; the protocol requires both halves, which is
+#: exactly why a half-written supersession is detectable at all.
+_SUPERSESSION_POINTERS = ("superseded_by", "supersedes")
+
+
+def _supersession_link_target(raw: str) -> str:
+    """The path a `supersedes`/`superseded_by` wikilink names, alias and anchor stripped."""
+    text = str(raw or "").strip()
+    if text.startswith("[[") and text.endswith("]]"):
+        text = text[2:-2]
+    return text.split("|", 1)[0].split("#", 1)[0].strip()
+
+
+def _check_supersession_integrity(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Surface supersession pointers that do not describe a real, single-headed chain.
+
+    Two defects, both in state a human authored, and neither inferred:
+
+    1. A DANGLING POINTER — `supersedes` or `superseded_by` naming a page that does
+       not resolve. The supersession protocol's whole promise is that a reader who
+       lands on the old conclusion is led to the current one; a pointer into
+       nothing is that promise broken silently, and the reader has no way to tell
+       the difference between "not superseded" and "superseded, link rotted".
+
+    2. A MULTI-HEADED CHAIN — a connected supersession component with more than one
+       member that nothing supersedes. `replace` maintains a linear spine on
+       purpose, so two live heads means the chain no longer has one current answer
+       and every consumer of it (evolution timelines, `prefer_active` ranking, a
+       human reading backwards) silently picks one.
+
+    Unlike the three time-driven consumers this ships beside, nothing here is
+    thresholded: the pointer either resolves or it does not, and the component
+    either has one head or it does not. That is why these are `warn` DEFECTS while
+    the others are `info` candidates, and why this category joins the default
+    attention union while `question_aging` does not.
+
+    Parked statuses are deliberately NOT excluded. A `superseded` page is precisely
+    where a dangling forward pointer lives, so filtering the way the measurement
+    queues do would blind the check to its main case.
+
+    Measurement-only: nothing is repaired, relinked, or re-pointed.
+    """
+    known: set[str] = set()
+    by_stem: dict[str, list[str]] = {}
+    for page in pages:
+        rel = page.rel_path
+        known.add(rel)
+        known.add(rel[:-3] if rel.endswith(".md") else rel)
+        by_stem.setdefault(page.path.stem, []).append(rel)
+
+    def _resolve(raw: str) -> str | None:
+        target = _supersession_link_target(raw)
+        if not target:
+            return None
+        for candidate in (target, f"{target}.md"):
+            if candidate in known:
+                return candidate if candidate.endswith(".md") else f"{candidate}.md"
+        # A bare name is a legitimate Obsidian spelling; resolve it only when it
+        # is UNAMBIGUOUS, because guessing between two stems would invent a chain.
+        if "/" not in target:
+            matches = by_stem.get(target) or by_stem.get(
+                target[:-3] if target.endswith(".md") else target
+            )
+            if matches and len(matches) == 1:
+                return matches[0]
+        # Last resort: the page may live outside the walked set (a curated tree),
+        # so believe the filesystem before calling a pointer broken.
+        for candidate in (target, f"{target}.md"):
+            if (vault_root / candidate).exists():
+                return candidate if candidate.endswith(".md") else f"{candidate}.md"
+        return None
+
+    findings: list[AuditFinding] = []
+    in_scope: list[find_module.ParsedPage] = []
+    resolved_edges: list[tuple[str, str]] = []  # (older, newer)
+
+    for page in pages:
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        in_scope.append(page)
+        for pointer in _SUPERSESSION_POINTERS:
+            for raw in getattr(page, pointer):
+                target = _resolve(raw)
+                if target is None:
+                    partition = content_hash(
+                        f"dangling\0{pointer}\0{_supersession_link_target(raw)}"
+                    )[:16]
+                    findings.append(
+                        AuditFinding(
+                            category="supersession_integrity",
+                            severity="warn",
+                            path=page.rel_path,
+                            detail=(
+                                f"`{pointer}:` names "
+                                f"{_supersession_link_target(raw)!r}, which does not "
+                                f"resolve to a page. The supersession chain is broken "
+                                f"here, so a reader cannot tell a page that was never "
+                                f"superseded from one whose forward link rotted."
+                            ),
+                            proposed_fix=(
+                                "Surfaced for REVIEW only — no pointer is repaired, "
+                                "re-pointed, or removed. Fix the target path, restore "
+                                "the missing page, or drop the pointer if the "
+                                "supersession never happened."
+                            ),
+                            meta={
+                                "signal_version": _page_signal_version(page),
+                                "review_partition": partition,
+                                "defect": "dangling_pointer",
+                                "pointer": pointer,
+                                "target": _supersession_link_target(raw),
+                                "due_since": (
+                                    _parse_fm_date(
+                                        page.frontmatter.get("updated")
+                                        or page.frontmatter.get("created")
+                                    )
+                                    or dt.date.min
+                                ).isoformat(),
+                            },
+                        )
+                    )
+                    continue
+                older, newer = (
+                    (page.rel_path, target)
+                    if pointer == "superseded_by"
+                    else (target, page.rel_path)
+                )
+                if older != newer:
+                    resolved_edges.append((older, newer))
+
+    findings.extend(_multi_headed_chain_findings(in_scope, resolved_edges))
+    # Deterministic: path, then the partition that distinguishes two defects on
+    # one page. Nothing here has an age or an urgency to order by.
+    findings.sort(key=lambda f: (f.path, str((f.meta or {}).get("review_partition"))))
+    return findings
+
+
+def _multi_headed_chain_findings(
+    pages: list[find_module.ParsedPage],
+    edges: list[tuple[str, str]],
+) -> list[AuditFinding]:
+    """One finding per supersession component carrying more than one current head."""
+    if not edges:
+        return []
+    by_path = {page.rel_path: page for page in pages}
+    parent: dict[str, str] = {}
+
+    def _find(node: str) -> str:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def _union(left: str, right: str) -> None:
+        left_root, right_root = _find(left), _find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    superseded: set[str] = set()
+    for older, newer in edges:
+        _union(older, newer)
+        superseded.add(older)
+
+    components: dict[str, set[str]] = {}
+    for older, newer in edges:
+        for node in (older, newer):
+            components.setdefault(_find(node), set()).add(node)
+
+    findings: list[AuditFinding] = []
+    for members in components.values():
+        heads = sorted(node for node in members if node not in superseded)
+        if len(heads) < 2:
+            continue
+        # Anchor on the component's first member by path so the finding has one
+        # stable home regardless of which head was written last.
+        anchor = sorted(members)[0]
+        page = by_path.get(anchor)
+        findings.append(
+            AuditFinding(
+                category="supersession_integrity",
+                severity="warn",
+                path=anchor,
+                paths=sorted(members),
+                detail=(
+                    f"This supersession chain has {len(heads)} current heads "
+                    f"({', '.join(heads)}). A chain is meant to have exactly one "
+                    f"current answer, so every reader and every consumer of it is "
+                    f"silently picking between them."
+                ),
+                proposed_fix=(
+                    "Surfaced for REVIEW only — nothing is merged, re-pointed, or "
+                    "archived. Decide which head is current and supersede or archive "
+                    "the other, or split the chain if the two are genuinely about "
+                    "different things."
+                ),
+                meta={
+                    "signal_version": (
+                        _page_signal_version(page) if page is not None else ""
+                    ),
+                    "review_partition": content_hash(
+                        "multi_head\0" + "\0".join(heads)
+                    )[:16],
+                    "defect": "multi_headed_chain",
+                    "heads": heads,
+                    "members": sorted(members),
+                    "due_since": (
+                        (
+                            _parse_fm_date(
+                                page.frontmatter.get("updated")
+                                or page.frontmatter.get("created")
+                            )
+                            if page is not None
+                            else None
+                        )
+                        or dt.date.min
+                    ).isoformat(),
+                },
+            )
+        )
+    return findings
 
 
 # ---------------- check: stale_review ----------------

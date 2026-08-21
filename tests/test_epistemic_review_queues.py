@@ -272,10 +272,28 @@ def test_default_attention_union_is_pinned() -> None:
     a governance review date and an epistemic check date are both dates a human
     wrote down, so they outrank a cosine proximity band, an age heuristic, an
     empty-field scan, and a missing-edge scan.
+
+    Widened once since, deliberately, for `supersession_integrity`
+    (`add-due-state-consumers-and-carriers`). Its argument is of the same kind
+    rather than of seniority: it is the only DEFECT queue in the union. The two
+    above it report an authored obligation that has come DUE, which is work; a
+    supersession pointer that resolves to nothing, or a chain with two live
+    heads, reports state that is already WRONG, and nothing about it is inferred
+    or thresholded. It sits below the dated queues because a broken pointer does
+    not expire while a check date does, and above the inferential ones because it
+    invents nothing.
+
+    That change states its position normatively in the ADDED requirement of its
+    own `attention-queue` delta rather than in a third concurrent MODIFIED delta
+    against this same requirement. Two unarchived changes already carry one
+    (`add-prediction-window-review` and this branch's own history), and a third
+    would collide at archive-sync — which is the exact failure that change's
+    task 0 exists to prevent. The normative record is present either way.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
         "prediction_window",
+        "supersession_integrity",
         "corpus_contradictions",
         "stale_review",
         "unprocessed_source",

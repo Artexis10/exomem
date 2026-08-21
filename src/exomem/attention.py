@@ -1,7 +1,8 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the six default measurement-only queues that `audit` already produces —
-`bridge_review`, `prediction_window`, `corpus_contradictions`, `stale_review`,
+Composes the seven default measurement-only queues that `audit` already produces —
+`bridge_review`, `prediction_window`, `supersession_integrity`,
+`corpus_contradictions`, `stale_review`,
 `unprocessed_source`, and `relation_debt` — into a single ranked list while retaining
 opt-in registered semantic and epistemic-lifecycle categories. The composition is pure
 measurement: each queue already emits its findings
@@ -36,6 +37,14 @@ from .audit import AuditFinding
 # round. `bridge_review` leads because its commitment is owed to another
 # audience, where a check date is owed to yourself.
 #
+# `supersession_integrity` sits third for a reason of the same kind rather than
+# by seniority: it is the only DEFECT queue in the union. The two above it report
+# an authored obligation that has come due, which is work; a dangling supersession
+# pointer or a two-headed chain reports state that is already WRONG, and a reader
+# who fixes one is repairing the record rather than deciding something. It ranks
+# below the dated queues because a broken pointer does not expire while a check
+# date does, and above the inferential ones because nothing about it is inferred.
+#
 # Below that line the order is HISTORICAL, not principled: `unprocessed_source`
 # and `relation_debt` are deterministic scans over authored state and are in that
 # sense less inferential than `corpus_contradictions` above them. Do not read a
@@ -43,6 +52,7 @@ from .audit import AuditFinding
 DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "bridge_review",
     "prediction_window",
+    "supersession_integrity",
     "corpus_contradictions",
     "stale_review",
     "unprocessed_source",

@@ -894,6 +894,12 @@ class CreationCommit:
     # Advisory only. Absent unless the written page shows recurring durable
     # material outside its own declared scope; never affects the commit.
     structure_suggestion: dict[str, Any] | None = None
+    # Advisory only, and a DIFFERENT kind of advisory: `structure_suggestion` is
+    # evidence about the page just written, while this is a bounded count of what
+    # the whole vault currently owes. It rides the same post-commit seam because
+    # a second one would be a second thing to keep fail-open; it does not share
+    # the seam's licence to skip a disclosure decision, and does not get one.
+    due_state: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -909,6 +915,8 @@ class CreationCommit:
         }
         if self.structure_suggestion is not None:
             value["structure_suggestion"] = self.structure_suggestion
+        if self.due_state is not None:
+            value["due_state"] = self.due_state
         return value
 
 
@@ -976,6 +984,12 @@ class ExistingCommit:
     # Advisory only. Absent unless the written page shows recurring durable
     # material outside its own declared scope; never affects the commit.
     structure_suggestion: dict[str, Any] | None = None
+    # Advisory only, and a DIFFERENT kind of advisory: `structure_suggestion` is
+    # evidence about the page just written, while this is a bounded count of what
+    # the whole vault currently owes. It rides the same post-commit seam because
+    # a second one would be a second thing to keep fail-open; it does not share
+    # the seam's licence to skip a disclosure decision, and does not get one.
+    due_state: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -992,6 +1006,8 @@ class ExistingCommit:
             value["index"] = self.index_report.as_dict()
         if self.structure_suggestion is not None:
             value["structure_suggestion"] = self.structure_suggestion
+        if self.due_state is not None:
+            value["due_state"] = self.due_state
         return value
 
 
@@ -2128,6 +2144,36 @@ def _structure_suggestion(
         return None
 
 
+def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
+    """Update the due-state projection for one written page and return its block.
+
+    Shares `_structure_suggestion`'s placement and its fail-open guard, for the
+    same reason: this runs after the guarded write has returned, and a fault here
+    must cost the caller an advisory and never the write.
+
+    It does NOT share that function's freedom from I/O. The projection is a
+    vault-wide aggregate, so the work here is one page read, three page-local
+    predicates and one small JSON replace — bounded, but real. It deliberately
+    never recomputes: this seam sits inside the mutation critical section, and a
+    full recompute here would put a vault-wide audit inside the write lock. When
+    there is no projection to delta against, the write stays silent and the next
+    read surface performs the recovery outside any lock.
+
+    Emission is governed here rather than in the terminal so that
+    `mutation_terminal` stays a pure presentation module: the terminal validates
+    and bounds what it is handed, and the decision about whether an agent has
+    already been told this is a command-layer fact.
+    """
+    try:
+        from . import due_state
+
+        block = due_state.block_for_write(vault_root, rel_path)
+        return block if due_state.should_emit(block) else None
+    except Exception:  # noqa: BLE001 — a due-state count never breaks a commit
+        log.debug("due-state projection failed (non-fatal)", exc_info=True)
+        return None
+
+
 def commit_existing(
     vault_root: Path,
     *,
@@ -2149,9 +2195,10 @@ def commit_existing(
             timings=timings,
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
-    if suggestion is None:
+    due = _due_state_block(vault_root, preflight.path)
+    if suggestion is None and due is None:
         return committed
-    return replace(committed, structure_suggestion=suggestion)
+    return replace(committed, structure_suggestion=suggestion, due_state=due)
 
 
 def _commit_existing(
@@ -3498,9 +3545,10 @@ def commit_creation(
         predecessor_content_hash=predecessor_content_hash,
     )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
-    if suggestion is None:
+    due = _due_state_block(vault_root, preflight.destination)
+    if suggestion is None and due is None:
         return committed
-    return replace(committed, structure_suggestion=suggestion)
+    return replace(committed, structure_suggestion=suggestion, due_state=due)
 
 
 def _commit_creation(
