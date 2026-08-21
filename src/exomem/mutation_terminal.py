@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
+
+log = logging.getLogger(__name__)
 
 ResponseDetail = Literal["compact", "full", "legacy"]
 
@@ -403,7 +406,7 @@ _MAX_DUE_STATE_REF_CHARS = 256
 _ADVISORY_REF_SCHEME = "exomem://"
 
 
-def _due_state_projection(leaf: Any) -> dict[str, Any] | None:
+def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
     """Lift one advisory due-state block out of a write leaf.
 
     Same posture as `_structure_suggestion_projection`, and for the same reason: a
@@ -413,9 +416,14 @@ def _due_state_projection(leaf: Any) -> dict[str, Any] | None:
     vault owes. Neither is ever a key a client branches on for the outcome of the
     mutation (see `_ENVELOPE_KEYS`), and both are absent — never null, never empty —
     when there is nothing to say.
+
+    Returns the validated block and the vault it was computed for. The vault rides
+    on the leaf under a server-internal `_vault` key that never reaches the wire —
+    the block below is rebuilt from validated fields only — because the terminal is
+    where emission is DECIDED and one process can serve more than one vault.
     """
     if not isinstance(leaf, Mapping):
-        return None
+        return None, ""
     for container_key in ("creation", "semantic", "source", None):
         container = leaf if container_key is None else leaf.get(container_key)
         if not isinstance(container, Mapping):
@@ -460,12 +468,43 @@ def _due_state_projection(leaf: Any) -> dict[str, Any] | None:
                 {"category": category, "ref": ref, "due_since": due_since}
             )
         else:
-            return {
-                "total": total,
-                "categories": {str(name): categories[name] for name in categories},
-                "top": rows,
-            }
-    return None
+            hint = value.get("_vault")
+            return (
+                {
+                    "total": total,
+                    "categories": {str(name): categories[name] for name in categories},
+                    "top": rows,
+                },
+                str(hint) if isinstance(hint, str) else "",
+            )
+    return None, ""
+
+
+def _admit_due_state(block: dict[str, Any], vault_hint: str) -> bool:
+    """Decide, at the point of DELIVERY, whether this response carries the block.
+
+    This is the one choke point every mutating command reaches, and it is called
+    once per command invocation -- so "a multi-write product command emits at most
+    once, at its terminal" (D9) holds by construction rather than by each writer
+    remembering to behave. It is also the first moment the detail level is known,
+    which matters: deciding at production burnt the session's single emission on
+    `legacy` responses that strip the block and on blocks the validation above
+    drops, leaving the caller told nothing and the next response silent.
+
+    Fails CLOSED. If the governor cannot be consulted, the safe direction for an
+    anti-nagging mechanism is silence -- the items are still on the review surface.
+    """
+    try:
+        from . import due_state as due_state_module
+
+        vault = vault_hint or None
+        if not due_state_module.would_emit(block, vault_root=vault):
+            return False
+        due_state_module.mark_emitted(block, vault_root=vault)
+        return True
+    except Exception:  # noqa: BLE001 -- an ungovernable advisory is not delivered
+        log.debug("due-state emission governor unavailable; dropping", exc_info=True)
+        return False
 
 
 def _due_state_token(value: Any) -> bool:
@@ -697,7 +736,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     ):
         return result
     raw_leaf = result["leaf_result"]
-    due_state = _due_state_projection(raw_leaf)
+    due_state, due_state_vault = _due_state_projection(raw_leaf)
     leaf = _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
     if detail == "legacy":
         return leaf
@@ -764,7 +803,7 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     structure_suggestion = _structure_suggestion_projection(leaf)
     if structure_suggestion is not None:
         compact["structure_suggestion"] = structure_suggestion
-    if due_state is not None:
+    if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
     compact["warnings_count"] = result["warnings_count"]
     # Projected from the leaf, never from the receipt. Receipt recovery replaces

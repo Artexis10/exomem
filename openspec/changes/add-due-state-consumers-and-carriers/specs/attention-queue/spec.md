@@ -30,6 +30,12 @@ are owned by the `add-prediction-window-review` and `close-experiment-lifecycle`
 respectively; this change consumes them through the projection unchanged and neither restates
 nor redefines their predicates.
 
+A review reference produced by a registered opt-in category SHALL resolve for triage without
+that category joining the default attention union, so that any reference a due-state count
+publishes can be dismissed, snoozed, or reopened by the agent it was published to; resolution
+SHALL consult the default union first, so references already resolvable keep the identity and
+fingerprint they have today.
+
 Absent optional fields SHALL mean what they mean today: a page carrying no supersession
 pointer and a page whose authored date is unparseable SHALL never surface in these
 categories. No category SHALL alter retrieval ranking.

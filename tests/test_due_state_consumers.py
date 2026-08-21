@@ -430,6 +430,26 @@ def test_supersession_integrity_composes_a_review_item_with_a_stable_fingerprint
     assert first.state == "open"
 
 
+def _fused_item(vault: Path, category: str, path: str) -> attention_module.AttentionItem:
+    """The item as a user meets it: the default union, plus this category if opt-in.
+
+    `_item` above pins one predicate in isolation, which is the right shape for
+    the predicate tests. It is the WRONG shape for a triage test: a single-category
+    call is the one configuration in which `attention._rank` folds nothing in, so
+    a dismissal recorded against it exercises no fusion at all. That mistake is
+    what let a dismissed item keep counting on every carrier.
+    """
+    categories = list(attention_module.DEFAULT_ATTENTION_CATEGORIES)
+    if category not in categories:
+        categories.append(category)
+    report = attention_module.attention(
+        vault, categories=categories, limit=0, state="all", today=TODAY
+    )
+    matches = [item for item in report.items if item.path == path]
+    assert matches, f"no fused review item for {path}"
+    return matches[0]
+
+
 @pytest.mark.parametrize(
     ("category", "make", "mutate"),
     [
@@ -460,8 +480,18 @@ def test_supersession_integrity_composes_a_review_item_with_a_stable_fingerprint
 def test_dismissal_holds_until_the_page_changes_materially(
     vault: Path, category: str, make, mutate
 ) -> None:
-    """Exactly the queue-wide contract: a dismissed fingerprint never comes back,
-    and a materially changed page surfaces as a NEW fingerprint."""
+    """The predicate's own half of the queue-wide contract, in isolation.
+
+    A dismissed fingerprint never comes back; a materially changed page surfaces
+    as a NEW one. Deliberately single-category: this pins what THIS predicate
+    contributes, holding fusion still.
+
+    It is not, and must not be read as, evidence that a dismissal made on the
+    real review surface reaches a single-category consumer -- the surface fuses,
+    and believing this test covered that is exactly how a dismissed item kept
+    being counted on every carrier. That claim is pinned across the boundary in
+    tests/test_due_state_projection.py.
+    """
     rel = make(vault)
     item = _item(vault, category, rel)
     store = review_state_module.ReviewStateStore(vault)
@@ -474,3 +504,62 @@ def test_dismissal_holds_until_the_page_changes_materially(
     changed = _item(vault, category, rel)
     assert changed.fingerprint != item.fingerprint
     assert changed.state == "open"
+
+
+def test_a_fused_dismissal_reaches_the_single_category_identity(vault: Path) -> None:
+    """Dismissing the fused item must quiet the single-category view of it.
+
+    The fixture is a page that is genuinely fused: still `active` while carrying a
+    rotted `superseded_by`, so the page-level queues have not parked it out of
+    rotation and `supersession_integrity` rides alongside them. A plain superseded
+    page yields a one-category item, which is the configuration in which the bug
+    is invisible -- so the fusion is asserted, not assumed.
+    """
+    from exomem import commands
+
+    rel = _superseded_page(
+        vault, "s", status="active", superseded_by=f"{RESEARCH}/gone", updated="2024-01-01"
+    )
+    fused = _fused_item(vault, "supersession_integrity", rel)
+    assert len(fused.categories) > 1, (
+        "this fixture stopped fusing, so the test no longer crosses the boundary "
+        "it exists for -- restore a page-level signal rather than relaxing this"
+    )
+    single = _item(vault, "supersession_integrity", rel)
+    assert single.fingerprint != fused.fingerprint, (
+        "the two identities genuinely differ; if they coincide this passes for "
+        "the wrong reason"
+    )
+
+    commands.op_triage_memory(vault, ref=fused.ref, action="dismiss", why="not now")
+
+    assert _item(vault, "supersession_integrity", rel).state == "dismissed"
+
+
+def test_an_opt_in_categorys_ref_resolves_for_triage(vault: Path) -> None:
+    """The inverse of what this test used to assert, and the reason it changed.
+
+    It previously pinned a REFUSAL: a `question_aging` item was produced by an
+    opt-in category, `attention.item_by_ref` walked only the default union, and
+    `triage_memory` rejected the ref. That was recorded as a pre-existing gap. It
+    is a defect of this change — the block publishes that ref and the bootstrap
+    guidance tells an agent to consult its state — so `item_by_ref` now falls back
+    to the opt-in epistemic queues after the default union misses.
+
+    The end-to-end claim (dismiss quiets the count, reopen restores it, for both
+    opt-in categories) lives in tests/test_due_state_projection.py, where the ref
+    can be taken from `due_state.served()` — the only ref an agent ever sees. This
+    keeps the consumer-side half: the ref resolves at all.
+    """
+    from exomem import commands
+
+    rel = _question_page(vault, "q", created="2026-05-01")
+    item = _fused_item(vault, "question_aging", rel)
+    assert "question_aging" in item.categories
+
+    result = commands.op_triage_memory(
+        vault, ref=item.ref, action="dismiss", why="not now"
+    )
+
+    assert result["state"] == "dismissed"
+    assert _item(vault, "question_aging", rel).state == "dismissed"

@@ -2392,8 +2392,9 @@ def op_reconcile(
     # exists to heal: a page edited in Obsidian or on the filesystem never fires
     # the per-write delta, so a resolved prediction can sit "open" in the
     # projection indefinitely. Reconcile is its full-recompute healer, and it
-    # runs here rather than on the write path because a full recompute must
-    # never happen inside a mutation's critical section.
+    # runs here rather than on the write path because a full recompute costs
+    # roughly thirty times a delta and scales with the corpus, which would make
+    # write latency a function of vault size.
     if not dry_run:
         try:
             from . import due_state as due_state_module
@@ -5598,10 +5599,15 @@ def op_triage_memory(
             "target_ref": item.target_ref,
             "categories": item.categories,
         }
-    result = review_state_module.ReviewStateStore(vault_root).apply(
-        item.item_id or review_state_module.parse_review_ref(ref),
-        item.fingerprint or "",
+    # Records the decision for the FUSED fingerprint (attention's own identity,
+    # unchanged) AND for each component fingerprint of the findings folded into
+    # it, so single-category consumers like `due_state` see the same dismissal.
+    # The fan-out lives in review_state so there is one composer, not two.
+    result = review_state_module.apply_for_item(
+        vault_root,
+        item,
         action=action,
+        review_id=item.item_id or review_state_module.parse_review_ref(ref),
         until=until,
         why=why,
     )

@@ -2152,23 +2152,32 @@ def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
     must cost the caller an advisory and never the write.
 
     It does NOT share that function's freedom from I/O. The projection is a
-    vault-wide aggregate, so the work here is one page read, three page-local
+    vault-wide aggregate, so the work here is one page read, four page-local
     predicates and one small JSON replace — bounded, but real. It deliberately
-    never recomputes: this seam sits inside the mutation critical section, and a
-    full recompute here would put a vault-wide audit inside the write lock. When
-    there is no projection to delta against, the write stays silent and the next
-    read surface performs the recovery outside any lock.
+    never recomputes, and the reason is cost rather than locking: a full recompute
+    is roughly thirty times the delta and, unlike the delta, scales with the
+    corpus, so putting one on the write path would make write latency a function
+    of vault size. (Whether this seam is inside the mutation critical section
+    depends on the command: `writer_lease._NARROW_BOUNDARY_COMMANDS` release their
+    guards before `_commit_existing` returns, so for those it is post-lock. The
+    bound has to hold either way, which is why it is argued from cost.) When there
+    is no projection to delta against, the write stays silent and the next read
+    surface performs the recovery outside any lock.
 
-    Emission is governed here rather than in the terminal so that
-    `mutation_terminal` stays a pure presentation module: the terminal validates
-    and bounds what it is handed, and the decision about whether an agent has
-    already been told this is a command-layer fact.
+    Emission is NOT decided here. This function produces; `mutation_terminal`
+    delivers, and only the deliverer can know whether the block actually reached
+    the caller — a `legacy` detail strips it and terminal validation can drop it.
+    Deciding here burnt the session's one emission on responses that carried
+    nothing. The vault rides along under a server-internal `_vault` key that the
+    terminal reads for the emission key and never puts on the wire.
     """
     try:
         from . import due_state
 
         block = due_state.block_for_write(vault_root, rel_path)
-        return block if due_state.should_emit(block) else None
+        if not block:
+            return None
+        return {**block, "_vault": str(vault_root)}
     except Exception:  # noqa: BLE001 — a due-state count never breaks a commit
         log.debug("due-state projection failed (non-fatal)", exc_info=True)
         return None

@@ -118,6 +118,42 @@ def _yesterday() -> str:
     return (dt.date.today() - dt.timedelta(days=1)).isoformat()
 
 
+def _govern(vault: Path) -> None:
+    """A real (permissive) release policy, so the egress filter actually runs.
+
+    Without a policy `release_walk_filter` takes its empty-policy fast path and
+    records nothing at all, which would make any receipt assertion vacuous.
+    """
+    from exomem.governance import membership, policy
+
+    gov = vault / "Knowledge Base" / "_Governance"
+    (gov / "scopes").mkdir(parents=True, exist_ok=True)
+    (gov / "scopes" / "notes.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Patterns\n"
+        'paths: ["Notes/Patterns/**"]\n',
+        encoding="utf-8",
+    )
+    (gov / "rules").mkdir(parents=True, exist_ok=True)
+    (gov / "rules" / "notes-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 3\n',
+        encoding="utf-8",
+    )
+    policy._CACHE.clear()
+    membership.clear_memo()
+    from exomem.governance import egress as egress_module
+
+    egress_module.clear_decision_memo()
+    find_module.clear_cache()
+
+
+def _served_ref(vault: Path) -> str:
+    """The review ref of the one thing this vault currently owes."""
+    rows = _due_state().served_entries(vault)
+    assert len(rows) == 1, f"expected exactly one due item, got {len(rows)}"
+    return rows[0]["ref"]
+
+
 def _observe(vault: Path, content: str, *, response_detail: str | None = None) -> dict:
     kwargs: dict = {
         "path": SCRATCH,
@@ -475,16 +511,141 @@ def test_a_change_in_totals_re_emits(vault: Path) -> None:
     assert changed["due_state"]["total"] == 2
 
 
-def test_a_forty_write_batch_emits_at_most_one_block(vault: Path) -> None:
-    """The top product risk of the whole programme is the counter becoming the nag."""
+def test_a_forty_write_batch_emits_once_at_the_moment_the_totals_change(
+    vault: Path,
+) -> None:
+    """The spec scenario, not a restatement of the identical-totals rule.
+
+    Forty compiled writes while the projection's totals change ONCE. The earlier
+    version of this test issued forty writes with unchanging totals, which only
+    re-proved "identical consecutive totals go quiet" — it would have passed with
+    no batch handling at all. Here a `check_by` comes due in the middle, so the
+    interesting question is asked: exactly one response carries a block, and it is
+    the one at the change.
+    """
+    from exomem import attention as attention_module
+
     _overdue_prediction(vault, check_by=_yesterday())
     _scratch_page(vault)
     _prime(vault)
 
-    results = [_observe(vault, f"Batch observation {index}.") for index in range(40)]
+    # Start the batch owing nothing: the item is real but already triaged. The
+    # totals are moved mid-batch by REOPENING it through the shipped review
+    # surface rather than by writing a page, because creating a note in the middle
+    # of a forty-write batch destabilises the epistemic-graph rebuild and would
+    # make this a test of that instead.
+    ref = _served_ref(vault)
+    item = attention_module.item_by_ref(vault, ref)
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="later")
+    _fresh_session()
 
-    carried = sum("due_state" in row for row in results)
-    assert carried == 1, f"forty writes emitted {carried} blocks"
+    results: list[dict] = []
+    for index in range(40):
+        if index == 20:
+            commands.op_triage_memory(vault, ref=ref, action="reopen")
+        results.append(_observe(vault, f"Batch observation {index}."))
+
+    carrying = [index for index, row in enumerate(results) if "due_state" in row]
+    assert len(carrying) == 1, (
+        f"forty writes emitted {len(carrying)} blocks (at {carrying}); the totals "
+        "changed exactly once"
+    )
+    assert carrying[0] >= 20, (
+        "the block must arrive at or after the write that changed the totals, "
+        f"not at index {carrying[0]}"
+    )
+    assert results[carrying[0]]["due_state"]["total"] == 1
+
+
+def test_a_legacy_response_does_not_burn_the_sessions_emission(vault: Path) -> None:
+    """Emission is decided where the block is DELIVERED, not where it is produced.
+
+    `response_detail='legacy'` strips every advisory. Recording the emission at
+    production meant the first legacy write consumed the session's single
+    emission, and the next compact write with identical totals went quiet about
+    something the caller had never been told.
+    """
+    _overdue_prediction(vault, check_by=_yesterday())
+    _scratch_page(vault)
+    _prime(vault)
+
+    legacy = _observe(vault, "Legacy detail write.", response_detail="legacy")
+    assert "due_state" not in legacy
+
+    compact = _observe(vault, "Compact detail write.")
+    assert "due_state" in compact, (
+        "the legacy response carried nothing, so the emission it would have used "
+        "must still be available"
+    )
+
+
+def test_a_terminal_validation_drop_does_not_burn_the_sessions_emission(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rule, the other way a block fails to reach the caller.
+
+    A malformed block is dropped by the terminal's validation. If the emission was
+    already recorded, the caller is told nothing and stays told nothing.
+    """
+    from exomem import mutation_terminal
+
+    _overdue_prediction(vault, check_by=_yesterday())
+    _scratch_page(vault)
+    _prime(vault)
+
+    real = mutation_terminal._due_state_projection
+    monkeypatch.setattr(
+        mutation_terminal, "_due_state_projection", lambda leaf: (None, "")
+    )
+    dropped = _observe(vault, "Block dropped by validation.")
+    assert "due_state" not in dropped
+
+    monkeypatch.setattr(mutation_terminal, "_due_state_projection", real)
+    recovered = _observe(vault, "Block survives validation.")
+    assert "due_state" in recovered, (
+        "a dropped block must leave the emission unspent"
+    )
+
+
+def test_emission_is_scoped_to_one_command_invocation_at_the_terminal(
+    vault: Path,
+) -> None:
+    """D9's "at most once, at its terminal" holds by construction, not by habit.
+
+    Every mutating command reaches `project_terminal` exactly once, and that is
+    the only place `due_state` enters a response — so a command that committed
+    several pages internally could not emit per commit even if it wanted to. This
+    pins the structural fact the guarantee rests on; today all four compiled
+    writers commit once, so there is no multi-commit seam to drive.
+    """
+    from exomem import mutation_terminal
+
+    source = mutation_terminal.project_terminal.__code__
+    admits = [
+        name for name in source.co_names if name == "_admit_due_state"
+    ]
+    assert admits, "the terminal no longer decides emission; D9 is unpinned"
+
+    seen: list[str] = []
+    real = mutation_terminal._admit_due_state
+
+    def _counting(block: dict, hint: str) -> bool:
+        seen.append(hint)
+        return real(block, hint)
+
+    mutation_terminal._admit_due_state = _counting
+    try:
+        _overdue_prediction(vault, check_by=_yesterday())
+        _scratch_page(vault)
+        _prime(vault)
+        seen.clear()
+        _observe(vault, "One command, one terminal.")
+    finally:
+        mutation_terminal._admit_due_state = real
+
+    assert len(seen) == 1, (
+        f"one command invocation consulted the governor {len(seen)} times"
+    )
 
 
 def test_emission_governance_is_per_audience(vault: Path) -> None:
@@ -507,6 +668,94 @@ def test_emission_governance_is_per_audience(vault: Path) -> None:
     )
 
 
+def test_emission_governance_is_per_vault(vault: Path, tmp_path: Path) -> None:
+    """One process can serve two vaults; being told about one must not silence the other.
+
+    The digest is over totals, so two vaults that each owe one prediction produce
+    the SAME digest. Keyed by (session, audience) alone, the second vault would go
+    quiet about an item nobody had been told about — a wrong answer, not a quiet one.
+    """
+    second = tmp_path / "second-vault"
+    (second / INSIGHTS).mkdir(parents=True)
+    _overdue_prediction(vault, check_by=_yesterday())
+    _overdue_prediction(second, check_by=_yesterday())
+
+    first_block = _due_state().served(vault)
+    second_block = _due_state().served(second)
+    assert first_block == second_block, "identical totals, so the digests coincide"
+
+    assert _due_state().should_emit(first_block, vault_root=vault)
+    assert _due_state().should_emit(second_block, vault_root=second), (
+        "the second vault has its own first-of-session emission"
+    )
+    assert not _due_state().should_emit(first_block, vault_root=vault)
+
+
+def _outcomes_on_the_mutation_receipt(vault: Path, content: str) -> int:
+    """How many egress outcomes one write leaves on the MUTATION's own receipt.
+
+    The boundary is opened here explicitly because that is what the command layer
+    does around a governed mutation, and it is the thing being protected: without
+    an ambient collector there is no receipt to pollute and any assertion would be
+    vacuous. Counting is the only honest measure — `_outcome_for_decision`
+    projects decisions "without carrying a path/title", so counting by path would
+    always find nothing.
+    """
+    from exomem.governance import egress as egress_module
+
+    with egress_module.disclosure_boundary(vault, "observe_memory") as collector:
+        _observe(vault, content)
+        return len(collector.outcomes)
+
+
+def test_a_writes_governance_receipt_gains_nothing_from_the_due_state_count(
+    vault: Path, tmp_path: Path
+) -> None:
+    """The advisory's egress decisions belong to the advisory, not to the mutation.
+
+    Counting IS an egress decision per page, so on a governed vault the filter
+    records one outcome per due item. Joining the mutation's collector would hand
+    the caller a receipt for a one-page write swollen with decisions about pages
+    the write never touched.
+
+    Measured as an A/B against an otherwise identical vault that owes nothing: the
+    mutation's own receipt must be the same size either way.
+    """
+    from exomem.governance import egress as egress_module
+    from exomem.governance.principal import owner_principal, request_scope
+
+    quiet = tmp_path / "quiet-vault"
+    (quiet / INSIGHTS).mkdir(parents=True)
+    for target in (vault, quiet):
+        _scratch_page(target)
+        _govern(target)
+    # Only this one owes anything.
+    for slug in ("one", "two", "three"):
+        _overdue_prediction(vault, slug, check_by=_yesterday())
+    for target in (vault, quiet):
+        _prime(target)
+    assert egress_module.release_walk_filter(vault) is not None, (
+        "an ungoverned vault takes the empty-policy fast path and records nothing, "
+        "which would make this assertion vacuous"
+    )
+
+    with request_scope(owner_principal(surface="cli")):
+        assert _due_state().served(vault)["total"] == 3
+        assert _due_state().served(quiet) is None
+
+        owing = _outcomes_on_the_mutation_receipt(
+            vault, "Governed write on a vault that owes three."
+        )
+        owed_nothing = _outcomes_on_the_mutation_receipt(
+            quiet, "Governed write on a quiet vault."
+        )
+
+    assert owing == owed_nothing, (
+        f"the write's own receipt grew from {owed_nothing} to {owing} outcomes "
+        "because the due-state count joined the mutation's collector"
+    )
+
+
 def test_emission_governance_is_deterministic_without_an_agent(vault: Path) -> None:
     _overdue_prediction(vault, check_by=_yesterday())
     _prime(vault)
@@ -524,12 +773,18 @@ def test_emission_governance_is_deterministic_without_an_agent(vault: Path) -> N
 def test_removing_emission_governance_fails_this_module(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Mechanism-removal: with the governor always saying yes, the quiet tests break."""
+    """Mechanism-removal: with the governor always saying yes, the quiet tests break.
+
+    The mutating carrier decides at DELIVERY, so `would_emit` is the mechanism to
+    remove here — `should_emit` is the decide-and-record convenience the read
+    surfaces use, and patching it would leave the write path governed and this
+    test green for the wrong reason.
+    """
     _overdue_prediction(vault, check_by=_yesterday())
     _scratch_page(vault)
     _prime(vault)
 
-    monkeypatch.setattr(_due_state(), "should_emit", lambda *a, **k: True)
+    monkeypatch.setattr(_due_state(), "would_emit", lambda *a, **k: True)
     results = [_observe(vault, f"Observation number {index}.") for index in range(3)]
 
     assert sum("due_state" in row for row in results) == 3, (

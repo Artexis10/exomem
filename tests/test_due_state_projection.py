@@ -84,6 +84,33 @@ def _prediction(
     return _write(vault, f"{folder}/{slug}.md", head + block)
 
 
+EXPERIMENTS = "Knowledge Base/Notes/Experiments/Infrastructure"
+
+
+def _question_page(vault: Path, slug: str, *, created: str) -> str:
+    """A long-unanswered question — a `question_aging` item, opt-in category."""
+    return _write(
+        vault,
+        f"{INSIGHTS}/{slug}.md",
+        f"---\ntitle: {slug}\ntype: insight\nstatus: active\n"
+        f"created: {created}\nupdated: {created}\n---\n\n"
+        "## Open Question\n\n- id: q1\n\n"
+        "Does the projection survive a day boundary with no write?\n",
+    )
+
+
+def _experiment(vault: Path, slug: str, *, started: str, duration: str) -> str:
+    """An experiment past its declared window with no outcome — opt-in category."""
+    return _write(
+        vault,
+        f"{EXPERIMENTS}/{slug}.md",
+        f"---\ntitle: {slug}\ntype: experiment\ndomain: infrastructure\n"
+        f"status: active\ncreated: 2025-01-01\nupdated: 2025-01-01\n"
+        f'started: {started}\nduration: "{duration}"\nn: 1\n---\n\n'
+        "## Hypothesis\n\nIt will work.\n",
+    )
+
+
 def _gov_dir(vault: Path) -> Path:
     return vault / "Knowledge Base" / "_Governance"
 
@@ -214,6 +241,84 @@ def test_a_delta_removes_the_written_pages_resolved_item(vault: Path) -> None:
     assert _served(vault) is None
 
 
+def _dangling(vault: Path, slug: str, *, target: str, status: str = "superseded") -> str:
+    """A page whose `superseded_by` points nowhere — the page-local defect."""
+    return _write(
+        vault,
+        f"{INSIGHTS}/{slug}.md",
+        f"---\ntitle: {slug}\ntype: insight\nstatus: {status}\n"
+        f"created: 2026-01-01\nupdated: 2026-06-01\n"
+        f'superseded_by: "[[{target}]]"\n---\n\n# {slug}\n\nBody.\n',
+    )
+
+
+def test_a_write_that_repairs_a_dangling_pointer_stops_counting_immediately(
+    vault: Path,
+) -> None:
+    """The page-local half of `supersession_integrity` settles on the write.
+
+    It is the only `warn` category the counter carries and the one a user acts on
+    at once, so continuing to report it until the next reconcile is the worst
+    behaviour available: the counter would nag about the thing just fixed.
+    """
+    real = _prediction(vault, "successor", check_by="2026-12-01")
+    rel = _dangling(vault, "old", target=f"{INSIGHTS}/nowhere")
+    due_state_module.reconcile(vault, today=TODAY)
+    assert _served(vault)["categories"]["supersession_integrity"] == 1
+
+    _dangling(vault, "old", target=real.removesuffix(".md"))
+    due_state_module.apply_write_delta(vault, rel, today=TODAY)
+
+    served = _served(vault)
+    assert served is None or "supersession_integrity" not in served["categories"]
+
+
+def test_a_write_does_not_delete_a_multi_headed_chain_the_full_pass_found(
+    vault: Path,
+) -> None:
+    """The chain-scoped half is NOT the write's to settle.
+
+    Whether writing one page forks a chain depends on what other pages point at
+    its predecessor. A delta that recomputed the whole category from the written
+    page alone would erase a fork it cannot see — so the stored multi-head entry
+    must survive a write that touches the same page.
+    """
+    def _head(slug: str, *, updated: str, body: str) -> str:
+        return _write(
+            vault,
+            f"{INSIGHTS}/{slug}.md",
+            f"---\ntitle: {slug}\ntype: insight\nstatus: active\ncreated: 2026-01-01\n"
+            f'updated: {updated}\nsupersedes: "[[{INSIGHTS}/root]]"\n---\n\n# {slug}\n\n{body}\n',
+        )
+
+    _dangling(vault, "root", target=f"{INSIGHTS}/head-a")
+    _head("head-a", updated="2026-06-01", body="Body.")
+    _head("head-b", updated="2026-06-01", body="Body.")
+    due_state_module.reconcile(vault, today=TODAY)
+    before = _served(vault)
+    assert before is not None
+    forks = before["categories"].get("supersession_integrity", 0)
+    assert forks >= 1, "the fixture must actually fork, or this test covers nothing"
+
+    # The finding is anchored on the first member by path, so writing THAT page is
+    # the case that matters: a delta which recomputed the category from the written
+    # page alone would drop the fork entirely. Writing a non-anchor page proves
+    # nothing, because the stored entry lives under a different key.
+    anchor = f"{INSIGHTS}/head-a.md"
+    stored = due_state_module.load(vault)["categories"]["supersession_integrity"]
+    assert anchor in stored, (
+        "the fork is not anchored where this test assumes; re-read the anchor rule "
+        f"in audit._multi_headed_chain_findings (stored under {sorted(stored)})"
+    )
+
+    rel = _head("head-a", updated="2026-08-16", body="More body.")
+    due_state_module.apply_write_delta(vault, rel, today=TODAY)
+
+    after = _served(vault)
+    assert after is not None
+    assert after["categories"].get("supersession_integrity", 0) == forks
+
+
 def test_a_delta_does_not_rerun_the_full_audit(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,19 +412,99 @@ def test_promotion_needs_no_audit_pass(
 
 
 def test_reconcile_heals_an_out_of_band_edit(vault: Path) -> None:
-    """A file changed by Obsidian, git, or a human — no write hook fired."""
+    """A file changed by Obsidian, git, or a human — no write hook fired.
+
+    The edit PUSHES THE CHECK DATE OUT rather than deleting the page: the author
+    decides in Obsidian that the prediction needs another quarter. Serving has no
+    way to notice that from stored state, so the projection keeps claiming the
+    item until the healer runs — which is exactly the staleness `reconcile` exists
+    for. (A deleted page is a different story and is handled at serve time; see
+    the vanished-path test below.)
+    """
     _prediction(vault, "one", check_by="2026-08-01")
     due_state_module.reconcile(vault, today=TODAY)
     assert _served(vault)["total"] == 1
 
-    (vault / f"{INSIGHTS}/one.md").unlink()
-    find_module.clear_cache()
+    _prediction(vault, "one", check_by="2026-12-01")
 
     # The stale projection still claims the item until the healer runs.
     assert _served(vault)["total"] == 1
 
     due_state_module.reconcile(vault, today=TODAY)
     assert _served(vault) is None
+
+
+def test_a_page_deleted_out_of_band_stops_counting_before_reconcile(
+    vault: Path,
+) -> None:
+    """Reconcile is the healer, but a vanished page must not be counted meanwhile.
+
+    A deleted page is the one staleness serving CAN see for itself, and it is the
+    shape a user notices: they delete a note and the counter keeps insisting the
+    vault owes something about it. Every category is dropped, not just the ones a
+    write can delta.
+    """
+    _prediction(vault, "one", check_by="2026-08-01")
+    _prediction(vault, "two", check_by="2026-08-02")
+    due_state_module.reconcile(vault, today=TODAY)
+    assert _served(vault)["total"] == 2
+
+    (vault / f"{INSIGHTS}/one.md").unlink()
+    (vault / f"{INSIGHTS}/two.md").unlink()
+    find_module.clear_cache()
+
+    assert _served(vault) is None
+
+
+def test_a_vault_that_owes_nothing_never_builds_the_release_filter(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty projection has no input for the egress rule, so it skips it.
+
+    This is not a relaxation of "egress before counting" — with no stored entry
+    the served view is the empty list under any filter, so there is nothing a
+    filter could change. It matters because building the release filter is
+    governance-proportional work paid on every recall and every bootstrap, and a
+    vault that owes nothing is the common case. Leaving it in showed up as
+    measurable overhead on the governed read path.
+
+    Pinned on the CALL rather than on a duration, so it is not a timing test.
+    """
+    from exomem.governance import egress as egress_module
+
+    calls: list[object] = []
+    real = egress_module.release_walk_filter
+    monkeypatch.setattr(
+        egress_module,
+        "release_walk_filter",
+        lambda *a, **k: (calls.append(1), real(*a, **k))[1],
+    )
+
+    due_state_module.reconcile(vault, today=TODAY)
+    assert _served(vault) is None
+    assert calls == [], "an empty projection consulted the release plane anyway"
+
+    # And the moment it owes something, the filter is back on the path.
+    _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    assert _served(vault)["total"] == 1
+    assert calls, "a non-empty projection must still be filtered before counting"
+
+
+def test_removing_the_vanished_path_drop_fails_this_module(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mechanism removal: with the existence check gone, the deleted page is back."""
+    _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    (vault / f"{INSIGHTS}/one.md").unlink()
+    find_module.clear_cache()
+    assert _served(vault) is None
+
+    monkeypatch.setattr(due_state_module, "_page_exists", lambda *a, **k: True)
+
+    stale = _served(vault)
+    assert stale is not None and stale["total"] == 1
 
 
 def test_missing_state_recomputes_at_serve_time(vault: Path) -> None:
@@ -449,23 +634,323 @@ def test_removing_the_egress_filter_fails_this_module(
 # ==========================================================================
 
 
-def test_a_dismissed_item_stops_counting(vault: Path) -> None:
-    from exomem import attention as attention_module
-    from exomem import review_state as review_state_module
+def _review_surface_item(vault: Path, rel: str, *, today: dt.date = TODAY):
+    """The item exactly as the REVIEW SURFACE composes it: the default union, fused.
 
-    _prediction(vault, "one", check_by="2026-08-01")
+    Deliberately not `categories=[one]`. `attention._rank` folds each page's
+    unpartitioned page-level signals (relation_debt, stale_review, ...) into the
+    partitioned item, so a single-category call is the ONE configuration in which
+    no fusion happens -- and a dismissal test written against it proves nothing
+    about the surface a user actually triages through.
+    """
+    from exomem import attention as attention_module
+
+    report = attention_module.attention(vault, limit=0, state="all", today=today)
+    matches = [item for item in report.items if item.path == rel]
+    assert matches, f"no default-union review item for {rel}"
+    return matches[0]
+
+
+def _assert_fused(item) -> None:
+    """The fixture must actually exercise the fusion boundary, or it covers nothing."""
+    assert "prediction_window" in item.categories
+    assert len(item.categories) > 1, (
+        "this page no longer picks up a second, page-level signal, so the item is "
+        "no longer FUSED and these tests have stopped crossing the boundary they "
+        "exist for -- give the fixture a page-level signal again (a page with no "
+        "wikilinks earns relation_debt) rather than relaxing this assertion"
+    )
+
+
+def test_a_dismissal_through_the_review_surface_stops_every_carrier_counting(
+    vault: Path,
+) -> None:
+    """The bug this pins shipped: dismissal never reached the counters.
+
+    `due_state` keys on ONE finding's identity; the review surface hands the user
+    a FUSED item whose fingerprint covers every queue that flagged the page. Same
+    `item_id`, different fingerprint -- so `effective_state` read the recorded
+    dismissal as "the signal materially changed" and kept counting the item on
+    every carrier, forever. The fix is one shared composer plus recording the
+    decision for each component at decision time.
+    """
+    from exomem import commands
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
     due_state_module.reconcile(vault, today=TODAY)
     assert _served(vault)["total"] == 1
 
-    report = attention_module.attention(
-        vault, categories=["prediction_window"], limit=0, state="all", today=TODAY
-    )
-    item = report.items[0]
-    store = review_state_module.ReviewStateStore(vault)
+    item = _review_surface_item(vault, rel)
+    _assert_fused(item)
     entry = due_state_module.served_entries(vault, today=TODAY)[0]
-    store.apply(item.item_id, entry["fingerprint"], action="dismiss", why="known")
+    assert entry["ref"] == item.ref, "same review identity"
+    assert entry["fingerprint"] != item.fingerprint, (
+        "the two fingerprints genuinely differ -- if they ever coincide this test "
+        "passes for the wrong reason"
+    )
+
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
 
     assert _served(vault) is None
+
+
+def test_a_snooze_through_the_review_surface_is_quiet_only_until_it_lapses(
+    vault: Path,
+) -> None:
+    from exomem import commands
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    item = _review_surface_item(vault, rel)
+    _assert_fused(item)
+
+    commands.op_triage_memory(
+        vault, ref=item.ref, action="snooze", until="2026-08-20", why="after the demo"
+    )
+
+    assert _served(vault, today=TODAY) is None
+    assert _served(vault, today=dt.date(2026, 8, 20)) is None
+    lapsed = _served(vault, today=dt.date(2026, 8, 21))
+    assert lapsed is not None and lapsed["total"] == 1
+
+
+def test_a_reopen_through_the_review_surface_makes_it_count_again(vault: Path) -> None:
+    from exomem import commands
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    item = _review_surface_item(vault, rel)
+    _assert_fused(item)
+
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
+    assert _served(vault) is None
+
+    commands.op_triage_memory(vault, ref=item.ref, action="reopen")
+
+    reopened = _served(vault)
+    assert reopened is not None and reopened["total"] == 1
+
+
+def test_a_material_change_resurfaces_a_dismissed_item_under_a_new_fingerprint(
+    vault: Path,
+) -> None:
+    """The other half of the contract: quiet is bound to the signal, not the item."""
+    from exomem import commands
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    item = _review_surface_item(vault, rel)
+    before = due_state_module.served_entries(vault, today=TODAY)[0]["fingerprint"]
+
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
+    assert _served(vault) is None
+
+    # The author edits the prediction itself -- new knowledge, not a reformat.
+    _write(
+        vault,
+        rel,
+        "---\ntitle: one\ntype: insight\nstatus: active\n"
+        "created: 2026-01-01\nupdated: 2026-08-16\n---\n\n"
+        "## Prediction\n\n- id: p1\n- check_by: 2026-08-01\n\n"
+        "The backlog clears within a DAY, not a week.\n",
+    )
+    due_state_module.reconcile(vault, today=TODAY)
+
+    after = _served(vault)
+    assert after is not None and after["total"] == 1
+    changed = due_state_module.served_entries(vault, today=TODAY)[0]["fingerprint"]
+    assert changed != before
+
+
+def test_the_projection_composes_its_identity_through_the_shared_composer(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`due_state` must not compose the per-finding fingerprint privately again.
+
+    Two private composers that must agree is exactly the shape that shipped the
+    dismissal bug, so this pins the call rather than the value: if the projection
+    stops routing through `review_state.component_fingerprint`, the sentinel never
+    appears and this goes red.
+    """
+    from exomem import review_state as review_state_module
+
+    monkeypatch.setattr(
+        review_state_module, "component_fingerprint", lambda **kwargs: "SENTINEL"
+    )
+    _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+
+    rows = due_state_module.served_entries(vault, today=TODAY)
+    assert rows and all(row["fingerprint"] == "SENTINEL" for row in rows)
+
+
+OPT_IN_CASES = [
+    (
+        "question_aging",
+        lambda vault: _question_page(vault, "resolver-budget", created="2026-05-01"),
+    ),
+    (
+        "unfinished_experiments",
+        lambda vault: _experiment(vault, "pool-sizing", started="2026-01-01", duration="30 days"),
+    ),
+]
+
+
+@pytest.mark.parametrize(("category", "make"), OPT_IN_CASES, ids=[c for c, _ in OPT_IN_CASES])
+def test_an_opt_in_categorys_ref_can_be_put_down_through_the_review_surface(
+    vault: Path, category: str, make
+) -> None:
+    """A counter must not hand out a reference nobody can act on.
+
+    `question_aging` and `unfinished_experiments` are registered but opt-in, and
+    `item_by_ref` used to resolve only against the default union — so a ref the
+    due-state block published was readable on every carrier and resolvable by no
+    path at all. `triage_memory` refused it with `REVIEW_ITEM_NOT_FOUND` while
+    `due_state_handling` was busy telling the agent to consult its state before
+    raising it again.
+
+    The ref used here is the one the BLOCK publishes, not one reconstructed from
+    attention, because that is the only ref an agent ever sees.
+    """
+    from exomem import commands
+
+    make(vault)
+    due_state_module.reconcile(vault, today=TODAY)
+    rows = [
+        row
+        for row in due_state_module.served_entries(vault, today=TODAY)
+        if row["category"] == category
+    ]
+    assert len(rows) == 1, f"expected one {category} item, got {len(rows)}"
+    ref = rows[0]["ref"]
+    assert _served(vault)["categories"][category] == 1
+
+    commands.op_triage_memory(vault, ref=ref, action="dismiss", why="known")
+    served = _served(vault)
+    assert served is None or category not in served["categories"], (
+        f"a dismissed {category} item is still being counted"
+    )
+
+    commands.op_triage_memory(vault, ref=ref, action="reopen")
+    assert _served(vault)["categories"][category] == 1
+
+
+@pytest.mark.parametrize(("category", "make"), OPT_IN_CASES, ids=[c for c, _ in OPT_IN_CASES])
+def test_removing_the_opt_in_fallback_fails_this_module(
+    vault: Path, category: str, make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mechanism removal, asserted on the OUTCOME because the two break differently.
+
+    Without the wider resolution, `question_aging` raises `REVIEW_ITEM_NOT_FOUND`
+    (nothing in the default union sits on its partitioned id) while
+    `unfinished_experiments` "succeeds" against the `relation_debt` item that
+    shares its bare id — dismissing a different signal and leaving the count up.
+    Both are the same product failure: the ref cannot be put down. Asserting the
+    exception alone would have let the second, quieter case through, which is how
+    it survived the first draft of this test.
+    """
+    from exomem import attention as attention_module
+    from exomem import commands
+
+    monkeypatch.setattr(
+        attention_module, "_item_by_ref_fallback", lambda *a, **k: None
+    )
+
+    make(vault)
+    due_state_module.reconcile(vault, today=TODAY)
+    ref = [
+        row
+        for row in due_state_module.served_entries(vault, today=TODAY)
+        if row["category"] == category
+    ][0]["ref"]
+
+    try:
+        commands.op_triage_memory(vault, ref=ref, action="dismiss", why="known")
+    except ValueError as exc:
+        assert "REVIEW_ITEM_NOT_FOUND" in str(exc)
+        return
+
+    served = _served(vault)
+    assert served is not None and served["categories"].get(category) == 1, (
+        "triage reported success without the wider resolution, so it must have put "
+        "down some OTHER signal while the count stayed up -- if this is green the "
+        "mechanism is not load-bearing"
+    )
+
+
+def test_the_fallback_does_not_move_a_default_union_items_identity(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordering guarantee, pinned: existing refs keep the fingerprint they had.
+
+    The default union is searched first, so an item it holds is returned before
+    the fallback runs. This measures that directly — the fingerprint resolved with
+    the fallback available must equal the one resolved with it disabled, which is
+    exactly the value #555's callers already round-trip into
+    `expected_fingerprint`.
+    """
+    from exomem import attention as attention_module
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
+    item = _review_surface_item(vault, rel)
+    _assert_fused(item)
+
+    with_fallback = attention_module.item_by_ref(vault, item.ref, today=TODAY)
+
+    monkeypatch.setattr(
+        attention_module, "_item_by_ref_fallback", lambda *a, **k: None
+    )
+    without_fallback = attention_module.item_by_ref(vault, item.ref, today=TODAY)
+
+    assert with_fallback.item_id == without_fallback.item_id
+    assert with_fallback.fingerprint == without_fallback.fingerprint
+    assert with_fallback.categories == without_fallback.categories
+
+
+def test_the_fallback_never_widens_to_every_audit_category(vault: Path) -> None:
+    """Bounded on purpose: opt-in REVIEW queues, never the structural checks.
+
+    `ALL_CATEGORIES` carries expensive checks that were never review items;
+    resolving a ref against them would turn one triage call into a full audit and
+    make things triageable that were never surfaced as items.
+    """
+    from exomem import attention as attention_module
+    from exomem import audit as audit_module
+
+    triageable = set(attention_module._TRIAGEABLE_CATEGORIES)
+    assert triageable == set(attention_module.DEFAULT_ATTENTION_CATEGORIES) | set(
+        audit_module.EPISTEMIC_REVIEW_CATEGORIES
+    )
+    assert triageable < set(audit_module.ALL_CATEGORIES)
+    assert set(due_state_module.PROJECTION_CATEGORIES) <= triageable, (
+        "every category the block can publish a ref for must be resolvable"
+    )
+
+
+def test_removing_the_component_fanout_fails_this_module(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mechanism removal for the fix above.
+
+    If `apply_for_item` stops recording the component identities, the dismissal
+    the user made through the review surface stops reaching the counter -- which
+    is precisely the shipped bug. A green suite with this monkeypatch in place
+    would mean the cross-boundary tests are tautologies again.
+    """
+    from exomem import commands
+    from exomem import review_state as review_state_module
+
+    monkeypatch.setattr(
+        review_state_module, "component_fingerprints", lambda *a, **k: []
+    )
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    item = _review_surface_item(vault, rel)
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
+
+    still_counted = _served(vault)
+    assert still_counted is not None and still_counted["total"] == 1
 
 
 def test_the_maintain_memory_reconcile_path_heals_the_projection(vault: Path) -> None:
@@ -483,8 +968,7 @@ def test_the_maintain_memory_reconcile_path_heals_the_projection(vault: Path) ->
     due_state_module.reconcile(vault, today=TODAY)
     assert _served(vault)["total"] == 1
 
-    (vault / f"{INSIGHTS}/one.md").unlink()
-    find_module.clear_cache()
+    _prediction(vault, "one", check_by="2026-12-01")
     assert _served(vault)["total"] == 1  # still stale
 
     commands.op_reconcile(vault)

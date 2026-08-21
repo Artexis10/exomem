@@ -33,14 +33,34 @@ finding's `signal_version` is derived from authored state and never from today, 
 review identity and fingerprint a far-future scan produces are the ones the real surface
 produces.
 
-**Why the write path never recomputes.** The only post-commit seam that reaches all four
-compiled writers runs inside the mutation critical section (it is the seam #538 built for
-`structure_suggestion`). A full recompute there would put a vault-wide audit inside the
-write lock, which the write-latency gates and the shortened critical section both forbid.
-So a write applies a bounded delta and nothing else; when there is no persisted state to
-delta, the write stays silent and the next read surface — bootstrap, recall, or reconcile —
-performs the recovery outside any lock. A quiet first write is the correct trade against a
-mutation whose latency is decided by corpus size.
+**Why the write path never recomputes.** Cost, not locking. A full recompute is roughly
+thirty times a delta and, unlike the delta, scales with the corpus — so putting one on the
+write path would make write latency a function of vault size, which is the failure this
+projection exists to avoid. (The seam it hangs on is the one #538 built for
+`structure_suggestion`. Whether that seam is inside the mutation critical section depends
+on the command: `writer_lease._NARROW_BOUNDARY_COMMANDS` release their guards before
+`_commit_existing` returns, so for those it is post-lock, and it is inside only for
+wide-boundary commands or under `EXOMEM_WIDE_MUTATION_BOUNDARY`. The bound has to hold
+either way, which is why it is argued from cost rather than from the lock.) So a write
+applies a bounded delta and nothing else; when there is no persisted state to delta, the
+write stays silent and the next read surface — bootstrap, recall, or reconcile — performs
+the recovery outside any lock. A quiet first write is the correct trade.
+
+**A read surface may write.** Recovery persists: `served_entries` on a vault with no
+projection recomputes and saves `.due-state.json` into the KB directory, so a nominally
+read-only command can create a file. Where that write is refused the projection is kept in
+process instead (see `_remember_unpersisted`) so an unpersistable vault recomputes once per
+process rather than once per read.
+
+**Concurrency, and what is deliberately not solved.** The lock here is a `threading.Lock`,
+so it orders deltas within one process and not across processes. Two sessions in two
+processes can lose one delta (last `os.replace` wins), and a `reconcile` triggered from a
+read can overwrite a concurrent delta with a slightly older snapshot. That is accepted
+rather than overlooked: every delta is re-derivable from authored state, `reconcile` is the
+named healer for exactly this class of drift, and the failure mode is a count that is
+briefly stale — never a wrong write to the vault, and never a disclosure. A file lock on the
+projection would add a cross-process serialization point to the write path to protect an
+advisory counter, which is a worse trade.
 
 **Egress before counting, always.** A count is an aggregate, and the governance plane's
 silence rule extends to aggregates. The persisted projection is server-internal and is never
@@ -84,20 +104,30 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "question_aging",
 )
 
-#: The categories a single write can soundly update on its own.
-#:
-#: `supersession_integrity` is absent on purpose. Its dangling-pointer half is
-#: page-local, but its multi-headed-chain half is a property of a CHAIN: whether
-#: writing page B forks a chain depends on what other pages point at B's
-#: predecessor, and answering that needs a reverse scan the write path cannot
-#: afford. Recomputing only the half a page can see would let a delta DELETE a
-#: fork the full pass had found, so the category is left whole to reconcile —
-#: which is exactly the healer D5 names for cross-page truth.
+#: The categories a single write can soundly settle in full on its own.
 DELTA_CATEGORIES: tuple[str, ...] = (
     "prediction_window",
     "unfinished_experiments",
     "question_aging",
 )
+
+#: Categories a write can settle only PARTLY, listed with the defects it may touch.
+#:
+#: `supersession_integrity` reports two defects with different scopes.
+#: `dangling_pointer` is page-local: whether THIS page's `superseded_by` resolves
+#: is decided by this page and the link target, so a write that repairs a rotted
+#: pointer must clear the finding immediately — it is the only `warn` category
+#: here and the one a user acts on at once, so nagging after the fix is the worst
+#: possible behaviour. `multi_headed_chain` is a property of a CHAIN: whether
+#: writing page B forks a chain depends on what other pages point at B's
+#: predecessor, and answering that needs a reverse scan the write path cannot
+#: afford. A delta that recomputed the whole category from one page would DELETE
+#: a fork the full pass found, so the multi-head half is left to `reconcile` —
+#: the healer D5 names for cross-page truth — while the page-local half updates
+#: on the write. Stored entries carry their `defect` so the two can be told apart.
+DELTA_DEFECTS: dict[str, tuple[str, ...]] = {
+    "supersession_integrity": ("dangling_pointer",),
+}
 
 #: How many item references the wire block may carry. Small on purpose: the block
 #: is an invitation to consult the review surface, not a replacement for it.
@@ -108,13 +138,26 @@ TOP_LIMIT = 5
 #: docstring for why this is a sentinel and not a tuning horizon.
 _FAR_FUTURE = dt.date(9999, 12, 31)
 
+#: What `supersession_integrity` publishes when the page it flagged carries no
+#: authored date at all (`audit` floors it at `dt.date.min`). It is a "due since
+#: forever" placeholder, not a real date, so serving sorts it LAST rather than
+#: letting it take every slot in a five-item `top` ahead of real overdue work.
+_NO_DATE = dt.date.min.isoformat()
+
 _LOCK = threading.Lock()
 
-#: Emission governance state, keyed by (session, audience). In memory by design:
-#: it is per-conversation presentation state, not a durable fact about the vault,
-#: and persisting it would make a server restart change what an agent is told.
-_EMISSION: dict[tuple[str, str], str] = {}
+#: Emission governance state, keyed by (session, audience, vault). In memory by
+#: design: it is per-conversation presentation state, not a durable fact about the
+#: vault, and persisting it would make a server restart change what an agent is
+#: told. The vault is in the key because one process can serve several.
+_EMISSION: dict[tuple[str, str, str], str] = {}
 _EMISSION_CAP = 512
+
+#: Projections for vaults whose state file could not be written (a read-only KB
+#: directory, a mount that refuses the replace). Without this, every read surface
+#: on such a vault pays a full four-category audit instead of reusing one.
+_UNPERSISTED: dict[str, dict[str, Any]] = {}
+_UNPERSISTED_CAP = 8
 
 #: The fallback session key for stdio and CLI, where the transport supplies no
 #: session identity. One key per process lifetime, which is exactly the scope of
@@ -168,7 +211,17 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
         )
         try:
             with os.fdopen(handle_fd, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False)
+                # Compact separators, sorted keys: this file is rewritten and
+                # fsynced on every governed write, so its size is a per-write cost.
+                # Indentation cost ~2.5x for a machine-read file nobody diffs;
+                # `sort_keys` stays for determinism.
+                json.dump(
+                    payload,
+                    handle,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -237,15 +290,23 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
     return {
         "ref": review_state_module.review_ref(review_id),
         "item_id": review_id,
-        "fingerprint": review_state_module.fingerprint(
+        # The ONE shared composer -- see review_state.component_fingerprint for why
+        # composing this by hand here silently broke dismissal for every carrier.
+        "fingerprint": review_state_module.component_fingerprint(
             target_ref=target_ref,
-            categories=[finding.category],
-            reasons=[reason],
+            reason=reason,
             related_refs=related_refs,
         ),
-        # Server-internal: the served view filters on this and never emits it.
+        # Server-internal: the served view filters on these and never emits them.
         "path": finding.path,
         "due": due,
+        # Present only where a category reports more than one kind of defect;
+        # `DELTA_DEFECTS` uses it to update one half of a category on a write.
+        **(
+            {"defect": str((finding.meta or {}).get("defect"))}
+            if (finding.meta or {}).get("defect")
+            else {}
+        ),
     }
 
 
@@ -282,6 +343,47 @@ def _bucket(
     open_rows.sort(key=lambda row: (row["due_since"], row["path"], row["ref"]))
     pending_rows.sort(key=lambda row: (row["due_on"], row["path"], row["ref"]))
     return {"open": open_rows, "pending": pending_rows}
+
+
+def _has_entries(payload: Any) -> bool:
+    """Whether a stored projection holds any entry at all, in any category."""
+    categories = (payload or {}).get("categories") or {}
+    if not isinstance(categories, dict):
+        return False
+    for pages in categories.values():
+        if not isinstance(pages, dict):
+            continue
+        for entries in pages.values():
+            if isinstance(entries, dict) and (
+                entries.get("open") or entries.get("pending")
+            ):
+                return True
+    return False
+
+
+def _page_exists(vault_root: Path, rel_path: str) -> bool:
+    """Whether a stored entry's page is still on disk.
+
+    Named rather than inlined so the drop it guards is a mechanism a test can
+    remove: patching `Path.exists` wholesale also breaks reading the projection,
+    which would make the removal test pass for the wrong reason.
+    """
+    return (Path(vault_root) / rel_path).exists()
+
+
+def _unbucket(bucket: Any) -> list[dict[str, Any]]:
+    """Turn a stored `{open, pending}` bucket back into plain dated entries."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(bucket, dict):
+        return out
+    for key, date_key in (("open", "due_since"), ("pending", "due_on")):
+        for row in bucket.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            entry = dict(row)
+            entry["due"] = entry.pop(date_key, None)
+            out.append(entry)
+    return out
 
 
 def _date(value: Any) -> dt.date | None:
@@ -324,7 +426,34 @@ def reconcile(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
     """Full recompute plus persist — the healer after out-of-band edits."""
     payload = recompute(vault_root, today=today)
     save(vault_root, payload)
+    _remember_unpersisted(vault_root, payload)
     return payload
+
+
+def _remember_unpersisted(vault_root: Path, payload: dict[str, Any]) -> None:
+    """Keep an in-process copy of a projection that could not be written down.
+
+    A KB directory that is read-only (or a vault on a mount that refuses the
+    replace) makes `save` a silent no-op — it is best-effort by design. Without
+    this, EVERY `ask_memory` and every bootstrap re-ran a four-category audit,
+    which on a 600-page vault is ~169 ms against ~5 ms for a delta. Recomputing
+    once per process and serving the copy is the honest recovery; the log line
+    fires once so an operator can see why a vault is not persisting.
+    """
+    if state_path(vault_root).exists():
+        return
+    key = str(vault_root)
+    with _LOCK:
+        first = key not in _UNPERSISTED
+        if len(_UNPERSISTED) >= _UNPERSISTED_CAP:
+            _UNPERSISTED.pop(next(iter(_UNPERSISTED)), None)
+        _UNPERSISTED[key] = payload
+    if first:
+        log.warning(
+            "due-state projection could not be persisted at %s; serving an "
+            "in-process copy and recomputing once per process",
+            state_path(vault_root),
+        )
 
 
 def apply_write_delta(
@@ -333,8 +462,8 @@ def apply_write_delta(
     """Recompute one written page's entries and re-aggregate. Bounded, no audit pass.
 
     Returns the updated projection, or None when there is nothing to delta against
-    — a missing or unreadable projection is recovered by a read surface outside the
-    mutation critical section, never by turning this write into a vault-wide scan.
+    — a missing or unreadable projection is recovered by a read surface, never by
+    turning this write into a vault-wide scan it would then have to pay for.
     """
     from . import audit as audit_module
     from . import find as find_module
@@ -362,6 +491,13 @@ def apply_write_delta(
         findings.extend(
             audit_module._check_question_aging(vault_root, pages, today=_FAR_FUTURE)
         )
+        # Page-local half of a split category: this page's own pointers only.
+        findings.extend(
+            finding
+            for finding in audit_module._check_supersession_integrity(vault_root, pages)
+            if str((finding.meta or {}).get("defect") or "")
+            in DELTA_DEFECTS["supersession_integrity"]
+        )
     grouped = _entries_from_findings(vault_root, findings)
 
     with _LOCK:
@@ -370,6 +506,21 @@ def apply_write_delta(
         for category in DELTA_CATEGORIES:
             pages_map = dict(categories.get(category) or {})
             entries = (grouped.get(category) or {}).get(rel)
+            if entries:
+                pages_map[rel] = _bucket(entries, today)
+            else:
+                pages_map.pop(rel, None)
+            categories[category] = pages_map
+        for category, settleable in DELTA_DEFECTS.items():
+            pages_map = dict(categories.get(category) or {})
+            # Keep every stored defect this write cannot decide (the chain-scoped
+            # half), replace only the page-local ones it just recomputed.
+            preserved = [
+                entry
+                for entry in _unbucket(pages_map.get(rel))
+                if str(entry.get("defect") or "") not in settleable
+            ]
+            entries = preserved + list((grouped.get(category) or {}).get(rel) or [])
             if entries:
                 pages_map[rel] = _bucket(entries, today)
             else:
@@ -409,7 +560,19 @@ def served_entries(
     today = today or dt.date.today()
     payload = load(vault_root)
     if payload is None:
+        # An unpersistable vault recomputes ONCE per process, not once per read.
+        payload = _UNPERSISTED.get(str(vault_root))
+    if payload is None:
         payload = reconcile(vault_root, today=today)
+
+    if not _has_entries(payload):
+        # Nothing stored, so nothing to filter, count or order — and no disclosure
+        # decision to make, because the answer is the empty list either way. This
+        # is not an optimisation of the egress rule; it is the case where the rule
+        # has no input. It matters because building the release filter is
+        # governance-proportional work, and a vault that owes nothing is the
+        # common case on every recall and every bootstrap.
+        return []
 
     keep = None
     try:
@@ -449,6 +612,12 @@ def served_entries(
                     path = str(entry.get("path") or "")
                     if keep is not None and path and not keep(path):
                         continue  # withheld: contributes to nothing, anywhere
+                    if path and not _page_exists(vault_root, path):
+                        # Deleted out of band. The projection is maintained, not
+                        # authoritative, and reconcile heals it — but until then a
+                        # counter must not report an obligation on a page that is
+                        # gone. Cheap enough to pay per served row.
+                        continue
                     effective, _decision = store.effective_state(
                         str(entry.get("item_id") or ""),
                         str(entry.get("fingerprint") or ""),
@@ -466,7 +635,17 @@ def served_entries(
                             "path": path,
                         }
                     )
-    rows.sort(key=lambda row: (row["due_since"], order[row["category"]], row["ref"]))
+    # Dated first, oldest first; dateless last. A defect a human authored no date
+    # for is reported with a floor date internally, and left to sort naively it
+    # would outrank every genuinely overdue prediction in a five-slot `top`.
+    rows.sort(
+        key=lambda row: (
+            row["due_since"] == _NO_DATE,
+            row["due_since"],
+            order[row["category"]],
+            row["ref"],
+        )
+    )
     return rows
 
 
@@ -519,13 +698,22 @@ def block_for_write(
 ) -> dict[str, Any] | None:
     """Apply the per-write delta and return the block this response may carry.
 
-    Called from the post-commit seam, which is inside the mutation critical
-    section, so this does bounded work only: one page parse, three page-local
-    predicates, one small JSON replace. It never recomputes.
+    Called from the post-commit seam, so this does bounded work only: one page
+    parse, four page-local predicates, one small JSON replace. It never recomputes.
+
+    The serve runs inside its OWN disclosure boundary. Counting is an egress
+    decision per page, and on a governed vault `release_walk_filter` records one
+    outcome per due item — joining the mutation's collector would hand the caller
+    a governance receipt for a write listing N pages the write never touched.
+    Those decisions are real and are collected; they just belong to this advisory
+    rather than to the mutation.
     """
     if apply_write_delta(vault_root, rel_path, today=today) is None:
         return None
-    return served(vault_root, today=today)
+    from .governance import egress as egress_module
+
+    with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
+        return served(vault_root, today=today)
 
 
 # --------------------------------------------------------------------------
@@ -533,12 +721,17 @@ def block_for_write(
 # --------------------------------------------------------------------------
 
 
-def emission_key() -> tuple[str, str]:
-    """(session, audience) — the scope one "already told them" fact belongs to.
+def emission_key(vault_root: Path | None = None) -> tuple[str, str, str]:
+    """(session, audience, vault) — the scope one "already told them" fact belongs to.
 
     Session identity comes from the MCP transport when it supplies one; stdio and
     CLI have no session concept, so the process lifetime IS the conversation and a
     per-process key is the honest equivalent rather than a degraded one.
+
+    The vault is part of the key because one process can serve more than one of
+    them: without it, telling a principal about vault A's four overdue items would
+    silence vault B's identical-looking four, which is a wrong answer rather than
+    a quiet one.
     """
     session = _PROCESS_SESSION_KEY
     try:
@@ -556,11 +749,19 @@ def emission_key() -> tuple[str, str]:
         audience = str(effective_principal().audience_id or "unknown")
     except Exception:  # noqa: BLE001
         pass
-    return session, audience
+    return session, audience, str(vault_root or "")
 
 
-def should_emit(payload: dict[str, Any] | None) -> bool:
-    """Whether this response may carry the block, and record that it did.
+def _digest(payload: dict[str, Any]) -> str:
+    return json.dumps(
+        {"total": payload.get("total"), "categories": payload.get("categories")},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def would_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> bool:
+    """Whether this block is new to this (session, audience, vault). Records nothing.
 
     Emit on the first qualifying response of a session, or when the totals change.
     Identical consecutive totals go quiet, because the top product risk of this
@@ -569,21 +770,45 @@ def should_emit(payload: dict[str, Any] | None) -> bool:
     """
     if not payload:
         return False
-    digest = json.dumps(
-        {"total": payload.get("total"), "categories": payload.get("categories")},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    key = emission_key()
+    with _LOCK:
+        return _EMISSION.get(emission_key(vault_root)) != _digest(payload)
+
+
+def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> None:
+    """Record that this block was actually DELIVERED to the caller.
+
+    Deliberately separate from `would_emit`, and deliberately called at the point
+    of delivery rather than the point of production. Recording at production burnt
+    the session's one emission on responses that never carried the block at all --
+    a `legacy` detail strips it, and terminal validation can drop it -- so the next
+    response with the same totals went quiet about something the caller was never
+    told. Produce freely; record only what was handed over.
+    """
+    if not payload:
+        return
+    key = emission_key(vault_root)
+    digest = _digest(payload)
     with _LOCK:
         if _EMISSION.get(key) == digest:
-            return False
+            return
         if len(_EMISSION) >= _EMISSION_CAP:
             # Bounded rather than unbounded: a long-lived server must not
             # accumulate one entry per session it has ever seen. Evicting the
             # oldest costs at worst one extra emission for a stale session.
             _EMISSION.pop(next(iter(_EMISSION)), None)
         _EMISSION[key] = digest
+
+
+def should_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> bool:
+    """Decide and record in one step. Only for carriers that deliver immediately.
+
+    Recall and bootstrap attach the block to the object they are about to return,
+    so for them production and delivery are the same moment. The mutating path is
+    not like that and must use `would_emit` / `mark_emitted`.
+    """
+    if not would_emit(payload, vault_root=vault_root):
+        return False
+    mark_emitted(payload, vault_root=vault_root)
     return True
 
 
@@ -591,3 +816,4 @@ def reset_emission_state() -> None:
     """Forget what has been emitted. For tests and for a deliberate session reset."""
     with _LOCK:
         _EMISSION.clear()
+        _UNPERSISTED.clear()

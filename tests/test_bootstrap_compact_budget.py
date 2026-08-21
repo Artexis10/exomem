@@ -46,11 +46,12 @@ from exomem import commands
 #: sits ~6 KB below the 64,070-byte regression point the gate was built to catch.
 #: `MINIMUM_SAVING_RATIO` below is untouched; the saving moved 32.74% -> 31.46%.
 #:
-#: Raised a second time, and the arithmetic is again on the record. The measured
-#: floor at 58,000 was 57,872 — 128 bytes of headroom, i.e. none. The due-state
-#: carriers add three `authoring_contract.post_write` entries (`due_state`,
-#: `due_state_handling`, `due_state_authority`) totalling 1,203 bytes, taking
-#: compact to 59,075. The block those entries describe costs this measurement
+#: Raised a second time, and the arithmetic is again on the record — re-measured
+#: on the final tree rather than carried over from a draft. The measured floor at
+#: 58,000 was 57,872 — 128 bytes of headroom, i.e. none. The due-state carriers add
+#: three `authoring_contract.post_write` entries (`due_state`,
+#: `due_state_handling`, `due_state_authority`) totalling 1,224 bytes, taking
+#: compact to 59,096. The block those entries describe costs this measurement
 #: nothing: it is vault-derived and absent on the empty fixture, and it is bounded
 #: at five references anyway.
 #:
@@ -69,9 +70,14 @@ from exomem import commands
 #: the fingerprint rule and the silence-beats-bureaucracy rule). Both remove
 #: exactly the restraint the counters need in order not to become a nuisance.
 #:
-#: The new ceiling is 59,500: 425 bytes of headroom, deliberately less than the
+#: The new ceiling is 59,500: 404 bytes of headroom, deliberately less than the
 #: last raise pre-authorised, and still ~4.5 KB below the 64,070-byte regression
-#: point. `MINIMUM_SAVING_RATIO` is untouched and the saving moved 31.46% -> 35.0%.
+#: point. `MINIMUM_SAVING_RATIO` is untouched, and the saving moved DOWN — 35.46%
+#: without these entries to 34.98% with them — because bytes added to compact make
+#: compact resemble full a little more. It stays far above the 15% floor. (The
+#: 31.46% recorded for the previous raise is stale: the payload has moved since,
+#: and the two figures here are both measured on the current tree, which is why
+#: they do not chain onto it.)
 COMPACT_BYTE_CEILING = 59_500
 
 #: The defect was compact and full being near-identical. A profile that does not
