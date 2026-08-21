@@ -263,7 +263,7 @@ made before both PRs and their combined verification are complete.
   `_Consolidation` for the future owning command with no public bypass flag and no
   fallback owner until it exists; give each registered database/index only its named
   subsystem token; owning commands still use safe handle traversal and no generic bypass.
-- [ ] 4.11 Run the reserved-path and active race matrices on Linux and the Windows-specific
+- [x] 4.11 Run the reserved-path and active race matrices on Linux and the Windows-specific
   windows-latest NTFS junction/reparse/hard-link/8.3/rename-disposition/fallback-disable
   CI job; wire it into the required combined release gate. Prove enumeration/download/
   export/dataset/transfer never disclose internal state through Exomem, same-device
