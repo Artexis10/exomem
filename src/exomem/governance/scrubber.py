@@ -24,8 +24,6 @@ Two properties make it safe to run on every result:
 
 from __future__ import annotations
 
-import base64
-import binascii
 import datetime as dt
 import functools
 import hmac
@@ -36,6 +34,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from . import authorization_sessions
 
 #: What replaces a blocked value. Deliberately fixed text: a per-credential
 #: description would itself carry information about what was found.
@@ -51,9 +51,6 @@ NOTICE = "[credential blocked by exomem egress policy]"
 _AUTHORIZATION_BEARER_CANDIDATE_RE = re.compile(
     r"(?<![A-Za-z0-9_-])as1\.[A-Za-z0-9_-]{1,256}\.[A-Za-z0-9_-]{1,256}(?![A-Za-z0-9_-])"
 )
-_BASE64URL_ALPHABET = frozenset(
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-)
 _ISSUANCE_ACTIONS = frozenset({"open", "rotate"})
 _ISSUANCE_CONTEXT_SEAL = object()
 _RFC3339_RE = re.compile(
@@ -63,44 +60,10 @@ _RFC3339_RE = re.compile(
 
 
 def _parse_authorization_bearer(value: object) -> str | None:
-    """Return only the exact canonical 70-byte authorization bearer.
+    """Compatibility wrapper over the shared exact capability parser."""
 
-    Decode and byte-identical re-encoding are load-bearing: alphabet/length
-    checks alone accept final characters whose unused base64 bits are non-zero.
-    """
-    if not isinstance(value, str):
-        return None
-    try:
-        encoded = value.encode("ascii")
-    except UnicodeEncodeError:
-        return None
-    if (
-        len(encoded) != 70
-        or encoded[:4] != b"as1."
-        or encoded[26:27] != b"."
-    ):
-        return None
-    locator = encoded[4:26]
-    secret = encoded[27:]
-    if not all(byte in _BASE64URL_ALPHABET for byte in (*locator, *secret)):
-        return None
-    try:
-        locator_bytes = base64.b64decode(
-            locator + b"==", altchars=b"-_", validate=True
-        )
-        secret_bytes = base64.b64decode(
-            secret + b"=", altchars=b"-_", validate=True
-        )
-    except (binascii.Error, ValueError):
-        return None
-    if len(locator_bytes) != 16 or len(secret_bytes) != 32:
-        return None
-    if (
-        base64.urlsafe_b64encode(locator_bytes).rstrip(b"=") != locator
-        or base64.urlsafe_b64encode(secret_bytes).rstrip(b"=") != secret
-    ):
-        return None
-    return value
+    parsed = authorization_sessions.parse_credential(value)
+    return None if parsed is None else parsed.encoded
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,20 +485,10 @@ def _scrub_canonical_authorization_bearers(text: str) -> tuple[str, int]:
     """
     parts: list[str] = []
     copied_through = 0
-    search_from = 0
     replacements = 0
-    while True:
-        start = text.find("as1.", search_from)
-        if start < 0:
-            break
-        end = start + 70
-        candidate = text[start:end]
-        if _parse_authorization_bearer(candidate) is None:
-            search_from = start + 1
-            continue
+    for start, end in authorization_sessions.iter_credential_spans(text):
         parts.extend((text[copied_through:start], NOTICE))
         copied_through = end
-        search_from = end
         replacements += 1
     if not replacements:
         return text, 0
