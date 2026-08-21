@@ -25,7 +25,7 @@ def _page(vault: Path) -> str:
     return "Knowledge Base/Notes/get-payload-probe.md"
 
 
-def _govern(vault: Path, *, ceiling: int) -> None:
+def _govern(vault: Path, *, ceiling: int, options: str = "") -> None:
     governance = vault / "Knowledge Base" / "_Governance"
     (governance / "scopes").mkdir(parents=True, exist_ok=True)
     (governance / "rules").mkdir(parents=True, exist_ok=True)
@@ -41,7 +41,8 @@ def _govern(vault: Path, *, ceiling: int) -> None:
         "id: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
         'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
         "audience: external\n"
-        f"ceiling: {ceiling}\n",
+        f"ceiling: {ceiling}\n"
+        f"{options}",
         encoding="utf-8",
     )
     from exomem.governance import membership, policy
@@ -171,9 +172,20 @@ def test_l6_raw_is_exact_and_default_remains_raw_free(vault: Path) -> None:
 
     with request_scope(_external()):
         ordinary = commands.op_get(vault, path=rel)
+        explicit_false = commands.op_get(vault, path=rel, include_raw=False)
+        frontmatter_only = commands.op_get(vault, path=rel, frontmatter_only=True)
         raw = commands.op_get(vault, path=rel, include_raw=True)
 
+    assert explicit_false == ordinary
     assert "content" not in ordinary
+    assert frontmatter_only == {
+        "path": rel,
+        "frontmatter": {
+            "type": "research-note",
+            "project": "project-alpha",
+        },
+        "has_frontmatter": True,
+    }
     assert raw["content"] == (vault / rel).read_bytes().decode("utf-8")
     assert raw["content_hash"] == ordinary["content_hash"]
 
@@ -238,3 +250,35 @@ def test_l5_projection_omits_every_exact_provenance_channel(vault: Path) -> None
 
     assert set(result) == {"path", "body", "body_truncated", "release_level"}
     assert "private" not in str(result)
+
+
+def test_l4_direct_read_returns_only_the_approved_bridge_abstraction(
+    vault: Path,
+) -> None:
+    rel = _page(vault)
+    _govern(
+        vault,
+        ceiling=egress.LEVEL_EXCERPT_REDACTED,
+        options=(
+            "options:\n"
+            "  notice: must not appear\n"
+            "  constraint: must not appear\n"
+            "  abstract: must not appear\n"
+            "  bridge: approved cross-domain abstraction\n"
+        ),
+    )
+
+    with request_scope(_external()):
+        result = commands.op_get(
+            vault,
+            path=rel,
+            include_raw=True,
+            include_history=True,
+            links=True,
+        )
+
+    assert result == {
+        "withheld": True,
+        "level": egress.LEVEL_EXCERPT_REDACTED,
+        "bridge": "approved cross-domain abstraction",
+    }

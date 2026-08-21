@@ -228,6 +228,27 @@ def test_project_l4_falls_back_to_l3_abstract() -> None:
     assert l4 is not None and "excerpt" not in l4
 
 
+def test_project_l4_emits_only_the_approved_bridge_abstraction() -> None:
+    out = egress.project(
+        _hit(RESTRICTED_PATH, title="must not appear"),
+        egress.LEVEL_EXCERPT_REDACTED,
+        rule_ids=(RULE_ID,),
+        scope_label="must not appear",
+        options={
+            "notice": "must not appear",
+            "constraint": "must not appear",
+            "abstract": "must not appear",
+            "bridge": "approved cross-domain abstraction",
+        },
+    )
+
+    assert out == {
+        "withheld": True,
+        "level": egress.LEVEL_EXCERPT_REDACTED,
+        "bridge": "approved cross-domain abstraction",
+    }
+
+
 def test_project_l5_carries_path_title_and_excerpt() -> None:
     out = egress.project(_hit(RESTRICTED_PATH, title="Kill switch"), egress.LEVEL_EXCERPT)
     assert out is not None

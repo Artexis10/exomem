@@ -406,7 +406,7 @@ LEVEL_NONE = 0  # L0 nothing — the item is omitted, silently
 LEVEL_NOTICE = 1  # L1 rule id + scope label
 LEVEL_CONSTRAINT = 2  # L2 + the constraint string
 LEVEL_ABSTRACT = 3  # L3 + an approved abstraction
-LEVEL_EXCERPT_REDACTED = 4  # L4 — renders as L3 until `add-redaction-levels`
+LEVEL_EXCERPT_REDACTED = 4  # L4 — exact approved bridge abstraction only
 LEVEL_EXCERPT = 5  # L5 bounded excerpt + ranking signals
 LEVEL_FULL = 6  # L6 full disclosure
 
@@ -767,13 +767,19 @@ def _notice(
     scope_label: str | None = None,
     options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """L1–L4 rendering: rule id + scope label, then constraint, then abstract.
+    """L1–L4 rendering: low-level notices or one approved L4 abstraction.
 
     Deliberately carries no path, title, excerpt, score, or provenance at any
     of these levels — see the `release-gate` spec's "Low levels strip metadata
     oracles" scenario.
     """
     options = options or {}
+    if level == LEVEL_EXCERPT_REDACTED and options.get("bridge"):
+        return {
+            "withheld": True,
+            "level": LEVEL_EXCERPT_REDACTED,
+            "bridge": str(options["bridge"]),
+        }
     out: dict[str, Any] = {"withheld": True, "level": level}
     if level == LEVEL_CONSTRAINT and options.get("constraint_source") == "scope":
         constraint = options.get("constraint")
@@ -822,10 +828,9 @@ def project(
 
     if level <= LEVEL_NONE:
         return None
-    if level == LEVEL_EXCERPT_REDACTED:
-        # L4 needs redaction span maps, which `add-redaction-levels` ships.
-        # Until then it renders exactly as L3 — an approved abstraction —
-        # rather than releasing an unredacted excerpt.
+    if level == LEVEL_EXCERPT_REDACTED and not (options or {}).get("bridge"):
+        # L4 without exact approved bridge content lowers to L3 rather than
+        # borrowing any source text or reviving the retired redaction lane.
         level = LEVEL_ABSTRACT
     if level < RELEASE_FLOOR:
         return _notice(level, rule_ids=rule_ids, scope_label=scope_label, options=options)
@@ -1757,7 +1762,9 @@ def annotate_page(
         ref=stable_ref,
     )
 
-    level = LEVEL_ABSTRACT if decision.level == LEVEL_EXCERPT_REDACTED else decision.level
+    level = decision.level
+    if level == LEVEL_EXCERPT_REDACTED and not decision.bridge:
+        level = LEVEL_ABSTRACT
     if level < RELEASE_FLOOR:
         # No path on a sub-floor notice. `op_get`/`op_read_memory` accept a
         # fuzzy identifier and `_resolve_memory_identifier` canonicalizes it
