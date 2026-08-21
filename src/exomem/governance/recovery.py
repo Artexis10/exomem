@@ -14,6 +14,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .. import reserved_paths
 from . import policy as policy_module
 from . import receipts, store
 from .operations import RECOVERY_STRATEGY_KEYS, journal_variant, recovery_strategy
@@ -311,6 +312,18 @@ def _actual_component_value(
     expected: Mapping[str, Any] | None = None,
     event_id: str | None = None,
 ) -> dict[str, Any]:
+    if kind == "companion":
+        try:
+            snapshot = reserved_paths.read_generic_bytes(vault_root, key)
+        except reserved_paths.ReservedPathLeafError as error:
+            return {
+                "status": "absent" if error.code == "MISSING" else "unsafe"
+            }
+        return {
+            "path_hash": hashlib.sha256(key.encode("utf-8")).hexdigest(),
+            "sha256": hashlib.sha256(snapshot.data).hexdigest(),
+            "size": len(snapshot.data),
+        }
     if kind == "yaml":
         return {"hash": _content_hash(policy_module.governance_root(vault_root) / key)}
     if kind == "archive":
@@ -764,6 +777,7 @@ def _activate_composite_dependents(
 
 _RECOVERY_ACTIVATORS: Mapping[str, Any] = MappingProxyType(
     {
+        "composite_companion": _activate_composite_yaml,
         "composite_yaml": _activate_composite_yaml,
         "compound_grant": _activate_compound_grant,
         "composite_sidecar": _activate_composite_sidecar,

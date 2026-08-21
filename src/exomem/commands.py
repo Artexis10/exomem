@@ -6763,6 +6763,7 @@ _GovernanceOperation = Literal[
     "resume",
     "undo",
     "declare",
+    "backfill_companion",
 ]
 if frozenset(_GovernanceOperation.__args__) != frozenset(governance_operations.OPERATION_SPECS):
     raise RuntimeError("govern_memory surface operation choices drifted from governance registry")
@@ -6790,6 +6791,8 @@ def op_govern_memory(
     rule_ids: list[str] | None = None,
     path: str | None = None,
     paths: list[str] | None = None,
+    backfill_action: Literal["preview", "commit"] | None = None,
+    companion_input: dict[str, object] | None = None,
 ) -> dict:
     """Inspect or author opt-in confidential governance policy.
 
@@ -6799,7 +6802,8 @@ def op_govern_memory(
 
     Args:
         operation: Governance lifecycle operation: list, explain, simulate, propose,
-            commit, grant, revoke, suspend, resume, undo, or declare.
+            commit, grant, revoke, suspend, resume, undo, declare, or
+            backfill_companion.
         documents: Canonical policy documents proposed for a new policy version.
         selector_paths: Paths or glob selectors whose membership a proposal resolves.
         intent: Plain-language policy intent for a proposal.
@@ -6821,6 +6825,8 @@ def op_govern_memory(
         rule_ids: Rule identifiers to suspend or resume.
         path: Item path for explain.
         paths: Item paths for simulate.
+        backfill_action: Preview or commit an owner-reviewed companion backfill.
+        companion_input: Exact version-1 artifact, companion, semantics, and binding input.
     """
     values = {
         "documents": documents,
@@ -6842,6 +6848,8 @@ def op_govern_memory(
         "rule_ids": rule_ids,
         "path": path,
         "paths": paths,
+        "backfill_action": backfill_action,
+        "companion_input": companion_input,
     }
     return governance_tool_module.op_govern_memory(
         vault_root,

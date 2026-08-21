@@ -842,6 +842,7 @@ def publish_generic_bytes(
     data: bytes,
     *,
     expected_identity: held_fs.StableIdentity | None,
+    expected_sha256: str | None = None,
     identities: IdentityCatalogue | None = None,
 ) -> held_fs.StableIdentity:
     """Publish one ordinary file through a retained parent and exact leaf CAS.
@@ -902,6 +903,7 @@ def publish_generic_bytes(
                     leaf,
                     data,
                     expected_identity=expected_identity,
+                    expected_sha256=expected_sha256,
                 )
                 if not published.ok:
                     code = (

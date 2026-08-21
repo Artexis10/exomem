@@ -220,6 +220,37 @@ class ClipIndex:
             own_instance,
         )
 
+    def frame_timestamps(self, rel_path: str) -> list[float]:
+        """Read existing keyframe timestamps without creating or migrating the index."""
+
+        try:
+            with reserved_paths._subsystem_authority_scope("clip_index"):
+                with reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=("clip-store",),
+                ):
+                    with reserved_paths._sqlite_owner_target_scope(
+                        self.vault_root,
+                        self.path,
+                        "clip-store",
+                        create=False,
+                    ) as target:
+                        connection = sqlite3.connect(
+                            f"{target.resolve().as_uri()}?mode=ro", uri=True
+                        )
+                        try:
+                            connection.execute("PRAGMA query_only=ON")
+                            rows = connection.execute(
+                                "SELECT frame_ts FROM images WHERE file_path=? "
+                                "AND frame_ts IS NOT NULL ORDER BY frame_ts, rowid",
+                                (rel_path,),
+                            ).fetchall()
+                        finally:
+                            connection.close()
+        except (FileNotFoundError, sqlite3.DatabaseError, RuntimeError):
+            return []
+        return [float(row[0]) for row in rows]
+
     def delete(self, rel_path: str) -> None:
         """Delete one visual key if the sidecar exists."""
         self.purge_paths_if_present([rel_path])
