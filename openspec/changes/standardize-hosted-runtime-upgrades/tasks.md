@@ -4,7 +4,7 @@
 - [x] 1.2 Add red-first unit tests for valid phase progression, safe retry, stale-input refusal, content/secret-field rejection, and phase-aware recovery decisions
 - [x] 1.3 Implement the pure execution state machine and canonical record hashing without performing external effects
 - [x] 1.4 Add a governed operator CLI that creates, inspects, revalidates, and advances an execution record only through the state machine
-- [ ] 1.5 Keep concrete release runs under `infra/operations/` as schema-validated evidence while excluding credentials, browser tokens, tenant content, paths, and titles
+- [x] 1.5 Keep concrete release runs under `infra/operations/` as schema-validated evidence while excluding credentials, browser tokens, tenant content, paths, and titles
 
 ## 2. Reconciled fleet inventory
 
@@ -69,7 +69,7 @@
 
 ## 8. First execution: runtime 0.57.2
 
-- [ ] 8.1 Verify the exact `v0.57.2` source commit, amd64 image digest, signed runtime candidate, source closure, attestations, protocol, profile, command fingerprint, schema digest, and compatibility digest
+- [x] 8.1 Verify the exact `v0.57.2` source commit, amd64 image digest, signed runtime candidate, source closure, attestations, protocol, profile, command fingerprint, schema digest, and compatibility digest
 - [ ] 8.2 Import the exact `0.57.2` agent and gateway fixtures into every Substrate release-pinned production site while retaining every release found by the live legacy inventory
 - [ ] 8.3 Land and deploy the reviewed Substrate trusted-release, rollforward, reviewer-client, migration, and operator changes; record the immutable consumer commit
 - [ ] 8.4 Compose, verify, review, and land the Exomem `0.57.2` expand/contract lock pair and provisioner image from the exact Substrate consumer and signed target evidence
