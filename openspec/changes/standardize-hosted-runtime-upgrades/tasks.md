@@ -1,9 +1,9 @@
 ## 1. Upgrade execution contract
 
-- [ ] 1.1 Add a strict versioned schema for redacted Hosted runtime-upgrade execution records, including phases, immutable release/repository/lock identities, inventory hashes, per-cell operation references, evidence hashes, stable result codes, and next-safe-action state
-- [ ] 1.2 Add red-first unit tests for valid phase progression, safe retry, stale-input refusal, content/secret-field rejection, and phase-aware recovery decisions
-- [ ] 1.3 Implement the pure execution state machine and canonical record hashing without performing external effects
-- [ ] 1.4 Add a governed operator CLI that creates, inspects, revalidates, and advances an execution record only through the state machine
+- [x] 1.1 Add a strict versioned schema for redacted Hosted runtime-upgrade execution records, including phases, immutable release/repository/lock identities, inventory hashes, per-cell operation references, evidence hashes, stable result codes, and next-safe-action state
+- [x] 1.2 Add red-first unit tests for valid phase progression, safe retry, stale-input refusal, content/secret-field rejection, and phase-aware recovery decisions
+- [x] 1.3 Implement the pure execution state machine and canonical record hashing without performing external effects
+- [x] 1.4 Add a governed operator CLI that creates, inspects, revalidates, and advances an execution record only through the state machine
 - [ ] 1.5 Keep concrete release runs under `infra/operations/` as schema-validated evidence while excluding credentials, browser tokens, tenant content, paths, and titles
 
 ## 2. Reconciled fleet inventory
