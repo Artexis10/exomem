@@ -1360,18 +1360,30 @@ class EpistemicGraphIndex:
                 descriptor_id,
                 create=True,
             ) as retained_target:
-                return self._connect_retained(retained_target)
-        return self._connect_retained(target)
+                return self._connect_retained(
+                    retained_target,
+                    descriptor_id=descriptor_id,
+                )
+        return self._connect_retained(target, descriptor_id=None)
 
-    def _connect_retained(self, target: Path) -> sqlite3.Connection:
+    def _connect_retained(
+        self,
+        target: Path,
+        *,
+        descriptor_id: str | None,
+    ) -> sqlite3.Connection:
         sidecar_store.ensure_sidecar_parent(target)
         conn = _sqlite_connect_owned(target)
-        try:
-            from . import embeddings
-
-            embeddings._apply_sidecar_pragmas(conn)
-        except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
-            pass
+        if descriptor_id == "graph-store":
+            # Live graph readers hold explicit snapshots while semantic writers
+            # converge in parallel. WAL keeps those reads from starving the
+            # writer that owns this exact private store.
+            sidecar_store.apply_sidecar_pragmas(conn)
+        elif descriptor_id == "graph-rebuild":
+            # Publication moves exactly one proven SQLite file into place.
+            # Keeping private rebuilds in rollback-journal mode prevents
+            # authoritative rows from remaining in a detached WAL companion.
+            conn.execute("PRAGMA journal_mode=DELETE")
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         if edge_columns and "raw_relation" not in edge_columns:
             conn.execute("DROP TABLE graph_edges")

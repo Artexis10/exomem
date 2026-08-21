@@ -3068,6 +3068,37 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
     assert accesses == ["read", "read"]
 
 
+def test_graph_live_store_uses_wal_but_rebuild_stays_single_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import epistemic_graph
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    index = epistemic_graph.EpistemicGraphIndex(tmp_path)
+
+    live = index._connect()
+    try:
+        assert live.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    finally:
+        live.close()
+
+    temporary = tmp_path / "Knowledge Base" / (
+        f".graph-rebuild-{'a' * 64}-{'b' * 24}.sqlite"
+    )
+    rebuild = index._connect(temporary)
+    try:
+        assert rebuild.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+    finally:
+        rebuild.close()
+
+    assert not temporary.with_name(f"{temporary.name}-wal").exists()
+    assert not temporary.with_name(f"{temporary.name}-shm").exists()
+
+
 def test_readonly_sqlite_connections_retain_their_owner_target_through_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
