@@ -46,13 +46,13 @@ _SUPPORTS_DIRECTORY_FD = bool(
 )
 # Guarded Windows snapshots must keep every verified ancestor from being
 # renamed, deleted, or changed into a reparse point until the leaf has been
-# opened and read.  FILE_SHARE_READ alone permits concurrent observation while
-# denying the DELETE/WRITE access required for that path substitution.
-_WINDOWS_GUARDED_DIRECTORY_SHARE = 0x00000001
+# opened and read. Child mutation needs WRITE sharing but cannot substitute a
+# retained non-empty ancestor; withholding DELETE pins the directory name.
+_WINDOWS_GUARDED_DIRECTORY_SHARE = 0x00000001 | 0x00000002
 _WINDOWS_DEFAULT_SHARE = 0x00000001 | 0x00000002 | 0x00000004
 # Requesting metadata-only access does not establish a Windows share
-# reservation.  FILE_LIST_DIRECTORY is the least directory access that makes
-# omission of FILE_SHARE_WRITE/DELETE actually pin the verified namespace.
+# reservation. FILE_LIST_DIRECTORY is the least directory access that makes
+# omission of FILE_SHARE_DELETE pin the verified namespace.
 _WINDOWS_FILE_LIST_DIRECTORY = 0x00000001
 
 log = logging.getLogger(__name__)

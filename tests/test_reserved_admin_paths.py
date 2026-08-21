@@ -414,7 +414,8 @@ def test_generic_read_refuses_parent_exchange_after_leaf_acquisition(
     assert not worker.is_alive()
     assert len(outcomes) == 1
     if exchange_blocked:
-        assert outcomes == [b"ordinary"]
+        assert isinstance(outcomes[0], reserved_paths.GenericFileSnapshot)
+        assert outcomes[0].data == b"ordinary"
         assert ordinary.read_text(encoding="utf-8") == "ordinary"
         assert not displaced.exists()
         return

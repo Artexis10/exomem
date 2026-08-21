@@ -385,6 +385,14 @@ def test_guarded_reader_dispatches_to_the_windows_descriptor_branch(
     assert captured[0][1:] == (("entry.md",), "entry.md", 64)
 
 
+def test_windows_guarded_directory_share_allows_cooperating_child_writes() -> None:
+    share = vault._WINDOWS_GUARDED_DIRECTORY_SHARE
+
+    assert share & 0x1  # FILE_SHARE_READ
+    assert share & 0x2  # FILE_SHARE_WRITE
+    assert not share & 0x4  # FILE_SHARE_DELETE keeps the directory name pinned
+
+
 def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
