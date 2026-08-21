@@ -235,7 +235,7 @@ class ClipIndex:
                         "clip-store",
                         create=False,
                     ) as target:
-                        connection = sqlite3.connect(
+                        connection = _sqlite_connect_owned(
                             f"{target.resolve().as_uri()}?mode=ro", uri=True
                         )
                         try:
