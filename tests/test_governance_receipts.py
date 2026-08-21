@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -41,6 +42,10 @@ _CRASH_ID = "1" * 32
 
 _LIFECYCLE_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 _LIFECYCLE_RULE = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
+
+_IDEMPOTENCY_SQLITE_MEMBER = re.compile(
+    r"idempotency-[0-9a-f]{20}\.sqlite(?:-(?:wal|shm|journal))?\Z"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -103,12 +108,26 @@ def _recursive_snapshot(
         snapshot[(index, ".")] = ("directory", None)
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root).as_posix()
-            if (
-                skip_private_coordination
-                and relative.startswith("idempotency-owners/")
-                and relative.endswith(".lock")
-            ):
-                continue
+            if skip_private_coordination:
+                if (
+                    relative.startswith("idempotency-owners/")
+                    and relative.endswith(".lock")
+                ):
+                    continue
+                name = relative.rsplit("/", 1)[-1]
+                if _IDEMPOTENCY_SQLITE_MEMBER.fullmatch(name):
+                    if not name.endswith(".sqlite"):
+                        continue
+                    connection = sqlite3.connect(
+                        f"{path.as_uri()}?mode=ro",
+                        uri=True,
+                    )
+                    try:
+                        logical = ("\n".join(connection.iterdump()) + "\n").encode()
+                    finally:
+                        connection.close()
+                    snapshot[(index, relative)] = ("sqlite", logical)
+                    continue
             snapshot[(index, relative)] = (
                 ("directory", None) if path.is_dir() else ("file", path.read_bytes())
             )
@@ -126,6 +145,27 @@ def _semantic_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes |
         if not key[1].endswith(".sqlite-shm")
         and not (key[1].endswith(".sqlite-wal") and value == ("file", b""))
     }
+
+
+def test_semantic_snapshot_ignores_idempotency_wal_checkpoint_layout(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    database = state_root / "idempotency-0123456789abcdef0123.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        connection.execute("CREATE TABLE mutations (key TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO mutations VALUES ('same-logical-row')")
+        connection.commit()
+        before = _semantic_snapshot(state_root)
+
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+    assert _semantic_snapshot(state_root) == before
 
 
 def test_append_canonical_record_and_verify_chain(vault: Path) -> None:
