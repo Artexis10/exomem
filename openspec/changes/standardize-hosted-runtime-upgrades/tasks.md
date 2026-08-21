@@ -52,8 +52,8 @@
 
 ## 6. Reviewer promotion and release acceptance
 
-- [ ] 6.1 Add red-first reviewer-bootstrap tests for an optional explicit existing client ID, unchanged fresh-ID behavior, full-partition reuse, mismatched configuration, enabled client, prior reviewer authorization, and no silent fallback
-- [ ] 6.2 Implement explicit client reuse through Substrate's ordinary pinned registration so the server revalidates eligibility before invite or authority creation
+- [x] 6.1 Add red-first reviewer-bootstrap tests for an optional explicit existing client ID, unchanged fresh-ID behavior, full-partition reuse, mismatched configuration, enabled client, prior reviewer authorization, and no silent fallback
+- [x] 6.2 Implement explicit client reuse through Substrate's ordinary pinned registration so the server revalidates eligibility before invite or authority creation
 - [ ] 6.3 Add the target execution and reconciled zero-legacy state to the free promotion preflight without starting the reviewer clock
 - [ ] 6.4 Preserve the prepare/run boundary and require both Claude and OpenAI evidence chains to import within their actual assignment validity before promotion
 - [ ] 6.5 Add personal-account acceptance for exact target identity, OAuth, bootstrap, recall, governed write/read-back, refresh, reconnect, and authority/capacity/unfinished-operation leak checks
