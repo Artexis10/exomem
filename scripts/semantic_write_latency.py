@@ -271,6 +271,22 @@ def _transition(vault_root: Path, rel_path: str, version: int) -> tuple[float, f
     return validate_ms, commit_ms, read_after_write_ms
 
 
+def _warm_activation_boundary(vault_root: Path, rel_path: str) -> None:
+    """Finish the initial whole-vault graph build before timed write samples.
+
+    The activation transition starts derived graph work asynchronously.  Letting
+    the timed burst begin immediately makes each sample invalidate one full
+    stabilization pass; on a slower runner the final sample can exhaust the
+    bounded rebuild just as the corpus stops moving.  That measures cold graph
+    construction and retry churn, not steady-state semantic write latency.
+    """
+    _transition(vault_root, rel_path, 1)
+    if not graph_sync.drain_active_rebuilds():
+        raise RuntimeError(
+            "initial graph rebuild did not finish before semantic write samples"
+        )
+
+
 def measure(
     vault_root: Path,
     size: int,
@@ -317,7 +333,7 @@ def _measure(
     semantic_contract.build_corpus_context(vault_root)
 
     # Install the activation boundary and warm derived sidecars outside samples.
-    _transition(vault_root, target_rel, 1)
+    _warm_activation_boundary(vault_root, target_rel)
     validates: list[float] = []
     commits: list[float] = []
     reads: list[float] = []
