@@ -15,7 +15,7 @@ from urllib.parse import quote, unquote
 
 import pytest
 
-from exomem import attention, commands, review_state
+from exomem import attention, commands, reserved_paths, review_state
 from exomem import find as find_module
 from exomem.governance import bridges, decisions, egress, membership, policy
 from exomem.governance.principal import (
@@ -38,17 +38,18 @@ SHA_B = "b" * 64
 
 @pytest.fixture(autouse=True)
 def _clear_policy_caches():
-    policy._CACHE.clear()
-    policy._LAST_GOOD.clear()
-    membership.clear_memo()
-    egress.clear_decision_memo()
-    find_module.clear_cache()
-    yield
-    policy._CACHE.clear()
-    policy._LAST_GOOD.clear()
-    membership.clear_memo()
-    egress.clear_decision_memo()
-    find_module.clear_cache()
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        policy._CACHE.clear()
+        policy._LAST_GOOD.clear()
+        membership.clear_memo()
+        egress.clear_decision_memo()
+        find_module.clear_cache()
+        yield
+        policy._CACHE.clear()
+        policy._LAST_GOOD.clear()
+        membership.clear_memo()
+        egress.clear_decision_memo()
+        find_module.clear_cache()
 
 
 def _write_policy(vault: Path, kind: str, name: str, content: str) -> Path:

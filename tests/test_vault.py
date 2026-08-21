@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import vault
+from exomem import held_fs, vault
 
 
 def test_wikilink_resolver_from_entries_matches_disk_resolution(tmp_path: Path) -> None:
@@ -157,6 +157,43 @@ def test_preparing_a_bounded_content_guard_preserves_its_read_limit(
         prepared[0].recheck(tmp_path)
 
 
+def test_guarded_reader_retries_a_transient_windows_sharing_refusal_from_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "guarded.md"
+    target.write_bytes(b"bounded bytes")
+    expected = vault._read_bounded_guarded_snapshot(tmp_path, "guarded.md", 64)
+    attempts = 0
+
+    def transient_snapshot(
+        vault_root: Path, relative: str, limit: int
+    ) -> tuple[bytes, vault.PathGuard]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            sharing = PermissionError("transient Windows sharing refusal")
+            sharing.winerror = 32
+            raise vault.PathGuardError(
+                "PATH_GUARD_IO", "guarded content could not be opened"
+            ) from sharing
+        assert vault_root == tmp_path
+        assert relative == "guarded.md"
+        assert limit == 64
+        return expected
+
+    monkeypatch.setattr(vault, "_uses_windows_guarded_reader", lambda: True)
+    monkeypatch.setattr(vault, "_read_bounded_guarded_snapshot", transient_snapshot)
+    monkeypatch.setattr(vault.time, "sleep", lambda _seconds: None)
+
+    data, guard = vault._read_bounded_guarded_snapshot_tolerating_transient_sharing(
+        tmp_path, "guarded.md", 64
+    )
+
+    assert data == b"bounded bytes"
+    assert guard is expected[1]
+    assert attempts == 2
+
+
 def test_batch_write_refuses_portably_colliding_destinations(tmp_path: Path) -> None:
     with pytest.raises(vault.PathGuardError) as raised:
         vault.batch_atomic_write(
@@ -183,6 +220,33 @@ def test_read_guarded_text_preserves_crlf_bytes_on_windows(tmp_path: Path) -> No
     guard.recheck(tmp_path)
 
 
+def test_read_guarded_text_refuses_multiply_linked_private_alias(tmp_path: Path) -> None:
+    governance = tmp_path / "Knowledge Base" / "_Governance"
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    governance.mkdir(parents=True)
+    notes.mkdir()
+    private = governance / "policy.md"
+    private.write_text("private policy", encoding="utf-8")
+    alias = notes / "ordinary.md"
+    try:
+        os.link(private, alias)
+    except OSError:
+        pytest.skip("hard links are unavailable")
+
+    with pytest.raises(vault.PathGuardError) as error:
+        vault.read_guarded_text(tmp_path, alias)
+
+    assert error.value.code == "PATH_GUARD_UNSAFE"
+    assert "private policy" not in error.value.reason
+
+
+def test_read_guarded_text_preserves_missing_file_signal(tmp_path: Path) -> None:
+    missing = tmp_path / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+
+    with pytest.raises(FileNotFoundError):
+        vault.read_guarded_text(tmp_path, missing)
+
+
 def test_missing_parent_swap_cannot_redirect_nested_directory_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -190,18 +254,18 @@ def test_missing_parent_swap_cannot_redirect_nested_directory_creation(
     outside = tmp_path / "outside"
     outside.mkdir()
     guard = vault.PathGuard.capture(tmp_path, "safe/nested/page.md", leaf_policy="absent")
-    real_mkdir = os.mkdir
+    real_parent_hook = vault._after_batch_parent_created
     swapped = False
 
-    def swap_created_parent(path, mode=0o777, *, dir_fd=None):
+    def swap_created_parent(root: Path, relative: str) -> None:
         nonlocal swapped
-        if not swapped and Path(path).name == "nested":
+        real_parent_hook(root, relative)
+        if not swapped and relative == "safe":
             swapped = True
             (tmp_path / "safe").rename(tmp_path / "safe-displaced")
             (tmp_path / "safe").symlink_to(outside, target_is_directory=True)
-        return real_mkdir(path, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(vault.os, "mkdir", swap_created_parent)
+    monkeypatch.setattr(vault, "_after_batch_parent_created", swap_created_parent)
 
     with pytest.raises(vault.PathGuardError):
         vault.batch_atomic_write(
@@ -233,7 +297,7 @@ def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
     `pending/` while the first artifact flips, and Windows refuses to
     rename a directory that contains an open file. The setup's own
     `pending_dir.rename(...)` raises `PermissionError [WinError 5]`
-    from inside the patched `os.replace`, where the writer correctly
+    from inside the patched held publication, where the writer correctly
     classifies it as a transient sharing refusal and retries -- so the
     test failed on its own injection rather than on the guard.
 
@@ -262,19 +326,19 @@ def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
             guard=vault.PathGuard.capture(tmp_path, "pending/two.md", leaf_policy="absent"),
         ),
     ]
-    real_replace = os.replace
+    real_publish = held_fs.publish_bytes
     swapped = False
 
-    def swap_after_first(src, dst):
+    def swap_after_first(filesystem, parent, leaf, data, **kwargs):  # noqa: ANN001
         nonlocal swapped
-        result = real_replace(src, dst)
-        if not swapped and Path(dst) == first:
+        result = real_publish(filesystem, parent, leaf, data, **kwargs)
+        if not swapped and leaf == first.name:
             swapped = True
             pending_dir.rename(tmp_path / "pending-old")
             pending_dir.mkdir()
         return result
 
-    monkeypatch.setattr(vault.os, "replace", swap_after_first)
+    monkeypatch.setattr(held_fs, "publish_bytes", swap_after_first)
 
     with pytest.raises(vault.BatchWriteError) as incomplete:
         vault.batch_atomic_write(writes, vault_root=tmp_path)
@@ -356,6 +420,14 @@ def test_guarded_reader_dispatches_to_the_windows_descriptor_branch(
     assert len(captured) == 1
     assert captured[0][0].as_posix() == tmp_path.as_posix()
     assert captured[0][1:] == (("entry.md",), "entry.md", 64)
+
+
+def test_windows_guarded_directory_share_allows_cooperating_child_writes() -> None:
+    share = vault._WINDOWS_GUARDED_DIRECTORY_SHARE
+
+    assert share & 0x1  # FILE_SHARE_READ
+    assert share & 0x2  # FILE_SHARE_WRITE
+    assert not share & 0x4  # FILE_SHARE_DELETE keeps the directory name pinned
 
 
 def test_windows_guarded_reader_bounds_reads_and_rechecks_ancestor_identity(

@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import sidecar_store
+from . import reserved_paths, sidecar_store
 from .kbdir import kb_dirname
 
 _SEMANTIC_ISOLATION_CURSOR_KEY = "semantic_isolation_cursors:v1"
@@ -40,25 +40,101 @@ _QUEUE_TABLES = {
 _ROTATION_EPSILON_SECONDS = 1e-6
 
 
+def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+    with reserved_paths._subsystem_authority_scope("deferred_index"):
+        return _sqlite_connect_owned(database, *args, **kwargs)
+
+
+def _sqlite_connect_owned(
+    database: Any, *args: Any, **kwargs: Any
+) -> sqlite3.Connection:
+    return sqlite3.connect(database, *args, **kwargs)
+
+
 def store_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".deferred-index.sqlite"
 
 
 def _connect_readonly(vault_root: Path) -> sqlite3.Connection:
     """Open an existing sidecar without schema repair or journal writes."""
-    return sqlite3.connect(
-        f"{store_path(vault_root).resolve().as_uri()}?mode=ro", uri=True, timeout=5.0
-    )
+    with reserved_paths._subsystem_authority_scope("deferred_index"):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("deferred-index-store",),
+        ):
+            return _connect_readonly_owned(vault_root)
+
+
+def _connect_readonly_owned(vault_root: Path) -> sqlite3.Connection:
+    path = store_path(vault_root)
+    with reserved_paths._sqlite_owner_target_scope(
+        vault_root,
+        path,
+        "deferred-index-store",
+        create=False,
+    ) as retained_path:
+        conn = _sqlite_connect_owned(
+            f"{retained_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=5.0,
+        )
+        try:
+            reserved_paths._publish_sqlite_owner_family(
+                vault_root,
+                path,
+                "deferred-index-store",
+                conn,
+            )
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
 
 def _connect(
     vault_root: Path, *, create: bool, connection_path: Path | None = None
 ) -> sqlite3.Connection:
+    with reserved_paths._subsystem_authority_scope("deferred_index"):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("deferred-index-store",),
+        ):
+            return _connect_owned(
+                vault_root,
+                create=create,
+                connection_path=connection_path,
+            )
+
+
+def _connect_owned(
+    vault_root: Path, *, create: bool, connection_path: Path | None = None
+) -> sqlite3.Connection:
     path = connection_path if connection_path is not None else store_path(vault_root)
     if not create:
-        return _connect_readonly(vault_root)
+        return _connect_readonly_owned(vault_root)
+    if connection_path is None or path == store_path(vault_root):
+        with reserved_paths._sqlite_owner_target_scope(
+            vault_root,
+            path,
+            "deferred-index-store",
+            create=True,
+        ) as retained_path:
+            return _connect_created_owned(
+                vault_root,
+                retained_path,
+                publish=True,
+            )
+    return _connect_created_owned(vault_root, path, publish=False)
+
+
+def _connect_created_owned(
+    vault_root: Path,
+    path: Path,
+    *,
+    publish: bool,
+) -> sqlite3.Connection:
     sidecar_store.ensure_sidecar_parent(path)
-    conn = sqlite3.connect(path, timeout=5.0)
+    conn = _sqlite_connect_owned(path, timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute(
@@ -137,6 +213,17 @@ def _connect(
         conn.execute(
             "ALTER TABLE full_upserts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
         )
+    if publish:
+        try:
+            reserved_paths._publish_sqlite_owner_family(
+                vault_root,
+                path,
+                "deferred-index-store",
+                conn,
+            )
+        except BaseException:
+            conn.close()
+            raise
     return conn
 
 
@@ -184,7 +271,15 @@ def semantic_isolation_signature(
     if not target.exists():
         return "semantic:0"
     try:
-        conn = sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True, timeout=5.0)
+        conn = (
+            _connect_readonly(vault_root)
+            if connection_path is None
+            else _sqlite_connect(
+                f"{target.as_uri()}?mode=ro",
+                uri=True,
+                timeout=5.0,
+            )
+        )
         try:
             row = conn.execute(
                 "SELECT value FROM maintenance_state WHERE key = ?",
@@ -1067,7 +1162,7 @@ def inspect_embedding_freshness(
                     Path(snapshot_dir.name) / source.name,
                 )
             query = "mode=ro"
-        conn = sqlite3.connect(
+        conn = _sqlite_connect(
             f"{query_sidecar.resolve().as_uri()}?{query}",
             uri=True,
             timeout=0.0,

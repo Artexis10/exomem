@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import access
+from . import access, reserved_paths
 from .vault import VaultPathError, resolve_under_vault
 
 log = logging.getLogger(__name__)
@@ -215,6 +215,29 @@ def load_rows(
     suffix = abs_path.suffix.lower()
     data = read_dataset_bytes(abs_path)
     return load_rows_bytes(data, suffix, record_path)
+
+
+def load_generic_rows(
+    vault_root: Path,
+    relative_path: str,
+    suffix: str,
+    record_path: str | None = None,
+) -> tuple[str, list[dict], list[str], list[str]]:
+    """Read a public dataset through the retained generic leaf before parsing."""
+
+    try:
+        snapshot = reserved_paths.read_generic_bytes(vault_root, relative_path)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "MISSING",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise QueryDataError("NOT_FOUND", "dataset could not be read") from None
+        raise QueryDataError("UNREADABLE", "dataset could not be read safely") from None
+    return load_rows_bytes(snapshot.data, suffix, record_path)
 
 
 def read_dataset_bytes(abs_path: Path) -> bytes:
@@ -513,7 +536,9 @@ def profile_data(
         raise QueryDataError(e.code, e.reason) from None
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
         raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported")
-    fmt, rows, cols, warnings = load_rows(abs_path, record_path)
+    fmt, rows, cols, warnings = load_generic_rows(
+        vault_root, rel, abs_path.suffix, record_path
+    )
     profiles = [
         _profile_column(c, [_get_field(r, c) for r in rows], max_distinct=max_distinct).as_dict()
         for c in cols
@@ -619,7 +644,9 @@ def query_data(
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
         raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported")
 
-    fmt, rows, cols, warnings = load_rows(abs_path, record_path)
+    fmt, rows, cols, warnings = load_generic_rows(
+        vault_root, rel, abs_path.suffix, record_path
+    )
     return evaluate_rows(
         rows,
         path=rel,

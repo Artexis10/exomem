@@ -18,7 +18,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from .. import index_paths, sidecar_store
+from .. import index_paths, reserved_paths, sidecar_store
 
 SCHEMA_USER_VERSION = 3
 DATA_TABLE = "compiled_policy"
@@ -49,17 +49,44 @@ def sidecar_path(vault_root: Path) -> Path:
 
 def open_readonly_connection(vault_root: Path) -> sqlite3.Connection | None:
     """Open an existing supported sidecar without migration, DDL, or creation."""
+
+    with reserved_paths._subsystem_authority_scope("governance.store"):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("governance-store",),
+        ):
+            return _open_readonly_connection_owned(vault_root)
+
+
+def _open_readonly_connection_owned(vault_root: Path) -> sqlite3.Connection | None:
     path = sidecar_path(vault_root)
-    if not path.exists():
-        return None
     try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-        conn.execute("PRAGMA query_only=ON")
-        if int(conn.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_USER_VERSION:
-            conn.close()
-            return None
-        return conn
-    except (sqlite3.Error, OSError):
+        with reserved_paths._sqlite_owner_target_scope(
+            vault_root,
+            path,
+            "governance-store",
+            create=False,
+        ) as retained_path:
+            conn = sqlite3.connect(f"{retained_path.as_uri()}?mode=ro", uri=True)
+            try:
+                conn.execute("PRAGMA query_only=ON")
+                if (
+                    int(conn.execute("PRAGMA user_version").fetchone()[0])
+                    != SCHEMA_USER_VERSION
+                ):
+                    conn.close()
+                    return None
+                reserved_paths._publish_sqlite_owner_family(
+                    vault_root,
+                    path,
+                    "governance-store",
+                    conn,
+                )
+                return conn
+            except BaseException:
+                conn.close()
+                raise
+    except (FileNotFoundError, RuntimeError, sqlite3.Error, OSError):
         return None
 
 
@@ -67,7 +94,41 @@ def open_connection(
     vault_root: Path, *, check_same_thread: bool = True
 ) -> sqlite3.Connection:
     """Open (creating if absent) the governance sidecar with its schema in place."""
-    path = sidecar_path(vault_root).resolve()
+
+    with reserved_paths._subsystem_authority_scope("governance.store"):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("governance-store",),
+        ):
+            return _open_connection_owned(
+                vault_root,
+                check_same_thread=check_same_thread,
+            )
+
+
+def _open_connection_owned(
+    vault_root: Path, *, check_same_thread: bool
+) -> sqlite3.Connection:
+    path = sidecar_path(vault_root)
+    with reserved_paths._sqlite_owner_target_scope(
+        vault_root,
+        path,
+        "governance-store",
+        create=True,
+    ) as retained_path:
+        return _open_connection_retained(
+            vault_root,
+            retained_path,
+            check_same_thread=check_same_thread,
+        )
+
+
+def _open_connection_retained(
+    vault_root: Path,
+    path: Path,
+    *,
+    check_same_thread: bool,
+) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=check_same_thread)
     try:
@@ -93,6 +154,12 @@ def open_connection(
                 _INITIALIZED_SIDECARS.move_to_end(path)
                 while len(_INITIALIZED_SIDECARS) > _INITIALIZED_SIDECARS_MAX:
                     _INITIALIZED_SIDECARS.popitem(last=False)
+        reserved_paths._publish_sqlite_owner_family(
+            vault_root,
+            path,
+            "governance-store",
+            conn,
+        )
         return conn
     except BaseException:
         conn.close()
@@ -461,65 +528,92 @@ def guard_generation_probe(vault_root: Path) -> dict[str, object]:
     if not path.exists():
         return {"state": "clear", "generation": "absent", "event_ids": ()}
     try:
-        conn = sqlite3.connect(
-            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.05
-        )
-        try:
-            conn.execute("PRAGMA query_only=ON")
-            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if version < SCHEMA_USER_VERSION:
-                return {
-                    "state": "clear",
-                    "generation": f"legacy:{version}",
-                    "event_ids": (),
-                }
-            if version != SCHEMA_USER_VERSION:
-                return {
-                    "state": "blocked",
-                    "generation": f"unsupported:{version}",
-                    "event_ids": (),
-                }
-            tables = {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            required_tables = _V3_GUARD_TABLES - {
-                "governance_session_purpose_staging"
-            }
-            if not required_tables <= tables:
-                return {
-                    "state": "blocked",
-                    "generation": "structurally-unknown",
-                    "event_ids": (),
-                }
-            pending = [
-                tuple(row)
-                for row in conn.execute(
-                    "SELECT event_id, operation, prior_digest, prepared_digest, final_digest, "
-                    "affected_ids, required_child_intents, required_child_terminals, "
-                    "marker_required, updated_at FROM governance_operation_journals "
-                    "WHERE phase='pending' ORDER BY event_id"
-                )
-            ]
-            if "governance_session_purpose_staging" not in tables and pending:
-                return {
-                    "state": "blocked",
-                    "generation": "legacy-open-protocol",
-                    "event_ids": tuple(str(row[0]) for row in pending),
-                }
-            schema_generation = int(
-                conn.execute("PRAGMA schema_version").fetchone()[0]
-            )
-        finally:
-            conn.close()
-    except (sqlite3.Error, OSError) as exc:
+        with reserved_paths._subsystem_authority_scope("governance.store"):
+            with reserved_paths._identity_coordination_scope(
+                vault_root,
+                descriptor_ids=("governance-store",),
+            ):
+                with reserved_paths._sqlite_owner_target_scope(
+                    vault_root,
+                    path,
+                    "governance-store",
+                    create=False,
+                ) as retained_path:
+                    return _guard_generation_probe_retained(
+                        vault_root,
+                        path,
+                        retained_path,
+                    )
+    except (RuntimeError, sqlite3.Error, OSError) as exc:
         return {
             "state": "blocked",
             "generation": f"unreadable:{type(exc).__name__}",
             "event_ids": (),
         }
+
+
+def _guard_generation_probe_retained(
+    vault_root: Path,
+    path: Path,
+    retained_path: Path,
+) -> dict[str, object]:
+    conn = sqlite3.connect(
+        f"{retained_path.as_uri()}?mode=ro",
+        uri=True,
+        timeout=0.05,
+    )
+    try:
+        reserved_paths._publish_sqlite_owner_family(
+            vault_root,
+            path,
+            "governance-store",
+            conn,
+        )
+        conn.execute("PRAGMA query_only=ON")
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version < SCHEMA_USER_VERSION:
+            return {
+                "state": "clear",
+                "generation": f"legacy:{version}",
+                "event_ids": (),
+            }
+        if version != SCHEMA_USER_VERSION:
+            return {
+                "state": "blocked",
+                "generation": f"unsupported:{version}",
+                "event_ids": (),
+            }
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        required_tables = _V3_GUARD_TABLES - {
+            "governance_session_purpose_staging"
+        }
+        if not required_tables <= tables:
+            return {
+                "state": "blocked",
+                "generation": "structurally-unknown",
+                "event_ids": (),
+            }
+        pending = [
+            tuple(row)
+            for row in conn.execute(
+                "SELECT event_id, operation, prior_digest, prepared_digest, final_digest, "
+                "affected_ids, required_child_intents, required_child_terminals, "
+                "marker_required, updated_at FROM governance_operation_journals "
+                "WHERE phase='pending' ORDER BY event_id"
+            )
+        ]
+        if "governance_session_purpose_staging" not in tables and pending:
+            return {
+                "state": "blocked",
+                "generation": "legacy-open-protocol",
+                "event_ids": tuple(str(row[0]) for row in pending),
+            }
+        schema_generation = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    finally:
+        conn.close()
     generation = hashlib.sha256(
         json.dumps(
             [version, schema_generation, pending],

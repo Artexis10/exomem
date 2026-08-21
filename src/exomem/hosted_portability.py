@@ -26,7 +26,7 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import __version__
+from . import __version__, reserved_paths
 from .kbdir import kb_dirname
 
 MANIFEST_NAME = "exomem-manifest.json"
@@ -147,34 +147,13 @@ def _is_generated_media_or_model(_path: str, parts: tuple[str, ...]) -> bool:
     )
 
 
-_REBUILDABLE_SQLITE_NAMES = {
-    ".embeddings.sqlite",
-    ".clip.sqlite",
-    ".lexical.sqlite",
-    ".graph.sqlite",
-    ".claims.sqlite",
-    ".references.sqlite",
-    ".refs.sqlite",
-    ".freshness.sqlite",
-    ".deferred-index.sqlite",
-    ".deferred_index.sqlite",
-    ".media-jobs.sqlite",
-    ".media_jobs.sqlite",
-    ".idempotency.sqlite",
-}
-
-
-def _is_rebuildable_sidecar(_path: str, parts: tuple[str, ...]) -> bool:
-    basename = parts[-1].casefold() if parts else ""
-    for name in _REBUILDABLE_SQLITE_NAMES:
-        if basename == name or basename in {f"{name}-wal", f"{name}-shm"}:
-            return True
-    return basename in {
-        ".idempotency.json",
-        ".idempotency.jsonl",
-        ".media-jobs.json",
-        ".deferred-index.json",
-    }
+def _is_registered_internal_state(path: str, parts: tuple[str, ...]) -> bool:
+    if not parts or parts[0].casefold() != kb_dirname().casefold():
+        return False
+    return (
+        reserved_paths.classify_logical(path).disposition
+        is reserved_paths.PathDisposition.RESERVED
+    )
 
 
 def _is_hosted_runtime_state(_path: str, parts: tuple[str, ...]) -> bool:
@@ -242,6 +221,12 @@ _CLASSIFICATION_RULES = (
         _is_review_state,
     ),
     _ClassificationRule(
+        "registered-internal-state",
+        ArtifactClass.DISPOSABLE_RUNTIME,
+        "The security registry owns this path; portability cannot redefine it as content.",
+        _is_registered_internal_state,
+    ),
+    _ClassificationRule(
         "provider-operational-logs",
         ArtifactClass.DISPOSABLE_RUNTIME,
         "Provider logs and query records are runtime-private and not vault history.",
@@ -264,12 +249,6 @@ _CLASSIFICATION_RULES = (
         ArtifactClass.DISPOSABLE_RUNTIME,
         "Generated frames, models, and voice profiles are machine-local state.",
         _is_generated_media_or_model,
-    ),
-    _ClassificationRule(
-        "rebuildable-index-sidecars",
-        ArtifactClass.DISPOSABLE_RUNTIME,
-        "Search, graph, media-job, and idempotency indexes rebuild from canonical files.",
-        _is_rebuildable_sidecar,
     ),
     _ClassificationRule(
         "hosted-cell-runtime-state",
@@ -303,6 +282,7 @@ def classification_registry() -> dict[str, Any]:
 
     return {
         "version": CLASSIFICATION_VERSION,
+        "internal_state_registry_version": reserved_paths.REGISTRY_VERSION,
         "rules": [
             {
                 "id": rule.rule_id,
@@ -446,7 +426,7 @@ class _SourceSnapshot:
     size: int
     sha256: str
     classification: str
-    source_signature: tuple[int, int, int, int, int]
+    source_signature: tuple[int, int, int, int, int, int]
 
 
 def _fail(code: str, reason: str) -> None:
@@ -530,17 +510,20 @@ def _safe_lstat(path: Path) -> os.stat_result:
         _fail("SOURCE_CHANGED_DURING_EXPORT", "a source entry changed during export")
 
 
-def _source_signature(source_stat: os.stat_result) -> tuple[int, int, int, int, int]:
+def _source_signature(
+    source_stat: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
     return (
         source_stat.st_dev,
         source_stat.st_ino,
         source_stat.st_size,
         source_stat.st_mtime_ns,
         source_stat.st_ctime_ns,
+        source_stat.st_nlink,
     )
 
 
-def _cross_source_signature(source_stat: os.stat_result) -> tuple[int, int, int, int]:
+def _cross_source_signature(source_stat: os.stat_result) -> tuple[int, int, int, int, int]:
     """The part of `_source_signature` a path stat and an fstat can be compared on.
 
     `st_ctime_ns` is deliberately absent. On Windows `os.stat` reports creation
@@ -561,19 +544,22 @@ def _cross_source_signature(source_stat: os.stat_result) -> tuple[int, int, int,
         source_stat.st_ino,
         source_stat.st_size,
         source_stat.st_mtime_ns,
+        source_stat.st_nlink,
     )
 
 
 def _open_regular_source(
     path: Path,
     *,
-    expected_signature: tuple[int, int, int, int, int] | None = None,
-) -> tuple[int, tuple[int, int, int, int, int]]:
+    expected_signature: tuple[int, int, int, int, int, int] | None = None,
+) -> tuple[int, tuple[int, int, int, int, int, int]]:
     before = _safe_lstat(path)
     if stat.S_ISLNK(before.st_mode):
         _fail("UNSAFE_SYMLINK", "vault exports never follow symbolic links")
     if not stat.S_ISREG(before.st_mode):
         _fail("UNSAFE_SOURCE_ENTRY", "vault exports accept regular files only")
+    if before.st_nlink != 1:
+        _fail("UNSAFE_SOURCE_ENTRY", "vault exports refuse multiply linked files")
 
     # `O_BINARY` or Windows opens this in text mode and translates CRLF away
     # on the way in. The bytes are hashed and counted, so that is not a
@@ -593,6 +579,8 @@ def _open_regular_source(
         opened = os.fstat(descriptor)
         if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
             _fail("UNSAFE_SOURCE_ENTRY", "vault exports accept regular files only")
+        if opened.st_nlink != 1:
+            _fail("UNSAFE_SOURCE_ENTRY", "vault exports refuse multiply linked files")
         opened_signature = _source_signature(opened)
         if _cross_source_signature(before) != _cross_source_signature(opened) or (
             expected_signature is not None and opened_signature != expected_signature
@@ -606,7 +594,7 @@ def _open_regular_source(
 
 def _digest_regular_source(
     path: Path,
-) -> tuple[int, str, tuple[int, int, int, int, int]]:
+) -> tuple[int, str, tuple[int, int, int, int, int, int]]:
     descriptor, signature = _open_regular_source(path)
     digest = hashlib.sha256()
     size = 0

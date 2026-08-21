@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_types
+from . import media_types, reserved_paths
 from .governance import lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -136,9 +136,18 @@ def delete_directory(
             ),
         )
 
-    # Enumerate contents.
-    contents = sorted(abs_path.rglob("*"), key=lambda item: item.as_posix())
-    files = [p for p in contents if p.is_file()]
+    # Acquire and classify every child before counts, link scans, markers, or
+    # lifecycle planning.  The later lifecycle snapshot rechecks the same
+    # content immediately before its retained directory rename.
+    try:
+        tree = reserved_paths.read_generic_tree(vault_root, rel_path)
+    except reserved_paths.ReservedPathLeafError as error:
+        code = "NOT_FOUND" if error.code == "MISSING" else "RESERVED_PATH"
+        raise DeleteDirectoryError(
+            code=code,
+            reason="directory could not be acquired through the generic boundary",
+        ) from None
+    files = [abs_path / item.relative_path for item in tree]
     if files and not recursive:
         raise DeleteDirectoryError(
             code="NOT_EMPTY",
@@ -201,14 +210,61 @@ def delete_directory(
     sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
     trash_basename = f"{time_prefix}-{sanitized}"
     trash_root = kb_root(vault_root) / TRASH_SUBPATH / date_dir
-    trash_root.mkdir(parents=True, exist_ok=True)
     trash_abs = trash_root / trash_basename
+
+    def trash_destination_exists(candidate: Path) -> bool:
+        relative = candidate.relative_to(vault_root).as_posix()
+        try:
+            reserved_paths.inspect_generic_path(vault_root, relative)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code == "MISSING":
+                return False
+            if error.code in {
+                "CAPABILITY_UNAVAILABLE",
+                "IDENTITY_CHANGED",
+                "RESERVED_PATH",
+                "UNSAFE_PATH",
+            }:
+                raise DeleteDirectoryError(
+                    "RESERVED_PATH",
+                    "trash destination is reserved for its owning subsystem",
+                ) from None
+            raise DeleteDirectoryError(
+                "DELETE_FAILED", "trash destination could not be acquired safely"
+            ) from None
+        return True
+
     i = 2
-    while trash_abs.exists():
+    while trash_destination_exists(trash_abs):
         trash_abs = trash_root / f"{trash_basename}-{i}"
         i += 1
 
     trash_rel = trash_abs.relative_to(vault_root).as_posix()
+    meta_abs = trash_root / f"{trash_abs.name}.meta.json"
+    meta_rel = meta_abs.relative_to(vault_root).as_posix()
+    try:
+        meta_expected_identity = reserved_paths.inspect_generic_file(
+            vault_root,
+            meta_rel,
+        )
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            meta_expected_identity = None
+        elif error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise DeleteDirectoryError(
+                "RESERVED_PATH",
+                "trash metadata destination is reserved for its owning subsystem",
+            ) from None
+        else:
+            raise DeleteDirectoryError(
+                "DELETE_FAILED",
+                "trash metadata destination could not be acquired safely",
+            ) from None
     # Capture vault-relative paths for every .md file in the doomed tree —
     # before the move, while they still resolve under vault_root. Used to
     # purge the embedding sidecar after the trash move succeeds.
@@ -373,12 +429,14 @@ def delete_directory(
         "allow_curated_used": bool(curated and allow_curated),
         "recursive_used": bool(recursive),
     }
-    meta_abs = trash_root / f"{trash_abs.name}.meta.json"
     try:
-        meta_abs.write_text(
-            json.dumps(meta, indent=2, default=str), encoding="utf-8"
+        reserved_paths.publish_generic_bytes(
+            vault_root,
+            meta_rel,
+            json.dumps(meta, indent=2, default=str).encode("utf-8"),
+            expected_identity=meta_expected_identity,
         )
-    except OSError as e:
+    except (OSError, reserved_paths.ReservedPathLeafError) as e:
         warnings.append(f"trashed dir ok but meta sidecar write failed: {e}")
 
     if not lifecycle.finish_deletion(

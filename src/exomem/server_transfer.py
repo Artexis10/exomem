@@ -8,14 +8,15 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartException
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from . import cf_access, upload_tokens
+from . import cf_access, reserved_paths, upload_tokens
 from .governance import egress
 from .governance import principal as principal_module
 from .vault import VaultPathError, resolve_under_vault
@@ -319,8 +320,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             abs_path, rel = resolve_under_vault(
                 vault_root, path, must_exist=True, must_be_file=True
             )
+            try:
+                snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+            except reserved_paths.ReservedPathLeafError:
+                raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
             # Release gate on the download TARGET, after the path resolves and
-            # before any bytes are handed to `FileResponse` (design D1: the
+            # before any retained bytes are handed to the response (design D1: the
             # transfer routes bypass `invoke_command`, so they carry the gate
             # explicitly). A download hands over the item's COMPLETE bytes, so
             # only full disclosure authorizes one — otherwise any ceiling
@@ -336,6 +341,11 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         except VaultPathError as exc:
             status = 404 if exc.code == "NOT_FOUND" else 400
             return JSONResponse({"code": exc.code, "reason": exc.reason}, status_code=status)
-        return FileResponse(abs_path, filename=abs_path.name)
+        filename = quote(abs_path.name, safe="")
+        return Response(
+            snapshot.data,
+            media_type="application/octet-stream",
+            headers={"content-disposition": f"attachment; filename*=utf-8''{filename}"},
+        )
 
     return config

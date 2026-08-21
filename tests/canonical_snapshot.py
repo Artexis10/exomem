@@ -1,15 +1,15 @@
-"""Snapshot a vault's *canonical* bytes, ignoring derived-index residue.
+"""Snapshot a vault's *canonical* bytes, ignoring registered internal state.
 
 Several tests assert that some operation left the vault byte-identical. Since an
 interactive write stopped joining its own graph rebuild, that rebuild is still
 running when the assertion is taken, and its scratch sidecars
 (`.graph-rebuild-<digest>.sqlite` and companions) are sitting in the tree.
 
-Those are not vault content, and the distinction is not a test convenience: it
-is the same one the canonical directory census makes in production, via the same
-predicate. A write is not "a mutation of the vault" because a rebuild happened to
-be mid-flight beside it, and a test that says otherwise is asserting something
-the guard itself does not.
+Those are not vault content, and the distinction is not a test convenience: the
+canonical directory census consumes the same closed internal-state registry. A
+write is not "a mutation of the vault" because an index owner happened to be
+mid-flight beside it, and a test that says otherwise is asserting something the
+guard itself does not.
 
 Deliberately one definition rather than one filter per test module. Two copies
 had already diverged into two different ideas of what counts as residue, and a
@@ -26,8 +26,8 @@ from exomem import vault as vault_module
 
 def is_canonical(path: Path, root: Path) -> bool:
     """Whether `path` is canonical vault content rather than derived residue."""
-    return path.is_file() and not any(
-        vault_module._is_derived_index_artifact(part) for part in path.relative_to(root).parts
+    return path.is_file() and not vault_module._is_registered_internal_state_artifact(
+        path.relative_to(root).as_posix()
     )
 
 

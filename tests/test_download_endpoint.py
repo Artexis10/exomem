@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -79,3 +81,24 @@ def test_download_nonexistent_file(vault, monkeypatch: pytest.MonkeyPatch) -> No
     c = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
     tok = upload_tokens.mint("sek", scope="download")
     assert _get(c, "Knowledge Base/nope-does-not-exist.md", tok).status_code == 404
+
+
+def test_download_hides_private_state_hardlink_before_release(vault, monkeypatch) -> None:
+    private = vault / "Knowledge Base" / ".embeddings.sqlite"
+    private.write_bytes(b"private-index")
+    alias = vault / "Knowledge Base" / "Notes" / "ordinary-looking.bin"
+    try:
+        os.link(private, alias)
+    except OSError:
+        pytest.skip("hard links are unavailable")
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
+    token = upload_tokens.mint("sek", scope="download")
+    hidden = _get(client, "Knowledge Base/Notes/ordinary-looking.bin", token)
+    alias.unlink()
+    missing = _get(client, "Knowledge Base/Notes/ordinary-looking.bin", token)
+
+    assert hidden.status_code == 404
+    assert hidden.status_code == missing.status_code
+    assert hidden.content == missing.content
+    assert b"private-index" not in hidden.content

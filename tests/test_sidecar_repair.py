@@ -53,6 +53,22 @@ def test_identical_nested_copies_collapse_to_one() -> None:
     assert len(repaired) < len(content)
 
 
+def test_crlf_nested_copies_collapse_without_preserving_scaffolding() -> None:
+    """Guarded byte reads must retain the old universal-newline semantics."""
+
+    text = "The same extraction, twice over."
+    content = _sidecar(text, text).replace("\n", "\r\n")
+
+    damage = sidecar_repair.analyze(content, Path("report.pdf.md"))
+    assert damage is not None
+
+    repaired = sidecar_repair.repair(content)
+    assert sidecar_repair.PRESERVED_HEADING not in repaired
+    assert repaired.count(sidecar_repair.EXTRACTED_HEADING) == 1
+    assert repaired.count(text) == 1
+    assert sidecar_repair.analyze(repaired, Path("report.pdf.md")) is None
+
+
 def test_repair_is_idempotent() -> None:
     text = "Extraction body."
     once = sidecar_repair.repair(_sidecar(text, text, text))

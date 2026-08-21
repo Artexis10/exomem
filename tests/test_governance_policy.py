@@ -13,8 +13,15 @@ from pathlib import Path
 
 import pytest
 
+from exomem import reserved_paths
 from exomem.governance import egress, policy, receipts, store
 from exomem.governance.principal import RequestPrincipal, owner_principal
+
+
+@pytest.fixture(autouse=True)
+def _governance_dispatcher_authority():
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        yield
 
 
 def _write(vault: Path, kind: str, name: str, text: str) -> Path:

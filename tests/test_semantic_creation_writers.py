@@ -708,10 +708,10 @@ def test_project_registry_plan_uses_one_guarded_read_snapshot(
         "    category: domain\n",
         encoding="utf-8",
     )
-    real_read_bytes = Path.read_bytes
+    real_read_guarded_text = project_keys.read_guarded_text
     injected = False
 
-    def inject_before_bytes(path: Path) -> bytes:
+    def inject_before_snapshot(root: Path, path: Path):
         nonlocal injected
         if path == registry_path and not injected:
             injected = True
@@ -719,9 +719,9 @@ def test_project_registry_plan_uses_one_guarded_read_snapshot(
                 path.read_text(encoding="utf-8") + "# concurrent registry marker\n",
                 encoding="utf-8",
             )
-        return real_read_bytes(path)
+        return real_read_guarded_text(root, path)
 
-    monkeypatch.setattr(Path, "read_bytes", inject_before_bytes)
+    monkeypatch.setattr(project_keys, "read_guarded_text", inject_before_snapshot)
     plan = project_keys.plan_project_keys(
         vault, ["new-guarded-project"], category="domain"
     )
@@ -897,7 +897,7 @@ def test_note_partial_commit_after_registry_replacement_recovers_exactly(
         "relation_review_reason": "No honest relation exists in the fixture corpus.",
     }
     real_batch = relation_review.vault.batch_atomic_write
-    real_replace = vault_module.os.replace
+    real_publish_hook = vault_module._after_batch_destination_published
     registry_path = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
     captured: list[tuple[tuple[str, str], ...]] = []
 
@@ -914,17 +914,20 @@ def test_note_partial_commit_after_registry_replacement_recovers_exactly(
         )
         return real_batch(detached, **batch_kwargs)
 
-    def die_after_registry(src: object, dst: object) -> None:
-        real_replace(src, dst)
-        destination = Path(dst)  # type: ignore[arg-type]
-        if str(src).endswith(".tmp") and destination == registry_path:
+    def die_after_registry(destination: Path) -> None:
+        real_publish_hook(destination)
+        if destination == registry_path:
             raise SimulatedProcessDeath
 
     monkeypatch.setattr(relation_review.vault, "batch_atomic_write", capture_batch)
-    monkeypatch.setattr(vault_module.os, "replace", die_after_registry)
+    monkeypatch.setattr(
+        vault_module, "_after_batch_destination_published", die_after_registry
+    )
     with pytest.raises(SimulatedProcessDeath):
         note.note(vault, **commit_kwargs, **kwargs)
-    monkeypatch.setattr(vault_module.os, "replace", real_replace)
+    monkeypatch.setattr(
+        vault_module, "_after_batch_destination_published", real_publish_hook
+    )
 
     assert not (vault / validation.destination).exists()
     receipt_path = relation_review.review_artifact_path(vault, validation.draft_id)
@@ -1200,7 +1203,7 @@ def test_replace_partial_after_predecessor_patch_recovers_exact_batch(
         "draft_token": validation.draft_token,
     }
     real_batch = relation_review.vault.batch_atomic_write
-    real_os_replace = vault_module.os.replace
+    real_publish_hook = vault_module._after_batch_destination_published
     captured: list[tuple[tuple[str, str], ...]] = []
 
     def capture_batch(writes: object, **kwargs: object):
@@ -1216,16 +1219,20 @@ def test_replace_partial_after_predecessor_patch_recovers_exact_batch(
         )
         return real_batch(detached, **kwargs)
 
-    def die_after_predecessor(src: object, dst: object) -> None:
-        real_os_replace(src, dst)
-        if str(src).endswith(".tmp") and Path(dst) == vault / predecessor.path:
+    def die_after_predecessor(destination: Path) -> None:
+        real_publish_hook(destination)
+        if destination == vault / predecessor.path:
             raise SimulatedProcessDeath
 
     monkeypatch.setattr(relation_review.vault, "batch_atomic_write", capture_batch)
-    monkeypatch.setattr(vault_module.os, "replace", die_after_predecessor)
+    monkeypatch.setattr(
+        vault_module, "_after_batch_destination_published", die_after_predecessor
+    )
     with pytest.raises(SimulatedProcessDeath):
         replace.replace(vault, **commit_kwargs, **replacement_kwargs)
-    monkeypatch.setattr(vault_module.os, "replace", real_os_replace)
+    monkeypatch.setattr(
+        vault_module, "_after_batch_destination_published", real_publish_hook
+    )
 
     assert not (vault / validation.destination).exists()
     receipt_path = relation_review.review_artifact_path(vault, validation.draft_id)

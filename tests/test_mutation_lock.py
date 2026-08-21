@@ -801,6 +801,21 @@ def test_holder_sidecar_is_bounded_content_free_runtime_metadata(tmp_path: Path)
         assert "tenant" not in rendered
 
 
+def test_metadata_free_hold_is_reserved_for_internal_identity_coordination(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
+
+    with pytest.raises(ValueError, match="reserved-state"):
+        with coordinator.hold(
+            holder_kind="command",
+            publish_holder_metadata=False,
+        ):
+            pytest.fail("ordinary mutation holds must remain attributable")
+
+
 def test_status_waits_out_acquire_to_publish_generation_transition(
     tmp_path: Path,
 ) -> None:

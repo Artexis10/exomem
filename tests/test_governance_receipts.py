@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -20,7 +21,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from exomem import audit, delete_directory, delete_file, embeddings, index_sync, recover_from_trash
+from exomem import (
+    audit,
+    delete_directory,
+    delete_file,
+    embeddings,
+    index_sync,
+    recover_from_trash,
+    reserved_paths,
+)
 from exomem import reconcile as reconcile_module
 from exomem.governance import egress, receipts, store
 
@@ -41,6 +50,10 @@ _CRASH_ID = "1" * 32
 
 _LIFECYCLE_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 _LIFECYCLE_RULE = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
+
+_IDEMPOTENCY_SQLITE_MEMBER = re.compile(
+    r"idempotency-[0-9a-f]{20}\.sqlite(?:-(?:wal|shm|journal))?\Z"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +104,10 @@ def _receipt_records(vault: Path) -> list[dict[str, object]]:
     ] if root.exists() else []
 
 
-def _recursive_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes | None]]:
+def _recursive_snapshot(
+    *roots: Path,
+    private_coordination_root_indexes: frozenset[int] = frozenset(),
+) -> dict[tuple[int, str], tuple[str, bytes | None]]:
     snapshot: dict[tuple[int, str], tuple[str, bytes | None]] = {}
     for index, root in enumerate(roots):
         if not root.exists():
@@ -100,20 +116,119 @@ def _recursive_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes 
         snapshot[(index, ".")] = ("directory", None)
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root).as_posix()
+            if index in private_coordination_root_indexes:
+                if (
+                    relative.startswith("idempotency-owners/")
+                    and relative.endswith(".lock")
+                ):
+                    continue
+                name = relative.rsplit("/", 1)[-1]
+                if _IDEMPOTENCY_SQLITE_MEMBER.fullmatch(name):
+                    if not name.endswith(".sqlite"):
+                        continue
+                    connection = sqlite3.connect(
+                        f"{path.as_uri()}?mode=ro",
+                        uri=True,
+                    )
+                    try:
+                        logical = ("\n".join(connection.iterdump()) + "\n").encode()
+                    finally:
+                        connection.close()
+                    snapshot[(index, relative)] = ("sqlite", logical)
+                    continue
             snapshot[(index, relative)] = (
                 ("directory", None) if path.is_dir() else ("file", path.read_bytes())
             )
     return snapshot
 
 
-def _semantic_snapshot(*roots: Path) -> dict[tuple[int, str], tuple[str, bytes | None]]:
-    """Snapshot evidence/data, excluding SQLite's empty lock coordination files."""
+def _semantic_snapshot(
+    *roots: Path,
+    private_coordination_roots: tuple[Path, ...] = (),
+) -> dict[tuple[int, str], tuple[str, bytes | None]]:
+    """Snapshot evidence/data, excluding non-semantic coordination files."""
+    private_roots = {
+        Path(root).resolve(strict=False) for root in private_coordination_roots
+    }
+    private_indexes = frozenset(
+        index
+        for index, root in enumerate(roots)
+        if Path(root).resolve(strict=False) in private_roots
+    )
+    snapshot = _recursive_snapshot(
+        *roots,
+        private_coordination_root_indexes=private_indexes,
+    )
     return {
         key: value
-        for key, value in _recursive_snapshot(*roots).items()
-        if not key[1].endswith(".sqlite-shm")
-        and not (key[1].endswith(".sqlite-wal") and value == ("file", b""))
+        for key, value in snapshot.items()
+        if not (
+            (
+                key[1].endswith(".sqlite-shm")
+                or (key[1].endswith(".sqlite-wal") and value == ("file", b""))
+            )
+            and reserved_paths.classify_logical(key[1]).disposition
+            is reserved_paths.PathDisposition.RESERVED
+        )
     }
+
+
+def test_semantic_snapshot_ignores_idempotency_wal_checkpoint_layout(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    database = state_root / "idempotency-0123456789abcdef0123.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        connection.execute("CREATE TABLE mutations (key TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO mutations VALUES ('same-logical-row')")
+        connection.commit()
+        before = _semantic_snapshot(
+            state_root,
+            private_coordination_roots=(state_root,),
+        )
+
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+    assert _semantic_snapshot(
+        state_root,
+        private_coordination_roots=(state_root,),
+    ) == before
+
+
+def test_semantic_snapshot_keeps_idempotency_shaped_vault_files_byte_exact(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    vault.mkdir()
+    state_root.mkdir()
+    database = vault / "idempotency-0123456789abcdef0123.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        connection.execute("CREATE TABLE user_data (key TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO user_data VALUES ('same-logical-row')")
+        connection.commit()
+        before = _semantic_snapshot(
+            vault,
+            state_root,
+            private_coordination_roots=(state_root,),
+        )
+
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+    assert _semantic_snapshot(
+        vault,
+        state_root,
+        private_coordination_roots=(state_root,),
+    ) != before
 
 
 def test_append_canonical_record_and_verify_chain(vault: Path) -> None:
@@ -920,11 +1035,19 @@ def test_reconcile_dry_run_keeps_evidence_and_operational_files_byte_identical(v
     derivative.parent.mkdir(exist_ok=True)
     derivative.write_bytes(b"unchanged")
     state_root = Path(os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"])
-    before = _semantic_snapshot(vault, state_root)
+    before = _semantic_snapshot(
+        vault,
+        state_root,
+        private_coordination_roots=(state_root,),
+    )
 
     receipts.reconcile(vault, dry_run=True)
 
-    assert _semantic_snapshot(vault, state_root) == before
+    assert _semantic_snapshot(
+        vault,
+        state_root,
+        private_coordination_roots=(state_root,),
+    ) == before
 
 
 def test_reconcile_repair_is_idempotent(vault: Path) -> None:
@@ -1902,7 +2025,8 @@ def test_lifecycle_refuses_operational_state_and_every_ancestor(
     with pytest.raises(error_type) as error:
         invoke()
 
-    assert error.value.code == "GOVERNANCE_STATE_PROTECTED"
+    expected = "RESERVED_PATH" if kind == "file" else "GOVERNANCE_STATE_PROTECTED"
+    assert error.value.code == expected
     assert target.exists()
 
 

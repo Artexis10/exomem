@@ -12,10 +12,14 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+
+from exomem import vault
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows NTFS")
 
@@ -85,6 +89,9 @@ def test_windows_backend_declares_native_relative_ffi_contract() -> None:
     assert backend.NtSetInformationFile is not None
     assert backend.FILE_OPEN_REPARSE_POINT
     assert backend.FILE_RENAME_INFORMATION == 10
+    assert backend.FILE_RENAME_INFORMATION_EX == 65
+    assert backend.FILE_RENAME_REPLACE_IF_EXISTS == 0x00000001
+    assert backend.FILE_RENAME_POSIX_SEMANTICS == 0x00000002
     assert backend.FILE_DISPOSITION_INFORMATION == 4
 
 
@@ -140,6 +147,83 @@ def test_windows_rename_uses_native_relative_information_class(
                 assert filesystem.rename(before, parent, "after.txt").ok
 
     assert backend.FILE_RENAME_INFORMATION in information_classes
+
+
+def test_windows_replace_uses_posix_semantics_while_old_target_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held_fs = _held_fs()
+    backend = importlib.import_module("exomem._held_fs_windows")
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        original = backend.NtSetInformationFile
+        calls: list[tuple[int, int]] = []
+
+        def observed(*args):
+            information_class = int(args[4])
+            information = ctypes.cast(
+                args[2], ctypes.POINTER(backend.FILE_NAME_INFORMATION)
+            ).contents
+            calls.append((information_class, int(information.Options.Flags)))
+            return original(*args)
+
+        monkeypatch.setattr(backend, "NtSetInformationFile", observed)
+        with filesystem.parent("native-replace", create=True).require() as parent:
+            for name, data in (("current.txt", b"old"), ("staged.txt", b"new")):
+                with filesystem.file(
+                    parent, name, access="write", create=True, exclusive=True
+                ).require() as file:
+                    assert filesystem.write(file, data).ok
+
+            with filesystem.file(parent, "current.txt").require() as old_target:
+                with filesystem.file(parent, "staged.txt", access="mutate").require() as staged:
+                    assert filesystem.rename(
+                        staged,
+                        parent,
+                        "current.txt",
+                        replace=True,
+                    ).ok
+                os.lseek(old_target.descriptor, 0, os.SEEK_SET)
+                assert os.read(old_target.descriptor, 3) == b"old"
+
+            with filesystem.file(parent, "current.txt").require() as current:
+                assert filesystem.read(current).require() == b"new"
+
+    assert (
+        backend.FILE_RENAME_INFORMATION_EX,
+        backend.FILE_RENAME_REPLACE_IF_EXISTS | backend.FILE_RENAME_POSIX_SEMANTICS,
+    ) in calls
+
+
+def test_windows_probe_exercises_posix_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = importlib.import_module("exomem._held_fs_windows")
+    original = backend._set_name_information
+    calls: list[tuple[int, bool]] = []
+
+    def observed(
+        descriptor,
+        destination_handle,
+        leaf,
+        information_class,
+        *,
+        replace=False,
+    ):
+        calls.append((information_class, replace))
+        return original(
+            descriptor,
+            destination_handle,
+            leaf,
+            information_class,
+            replace=replace,
+        )
+
+    monkeypatch.setattr(backend, "_set_name_information", observed)
+
+    capability = backend.probe(tmp_path)
+
+    assert capability.relative_operations is True
+    assert (backend.FILE_RENAME_INFORMATION_EX, True) in calls
 
 
 def test_windows_reparse_points_and_short_aliases_refuse(tmp_path: Path) -> None:
@@ -379,6 +463,167 @@ def test_windows_live_wal_identity_publication_uses_compatible_share_modes(
         assert set(published[0]) == {"state.sqlite", "state.sqlite-wal", "state.sqlite-shm"}
     finally:
         connection.close()
+
+
+def test_windows_guarded_reader_waits_for_transient_parent_mutation_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    knowledge_base = tmp_path / "Knowledge Base"
+    knowledge_base.mkdir()
+    record = knowledge_base / "record.md"
+    record.write_bytes(b"record")
+    opening_knowledge_base = threading.Event()
+    real_open_directory = vault._open_directory_path
+
+    def observe_directory_open(path: Path, **kwargs: object) -> int:
+        if Path(path) == knowledge_base:
+            opening_knowledge_base.set()
+        return real_open_directory(path, **kwargs)
+
+    monkeypatch.setattr(vault, "_open_directory_path", observe_directory_open)
+    held_fs = _held_fs()
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with filesystem.parent("Knowledge Base", access="mutate").require():
+                future = executor.submit(
+                    vault.read_bounded_guarded_bytes,
+                    tmp_path,
+                    "Knowledge Base/record.md",
+                    limit=16,
+                )
+                assert opening_knowledge_base.wait(5)
+                time.sleep(0.03)
+            data, guard = future.result(timeout=5)
+
+    assert data == b"record"
+    guard.recheck(tmp_path)
+
+
+def test_windows_owner_child_publication_does_not_block_guarded_parent_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import graph_sync, held_fs, reserved_paths, writer_lease
+
+    knowledge_base = tmp_path / "Knowledge Base"
+    knowledge_base.mkdir()
+    record = knowledge_base / "record.md"
+    record.write_bytes(b"record")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    publication_entered = threading.Event()
+    finish_publication = threading.Event()
+    real_publish = held_fs.publish_bytes
+
+    def paused_publish(*args, **kwargs):  # noqa: ANN002, ANN003
+        publication_entered.set()
+        assert finish_publication.wait(5)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(held_fs, "publish_bytes", paused_publish)
+    errors: list[BaseException] = []
+
+    def publish_owner_child() -> None:
+        try:
+            with reserved_paths._subsystem_authority_scope("graph_sync"):
+                reserved_paths._publish_owner_bytes(
+                    tmp_path,
+                    graph_sync.floor_path(tmp_path),
+                    "graph-handoff",
+                    b"owner bytes",
+                )
+        except BaseException as error:  # noqa: BLE001 - report worker failure below
+            errors.append(error)
+
+    worker = threading.Thread(target=publish_owner_child)
+    worker.start()
+    assert publication_entered.wait(5)
+    try:
+        data, guard = vault.read_bounded_guarded_bytes(
+            tmp_path,
+            "Knowledge Base/record.md",
+            limit=16,
+        )
+    finally:
+        finish_publication.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert data == b"record"
+    guard.recheck(tmp_path)
+
+
+def test_windows_owner_child_removal_flushes_without_blocking_guarded_parent_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import graph_sync, held_fs, reserved_paths, writer_lease
+
+    knowledge_base = tmp_path / "Knowledge Base"
+    knowledge_base.mkdir()
+    record = knowledge_base / "record.md"
+    record.write_bytes(b"record")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    target = graph_sync.floor_path(tmp_path)
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        reserved_paths._publish_owner_bytes(
+            tmp_path,
+            target,
+            "graph-handoff",
+            b"owner bytes",
+        )
+
+    acquired = held_fs.acquire(tmp_path)
+    assert acquired.ok
+    filesystem_type = type(acquired.require())
+    acquired.require().close()
+    real_unlink = filesystem_type.unlink
+    removal_entered = threading.Event()
+    finish_removal = threading.Event()
+
+    def paused_unlink(filesystem, file):  # noqa: ANN001
+        removal_entered.set()
+        assert finish_removal.wait(5)
+        return real_unlink(filesystem, file)
+
+    monkeypatch.setattr(filesystem_type, "unlink", paused_unlink)
+    errors: list[BaseException] = []
+
+    def remove_owner_child() -> None:
+        try:
+            with reserved_paths._subsystem_authority_scope("graph_sync"):
+                reserved_paths._remove_owner_file(
+                    tmp_path,
+                    target,
+                    "graph-handoff",
+                )
+        except BaseException as error:  # noqa: BLE001 - report worker failure below
+            errors.append(error)
+
+    worker = threading.Thread(target=remove_owner_child)
+    worker.start()
+    assert removal_entered.wait(5)
+    try:
+        data, guard = vault.read_bounded_guarded_bytes(
+            tmp_path,
+            "Knowledge Base/record.md",
+            limit=16,
+        )
+    finally:
+        finish_removal.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert not target.exists()
+    assert data == b"record"
+    guard.recheck(tmp_path)
 
 
 def test_windows_native_information_buffers_use_abi_offsets() -> None:
