@@ -2234,10 +2234,12 @@ def _sqlite_owner_target_scope(
                 raise FileNotFoundError(database)
             raise RuntimeError("private SQLite target cannot retain its parent")
         with parent_result.require() as parent:
+            # Retain identity without DELETE access: a live Windows SQLite
+            # handle does not necessarily share DELETE with another opener.
             existing_result = filesystem.file(
                 parent,
                 relative.name,
-                access="mutate" if create else "read",
+                access="read",
             )
             existing: held_fs.HeldFile | None = None
             expected: held_fs.StableIdentity | None = None
@@ -2273,7 +2275,7 @@ def _sqlite_owner_target_scope(
                     current_result = filesystem.file(
                         parent,
                         relative.name,
-                        access="mutate" if create else "read",
+                        access="read",
                     )
                     if not current_result.ok:
                         raise RuntimeError("private SQLite target changed during open")

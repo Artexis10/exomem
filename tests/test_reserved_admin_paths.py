@@ -400,13 +400,24 @@ def test_generic_read_refuses_parent_exchange_after_leaf_acquisition(
     worker.start()
     assert acquired_leaf.wait(5)
     displaced = tmp_path / "Knowledge Base" / "Notes-displaced"
-    notes.rename(displaced)
-    notes.mkdir()
-    release.set()
+    exchange_blocked = False
+    try:
+        notes.rename(displaced)
+    except PermissionError:
+        exchange_blocked = True
+    else:
+        notes.mkdir()
+    finally:
+        release.set()
     worker.join(5)
 
     assert not worker.is_alive()
     assert len(outcomes) == 1
+    if exchange_blocked:
+        assert outcomes == [b"ordinary"]
+        assert ordinary.read_text(encoding="utf-8") == "ordinary"
+        assert not displaced.exists()
+        return
     assert isinstance(outcomes[0], reserved_paths.ReservedPathLeafError)
     assert outcomes[0].code == "IDENTITY_CHANGED"
     assert (displaced / ordinary.name).read_text(encoding="utf-8") == "ordinary"
@@ -2552,13 +2563,26 @@ def test_lexical_publication_refuses_parent_exchange_after_destination_probe(
     worker.start()
     assert destination_probed.wait(5)
     displaced = tmp_path / "Knowledge Base-displaced"
-    kb.rename(displaced)
-    kb.mkdir()
-    release.set()
+    exchange_blocked = False
+    try:
+        kb.rename(displaced)
+    except PermissionError:
+        exchange_blocked = True
+    else:
+        kb.mkdir()
+    finally:
+        release.set()
     worker.join(5)
 
     assert not worker.is_alive()
     assert len(outcomes) == 1
+    if exchange_blocked:
+        assert isinstance(outcomes[0], held_fs.StableIdentity)
+        assert outcomes[0].kind == "file"
+        assert live.read_bytes() == b"target generation"
+        assert not staged.exists()
+        assert not displaced.exists()
+        return
     assert isinstance(outcomes[0], OSError)
     assert "parent changed" in str(outcomes[0])
     assert (displaced / staged.name).read_bytes() == b"target generation"
@@ -2862,6 +2886,42 @@ def test_sqlite_owner_target_scope_rejects_symlink_and_hardlink_aliases(
                     create=True,
                 ):
                     pytest.fail("ambiguous SQLite alias reached the connection leaf")
+
+
+def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import held_fs
+
+    database = tmp_path / "Knowledge Base" / ".embeddings.sqlite"
+    database.parent.mkdir()
+    database.write_bytes(b"existing")
+    acquired = held_fs.acquire(tmp_path)
+    assert acquired.ok
+    filesystem_type = type(acquired.require())
+    acquired.require().close()
+    real_file = filesystem_type.file
+    accesses: list[str] = []
+
+    def observe_access(self, parent, leaf, **kwargs):  # noqa: ANN001
+        if leaf == database.name:
+            accesses.append(kwargs.get("access", "read"))
+        return real_file(self, parent, leaf, **kwargs)
+
+    monkeypatch.setattr(filesystem_type, "file", observe_access)
+
+    with reserved_paths._subsystem_authority_scope("embedding_index"):
+        with reserved_paths._identity_coordination_scope(tmp_path):
+            with reserved_paths._sqlite_owner_target_scope(
+                tmp_path,
+                database,
+                "embeddings-store",
+                create=True,
+            ) as retained:
+                assert retained == database
+
+    assert accesses == ["read", "read"]
 
 
 def test_readonly_sqlite_connections_retain_their_owner_target_through_open(

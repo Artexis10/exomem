@@ -13,10 +13,12 @@ import secrets
 from ctypes import (
     POINTER,
     Structure,
+    Union,
     byref,
     c_byte,
     c_long,
     c_ubyte,
+    c_uint32,
     c_ulong,
     c_ulonglong,
     c_ushort,
@@ -63,6 +65,9 @@ DELETE = 0x00010000
 SYNCHRONIZE = 0x00100000
 OBJ_CASE_INSENSITIVE = 0x00000040
 FILE_RENAME_INFORMATION = 10
+FILE_RENAME_INFORMATION_EX = 65
+FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001
+FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 FILE_LINK_INFORMATION = 11
 FILE_DISPOSITION_INFORMATION = 4
 FILE_BOTH_DIRECTORY_INFORMATION = 3
@@ -117,13 +122,17 @@ class BY_HANDLE_FILE_INFORMATION(Structure):
     ]
 
 
+class FILE_NAME_OPTIONS(Union):
+    _fields_ = [("ReplaceIfExists", c_ubyte), ("Flags", c_uint32)]
+
+
 class FILE_NAME_INFORMATION(Structure):
     """ABI-derived header shared by native rename and link information."""
 
     _fields_ = [
-        ("ReplaceIfExists", c_ubyte),
+        ("Options", FILE_NAME_OPTIONS),
         ("RootDirectory", c_void_p),
-        ("FileNameLength", c_ulong),
+        ("FileNameLength", c_uint32),
         ("FileName", c_ushort * 1),
     ]
 
@@ -365,12 +374,25 @@ def _open_relative(
         raise
 
 
-def _name_payload(replace: bool, destination_handle: int, leaf: str) -> ctypes.Array[ctypes.c_char]:
+def _name_payload(
+    replace: bool,
+    destination_handle: int,
+    leaf: str,
+    *,
+    information_class: int = FILE_RENAME_INFORMATION,
+) -> ctypes.Array[ctypes.c_char]:
     encoded = leaf.encode("utf-16-le")
     offset = FILE_NAME_INFORMATION.FileName.offset
     payload = create_string_buffer(sizeof(FILE_NAME_INFORMATION) + len(encoded))
     information = FILE_NAME_INFORMATION.from_buffer(payload)
-    information.ReplaceIfExists = replace
+    if information_class == FILE_RENAME_INFORMATION_EX:
+        information.Options.Flags = (
+            FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS
+            if replace
+            else 0
+        )
+    else:
+        information.Options.ReplaceIfExists = replace
     information.RootDirectory = destination_handle
     information.FileNameLength = len(encoded)
     ctypes.memmove(ctypes.addressof(payload) + offset, encoded, len(encoded))
@@ -386,7 +408,12 @@ def _set_name_information(
     replace: bool = False,
 ) -> None:
     assert NtSetInformationFile is not None
-    payload = _name_payload(replace, destination_handle, leaf)
+    payload = _name_payload(
+        replace,
+        destination_handle,
+        leaf,
+        information_class=information_class,
+    )
     status = IO_STATUS_BLOCK()
     result = NtSetInformationFile(
         _native(descriptor),
@@ -779,7 +806,9 @@ class WindowsHeldFilesystem(HeldFilesystem):
                 checked.descriptor,
                 _native(destination.descriptor),
                 destination_leaf,
-                FILE_RENAME_INFORMATION,
+                # The legacy class refuses replacement while the caller retains
+                # the exact old target. POSIX semantics keeps that handle valid.
+                FILE_RENAME_INFORMATION_EX if replace else FILE_RENAME_INFORMATION,
                 replace=replace,
             )
             checked.named = False
@@ -1076,6 +1105,8 @@ def _probe(root: Path) -> Capabilities:
     source_name = f".exomem-held-probe-{token}"
     renamed_name = f"{source_name}-renamed"
     linked_name = f"{source_name}-link"
+    replacement_source_name = f"{source_name}-replacement-source"
+    replacement_target_name = f"{source_name}-replacement-target"
     alias_name = f"{source_name}-alias"
     directory_name = f"{source_name}-directory"
     directory_alias_name = f"{directory_name}-alias"
@@ -1111,6 +1142,39 @@ def _probe(root: Path) -> Capabilities:
             with filesystem.file(parent, renamed_name, access="mutate").require() as renamed:
                 if not filesystem.unlink(renamed).ok:
                     return Capabilities.disabled("relative unlink is unavailable")
+
+            for name, data in (
+                (replacement_source_name, b"replacement"),
+                (replacement_target_name, b"prior"),
+            ):
+                with filesystem.file(
+                    parent,
+                    name,
+                    access="write",
+                    create=True,
+                    exclusive=True,
+                ).require() as file:
+                    if not filesystem.write(file, data).ok:
+                        return Capabilities.disabled("relative replacement setup is unavailable")
+            with filesystem.file(parent, replacement_target_name).require() as prior:
+                with filesystem.file(
+                    parent,
+                    replacement_source_name,
+                    access="mutate",
+                ).require() as replacement:
+                    if not filesystem.rename(
+                        replacement,
+                        parent,
+                        replacement_target_name,
+                        replace=True,
+                    ).ok:
+                        return Capabilities.disabled("relative replacement is unavailable")
+                os.lseek(prior.descriptor, 0, os.SEEK_SET)
+                if os.read(prior.descriptor, 5) != b"prior":
+                    return Capabilities.disabled("open-target replacement is unavailable")
+            with filesystem.file(parent, replacement_target_name).require() as installed:
+                if filesystem.read(installed).value != b"replacement":
+                    return Capabilities.disabled("relative replacement identity is unavailable")
         return Capabilities(True, True, True, True, hard_link)
     except (HeldFsError, OSError):
         return Capabilities.disabled("actual-filesystem capability probe failed")
@@ -1120,6 +1184,8 @@ def _probe(root: Path) -> Capabilities:
             source_name,
             renamed_name,
             linked_name,
+            replacement_source_name,
+            replacement_target_name,
             alias_name,
             directory_alias_name,
         ):

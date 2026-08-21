@@ -42,6 +42,22 @@ def test_windows_ffi_structures_construct_on_every_supported_interpreter() -> No
     )
 
 
+def test_windows_extended_rename_payload_binds_posix_replacement_flags() -> None:
+    backend = importlib.import_module("exomem._held_fs_windows")
+    payload = backend._name_payload(
+        True,
+        1,
+        "x",
+        information_class=backend.FILE_RENAME_INFORMATION_EX,
+    )
+    information = backend.FILE_NAME_INFORMATION.from_buffer(payload)
+
+    assert backend.FILE_RENAME_INFORMATION_EX == 65
+    assert information.Options.Flags == (
+        backend.FILE_RENAME_REPLACE_IF_EXISTS | backend.FILE_RENAME_POSIX_SEMANTICS
+    )
+
+
 @_requires_native_route
 def test_public_contract_uses_closed_results_and_content_free_refusals(tmp_path: Path) -> None:
     held_fs = _module()

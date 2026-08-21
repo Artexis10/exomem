@@ -85,6 +85,9 @@ def test_windows_backend_declares_native_relative_ffi_contract() -> None:
     assert backend.NtSetInformationFile is not None
     assert backend.FILE_OPEN_REPARSE_POINT
     assert backend.FILE_RENAME_INFORMATION == 10
+    assert backend.FILE_RENAME_INFORMATION_EX == 65
+    assert backend.FILE_RENAME_REPLACE_IF_EXISTS == 0x00000001
+    assert backend.FILE_RENAME_POSIX_SEMANTICS == 0x00000002
     assert backend.FILE_DISPOSITION_INFORMATION == 4
 
 
@@ -140,6 +143,83 @@ def test_windows_rename_uses_native_relative_information_class(
                 assert filesystem.rename(before, parent, "after.txt").ok
 
     assert backend.FILE_RENAME_INFORMATION in information_classes
+
+
+def test_windows_replace_uses_posix_semantics_while_old_target_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held_fs = _held_fs()
+    backend = importlib.import_module("exomem._held_fs_windows")
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        original = backend.NtSetInformationFile
+        calls: list[tuple[int, int]] = []
+
+        def observed(*args):
+            information_class = int(args[4])
+            information = ctypes.cast(
+                args[2], ctypes.POINTER(backend.FILE_NAME_INFORMATION)
+            ).contents
+            calls.append((information_class, int(information.Options.Flags)))
+            return original(*args)
+
+        monkeypatch.setattr(backend, "NtSetInformationFile", observed)
+        with filesystem.parent("native-replace", create=True).require() as parent:
+            for name, data in (("current.txt", b"old"), ("staged.txt", b"new")):
+                with filesystem.file(
+                    parent, name, access="write", create=True, exclusive=True
+                ).require() as file:
+                    assert filesystem.write(file, data).ok
+
+            with filesystem.file(parent, "current.txt").require() as old_target:
+                with filesystem.file(parent, "staged.txt", access="mutate").require() as staged:
+                    assert filesystem.rename(
+                        staged,
+                        parent,
+                        "current.txt",
+                        replace=True,
+                    ).ok
+                os.lseek(old_target.descriptor, 0, os.SEEK_SET)
+                assert os.read(old_target.descriptor, 3) == b"old"
+
+            with filesystem.file(parent, "current.txt").require() as current:
+                assert filesystem.read(current).require() == b"new"
+
+    assert (
+        backend.FILE_RENAME_INFORMATION_EX,
+        backend.FILE_RENAME_REPLACE_IF_EXISTS | backend.FILE_RENAME_POSIX_SEMANTICS,
+    ) in calls
+
+
+def test_windows_probe_exercises_posix_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = importlib.import_module("exomem._held_fs_windows")
+    original = backend._set_name_information
+    calls: list[tuple[int, bool]] = []
+
+    def observed(
+        descriptor,
+        destination_handle,
+        leaf,
+        information_class,
+        *,
+        replace=False,
+    ):
+        calls.append((information_class, replace))
+        return original(
+            descriptor,
+            destination_handle,
+            leaf,
+            information_class,
+            replace=replace,
+        )
+
+    monkeypatch.setattr(backend, "_set_name_information", observed)
+
+    capability = backend.probe(tmp_path)
+
+    assert capability.relative_operations is True
+    assert (backend.FILE_RENAME_INFORMATION_EX, True) in calls
 
 
 def test_windows_reparse_points_and_short_aliases_refuse(tmp_path: Path) -> None:
