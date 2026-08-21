@@ -3034,6 +3034,101 @@ def test_live_graph_publishes_identity_before_schema_initialization(
     assert observations == [(True, False)]
 
 
+def test_fresh_live_graph_publishes_complete_wal_family_and_refuses_alias(
+    tmp_path: Path,
+) -> None:
+    from exomem import epistemic_graph
+
+    graph = epistemic_graph.EpistemicGraphIndex(
+        tmp_path,
+        mutation_coordinator=SimpleNamespace(),
+    )
+    connection = graph._connect()
+    try:
+        family = tuple(
+            tmp_path / "Knowledge Base" / f".graph.sqlite{suffix}"
+            for suffix in ("", "-wal", "-shm")
+        )
+        catalogue = reserved_paths._published_identity_catalogue(tmp_path)
+        assert all(path.exists() for path in family)
+        assert all(
+            catalogue.descriptor_for(reserved_paths._lstat_identity(path))
+            == "graph-store"
+            for path in family
+        )
+
+        notes = tmp_path / "Knowledge Base" / "Notes"
+        notes.mkdir()
+        alias = notes / "ordinary.bin"
+        try:
+            os.link(family[1], alias)
+        except OSError:
+            pytest.skip("hard links are unavailable")
+
+        with pytest.raises(DeleteFileError) as error:
+            delete_file(
+                tmp_path,
+                path="Knowledge Base/Notes/ordinary.bin",
+                confirm=True,
+                force_orphan=True,
+            )
+
+        assert error.value.code == "RESERVED_PATH"
+        assert alias.exists()
+        assert not (tmp_path / "Knowledge Base" / "_trash").exists()
+    finally:
+        connection.close()
+
+
+def test_live_graph_closes_connection_when_retained_target_exit_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import epistemic_graph
+
+    connections: list[sqlite3.Connection] = []
+    connect = epistemic_graph._sqlite_connect_owned
+
+    def observe_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    @contextmanager
+    def refuse_on_exit(
+        _vault_root: Path,
+        database: Path,
+        _descriptor_id: str,
+        *,
+        create: bool,
+    ):
+        assert create
+        yield database
+        raise RuntimeError("retained target changed during open")
+
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_sqlite_connect_owned",
+        observe_connect,
+    )
+    monkeypatch.setattr(
+        reserved_paths,
+        "_sqlite_owner_target_scope",
+        refuse_on_exit,
+    )
+
+    graph = epistemic_graph.EpistemicGraphIndex(
+        tmp_path,
+        mutation_coordinator=SimpleNamespace(),
+    )
+    with pytest.raises(RuntimeError, match="retained target changed"):
+        graph._connect()
+
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connections[0].execute("SELECT 1")
+
+
 def test_sqlite_owner_target_scope_rejects_symlink_and_hardlink_aliases(
     tmp_path: Path,
 ) -> None:

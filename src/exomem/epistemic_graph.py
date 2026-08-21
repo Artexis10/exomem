@@ -1336,17 +1336,25 @@ class EpistemicGraphIndex:
                 relative.as_posix()
             ).descriptor_id
         if descriptor_id == "graph-store":
-            with reserved_paths._identity_coordination_scope(
-                self.vault_root,
-                descriptor_ids=(descriptor_id,),
-            ):
-                with reserved_paths._sqlite_owner_target_scope(
+            connection: sqlite3.Connection | None = None
+            try:
+                with reserved_paths._identity_coordination_scope(
                     self.vault_root,
-                    target,
-                    descriptor_id,
-                    create=True,
-                ) as retained_target:
-                    connection = self._open_live_graph_store(retained_target)
+                    descriptor_ids=(descriptor_id,),
+                ):
+                    with reserved_paths._sqlite_owner_target_scope(
+                        self.vault_root,
+                        target,
+                        descriptor_id,
+                        create=True,
+                    ) as retained_target:
+                        connection = self._open_live_graph_store(retained_target)
+            except BaseException:
+                if connection is not None:
+                    connection.close()
+                raise
+            if connection is None:  # pragma: no cover - context entered or raised
+                raise RuntimeError("live graph store did not open a connection")
             try:
                 return self._initialize_graph_schema(connection)
             except BaseException:
@@ -1383,6 +1391,19 @@ class EpistemicGraphIndex:
         conn = _sqlite_connect_owned(target)
         try:
             sidecar_store.apply_sidecar_pragmas(conn)
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()
+            if (
+                journal_mode is None
+                or not journal_mode
+                or str(journal_mode[0]).lower() != "wal"
+            ):
+                raise RuntimeError("live graph store could not establish WAL mode")
+            # WAL negotiation persists the mode but does not materialize the
+            # companion files on a fresh database.  A write reservation creates
+            # and pins WAL/SHM without changing graph data, so the complete
+            # physical family can be published before coordination is released.
+            conn.execute("BEGIN IMMEDIATE")
+            conn.rollback()
             reserved_paths._publish_sqlite_owner_family(
                 self.vault_root,
                 target,
