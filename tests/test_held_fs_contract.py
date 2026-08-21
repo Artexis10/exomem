@@ -58,6 +58,52 @@ def test_windows_extended_rename_payload_binds_posix_replacement_flags() -> None
     )
 
 
+def test_windows_root_flush_reopens_the_exact_retained_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = importlib.import_module("exomem._held_fs_windows")
+    expected = backend.StableIdentity(1, 2, "directory", 1)
+    calls: list[tuple[int, int, int, int]] = []
+
+    def reopen(handle, desired, sharing, flags):
+        calls.append((handle.value, desired, sharing, flags))
+        return 202
+
+    monkeypatch.setattr(backend, "ReOpenFile", reopen)
+    monkeypatch.setattr(backend, "_native", lambda descriptor: 101)
+    monkeypatch.setattr(backend, "_identity", lambda handle: expected)
+    monkeypatch.setattr(backend, "_fd", lambda handle: 303)
+
+    assert backend._reopen_directory_descriptor(7, backend.GENERIC_WRITE) == 303
+    assert calls == [
+        (
+            101,
+            backend.GENERIC_WRITE,
+            backend.FILE_SHARE_ALL,
+            backend.FILE_FLAG_BACKUP_SEMANTICS | backend.FILE_OPEN_REPARSE_POINT,
+        )
+    ]
+
+
+def test_windows_root_flush_reopen_refusal_is_a_closed_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = importlib.import_module("exomem._held_fs_windows")
+    filesystem = object.__new__(backend.WindowsHeldFilesystem)
+    filesystem.descriptor = 7
+    filesystem.closed = False
+
+    def refuse_reopen(descriptor, desired_access):
+        raise OSError("flush authority unavailable")
+
+    monkeypatch.setattr(backend, "_reopen_directory_descriptor", refuse_reopen)
+
+    result = filesystem.parent(".", access="flush")
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "IO_REFUSED"
+
+
 @_requires_native_route
 def test_public_contract_uses_closed_results_and_content_free_refusals(tmp_path: Path) -> None:
     held_fs = _module()
@@ -154,6 +200,20 @@ def test_relative_leaf_operations_use_held_parents_only(tmp_path: Path) -> None:
                             destination, "linked.txt", access="mutate"
                         ).require() as linked:
                             assert filesystem.unlink(linked).ok
+
+
+@_requires_native_route
+def test_directory_flush_requires_flush_capable_access(tmp_path: Path) -> None:
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent(".", access="flush").require() as root:
+            assert filesystem.flush_directory(root).ok
+        with filesystem.parent("flush-parent", create=True).require() as parent:
+            refused = filesystem.flush_directory(parent)
+            assert refused.error is not None
+            assert refused.error.code == "INVALID_ACCESS"
+        with filesystem.parent("flush-parent", access="flush").require() as parent:
+            assert filesystem.flush_directory(parent).ok
 
 
 @_requires_native_route

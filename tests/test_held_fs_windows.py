@@ -556,6 +556,76 @@ def test_windows_owner_child_publication_does_not_block_guarded_parent_read(
     guard.recheck(tmp_path)
 
 
+def test_windows_owner_child_removal_flushes_without_blocking_guarded_parent_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import graph_sync, held_fs, reserved_paths, writer_lease
+
+    knowledge_base = tmp_path / "Knowledge Base"
+    knowledge_base.mkdir()
+    record = knowledge_base / "record.md"
+    record.write_bytes(b"record")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    target = graph_sync.floor_path(tmp_path)
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        reserved_paths._publish_owner_bytes(
+            tmp_path,
+            target,
+            "graph-handoff",
+            b"owner bytes",
+        )
+
+    acquired = held_fs.acquire(tmp_path)
+    assert acquired.ok
+    filesystem_type = type(acquired.require())
+    acquired.require().close()
+    real_unlink = filesystem_type.unlink
+    removal_entered = threading.Event()
+    finish_removal = threading.Event()
+
+    def paused_unlink(filesystem, file):  # noqa: ANN001
+        removal_entered.set()
+        assert finish_removal.wait(5)
+        return real_unlink(filesystem, file)
+
+    monkeypatch.setattr(filesystem_type, "unlink", paused_unlink)
+    errors: list[BaseException] = []
+
+    def remove_owner_child() -> None:
+        try:
+            with reserved_paths._subsystem_authority_scope("graph_sync"):
+                reserved_paths._remove_owner_file(
+                    tmp_path,
+                    target,
+                    "graph-handoff",
+                )
+        except BaseException as error:  # noqa: BLE001 - report worker failure below
+            errors.append(error)
+
+    worker = threading.Thread(target=remove_owner_child)
+    worker.start()
+    assert removal_entered.wait(5)
+    try:
+        data, guard = vault.read_bounded_guarded_bytes(
+            tmp_path,
+            "Knowledge Base/record.md",
+            limit=16,
+        )
+    finally:
+        finish_removal.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert not target.exists()
+    assert data == b"record"
+    guard.recheck(tmp_path)
+
+
 def test_windows_native_information_buffers_use_abi_offsets() -> None:
     backend = importlib.import_module("exomem._held_fs_windows")
     assert backend.FILE_NAME_INFORMATION.FileName.offset > backend.ctypes.sizeof(

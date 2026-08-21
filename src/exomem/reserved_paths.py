@@ -2543,6 +2543,7 @@ def _remove_owner_file(
             parent_text = relative.parent.as_posix()
             parent_result = filesystem.parent(
                 parent_text if parent_text != "." else ".",
+                access="flush",
             )
             if not parent_result.ok:
                 if (

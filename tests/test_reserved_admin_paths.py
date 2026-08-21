@@ -2753,7 +2753,8 @@ def test_owner_child_file_mutations_retain_parent_without_delete_access(
         access for relative, access in parent_accesses if relative == "Knowledge Base"
     ]
     assert knowledge_base_accesses
-    assert set(knowledge_base_accesses) == {"read"}
+    assert "mutate" not in knowledge_base_accesses
+    assert knowledge_base_accesses[-1] == "flush"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX retained-directory durability probe")

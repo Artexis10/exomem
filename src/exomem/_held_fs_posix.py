@@ -294,7 +294,7 @@ class PosixHeldFilesystem(HeldFilesystem):
         access: str = "read",
     ) -> HeldResult[HeldDirectory]:
         parts = _parts(relative)
-        if parts is None or access not in {"read", "mutate"}:
+        if parts is None or access not in {"read", "flush", "mutate"}:
             return HeldResult(error=_invalid())
         if exclusive and (not create or not parts):
             return HeldResult(error=_invalid())
@@ -439,6 +439,12 @@ class PosixHeldFilesystem(HeldFilesystem):
     def flush_directory(self, directory: HeldDirectory) -> HeldResult[None]:
         try:
             checked = self._check_directory(directory)
+            if checked.access not in {"flush", "mutate"}:
+                return HeldResult(
+                    error=HeldFsError(
+                        "INVALID_ACCESS", "held directory is not flush-capable"
+                    )
+                )
             _fsync(checked.descriptor)
             return HeldResult(value=None)
         except OSError as error:
