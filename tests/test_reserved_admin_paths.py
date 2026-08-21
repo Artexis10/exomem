@@ -2905,6 +2905,7 @@ def test_primary_sqlite_connections_retain_their_owner_target_through_open(
     observed: list[tuple[str, str, bool]] = []
     published: list[str] = []
     retained: set[str] = set()
+    publish_owner_family = reserved_paths._publish_sqlite_owner_family
 
     @contextmanager
     def observe_scope(
@@ -2924,13 +2925,14 @@ def test_primary_sqlite_connections_retain_their_owner_target_through_open(
             retained.remove(descriptor_id)
 
     def observe_publication(
-        _vault_root: Path,
-        _database: Path,
+        vault_root: Path,
+        database: Path,
         descriptor_id: str,
-        _connection: object,
+        connection: object,
     ) -> None:
         assert descriptor_id in retained
         published.append(descriptor_id)
+        publish_owner_family(vault_root, database, descriptor_id, connection)
 
     monkeypatch.setattr(
         reserved_paths,
@@ -2974,7 +2976,11 @@ def test_primary_sqlite_connections_retain_their_owner_target_through_open(
         descriptor_id for descriptor_id, _connect in cases
     ]
     assert all(create for _descriptor_id, _name, create in observed)
-    assert published == [descriptor_id for descriptor_id, _connect in cases]
+    assert published == [
+        descriptor_id
+        for descriptor_id, _connect in cases
+        for _attempt in range(2 if descriptor_id == "graph-store" else 1)
+    ]
 
 
 def test_live_graph_publishes_identity_before_schema_initialization(
@@ -3809,6 +3815,7 @@ def test_primary_sqlite_owners_publish_under_exact_authority_and_coordination(
     from exomem.governance import store as governance_store
 
     observed: list[tuple[str, str]] = []
+    publish_owner_family = reserved_paths._publish_sqlite_owner_family
 
     def observe_publication(
         vault_root: Path,
@@ -3816,11 +3823,11 @@ def test_primary_sqlite_owners_publish_under_exact_authority_and_coordination(
         descriptor_id: str,
         connection: object,
     ) -> None:
-        del connection
         assert reserved_paths.owner_authorized(descriptor_id)
         assert reserved_paths._identity_coordination_active(vault_root)
         assert database.parent == tmp_path / "Knowledge Base"
         observed.append((descriptor_id, database.name))
+        publish_owner_family(vault_root, database, descriptor_id, connection)
 
     monkeypatch.setattr(
         reserved_paths,
@@ -3852,7 +3859,9 @@ def test_primary_sqlite_owners_publish_under_exact_authority_and_coordination(
         assert observed[-1][0] == descriptor_id
 
     assert [descriptor_id for descriptor_id, _name in observed] == [
-        descriptor_id for descriptor_id, _connect in cases
+        descriptor_id
+        for descriptor_id, _connect in cases
+        for _attempt in range(2 if descriptor_id == "graph-store" else 1)
     ]
 
 

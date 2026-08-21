@@ -148,6 +148,24 @@ jobs:
           tests/test_mutation_concurrency.py
           tests/test_windows_path_alias_guard.py
           --session-timeout=600
+      - name: Native reserved-path compatibility gate
+        env:
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state-compat
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python -m pytest -q
+          tests/test_governance_receipts.py
+          tests/test_graph_lifecycle_windows.py
+          tests/test_media_processing.py
+          tests/test_plan_progress_review.py
+          tests/test_record_audit_protocol.py
+          tests/test_record_rebaseline.py
+          tests/test_records_live_acceptance.py
+          tests/test_review_context.py
+          --session-timeout=600
 
   tui:
     name: terminal UI (textual, headless + snapshots)
