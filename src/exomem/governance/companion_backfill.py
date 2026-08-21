@@ -13,7 +13,6 @@ from typing import Any
 import yaml
 
 from .. import media_types, reserved_paths, vault
-from ..clip_index import ClipIndex
 from ..kbdir import kb_dirname
 from . import companions
 
@@ -332,6 +331,10 @@ def _class_specific(
         or parsed.get("parent_media") != parent_path
     ):
         raise _stale("scene-frame timestamp or parent disagrees")
+    # ClipIndex pulls in the optional media/NumPy stack. Keep it off the
+    # ordinary command import path and load it only for scene-frame backfill.
+    from ..clip_index import ClipIndex
+
     indexed = ClipIndex(vault_root).frame_timestamps(parent_path)
     matching_index = [
         value
