@@ -30,3 +30,14 @@ def test_main_scaffold_treats_entities_as_stepping_stones_without_frozen_list() 
     assert 'connect_memory(operation="create-entity")' in text
     assert "single incidental mention" in text
     assert "person, organization, concept, library, decision" not in text
+
+
+def test_people_pages_document_aliases_and_about_entity() -> None:
+    skill = (SCHEMA / "SKILL.md").read_text(encoding="utf-8")
+    page_types = (SCHEMA / "references" / "page-types.md").read_text(encoding="utf-8")
+
+    assert "### Referents" in skill
+    assert "unresolved" in skill and "never guess" in skill
+    people = page_types.split("### People", 1)[1].split("### ", 1)[0]
+    assert "aliases" in people
+    assert "about_entity" in people

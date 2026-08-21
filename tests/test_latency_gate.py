@@ -69,6 +69,7 @@ _REPEAT = 3  # passes over the query set → ~9 samples per lane for a stable me
 # CI-speed variance over the warm baseline does not.
 CEIL_GRAPH_MS = 1000.0  # warm ~222ms; a per-query resolver rebuild → ~1.9s trips this
 CEIL_TOTAL_MS = 5000.0  # warm ~805ms; catastrophic-blowup backstop, CI-robust
+CEIL_REFERENTS_MS = 1000.0
 # Relation-filtered recall adds one indexed sidecar lookup (two indexed edge
 # queries + graph_nodes joins) to find(); it must not turn into an O(corpus)
 # walk. This is a generous catastrophic-blowup backstop, not a tight bound —
@@ -90,6 +91,8 @@ CEIL_RELATION_FILTER_MS = 5000.0
 N_NOTES_LARGE = 8000  # 4x the base corpus
 CEIL_GRAPH_RATIO = 1.5  # warm graph median at 4x corpus must stay within 1.5x
 GRAPH_RATIO_SLACK_MS = 25.0  # noise floor for ms-scale medians on shared CI
+CEIL_REFERENTS_RATIO = 1.5
+REFERENTS_RATIO_SLACK_MS = 25.0
 
 
 def _seed_freshness_live(vault: Path) -> None:
@@ -301,4 +304,83 @@ def test_warm_graph_lane_does_not_scale_linearly(tmp_path: Path, model_free) -> 
         f"@ {N_NOTES_LARGE} notes (bound {bound:.1f}ms): a linear-in-N per-query "
         f"cost is back in the graph lane. Sub-spans: "
         f"{ {k: round(v, 1) for k, v in large_medians.items() if k.startswith('graph')} }"
+    )
+
+
+def _referent_stage_median(vault: Path) -> float:
+    from exomem import commands
+
+    samples: list[float] = []
+    for _ in range(3):
+        result = commands.op_find(
+            vault,
+            query="my two synthetic friends",
+            limit=10,
+            mode="hybrid",
+            graph=True,
+            rerank=False,
+            include_timings=True,
+        )
+        stage = result["timings"]["stages"].get("referents")
+        assert stage is not None and "ms" in stage
+        samples.append(stage["ms"])
+    return statistics.median(samples)
+
+
+@pytest.mark.timeout(300)
+def test_referent_stage_stays_bounded_at_scale(
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from synth_vault import gen_entity_overlay
+    from exomem import commands
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 125, seed=19)
+    _seed_freshness_live(vault)
+    referents_ms = _referent_stage_median(vault)
+    assert referents_ms < CEIL_REFERENTS_MS
+
+    non_cue = commands.op_find(
+        vault,
+        query="synthetic retrieval topic",
+        mode="hybrid",
+        graph=True,
+        rerank=False,
+        include_timings=True,
+    )
+    assert "referents" not in non_cue["timings"]["stages"]
+
+    monkeypatch.setenv("EXOMEM_DISABLE_REFERENTS", "1")
+    disabled = commands.op_find(
+        vault,
+        query="my two synthetic friends",
+        mode="hybrid",
+        graph=True,
+        rerank=False,
+        include_timings=True,
+    )
+    assert "referents" not in disabled["timings"]["stages"]
+
+
+@pytest.mark.timeout(600)
+def test_referent_stage_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
+    from synth_vault import gen_entity_overlay
+
+    small = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(small, 125, seed=23)
+    _seed_freshness_live(small)
+    small_ms = _referent_stage_median(small)
+
+    large = _build_dense_vault(tmp_path, N_NOTES_LARGE)
+    gen_entity_overlay(large, 500, seed=23)
+    _seed_freshness_live(large)
+    large_ms = _referent_stage_median(large)
+
+    bound = max(
+        small_ms * CEIL_REFERENTS_RATIO,
+        small_ms + REFERENTS_RATIO_SLACK_MS,
+    )
+    assert large_ms < bound, (
+        f"referents stage scaled {small_ms:.1f}ms @ {N_NOTES} to "
+        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)"
     )

@@ -632,6 +632,82 @@ def test_find_hot_cache_stays_principal_free(vault: Path) -> None:
     ]
     assert cached_hits, "expected the hot cache to be populated"
     assert all(getattr(hit, "decision", None) is None for hit in cached_hits)
+    assert all(not hasattr(hit, "referents") for hit in cached_hits)
+
+
+def test_referents_never_name_withheld_entity_pages(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    release = egress.AnnotatedHits(
+        hits=[_hit(OPEN_PATH)],
+        withheld_paths=frozenset({RESTRICTED_PATH}),
+        active=True,
+    )
+    block = {
+        "status": "resolved",
+        "entity_type": "person",
+        "resolved": [
+            {"path": RESTRICTED_PATH, "title": "Hidden", "entity_type": "person", "evidence": []}
+        ],
+        "candidates": [
+            {"path": OPEN_PATH, "title": "Open", "entity_type": "person", "evidence": []}
+        ],
+        "reasons": {},
+    }
+    with request_scope(_external()):
+        guarded = egress.guard_referents(vault, block, release)
+    assert guarded is not None
+    assert [item["path"] for item in guarded["candidates"]] == [OPEN_PATH]
+    assert RESTRICTED_PATH not in str(guarded)
+
+
+def test_referents_drop_evidence_naming_withheld_anchor_seeds(vault: Path) -> None:
+    release = egress.AnnotatedHits(
+        hits=[_hit(OPEN_PATH)],
+        withheld_paths=frozenset({RESTRICTED_PATH}),
+        active=True,
+    )
+    block = {
+        "status": "resolved",
+        "entity_type": "person",
+        "resolved": [
+            {
+                "path": OPEN_PATH,
+                "title": "Open",
+                "entity_type": "person",
+                "evidence": [
+                    {"kind": "graph", "seed": RESTRICTED_PATH, "relation_type": "relates_to"},
+                    {"kind": "attribute", "matched": ["friend"]},
+                ],
+            }
+        ],
+        "candidates": [],
+        "reasons": {},
+    }
+    guarded = egress.guard_referents(vault, block, release)
+    assert guarded is not None
+    evidence = guarded["resolved"][0]["evidence"]
+    assert evidence == [{"kind": "attribute", "matched": ["friend"]}]
+    assert RESTRICTED_PATH not in str(guarded)
+
+
+def test_referents_block_omitted_for_blocked_audience(vault: Path) -> None:
+    write_broken_policy(vault)
+    release = egress.AnnotatedHits(
+        hits=[],
+        withheld_paths=frozenset({RESTRICTED_PATH, OPEN_PATH}),
+        active=True,
+        blocked=True,
+    )
+    block = {
+        "status": "resolved",
+        "entity_type": "person",
+        "resolved": [{"path": OPEN_PATH, "title": "Open", "evidence": []}],
+        "candidates": [],
+        "reasons": {},
+    }
+    with request_scope(_external()):
+        assert egress.guard_referents(vault, block, release) is None
 
 
 def test_purpose_never_enters_the_find_cache_key(vault: Path) -> None:
