@@ -210,6 +210,24 @@ def test_verify_accepts_only_active_unexpired_record_and_matching_key() -> None:
     )
 
 
+def test_verify_accepts_a_matching_utf8_verifier_key_id() -> None:
+    key_id = "auth-key-å-2026"
+    issued = authorization_sessions.issue_credential(
+        verifier_key=b"k" * 32,
+        verifier_key_id=key_id,
+        binding=_binding(),
+    )
+
+    assert authorization_sessions.verify_credential(
+        issued.bearer,
+        record=issued.record,
+        verifier_key=b"k" * 32,
+        verifier_key_id=key_id,
+        expected_binding=_binding(),
+        now=1_800_000_000,
+    )
+
+
 def test_verify_compares_digest_before_rejecting_validly_parsed_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

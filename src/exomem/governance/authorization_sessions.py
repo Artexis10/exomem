@@ -229,7 +229,10 @@ def verify_credential(
     )
     valid = hmac.compare_digest(calculated_locator, record.locator_digest)
     valid &= hmac.compare_digest(calculated_verifier, record.verifier)
-    valid &= hmac.compare_digest(verifier_key_id, record.verifier_key_id)
+    valid &= hmac.compare_digest(
+        verifier_key_id.encode("utf-8"),
+        record.verifier_key_id.encode("utf-8"),
+    )
     for actual, expected in zip(
         _binding_fields(record.binding),
         _binding_fields(expected_binding),
