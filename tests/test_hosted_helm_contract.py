@@ -201,6 +201,23 @@ def test_platform_requires_cross_repository_trust_in_runtime_upgrade_metadata(
     assert "runtime upgrade is invalid" in result.stderr
 
 
+def test_platform_accepts_an_authoritatively_empty_legacy_catalog(tmp_path: Path) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+    lock = json.loads(values["provisioner"]["deploymentLockJson"])
+    lock["composition"]["legacyCatalog"] = []
+    lock["composition"]["legacyReleaseSetSha256"] = hashlib.sha256(b"[]\n").hexdigest()
+    override = _lock_override(tmp_path, lock)
+
+    _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=("--values", str(override)),
+    )
+
+
 def test_platform_rejects_deployment_lock_hash_drift(
     tmp_path: Path,
 ) -> None:

@@ -154,6 +154,22 @@ def test_empty_fleet_requires_three_authorities_to_agree() -> None:
     Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8"))).validate(inventory)
 
 
+def test_inventory_projects_the_verified_ten_field_upgrade_target() -> None:
+    module = _module()
+    runtime = _runtime("0.57.2", "a")
+    verified_target = {
+        **runtime,
+        "sourceCommit": "b" * 40,
+        "runtimeCandidateSha256": "c" * 64,
+    }
+
+    assert module.runtime_from_upgrade_target(verified_target) == runtime
+
+    verified_target["unexpected"] = "drift"
+    with pytest.raises(module.InventoryError, match="target fields"):
+        module.runtime_from_upgrade_target(verified_target)
+
+
 @pytest.mark.parametrize(
     ("reviewer", "classification", "ordinary", "reviewers"),
     [(False, "target", 1, 0), (True, "reviewer", 0, 1)],
@@ -595,7 +611,16 @@ def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
     token.write_text("not-a-real-token", encoding="utf-8")
     token.chmod(0o600)
     target_path = tmp_path / "target.json"
-    target_path.write_text(json.dumps(target), encoding="utf-8")
+    target_path.write_text(
+        json.dumps(
+            {
+                **target,
+                "sourceCommit": "b" * 40,
+                "runtimeCandidateSha256": "c" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
     catalog_path = tmp_path / "catalog.json"
     catalog_path.write_text(json.dumps({"runtimes": [target]}), encoding="utf-8")
     inventory_path = tmp_path / "inventory.json"

@@ -134,7 +134,7 @@
         },
         "forwardContractSha256": {"$ref": "#/$defs/sha256"},
         "authoritativeLegacyReleaseSetSha256": {"$ref": "#/$defs/sha256"},
-        "legacyCatalog": {"type": "array", "items": {"$ref": "#/$defs/legacyUnit"}, "minItems": 1},
+        "legacyCatalog": {"type": "array", "items": {"$ref": "#/$defs/legacyUnit"}},
         "legacyReleaseSetSha256": {"$ref": "#/$defs/sha256"}
       }
     },

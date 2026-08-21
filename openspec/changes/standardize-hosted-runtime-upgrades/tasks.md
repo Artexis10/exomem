@@ -42,26 +42,26 @@
 ## 5. Generic expand, drain, and contract orchestration
 
 - [x] 5.1 Extend release verification to emit the exact target identities consumed by both Substrate fixtures and Exomem deployment-lock composition
-- [ ] 5.2 Derive the authoritative legacy catalog from the reconciled routable, assigned, and unfinished-operation release set and reject missing, duplicate, mutable, or unreferenced entries
-- [ ] 5.3 Make the operator CLI prove that Substrate's reviewed consumer commit trusts the target at every pinned site before composing the Exomem lock pair
-- [ ] 5.4 Gate expand deployment on exact lock verification and prove post-deploy that adoption enqueued no tenant lifecycle operation and changed no existing tenant Kubernetes or control-plane resource
-- [ ] 5.5 Implement explicit canary selection followed by sequential per-cell assignment/rollforward, stopping on the first non-success terminal
-- [ ] 5.6 Gate contract deployment on a fresh zero-legacy proof across every collector and exact expand/contract lineage equality
-- [ ] 5.7 Implement phase-aware stop/recovery output that keeps expand active whenever any target cell or unresolved transition exists
-- [ ] 5.8 Update the Hosted alpha runbook so operators execute the CLI phases and evidence checks rather than manually editing release-specific command blocks
+- [x] 5.2 Derive the authoritative legacy catalog from the reconciled routable, assigned, and unfinished-operation release set and reject missing, duplicate, mutable, or unreferenced entries
+- [x] 5.3 Make the operator CLI prove that Substrate's reviewed consumer commit trusts the target at every pinned site before composing the Exomem lock pair
+- [x] 5.4 Gate expand deployment on exact lock verification and prove post-deploy that adoption enqueued no tenant lifecycle operation and changed no existing tenant Kubernetes or control-plane resource
+- [x] 5.5 Implement explicit canary selection followed by sequential per-cell assignment/rollforward, stopping on the first non-success terminal
+- [x] 5.6 Gate contract deployment on a fresh zero-legacy proof across every collector and exact expand/contract lineage equality
+- [x] 5.7 Implement phase-aware stop/recovery output that keeps expand active whenever any target cell or unresolved transition exists
+- [x] 5.8 Update the Hosted alpha runbook so operators execute the CLI phases and evidence checks rather than manually editing release-specific command blocks
 
 ## 6. Reviewer promotion and release acceptance
 
 - [x] 6.1 Add red-first reviewer-bootstrap tests for an optional explicit existing client ID, unchanged fresh-ID behavior, full-partition reuse, mismatched configuration, enabled client, prior reviewer authorization, and no silent fallback
 - [x] 6.2 Implement explicit client reuse through Substrate's ordinary pinned registration so the server revalidates eligibility before invite or authority creation
-- [ ] 6.3 Add the target execution and reconciled zero-legacy state to the free promotion preflight without starting the reviewer clock
+- [x] 6.3 Add the target execution and reconciled zero-legacy state to the free promotion preflight without starting the reviewer clock
 - [ ] 6.4 Preserve the prepare/run boundary and require both Claude and OpenAI evidence chains to import within their actual assignment validity before promotion
 - [ ] 6.5 Add personal-account acceptance for exact target identity, OAuth, bootstrap, recall, governed write/read-back, refresh, reconnect, and authority/capacity/unfinished-operation leak checks
 - [ ] 6.6 Ensure failed reviewer cleanup can select only the explicit reviewer-purpose tenant and can never select an ordinary tenant or its volume
 
 ## 7. Generic verification and independent review
 
-- [ ] 7.1 Run focused Exomem unit, provisioner, Helm, cross-language, K3s, scaffold leak, and lint gates for the new workflow
+- [x] 7.1 Run focused Exomem unit, provisioner, Helm, cross-language, K3s, scaffold leak, and lint gates for the new workflow
 - [ ] 7.2 Run focused Substrate unit, PostgreSQL integration, migration, contract fixture, OAuth client, lifecycle, promotion, and runbook gates
 - [ ] 7.3 Exercise empty fleet, one-cell canary, mixed fleet, divergent authorities, failed migration, failed readiness, preservation mismatch, interrupted/replayed operation, and post-record failure in non-production environments
 - [ ] 7.4 Review both repository diffs for tenant-data safety, authorization boundaries, secret handling, compatibility, rollback truthfulness, and unintended release/profile changes

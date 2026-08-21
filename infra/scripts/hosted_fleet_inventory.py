@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _RELEASE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 _IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$")
 _PROTOCOL = re.compile(r"^[1-9][0-9]{0,7}$")
@@ -38,6 +39,7 @@ _RUNTIME_FIELDS = {
     "schemaDigest",
     "compatibilityDigest",
 }
+_UPGRADE_TARGET_FIELDS = _RUNTIME_FIELDS | {"sourceCommit", "runtimeCandidateSha256"}
 _CONTROL_RUNTIME_FIELDS = _RUNTIME_FIELDS - {"runtimeImage"}
 _DEPLOYMENT_RUNTIME_FIELDS = _RUNTIME_FIELDS - {"compatibilityDigest"}
 _SUBSTRATE_FIELDS = {
@@ -172,6 +174,24 @@ def _runtime(value: object, *, label: str) -> dict[str, str]:
         if not isinstance(runtime[field], str) or not _SHA256.fullmatch(runtime[field]):
             _error(f"{label} {field} is invalid")
     return {field: cast(str, runtime[field]) for field in _RUNTIME_FIELDS}
+
+
+def runtime_from_upgrade_target(value: object) -> dict[str, str]:
+    """Project the verifier's exact ten-field target into fleet runtime identity."""
+
+    target = _closed(value, _UPGRADE_TARGET_FIELDS, label="upgrade target")
+    if not isinstance(target["sourceCommit"], str) or not _COMMIT.fullmatch(
+        target["sourceCommit"]
+    ):
+        _error("upgrade target sourceCommit is invalid")
+    if not isinstance(target["runtimeCandidateSha256"], str) or not _SHA256.fullmatch(
+        target["runtimeCandidateSha256"]
+    ):
+        _error("upgrade target runtimeCandidateSha256 is invalid")
+    return _runtime(
+        {field: target[field] for field in _RUNTIME_FIELDS},
+        label="upgrade target runtime",
+    )
 
 
 def _control_runtime(value: object, *, label: str) -> dict[str, str]:
@@ -663,13 +683,13 @@ def collect_kubernetes(
                 workload["protocolVersion"],
                 workload["runtimeImage"],
             )
-            runtime = catalog.get(key)
-            if runtime is None:
+            catalog_runtime = catalog.get(key)
+            if catalog_runtime is None:
                 _error("kubernetes collector runtime identity is not in the reviewed catalog")
             helm_releases.append(
                 {
                     "cellId": namespace_identity["cellId"],
-                    "runtime": runtime,
+                    "runtime": catalog_runtime,
                     "driver": "configmap",
                     "status": "deployed",
                 }
@@ -1062,23 +1082,23 @@ def reconcile_inventory(
                     current["issues"].add(issue)
 
         runtime_by_bytes = {_canonical(runtime): runtime for runtime in current["runtimes"]}
-        runtime = runtime_by_bytes[sorted(runtime_by_bytes)[0]] if runtime_by_bytes else None
+        cell_runtime = runtime_by_bytes[sorted(runtime_by_bytes)[0]] if runtime_by_bytes else None
         if live_other and not runtime_by_bytes:
             current["issues"].add("missing_runtime_identity")
         if len(runtime_by_bytes) > 1:
             current["issues"].add("runtime_identity_divergence")
-        if runtime is not None and (
-            any(claim != _runtime_contract(runtime) for claim in current["runtimeClaims"])
+        if cell_runtime is not None and (
+            any(claim != _runtime_contract(cell_runtime) for claim in current["runtimeClaims"])
             or any(
-                deployment != _runtime_deployment(runtime)
+                deployment != _runtime_deployment(cell_runtime)
                 for deployment in current["runtimeDeployments"]
             )
         ):
             current["issues"].add("runtime_identity_divergence")
         if current["workloadImages"] and (
             len(set(current["workloadImages"])) > 1
-            or runtime is None
-            or current["workloadImages"][0] != runtime["runtimeImage"]
+            or cell_runtime is None
+            or current["workloadImages"][0] != cell_runtime["runtimeImage"]
         ):
             current["issues"].add("runtime_identity_divergence")
 
@@ -1098,7 +1118,7 @@ def reconcile_inventory(
             terminal_count += 1
         elif reviewer:
             classification = "reviewer"
-        elif runtime == selected_target:
+        elif cell_runtime == selected_target:
             classification = "target"
         else:
             classification = "legacy"
@@ -1109,7 +1129,7 @@ def reconcile_inventory(
                 reviewer_count += 1
             else:
                 ordinary_count += 1
-            if runtime == selected_target:
+            if cell_runtime == selected_target:
                 target_count += 1
             else:
                 legacy_count += 1
@@ -1118,7 +1138,7 @@ def reconcile_inventory(
             {
                 "cellId": identifier,
                 "classification": classification,
-                "runtime": runtime,
+                "runtime": cell_runtime,
                 "surfaces": {
                     "bindingStatus": (
                         "active" if active_binding else "destroyed" if destroyed_binding else None
@@ -1343,10 +1363,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        target = _runtime(
-            _load_operator_json(args.target, label="target"),
-            label="target runtime",
-        )
+        target = runtime_from_upgrade_target(_load_operator_json(args.target, label="target"))
         catalog_document = _load_operator_json(args.runtime_catalog, label="runtime catalog")
         if set(catalog_document) != {"runtimes"} or not isinstance(
             catalog_document["runtimes"], list

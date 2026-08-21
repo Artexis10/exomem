@@ -227,7 +227,7 @@ class DeploymentComposition(BaseModel):
     sourceClosure: DeploymentSourceClosures
     forwardContractSha256: str = Field(pattern=_SHA256)
     authoritativeLegacyReleaseSetSha256: str = Field(pattern=_SHA256)
-    legacyCatalog: tuple[DeploymentLegacyUnit, ...] = Field(min_length=1, strict=False)
+    legacyCatalog: tuple[DeploymentLegacyUnit, ...] = Field(strict=False)
     legacyReleaseSetSha256: str = Field(pattern=_SHA256)
 
     @model_validator(mode="after")

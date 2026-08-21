@@ -157,7 +157,8 @@ def _target(value: object) -> dict[str, object]:
         "schemaDigest",
         "compatibilityDigest",
     ):
-        if not isinstance(target[field], str) or not _SHA256.fullmatch(target[field]):
+        digest = target[field]
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
             _error(f"target {field} is invalid")
     return dict(target)
 
@@ -254,6 +255,7 @@ def _validate_cell(value: object) -> dict[str, Any]:
         cell["beforeVaultSha256"] is None
         or cell["afterVaultSha256"] is None
         or cell["evidenceSha256"] is None
+        or cell["beforeVaultSha256"] != cell["afterVaultSha256"]
     ):
         _error("complete cell lacks preservation evidence")
     return cell
@@ -320,11 +322,23 @@ def validate_execution(value: object) -> dict[str, Any]:
     result = _closed_dict(record["result"], _RESULT_FIELDS, label="result")
     if not isinstance(result["code"], str) or not _RESULT_CODE.fullmatch(result["code"]):
         _error("result code is invalid")
-    expected_action = _EXPECTED_ACTION[phase]
-    if phase == "rolling" and inventory["legacyCellCount"] == 0:
-        expected_action = "prove_zero_legacy"
-    expected_code = "complete" if phase == "complete" else "in_progress"
-    if result != {"code": expected_code, "nextSafeAction": expected_action}:
+    failed_rollout = phase == "rolling" and any(
+        cell["status"] in {"failed", "recovery_required"} for cell in cells
+    )
+    if failed_rollout:
+        expected_result = {
+            "code": "cell_rollforward_failed",
+            "nextSafeAction": "hold_expand_and_recover",
+        }
+    else:
+        expected_action = _EXPECTED_ACTION[phase]
+        if phase == "rolling" and inventory["legacyCellCount"] == 0:
+            expected_action = "prove_zero_legacy"
+        expected_result = {
+            "code": "complete" if phase == "complete" else "in_progress",
+            "nextSafeAction": expected_action,
+        }
+    if result != expected_result:
         _error("result does not match execution phase")
 
     created = _timestamp(record["createdAt"], label="createdAt")

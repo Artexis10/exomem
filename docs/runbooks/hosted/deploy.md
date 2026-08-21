@@ -7,6 +7,10 @@ ciphertexts, and owner-only invitation gate must be green. Production mutation
 always uses a saved plan; a second plan is never computed during apply. The
 pair is committed at `infra/contracts/exomem-hosted-deployment-lock-pair-v2.json`.
 
+Runtime releases use the governed expand/canary/contract workflow in
+[`runtime-upgrades.md`](runtime-upgrades.md). The deployment sections below are its
+effectors, not a release checklist; do not edit their release values by hand.
+
 ## Records reader-floor rollout
 
 Deployment-lock v3 is additive. It binds `minimum_records_reader_version: 2`, the

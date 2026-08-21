@@ -496,7 +496,7 @@ def _legacy_catalog(
     contracts: tuple[HashedInput, ...],
 ) -> tuple[list[dict[str, object]], str]:
     body = _exact_object(catalog, label="legacy catalog", fields={"schemaVersion", "units"})
-    if body["schemaVersion"] != 1 or not isinstance(body["units"], list) or not body["units"]:
+    if body["schemaVersion"] != 1 or not isinstance(body["units"], list):
         _error("legacy catalog is invalid")
     authority_body = _exact_object(
         authority,
@@ -507,7 +507,6 @@ def _legacy_catalog(
         authority_body["artifact"] != "exomem-hosted-authoritative-legacy-v1-release-set"
         or authority_body["schemaVersion"] != 1
         or not isinstance(authority_body["units"], list)
-        or not authority_body["units"]
     ):
         _error("authoritative legacy release set is invalid")
     authoritative_units: set[tuple[str, str, str, str]] = set()
@@ -725,7 +724,7 @@ def validate_deployment_lock(value: object) -> None:
     _sha256(composition["forwardContractSha256"], label="forward contract")
     _sha256(composition["authoritativeLegacyReleaseSetSha256"], label="authoritative legacy release set")
     _sha256(composition["legacyReleaseSetSha256"], label="legacy release set")
-    if not isinstance(composition["legacyCatalog"], list) or not composition["legacyCatalog"]:
+    if not isinstance(composition["legacyCatalog"], list):
         _error("deployment lock legacy catalog is invalid")
     legacy_units: set[tuple[str, str]] = set()
     for raw_unit in composition["legacyCatalog"]:
@@ -1052,7 +1051,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--forward-contract", type=_hashed_argument, required=True)
     parser.add_argument("--authoritative-legacy-release-set", type=_hashed_argument, required=True)
     parser.add_argument("--legacy-catalog", type=_hashed_argument, required=True)
-    parser.add_argument("--legacy-contract", type=_hashed_argument, action="append", required=True)
+    parser.add_argument("--legacy-contract", type=_hashed_argument, action="append", default=[])
     parser.add_argument("--rollback", type=_hashed_argument, required=True)
     parser.add_argument("--records-compatibility", type=_hashed_argument)
     parser.add_argument("--runtime-upgrade", type=_hashed_argument)

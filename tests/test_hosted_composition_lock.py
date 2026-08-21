@@ -311,6 +311,92 @@ def test_composer_binds_runtime_upgrade_compatibility_and_migration(
     ]
 
 
+def test_composer_accepts_an_authoritatively_empty_legacy_dependency_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    authority = json.loads(request.authoritative_legacy_release_set.path.read_text())
+    authority["units"] = []
+    catalog = json.loads(request.legacy_catalog.path.read_text())
+    catalog["units"] = []
+    request = replace(
+        request,
+        authoritative_legacy_release_set=replace(
+            request.authoritative_legacy_release_set,
+            sha256=_write_json(request.authoritative_legacy_release_set.path, authority),
+        ),
+        legacy_catalog=replace(
+            request.legacy_catalog,
+            sha256=_write_json(request.legacy_catalog.path, catalog),
+        ),
+        legacy_contracts=(),
+    )
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        composer,
+        "verify_source_closure",
+        lambda _repository, candidate, composition, paths: {
+            "candidateCommit": candidate,
+            "compositionCommit": composition,
+            "paths": list(paths),
+        },
+    )
+
+    pair = composer.compose_locks(request)
+
+    assert [lock["composition"]["legacyCatalog"] for lock in pair["locks"]] == [[], []]
+
+
+def test_composer_cli_allows_zero_legacy_contract_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composer = _module()
+    captured = []
+    monkeypatch.setattr(composer, "compose_locks", lambda request: captured.append(request))
+    digest = "a" * 64
+
+    assert (
+        composer.main(
+            [
+                "--repository",
+                str(tmp_path),
+                "--composition-commit",
+                "b" * 40,
+                "--runtime-candidate",
+                "runtime.json",
+                "--runtime-candidate-sha256",
+                digest,
+                "--runtime-candidate-bundle",
+                "runtime.bundle.json",
+                "--runtime-bundle",
+                "runtime.image.bundle.json",
+                "--provisioner-candidate",
+                "provisioner.json",
+                "--provisioner-candidate-sha256",
+                digest,
+                "--provisioner-candidate-bundle",
+                "provisioner.bundle.json",
+                "--provisioner-bundle",
+                "provisioner.image.bundle.json",
+                "--forward-contract",
+                f"forward.json={digest}",
+                "--authoritative-legacy-release-set",
+                f"authority.json={digest}",
+                "--legacy-catalog",
+                f"catalog.json={digest}",
+                "--rollback",
+                f"rollback.json={digest}",
+                "--output",
+                "pair.json",
+            ]
+        )
+        == 0
+    )
+    assert len(captured) == 1
+    assert captured[0].legacy_contracts == ()
+
+
 @pytest.mark.parametrize("tamper", ("missing", "target", "commit", "digest", "sites"))
 def test_runtime_upgrade_composition_requires_exact_substrate_trust(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str

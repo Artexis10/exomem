@@ -98,7 +98,7 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if or (not (kindIs "slice" $composition.legacyCatalog)) (lt (len $composition.legacyCatalog) 1) -}}
+{{- if not (kindIs "slice" $composition.legacyCatalog) -}}
 {{- fail "deployment lock legacy catalog is invalid" -}}
 {{- end -}}
 {{- range $legacy := $composition.legacyCatalog -}}
