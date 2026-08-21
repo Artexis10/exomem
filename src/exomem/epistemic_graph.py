@@ -1322,26 +1322,8 @@ class EpistemicGraphIndex:
         return self._mutation_coordinator
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
-        target = path if path is not None else self.path
-        try:
-            relative = target.absolute().relative_to(self.vault_root.absolute())
-        except ValueError:
-            descriptor_ids = None
-        else:
-            descriptor_id = reserved_paths.classify_logical(
-                relative.as_posix()
-            ).descriptor_id
-            descriptor_ids = (
-                (descriptor_id,)
-                if descriptor_id in {"graph-store", "graph-rebuild"}
-                else None
-            )
         with reserved_paths._subsystem_authority_scope("epistemic_graph"):
-            with reserved_paths._identity_coordination_scope(
-                self.vault_root,
-                descriptor_ids=descriptor_ids,
-            ):
-                return self._connect_owned(path)
+            return self._connect_owned(path)
 
     def _connect_owned(self, path: Path | None = None) -> sqlite3.Connection:
         target = path if path is not None else self.path
@@ -1353,18 +1335,64 @@ class EpistemicGraphIndex:
             descriptor_id = reserved_paths.classify_logical(
                 relative.as_posix()
             ).descriptor_id
-        if descriptor_id in {"graph-store", "graph-rebuild"}:
-            with reserved_paths._sqlite_owner_target_scope(
+        if descriptor_id == "graph-store":
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=(descriptor_id,),
+            ):
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root,
+                    target,
+                    descriptor_id,
+                    create=True,
+                ) as retained_target:
+                    connection = self._open_live_graph_store(retained_target)
+            try:
+                return self._initialize_graph_schema(connection)
+            except BaseException:
+                connection.close()
+                raise
+        if descriptor_id == "graph-rebuild":
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=(descriptor_id,),
+            ):
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root,
+                    target,
+                    descriptor_id,
+                    create=True,
+                ) as retained_target:
+                    return self._connect_retained(
+                        retained_target,
+                        descriptor_id=descriptor_id,
+                    )
+        with reserved_paths._identity_coordination_scope(self.vault_root):
+            return self._connect_retained(target, descriptor_id=None)
+
+    def _open_live_graph_store(self, target: Path) -> sqlite3.Connection:
+        """Publish the WAL family before leaving owner coordination.
+
+        Schema setup can wait on another SQLite connection for the configured
+        busy timeout.  The live primary/WAL/SHM identities are already stable
+        by then, so keeping the graph identity domain locked across that wait
+        only starves unrelated public mutations that need a catalogue snapshot.
+        """
+
+        sidecar_store.ensure_sidecar_parent(target)
+        conn = _sqlite_connect_owned(target)
+        try:
+            sidecar_store.apply_sidecar_pragmas(conn)
+            reserved_paths._publish_sqlite_owner_family(
                 self.vault_root,
                 target,
-                descriptor_id,
-                create=True,
-            ) as retained_target:
-                return self._connect_retained(
-                    retained_target,
-                    descriptor_id=descriptor_id,
-                )
-        return self._connect_retained(target, descriptor_id=None)
+                "graph-store",
+                conn,
+            )
+        except BaseException:
+            conn.close()
+            raise
+        return conn
 
     def _connect_retained(
         self,
@@ -1384,6 +1412,16 @@ class EpistemicGraphIndex:
             # Keeping private rebuilds in rollback-journal mode prevents
             # authoritative rows from remaining in a detached WAL companion.
             conn.execute("PRAGMA journal_mode=DELETE")
+        try:
+            return self._initialize_graph_schema(conn)
+        except BaseException:
+            conn.close()
+            raise
+
+    def _initialize_graph_schema(
+        self,
+        conn: sqlite3.Connection,
+    ) -> sqlite3.Connection:
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         if edge_columns and "raw_relation" not in edge_columns:
             conn.execute("DROP TABLE graph_edges")
@@ -1456,23 +1494,6 @@ class EpistemicGraphIndex:
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_parent_relation "
             "ON graph_edges(parent_relation, src_key, dst_key)"
         )
-        if target == self.path:
-            try:
-                classification = reserved_paths.classify_logical(
-                    target.relative_to(self.vault_root).as_posix()
-                )
-                descriptor_id = classification.descriptor_id
-                if descriptor_id not in {"graph-store", "graph-rebuild"}:
-                    raise RuntimeError("graph SQLite target is not owner-bound")
-                reserved_paths._publish_sqlite_owner_family(
-                    self.vault_root,
-                    target,
-                    descriptor_id,
-                    conn,
-                )
-            except BaseException:
-                conn.close()
-                raise
         return conn
 
     def _connect_existing(

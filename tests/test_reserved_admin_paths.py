@@ -7,6 +7,7 @@ import datetime as dt
 import inspect
 import os
 import pickle
+import sqlite3
 import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace as dataclass_replace
@@ -2973,6 +2974,64 @@ def test_primary_sqlite_connections_retain_their_owner_target_through_open(
     ]
     assert all(create for _descriptor_id, _name, create in observed)
     assert published == [descriptor_id for descriptor_id, _connect in cases]
+
+
+def test_live_graph_publishes_identity_before_schema_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import epistemic_graph
+
+    published = False
+    observations: list[tuple[bool, bool]] = []
+    publish_owner_family = reserved_paths._publish_sqlite_owner_family
+
+    def observe_publication(
+        vault_root: Path,
+        database: Path,
+        descriptor_id: str,
+        connection: object,
+    ) -> None:
+        nonlocal published
+        publish_owner_family(vault_root, database, descriptor_id, connection)
+        published = True
+
+    initialize_graph_schema = epistemic_graph.EpistemicGraphIndex._initialize_graph_schema
+
+    def observe_schema_initialization(
+        graph: epistemic_graph.EpistemicGraphIndex,
+        connection: sqlite3.Connection,
+    ) -> sqlite3.Connection:
+        observations.append(
+            (
+                published,
+                reserved_paths._identity_coordination_active(
+                    tmp_path,
+                    "graph-store",
+                ),
+            )
+        )
+        return initialize_graph_schema(graph, connection)
+
+    monkeypatch.setattr(
+        reserved_paths,
+        "_publish_sqlite_owner_family",
+        observe_publication,
+    )
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_initialize_graph_schema",
+        observe_schema_initialization,
+    )
+
+    graph = epistemic_graph.EpistemicGraphIndex(
+        tmp_path,
+        mutation_coordinator=SimpleNamespace(),
+    )
+    connection = graph._connect()
+    connection.close()
+
+    assert observations == [(True, False)]
 
 
 def test_sqlite_owner_target_scope_rejects_symlink_and_hardlink_aliases(
