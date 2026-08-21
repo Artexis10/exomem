@@ -147,7 +147,7 @@
 - [x] 3.8 Split the pure pinned-byte compiler from guarded live prospective acquisition;
   implement a before/read/after `AuthoringSnapshot` and return a bound
   `ProspectiveCompile` only for a stable conflict-free regular-file tree.
-- [ ] 3.9 Add append-only `compiled_policy_generations`, immutable catalog descriptors,
+- [x] 3.9 Add append-only `compiled_policy_generations`, immutable catalog descriptors,
   and singleton `active_governance_tuple` to exact schema v4. Store ordered source and
   compiled bytes/fingerprints, compiler/projector versions, predecessor/event/receipt,
   projection namespace, immutable store id, epoch, and activation digest; enforce
@@ -284,7 +284,7 @@ made before both PRs and their combined verification are complete.
   Cover padding/whitespace/alternate alphabet/wrong length/noncanonical bits/duplicates,
   malformed/expired/closed, cross-principal/cross-issuer/cross-cell/cross-vault,
   unregistered copy, unknown-key equivalence, and accepted-parser⊆scrubber property.
-- [ ] 5.2 Add red custody tests for `EXOMEM_AUTH_SESSION_KEYRING_FILE` and
+- [x] 5.2 Add red custody tests for `EXOMEM_AUTH_SESSION_KEYRING_FILE` and
   `EXOMEM_AUTH_SESSION_CONTROL_FILE`: absent, symlink/non-regular, oversized, bad
   version/id/key length/time/signature, identity mismatch, permissive POSIX mode or
   Windows ACL, policy/request/CLI/vault-provided values, and first-use generation all
