@@ -2041,7 +2041,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "Governance lifecycle operation: list, explain, simulate, propose, commit, grant, revoke, suspend, resume, undo, or declare.",
+          "description": "Governance lifecycle operation: list, explain, simulate, propose, commit, grant, revoke, suspend, resume, undo, declare, or backfill_companion.",
           "enum": [
             "list",
             "explain",
@@ -2053,7 +2053,8 @@
             "suspend",
             "resume",
             "undo",
-            "declare"
+            "declare",
+            "backfill_companion"
           ],
           "type": "string"
         },
@@ -2299,6 +2300,35 @@
           ],
           "default": null,
           "description": "Item paths for simulate."
+        },
+        "backfill_action": {
+          "anyOf": [
+            {
+              "enum": [
+                "preview",
+                "commit"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Preview or commit an owner-reviewed companion backfill."
+        },
+        "companion_input": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact version-1 artifact, companion, semantics, and binding input."
         },
         "response_detail": {
           "default": "full",
