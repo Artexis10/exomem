@@ -592,12 +592,44 @@ def _manifest_matches_source(
     return actual == expected
 
 
+def _device(path: Path) -> int:
+    """Return the pathname device for conservative lifecycle preflight.
+
+    The held move below remains the authorizing same-device check. Keeping
+    this preflight preserves the established early-refusal seam and can only
+    reject; it cannot authorize a later pathname operation.
+    """
+
+    current = path
+    while True:
+        try:
+            return current.stat().st_dev
+        except FileNotFoundError:
+            parent = current.parent
+            if parent == current:
+                raise
+            current = parent
+
+
 def atomic_rename(
     operation: LifecycleOperation,
     *, source: Path,
     destination: Path,
     recovery: bool = False,
 ) -> None:
+    try:
+        if _device(source) != _device(destination.parent):
+            raise LifecycleError(
+                "CROSS_DEVICE_MOVE",
+                "lifecycle moves require a same-device atomic rename",
+            )
+    except LifecycleError:
+        raise
+    except OSError as error:
+        raise LifecycleError(
+            "ATOMIC_MOVE_PREFLIGHT_FAILED",
+            "could not verify lifecycle move device",
+        ) from error
     source_kind = "directory" if source.is_dir() else "file"
     expected = tuple(
         ManifestItem(

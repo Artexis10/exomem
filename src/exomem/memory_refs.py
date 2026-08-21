@@ -91,7 +91,10 @@ class ReferenceIndex:
 
     def _connect(self) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("memory_refs"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("refs-store",),
+            ):
                 return self._connect_owned()
 
     def _connect_owned(self) -> sqlite3.Connection:
@@ -145,7 +148,10 @@ class ReferenceIndex:
 
     def _connect_readonly(self) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("memory_refs"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("refs-store",),
+            ):
                 with reserved_paths._sqlite_owner_target_scope(
                     self.vault_root,
                     self.path,

@@ -1902,7 +1902,8 @@ def test_lifecycle_refuses_operational_state_and_every_ancestor(
     with pytest.raises(error_type) as error:
         invoke()
 
-    assert error.value.code == "GOVERNANCE_STATE_PROTECTED"
+    expected = "RESERVED_PATH" if kind == "file" else "GOVERNANCE_STATE_PROTECTED"
+    assert error.value.code == expected
     assert target.exists()
 
 

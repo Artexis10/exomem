@@ -96,6 +96,11 @@ class _DirStat:
 
 def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
     rel = (path or "").replace("\\", "/").strip("/")
+    if rel == ".":
+        # Product CLI callers conventionally spell the selected vault root as
+        # ``.``.  Normalize that selector before the closed path classifier;
+        # dot components remain forbidden everywhere below the root.
+        rel = ""
     if rel:
         if Path(rel).is_absolute() or rel.startswith(".."):
             raise OverviewError("INVALID_PATH", f"path escapes the vault: {path!r}")

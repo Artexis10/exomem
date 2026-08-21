@@ -499,6 +499,133 @@ def test_owner_identity_publication_requires_exact_authority_and_coordination(
                 )
 
 
+def test_identity_coordination_does_not_take_the_content_mutation_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = tmp_path / "state"
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=state_dir),
+        mutation_timeout_seconds=0.05,
+    )
+    content_boundary = manager._mutation_coordinator_for(vault_root)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_content_boundary() -> None:
+        with content_boundary.hold(
+            operation="content-write",
+            holder_kind="test",
+        ):
+            holding.set()
+            assert release.wait(5)
+
+    worker = threading.Thread(target=hold_content_boundary, daemon=True)
+    worker.start()
+    assert holding.wait(2)
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+
+    try:
+        with reserved_paths._identity_coordination_scope(vault_root):
+            assert reserved_paths._identity_coordination_active(vault_root)
+    finally:
+        release.set()
+        worker.join(5)
+
+    assert not worker.is_alive()
+
+
+def test_owner_identity_domains_are_independent_but_generic_scope_covers_all(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.cli_ops import OpError
+
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=0.05,
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    graph_holding = threading.Event()
+    release_graph = threading.Event()
+
+    def hold_graph_identity() -> None:
+        with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+            with reserved_paths._identity_coordination_scope(vault_root):
+                graph_holding.set()
+                assert release_graph.wait(5)
+
+    worker = threading.Thread(target=hold_graph_identity, daemon=True)
+    worker.start()
+    assert graph_holding.wait(2)
+
+    try:
+        with reserved_paths._subsystem_authority_scope("graph_sync"):
+            with reserved_paths._identity_coordination_scope(vault_root):
+                assert reserved_paths._identity_coordination_active(vault_root)
+
+        with pytest.raises(OpError, match="MUTATION_BUSY"):
+            with reserved_paths._identity_coordination_scope(vault_root):
+                pytest.fail("generic coordination omitted a private owner domain")
+    finally:
+        release_graph.set()
+        worker.join(5)
+
+    assert not worker.is_alive()
+
+
+def test_one_owner_coordinates_only_the_exact_descriptor_it_is_opening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=0.05,
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    rebuild_holding = threading.Event()
+    release_rebuild = threading.Event()
+
+    def hold_rebuild_identity() -> None:
+        with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+            with reserved_paths._identity_coordination_scope(
+                vault_root,
+                descriptor_ids=("graph-rebuild",),
+            ):
+                rebuild_holding.set()
+                assert release_rebuild.wait(5)
+
+    worker = threading.Thread(target=hold_rebuild_identity, daemon=True)
+    worker.start()
+    assert rebuild_holding.wait(2)
+
+    try:
+        with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+            with reserved_paths._identity_coordination_scope(
+                vault_root,
+                descriptor_ids=("graph-store",),
+            ):
+                assert reserved_paths._identity_coordination_active(
+                    vault_root,
+                    "graph-store",
+                )
+                assert not reserved_paths._identity_coordination_active(
+                    vault_root,
+                    "graph-rebuild",
+                )
+    finally:
+        release_rebuild.set()
+        worker.join(5)
+
+    assert not worker.is_alive()
+
+
 def test_published_private_directory_identity_is_checked_before_enumeration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -927,6 +1054,7 @@ def test_generic_directory_create_refuses_symlink_parent_to_private_tree(
     manager = SimpleNamespace(
         mutation_guard=lambda *_args, **_kwargs: nullcontext(),
         consistency_guard=lambda *_args, **_kwargs: nullcontext(),
+        reserved_identity_guard=lambda *_args, **_kwargs: nullcontext(),
     )
     monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
     monkeypatch.setattr(writer_lease, "active_mutation_request_id", lambda: None)
@@ -1963,6 +2091,9 @@ def test_process_media_private_alias_matches_absent_before_existence_probe(
         def consistency_guard(self, *_args: object, **_kwargs: object):
             return nullcontext()
 
+        def reserved_identity_guard(self, *_args: object, **_kwargs: object):
+            return nullcontext()
+
         def mutation_guard(self, *_args: object, **_kwargs: object):
             pytest.fail("a refused media probe must not acquire the mutation guard")
 
@@ -2898,18 +3029,29 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
     database = tmp_path / "Knowledge Base" / ".embeddings.sqlite"
     database.parent.mkdir()
     database.write_bytes(b"existing")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
     acquired = held_fs.acquire(tmp_path)
     assert acquired.ok
     filesystem_type = type(acquired.require())
     acquired.require().close()
+    real_parent = filesystem_type.parent
     real_file = filesystem_type.file
+    parent_accesses: list[str] = []
     accesses: list[str] = []
+
+    def observe_parent_access(self, relative, **kwargs):  # noqa: ANN001
+        parent_accesses.append(kwargs.get("access", "read"))
+        return real_parent(self, relative, **kwargs)
 
     def observe_access(self, parent, leaf, **kwargs):  # noqa: ANN001
         if leaf == database.name:
             accesses.append(kwargs.get("access", "read"))
         return real_file(self, parent, leaf, **kwargs)
 
+    monkeypatch.setattr(filesystem_type, "parent", observe_parent_access)
     monkeypatch.setattr(filesystem_type, "file", observe_access)
 
     with reserved_paths._subsystem_authority_scope("embedding_index"):
@@ -2922,7 +3064,35 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
             ) as retained:
                 assert retained == database
 
+    assert parent_accesses == ["read"]
     assert accesses == ["read", "read"]
+
+
+def test_graph_owner_connection_stays_writable_while_a_snapshot_is_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import epistemic_graph
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    index = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    setup = index._connect()
+    try:
+        assert setup.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        setup.close()
+
+    reader = index._connect_existing(readonly=True)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM graph_meta").fetchall()
+        writer = index._connect()
+        writer.close()
+    finally:
+        reader.close()
 
 
 def test_readonly_sqlite_connections_retain_their_owner_target_through_open(

@@ -331,7 +331,10 @@ class MediaJobStore:
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("media_jobs"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("media-jobs-store",),
+            ):
                 return self._connect_owned(readonly=readonly)
 
     def _connect_owned(self, *, readonly: bool = False) -> sqlite3.Connection:
@@ -1013,7 +1016,10 @@ def _diagnostic_snapshot_rows(
     target = Path(os.path.abspath(path))
     vault_root = target.parent.parent
     with reserved_paths._subsystem_authority_scope("media_jobs"):
-        with reserved_paths._identity_coordination_scope(vault_root):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("media-jobs-store",),
+        ):
             with reserved_paths._sqlite_owner_target_scope(
                 vault_root,
                 target,

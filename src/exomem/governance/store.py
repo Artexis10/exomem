@@ -51,7 +51,10 @@ def open_readonly_connection(vault_root: Path) -> sqlite3.Connection | None:
     """Open an existing supported sidecar without migration, DDL, or creation."""
 
     with reserved_paths._subsystem_authority_scope("governance.store"):
-        with reserved_paths._identity_coordination_scope(vault_root):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("governance-store",),
+        ):
             return _open_readonly_connection_owned(vault_root)
 
 
@@ -93,7 +96,10 @@ def open_connection(
     """Open (creating if absent) the governance sidecar with its schema in place."""
 
     with reserved_paths._subsystem_authority_scope("governance.store"):
-        with reserved_paths._identity_coordination_scope(vault_root):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("governance-store",),
+        ):
             return _open_connection_owned(
                 vault_root,
                 check_same_thread=check_same_thread,
@@ -523,7 +529,10 @@ def guard_generation_probe(vault_root: Path) -> dict[str, object]:
         return {"state": "clear", "generation": "absent", "event_ids": ()}
     try:
         with reserved_paths._subsystem_authority_scope("governance.store"):
-            with reserved_paths._identity_coordination_scope(vault_root):
+            with reserved_paths._identity_coordination_scope(
+                vault_root,
+                descriptor_ids=("governance-store",),
+            ):
                 with reserved_paths._sqlite_owner_target_scope(
                     vault_root,
                     path,

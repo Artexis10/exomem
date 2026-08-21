@@ -58,7 +58,10 @@ def store_path(vault_root: Path) -> Path:
 def _connect_readonly(vault_root: Path) -> sqlite3.Connection:
     """Open an existing sidecar without schema repair or journal writes."""
     with reserved_paths._subsystem_authority_scope("deferred_index"):
-        with reserved_paths._identity_coordination_scope(vault_root):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("deferred-index-store",),
+        ):
             return _connect_readonly_owned(vault_root)
 
 
@@ -92,7 +95,10 @@ def _connect(
     vault_root: Path, *, create: bool, connection_path: Path | None = None
 ) -> sqlite3.Connection:
     with reserved_paths._subsystem_authority_scope("deferred_index"):
-        with reserved_paths._identity_coordination_scope(vault_root):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("deferred-index-store",),
+        ):
             return _connect_owned(
                 vault_root,
                 create=create,

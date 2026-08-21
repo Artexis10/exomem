@@ -11,7 +11,7 @@ import os
 import re
 import threading
 import unicodedata
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -186,7 +186,9 @@ class _OwnerAuthority:
 _ACTIVE_OWNER_AUTHORITY: ContextVar[_OwnerAuthority | None] = ContextVar(
     "exomem_reserved_owner_authority", default=None
 )
-_ACTIVE_IDENTITY_COORDINATION: ContextVar[tuple[str, ...]] = ContextVar(
+_ACTIVE_IDENTITY_COORDINATION: ContextVar[
+    tuple[tuple[str, frozenset[str]], ...]
+] = ContextVar(
     "exomem_reserved_identity_coordination", default=()
 )
 
@@ -203,30 +205,76 @@ def _vault_identity_key(vault_root: Path) -> str:
     return os.path.normcase(str(Path(vault_root).expanduser().resolve(strict=False)))
 
 
-def _identity_coordination_active(vault_root: Path) -> bool:
-    """Whether this task currently holds the cooperative identity boundary."""
+def _identity_coordination_domains(
+    descriptor_ids: Iterable[str] | None,
+) -> tuple[frozenset[str], bool]:
+    """Return the exact private-owner domains and whether all must be excluded."""
 
-    return _vault_identity_key(vault_root) in _ACTIVE_IDENTITY_COORDINATION.get()
+    authority = _ACTIVE_OWNER_AUTHORITY.get()
+    if descriptor_ids is not None:
+        domains = frozenset(descriptor_ids)
+        if (
+            not domains
+            or authority is None
+            or authority._seal is not _OWNER_AUTHORITY_SEAL
+            or not domains <= authority._descriptor_ids
+        ):
+            raise RuntimeError("private identity domain lacks exact owner authority")
+        return domains, False
+    if authority is not None and authority._seal is _OWNER_AUTHORITY_SEAL:
+        return authority._descriptor_ids, False
+    return frozenset(descriptor.id for descriptor in _REGISTRY), True
+
+
+def _identity_coordination_active(
+    vault_root: Path,
+    descriptor_id: str | None = None,
+) -> bool:
+    """Whether this task holds the required cooperative identity domain."""
+
+    key = _vault_identity_key(vault_root)
+    return any(
+        active_key == key
+        and (descriptor_id is None or descriptor_id in active_domains)
+        for active_key, active_domains in _ACTIVE_IDENTITY_COORDINATION.get()
+    )
 
 
 @contextmanager
-def _identity_coordination_scope(vault_root: Path) -> Iterator[None]:
+def _identity_coordination_scope(
+    vault_root: Path,
+    *,
+    descriptor_ids: Iterable[str] | None = None,
+) -> Iterator[None]:
     """Serialize private identity publication with generic held-leaf acquisition."""
 
     key = _vault_identity_key(vault_root)
+    domains, exclusive = _identity_coordination_domains(descriptor_ids)
+    if not domains:
+        raise RuntimeError("private identity coordination has no registered domain")
     active = _ACTIVE_IDENTITY_COORDINATION.get()
-    if key in active:
+    held_domains = frozenset(
+        domain
+        for active_key, active_set in active
+        if active_key == key
+        for domain in active_set
+    )
+    if domains <= held_domains:
         yield
         return
+    if held_domains:
+        raise RuntimeError("private identity coordination cannot widen while held")
 
     from .writer_lease import active_manager
 
-    with active_manager().consistency_guard(
+    with active_manager().reserved_identity_guard(
         vault_root,
+        domains=domains,
+        exclusive=exclusive,
         operation="reserved_identity",
         holder_kind="reserved-state",
     ):
-        token = _ACTIVE_IDENTITY_COORDINATION.set((*active, key))
+        token = _ACTIVE_IDENTITY_COORDINATION.set((*active, (key, domains)))
         try:
             yield
         finally:
@@ -1698,7 +1746,7 @@ def _publish_owner_identities(
 
     if not owner_authorized(descriptor_id):
         raise RuntimeError("private identity publication lacks exact owner authority")
-    if not _identity_coordination_active(vault_root):
+    if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("private identity publication lacks coordination")
 
     published: dict[str, held_fs.StableIdentity] = {}
@@ -1783,7 +1831,7 @@ def _reachable_owner_publications(
     reused for the new primary can appear to alias an already-gone SHM entry and
     make the owner's own atomic publish fail as ambiguous.
     """
-    if not _identity_coordination_active(vault_root):
+    if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("private identity refresh lacks coordination")
 
     root = Path(os.path.abspath(vault_root))
@@ -1886,7 +1934,7 @@ def _publish_sqlite_owner_family(
 
     if not owner_authorized(descriptor_id):
         raise RuntimeError("SQLite identity publication lacks exact owner authority")
-    if not _identity_coordination_active(vault_root):
+    if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("SQLite identity publication lacks coordination")
 
     root = Path(os.path.abspath(vault_root))
@@ -2005,7 +2053,7 @@ def _publish_owner_bytes(
     except OSError as error:
         raise RuntimeError("private byte publication cannot create the vault") from error
 
-    with _identity_coordination_scope(root):
+    with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
         acquired = held_fs.acquire(root)
         if not acquired.ok:
             raise RuntimeError("private byte publication cannot acquire the vault")
@@ -2087,7 +2135,7 @@ def _read_owner_bytes(
     except OSError as error:
         raise OSError("private byte read cannot inspect the vault") from error
 
-    with _identity_coordination_scope(root):
+    with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
         acquired = held_fs.acquire(root)
         if not acquired.ok:
             raise OSError("private byte read cannot acquire the vault")
@@ -2194,7 +2242,7 @@ def _sqlite_owner_target_scope(
     coordination guard may be released.  No pathname-only fallback exists.
     """
 
-    if not _identity_coordination_active(vault_root):
+    if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("private SQLite target lacks coordination")
     root, relative = _owner_relative_path(
         vault_root,
@@ -2223,7 +2271,7 @@ def _sqlite_owner_target_scope(
         parent_result = filesystem.parent(
             parent_text if parent_text != "." else ".",
             create=create,
-            access="mutate" if create else "read",
+            access="read",
         )
         if not parent_result.ok:
             if (
@@ -2331,7 +2379,10 @@ def _move_owner_file(
     if destination_root != root:
         raise RuntimeError("private move targets different vault roots")
 
-    with _identity_coordination_scope(root):
+    with _identity_coordination_scope(
+        root,
+        descriptor_ids=(source_descriptor_id, destination_descriptor_id),
+    ):
         acquired = held_fs.acquire(root)
         if not acquired.ok:
             raise OSError("private move cannot acquire the vault")
@@ -2464,7 +2515,7 @@ def _remove_owner_file(
         descriptor_id,
         operation="remove",
     )
-    with _identity_coordination_scope(root):
+    with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
         acquired = held_fs.acquire(root)
         if not acquired.ok:
             if missing_ok:

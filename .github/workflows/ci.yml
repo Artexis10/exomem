@@ -133,7 +133,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "failed to verify per-volume 8.3 alias creation"
           }
-      - name: Native held-filesystem and reserved-path gate
+      - name: Native held-filesystem gate
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"

@@ -179,7 +179,17 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
             reason=f"file does not exist: {missing_path}",
         )
     try:
-        snapshot = reserved_paths.read_generic_bytes(vault_root, resolution.relative)
+        # The resolver may have followed a stable in-vault alias. Read the
+        # exact resolved target it classified, not the caller spelling that
+        # could be swapped after resolution.
+        expected_identity = reserved_paths.inspect_generic_file(
+            vault_root, resolution.resolved_relative
+        )
+        snapshot = reserved_paths.read_generic_bytes(
+            vault_root, resolution.resolved_relative
+        )
+        if snapshot.identity != expected_identity:
+            raise GetError(code="UNREADABLE", reason="file changed while being read")
     except reserved_paths.ReservedPathLeafError as error:
         if error.code in {
             "CAPABILITY_UNAVAILABLE",

@@ -25,8 +25,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -2335,6 +2335,70 @@ class LeaseManager:
             holder_kind=holder_kind,
         ):
             yield mutation
+
+    @contextmanager
+    def reserved_identity_guard(
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        domains: Iterable[str],
+        exclusive: bool,
+        request_id: str | None = None,
+        operation: str | None = None,
+        holder_kind: str = "reserved-state",
+    ) -> Iterator[None]:
+        """Coordinate one owner's identities without serializing other owners."""
+
+        ordered_domains = tuple(sorted(set(domains)))
+        if not ordered_domains or any(
+            type(domain) is not str
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", domain) is None
+            for domain in ordered_domains
+        ):
+            raise ValueError("reserved identity domains must be registered labels")
+        vault_identity = canonical_mutation_identity(vault_root)
+        deadline = time.monotonic() + self._mutation_timeout_seconds
+        gate = self._mutation_coordinator_for(
+            f"reserved-identity-v1:gate:{vault_identity}"
+        )
+
+        def enter(
+            stack: ExitStack,
+            mutation: VaultMutationCoordinator,
+            *,
+            operation_label: str | None = operation,
+        ) -> None:
+            stack.enter_context(
+                mutation.hold(
+                    timeout_seconds=max(0.0, deadline - time.monotonic()),
+                    request_id=request_id,
+                    operation=operation_label,
+                    holder_kind=holder_kind,
+                )
+            )
+
+        def enter_domains(stack: ExitStack) -> None:
+            for domain in ordered_domains:
+                identity = f"reserved-identity-v1:{domain}:{vault_identity}"
+                mutation = self._mutation_coordinator_for(identity)
+                label = f"{operation}:{domain}" if operation is not None else domain
+                enter(stack, mutation, operation_label=label)
+
+        if exclusive:
+            with ExitStack() as gate_stack:
+                gate_label = f"{operation}:gate" if operation is not None else "gate"
+                enter(gate_stack, gate, operation_label=gate_label)
+                with ExitStack() as domains_stack:
+                    enter_domains(domains_stack)
+                    yield
+            return
+
+        with ExitStack() as domains_stack:
+            with ExitStack() as gate_stack:
+                gate_label = f"{operation}:gate" if operation is not None else "gate"
+                enter(gate_stack, gate, operation_label=gate_label)
+                enter_domains(domains_stack)
+            yield
 
     @contextmanager
     def mutation_guard(

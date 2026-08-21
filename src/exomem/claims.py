@@ -349,7 +349,10 @@ class ClaimIndex:
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("claims"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("claims-store",),
+            ):
                 return self._connect_owned(path)
 
     def _connect_owned(self, path: Path | None = None) -> sqlite3.Connection:
@@ -642,7 +645,10 @@ class ClaimIndex:
 
     def _connect_readonly(self) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("claims"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("claims-store",),
+            ):
                 with reserved_paths._sqlite_owner_target_scope(
                     self.vault_root,
                     self.path,

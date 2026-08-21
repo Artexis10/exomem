@@ -331,7 +331,10 @@ def _connect_existing_owner_target(
     if descriptor_id not in {"graph-store", "graph-rebuild"}:
         raise RuntimeError("graph SQLite target is not owner-bound")
     with reserved_paths._subsystem_authority_scope("epistemic_graph"):
-        with reserved_paths._identity_coordination_scope(root):
+        with reserved_paths._identity_coordination_scope(
+            root,
+            descriptor_ids=(descriptor_id,),
+        ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,
                 target,
@@ -385,7 +388,10 @@ def _backup_graph_rebuild_into_store(
 
     root = Path(vault_root)
     with reserved_paths._subsystem_authority_scope("epistemic_graph"):
-        with reserved_paths._identity_coordination_scope(root):
+        with reserved_paths._identity_coordination_scope(
+            root,
+            descriptor_ids=("graph-rebuild", "graph-store"),
+        ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,
                 temporary,
@@ -1316,8 +1322,25 @@ class EpistemicGraphIndex:
         return self._mutation_coordinator
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
+        target = path if path is not None else self.path
+        try:
+            relative = target.absolute().relative_to(self.vault_root.absolute())
+        except ValueError:
+            descriptor_ids = None
+        else:
+            descriptor_id = reserved_paths.classify_logical(
+                relative.as_posix()
+            ).descriptor_id
+            descriptor_ids = (
+                (descriptor_id,)
+                if descriptor_id in {"graph-store", "graph-rebuild"}
+                else None
+            )
         with reserved_paths._subsystem_authority_scope("epistemic_graph"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=descriptor_ids,
+            ):
                 return self._connect_owned(path)
 
     def _connect_owned(self, path: Path | None = None) -> sqlite3.Connection:
@@ -1343,12 +1366,7 @@ class EpistemicGraphIndex:
     def _connect_retained(self, target: Path) -> sqlite3.Connection:
         sidecar_store.ensure_sidecar_parent(target)
         conn = _sqlite_connect_owned(target)
-        try:
-            from . import embeddings
-
-            embeddings._apply_sidecar_pragmas(conn)
-        except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
-            pass
+        sidecar_store.apply_sidecar_pragmas(conn)
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         if edge_columns and "raw_relation" not in edge_columns:
             conn.execute("DROP TABLE graph_edges")

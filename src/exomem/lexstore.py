@@ -1065,8 +1065,26 @@ class LexicalStore:
         `path` targets a build sibling (`rebuild_atomic`); it defaults to the
         live sidecar.
         """
+        target = path if path is not None else self.path
+        try:
+            relative = target.absolute().relative_to(self.vault_root.absolute())
+        except ValueError:
+            descriptor_ids = None
+        else:
+            descriptor_id = reserved_paths.classify_logical(
+                relative.as_posix()
+            ).descriptor_id
+            descriptor_ids = (
+                (descriptor_id,)
+                if descriptor_id
+                in {"lexical-store", "lexical-rebuild", "lexical-quarantine"}
+                else None
+            )
         with reserved_paths._subsystem_authority_scope("lexstore"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=descriptor_ids,
+            ):
                 return self._connect_owned(path)
 
     def _connect_owned(
@@ -1140,14 +1158,17 @@ class LexicalStore:
         a failed negotiation is logged and ignored.
         """
         target = path if path is not None else self.path
+        classification = reserved_paths.classify_logical(
+            target.relative_to(self.vault_root).as_posix()
+        )
+        descriptor_id = classification.descriptor_id
+        if descriptor_id not in {"lexical-store", "lexical-rebuild"}:
+            raise RuntimeError("lexical SQLite target is not owner-bound")
         with reserved_paths._subsystem_authority_scope("lexstore"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
-                classification = reserved_paths.classify_logical(
-                    target.relative_to(self.vault_root).as_posix()
-                )
-                descriptor_id = classification.descriptor_id
-                if descriptor_id not in {"lexical-store", "lexical-rebuild"}:
-                    raise RuntimeError("lexical SQLite target is not owner-bound")
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=(descriptor_id,),
+            ):
                 with reserved_paths._sqlite_owner_target_scope(
                     self.vault_root,
                     target,
@@ -1187,7 +1208,10 @@ class LexicalStore:
         connection is never used to serve query results or prove WAL contents.
         """
         with reserved_paths._subsystem_authority_scope("lexstore"):
-            with reserved_paths._identity_coordination_scope(self.vault_root):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("lexical-store",),
+            ):
                 with reserved_paths._sqlite_owner_target_scope(
                     self.vault_root,
                     self.path,

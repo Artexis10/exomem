@@ -20,8 +20,9 @@ import tempfile
 import threading
 import time
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal
@@ -1146,6 +1147,10 @@ class PathGuard:
             # path through Path.  Re-open descriptor-rooted and cap the read at
             # the exact byte count captured with the hash.
             if self.expected_content_size is not None:
+                if info.st_size != self.expected_content_size:
+                    raise PathGuardError(
+                        "PATH_GUARD_CONTENT", "guarded content changed"
+                    )
                 data, rebound = _read_bounded_guarded_snapshot(
                     root, self.target, self.expected_content_size
                 )
@@ -1335,6 +1340,35 @@ class _BatchSnapshot:
     xattrs: dict[str, bytes] | None
 
 
+@dataclass(frozen=True, slots=True)
+class _BatchReplaceContext:
+    vault_root: Path | None
+    expected_destination: PathIdentity | None
+    published_metadata: _BatchSnapshot | None = None
+
+
+_BATCH_REPLACE_CONTEXT: ContextVar[_BatchReplaceContext | None] = ContextVar(
+    "exomem_batch_replace_context", default=None
+)
+
+
+@contextmanager
+def _batch_replace_context(
+    vault_root: Path | None,
+    expected_destination: PathIdentity | None,
+    published_metadata: _BatchSnapshot | None = None,
+) -> Iterator[None]:
+    """Carry held-publication inputs without widening the legacy test seam."""
+
+    token = _BATCH_REPLACE_CONTEXT.set(
+        _BatchReplaceContext(vault_root, expected_destination, published_metadata)
+    )
+    try:
+        yield
+    finally:
+        _BATCH_REPLACE_CONTEXT.reset(token)
+
+
 @dataclass(slots=True)
 class _WorkspaceArtifact:
     workspace: _BatchWorkspace
@@ -1447,6 +1481,36 @@ def _batch_workspace_token(size: int) -> str:
     return secrets.token_hex(size)
 
 
+def _after_batch_destination_published(_path: Path) -> None:
+    """Crash-injection seam after one canonical destination is installed."""
+
+
+def _before_batch_destination_published(
+    _path: Path, *, restoring: bool
+) -> None:
+    """Fault-injection seam immediately before one held publication attempt."""
+
+
+def _after_batch_parent_created(_vault_root: Path, _relative: str) -> None:
+    """Race-injection seam after one retained parent is created."""
+
+
+def _remove_held_workspace(
+    filesystem: held_fs.HeldFilesystem,
+    relative: str,
+    expected: held_fs.StableIdentity,
+) -> bool:
+    """Remove one exact workspace through a fresh mutation-capable handle."""
+
+    mutable = filesystem.parent(relative, access="mutate")
+    if not mutable.ok:
+        return False
+    with mutable.require() as directory:
+        if directory.identity != expected:
+            return False
+        return filesystem.unlink_directory(directory).ok
+
+
 @dataclass(slots=True)
 class _BatchWorkspace:
     parent: Path
@@ -1459,6 +1523,7 @@ class _BatchWorkspace:
     held_filesystem: held_fs.HeldFilesystem | None = None
     held_parent: held_fs.HeldDirectory | None = None
     held_directory: held_fs.HeldDirectory | None = None
+    held_workspace_relative: str | None = None
     closed: bool = False
 
     @property
@@ -1598,7 +1663,7 @@ class _BatchWorkspace:
                 "PATH_GUARD_UNSAFE", "held filesystem route is unavailable"
             )
         filesystem = acquired.require()
-        parent_result = filesystem.parent(parent_relative, access="mutate")
+        parent_result = filesystem.parent(parent_relative)
         if not parent_result.ok:
             filesystem.close()
             raise PathGuardError("PATH_GUARD_UNSAFE", "batch parent is unsafe")
@@ -1616,7 +1681,7 @@ class _BatchWorkspace:
                     workspace_relative,
                     create=True,
                     exclusive=True,
-                    access="mutate",
+                    access="read",
                 )
                 if created.ok:
                     held_directory = created.require()
@@ -1654,6 +1719,7 @@ class _BatchWorkspace:
                 filesystem,
                 held_parent,
                 held_directory,
+                workspace_relative,
             )
             if os.name != "nt" and hasattr(os, "fchmod"):
                 os.fchmod(workspace_descriptor, 0o700)
@@ -1661,7 +1727,11 @@ class _BatchWorkspace:
             return workspace
         except BaseException:
             if held_directory is not None:
-                filesystem.unlink_directory(held_directory)
+                _remove_held_workspace(
+                    filesystem,
+                    workspace_relative,
+                    held_directory.identity,
+                )
                 held_directory.close()
             held_parent.close()
             filesystem.close()
@@ -1907,6 +1977,14 @@ class _BatchWorkspace:
         expected_destination: PathIdentity | None = None,
         published_metadata: _BatchSnapshot | None = None,
     ) -> PathIdentity:
+        context = _BATCH_REPLACE_CONTEXT.get()
+        if context is not None:
+            if vault_root is None:
+                vault_root = context.vault_root
+            if expected_destination is None:
+                expected_destination = context.expected_destination
+            if published_metadata is None:
+                published_metadata = context.published_metadata
         self.recheck()
         artifact.recheck()
         if vault_root is not None:
@@ -1993,6 +2071,9 @@ class _BatchWorkspace:
                             if published_metadata is not None:
                                 _apply_held_snapshot_metadata(file, published_metadata)
 
+                        _before_batch_destination_published(
+                            final, restoring=published_metadata is not None
+                        )
                         published = held_fs.publish_bytes(
                             filesystem,
                             parent,
@@ -2282,7 +2363,16 @@ class _BatchWorkspace:
         if self.held_filesystem is not None and self.held_directory is not None:
             try:
                 self.recheck()
-                removed = self.held_filesystem.unlink_directory(self.held_directory).ok
+                if self.held_workspace_relative is None:
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED",
+                        "held workspace name is unavailable",
+                    )
+                removed = _remove_held_workspace(
+                    self.held_filesystem,
+                    self.held_workspace_relative,
+                    self.held_directory.identity,
+                )
             except PathGuardError:
                 removed = False
             self.close()
@@ -3941,6 +4031,7 @@ def _create_missing_guard_parents(
                     created_dirs.append(
                         _CreatedDirectory(vault_root, relative, directory.identity)
                     )
+            _after_batch_parent_created(vault_root, relative)
 
 
 def post_commit_batch_fanout(
@@ -4107,6 +4198,11 @@ def _create_parent_dirs_held(
         raise PathGuardError(
             "PATH_GUARD_TARGET", "batch directory escaped the vault"
         ) from error
+    if not root.exists():
+        # Bootstrap is the one point where no vault-root handle can exist yet.
+        # The configured root is owner-trusted; after creation every child
+        # operation immediately switches to the held no-follow substrate.
+        _create_parent_dirs(root, created_dirs)
     if relative_parent == Path("."):
         return
     acquired = held_fs.acquire(root)
@@ -4143,6 +4239,7 @@ def _create_parent_dirs_held(
                 created_dirs.append(
                     _CreatedDirectory(root, relative, directory.identity)
                 )
+            _after_batch_parent_created(root, relative)
 
 
 def _remove_empty_created_dirs(
@@ -4518,41 +4615,38 @@ def _batch_atomic_write_locked(
             if writes[index].create_only and os.path.lexists(final):
                 raise CreateOnlyConflict(_safe_write_target(final, vault_root))
             artifact.recheck()
-            try:
-                installed_identity = workspace.replace_artifact(
-                    artifact,
-                    final,
-                    vault_root=Path(vault_root) if vault_root is not None else None,
-                    expected_destination=(
-                        source_guards[index].identity
-                        if source_guards[index] is not None
-                        else None
-                    ),
-                )
-            except BaseException:
-                installed_identity = workspace.bind_installed_after_error(
-                    artifact,
-                    final,
-                    expected_destination=(
-                        source_guards[index].identity
-                        if source_guards[index] is not None
-                        else None
-                    ),
-                )
-                if installed_identity is not None:
-                    replaced.append(final)
-                    final_guards[final] = _BatchArtifactGuard.capture(
+            expected_destination = (
+                source_guards[index].identity
+                if source_guards[index] is not None
+                else None
+            )
+            with _batch_replace_context(
+                Path(vault_root) if vault_root is not None else None,
+                expected_destination,
+            ):
+                try:
+                    installed_identity = workspace.replace_artifact(artifact, final)
+                except BaseException:
+                    installed_identity = workspace.bind_installed_after_error(
+                        artifact,
                         final,
-                        expected_content_hash=artifact.content_hash,
-                        expected_identity=installed_identity,
+                        expected_destination=expected_destination,
                     )
-                raise
+                    if installed_identity is not None:
+                        replaced.append(final)
+                        final_guards[final] = _BatchArtifactGuard.capture(
+                            final,
+                            expected_content_hash=artifact.content_hash,
+                            expected_identity=installed_identity,
+                        )
+                    raise
             replaced.append(final)
             final_guards[final] = _BatchArtifactGuard.capture(
                 final,
                 expected_content_hash=artifact.content_hash,
                 expected_identity=installed_identity,
             )
+            _after_batch_destination_published(final)
             workspace.recheck()
         for guard in read_only_guards:
             guard.recheck(Path(vault_root))
@@ -4600,13 +4694,12 @@ def _batch_atomic_write_locked(
                     _apply_snapshot_metadata(restore, snapshot)
                     restore.recheck(verify_content=False)
                     final_guard.recheck()
-                    restored_identity = workspace.replace_artifact(
-                        restore,
-                        final,
-                        vault_root=Path(vault_root) if vault_root is not None else None,
-                        expected_destination=final_guard.identity,
-                        published_metadata=snapshot,
-                    )
+                    with _batch_replace_context(
+                        Path(vault_root) if vault_root is not None else None,
+                        final_guard.identity,
+                        snapshot,
+                    ):
+                        restored_identity = workspace.replace_artifact(restore, final)
                     _BatchArtifactGuard.capture(
                         final,
                         expected_content_hash=snapshot.content_hash,

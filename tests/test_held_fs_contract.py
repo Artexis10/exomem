@@ -110,6 +110,22 @@ def test_acquire_reuses_one_capability_probe_for_the_same_stable_root(
         held_fs.reset_capability_cache_for_tests()
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux fd accounting")
+def test_repeated_enumeration_releases_its_scan_descriptors(tmp_path: Path) -> None:
+    held_fs = _module()
+    (tmp_path / "directory").mkdir()
+    (tmp_path / "directory" / "entry.txt").write_text("entry", encoding="utf-8")
+    baseline = len(os.listdir("/proc/self/fd"))
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent(".").require() as root:
+            for _ in range(32):
+                assert filesystem.children(root).ok
+                assert filesystem.enumerate(root).ok
+
+    assert len(os.listdir("/proc/self/fd")) == baseline
+
+
 @_requires_native_route
 def test_relative_leaf_operations_use_held_parents_only(tmp_path: Path) -> None:
     held_fs = _module()
