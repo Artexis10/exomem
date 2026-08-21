@@ -766,6 +766,7 @@ def _notice(
     rule_ids: Sequence[str] = (),
     scope_label: str | None = None,
     options: Mapping[str, Any] | None = None,
+    bridge_abstraction: str | None = None,
 ) -> dict[str, Any]:
     """L1–L4 rendering: low-level notices or one approved L4 abstraction.
 
@@ -774,11 +775,11 @@ def _notice(
     oracles" scenario.
     """
     options = options or {}
-    if level == LEVEL_EXCERPT_REDACTED and options.get("bridge"):
+    if level == LEVEL_EXCERPT_REDACTED and bridge_abstraction:
         return {
             "withheld": True,
             "level": LEVEL_EXCERPT_REDACTED,
-            "bridge": str(options["bridge"]),
+            "bridge": bridge_abstraction,
         }
     out: dict[str, Any] = {"withheld": True, "level": level}
     if level == LEVEL_CONSTRAINT and options.get("constraint_source") == "scope":
@@ -825,15 +826,22 @@ def project(
     if decision is not None:
         rule_ids = rule_ids or decision.rule_ids
         options = options if options is not None else decision.options
+    bridge_abstraction = decision.bridge_abstraction if decision is not None else None
 
     if level <= LEVEL_NONE:
         return None
-    if level == LEVEL_EXCERPT_REDACTED and not (options or {}).get("bridge"):
+    if level == LEVEL_EXCERPT_REDACTED and not bridge_abstraction:
         # L4 without exact approved bridge content lowers to L3 rather than
         # borrowing any source text or reviving the retired redaction lane.
         level = LEVEL_ABSTRACT
     if level < RELEASE_FLOOR:
-        return _notice(level, rule_ids=rule_ids, scope_label=scope_label, options=options)
+        return _notice(
+            level,
+            rule_ids=rule_ids,
+            scope_label=scope_label,
+            options=options,
+            bridge_abstraction=bridge_abstraction,
+        )
 
     resolved_kind = kind or _kind_for(payload)
     if resolved_kind in _FULL_ONLY_PROJECTORS and level < LEVEL_FULL:
@@ -1016,6 +1024,61 @@ def _declared_purpose(
     )
 
 
+def _resolve_l4_bridge(
+    vault_root: Path,
+    decision: Decision,
+    *,
+    policy: Policy,
+    audience: str,
+) -> Decision:
+    """Bind an L4 decision to live approved content, never to its opaque id.
+
+    The pure policy meet deliberately carries only a release-grant id.  Bridge
+    bytes and dependency state are mutable inputs, so this resolution happens
+    after (and outside) the decision memo on every request.  A missing or stale
+    approval lowers to the already-authorized L3 abstract without borrowing
+    source text.
+    """
+    if decision.level != LEVEL_EXCERPT_REDACTED:
+        return decision
+    bridge_id = decision.bridge
+    projection = (
+        bridges.resolve_approved_abstraction(
+            vault_root,
+            bridge_id,
+            policy=policy,
+            audience=audience,
+        )
+        if bridge_id
+        else None
+    )
+    if projection is None or not projection.allowed:
+        return replace(
+            decision,
+            level=LEVEL_ABSTRACT,
+            options={
+                key: value
+                for key, value in decision.options.items()
+                if key != "bridge"
+            },
+            bridge=None,
+            bridge_abstraction=None,
+            release_reason=(
+                projection.reason if projection is not None else bridges.RELEASE_UNAPPROVED
+            ),
+            release_grant_id=None,
+            release_strip=(),
+            release_dependency_digest=None,
+        )
+    return replace(
+        decision,
+        bridge_abstraction=projection.abstraction,
+        release_grant_id=projection.grant.id if projection.grant else None,
+        release_strip=projection.strip_identities,
+        release_dependency_digest=projection.dependency_digest,
+    )
+
+
 def _applicable_org_ceiling(policy: Policy, decision: Decision) -> int:
     participating = set(decision.rule_ids)
     return min(
@@ -1096,7 +1159,12 @@ def _decide_path(
     cached = _DECISION_MEMO.get(key)
     if cached is not None and (raw is None or not bridges.maybe_bridge(raw)):
         _DECISION_MEMO.move_to_end(key)
-        return cached
+        return _resolve_l4_bridge(
+            vault_root,
+            cached,
+            policy=policy,
+            audience=audience,
+        )
 
     mtime = st.st_mtime
     if not rel_path.lower().endswith(".md"):
@@ -1168,7 +1236,12 @@ def _decide_path(
     _DECISION_MEMO.move_to_end(key)
     while len(_DECISION_MEMO) > _DECISION_MEMO_MAX:
         _DECISION_MEMO.popitem(last=False)
-    return decision
+    return _resolve_l4_bridge(
+        vault_root,
+        decision,
+        policy=policy,
+        audience=audience,
+    )
 
 
 def _scope_label(policy: Policy, decision: Decision) -> str | None:
@@ -1732,6 +1805,12 @@ def annotate_page(
                     release_strip=admission.strip_identities,
                     release_dependency_digest=admission.dependency_digest,
                 )
+        decision = _resolve_l4_bridge(
+            vault_root,
+            decision,
+            policy=policy,
+            audience=who.audience_id,
+        )
     else:
         # Compatibility for internal/synthetic callers. Production direct-read
         # leaves always supply ``snapshot_content``.
@@ -1763,7 +1842,7 @@ def annotate_page(
     )
 
     level = decision.level
-    if level == LEVEL_EXCERPT_REDACTED and not decision.bridge:
+    if level == LEVEL_EXCERPT_REDACTED and not decision.bridge_abstraction:
         level = LEVEL_ABSTRACT
     if level < RELEASE_FLOOR:
         # No path on a sub-floor notice. `op_get`/`op_read_memory` accept a
@@ -1776,6 +1855,7 @@ def annotate_page(
             rule_ids=decision.rule_ids,
             scope_label=_scope_label(policy, decision),
             options=decision.options,
+            bridge_abstraction=decision.bridge_abstraction,
         )
 
     # L5/L6: the page is released. Its own provenance must still not name a

@@ -22,6 +22,7 @@ from exomem import find as find_module
 from exomem import query_data as query_data_module
 from exomem.find_types import GraphProvenance, Hit
 from exomem.governance import egress, receipts
+from exomem.governance.decisions import Decision
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 # --------------------------------------------------------------------------
@@ -229,17 +230,23 @@ def test_project_l4_falls_back_to_l3_abstract() -> None:
 
 
 def test_project_l4_emits_only_the_approved_bridge_abstraction() -> None:
-    out = egress.project(
-        _hit(RESTRICTED_PATH, title="must not appear"),
-        egress.LEVEL_EXCERPT_REDACTED,
+    decision = Decision(
+        level=egress.LEVEL_EXCERPT_REDACTED,
         rule_ids=(RULE_ID,),
-        scope_label="must not appear",
         options={
             "notice": "must not appear",
             "constraint": "must not appear",
             "abstract": "must not appear",
-            "bridge": "approved cross-domain abstraction",
+            "bridge": "01ARZ3NDEKTSV4RRFFQ69G5FB1",
         },
+        bridge="01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        bridge_abstraction="approved cross-domain abstraction",
+    )
+    out = egress.project(
+        _hit(RESTRICTED_PATH, title="must not appear"),
+        egress.LEVEL_EXCERPT_REDACTED,
+        decision=decision,
+        scope_label="must not appear",
     )
 
     assert out == {
@@ -247,6 +254,26 @@ def test_project_l4_emits_only_the_approved_bridge_abstraction() -> None:
         "level": egress.LEVEL_EXCERPT_REDACTED,
         "bridge": "approved cross-domain abstraction",
     }
+
+
+def test_project_l4_never_treats_the_opaque_bridge_id_as_abstraction() -> None:
+    opaque_bridge_id = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+
+    out = egress.project(
+        _hit(RESTRICTED_PATH, title="must not appear"),
+        egress.LEVEL_EXCERPT_REDACTED,
+        options={
+            "abstract": "safe fallback abstraction",
+            "bridge": opaque_bridge_id,
+        },
+    )
+
+    assert out == {
+        "withheld": True,
+        "level": egress.LEVEL_ABSTRACT,
+        "abstract": "safe fallback abstraction",
+    }
+    assert opaque_bridge_id not in str(out)
 
 
 def test_project_l5_carries_path_title_and_excerpt() -> None:

@@ -331,10 +331,11 @@ def test_below_l6_projection_redacts_forward_reverse_and_wire_provenance(
     assert "private-source" not in str(result).casefold()
 
 
-def test_l4_direct_read_returns_only_the_approved_bridge_abstraction(
+def test_l4_direct_read_without_exact_bridge_approval_lowers_to_l3(
     vault: Path,
 ) -> None:
     rel = _page(vault)
+    opaque_bridge_id = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
     _govern(
         vault,
         ceiling=egress.LEVEL_EXCERPT_REDACTED,
@@ -342,8 +343,8 @@ def test_l4_direct_read_returns_only_the_approved_bridge_abstraction(
             "options:\n"
             "  notice: must not appear\n"
             "  constraint: must not appear\n"
-            "  abstract: must not appear\n"
-            "  bridge: approved cross-domain abstraction\n"
+            "  abstract: safe fallback abstraction\n"
+            f"  bridge: {opaque_bridge_id}\n"
         ),
     )
 
@@ -356,8 +357,9 @@ def test_l4_direct_read_returns_only_the_approved_bridge_abstraction(
             links=True,
         )
 
-    assert result == {
-        "withheld": True,
-        "level": egress.LEVEL_EXCERPT_REDACTED,
-        "bridge": "approved cross-domain abstraction",
-    }
+    assert result["withheld"] is True
+    assert result["level"] == egress.LEVEL_ABSTRACT
+    assert result["abstract"] == "safe fallback abstraction"
+    assert opaque_bridge_id not in str(result)
+    assert "body text here" not in str(result)
+    assert not {"path", "body", "content", "content_hash"}.intersection(result)

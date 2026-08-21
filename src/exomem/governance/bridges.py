@@ -119,6 +119,18 @@ class BridgeAdmission:
 
 
 @dataclass(frozen=True)
+class BridgeProjection:
+    """Projection material derived from one exact current release grant."""
+
+    allowed: bool
+    reason: str | None
+    abstraction: str | None = None
+    grant: ReleaseGrant | None = None
+    strip_identities: tuple[StripIdentity, ...] = ()
+    dependency_digest: str | None = None
+
+
+@dataclass(frozen=True)
 class BridgeReviewSignal:
     cause: str
     bridge_hash: str
@@ -886,6 +898,78 @@ def admit(
         grant=grant,
         strip_identities=identities,
         dependency_digest=dependency_digest,
+    )
+
+
+def resolve_approved_abstraction(
+    vault_root: Path,
+    bridge_id: str,
+    *,
+    policy: Policy,
+    audience: str,
+) -> BridgeProjection:
+    """Resolve an opaque policy option to exact approved bridge content.
+
+    The authored option names a release-grant id; it is never response text.
+    Resolution rereads the grant-bound bridge bytes and delegates all path,
+    ref, audience, byte-hash, dependency, restriction-signature, and
+    provenance checks to :func:`admit`.  Only the approved bridge body after
+    release-bound provenance stripping is returned to the caller.
+    """
+    candidates = [
+        grant
+        for grant in policy.release_grants
+        if grant.id == bridge_id and grant.to_audience == audience
+    ]
+    if not candidates:
+        return BridgeProjection(False, RELEASE_UNAPPROVED)
+    if len(candidates) != 1:
+        return BridgeProjection(False, RELEASE_STALE)
+    grant = candidates[0]
+    try:
+        target, canonical = resolve_under_vault(
+            Path(vault_root),
+            grant.path,
+            must_exist=True,
+            must_be_file=True,
+        )
+        if canonical != grant.path:
+            return BridgeProjection(False, RELEASE_STALE)
+        raw = target.read_bytes()
+    except (VaultPathError, OSError):
+        return BridgeProjection(False, RELEASE_STALE)
+
+    admission = admit(
+        Path(vault_root),
+        canonical,
+        raw,
+        policy=policy,
+        audience=audience,
+    )
+    if (
+        not admission.allowed
+        or admission.grant is None
+        or admission.grant.id != bridge_id
+    ):
+        return BridgeProjection(False, admission.reason or RELEASE_STALE)
+    parsed = _parse_exact(Path(vault_root), canonical, raw)
+    if parsed is None:
+        return BridgeProjection(False, RELEASE_STALE)
+    projected = strip_provenance(
+        {"body": parsed.body},
+        admission.strip_identities,
+        direct_page=True,
+    )
+    abstraction = projected.get("body") if isinstance(projected, Mapping) else None
+    if not isinstance(abstraction, str) or not abstraction.strip():
+        return BridgeProjection(False, RELEASE_STALE)
+    return BridgeProjection(
+        True,
+        None,
+        abstraction=abstraction,
+        grant=admission.grant,
+        strip_identities=admission.strip_identities,
+        dependency_digest=admission.dependency_digest,
     )
 
 
