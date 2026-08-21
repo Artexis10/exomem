@@ -462,7 +462,8 @@ active entity registry exposed by bootstrap.
 
 ### People
 
-Optional frontmatter: `affiliation`, `relationship` (e.g., colleague, public-figure, source-author).
+Optional frontmatter: `affiliation`, `relationship` (e.g., colleague, public-figure, source-author),
+and `aliases` for reviewed alternate spellings or names.
 
 ```markdown
 ---
@@ -490,6 +491,9 @@ What this person is relevant to in your work.
 
 - relates_to [[...]]
 ```
+
+On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical
+topic-to-person edge. Entity-side `relates_to` remains valid connective tissue.
 
 ### Organizations
 
