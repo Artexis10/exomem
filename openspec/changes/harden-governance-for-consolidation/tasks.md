@@ -62,11 +62,11 @@
 - [x] 2.1 Add red tests in `tests/test_governance_membership.py` for a missing companion
   under semantic-only project/tag/type/class scopes, proving the outcome is unresolved
   rather than the classified empty set.
-- [ ] 2.2 Add red tests for malformed, unreadable, stale, symlink-escaping, and
+- [x] 2.2 Add red tests for malformed, unreadable, stale, symlink-escaping, and
   artifact-mismatched companions; cover duplicate/relocated dataset cards and scene-frame
   parent/path/hash/timestamp mismatches, assert the same fail-closed outcome, and prove no
   cached open answer.
-- [ ] 2.3 Add red/passing distinction tests for path/ref-only policy, a path/ref exclusion
+- [x] 2.3 Add red/passing distinction tests for path/ref-only policy, a path/ref exclusion
   that proves a semantic scope excluded, a positive path match plus an unresolved
   semantic sibling, and a valid explicitly empty companion. The empty fixture must carry
   `state: classified`, all four explicit empty semantic lists, and the complete class-
@@ -85,7 +85,7 @@
 - [ ] 2.6 Add red integration coverage in `tests/test_governance_egress.py`,
   `tests/test_record_governance.py`, and media/dataset tests proving unresolved artifacts
   are L0/missing before counts, frames, rows, proposals, or grant-drift checks.
-- [ ] 2.7 Implement the closed companion locator/descriptor registry: sibling binary/media
+- [x] 2.7 Implement the closed companion locator/descriptor registry: sibling binary/media
   path/hash/size/class (+ media type/original name), unique dataset-card
   data-path/hash/size/format, and scene-frame frame/parent path+hash+size and canonical
   bounded `frame_timestamp_ms`, plus exact artifact
@@ -96,10 +96,10 @@
   context and receipt-first no-follow held-parent/descriptor-bound transaction. Validate
   the exact version-1 input, preserve all non-descriptor bytes, persist prior/target
   identities and owner/event evidence, and prohibit every metadata-inference path.
-- [ ] 2.9 Introduce the typed classified/unresolved membership result and update memo keys
+- [x] 2.9 Introduce the typed classified/unresolved membership result and update memo keys
   so companion and artifact immutable identities participate without adding index-time
   materialization.
-- [ ] 2.10 Wire direct media/frame/dataset reads, corpus walks, proposal membership, and
+- [x] 2.10 Wire direct media/frame/dataset reads, corpus walks, proposal membership, and
   active-session-grant revalidation to propagate unresolved membership; remove every
   fallback that converts it to `frozenset()`.
 - [ ] 2.11 Run the membership, preserve/media-processing, scene-frame, query-dataset,
