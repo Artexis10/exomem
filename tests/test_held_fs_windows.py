@@ -499,6 +499,63 @@ def test_windows_guarded_reader_waits_for_transient_parent_mutation_handle(
     guard.recheck(tmp_path)
 
 
+def test_windows_owner_child_publication_does_not_block_guarded_parent_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import graph_sync, held_fs, reserved_paths, writer_lease
+
+    knowledge_base = tmp_path / "Knowledge Base"
+    knowledge_base.mkdir()
+    record = knowledge_base / "record.md"
+    record.write_bytes(b"record")
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    publication_entered = threading.Event()
+    finish_publication = threading.Event()
+    real_publish = held_fs.publish_bytes
+
+    def paused_publish(*args, **kwargs):  # noqa: ANN002, ANN003
+        publication_entered.set()
+        assert finish_publication.wait(5)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(held_fs, "publish_bytes", paused_publish)
+    errors: list[BaseException] = []
+
+    def publish_owner_child() -> None:
+        try:
+            with reserved_paths._subsystem_authority_scope("graph_sync"):
+                reserved_paths._publish_owner_bytes(
+                    tmp_path,
+                    graph_sync.floor_path(tmp_path),
+                    "graph-handoff",
+                    b"owner bytes",
+                )
+        except BaseException as error:  # noqa: BLE001 - report worker failure below
+            errors.append(error)
+
+    worker = threading.Thread(target=publish_owner_child)
+    worker.start()
+    assert publication_entered.wait(5)
+    try:
+        data, guard = vault.read_bounded_guarded_bytes(
+            tmp_path,
+            "Knowledge Base/record.md",
+            limit=16,
+        )
+    finally:
+        finish_publication.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert data == b"record"
+    guard.recheck(tmp_path)
+
+
 def test_windows_native_information_buffers_use_abi_offsets() -> None:
     backend = importlib.import_module("exomem._held_fs_windows")
     assert backend.FILE_NAME_INFORMATION.FileName.offset > backend.ctypes.sizeof(

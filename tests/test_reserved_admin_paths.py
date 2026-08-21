@@ -2696,6 +2696,66 @@ def test_owner_move_and_remove_require_exact_named_authority(tmp_path: Path) -> 
     assert not live.exists()
 
 
+def test_owner_child_file_mutations_retain_parent_without_delete_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child mutation must not block unrelated guarded reads of its parent."""
+    from exomem import graph_sync, held_fs
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    acquired = held_fs.acquire(tmp_path)
+    assert acquired.ok
+    filesystem_type = type(acquired.require())
+    acquired.require().close()
+    real_parent = filesystem_type.parent
+    parent_accesses: list[tuple[str, str]] = []
+
+    def observe_parent_access(self, relative, **kwargs):  # noqa: ANN001
+        parent_accesses.append((str(relative), kwargs.get("access", "read")))
+        return real_parent(self, relative, **kwargs)
+
+    monkeypatch.setattr(filesystem_type, "parent", observe_parent_access)
+    source = graph_sync.floor_path(tmp_path)
+    destination = graph_sync.checkpoint_path(tmp_path)
+
+    reserved_paths.publish_generic_bytes(
+        tmp_path,
+        "Knowledge Base/ordinary.txt",
+        b"ordinary bytes",
+        expected_identity=None,
+    )
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        reserved_paths._publish_owner_bytes(
+            tmp_path,
+            source,
+            "graph-handoff",
+            b"owner bytes",
+        )
+        reserved_paths._move_owner_file(
+            tmp_path,
+            source,
+            "graph-handoff",
+            destination,
+            "graph-handoff",
+            replace=False,
+        )
+        assert reserved_paths._remove_owner_file(
+            tmp_path,
+            destination,
+            "graph-handoff",
+        )
+
+    knowledge_base_accesses = [
+        access for relative, access in parent_accesses if relative == "Knowledge Base"
+    ]
+    assert knowledge_base_accesses
+    assert set(knowledge_base_accesses) == {"read"}
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX retained-directory durability probe")
 def test_owner_remove_flushes_the_retained_parent(
     tmp_path: Path,

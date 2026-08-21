@@ -865,7 +865,6 @@ def publish_generic_bytes(
             parent_result = filesystem.parent(
                 parent_path,
                 create=True,
-                access="mutate",
             )
             if not parent_result.ok:
                 code = (
@@ -2084,7 +2083,6 @@ def _publish_owner_bytes(
             parent_result = filesystem.parent(
                 parent_text if parent_text != "." else ".",
                 create=True,
-                access="mutate",
             )
             if not parent_result.ok:
                 raise RuntimeError("private byte publication cannot retain its parent")
@@ -2413,7 +2411,6 @@ def _move_owner_file(
             destination_parent_text = destination_relative.parent.as_posix()
             source_parent_result = filesystem.parent(
                 source_parent_text if source_parent_text != "." else ".",
-                access="mutate",
             )
             if not source_parent_result.ok:
                 if (
@@ -2428,7 +2425,6 @@ def _move_owner_file(
                     if destination_parent_text != "."
                     else ".",
                     create=True,
-                    access="mutate",
                 )
                 if not destination_parent_result.ok:
                     raise OSError("private move destination parent is unsafe")
@@ -2547,7 +2543,6 @@ def _remove_owner_file(
             parent_text = relative.parent.as_posix()
             parent_result = filesystem.parent(
                 parent_text if parent_text != "." else ".",
-                access="mutate",
             )
             if not parent_result.ok:
                 if (
