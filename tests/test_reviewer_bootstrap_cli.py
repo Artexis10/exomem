@@ -383,6 +383,155 @@ def test_preflight_fails_when_a_contract_digest_drifted(field: str, capsys) -> N
     assert "repo locks match candidate" in capsys.readouterr().out
 
 
+# --- explicit reviewer bootstrap client reuse -------------------------------
+
+
+REUSABLE_PUBLIC_CLIENT_ID = "exomem-reviewer-bootstrap-11111111-1111-4111-8111-111111111111"
+REUSABLE_CLIENT_RECORD_ID = "22222222-2222-4222-8222-222222222222"
+STAGE_ID = "33333333-3333-4333-8333-333333333333"
+
+
+def _prepare_cp(tmp_path, *, client_response: dict | None = None) -> _RecordingControlPlane:
+    cp = _RecordingControlPlane(
+        {
+            "preflight-reuse-client": (
+                200,
+                {"eligible": True, "clientRecordId": REUSABLE_CLIENT_RECORD_ID},
+            ),
+            "prepare-stage": (200, {"stage": {"id": STAGE_ID}}),
+            "prepare-client": (
+                200,
+                client_response or {"id": REUSABLE_CLIENT_RECORD_ID, "enabled": False},
+            ),
+            "prepare-invite": (201, {"inviteId": "invite-1"}),
+        }
+    )
+    cp.state_dir = tmp_path
+    return cp
+
+
+def test_prepare_keeps_fresh_client_generation_as_the_default(monkeypatch, tmp_path) -> None:
+    module = _load_module()
+    generated = "44444444-4444-4444-8444-444444444444"
+    monkeypatch.setattr(module, "attach_openai_locks", lambda *_: None)
+    monkeypatch.setattr(module.uuid, "uuid4", lambda: module.uuid.UUID(generated))
+    cp = _prepare_cp(
+        tmp_path,
+        client_response={"id": "55555555-5555-4555-8555-555555555555", "enabled": False},
+    )
+
+    context = module.prepare(cp, "cand-1", "reviewer@example.invalid", _locks())
+
+    client_call = next(call for call in cp.calls if call["label"] == "prepare-client")
+    assert client_call["body"]["clientId"] == f"exomem-reviewer-bootstrap-{generated}"
+    assert "existingClientRecordId" not in client_call["body"]
+    assert context["clientId"] == f"exomem-reviewer-bootstrap-{generated}"
+    assert all(call["label"] != "preflight-reuse-client" for call in cp.calls)
+
+
+def test_prepare_reuses_only_the_explicit_exact_disabled_client(monkeypatch, tmp_path) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module, "attach_openai_locks", lambda *_: None)
+    cp = _prepare_cp(tmp_path)
+
+    context = module.prepare(
+        cp,
+        "cand-1",
+        "reviewer@example.invalid",
+        _locks(),
+        REUSABLE_PUBLIC_CLIENT_ID,
+    )
+
+    labels = [call["label"] for call in cp.calls]
+    assert labels == [
+        "preflight-reuse-client",
+        "prepare-stage",
+        "prepare-client",
+        "prepare-invite",
+    ]
+    stage_call = cp.calls[1]
+    assert stage_call["body"]["oauthClientConfigSha256"] == module.client_config_sha256(
+        platform="claude",
+        admission_mode="pinned",
+        client_id=REUSABLE_PUBLIC_CLIENT_ID,
+        redirect_uris=[module.LOOPBACK_REDIRECT],
+    )
+    client_call = cp.calls[2]
+    assert client_call["body"]["clientId"] == REUSABLE_PUBLIC_CLIENT_ID
+    assert client_call["body"]["existingClientRecordId"] == REUSABLE_CLIENT_RECORD_ID
+    assert context["oauthClientId"] == REUSABLE_CLIENT_RECORD_ID
+    assert context["clientId"] == REUSABLE_PUBLIC_CLIENT_ID
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ("mismatched_configuration", "enabled_client", "prior_reviewer_authorization"),
+)
+def test_prepare_never_falls_back_when_explicit_reuse_is_ineligible(
+    reason: str, monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module, "attach_openai_locks", lambda *_: None)
+    cp = _prepare_cp(tmp_path)
+    cp.responses["preflight-reuse-client"] = (200, {"eligible": False, "reason": reason})
+
+    with pytest.raises(SystemExit, match="not eligible for reuse"):
+        module.prepare(
+            cp,
+            "cand-1",
+            "reviewer@example.invalid",
+            _locks(),
+            REUSABLE_PUBLIC_CLIENT_ID,
+        )
+
+    assert [call["label"] for call in cp.calls] == ["preflight-reuse-client"]
+
+
+@pytest.mark.parametrize(
+    "client_response",
+    (
+        {"id": "66666666-6666-4666-8666-666666666666", "enabled": False},
+        {"id": REUSABLE_CLIENT_RECORD_ID, "enabled": True},
+    ),
+    ids=("different-record", "enabled-after-registration"),
+)
+def test_prepare_stops_if_control_plane_does_not_reuse_exactly(
+    client_response: dict, monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module, "attach_openai_locks", lambda *_: None)
+    cp = _prepare_cp(tmp_path, client_response=client_response)
+
+    with pytest.raises(SystemExit, match="did not reuse"):
+        module.prepare(
+            cp,
+            "cand-1",
+            "reviewer@example.invalid",
+            _locks(),
+            REUSABLE_PUBLIC_CLIENT_ID,
+        )
+
+    assert "prepare-invite" not in [call["label"] for call in cp.calls]
+
+
+def test_preflight_allows_a_full_client_partition_with_explicit_reuse() -> None:
+    module = _load_module()
+    locks = _locks()
+    cp = _preflight_cp(
+        _contracts_response(locks["contract"], locks["compatibility"], locks["command_surface"])
+    )
+    cp.responses["preflight-clients"] = (
+        200,
+        {"bootstrapAuthorities": [], "clients": [{} for _ in range(module.OPERATOR_CLIENT_BOUND)]},
+    )
+    cp.responses["preflight-reuse-client"] = (
+        200,
+        {"eligible": True, "clientRecordId": REUSABLE_CLIENT_RECORD_ID},
+    )
+
+    assert module.preflight(cp, "cand-1", locks, REUSABLE_PUBLIC_CLIENT_ID) is True
+
+
 def test_run_resolves_the_connector_before_creating_the_authority(monkeypatch) -> None:
     """The connector document is fetched from chatgpt.com, and that can 403.
 

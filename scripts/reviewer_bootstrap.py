@@ -359,7 +359,36 @@ class ControlPlane:
         return status, parsed
 
 
-def preflight(cp: ControlPlane, candidate_id: str, locks: dict) -> bool:
+def reusable_client_record(cp: ControlPlane, client_id: str) -> str:
+    if not client_id.startswith("exomem-reviewer-bootstrap-") or len(client_id) > 256:
+        raise SystemExit("--existing-client-id is not a reviewer bootstrap client ID")
+    status, result = cp.call(
+        "POST",
+        "/api/exomem/admin/oauth-clients",
+        label="preflight-reuse-client",
+        body={
+            "action": "preflight_reuse_pinned",
+            "platform": "claude",
+            "clientId": client_id,
+            "redirectUris": [LOOPBACK_REDIRECT],
+        },
+    )
+    record_id = result.get("clientRecordId") if status == 200 and result.get("eligible") else None
+    try:
+        uuid.UUID(record_id)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise SystemExit(
+            "the explicitly selected reviewer client is not eligible for reuse"
+        ) from error
+    return record_id
+
+
+def preflight(
+    cp: ControlPlane,
+    candidate_id: str,
+    locks: dict,
+    existing_client_id: str | None = None,
+) -> bool:
     """Report every blocker. Returns True when a bootstrap can succeed."""
     ok = True
 
@@ -438,8 +467,19 @@ def preflight(cp: ControlPlane, candidate_id: str, locks: dict) -> bool:
     # and they have their own separate partition of 128.
     stored = len(clients.get("clients", []))
     headroom = OPERATOR_CLIENT_BOUND - stored
+    reusable = None
+    if existing_client_id is not None:
+        try:
+            reusable = reusable_client_record(cp, existing_client_id)
+        except SystemExit:
+            reusable = None
+        print(
+            f"  {'ok  ' if reusable else 'FAIL'}  explicit reviewer client reuse: "
+            f"{existing_client_id[:32]}"
+        )
+        ok &= reusable is not None
     print(
-        f"  {'ok  ' if headroom > 2 else 'WARN'}  oauth clients: {stored} stored, "
+        f"  {'ok  ' if headroom > 2 or reusable else 'WARN'}  oauth clients: {stored} stored, "
         f"<={headroom} of {OPERATOR_CLIENT_BOUND} operator slot(s) free"
     )
     if headroom <= 2:
@@ -487,13 +527,22 @@ def _stage_collision_hint(status: int, platform: str) -> str:
     )
 
 
-def prepare(cp: ControlPlane, candidate_id: str, email: str, locks: dict) -> dict:
+def prepare(
+    cp: ControlPlane,
+    candidate_id: str,
+    email: str,
+    locks: dict,
+    existing_client_id: str | None = None,
+) -> dict:
     """Create stage, pinned client and invite. Spends nothing irreversible."""
     # First, because `run` cannot create the OpenAI sibling stage without it and
     # by then the window is already running.
     attach_openai_locks(cp, candidate_id, locks)
 
-    client_id = f"exomem-reviewer-bootstrap-{uuid.uuid4()}"
+    client_id = existing_client_id or f"exomem-reviewer-bootstrap-{uuid.uuid4()}"
+    existing_client_record_id = (
+        reusable_client_record(cp, client_id) if existing_client_id is not None else None
+    )
     verifier, challenge = pkce_pair()
     config_sha = client_config_sha256(
         platform="claude",
@@ -536,10 +585,19 @@ def prepare(cp: ControlPlane, candidate_id: str, email: str, locks: dict) -> dic
             "stagedClientReleaseId": stage_id,
             "clientId": client_id,
             "redirectUris": [LOOPBACK_REDIRECT],
+            **(
+                {"existingClientRecordId": existing_client_record_id}
+                if existing_client_record_id is not None
+                else {}
+            ),
         },
     )
     if status != 200:
         raise SystemExit(f"register_pinned failed: {status} {client}")
+    if existing_client_record_id is not None and (
+        client.get("id") != existing_client_record_id or client.get("enabled") is not False
+    ):
+        raise SystemExit("the control plane did not reuse the explicitly selected client")
 
     status, invite = cp.call(
         "POST",
@@ -869,6 +927,10 @@ def main() -> int:
     parser.add_argument("--state-dir", required=True, type=Path)
     parser.add_argument("--repo", default=".", type=Path)
     parser.add_argument("--email", help="reviewer alias, required for prepare")
+    parser.add_argument(
+        "--existing-client-id",
+        help="explicit disabled pinned reviewer-bootstrap client ID to reuse; never auto-selected",
+    )
     parser.add_argument("--token", help="emailed invite token, required for run")
     parser.add_argument(
         "--openai-connector",
@@ -899,18 +961,18 @@ def main() -> int:
 
     if args.command == "preflight":
         print("preflight:")
-        return 0 if preflight(cp, args.candidate_id, locks) else 1
+        return 0 if preflight(cp, args.candidate_id, locks, args.existing_client_id) else 1
 
     if args.command == "prepare":
         if not args.email:
             print("--email is required for prepare", file=sys.stderr)
             return 2
         print("preflight:")
-        if not preflight(cp, args.candidate_id, locks):
+        if not preflight(cp, args.candidate_id, locks, args.existing_client_id):
             print("\nrefusing to prepare while preflight is red")
             return 1
         print("\nprepare:")
-        context = prepare(cp, args.candidate_id, args.email, locks)
+        context = prepare(cp, args.candidate_id, args.email, locks, args.existing_client_id)
         print(f"  stage   {context['stageId']}")
         print(f"  client  {context['oauthClientId']}")
         print(f"  invite  {context['inviteId']}")
