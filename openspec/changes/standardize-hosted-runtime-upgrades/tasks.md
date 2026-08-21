@@ -41,7 +41,7 @@
 
 ## 5. Generic expand, drain, and contract orchestration
 
-- [ ] 5.1 Extend release verification to emit the exact target identities consumed by both Substrate fixtures and Exomem deployment-lock composition
+- [x] 5.1 Extend release verification to emit the exact target identities consumed by both Substrate fixtures and Exomem deployment-lock composition
 - [ ] 5.2 Derive the authoritative legacy catalog from the reconciled routable, assigned, and unfinished-operation release set and reject missing, duplicate, mutable, or unreferenced entries
 - [ ] 5.3 Make the operator CLI prove that Substrate's reviewed consumer commit trusts the target at every pinned site before composing the Exomem lock pair
 - [ ] 5.4 Gate expand deployment on exact lock verification and prove post-deploy that adoption enqueued no tenant lifecycle operation and changed no existing tenant Kubernetes or control-plane resource
@@ -70,7 +70,7 @@
 ## 8. First execution: runtime 0.57.2
 
 - [x] 8.1 Verify the exact `v0.57.2` source commit, amd64 image digest, signed runtime candidate, source closure, attestations, protocol, profile, command fingerprint, schema digest, and compatibility digest
-- [ ] 8.2 Import the exact `0.57.2` agent and gateway fixtures into every Substrate release-pinned production site while retaining every release found by the live legacy inventory
+- [x] 8.2 Import the exact `0.57.2` agent and gateway fixtures into every Substrate release-pinned production site while retaining every release found by the live legacy inventory
 - [ ] 8.3 Land and deploy the reviewed Substrate trusted-release, rollforward, reviewer-client, migration, and operator changes; record the immutable consumer commit
 - [ ] 8.4 Compose, verify, review, and land the Exomem `0.57.2` expand/contract lock pair and provisioner image from the exact Substrate consumer and signed target evidence
 - [ ] 8.5 Create the schema-valid `0.57.2` execution record, run the live reconciled inventory, and resolve every ghost, divergence, stale assignment, unfinished operation, or capacity mismatch before mutation
