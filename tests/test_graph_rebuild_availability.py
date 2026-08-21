@@ -2843,9 +2843,71 @@ def test_crash_after_canonical_terminal_persistence_never_replays_the_write(tmp_
     assert replayed == {"state": "committed", "graph_sync": "completed"}
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows refuses replacement while a reader is open")
-def test_temporary_swap_keeps_an_open_reader_on_the_previous_sidecar(tmp_path: Path) -> None:
+def test_wal_publication_keeps_an_open_reader_on_the_previous_snapshot(
+    tmp_path: Path,
+) -> None:
     import sqlite3
+
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(live)) as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        conn.execute("CREATE TABLE value (item TEXT)")
+        conn.execute("INSERT INTO value VALUES ('old')")
+        conn.commit()
+    temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
+    with closing(sqlite3.connect(temporary)) as conn:
+        conn.execute("CREATE TABLE value (item TEXT)")
+        conn.execute("INSERT INTO value VALUES ('new')")
+        conn.commit()
+
+    reader = sqlite3.connect(live)
+    try:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT item FROM value").fetchone() == ("old",)
+        graph_sync.replace_sidecar(temporary, live)
+        assert reader.execute("SELECT item FROM value").fetchone() == ("old",)
+        with closing(sqlite3.connect(live)) as current:
+            assert current.execute("SELECT item FROM value").fetchone() == ("new",)
+    finally:
+        reader.close()
+
+
+def test_live_wal_publication_does_not_replay_the_predecessor_wal(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live.parent.mkdir(parents=True)
+    predecessor = sqlite3.connect(live)
+    try:
+        assert predecessor.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        predecessor.execute("CREATE TABLE value (item TEXT)")
+        predecessor.execute("INSERT INTO value VALUES ('old')")
+        predecessor.commit()
+        assert live.with_name(f"{live.name}-wal").exists()
+
+        temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
+        with closing(sqlite3.connect(temporary)) as conn:
+            conn.execute("CREATE TABLE value (item TEXT)")
+            conn.execute("INSERT INTO value VALUES ('new')")
+            conn.commit()
+
+        graph_sync.replace_sidecar(temporary, live, vault_root=tmp_path)
+
+        with closing(sqlite3.connect(live)) as current:
+            assert current.execute("SELECT item FROM value").fetchone() == ("new",)
+    finally:
+        predecessor.close()
+
+
+def test_existing_live_publication_refusal_keeps_the_previous_complete_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from exomem import epistemic_graph
 
     live = tmp_path / "Knowledge Base/.graph.sqlite"
     live.parent.mkdir(parents=True)
@@ -2858,78 +2920,62 @@ def test_temporary_swap_keeps_an_open_reader_on_the_previous_sidecar(tmp_path: P
         conn.execute("CREATE TABLE value (item TEXT)")
         conn.execute("INSERT INTO value VALUES ('new')")
         conn.commit()
-
-    reader = sqlite3.connect(live)
-    try:
-        assert reader.execute("SELECT item FROM value").fetchone() == ("old",)
-        graph_sync.replace_sidecar(temporary, live)
-        assert reader.execute("SELECT item FROM value").fetchone() == ("old",)
-        with closing(sqlite3.connect(live)) as current:
-            assert current.execute("SELECT item FROM value").fetchone() == ("new",)
-    finally:
-        reader.close()
-
-
-def test_windows_replacement_refusal_keeps_the_previous_complete_sidecar(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from exomem import epistemic_graph
-
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
-    live.parent.mkdir(parents=True)
-    live.write_bytes(b"old")
-    temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
-    temporary.write_bytes(b"new")
+    old_live = live.read_bytes()
+    new_temporary = temporary.read_bytes()
     monkeypatch.setattr(
         epistemic_graph,
-        "_move_graph_rebuild_into_store",
-        lambda *_args: (_ for _ in ()).throw(PermissionError()),
+        "_backup_graph_rebuild_into_store",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError()),
     )
 
     with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable):
         graph_sync.replace_sidecar(temporary, live)
-    assert live.read_bytes() == b"old"
-    assert temporary.read_bytes() == b"new"
+    assert live.read_bytes() == old_live
+    assert temporary.read_bytes() == new_temporary
 
 
 def test_replacement_refusal_names_what_it_observed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import sqlite3
+
     from exomem import epistemic_graph
 
-    """The refusal has to say more than "an open reader".
+    """A bounded live-database refusal reports what SQLite actually observed.
 
-    It fired on a Windows CI shard without reproducing locally, and by the time
-    it is raised the code has already spent three in-place attempts behind a 5s
-    busy timeout, under four publication attempts above it -- so something held
-    on for close to a minute. "Has an open reader" is a hypothesis, not an
-    observation, and it cannot be told apart from a permission error that is
-    not a sharing conflict at all. Widening a budget that size again would be
-    guessing; carrying the evidence is not.
+    "Database is locked" can name a competing writer or a longer transaction;
+    the retry count and elapsed evidence distinguish it from an immediate
+    permission or malformed-store failure without guessing at the holder.
     """
     live = tmp_path / "Knowledge Base/.graph.sqlite"
     live.parent.mkdir(parents=True)
-    live.write_bytes(b"old")
+    with closing(sqlite3.connect(live)) as conn:
+        conn.execute("CREATE TABLE value (item TEXT)")
+        conn.commit()
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
-    temporary.write_bytes(b"new")
+    with closing(sqlite3.connect(temporary)) as conn:
+        conn.execute("CREATE TABLE value (item TEXT)")
+        conn.commit()
     monkeypatch.setattr(
         epistemic_graph,
-        "_move_graph_rebuild_into_store",
-        lambda *_args: (_ for _ in ()).throw(PermissionError(13, "sharing violation")),
+        "_backup_graph_rebuild_into_store",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
     )
 
     with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable) as raised:
         graph_sync.replace_sidecar(temporary, live)
 
     message = str(raised.value)
-    # What the held replacement itself said, not a paraphrase of it.
-    assert "PermissionError" in message
-    assert "sharing violation" in message
+    # What the SQLite publication itself said, not a paraphrase of it.
+    assert "OperationalError" in message
+    assert "database is locked" in message
     # Every in-place attempt is accounted for, with the error each one hit.
     assert f"in-place {graph_sync.PUBLISH_IN_PLACE_ATTEMPTS} attempt(s)" in message
     assert message.count("#") == graph_sync.PUBLISH_IN_PLACE_ATTEMPTS
-    # Elapsed time is the term that separates "a reader held SHARED for the
-    # whole busy timeout" from "this failed instantly and is not a lock at all".
+    # Elapsed time separates a writer that held the live transaction across the
+    # busy timeout from an immediate failure that is not contention at all.
     assert "s:" in message and "after" in message
 
 
@@ -3064,14 +3110,14 @@ def test_temp_sweep_removes_abandoned_sqlite_companions_but_keeps_active_set(
     assert all(path.exists() for path in active_set)
 
 
-# --- Publication robustness: the replace must not depend on a reader leaving --
+# --- Publication robustness: a live WAL family stays one SQLite transaction ---
 
 
-def _refuse_replacement_onto(monkeypatch: pytest.MonkeyPatch, live: Path) -> None:
-    """Model Windows refusing the held rename onto one open destination only.
+def _forbid_move_onto_existing_live(monkeypatch: pytest.MonkeyPatch, live: Path) -> None:
+    """Prove an existing live store never reaches the held first-publish move.
 
-    The private graph owner uses the held filesystem substrate; patch that
-    exact owner seam without disturbing unrelated vault mutation state.
+    Moving only the main file would split it from its predecessor WAL. The move
+    remains valid only for the exact absent-live first-publication case.
     """
     from exomem import epistemic_graph
 
@@ -3079,7 +3125,7 @@ def _refuse_replacement_onto(monkeypatch: pytest.MonkeyPatch, live: Path) -> Non
 
     def refuse_for_live(vault_root: Path, temporary: Path, destination: Path) -> None:
         if destination == live:
-            raise PermissionError("live graph sidecar has an open reader")
+            raise AssertionError("existing live graph reached the first-publication move")
         real_move(vault_root, temporary, destination)
 
     monkeypatch.setattr(
@@ -3089,16 +3135,13 @@ def _refuse_replacement_onto(monkeypatch: pytest.MonkeyPatch, live: Path) -> Non
     )
 
 
-def test_refused_replacement_publishes_in_place_without_moving_the_live_entry(
+def test_existing_wal_publication_does_not_move_the_live_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A reader that never lets go no longer costs the vault its publication.
+    """A resident reader keeps its handle while a complete rebuild publishes.
 
-    Windows refuses `os.replace` while any handle is open on the destination.
-    Publishing the same proven bytes *into* the existing file leaves the
-    directory entry — and therefore every open handle — intact, which is what
-    lets a resident service's reader see the new content instead of pinning the
-    old sidecar forever.
+    SQLite backup leaves the directory entry and WAL family intact, so an open
+    reader does not force a main-file replacement or pin the old live database.
     """
     import sqlite3
 
@@ -3116,7 +3159,7 @@ def test_refused_replacement_publishes_in_place_without_moving_the_live_entry(
     identity_before = live.stat()
     note.write_text("# After the refused replacement\n", encoding="utf-8", newline="\n")
 
-    _refuse_replacement_onto(monkeypatch, live)
+    _forbid_move_onto_existing_live(monkeypatch, live)
     # A reader that stays open across the whole publication, exactly the
     # resident-service condition the issue reports.
     with closing(sqlite3.connect(f"{live.resolve().as_uri()}?mode=ro", uri=True)) as reader:
@@ -3144,10 +3187,10 @@ def test_refused_replacement_publishes_in_place_without_moving_the_live_entry(
     ), "a landed publication leaves no preserved temporary"
 
 
-def test_publication_refused_by_both_paths_still_fails_closed(
+def test_existing_live_publication_refusal_still_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When neither publication path can land, the old sidecar survives intact."""
+    """When the live transaction cannot land, the old sidecar survives intact."""
     from exomem import epistemic_graph
     from exomem.epistemic_graph import EpistemicGraphIndex
 
@@ -3163,7 +3206,7 @@ def test_publication_refused_by_both_paths_still_fails_closed(
     note.write_text("# After\n", encoding="utf-8", newline="\n")
     epistemic_graph.clear_publication_memos()
 
-    _refuse_replacement_onto(monkeypatch, index.path)
+    _forbid_move_onto_existing_live(monkeypatch, index.path)
     # Takes **_kwargs so it keeps matching the real signature: the refusal now
     # collects per-attempt evidence through an `attempts_out` list, and a stub
     # that only accepts positionals fails with TypeError instead of exercising

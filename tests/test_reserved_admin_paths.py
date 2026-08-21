@@ -2429,7 +2429,6 @@ def test_graph_sidecar_publication_uses_exact_graph_owner_move(
 
     live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
-    live.write_bytes(b"prior")
     temporary = graph_sync.temporary_sidecar_path(
         live,
         SimpleNamespace(checkpoint_sha256="a" * 64),
@@ -2471,7 +2470,7 @@ def test_graph_sidecar_publication_uses_exact_graph_owner_move(
             "graph-rebuild",
             ".graph.sqlite",
             "graph-store",
-            True,
+            False,
         )
     ]
     assert live.read_bytes() == b"replacement"

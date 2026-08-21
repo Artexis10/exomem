@@ -364,7 +364,7 @@ def _move_graph_rebuild_into_store(
     temporary: Path,
     live: Path,
 ) -> None:
-    """Publish one graph rebuild through the graph owner's held move."""
+    """Publish the first graph rebuild through an absent-target held move."""
 
     with reserved_paths._subsystem_authority_scope("epistemic_graph"):
         reserved_paths._move_owner_file(
@@ -373,7 +373,7 @@ def _move_graph_rebuild_into_store(
             "graph-rebuild",
             live,
             "graph-store",
-            replace=True,
+            replace=False,
         )
 
 

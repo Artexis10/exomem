@@ -2887,67 +2887,59 @@ def replace_sidecar(
 ) -> None:
     """Publish the proven temporary as the live sidecar.
 
-    The fast path is the platform's atomic replacement primitive, which Linux
-    always grants and which Windows grants once no handle is open on the
-    destination. Windows refuses it while any reader keeps the live SQLite file
-    open, and a resident service makes that a routine condition rather than a
-    rare one, so a refusal must not be the end of the road: fall back to
-    publishing the same proven bytes *into* the existing file with SQLite's
-    backup API, which leaves the directory entry untouched and so does not care
-    how many handles are open on it.
+    An existing live graph runs in WAL mode. Replacing only its main SQLite
+    file leaves the predecessor ``-wal`` at the same pathname, so a new reader
+    can replay predecessor pages over the proven replacement. Publish into an
+    existing live database with SQLite's backup API instead: the destination
+    transaction preserves old/new snapshot atomicity without splitting the WAL
+    family or moving its directory entry.
 
-    That fallback covers open *handles*, not open read *transactions*. This
-    sidecar runs in rollback-journal mode, where a reader inside `BEGIN` holds a
-    SHARED lock that blocks the backup's EXCLUSIVE one — so a reader that holds
-    a transaction across the whole window still defeats both paths. Bounded
-    retries absorb the ordinary case where the reader commits and lets go.
-
-    Only when both fail is the publication genuinely unavailable. Leaving the
-    complete old sidecar in place is fail-closed; the checkpoint remains
-    unacknowledged and the graph's own recovery path retries later.
+    A first publication has no live database to back up into. Only that exact
+    absence takes the held atomic-move path. Any other backup refusal leaves the
+    complete old sidecar and proven temporary intact and fails closed; the
+    checkpoint remains unacknowledged and the graph recovery path retries later.
     """
     from . import epistemic_graph
 
     root = Path(vault_root) if vault_root is not None else live.parent.parent
+    started = time.monotonic()
+    attempts: list[str] = []
+    if _publish_sidecar_in_place(
+        temporary,
+        live,
+        vault_root=root,
+        attempts_out=attempts,
+    ):
+        try:
+            epistemic_graph._remove_graph_rebuild_artifact(
+                root,
+                temporary,
+                missing_ok=True,
+            )
+        except OSError:
+            # A retained temp is inert once the live file already carries the
+            # published bytes; the reaper collects it on a later pass.
+            pass
+        return
+
+    if attempts == ["temporary sidecar absent"]:
+        raise FileNotFoundError(temporary)
+    if attempts != ["live sidecar absent"]:
+        raise GraphSidecarReplaceUnavailable(
+            "live graph sidecar could not accept the proven rebuild "
+            f"(in-place {len(attempts)} attempt(s) over "
+            f"{time.monotonic() - started:.1f}s: "
+            f"{'; '.join(attempts) if attempts else 'none ran'})"
+        )
+
     try:
         epistemic_graph._move_graph_rebuild_into_store(root, temporary, live)
     except FileNotFoundError:
         raise
     except OSError as error:
-        started = time.monotonic()
-        attempts: list[str] = []
-        if _publish_sidecar_in_place(
-            temporary,
-            live,
-            vault_root=root,
-            attempts_out=attempts,
-        ):
-            try:
-                epistemic_graph._remove_graph_rebuild_artifact(
-                    root,
-                    temporary,
-                    missing_ok=True,
-                )
-            except OSError:
-                # A retained temp is inert once the live file already carries
-                # the published bytes; the reaper collects it on a later pass.
-                pass
-            return
-        # Carry what the refusal actually observed. This has fired on CI
-        # without reproducing locally, and the message alone -- "has an open
-        # reader" -- cannot distinguish the three things it might be: a reader
-        # that holds a transaction for longer than the whole budget, a
-        # permission problem that is not a sharing conflict at all, or a temp
-        # that never existed. The budget is already generous (three in-place
-        # attempts behind a 5s busy timeout, under four publication attempts
-        # above), so a refusal means something held on for close to a minute
-        # and the useful question is what. Widening a budget that large again
-        # would be guessing; naming the holder is not.
         raise GraphSidecarReplaceUnavailable(
-            "live graph sidecar has an open reader "
-            f"(held replace: {error.__class__.__name__}: {error}; "
-            f"in-place {len(attempts)} attempt(s) over {time.monotonic() - started:.1f}s: "
-            f"{'; '.join(attempts) if attempts else 'none ran'})"
+            "live sidecar absent; held graph publication failed "
+            f"({error.__class__.__name__}: {error})"
         ) from error
 
 
@@ -2964,13 +2956,11 @@ def _publish_sidecar_in_place(
     destination transaction, so a concurrent reader either sees the complete
     old content or the complete new content — never a half-written file.
 
-    The sidecar is a rollback-journal database (nothing sets `journal_mode`), so
-    a reader inside `BEGIN` holds a SHARED lock and the backup's EXCLUSIVE lock
-    waits on it. The busy timeout absorbs that once the connection is open; a
-    failure raised at *open* time returns immediately, so the attempts are also
-    spaced, or all three would burn in microseconds and prove nothing. A reader
-    that never yields exhausts them and leaves the live sidecar exactly as it
-    was.
+    The private rebuild is a single rollback-journal file; the live destination
+    is WAL. A live read transaction can therefore retain its predecessor
+    snapshot while the backup transaction publishes the new generation. The
+    busy timeout and spaced retries cover a competing live writer; exhaustion
+    leaves both the old live database and proven temporary intact.
     """
     from . import epistemic_graph
 
