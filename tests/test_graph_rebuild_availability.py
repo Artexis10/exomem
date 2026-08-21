@@ -2360,6 +2360,58 @@ def test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild(
     assert graph_sync.status(tmp_path)["state"] == "current"
 
 
+def test_manager_reconcile_closes_drift_that_supersedes_its_joined_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconcile must prove the graph current even when its first join is stale."""
+    from exomem import audit as audit_module
+    from exomem.epistemic_graph import EpistemicGraphIndex
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    state_dir = tmp_path / "state"
+    checkpoint = _checkpoint(1)
+    rebuilt = False
+
+    def build(required: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        return graph_sync.GraphBuildOutcome.covering(required)
+
+    def reconcile_leaf(vault_root: Path) -> dict[str, object]:
+        graph_sync.register_rebuild(
+            vault_root,
+            checkpoint,
+            build,
+            state_root=state_dir,
+        )
+        return {
+            "graph_status": "unavailable",
+            "_graph_reconcile_registered": 1,
+        }
+
+    def available(_index: EpistemicGraphIndex) -> bool:
+        return rebuilt
+
+    def rebuild_all(_index: EpistemicGraphIndex) -> dict[str, int]:
+        nonlocal rebuilt
+        rebuilt = True
+        return {"indexed_files": 1, "nodes": 1, "edges": 0}
+
+    monkeypatch.setattr(graph_sync, "status", lambda _root: {"state": "current"})
+    monkeypatch.setattr(EpistemicGraphIndex, "available", available)
+    monkeypatch.setattr(EpistemicGraphIndex, "rebuild_all", rebuild_all)
+    monkeypatch.setattr(audit_module, "_check_graph_drift", lambda _root: [])
+    command = SimpleNamespace(name="reconcile", read_only=False, leaf=reconcile_leaf)
+
+    result = LeaseManager(LeaseConfig(state_dir=state_dir)).invoke(
+        command,
+        (tmp_path,),
+        {},
+    )
+
+    assert rebuilt is True
+    assert result["graph_status"] == "refreshed"
+    assert result["graph_refreshed"] == 1
+
+
 def test_manager_rebuild_graph_finalizes_unavailable_reset_after_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

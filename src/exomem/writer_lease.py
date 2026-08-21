@@ -2780,17 +2780,31 @@ class LeaseManager:
             if command.name == "reconcile" or (
                 command.name == "maintain_memory" and kwargs.get("mode") == "reconcile"
             ):
-                try:
-                    from . import audit as audit_module
-                    from .epistemic_graph import EpistemicGraphIndex
+                from . import audit as audit_module
+                from .epistemic_graph import EpistemicGraphIndex
 
-                    graph_current = (
+                def graph_is_current() -> bool:
+                    return (
                         graph_sync.status(root)["state"] == "current"
                         and EpistemicGraphIndex(
                             root, mutation_coordinator=self._mutation_coordinator_for(root)
                         ).available()
                         and not audit_module._check_graph_drift(root)
                     )
+
+                try:
+                    graph_current = graph_is_current()
+                    if not graph_current and not has_reconcile_handoff:
+                        # A startup/background mutation can supersede the exact
+                        # checkpoint reconcile joined while its canonical guard
+                        # is still held. Reconcile is the one command whose
+                        # terminal promises graph currency, so close that final
+                        # post-guard drift here instead of returning
+                        # ``unavailable`` while the drain rebuilds moments later.
+                        EpistemicGraphIndex(
+                            root, mutation_coordinator=self._mutation_coordinator_for(root)
+                        ).rebuild_all()
+                        graph_current = graph_is_current()
                 except Exception:  # noqa: BLE001 - preserve a failed graph terminal
                     graph_current = False
                 terminal_result = finish_reconcile_graph_status(
