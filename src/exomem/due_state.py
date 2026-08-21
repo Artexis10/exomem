@@ -802,9 +802,15 @@ def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = No
 def should_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> bool:
     """Decide and record in one step. Only for carriers that deliver immediately.
 
-    Recall and bootstrap attach the block to the object they are about to return,
-    so for them production and delivery are the same moment. The mutating path is
-    not like that and must use `would_emit` / `mark_emitted`.
+    Recall attaches the block to the object it is about to return, so for it
+    production and delivery are the same moment. Pass `vault_root`: the key's third
+    component is the vault, and a carrier that omits it both silences a second vault
+    and misses what the mutating path recorded.
+
+    The other two carriers do not use this. The mutating path produces before it
+    knows whether the response will carry anything, so it must use `would_emit` /
+    `mark_emitted` separately. Bootstrap attaches unconditionally rather than
+    deciding, so it calls `mark_emitted` alone.
     """
     if not would_emit(payload, vault_root=vault_root):
         return False

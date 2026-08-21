@@ -668,27 +668,127 @@ def test_emission_governance_is_per_audience(vault: Path) -> None:
     )
 
 
-def test_emission_governance_is_per_vault(vault: Path, tmp_path: Path) -> None:
+def test_emission_governance_is_per_vault_through_the_shipped_recall(
+    vault: Path, tmp_path: Path
+) -> None:
     """One process can serve two vaults; being told about one must not silence the other.
 
+    Driven through `op_ask_memory` rather than `due_state.should_emit`, because the
+    defect this pins is a MISSING ARGUMENT at the call site. The module function
+    keys correctly when it is handed a vault, so a test that hands it one directly
+    is blind to a carrier that forgets to — which is exactly how the recall carrier
+    shipped keyless and green.
+
     The digest is over totals, so two vaults that each owe one prediction produce
-    the SAME digest. Keyed by (session, audience) alone, the second vault would go
-    quiet about an item nobody had been told about — a wrong answer, not a quiet one.
+    the SAME digest. Keyed by (session, audience) alone, the second vault goes quiet
+    about an item nobody has been told about — a wrong answer, not a quiet one.
     """
     second = tmp_path / "second-vault"
     (second / INSIGHTS).mkdir(parents=True)
     _overdue_prediction(vault, check_by=_yesterday())
     _overdue_prediction(second, check_by=_yesterday())
 
-    first_block = _due_state().served(vault)
-    second_block = _due_state().served(second)
-    assert first_block == second_block, "identical totals, so the digests coincide"
+    assert _due_state().served(vault) == _due_state().served(second), (
+        "identical totals, so the digests coincide"
+    )
 
-    assert _due_state().should_emit(first_block, vault_root=vault)
-    assert _due_state().should_emit(second_block, vault_root=second), (
+    first = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+    other = commands.op_ask_memory(second, query="autovacuum", limit=5)
+    repeat = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+
+    assert isinstance(first, dict) and "due_state" in first
+    assert isinstance(other, dict) and "due_state" in other, (
         "the second vault has its own first-of-session emission"
     )
-    assert not _due_state().should_emit(first_block, vault_root=vault)
+    assert not (isinstance(repeat, dict) and "due_state" in repeat), (
+        "the first vault's identical repeat still goes quiet"
+    )
+
+
+def test_a_recall_after_a_write_is_quiet_when_the_totals_have_not_moved(
+    vault: Path,
+) -> None:
+    """The write and the recall have to agree on the key, or the session hears it twice.
+
+    `mutation_terminal._admit_due_state` passes the vault. The recall carrier did
+    not, so a write recorded under `(session, audience, '/vault')` while the very
+    next recall asked about `(session, audience, '')` — a miss by construction.
+    Identical totals delivered twice in one session is what
+    `specs/command-surface/spec.md:26` forbids.
+    """
+    _overdue_prediction(vault, check_by=_yesterday())
+    _scratch_page(vault)
+    _prime(vault)
+
+    mutation = _observe(vault, "Reader saturation reproduces on the replica too.")
+    assert "due_state" in mutation, "the write is this session's first delivery"
+    delivered = mutation["due_state"]
+
+    recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+
+    assert _due_state().served(vault, purpose="recall") == delivered, (
+        "the totals have not moved, so the question is only about the key"
+    )
+    assert not (isinstance(recall, dict) and "due_state" in recall), (
+        "the recall repeats totals the write already delivered"
+    )
+
+
+def test_a_recall_after_bootstrap_is_quiet_when_the_totals_have_not_moved(
+    vault: Path,
+) -> None:
+    """Bootstrap attaches unconditionally, so it must also RECORD the delivery.
+
+    The contract makes bootstrap's attachment unconditional — a session that starts
+    on a reduced surface has no other way to hear about it. That is a delivery, and
+    a delivery the governor never learned about let the first recall of the session
+    repeat the identical block.
+    """
+    _overdue_prediction(vault, check_by=_yesterday())
+    _fresh_session()
+
+    payload = commands.op_bootstrap(vault)
+    recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+
+    assert "due_state" in payload, "bootstrap always carries it"
+    assert not (isinstance(recall, dict) and "due_state" in recall), (
+        "bootstrap DELIVERED this block, so the first recall with the same totals "
+        "is a repeat"
+    )
+
+
+def test_a_write_after_bootstrap_carries_the_block_when_the_totals_move(
+    vault: Path,
+) -> None:
+    """Recording bootstrap's delivery must silence repeats, not the next real change.
+
+    The inverse of the test above, and the reason `mark_emitted` is keyed on a
+    digest rather than on a flag: a change of totals is always news.
+    """
+    from exomem import attention as attention_module
+
+    _overdue_prediction(vault, "backlog", check_by=_yesterday())
+    _overdue_prediction(vault, "replica-lag", check_by=_yesterday())
+    _scratch_page(vault)
+    _prime(vault)
+
+    rows = _due_state().served_entries(vault)
+    assert len(rows) == 2, f"expected two due items, got {len(rows)}"
+    parked = rows[0]["ref"]
+    item = attention_module.item_by_ref(vault, parked)
+    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="later")
+    _fresh_session()
+
+    payload = commands.op_bootstrap(vault)
+    assert payload["due_state"]["total"] == 1
+
+    commands.op_triage_memory(vault, ref=parked, action="reopen")
+    mutation = _observe(vault, "Replica lag reproduces under the same load.")
+
+    assert "due_state" in mutation, (
+        "bootstrap recorded total=1; this write is total=2, which is news"
+    )
+    assert mutation["due_state"]["total"] == 2
 
 
 def _outcomes_on_the_mutation_receipt(vault: Path, content: str) -> int:

@@ -1102,7 +1102,14 @@ def op_bootstrap(
         with egress_module.disclosure_boundary(vault_root, "bootstrap"):
             due_block = due_state_module.served(vault_root)
         if due_block is not None:
+            # Attached unconditionally, then RECORDED. The attachment stays
+            # unconditional because a session opening on a reduced surface has no
+            # other way to hear about this at all, so bootstrap is not governed by
+            # emission. But it is still a delivery: without marking it, the first
+            # recall of the session repeats the identical block, which is the exact
+            # nagging the governor exists to prevent.
             payload["due_state"] = due_block
+            due_state_module.mark_emitted(due_block, vault_root=vault_root)
     except Exception:  # noqa: BLE001 — a due-state count never breaks a bootstrap
         log.debug("due-state projection unavailable for bootstrap", exc_info=True)
     return _filter_bootstrap_payload(payload, active_descriptor)
@@ -4372,7 +4379,7 @@ def _with_due_state(
         # anything is counted.
         with egress_module.disclosure_boundary(vault_root, "ask_memory"):
             block = due_state_module.served(vault_root, purpose=purpose)
-        if not due_state_module.should_emit(block):
+        if not due_state_module.should_emit(block, vault_root=vault_root):
             return result
     except Exception:  # noqa: BLE001 — a due-state count never breaks a recall
         log.debug("due-state projection unavailable for recall", exc_info=True)
