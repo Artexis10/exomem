@@ -25,6 +25,10 @@
 - [x] 1.21 test_registry_records_inactive_status_and_skips_non_entity_pages: lifecycle is retained and page type enforced.
 - [x] 1.22 test_registry_skips_index_and_records_paths: navigation pages are excluded.
 - [x] 1.23 test_registry_cache_hits_on_same_freshness_key_and_rebuilds_on_new_key: checkpoint cache invalidates exactly.
+- [x] 1.24 test_cue_prefers_typed_noun_over_leading_interrogative: typed nouns outrank interrogative fallback cues.
+- [x] 1.25 test_cue_count_survives_interrogative_prefix: a leading interrogative cannot discard the typed noun's count.
+- [x] 1.26 test_partial_name_token_is_fuzzy_name_evidence: an exact token within a longer identity remains partial-name evidence.
+- [x] 1.27 test_candidates_are_capped_deterministically_with_omitted_count: serialized matches are path-stable and bounded.
 
 ## 2. Runtime, envelope, and governance
 
@@ -42,12 +46,18 @@
 - [x] 2.12 test_referents_never_name_withheld_entity_pages: withheld entities cannot leak.
 - [x] 2.13 test_referents_drop_evidence_naming_withheld_anchor_seeds: withheld anchors cannot leak through evidence.
 - [x] 2.14 test_referents_block_omitted_for_blocked_audience: blocked policy is silent.
+- [x] 2.15 test_referents_drop_tombstoned_entities_and_evidence_even_when_policy_is_empty: lifecycle deletions fail closed before policy routing.
+- [x] 2.16 test_referents_release_decisions_are_receipted: every referent-path decision reaches the disclosure receipt.
+- [x] 2.17 test_referents_block_omitted_when_guard_withholds_every_match: guarded emptiness cannot reveal a hidden match.
+- [x] 2.18 test_referents_honour_release_strip_decisions: bridge stripping removes detail without dropping the released identity.
+- [x] 2.19 test_resolver_exception_is_logged_and_soft_fails: additive resolver failures warn once and preserve hits.
+- [x] 2.20 test_ask_cli_lists_hits_and_summarises_referents_for_cue_queries: human CLI output keeps hit listings and adds a referent summary.
 
 ## 3. Benchmark, performance, and guidance
 
 - [x] 3.1 test_fixture_render_is_deterministic_for_seed: seeded corpus bytes are reproducible.
 - [x] 3.2 test_fixture_passes_public_artifact_privacy_scan: committed fixture content is synthetic/public-safe.
-- [x] 3.3 test_every_case_meets_expected_outcome_with_graph_on: cases A-J meet their graph-on contract.
+- [x] 3.3 test_every_case_meets_expected_outcome_with_graph_on: cases A, A2, B, C, D, D2, E, F, G, H, I, and J meet their graph-on contract.
 - [x] 3.4 test_graph_only_cases_fail_without_graph_and_pass_with_graph: graph value is measured by ablation.
 - [x] 3.5 test_negative_control_and_ambiguity_cases_abstain: unsafe cases never false-resolve.
 - [x] 3.6 test_metric_floors_hold: aggregate quality floors are enforced.

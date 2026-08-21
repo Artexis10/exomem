@@ -81,11 +81,11 @@ from . import plan_progress as plan_progress_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
-from . import referent_runtime as referent_runtime_module
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
+from . import referent_runtime as referent_runtime_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
@@ -984,7 +984,9 @@ def op_bootstrap(
                     "a bounded retrieval profile and per-hit evidence without changing recall"
                 ),
                 "referents": (
-                    "resolved names; partial N unresolved; ambiguous ask; unresolved never guess"
+                    "partial ambiguous unresolved; never guess"
+                    if profile == "compact"
+                    else "resolved names; partial N unresolved; ambiguous ask; unresolved never guess"
                 ),
                 "score_interpretation": {
                     "bm25": "backend relevance value; interpret using the returned direction and range",
@@ -1408,7 +1410,8 @@ def op_find(
         )
         hits = release.hits
     referents: dict[str, Any] | None = None
-    if referent_runtime_module.should_resolve_for_find(query=query, mode=mode):
+    referent_cue = referent_runtime_module.cue_for_find(query=query, mode=mode)
+    if referent_cue is not None:
         with find_module._span(timings, "referents"):
             try:
                 referents = referent_runtime_module.resolve_for_find(
@@ -1419,6 +1422,7 @@ def op_find(
                     graph=graph,
                     release=release,
                     purpose=purpose,
+                    cue=referent_cue,
                 )
             except Exception:
                 referents = None

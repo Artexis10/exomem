@@ -4,9 +4,22 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "referent_resolution_benchmark.py"
 MANIFEST = ROOT / "tests" / "fixtures" / "referent_resolution" / "manifest.json"
+
+
+@pytest.fixture(autouse=True)
+def _model_free_benchmark(monkeypatch: pytest.MonkeyPatch):
+    from exomem import find as find_module
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    find_module.clear_cache()
+    yield
+    find_module.clear_cache()
 
 
 def _module():
@@ -34,6 +47,20 @@ def test_fixture_passes_public_artifact_privacy_scan(tmp_path: Path) -> None:
 
 def test_every_case_meets_expected_outcome_with_graph_on(tmp_path: Path) -> None:
     report = _module().run_benchmark(MANIFEST, work_root=tmp_path)
+    assert [case["case_id"] for case in report["_case_results"]] == [
+        "A",
+        "A2",
+        "B",
+        "C",
+        "D",
+        "D2",
+        "E",
+        "F",
+        "G",
+        "H",
+        "I",
+        "J",
+    ]
     assert all(case["graph_on"]["expected"] for case in report["_case_results"])
 
 

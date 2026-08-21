@@ -30,6 +30,11 @@ The resolver SHALL emit resolved at exact count, partial with an unresolved coun
 - **WHEN** one person resolves and the query expected two
 - **THEN** status is partial and unresolved_count is one
 
+#### Scenario: Candidate envelope remains bounded
+- **WHEN** more than 25 entities have candidate or resolved evidence
+- **THEN** each list contains its first 25 paths in deterministic order
+- **AND** omitted_candidate_count reports the total omitted remainder
+
 ### Requirement: Referents Never Reorder Or Alter Hits
 The referent stage SHALL run after release annotation, SHALL never enter the hit cache, and SHALL omit itself without changing hits on disablement or error.
 
@@ -38,7 +43,7 @@ The referent stage SHALL run after release annotation, SHALL never enter the hit
 - **THEN** hits are byte-identical and no referents block or timing stage appears
 
 ### Requirement: Graph Corroboration Is Optional And Ablatable
-Graph evidence SHALL use at most the first ten released non-superseded anchors and one sidecar neighbor call, and SHALL be absent when graph is false or unavailable.
+Graph evidence SHALL use the top ten released hits as its bounded prefix, SHALL ignore any superseded hit inside that prefix, and SHALL make one sidecar neighbor call. It SHALL be absent when graph is false or unavailable.
 
 #### Scenario: Graph off
 - **WHEN** the existing graph argument is false

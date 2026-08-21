@@ -105,6 +105,9 @@ _PERSON_NOUNS = frozenset(
         "whose",
     }
 )
+_INTERROGATIVE_NOUNS = frozenset({"who", "whom", "whose"})
+
+REFERENT_CANDIDATE_CAP = 25
 
 
 def _tokens(text: object) -> tuple[str, ...]:
@@ -212,6 +215,7 @@ class ReferentResolution:
     candidates: tuple[ReferentMatch, ...]
     unresolved_count: int | None
     reasons: Mapping[str, int]
+    omitted_candidate_count: int
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -225,23 +229,30 @@ class ReferentResolution:
             out["expected_count"] = self.expected_count
         if self.unresolved_count is not None:
             out["unresolved_count"] = self.unresolved_count
+        if self.omitted_candidate_count:
+            out["omitted_candidate_count"] = self.omitted_candidate_count
         return out
 
 
 def detect_cue(query: str) -> ReferentCue | None:
     """Return the first deterministic entity cue, or ``None``."""
     tokens = _tokens(query)
-    cue_index = -1
-    noun = ""
-    entity_type = ""
+    selected: tuple[int, str, str] | None = None
+    fallback: tuple[int, str, str] | None = None
     for index, token in enumerate(tokens):
-        if token in _CUE_NOUNS:
-            cue_index = index
-            noun = token
-            entity_type = _CUE_NOUNS[token]
-            break
-    if cue_index < 0:
+        entity_type = _CUE_NOUNS.get(token)
+        if entity_type is None:
+            continue
+        match = (index, token, entity_type)
+        if token in _INTERROGATIVE_NOUNS:
+            fallback = fallback or match
+            continue
+        selected = match
+        break
+    chosen = selected or fallback
+    if chosen is None:
         return None
+    cue_index, noun, entity_type = chosen
 
     expected_count: int | None = None
     for token in reversed(tokens[max(0, cue_index - 3) : cue_index]):
@@ -297,7 +308,6 @@ def _fuzzy_name(cue: ReferentCue, entity: EntityRecord) -> tuple[str, str, int] 
                 not query_token
                 or query_token[0] != candidate[0]
                 or abs(len(query_token) - len(candidate)) > 2
-                or query_token == candidate
             ):
                 continue
             distance = _levenshtein(query_token, candidate, max_dist=threshold)
@@ -450,12 +460,16 @@ def resolve_referents(
         status = "partial" if resolved_tuple else "unresolved"
         unresolved_count = expected - len(resolved_tuple)
 
+    omitted_candidate_count = max(0, len(resolved) - REFERENT_CANDIDATE_CAP) + max(
+        0, len(candidates) - REFERENT_CANDIDATE_CAP
+    )
     return ReferentResolution(
         status=status,
         entity_type=cue.entity_type,
         expected_count=expected,
-        resolved=resolved_tuple,
-        candidates=tuple(candidates),
+        resolved=resolved_tuple[:REFERENT_CANDIDATE_CAP],
+        candidates=tuple(candidates[:REFERENT_CANDIDATE_CAP]),
         unresolved_count=unresolved_count,
         reasons=reasons,
+        omitted_candidate_count=omitted_candidate_count,
     )

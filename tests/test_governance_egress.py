@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands
+from exomem import commands, referent_runtime
 from exomem import find as find_module
 from exomem.find_types import GraphProvenance, Hit
-from exomem.governance import egress, receipts
+from exomem.governance import bridges, egress, receipts
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 # --------------------------------------------------------------------------
@@ -610,13 +610,24 @@ def test_op_find_never_leaks_a_withheld_path_in_graph_provenance(vault: Path) ->
 # --------------------------------------------------------------------------
 
 
-def test_find_hot_cache_stays_principal_free(vault: Path) -> None:
+def test_find_hot_cache_stays_principal_free(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Two audiences, second call served from the hot cache: decisions are
     recomputed per request and NO cached candidate copy carries a prior
     audience's decision."""
     write_scope(vault)
     write_rule(vault, ceiling=0)
-    query = "kill switch risky releases"
+    query = "kill switch risky releases for two people"
+    resolver_calls = 0
+    original_resolver = referent_runtime.resolve_for_find
+
+    def counted_resolver(*args, **kwargs):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return original_resolver(*args, **kwargs)
+
+    monkeypatch.setattr(referent_runtime, "resolve_for_find", counted_resolver)
 
     with request_scope(_external()):
         commands.op_find(vault, query=query, limit=10)
@@ -624,7 +635,8 @@ def test_find_hot_cache_stays_principal_free(vault: Path) -> None:
         second = commands.op_find(vault, query=query, limit=10)
 
     # The owner sees the restricted page the external audience could not.
-    assert RESTRICTED_PATH in [h["path"] for h in second]
+    second_hits = second["hits"] if isinstance(second, dict) else second
+    assert RESTRICTED_PATH in [h["path"] for h in second_hits]
 
     # Every Hit sitting in the shared hot cache is principal-free.
     cached_hits = [
@@ -632,7 +644,8 @@ def test_find_hot_cache_stays_principal_free(vault: Path) -> None:
     ]
     assert cached_hits, "expected the hot cache to be populated"
     assert all(getattr(hit, "decision", None) is None for hit in cached_hits)
-    assert all(not hasattr(hit, "referents") for hit in cached_hits)
+    assert all("referents" not in hit.as_dict() for hit in cached_hits)
+    assert resolver_calls == 2, "referents must be recomputed on the hot-cache hit"
 
 
 def test_referents_never_name_withheld_entity_pages(vault: Path) -> None:
@@ -708,6 +721,155 @@ def test_referents_block_omitted_for_blocked_audience(vault: Path) -> None:
     }
     with request_scope(_external()):
         assert egress.guard_referents(vault, block, release) is None
+
+
+def test_referents_drop_tombstoned_entities_and_evidence_even_when_policy_is_empty(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tombstoned_entity = "Knowledge Base/Entities/People/tombstoned.md"
+    tombstoned_anchor = "Knowledge Base/Notes/Research/tombstoned-anchor.md"
+    monkeypatch.setattr(
+        egress.lifecycle,
+        "is_tombstoned",
+        lambda _vault, path: path in {tombstoned_entity, tombstoned_anchor},
+    )
+    release = egress.AnnotatedHits(hits=[], active=False)
+    block = {
+        "status": "resolved",
+        "entity_type": "person",
+        "resolved": [
+            {
+                "path": tombstoned_entity,
+                "title": "Tombstoned",
+                "entity_type": "person",
+                "evidence": [{"kind": "exact_name", "matched": "Tombstoned"}],
+            }
+        ],
+        "candidates": [
+            {
+                "path": OPEN_PATH,
+                "title": "Open",
+                "entity_type": "person",
+                "evidence": [
+                    {"kind": "graph", "seed": tombstoned_anchor},
+                    {"kind": "attribute", "matched": ["friend"]},
+                ],
+            }
+        ],
+        "reasons": {},
+    }
+
+    guarded = egress.guard_referents(vault, block, release)
+
+    assert guarded is not None
+    assert guarded["resolved"] == []
+    assert guarded["candidates"][0]["evidence"] == [
+        {"kind": "attribute", "matched": ["friend"]}
+    ]
+    assert tombstoned_entity not in str(guarded)
+    assert tombstoned_anchor not in str(guarded)
+
+
+def test_referents_release_decisions_are_receipted(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    release = egress.AnnotatedHits(hits=[], active=True)
+    block = {
+        "status": "resolved",
+        "entity_type": "person",
+        "resolved": [
+            {"path": RESTRICTED_PATH, "title": "Hidden", "evidence": []}
+        ],
+        "candidates": [{"path": OPEN_PATH, "title": "Open", "evidence": []}],
+        "reasons": {},
+    }
+
+    with request_scope(_external()), egress.disclosure_boundary(vault, "find") as collector:
+        egress.guard_referents(vault, block, release)
+        egress.emit_boundary_receipt(collector)
+
+    outcomes = _receipt_records(vault)[0]["outcomes"]
+    assert {item["decision"] for item in outcomes} == {"released", "withheld"}
+
+
+def test_referents_block_omitted_when_guard_withholds_every_match(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.referent_resolution import EntityRecord
+
+    entity_path = "Knowledge Base/Entities/People/hidden-entity.md"
+    write_scope(vault, paths="Entities/People/**", name="People")
+    write_rule(vault, ceiling=0)
+    entity = EntityRecord(
+        path=entity_path,
+        title="Hidden Entity",
+        entity_type="person",
+        status="active",
+    )
+    monkeypatch.setattr(
+        referent_runtime,
+        "load_entity_registry",
+        lambda *_args, **_kwargs: {entity_path: entity},
+    )
+    release = egress.AnnotatedHits(hits=[], active=True)
+
+    with request_scope(_external()):
+        block = referent_runtime.resolve_for_find(
+            vault,
+            query="who was Hidden Entity",
+            hits=[],
+            mode="hybrid",
+            graph=False,
+            release=release,
+            purpose=None,
+        )
+
+    assert block is None
+
+
+def test_referents_honour_release_strip_decisions(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=6)
+    identity = bridges.StripIdentity(
+        path=OPEN_PATH,
+        ref="exomem://memory/open",
+        title="Open",
+    )
+    decision = egress.Decision(
+        level=egress.LEVEL_FULL,
+        release_strip=(identity,),
+    )
+    monkeypatch.setattr(egress, "_decide_path", lambda *_args, **_kwargs: decision)
+    block = {
+        "status": "resolved",
+        "entity_type": "person",
+        "resolved": [
+            {
+                "path": OPEN_PATH,
+                "title": "Open",
+                "entity_type": "person",
+                "ref": "exomem://memory/open",
+                "evidence": [{"kind": "exact_name", "matched": "Open"}],
+            }
+        ],
+        "candidates": [],
+        "reasons": {},
+    }
+
+    with request_scope(owner_principal()):
+        guarded = egress.guard_referents(
+            vault,
+            block,
+            egress.AnnotatedHits(hits=[], active=True),
+        )
+
+    assert guarded is not None
+    assert guarded["resolved"][0]["path"] == OPEN_PATH
+    assert guarded["resolved"][0]["title"] == "Open"
+    assert "ref" not in guarded["resolved"][0]
+    assert guarded["resolved"][0]["evidence"] == []
 
 
 def test_purpose_never_enters_the_find_cache_key(vault: Path) -> None:

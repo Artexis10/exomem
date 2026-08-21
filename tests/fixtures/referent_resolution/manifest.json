@@ -6,9 +6,11 @@
   "noise_organizations": 6,
   "cases": [
     {"id": "A", "query": "my two aerian friends", "status": "resolved", "resolved": ["a-one", "a-two"], "expected_count": 2},
+    {"id": "A2", "query": "Who are my two aerian friends?", "status": "resolved", "resolved": ["a-one", "a-two"], "expected_count": 2},
     {"id": "B", "query": "which tundran colleague", "status": "resolved", "resolved": ["b-one"]},
     {"id": "C", "query": "which observatory colleague", "status": "resolved", "resolved": ["c-one"]},
     {"id": "D", "query": "which person was Velix", "status": "resolved", "resolved": ["d-one"]},
+    {"id": "D2", "query": "which zephyric friend was Nerol", "status": "resolved", "resolved": ["d-two"]},
     {"id": "E", "query": "my two pelagic friends", "status": "partial", "resolved": ["e-one"], "expected_count": 2, "unresolved_count": 1},
     {"id": "F", "query": "my one ember colleague", "status": "ambiguous", "resolved": ["f-one", "f-two"], "expected_count": 1},
     {"id": "G", "query": "which basalt person", "status": "unresolved", "resolved": []},

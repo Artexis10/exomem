@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import math
 
 
 def _rr():
@@ -78,6 +77,21 @@ def test_cue_organization_from_registry_aliases() -> None:
     assert cue.expected_count == 2
 
 
+def test_cue_prefers_typed_noun_over_leading_interrogative() -> None:
+    cue = _rr().detect_cue("Who is the coastal friend?")
+    assert cue is not None
+    assert cue.noun == "friend"
+    assert cue.entity_type == "person"
+    assert "coastal" in cue.descriptors
+
+
+def test_cue_count_survives_interrogative_prefix() -> None:
+    cue = _rr().detect_cue("Who are my two coastal friends?")
+    assert cue is not None
+    assert cue.noun == "friends"
+    assert cue.expected_count == 2
+
+
 def test_exact_name_resolves_alone() -> None:
     out = _resolve("which person was Aria Vale")
     assert out.status == "resolved"
@@ -92,6 +106,18 @@ def test_fuzzy_name_needs_second_kind() -> None:
     assert {e.kind for e in fuzzy_only.candidates[0].evidence} == {"fuzzy_name"}
     corroborated = _resolve("which friend was Maribell", entities=(entity,))
     assert [item.path for item in corroborated.resolved] == [entity.path]
+
+
+def test_partial_name_token_is_fuzzy_name_evidence() -> None:
+    entity = _entity(title="Aster Vale", relationship="friend")
+    out = _resolve("which friend was Aster", entities=(entity,))
+    evidence = {item.kind: item.detail for item in out.resolved[0].evidence}
+    assert evidence["fuzzy_name"] == {
+        "query_token": "aster",
+        "name_token": "aster",
+        "distance": 0,
+    }
+    assert "attribute" in evidence
 
 
 def test_graph_edge_from_non_entity_anchor_is_graph_evidence() -> None:
@@ -208,6 +234,23 @@ def test_no_count_zero_resolved_is_unresolved() -> None:
     assert out.status == "unresolved"
 
 
+def test_candidates_are_capped_deterministically_with_omitted_count() -> None:
+    rr = _rr()
+    entities = tuple(
+        _entity(
+            f"Knowledge Base/Entities/People/candidate-{index:02d}.md",
+            title=f"Candidate {index:02d}",
+            relationship="friend",
+        )
+        for index in reversed(range(rr.REFERENT_CANDIDATE_CAP + 7))
+    )
+    block = _resolve("my two friends", entities=entities).as_dict()
+    assert [item["path"] for item in block["candidates"]] == sorted(
+        entity.path for entity in entities
+    )[: rr.REFERENT_CANDIDATE_CAP]
+    assert block["omitted_candidate_count"] == 7
+
+
 def test_block_contains_no_floats() -> None:
     entity = _entity(tags=("coastal",), relationship="friend")
     block = _resolve("my two coastal friends", entities=(entity,)).as_dict()
@@ -217,7 +260,7 @@ def test_block_contains_no_floats() -> None:
             return all(walk(v) for v in value.values())
         if isinstance(value, (list, tuple)):
             return all(walk(v) for v in value)
-        return not isinstance(value, float) or math.isnan(value)
+        return not isinstance(value, float)
 
     assert walk(block)
 

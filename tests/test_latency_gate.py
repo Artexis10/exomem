@@ -33,6 +33,7 @@ hide. Re-measure (don't hand-tune) if the corpus generator or lane code changes.
 
 from __future__ import annotations
 
+import json
 import statistics
 import sys
 from pathlib import Path
@@ -307,11 +308,10 @@ def test_warm_graph_lane_does_not_scale_linearly(tmp_path: Path, model_free) -> 
     )
 
 
-def _referent_stage_median(vault: Path) -> float:
+def _measure_referent_stage(vault: Path) -> tuple[float, float, dict]:
     from exomem import commands
 
-    samples: list[float] = []
-    for _ in range(3):
+    def call() -> dict:
         result = commands.op_find(
             vault,
             query="my two synthetic friends",
@@ -321,10 +321,19 @@ def _referent_stage_median(vault: Path) -> float:
             rerank=False,
             include_timings=True,
         )
+        assert isinstance(result, dict)
+        return result
+
+    first = call()
+    first_stage = first["timings"]["stages"].get("referents")
+    assert first_stage is not None and "ms" in first_stage
+    samples: list[float] = []
+    for _ in range(3):
+        result = call()
         stage = result["timings"]["stages"].get("referents")
         assert stage is not None and "ms" in stage
         samples.append(stage["ms"])
-    return statistics.median(samples)
+    return first_stage["ms"], statistics.median(samples), first["referents"]
 
 
 @pytest.mark.timeout(300)
@@ -332,13 +341,26 @@ def test_referent_stage_stays_bounded_at_scale(
     tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from synth_vault import gen_entity_overlay
-    from exomem import commands
+
+    from exomem import commands, referent_runtime
 
     vault = _build_dense_vault(tmp_path, N_NOTES)
-    gen_entity_overlay(vault, 125, seed=19)
+    gen_entity_overlay(vault, 500, seed=19)
     _seed_freshness_live(vault)
-    referents_ms = _referent_stage_median(vault)
+    cold_referents_ms, referents_ms, block = _measure_referent_stage(vault)
+    assert cold_referents_ms < CEIL_REFERENTS_MS
     assert referents_ms < CEIL_REFERENTS_MS
+    assert len(json.dumps(block)) < 16_000
+
+    resolver_calls = 0
+    original_resolver = referent_runtime.resolve_for_find
+
+    def counted_resolver(*args, **kwargs):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return original_resolver(*args, **kwargs)
+
+    monkeypatch.setattr(referent_runtime, "resolve_for_find", counted_resolver)
 
     non_cue = commands.op_find(
         vault,
@@ -349,6 +371,7 @@ def test_referent_stage_stays_bounded_at_scale(
         include_timings=True,
     )
     assert "referents" not in non_cue["timings"]["stages"]
+    assert resolver_calls == 0
 
     monkeypatch.setenv("EXOMEM_DISABLE_REFERENTS", "1")
     disabled = commands.op_find(
@@ -369,12 +392,12 @@ def test_referent_stage_does_not_scale_linearly(tmp_path: Path, model_free) -> N
     small = _build_dense_vault(tmp_path, N_NOTES)
     gen_entity_overlay(small, 125, seed=23)
     _seed_freshness_live(small)
-    small_ms = _referent_stage_median(small)
+    _, small_ms, _ = _measure_referent_stage(small)
 
     large = _build_dense_vault(tmp_path, N_NOTES_LARGE)
     gen_entity_overlay(large, 500, seed=23)
     _seed_freshness_live(large)
-    large_ms = _referent_stage_median(large)
+    _, large_ms, _ = _measure_referent_stage(large)
 
     bound = max(
         small_ms * CEIL_REFERENTS_RATIO,

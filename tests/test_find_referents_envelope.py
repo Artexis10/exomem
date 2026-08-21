@@ -172,6 +172,26 @@ def test_resolver_exception_soft_fails_to_unchanged_response(
     assert isinstance(result, list) or "referents" not in result
 
 
+def test_resolver_exception_is_logged_and_soft_fails(
+    referent_vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = _runtime()
+    monkeypatch.setattr(
+        runtime,
+        "load_entity_registry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("registry boom")),
+    )
+
+    with caplog.at_level("WARNING", logger="exomem.referent_runtime"):
+        result = _call(referent_vault)
+
+    assert isinstance(result, list) or "referents" not in result
+    assert "referent resolution failed" in caplog.text
+    assert "registry boom" in caplog.text
+
+
 def test_kill_switch_env_disables_resolver(referent_vault: Path, monkeypatch) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_REFERENTS", "1")
     result = _call(referent_vault)

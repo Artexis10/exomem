@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -10,18 +11,30 @@ from . import epistemic_graph, memory_refs
 from .entity_registry import load_entity_registry
 from .find import FreshnessSnapshot
 from .governance import egress
-from .referent_resolution import EdgeFact, HitFact, detect_cue, resolve_referents
+from .referent_resolution import (
+    EdgeFact,
+    HitFact,
+    ReferentCue,
+    detect_cue,
+    resolve_referents,
+)
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
+log = logging.getLogger(__name__)
+
+
+def cue_for_find(*, query: str, mode: str) -> ReferentCue | None:
+    """Return the eligible cue once, before opening the optional stage."""
+    if mode not in {"hybrid", "vector"}:
+        return None
+    if os.environ.get("EXOMEM_DISABLE_REFERENTS", "").strip().casefold() in _TRUE:
+        return None
+    return detect_cue(query)
 
 
 def should_resolve_for_find(*, query: str, mode: str) -> bool:
     """Cheap trigger used before opening the optional timing span."""
-    if mode not in {"hybrid", "vector"}:
-        return False
-    if os.environ.get("EXOMEM_DISABLE_REFERENTS", "").strip().casefold() in _TRUE:
-        return False
-    return detect_cue(query) is not None
+    return cue_for_find(query=query, mode=mode) is not None
 
 
 def _hit_facts(hits: list[Any]) -> tuple[HitFact, ...]:
@@ -97,12 +110,15 @@ def resolve_for_find(
     graph: bool,
     release: Any,
     purpose: str | None,
+    cue: ReferentCue | None = None,
 ) -> dict[str, Any] | None:
     """Resolve a bounded referent block; every exception soft-fails."""
     try:
-        if not should_resolve_for_find(query=query, mode=mode):
+        if mode not in {"hybrid", "vector"}:
             return None
-        cue = detect_cue(query)
+        if os.environ.get("EXOMEM_DISABLE_REFERENTS", "").strip().casefold() in _TRUE:
+            return None
+        cue = cue or detect_cue(query)
         if cue is None:
             return None
         freshness_key = FreshnessSnapshot(vault_root).projection_key("kb")
@@ -131,6 +147,12 @@ def resolve_for_find(
         )
         if guarded is None:
             return None
+        if (
+            not guarded.get("resolved")
+            and not guarded.get("candidates")
+            and guarded.get("expected_count") is None
+        ):
+            return None
         paths = [
             str(item.get("path") or "")
             for section in ("resolved", "candidates")
@@ -144,4 +166,5 @@ def resolve_for_find(
                     item["ref"] = ref
         return guarded
     except Exception:  # noqa: BLE001 - the additive stage is contractually fail-open
+        log.warning("referent resolution failed; omitting additive block", exc_info=True)
         return None

@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from exomem import commands, epistemic_graph
+from exomem import commands, epistemic_graph, public_artifact_privacy
 from exomem import find as find_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,9 +67,11 @@ def _entity(
         optional += f"aliases: [{', '.join(aliases)}]\n"
     relation_text = ""
     if relations:
-        relation_text = "\n## Relations\n" + "\n".join(
-            f"- relates_to [[{target[:-3]}]]" for target in relations
-        ) + "\n"
+        relation_text = (
+            "\n## Relations\n"
+            + "\n".join(f"- relates_to [[{target[:-3]}]]" for target in relations)
+            + "\n"
+        )
     _write(
         root,
         rel,
@@ -97,9 +99,11 @@ def _note(
     rel = f"Knowledge Base/Notes/Research/{note_id}.md"
     relation_text = ""
     if relations:
-        relation_text = "\n## Relations\n" + "\n".join(
-            f"- about_entity [[{target[:-3]}]]" for target in relations
-        ) + "\n"
+        relation_text = (
+            "\n## Relations\n"
+            + "\n".join(f"- about_entity [[{target[:-3]}]]" for target in relations)
+            + "\n"
+        )
     _write(
         root,
         rel,
@@ -117,17 +121,53 @@ def _note(
 def _render_cases(root: Path) -> dict[str, str]:
     paths: dict[str, str] = {}
 
-    a_topic = _note(root, "a-aerian", "Two aerian friends compared seasonal routes.")
-    paths["a-one"] = _entity(root, "a-one", "Aven Sol", relationship="friend", tags=("aerian",), relations=(a_topic,))
-    paths["a-two"] = _entity(root, "a-two", "Bex Tor", relationship="friend", tags=("aerian",), relations=(a_topic,))
+    a_topic = _note(
+        root,
+        "a-aerian",
+        (
+            "Who are my two aerian friends? Seasonal routes were compared across "
+            "a synthetic archive with neutral measurements."
+        ),
+    )
+    paths["a-one"] = _entity(
+        root,
+        "a-one",
+        "Aven Sol",
+        relationship="friend",
+        tags=("aerian",),
+        body="An aerian identity in the synthetic benchmark.",
+        relations=(a_topic,),
+    )
+    paths["a-two"] = _entity(
+        root,
+        "a-two",
+        "Bex Tor",
+        relationship="friend",
+        tags=("aerian",),
+        body="Another aerian identity in the synthetic benchmark.",
+        relations=(a_topic,),
+    )
+    for index in range(12):
+        _note(
+            root,
+            f"friend-noise-{index:02d}",
+            "My two friends discussed two friend routes in a synthetic archive.",
+        )
 
     paths["b-one"] = _entity(
-        root, "b-one", "Cira Venn", relationship="colleague", tags=("tundran",),
+        root,
+        "b-one",
+        "Cira Venn",
+        relationship="colleague",
+        tags=("tundran",),
         body="A tundran colleague working on synthetic instruments.",
     )
 
     c_org = _entity(
-        root, "c-org", "Orbel Array", entity_type="organization",
+        root,
+        "c-org",
+        "Orbel Array",
+        entity_type="organization",
         body="An observatory colleague network for synthetic sky measurements.",
     )
     paths["c-one"] = _entity(
@@ -135,28 +175,60 @@ def _render_cases(root: Path) -> dict[str, str]:
     )
 
     paths["d-one"] = _entity(root, "d-one", "Velyn Rook", aliases=("Velix",))
+    paths["d-two"] = _entity(
+        root,
+        "d-two",
+        "Neral Pike",
+        relationship="friend",
+        tags=("zephyric",),
+    )
 
     e_topic = _note(root, "e-pelagic", "Two pelagic friends discussed currents.")
-    paths["e-one"] = _entity(root, "e-one", "Eris Noll", relationship="friend", tags=("pelagic",), relations=(e_topic,))
+    paths["e-one"] = _entity(
+        root, "e-one", "Eris Noll", relationship="friend", tags=("pelagic",), relations=(e_topic,)
+    )
 
     paths["f-one"] = _entity(
-        root, "f-one", "Fara Wex", relationship="colleague", tags=("ember",),
+        root,
+        "f-one",
+        "Fara Wex",
+        relationship="colleague",
+        tags=("ember",),
         body="My one ember colleague in the synthetic trial.",
     )
     paths["f-two"] = _entity(
-        root, "f-two", "Garo Yul", relationship="colleague", tags=("ember",),
+        root,
+        "f-two",
+        "Garo Yul",
+        relationship="colleague",
+        tags=("ember",),
         body="My one ember colleague in another synthetic trial.",
     )
 
-    h_active = _note(root, "h-active", "Two old-harbour friends were expected; one remains represented.")
-    h_old = _note(root, "h-old", "An old-harbour friend from an obsolete account.", status="superseded")
-    paths["h-one"] = _entity(root, "h-one", "Hesa Zor", relationship="friend", tags=("old-harbour",), relations=(h_active,))
-    paths["h-old"] = _entity(root, "h-old", "Iven Cal", relationship="friend", tags=("old-harbour",), relations=(h_old,))
+    h_active = _note(
+        root, "h-active", "Two old-harbour friends were expected; one remains represented."
+    )
+    h_old = _note(
+        root, "h-old", "An old-harbour friend from an obsolete account.", status="superseded"
+    )
+    paths["h-one"] = _entity(
+        root,
+        "h-one",
+        "Hesa Zor",
+        relationship="friend",
+        tags=("old-harbour",),
+        relations=(h_active,),
+    )
+    paths["h-old"] = _entity(
+        root, "h-old", "Iven Cal", relationship="friend", tags=("old-harbour",), relations=(h_old,)
+    )
 
     paths["i-one"] = _entity(root, "i-one", "Inara Quill", status="superseded")
 
     j_topic = _note(root, "j-crystal", "The crystal friend project records a social connection.")
-    paths["j-one"] = _entity(root, "j-one", "Jora Pell", relationship="friend", relations=(j_topic,))
+    paths["j-one"] = _entity(
+        root, "j-one", "Jora Pell", relationship="friend", relations=(j_topic,)
+    )
     return paths
 
 
@@ -206,13 +278,11 @@ def render_fixture(manifest: dict[str, Any], root: Path) -> SimpleNamespace:
 
 def scan_public_artifacts(root: Path) -> list[str]:
     findings: list[str] = []
-    root_text = str(Path(root).absolute())
     for path in sorted(Path(root).rglob("*.md")):
-        text = path.read_text(encoding="utf-8")
-        if root_text in text:
-            findings.append(f"absolute-path:{path.relative_to(root).as_posix()}")
-        if "@" in text or "https://" in text or "http://" in text:
-            findings.append(f"external-identifier:{path.relative_to(root).as_posix()}")
+        label = path.relative_to(root).as_posix()
+        findings.extend(
+            str(finding) for finding in public_artifact_privacy.scan_artifact(path, label=label)
+        )
     return findings
 
 
@@ -250,13 +320,10 @@ def _arm(vault: Path, case: dict[str, Any], *, graph: bool) -> dict[str, Any]:
     }
 
 
-def run_benchmark(manifest_path: Path = DEFAULT_MANIFEST, *, work_root: Path) -> dict[str, Any]:
+def _run_benchmark(manifest_path: Path, *, work_root: Path) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     rendered = render_fixture(manifest, Path(work_root) / "referent-fixture")
     epistemic_graph.EpistemicGraphIndex(rendered.root).rebuild_all()
-    os.environ["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
-    os.environ["EXOMEM_DISABLE_CLIP"] = "1"
-    find_module.clear_cache()
     case_results: list[dict[str, Any]] = []
     for raw_case in manifest["cases"]:
         case = dict(raw_case)
@@ -282,13 +349,18 @@ def run_benchmark(manifest_path: Path = DEFAULT_MANIFEST, *, work_root: Path) ->
     ]
     metrics = {
         "set_accuracy": sum(case["graph_on"]["expected"] for case in case_results) / total,
-        "false_resolution_rate": sum(case["graph_on"]["false_resolution"] for case in case_results) / total,
+        "false_resolution_rate": sum(case["graph_on"]["false_resolution"] for case in case_results)
+        / total,
         "abstention_accuracy": sum(
-            case["graph_on"]["expected"] for case in case_results if case["case_id"] in abstention_ids
-        ) / len(abstention_ids),
+            case["graph_on"]["expected"]
+            for case in case_results
+            if case["case_id"] in abstention_ids
+        )
+        / len(abstention_ids),
         "partial_accuracy": sum(
             case["graph_on"]["expected"] for case in case_results if case["case_id"] in partial_ids
-        ) / len(partial_ids),
+        )
+        / len(partial_ids),
         "graph_incremental_value": sum(
             int(case["graph_on"]["expected"] and not case["graph_off"]["expected"])
             for case in case_results
@@ -309,6 +381,15 @@ def run_benchmark(manifest_path: Path = DEFAULT_MANIFEST, *, work_root: Path) ->
         "referents_stage": timings,
         "_case_results": case_results,
     }
+
+
+def run_benchmark(manifest_path: Path = DEFAULT_MANIFEST, *, work_root: Path) -> dict[str, Any]:
+    """Run without leaking recall cache state into the caller's process."""
+    find_module.clear_cache()
+    try:
+        return _run_benchmark(manifest_path, work_root=work_root)
+    finally:
+        find_module.clear_cache()
 
 
 def public_report(report: dict[str, Any]) -> dict[str, Any]:
@@ -357,8 +438,19 @@ def main() -> int:
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="exomem-referents-") as temp:
-        report = run_benchmark(args.manifest, work_root=Path(temp))
+    env_names = ("EXOMEM_DISABLE_EMBEDDINGS", "EXOMEM_DISABLE_CLIP")
+    previous_env = {name: os.environ.get(name) for name in env_names}
+    try:
+        for name in env_names:
+            os.environ[name] = "1"
+        with tempfile.TemporaryDirectory(prefix="exomem-referents-") as temp:
+            report = run_benchmark(args.manifest, work_root=Path(temp))
+    finally:
+        for name, value in previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
     public = public_report(report)
     print(json.dumps(public, sort_keys=True, indent=2) if args.json else _markdown(public))
     return 0 if not args.check or _passes(report) else 1

@@ -27,6 +27,7 @@ resolved and did not must not reach the open path.
 from __future__ import annotations
 
 import ast
+import copy
 import functools
 import hashlib
 import inspect
@@ -1554,8 +1555,6 @@ def guard_referents(
     purpose: str | None = None,
 ) -> dict[str, Any] | None:
     """Apply release decisions to entity candidates and their evidence paths."""
-    import copy
-
     if release.blocked:
         return None
     vault_root = Path(vault_root)
@@ -1566,7 +1565,26 @@ def guard_referents(
         _record_blocked_outcome(who.audience_id)
         return None
 
-    withheld = set(release.withheld_paths)
+    tombstoned: set[str] = set()
+    for section in ("resolved", "candidates"):
+        for item in guarded.get(section, []):
+            if not isinstance(item, Mapping):
+                continue
+            path = str(item.get("path") or "")
+            if path and lifecycle.is_tombstoned(vault_root, path):
+                tombstoned.add(path)
+            for evidence in item.get("evidence") or []:
+                if not isinstance(evidence, Mapping):
+                    continue
+                for field_name in ("seed", "anchor", "path"):
+                    evidence_path = evidence.get(field_name)
+                    if isinstance(evidence_path, str) and lifecycle.is_tombstoned(
+                        vault_root, evidence_path
+                    ):
+                        tombstoned.add(evidence_path)
+
+    withheld = set(release.withheld_paths) | tombstoned
+    decisions: dict[str, Decision | None] = {}
     if not policy.empty:
         grants_hash = _grants_hash(policy)
         declared_purpose = _declared_purpose(vault_root, who, purpose)
@@ -1576,7 +1594,7 @@ def guard_referents(
             for item in guarded.get(section, [])
             if isinstance(item, Mapping) and item.get("path")
         }
-        for rel_path in candidate_paths:
+        for rel_path in sorted(candidate_paths):
             decision = _decide_path(
                 vault_root,
                 rel_path,
@@ -1586,8 +1604,18 @@ def guard_referents(
                 grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
             )
+            decisions[rel_path] = decision
             if decision is None or decision.level < RELEASE_FLOOR:
                 withheld.add(rel_path)
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=decision,
+                policy=policy,
+                audience=who.audience_id,
+                outcome="withheld" if rel_path in withheld else "released",
+                purpose=declared_purpose,
+            )
 
     frozen_withheld = frozenset(withheld)
     for section in ("resolved", "candidates"):
@@ -1605,6 +1633,22 @@ def guard_referents(
                     for value in evidence
                     if not _names_withheld(value, frozen_withheld, reference_field=True)
                 ]
+            decision = decisions.get(str(item.get("path") or ""))
+            if decision is not None and decision.release_strip:
+                protected = {
+                    key: item[key]
+                    for key in ("path", "title", "entity_type")
+                    if key in item
+                }
+                detail = {
+                    key: value
+                    for key, value in item.items()
+                    if key not in protected
+                }
+                stripped = bridges.strip_provenance(detail, decision.release_strip)
+                item = dict(protected)
+                if isinstance(stripped, Mapping):
+                    item.update(stripped)
             kept.append(item)
         guarded[section] = kept
 
