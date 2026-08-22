@@ -93,7 +93,14 @@ def _seed(
 def _private_file(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
-    if os.name != "nt":
+    if os.name == "nt":
+        from exomem import mutation_lock
+
+        mutation_lock._windows_apply_private_dacl(
+            path,
+            mutation_lock._windows_current_user_sid(),
+        )
+    else:
         path.chmod(0o600)
 
 
