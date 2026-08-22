@@ -6,9 +6,7 @@ operating contract instead of guessing conventions: a read-only `bootstrap`
 operation that returns workflow guidance, tool defaults, performance profiles,
 and search guidance as structured JSON, without inspecting or summarizing any
 private vault content.
-
 ## Requirements
-
 ### Requirement: Agent Bootstrap Contract
 The system SHALL expose a read-only `bootstrap` operation that returns a
 versioned operating contract for agents using Exomem without a native skill.
@@ -598,3 +596,15 @@ Bootstrap and the shipped scaffold SHALL teach agents to name only resolved enti
 #### Scenario: Partial referent result
 - **WHEN** an agent receives partial with unresolved_count one
 - **THEN** it names the resolved entity and says one identity remains unresolved
+
+### Requirement: The engagement guidance teaches reason codes and family dispositions
+
+The bootstrap engagement guidance SHALL teach that a dismissal carries a reason code as the leading token of its why, name the closed vocabulary, and instruct that a user's request to stop hearing about a kind of signal is answered by quieting that family through triage with a reason, never by lowering prominence. The guidance SHALL state that a quiet family is silent on the carriers but still reviewable on request, and that a due-state block omitting a family is not evidence the family is clean. The guidance SHALL stay within the compact bootstrap byte ceiling.
+
+#### Scenario: The bootstrap payload names the vocabulary and the family route
+
+- **WHEN** bootstrap is requested at the compact detail
+- **THEN** the engagement guidance lists the reason codes
+- **AND** names the family review reference form and the three disposition actions
+- **AND** the payload size remains under the compact ceiling
+
