@@ -13,6 +13,7 @@ import math
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from numbers import Real
 from types import MappingProxyType
 
 from .. import bm25
@@ -21,7 +22,7 @@ from . import projection_store, projections
 _HEX = frozenset("0123456789abcdef")
 _BM25_K1 = 1.5
 _BM25_B = 0.75
-_MAX_RESULTS = 1_000
+_MAX_RESULTS = projections.MAX_GOVERNED_CATALOG_ITEMS
 _SNIPPET_CHARS = 320
 
 
@@ -350,6 +351,16 @@ def _variant_text(variant: projections.ProjectionVariant) -> str:
     )
 
 
+def clip_variant_applicable(variant: projections.ProjectionVariant) -> bool:
+    """Whether one committed projection row owns a CLIP pixel measurement."""
+
+    return (
+        variant.decision_level == 6
+        and variant.search_fields.get("media_type") in {"image", "video"}
+        and not variant.search_fields.get("parent_media")
+    )
+
+
 def _projected_hit(
     variant: projections.ProjectionVariant,
     score: float,
@@ -667,11 +678,11 @@ class ProjectedClipIndex:
             "CLIP model version",
             maximum=256,
         )
-        l6_variant_ids = {
+        clip_variant_ids = {
             variant.projection_variant_id
             for item in self._items.values()
             for variant in item.variants
-            if variant.decision_level == 6
+            if clip_variant_applicable(variant)
         }
         by_variant: dict[str, ProjectionClipMeasurement] = {}
         dimension: int | None = None
@@ -689,9 +700,9 @@ class ProjectedClipIndex:
                 raise projections.ProjectionCanonicalizationError(
                     "CLIP measurement model version does not match index"
                 )
-            if key.projection_variant_id not in l6_variant_ids:
+            if key.projection_variant_id not in clip_variant_ids:
                 raise projections.ProjectionCanonicalizationError(
-                    "CLIP measurement variant is not an L6 catalog projection"
+                    "CLIP measurement variant is not an applicable L6 pixel catalog projection"
                 )
             if key.projection_variant_id in by_variant:
                 raise projections.ProjectionCanonicalizationError(
@@ -724,7 +735,7 @@ class ProjectedClipIndex:
                 self._items,
                 authorization,
             )
-            if variant.decision_level == 6
+            if clip_variant_applicable(variant)
         )
         if not selected:
             return ()
@@ -824,7 +835,7 @@ class ProjectedReranker:
                 raw_score = scorer(query, variant.search_fields)
             except Exception as error:
                 raise ProjectedLaneUnavailable("projected rerank scorer failed") from error
-            if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+            if isinstance(raw_score, bool) or not isinstance(raw_score, Real):
                 raise ProjectedLaneUnavailable("projected rerank score must be finite")
             score = float(raw_score)
             if not math.isfinite(score):
@@ -834,6 +845,78 @@ class ProjectedReranker:
         return tuple(
             _projected_hit(variant, score)
             for _ordinal, variant, score in scored[:limit]
+        )
+
+    def rerank_batch(
+        self,
+        authorization: AuthorizationProjectionMap,
+        query: str,
+        candidates: tuple[str, ...],
+        *,
+        scorer: Callable[[str, list[str]], object],
+        k: int,
+    ) -> tuple[ProjectedLexicalHit, ...]:
+        """Batch-score every projected candidate before applying the final cap."""
+
+        limit = _result_limit(k)
+        if not isinstance(query, str) or len(query) > 1_048_576:
+            raise ValueError("query must be bounded text")
+        if (
+            not isinstance(candidates, tuple)
+            or len(candidates) > projections.MAX_GOVERNED_CATALOG_ITEMS
+        ):
+            raise ProjectedRetrievalUnavailable(
+                "rerank candidates must be one bounded immutable tuple"
+            )
+        if not callable(scorer):
+            raise ProjectedLaneUnavailable("projected rerank scorer is unavailable")
+        if len(frozenset(candidates)) != len(candidates):
+            raise ProjectedRetrievalUnavailable(
+                "rerank candidate set contains a duplicate"
+            )
+        for identity in candidates:
+            _bounded_text(identity, "rerank candidate identity", maximum=4096)
+
+        selected = _selected_variants(
+            self.namespace_key,
+            self._items,
+            authorization,
+        )
+        selected_by_identity = {variant.item_identity: variant for variant in selected}
+        if any(identity not in selected_by_identity for identity in candidates):
+            raise ProjectedRetrievalUnavailable(
+                "rerank candidate is outside the selected projected corpus"
+            )
+        variants = tuple(selected_by_identity[identity] for identity in candidates)
+        passages = [_variant_text(variant) for variant in variants]
+        try:
+            raw_scores = scorer(query, passages)
+            scores = tuple(raw_scores)  # type: ignore[arg-type]
+        except Exception as error:
+            raise ProjectedLaneUnavailable("projected rerank scorer failed") from error
+        if len(scores) != len(variants):
+            raise ProjectedLaneUnavailable(
+                "projected rerank score count does not match candidates"
+            )
+
+        ranked: list[tuple[int, projections.ProjectionVariant, float]] = []
+        for ordinal, (variant, raw_score) in enumerate(
+            zip(variants, scores, strict=True)
+        ):
+            if isinstance(raw_score, bool) or not isinstance(raw_score, Real):
+                raise ProjectedLaneUnavailable(
+                    "projected rerank score must be finite"
+                )
+            score = float(raw_score)
+            if not math.isfinite(score):
+                raise ProjectedLaneUnavailable(
+                    "projected rerank score must be finite"
+                )
+            ranked.append((ordinal, variant, score))
+        ranked.sort(key=lambda item: (-item[2], item[0]))
+        return tuple(
+            _projected_hit(variant, score)
+            for _ordinal, variant, score in ranked[:limit]
         )
 
 
@@ -850,4 +933,5 @@ __all__ = [
     "ProjectionCatalog",
     "ProjectionVectorMeasurement",
     "ProjectionSelection",
+    "clip_variant_applicable",
 ]

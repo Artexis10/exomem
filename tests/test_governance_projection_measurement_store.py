@@ -34,7 +34,10 @@ def _variant(identity: str, level: int) -> projections.ProjectionVariant:
         content_hash=content_hash,
         decision=Decision(level=level, options=options),
         projector_schema_version=1,
-        full_search_fields={"body": f"private body for {identity}"},
+        full_search_fields={
+            "body": f"private body for {identity}",
+            **({"media_type": "image"} if level == 6 else {}),
+        },
     )
     assert variant is not None
     return variant

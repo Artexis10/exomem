@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from numbers import Real
 from pathlib import Path, PurePosixPath
 
-from ..find_types import Hit
+from .. import bm25, find_policy, fusion, ranking_config
+from ..find_types import GraphProvenance, Hit
 from ..kbdir import kb_dirname
 from . import (
     authorization_custody,
@@ -72,6 +76,10 @@ class ActiveProjectionRuntime:
         repr=False,
     )
     lexical_index: projected_retrieval.ProjectedLexicalIndex = field(
+        init=False,
+        repr=False,
+    )
+    reranker: projected_retrieval.ProjectedReranker = field(
         init=False,
         repr=False,
     )
@@ -167,6 +175,11 @@ class ActiveProjectionRuntime:
             self,
             "lexical_index",
             projected_retrieval.ProjectedLexicalIndex(catalog),
+        )
+        object.__setattr__(
+            self,
+            "reranker",
+            projected_retrieval.ProjectedReranker(self.namespace),
         )
 
     @property
@@ -643,6 +656,14 @@ def _wire_hit(
     rank: int,
     knowledge_base_name: str,
     keyword: bool,
+    lane_ranks: dict[str, int] | None = None,
+    lane_scores: dict[str, float] | None = None,
+    graph_in_degree: int = 0,
+    graph_hop: bool = False,
+    graph_provenance: GraphProvenance | None = None,
+    rerank_score: float | None = None,
+    rerank_raw_score: float | None = None,
+    rerank_input_rank: int | None = None,
 ) -> Hit:
     decision = selection.decision
     if decision is None or decision.level != hit.decision_level:
@@ -653,6 +674,13 @@ def _wire_hit(
     path = hit.item_identity
     path_parts = PurePosixPath(path).parts
     inside_kb = bool(path_parts and path_parts[0] == knowledge_base_name)
+    ranks = lane_ranks or {}
+    scores = lane_scores or {}
+    bm25_rank = ranks.get("bm25")
+    keyword_rank = ranks.get("keyword")
+    if lane_ranks is None:
+        bm25_rank = None if keyword else rank
+        keyword_rank = rank if keyword else None
     return Hit(
         path=path,
         type=fields.get("type"),
@@ -660,12 +688,102 @@ def _wire_hit(
         title=fields.get("title") or PurePosixPath(path).stem,
         updated=fields.get("updated", ""),
         excerpt=hit.snippet,
-        bm25_rank=None if keyword else rank,
-        keyword_rank=rank if keyword else None,
+        bm25_rank=bm25_rank,
+        keyword_rank=keyword_rank,
+        vector_rank=ranks.get("vector"),
+        vector_score=scores.get("vector"),
+        clip_rank=ranks.get("clip"),
+        clip_score=scores.get("clip"),
+        graph_hop=graph_hop,
+        graph_in_degree=graph_in_degree,
+        graph_provenance=graph_provenance,
+        rerank_score=rerank_score,
+        rerank_raw_score=rerank_raw_score,
+        rerank_input_rank=rerank_input_rank,
         outside_kb=not inside_kb,
+        media_type=fields.get("media_type"),
+        status=fields.get("status"),
         snapshot_hash=selection.content_hash,
         decision=decision,
     )
+
+
+def _projected_rank_multiplier(
+    fields: Mapping[str, str],
+    config: ranking_config.RankingConfig,
+    *,
+    prefer_compiled: bool,
+    prefer_active: bool,
+) -> float:
+    """Apply public type/status rank policy using projected fields only."""
+
+    multiplier = 1.0
+    if prefer_compiled and not fields.get("media_type"):
+        multiplier *= find_policy.type_multiplier(fields.get("type"), config)
+    if prefer_active:
+        multiplier *= find_policy.status_multiplier(fields.get("status"), config)
+    return multiplier
+
+
+def _retain_projected_bm25_hits(
+    lane_hits: Mapping[
+        str,
+        tuple[projected_retrieval.ProjectedLexicalHit, ...],
+    ],
+    query: str,
+) -> tuple[projected_retrieval.ProjectedLexicalHit, ...]:
+    """Apply the public BM25-only gate without reopening raw item bytes."""
+
+    bm25_hits = lane_hits.get("bm25", ())
+    corroborated = {
+        hit.item_identity
+        for lane in ("vector", "keyword", "clip")
+        for hit in lane_hits.get(lane, ())
+    }
+    semantic_lanes_absent = not lane_hits.get("vector") and not lane_hits.get("clip")
+    query_groups = find_policy.query_word_stem_groups(query)
+    retained: list[projected_retrieval.ProjectedLexicalHit] = []
+    for hit in bm25_hits:
+        if hit.item_identity in corroborated:
+            retained.append(hit)
+            continue
+        text = " ".join(
+            hit.search_fields[key]
+            for key in sorted(
+                hit.search_fields,
+                key=lambda value: value.encode("utf-16-be"),
+            )
+        )
+        present, total, content_present = find_policy.stem_word_coverage(
+            frozenset(bm25.tokenize(text)),
+            query_groups,
+        )
+        if semantic_lanes_absent:
+            keep = 2 * present > total and content_present > 0
+        else:
+            keep = total > 0 and present == total
+        if keep:
+            retained.append(hit)
+    return tuple(retained)
+
+
+def _should_auto_rerank(
+    lane_hits: Mapping[
+        str,
+        tuple[projected_retrieval.ProjectedLexicalHit, ...],
+    ],
+    query: str,
+) -> bool:
+    """Projected-input form of the public rerank policy."""
+
+    if len((query or "").split()) >= 5:
+        return True
+    vector = [hit.item_identity for hit in lane_hits.get("vector", ())[:3]]
+    lexical = [hit.item_identity for hit in lane_hits.get("bm25", ())[:3]]
+    if not vector or not lexical:
+        return False
+    overlap = len(set(vector) & set(lexical))
+    return 1.0 - overlap / max(len(vector), len(lexical)) > 0.5
 
 
 def find_projected_hits(
@@ -677,10 +795,16 @@ def find_projected_hits(
     mode: str,
     graph: bool,
     rerank: bool | None,
+    auto_rerank: bool = False,
+    prefer_compiled: bool = True,
+    prefer_active: bool = True,
+    rank_config: ranking_config.RankingConfig = ranking_config.DEFAULT_RANKING,
     principal: RequestPrincipal,
     purpose: str | None,
 ) -> ProjectedFindResult:
     """Acquire public candidates without opening a raw corpus/index lane."""
+
+    from .. import embeddings, readiness
 
     if not isinstance(runtime, ActiveProjectionRuntime):
         raise ProjectionRuntimeUnavailable(
@@ -690,7 +814,19 @@ def find_projected_hits(
         raise ValueError("find: limit must be an integer from 1 through 100")
     if not isinstance(query, str) or len(query) > 1_048_576:
         raise ValueError("find: query must be bounded text")
-    if not query or mode != "keyword" or graph or rerank is not False:
+    if (
+        type(auto_rerank) is not bool
+        or type(prefer_compiled) is not bool
+        or type(prefer_active) is not bool
+        or not isinstance(rank_config, ranking_config.RankingConfig)
+    ):
+        raise ValueError("find: projected rank policy is invalid")
+    if (
+        not query
+        or mode not in {"keyword", "hybrid", "vector"}
+        or (graph and mode == "keyword")
+        or rerank not in {None, False, True}
+    ):
         raise ProjectionRuntimeUnavailable(
             "governed projected retrieval is unavailable"
         )
@@ -721,30 +857,390 @@ def find_projected_hits(
         for selection in authorization.selections
         if selection.projection_variant_id is None
     )
-    projected_hits = runtime.lexical_index.search_keyword(
-        authorization,
-        query,
-        k=limit,
-    )
-
     by_identity = {
         selection.item_identity: selection
         for selection in authorization.selections
     }
-    knowledge_base_name = kb_dirname()
-    hits = tuple(
-        _wire_hit(
-            hit,
-            selection=by_identity[hit.item_identity],
-            rank=rank,
-            knowledge_base_name=knowledge_base_name,
-            keyword=True,
-        )
-        for rank, hit in enumerate(projected_hits, 1)
+    selected_count = sum(
+        selection.projection_variant_id is not None
+        for selection in authorization.selections
     )
+    selected_variants = {
+        variant.item_identity: variant
+        for variant in runtime.catalog.select(authorization)
+    }
+    has_selected_l6 = any(
+        variant.decision_level == 6 for variant in selected_variants.values()
+    )
+    has_selected_clip = any(
+        projected_retrieval.clip_variant_applicable(variant)
+        for variant in selected_variants.values()
+    )
+    if selected_count == 0:
+        return ProjectedFindResult(
+            hits=(),
+            withheld_paths=withheld,
+            declared_purpose=declared_purpose,
+        )
+    lane_depth = selected_count
+    candidate_depth = min(
+        selected_count,
+        max(
+            limit * rank_config.candidate_multiplier,
+            rank_config.candidate_floor,
+        ),
+    )
+    lane_hits: dict[str, tuple[projected_retrieval.ProjectedLexicalHit, ...]] = {}
+    warming: set[str] = set()
+
+    if mode == "keyword":
+        lane_hits["keyword"] = runtime.lexical_index.search_keyword(
+            authorization,
+            query,
+            k=lane_depth,
+        )
+    elif mode == "hybrid":
+        lane_hits["bm25"] = runtime.lexical_index.search_bm25(
+            authorization,
+            query,
+            k=lane_depth,
+        )
+        lane_hits["keyword"] = runtime.lexical_index.search_keyword(
+            authorization,
+            query,
+            k=lane_depth,
+        )
+
+    if mode in {"hybrid", "vector"}:
+        vector_index = runtime.vector_index
+        if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+            lane_hits["vector"] = ()
+        elif readiness.should_defer("embeddings"):
+            warming.add("vector")
+        elif (
+            vector_index is None
+            or vector_index.extractor_version != "projected-text-v1"
+            or vector_index.model_version != embeddings.MODEL_NAME
+        ):
+            warming.add("vector")
+        else:
+            try:
+                query_vector = tuple(
+                    float(value)
+                    for value in embeddings.embed_texts([query], is_query=True)[0]
+                )
+            except Exception:  # noqa: BLE001 - optional query model soft-fails
+                warming.add("vector")
+            else:
+                try:
+                    lane_hits["vector"] = vector_index.search_vector(
+                        authorization,
+                        query_vector,
+                        k=lane_depth,
+                    )
+                except projected_retrieval.ProjectedLaneUnavailable:
+                    warming.add("vector")
+                except projected_retrieval.ProjectedRetrievalUnavailable as error:
+                    raise ProjectionRuntimeUnavailable(
+                        "governed projected retrieval is unavailable"
+                    ) from error
+
+        clip_index = runtime.clip_index
+        if not has_selected_clip:
+            lane_hits["clip"] = ()
+        elif not embeddings.clip_enabled():
+            lane_hits["clip"] = ()
+        elif readiness.should_defer("clip"):
+            warming.add("clip")
+        elif (
+            clip_index is None
+            or clip_index.extractor_version != "pixels-v1"
+            or clip_index.model_version != embeddings.CLIP_MODEL_NAME
+        ):
+            warming.add("clip")
+        else:
+            try:
+                clip_query = tuple(
+                    float(value) for value in embeddings.embed_clip_text(query)
+                )
+            except Exception:  # noqa: BLE001 - optional query model soft-fails
+                warming.add("clip")
+            else:
+                try:
+                    lane_hits["clip"] = clip_index.search_clip(
+                        authorization,
+                        clip_query,
+                        k=lane_depth,
+                    )
+                except projected_retrieval.ProjectedLaneUnavailable:
+                    warming.add("clip")
+                except projected_retrieval.ProjectedRetrievalUnavailable as error:
+                    raise ProjectionRuntimeUnavailable(
+                        "governed projected retrieval is unavailable"
+                    ) from error
+
+    raw_bm25_hits = lane_hits.get("bm25", ())
+    if mode == "hybrid":
+        lane_hits["bm25"] = _retain_projected_bm25_hits(lane_hits, query)
+
+    graph_degrees: dict[str, int] = {}
+    graph_hops: set[str] = set()
+    graph_provenance: dict[str, GraphProvenance] = {}
+    if graph:
+        if not has_selected_l6:
+            lane_hits["graph"] = ()
+        elif runtime.graph_index is None:
+            warming.add("graph")
+        else:
+            try:
+                admitted = runtime.graph_index.authorize(authorization)
+                seeds: list[str] = []
+                seen_seeds: set[str] = set()
+                graph_seed_cap = min(
+                    rank_config.graph_seed_cap,
+                    candidate_depth,
+                )
+                for lane in ("vector", "bm25"):
+                    for lane_hit in lane_hits.get(lane, ())[:graph_seed_cap]:
+                        if lane_hit.item_identity not in seen_seeds:
+                            seen_seeds.add(lane_hit.item_identity)
+                            seeds.append(lane_hit.item_identity)
+                primary_hits = {
+                    "vector": lane_hits.get("vector", ()),
+                    "bm25": raw_bm25_hits,
+                }
+                primary_set = {
+                    hit.item_identity
+                    for lane in ("vector", "bm25")
+                    for hit in primary_hits[lane][:candidate_depth]
+                }
+                best_tier: dict[str, int] = {}
+                first_seen: dict[str, int] = {}
+                position = 0
+                for seed in seeds:
+                    for edge in admitted.outgoing_edges(seed):
+                        target = edge.target_item_identity
+                        graph_degrees[target] = graph_degrees.get(target, 0) + 1
+                        if target in primary_set:
+                            position += 1
+                            continue
+                        tier = 1 if edge.relation_type == "links_to" else 0
+                        current_tier = best_tier.get(target)
+                        if current_tier is None or tier < current_tier:
+                            best_tier[target] = tier
+                            first_seen[target] = position
+                            graph_provenance[target] = GraphProvenance(
+                                relation_type=edge.relation_type,
+                                direction="outbound",
+                                seed=seed,
+                            )
+                        graph_hops.add(target)
+                        position += 1
+                graph_ranking = sorted(
+                    best_tier,
+                    key=lambda identity: (
+                        best_tier[identity],
+                        first_seen[identity],
+                        identity.encode("utf-16-be"),
+                    ),
+                )
+                lane_hits["graph"] = tuple(
+                    projected_retrieval.ProjectedLexicalHit(
+                        item_identity=identity,
+                        projection_variant_id=(
+                            selected_variants[identity].projection_variant_id
+                        ),
+                        decision_level=selected_variants[identity].decision_level,
+                        score=float(graph_degrees[identity]),
+                        search_fields=selected_variants[identity].search_fields,
+                        snippet=" ".join(
+                            selected_variants[identity].search_fields[key]
+                            for key in sorted(
+                                selected_variants[identity].search_fields,
+                                key=lambda value: value.encode("utf-16-be"),
+                            )
+                        )[:320].rstrip(),
+                    )
+                    for identity in graph_ranking
+                )
+            except projected_retrieval.ProjectedLaneUnavailable:
+                warming.add("graph")
+            except projected_retrieval.ProjectedRetrievalUnavailable as error:
+                raise ProjectionRuntimeUnavailable(
+                    "governed projected retrieval is unavailable"
+                ) from error
+
+    lane_order = ranking_config.LANE_ORDER[:5]
+    lane_hits = {
+        lane: hits[:candidate_depth]
+        for lane, hits in lane_hits.items()
+    }
+    active_lanes = [lane for lane in lane_order if lane_hits.get(lane)]
+    rankings = [
+        [hit.item_identity for hit in lane_hits[lane]] for lane in active_lanes
+    ]
+    if not rankings:
+        return ProjectedFindResult(
+            hits=(),
+            withheld_paths=withheld,
+            warming_components=tuple(
+                lane for lane in ("vector", "clip", "graph", "rerank") if lane in warming
+            ),
+            declared_purpose=declared_purpose,
+        )
+    intent_weights = rank_config.intent_weights(find_policy.classify_intent(query))
+    weights_by_lane = dict(zip(ranking_config.LANE_ORDER, intent_weights, strict=True))
+    fused = fusion.reciprocal_rank_fusion_weighted(
+        rankings,
+        [weights_by_lane[lane] for lane in active_lanes],
+        k=rank_config.rrf_k,
+    )
+    fused = [
+        (
+            identity,
+            score
+            * _projected_rank_multiplier(
+                selected_variants[identity].search_fields,
+                rank_config,
+                prefer_compiled=prefer_compiled,
+                prefer_active=prefer_active,
+            ),
+        )
+        for identity, score in fused
+    ]
+    fused.sort(key=lambda item: (-item[1], item[0]))
+    ordered_identities = tuple(identity for identity, _score in fused)
+    reranked: tuple[projected_retrieval.ProjectedLexicalHit, ...] | None = None
+    rerank_raw_scores: dict[str, float] = {}
+    rerank_inputs = {
+        identity: rank for rank, identity in enumerate(ordered_identities, 1)
+    }
+    do_rerank = mode != "keyword" and (
+        rerank is True
+        or (
+            rerank is None
+            and auto_rerank
+            and _should_auto_rerank(lane_hits, query)
+        )
+    )
+    if do_rerank and not embeddings.ranking_enabled():
+        do_rerank = False
+    if do_rerank and readiness.should_defer("reranker"):
+        warming.add("rerank")
+        do_rerank = False
+    if do_rerank:
+        def score_projected_passages(
+            scorer_query: str,
+            passages: list[str],
+        ) -> list[float]:
+            raw_scores = tuple(embeddings.rerank_pairs(scorer_query, passages))
+            if len(raw_scores) != len(ordered_identities):
+                raise ValueError("reranker returned an invalid score count")
+            pending_raw: dict[str, float] = {}
+            adjusted: list[float] = []
+            for identity, raw_score in zip(
+                ordered_identities,
+                raw_scores,
+                strict=True,
+            ):
+                if isinstance(raw_score, bool) or not isinstance(raw_score, Real):
+                    raise ValueError("reranker returned a non-finite score")
+                score = float(raw_score)
+                if not math.isfinite(score):
+                    raise ValueError("reranker returned a non-finite score")
+                pending_raw[identity] = score
+                adjusted.append(
+                    score
+                    * _projected_rank_multiplier(
+                        selected_variants[identity].search_fields,
+                        rank_config,
+                        prefer_compiled=prefer_compiled,
+                        prefer_active=prefer_active,
+                    )
+                )
+            rerank_raw_scores.update(pending_raw)
+            return adjusted
+
+        try:
+            reranked = runtime.reranker.rerank_batch(
+                authorization,
+                query,
+                ordered_identities,
+                scorer=score_projected_passages,
+                k=len(ordered_identities),
+            )
+            ordered_identities = tuple(hit.item_identity for hit in reranked)
+        except projected_retrieval.ProjectedLaneUnavailable:
+            warming.add("rerank")
+        except projected_retrieval.ProjectedRetrievalUnavailable as error:
+            raise ProjectionRuntimeUnavailable(
+                "governed projected retrieval is unavailable"
+            ) from error
+
+    hits_by_lane = {
+        lane: {hit.item_identity: hit for hit in hits}
+        for lane, hits in lane_hits.items()
+    }
+    ranks_by_lane = {
+        lane: {
+            hit.item_identity: rank for rank, hit in enumerate(lane_values, 1)
+        }
+        for lane, lane_values in lane_hits.items()
+    }
+    reranked_by_identity = (
+        {} if reranked is None else {hit.item_identity: hit for hit in reranked}
+    )
+    knowledge_base_name = kb_dirname()
+    hits: list[Hit] = []
+    for final_rank, identity in enumerate(ordered_identities[:limit], 1):
+        source_hit = reranked_by_identity.get(identity)
+        if source_hit is None:
+            source_hit = next(
+                hits_by_lane[lane][identity]
+                for lane in lane_order
+                if identity in hits_by_lane.get(lane, {})
+            )
+        lane_ranks = {
+            lane: ranks_for_lane[identity]
+            for lane, ranks_for_lane in ranks_by_lane.items()
+            if identity in ranks_for_lane
+        }
+        lane_scores = {
+            lane: lane_values[identity].score
+            for lane, lane_values in hits_by_lane.items()
+            if identity in lane_values and lane in {"vector", "clip"}
+        }
+        hits.append(
+            _wire_hit(
+                source_hit,
+                selection=by_identity[identity],
+                rank=final_rank,
+                knowledge_base_name=knowledge_base_name,
+                keyword=mode == "keyword",
+                lane_ranks=lane_ranks,
+                lane_scores=lane_scores,
+                graph_in_degree=graph_degrees.get(identity, 0),
+                graph_hop=identity in graph_hops,
+                graph_provenance=graph_provenance.get(identity),
+                rerank_score=(
+                    reranked_by_identity[identity].score
+                    if identity in reranked_by_identity
+                    else None
+                ),
+                rerank_raw_score=rerank_raw_scores.get(identity),
+                rerank_input_rank=(
+                    rerank_inputs[identity]
+                    if identity in reranked_by_identity
+                    else None
+                ),
+            )
+        )
     return ProjectedFindResult(
-        hits=hits,
+        hits=tuple(hits),
         withheld_paths=withheld,
+        warming_components=tuple(
+            lane for lane in ("vector", "clip", "graph", "rerank") if lane in warming
+        ),
         declared_purpose=declared_purpose,
     )
 

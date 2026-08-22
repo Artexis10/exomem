@@ -3468,40 +3468,6 @@ def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
     return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm))
 
 
-# Function words that must never, on their own, carry the degraded-retention
-# majority: articles/determiners, quantifiers, pronouns, wh-words,
-# prepositions/conjunctions, auxiliaries, negation. Surface forms; matched in
-# stem space via _function_word_stems() so classification consumes the same
-# tokenize() output presence checks use. (claims.py keeps a private
-# _STOPWORDS lexicon for contradiction topic-overlap, but it has no wh-words
-# and its own tokenizer — retention gating keeps an independent frozen set so
-# unrelated lexicon edits cannot reshape retrieval.)
-_FUNCTION_WORDS = frozenset(
-    """a an the this that these those all any some each no not
-    i we you he she it they me us them my our your their his her its
-    what which who whom whose when where why how
-    of in on at to for from by with about as into over under
-    and or but if then than so
-    is are was were be been being am
-    do does did done doing have has had having
-    can could will would shall should may might must""".split()
-)
-_FUNCTION_WORD_STEMS: frozenset[str] | None = None
-
-
-def _function_word_stems() -> frozenset[str]:
-    """Stem-space view of `_FUNCTION_WORDS`, built lazily (bm25 owns the
-    stemmer) and memoized — the set is tiny and the computation idempotent."""
-    global _FUNCTION_WORD_STEMS
-    if _FUNCTION_WORD_STEMS is None:
-        from . import bm25 as bm25_module
-
-        _FUNCTION_WORD_STEMS = frozenset(
-            bm25_module.stem_word(word) for word in _FUNCTION_WORDS
-        )
-    return _FUNCTION_WORD_STEMS
-
-
 def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool]]:
     """Per whitespace word: (BM25 subtoken stems, is_function_word).
 
@@ -3514,18 +3480,7 @@ def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool]]:
     (known limit: mixed-script queries are gated more permissively than
     v0.36.0's all-stems veto).
     """
-    from . import bm25 as bm25_module
-
-    function_stems = _function_word_stems()
-    groups: list[tuple[list[str], bool]] = []
-    for word in query_norm.split():
-        subtoken_stems = bm25_module.tokenize(word)
-        if not subtoken_stems:
-            continue
-        groups.append(
-            (subtoken_stems, all(s in function_stems for s in subtoken_stems))
-        )
-    return groups
+    return find_policy.query_word_stem_groups(query_norm)
 
 
 def _stem_word_coverage(
@@ -3546,15 +3501,7 @@ def _stem_word_coverage(
     `_any_stem_present` (>=1 stem anywhere) and `_stem_tokens_present` (ALL
     whitespace tokens, whole-token stems).
     """
-    text_stems = page.stem_set
-    present = 0
-    content_present = 0
-    for subtoken_stems, is_function in word_stem_groups:
-        if all(stem in text_stems for stem in subtoken_stems):
-            present += 1
-            if not is_function:
-                content_present += 1
-    return present, len(word_stem_groups), content_present
+    return find_policy.stem_word_coverage(page.stem_set, word_stem_groups)
 
 
 def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
