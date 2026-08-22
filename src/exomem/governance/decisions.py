@@ -58,6 +58,10 @@ class Decision:
     default_deny_scope_ids: tuple[str, ...] = ()
     options: dict[str, Any] = field(default_factory=dict)
     notice: str | None = None
+    #: Trusted rendered content from an exact current bridge approval.  The
+    #: authored ``bridge`` option above remains an opaque approval id and is
+    #: never itself suitable for a wire response.
+    bridge_abstraction: str | None = None
     bridge: str | None = None
     release_reason: str | None = None
     release_grant_id: str | None = None

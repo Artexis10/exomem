@@ -3830,7 +3830,7 @@ def test_non_owner_inspection_remains_available_when_a_grant_raises_the_default(
     grants.mkdir(parents=True, exist_ok=True)
     (grants / "external.yaml").write_text(
         "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\nkind: standing\n"
-        f'scope_ids: ["{SCOPE_ID}"]\naudience: external\nceiling: 4\n',
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: external\nceiling: 3\n',
         encoding="utf-8",
     )
 
@@ -3849,5 +3849,5 @@ def test_non_owner_inspection_remains_available_when_a_grant_raises_the_default(
         paths=[DECLARED_RESTRICTED],
     )
 
-    assert explained["effective_ceiling"] == 4
+    assert explained["effective_ceiling"] == 3
     assert simulated["evaluated_count"] == 1

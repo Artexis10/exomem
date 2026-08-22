@@ -34,6 +34,12 @@ BRIDGE_PATH = "Knowledge Base/Notes/Insights/workload-constraint.md"
 SOURCE_PATH = "Knowledge Base/Notes/Research/Health/private-source.md"
 SHA_A = "a" * 64
 SHA_B = "b" * 64
+APPROVED_BRIDGE_ABSTRACTION = (
+    "# Workload constraint\n\n"
+    "## Observations\n"
+    "- [constraint] Do not assume unlimited evening capacity #planning ^capacity\n\n"
+    "## Relations\n"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -192,6 +198,8 @@ def _write_bridge_fixture(
     approval: bool,
     review: str = "2026-12-01",
     source_title: str = "Private source title",
+    source_ceiling: int = 0,
+    source_rule_extra: str = "",
 ) -> tuple[Path, Path]:
     source = vault / SOURCE_PATH
     bridge = vault / BRIDGE_PATH
@@ -200,7 +208,16 @@ def _write_bridge_fixture(
     source.write_text(_bridge_source_text(title=source_title), encoding="utf-8")
     bridge.write_text(_bridge_text(review=review), encoding="utf-8")
     _write_policy(vault, "scopes", "private", _scope_document(SCOPE_A))
-    _write_policy(vault, "rules", "private", _rule_document(scope_ids=(SCOPE_A,), ceiling=0))
+    _write_policy(
+        vault,
+        "rules",
+        "private",
+        _rule_document(
+            scope_ids=(SCOPE_A,),
+            ceiling=source_ceiling,
+            extra=source_rule_extra,
+        ),
+    )
     if approval:
         release = _release_document()
         release = release.replace(SHA_A, hashlib.sha256(bridge.read_bytes()).hexdigest(), 1)
@@ -523,6 +540,70 @@ def test_exact_approved_unchanged_bridge_releases_but_source_stays_withheld(
 
     assert "unlimited evening capacity" in page["body"]
     assert BRIDGE_PATH in [hit.get("path") for hit in hits]
+
+
+def test_l4_source_renders_only_the_exact_approved_bridge_abstraction(
+    vault: Path,
+) -> None:
+    _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_ceiling=egress.LEVEL_EXCERPT_REDACTED,
+        source_rule_extra=(
+            "options:\n"
+            f"  bridge: {RELEASE_ID}\n"
+            "  abstract: safe fallback abstraction\n"
+        ),
+    )
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=SOURCE_PATH, include_raw=True)
+
+    assert page == {
+        "withheld": True,
+        "level": egress.LEVEL_EXCERPT_REDACTED,
+        "bridge": APPROVED_BRIDGE_ABSTRACTION,
+    }
+    assert RELEASE_ID not in str(page)
+    assert SOURCE_PATH not in str(page)
+    assert SOURCE_REF not in str(page)
+
+
+def test_l4_source_bridge_edit_lowers_without_reusing_cached_approval(
+    vault: Path,
+) -> None:
+    bridge, _source = _write_bridge_fixture(
+        vault,
+        approval=True,
+        source_ceiling=egress.LEVEL_EXCERPT_REDACTED,
+        source_rule_extra=(
+            "options:\n"
+            f"  bridge: {RELEASE_ID}\n"
+            "  abstract: safe fallback abstraction\n"
+        ),
+    )
+    with request_scope(_external()):
+        approved = commands.op_get(vault, path=SOURCE_PATH, include_raw=True)
+    assert approved["bridge"] == APPROVED_BRIDGE_ABSTRACTION
+
+    bridge.write_text(
+        _bridge_text().replace("unlimited evening capacity", "changed private bridge"),
+        encoding="utf-8",
+    )
+    find_module.clear_cache()
+
+    with request_scope(_external()):
+        page = commands.op_get(vault, path=SOURCE_PATH, include_raw=True)
+
+    assert page == {
+        "withheld": True,
+        "level": egress.LEVEL_ABSTRACT,
+        "rule_ids": [RULE_ID],
+        "scope_label": SCOPE_A,
+        "abstract": "safe fallback abstraction",
+    }
+    assert RELEASE_ID not in str(page)
+    assert "changed private bridge" not in str(page)
 
 
 def test_empty_policy_bridge_fast_path_never_parses_or_creates_governance_state(
