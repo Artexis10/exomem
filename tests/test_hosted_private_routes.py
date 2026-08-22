@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import pytest
 from fastmcp import FastMCP
+from starlette.middleware import Middleware as ASGIMiddleware
 
 from exomem import (
     cli_ops,
@@ -31,10 +32,10 @@ from exomem import (
     server_runtime,
     writer_lease,
 )
-from exomem import (
-    commands as commands_module,
-)
+from exomem import commands as commands_module
 from exomem import hosted_gateway as gateway
+from exomem.access_log import AccessLogMiddleware
+from exomem.governance.authorization_transport import AuthorizationCarrierMiddleware
 from exomem.hosted_runtime import (
     HostedCellConfig,
     HostedCellLifecycle,
@@ -524,6 +525,137 @@ def _hosted_bootstrap_tool_refs(payload: object) -> set[str]:
 
     walk(payload)
     return refs
+
+
+def test_hosted_invalid_session_header_wins_before_argument_coercion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-authorization-order",
+        credential="authorization-order-private-service-credential",
+    )
+    monkeypatch.setattr(
+        cli_ops,
+        "coerce",
+        lambda *args, **kwargs: pytest.fail(
+            "Hosted coercion ran before authorization-session refusal"
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/ask_memory",
+        headers=_headers(
+            config,
+            **{"X-Exomem-Authorization-Session": "not-a-session-bearer"},
+        ),
+        json={"limit": "malformed"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "AUTHORIZATION_SESSION_UNAVAILABLE",
+        "message": "authorization session is unavailable",
+        "remediation": None,
+    }
+    assert "not-a-session-bearer" not in response.text
+    assert invoker.calls == []
+
+
+def test_hosted_invalid_session_header_wins_before_json_parsing(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-authorization-json-order",
+        credential="authorization-json-order-private-service-credential",
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/ask_memory",
+        headers={
+            **_headers(config),
+            "X-Exomem-Authorization-Session": "not-a-session-bearer",
+            "Content-Type": "application/json",
+        },
+        content=b"not-json",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "AUTHORIZATION_SESSION_UNAVAILABLE",
+        "message": "authorization session is unavailable",
+        "remediation": None,
+    }
+    assert "not-json" not in response.text
+    assert "not-a-session-bearer" not in response.text
+    assert invoker.calls == []
+
+
+def test_hosted_unknown_canonical_session_wins_before_json_parsing(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-authorization-canonical-order",
+        credential="authorization-canonical-order-private-service-credential",
+    )
+    bearer = (
+        "as1.AQEBAQEBAQEBAQEBAQEBAQ."
+        "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/ask_memory",
+        headers={
+            **_headers(config),
+            "X-Exomem-Authorization-Session": bearer,
+            "Content-Type": "application/json",
+        },
+        content=b"not-json",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "AUTHORIZATION_SESSION_UNAVAILABLE",
+        "message": "authorization session is unavailable",
+        "remediation": None,
+    }
+    assert "not-json" not in response.text
+    assert bearer not in response.text
+    assert invoker.calls == []
+
+
+@pytest.mark.parametrize(
+    ("params", "body"),
+    [
+        ({}, {"authorization_session_credential": "not-a-session-bearer"}),
+        ({"authorization_session_credential": "not-a-session-bearer"}, {}),
+    ],
+)
+def test_hosted_body_and_query_session_carriers_refuse(
+    tmp_path: Path,
+    params: dict[str, str],
+    body: dict[str, str],
+) -> None:
+    client, config, _lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-authorization-carrier",
+        credential="authorization-carrier-private-service-credential",
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/ask_memory",
+        headers=_headers(config),
+        params=params,
+        json=body,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "AUTHORIZATION_SESSION_UNAVAILABLE"
+    assert "not-a-session-bearer" not in response.text
+    assert invoker.calls == []
 
 
 def test_hosted_bootstrap_extractor_distinguishes_tool_keys_from_actions() -> None:
@@ -2106,7 +2238,20 @@ def test_hosted_server_build_skips_personal_oauth_assets_rest_and_transfer(
     app = server.build_server(require_auth=True)
     assert asyncio.run(app.list_tools()) == []
     assert all(key not in hosted_runtime.os.environ for key in personal_ingress)
-    client = _ASGIClient(app.http_app())
+    http_app = app.http_app(
+        middleware=[ASGIMiddleware(AccessLogMiddleware)],
+    )
+    middleware = [item.cls for item in http_app.user_middleware]
+    assert middleware.index(AuthorizationCarrierMiddleware) < middleware.index(
+        AccessLogMiddleware
+    )
+    [carrier_middleware] = [
+        item
+        for item in http_app.user_middleware
+        if item.cls is AuthorizationCarrierMiddleware
+    ]
+    assert carrier_middleware.kwargs["mcp_path"] is None
+    client = _ASGIClient(http_app)
     headers = _headers(config)
 
     assert client.get("/private/exomem/v1/live", headers=headers).status_code == 200

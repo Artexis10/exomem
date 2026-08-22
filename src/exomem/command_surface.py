@@ -402,10 +402,41 @@ def bind_vault(
             len(visible),
         )
         visible.insert(insert_at, response_detail)
+    if command is not None:
+        authorization_credential = inspect.Parameter(
+            "authorization_session_credential",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=typing.Annotated[
+                str | None,
+                Field(
+                    description=(
+                        "Optional authorization-session bearer. Consumed by the raw "
+                        "MCP boundary before tool validation."
+                    )
+                ),
+            ],
+        )
+        insert_at = next(
+            (
+                index
+                for index, parameter in enumerate(visible)
+                if parameter.kind is inspect.Parameter.VAR_KEYWORD
+            ),
+            len(visible),
+        )
+        visible.insert(insert_at, authorization_credential)
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
+        from .governance import authorization_request
         from .governance import principal as principal_module
+
+        if kwargs.pop("authorization_session_credential", None) is not None:
+            raise authorization_request.AuthorizationContextUnavailable
+        principal = principal_module.current_principal()
+        if principal is None:
+            raise authorization_request.AuthorizationContextUnavailable
 
         context = (
             capabilities.active_surface(surface_descriptor)
@@ -416,9 +447,7 @@ def bind_vault(
         # existing `mcp_retry_scope()` identity derivation (design D5). Bound
         # for the whole invocation so every read leaf under it decides against
         # the same principal; stdio resolves to `owner`.
-        with context, principal_module.request_scope(
-            principal_module.resolve_mcp_principal()
-        ):
+        with context, principal_module.request_scope(principal):
             if command is None:
                 return leaf(*injected, **kwargs)
             from .commands import invocation_is_read_only
