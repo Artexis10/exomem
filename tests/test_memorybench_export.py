@@ -589,6 +589,27 @@ def test_preflight_binds_real_setup_provider_checkout_and_dataset_before_first_s
     assert terminal_manifest["preregistration_identity"]["contract_revision"] == payload["contract_revision"]
 
 
+def test_exomem_stage_environment_preserves_explicit_model_cache_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memorybench.export import _stage_environment
+    from protocol.models import MemoryBenchRunPlan
+
+    cache = tmp_path / "hf-cache"
+    hub = cache / "hub"
+    hub.mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(cache))
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+
+    environment = _stage_environment(
+        MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path)),
+        "/controlled",
+    )
+
+    assert environment["HF_HOME"] == str(cache)
+    assert environment["HF_HUB_CACHE"] == str(hub)
+
+
 def test_preregistration_plan_digest_is_only_an_assertion_against_derived_identity(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:

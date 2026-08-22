@@ -569,6 +569,9 @@ def _stage_environment(plan: MemoryBenchRunPlan, controlled_path: str = os.defpa
         "TRANSFORMERS_OFFLINE": "1",
     }
     if plan.provider == "exomem":
+        for variable in ("HF_HOME", "HF_HUB_CACHE"):
+            if value := os.environ.get(variable):
+                values[variable] = value
         values.update({
             "EXOMEM_HOME": plan.provider_checkout.root,
             "EXOMEM_COMMIT": plan.provider_checkout.commit,
