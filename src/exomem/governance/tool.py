@@ -15,6 +15,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -34,7 +35,15 @@ from .. import (
     review_state,
 )
 from ..kbdir import kb_dirname
-from . import companion_backfill, decisions, membership, receipts, store
+from . import (
+    authorization_custody,
+    authorization_session_lifecycle,
+    companion_backfill,
+    decisions,
+    membership,
+    receipts,
+    store,
+)
 from . import policy as policy_module
 from . import tokens as tokens_module
 from .operations import (
@@ -62,6 +71,10 @@ from .transaction import fsync_directory as _fsync_directory
 
 PENDING_MARKER = ".policy-mutation.pending.json"
 DEFAULT_PROPOSAL_TTL_SECONDS = 900
+_SESSION_ACTIONS = frozenset({"open", "status", "rotate", "close"})
+_SESSION_ARGUMENTS = frozenset(
+    {"authorization_session", "now", "principal", "session_action", "ttl_seconds"}
+)
 _GRAPH_REBUILD_SIDECAR_RE = re.compile(
     rf"^{re.escape(graph_sync._TEMP_PREFIX)}[0-9a-f]{{64}}-[0-9a-f]{{24}}\.sqlite"
     r"(?:-(?:wal|shm|journal))?$"
@@ -2833,6 +2846,19 @@ from .recovery import (  # noqa: E402 - imported after circular protocol helpers
 def _selected_variant(
     operation: str, _spec: OperationSpec, kwargs: Mapping[str, Any]
 ) -> OperationVariant:
+    if operation == "session":
+        action = kwargs.get("session_action")
+        if action not in _SESSION_ACTIONS:
+            raise GovernanceError(
+                "INVALID_AUTHORIZATION_SESSION_ACTION",
+                "session_action must be open, status, rotate, or close",
+            )
+        return select_operation(operation)
+    if kwargs.get("session_action") is not None:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "session_action is valid only when operation is session",
+        )
     if operation == "backfill_companion":
         action = kwargs.get("backfill_action")
         if action not in {"preview", "commit"}:
@@ -2847,6 +2873,195 @@ def _selected_variant(
             "INVALID_GRANT_SCOPE", "scope must be omitted, session, or standing"
         )
     return select_operation(operation, scope)
+
+
+def _validate_session_arguments(kwargs: Mapping[str, Any]) -> None:
+    action = kwargs.get("session_action")
+    if action not in _SESSION_ACTIONS:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ACTION",
+            "session_action must be open, status, rotate, or close",
+        )
+    if set(kwargs) - _SESSION_ARGUMENTS:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "session action received unsupported arguments",
+        )
+    ttl = kwargs.get("ttl_seconds")
+    if action in {"open", "rotate"}:
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, int)
+            or not 1 <= ttl <= authorization_session_lifecycle.MAX_SESSION_TTL_SECONDS
+        ):
+            raise GovernanceError(
+                "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+                "open and rotate require a bounded ttl_seconds",
+            )
+    elif ttl is not None:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "status and close forbid ttl_seconds",
+        )
+    if action == "open" and kwargs.get("authorization_session") is not None:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "session open forbids an existing authorization-session echo",
+        )
+    supplied_now = kwargs.get("now")
+    if supplied_now is not None and (
+        isinstance(supplied_now, bool)
+        or not isinstance(supplied_now, int)
+        or supplied_now <= 0
+    ):
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "session time must be a positive integer",
+        )
+
+
+def _trusted_session_principal(value: RequestPrincipal | None) -> RequestPrincipal:
+    who = _principal(value)
+    if (
+        not who.resolved
+        or _bounded_session_identity(who.audience_id) is None
+        or _bounded_session_identity(who.issuer_family) is None
+    ):
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_REQUIRED",
+            "trusted principal and issuer context are required",
+        )
+    return who
+
+
+def _bounded_session_identity(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return value if len(encoded) <= 512 else None
+
+
+def _verified_session_context(
+    who: RequestPrincipal,
+    supplied_echo: object,
+) -> authorization_session_lifecycle.AuthorizationSessionContext:
+    context = who.verified_authorization_session
+    if (
+        not isinstance(
+            context,
+            authorization_session_lifecycle.AuthorizationSessionContext,
+        )
+        or context.principal_id != who.audience_id
+        or context.issuer_family != who.issuer_family
+    ):
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_REQUIRED",
+            "a verified authorization session is required",
+        )
+    for echo in (who.authorization_session_id, supplied_echo):
+        if echo is None:
+            continue
+        if (
+            _bounded_session_identity(echo) is None
+            or not __import__("hmac").compare_digest(echo, context.session_id)
+        ):
+            raise GovernanceError(
+                "AUTHORIZATION_SESSION_REQUIRED",
+                "legacy authorization-session echo does not match verified context",
+            )
+    return context
+
+
+def _session_status_response(
+    context: authorization_session_lifecycle.AuthorizationSessionContext,
+) -> dict[str, Any]:
+    return {
+        "status": "active",
+        "credential_generation": context.credential_generation,
+        "expires_at": datetime.fromtimestamp(context.expires_at, tz=UTC)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+    }
+
+
+def _session(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    action = str(kwargs["session_action"])
+    who = _trusted_session_principal(kwargs.get("principal"))
+    now = int(kwargs.get("now", int(time.time())))
+    context: authorization_session_lifecycle.AuthorizationSessionContext | None = None
+    if action == "open":
+        if (
+            who.verified_authorization_session is not None
+            or who.authorization_session_id is not None
+        ):
+            raise GovernanceError(
+                "AUTHORIZATION_SESSION_CREDENTIAL_FORBIDDEN",
+                "session open forbids existing authorization-session authority",
+            )
+    else:
+        context = _verified_session_context(
+            who,
+            kwargs.get("authorization_session"),
+        )
+
+    connection: sqlite3.Connection | None = None
+    try:
+        custody = authorization_custody.load_authorization_custody(vault_root, now=now)
+        connection = store.open_authorization_session_connection(vault_root)
+        if action == "open":
+            issuance = authorization_session_lifecycle.open_session(
+                connection,
+                custody=custody,
+                principal_id=who.audience_id,
+                issuer_family=who.issuer_family,
+                now=now,
+                ttl_seconds=int(kwargs["ttl_seconds"]),
+            )
+            return issuance.response()
+        if context is None:  # pragma: no cover - guarded above
+            raise authorization_session_lifecycle.AuthorizationSessionUnavailable
+        if action == "status":
+            current = authorization_session_lifecycle.status_verified_session(
+                connection,
+                custody=custody,
+                context=context,
+                now=now,
+            )
+            return _session_status_response(current)
+        if action == "rotate":
+            issuance = authorization_session_lifecycle.rotate_verified_session(
+                connection,
+                custody=custody,
+                context=context,
+                now=now,
+                ttl_seconds=int(kwargs["ttl_seconds"]),
+            )
+            return issuance.response()
+        authorization_session_lifecycle.close_verified_session(
+            connection,
+            custody=custody,
+            context=context,
+            now=now,
+        )
+        return {"status": "closed"}
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        authorization_session_lifecycle.AuthorizationSessionUnavailable,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        store.UnsupportedGovernanceSchema,
+    ):
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_UNAVAILABLE",
+            "authorization session is unavailable",
+        ) from None
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _inspect(vault_root: Path, operation: str, **kwargs: Any) -> dict[str, Any]:
@@ -2873,6 +3088,7 @@ _HANDLER_STRATEGIES: Mapping[str, Any] = MappingProxyType(
         "grant_standing": _standing_grant,
         "revoke_session": _revoke,
         "revoke_standing": _standing_revoke,
+        "session": _session,
         "toggle_rules": _toggle_rules,
         "undo": _undo,
         "declare": _declare,
@@ -2898,13 +3114,15 @@ def op_govern_memory(vault_root: Path, operation: str, **kwargs: Any) -> dict[st
         )
     root = Path(vault_root)
     selection = _selected_variant(operation, spec, kwargs)
+    if operation == "session":
+        _validate_session_arguments(kwargs)
     if not spec.read_only:
         _authorize_operation(selection, kwargs)
         # One registry-driven gate for every authoring operation, rather than
         # thirteen `.blocked` sites. Prospective policy paths independently
         # re-probe the conflict set around their held-handle byte acquisition;
         # this fast gate also covers authoring variants that do not compile.
-        if policy_module.has_conflict_copy(root):
+        if operation != "session" and policy_module.has_conflict_copy(root):
             raise GovernanceError(
                 "GOVERNANCE_CONFLICTED",
                 "a synchronisation conflict copy is present under _Governance/; "

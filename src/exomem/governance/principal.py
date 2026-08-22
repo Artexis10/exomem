@@ -35,7 +35,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .authorization_session_lifecycle import AuthorizationSessionContext
 
 # The vault's own operator: stdio MCP, the CLI, the shared REST key, and any
 # in-process/library call with no surface bound.
@@ -76,6 +79,8 @@ class RequestPrincipal:
     authorization_session_id: str | None = None
     purpose: str | None = None
     resolved: bool = True
+    issuer_family: str | None = None
+    verified_authorization_session: AuthorizationSessionContext | None = None
 
     def with_purpose(self, purpose: str | None) -> RequestPrincipal:
         """Layer a per-call declared purpose on without mutating the binding."""
@@ -86,6 +91,19 @@ class RequestPrincipal:
     def with_authorization_session(self, handle: str | None) -> RequestPrincipal:
         """Bind the explicit client-conversation authorization identity."""
         return replace(self, authorization_session_id=handle)
+
+    def with_verified_authorization_session(
+        self,
+        context: AuthorizationSessionContext | None,
+        *,
+        issuer_family: str,
+    ) -> RequestPrincipal:
+        """Bind dispatcher-verified capability context without retaining its bearer."""
+        return replace(
+            self,
+            issuer_family=issuer_family,
+            verified_authorization_session=context,
+        )
 
 
 def normalize_audience(*, subject: Any, issuer: Any = None) -> str:

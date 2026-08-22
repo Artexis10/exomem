@@ -147,7 +147,7 @@
 - [x] 3.8 Split the pure pinned-byte compiler from guarded live prospective acquisition;
   implement a before/read/after `AuthoringSnapshot` and return a bound
   `ProspectiveCompile` only for a stable conflict-free regular-file tree.
-- [ ] 3.9 Add append-only `compiled_policy_generations`, immutable catalog descriptors,
+- [x] 3.9 Add append-only `compiled_policy_generations`, immutable catalog descriptors,
   and singleton `active_governance_tuple` to exact schema v4. Store ordered source and
   compiled bytes/fingerprints, compiler/projector versions, predecessor/event/receipt,
   projection namespace, immutable store id, epoch, and activation digest; enforce
@@ -275,7 +275,7 @@ made before both PRs and their combined verification are complete.
 
 ## 5. Durable Authorization-Session Capability Core
 
-- [ ] 5.1 Add red pure tests in `tests/test_authorization_session_binding.py` for exact
+- [x] 5.1 Add red pure tests in `tests/test_authorization_session_binding.py` for exact
   70-byte `as1.<22-char canonical b64url 16-byte locator>.<43-char canonical b64url
   32-byte secret>` issuance, bounded decode/re-encode parser, parser-derived scrubber
   matcher, constant-time verifier success/
@@ -284,7 +284,7 @@ made before both PRs and their combined verification are complete.
   Cover padding/whitespace/alternate alphabet/wrong length/noncanonical bits/duplicates,
   malformed/expired/closed, cross-principal/cross-issuer/cross-cell/cross-vault,
   unregistered copy, unknown-key equivalence, and accepted-parser⊆scrubber property.
-- [ ] 5.2 Add red custody tests for `EXOMEM_AUTH_SESSION_KEYRING_FILE` and
+- [x] 5.2 Add red custody tests for `EXOMEM_AUTH_SESSION_KEYRING_FILE` and
   `EXOMEM_AUTH_SESSION_CONTROL_FILE`: absent, symlink/non-regular, oversized, bad
   version/id/key length/time/signature, identity mismatch, permissive POSIX mode or
   Windows ACL, policy/request/CLI/vault-provided values, and first-use generation all
@@ -298,7 +298,7 @@ made before both PRs and their combined verification are complete.
   vault+sidecar+keyring/control copies, copied external files without registry ownership,
   exact offline restore, clone with new ids, and detach-ack/attachment-epoch move; no
   colliding pair may serve simultaneously or synthesize identity.
-- [ ] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
+- [x] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
   status, close, replay of the old bearer, restart/resume, and two v4 processes/replicas.
   Add malformed/extra-copy/raised issuance tests proving the terminal scrubber exception
   activates only after exact response validation and otherwise scrubs/refuses.
@@ -323,7 +323,7 @@ made before both PRs and their combined verification are complete.
   member blocking, old/new key overlap, issuance switch, max-TTL+skew/live-row drain,
   explicit `SERVING -> DRAINING`, no-in-flight acknowledgement, epoch advance/removal,
   and current-epoch rejoin. Silence/gossip MUST NOT remove a replica from the intersection.
-- [ ] 5.9 Add red same-principal cross-session tests: tokens, grants, purpose, revoke, and
+- [x] 5.9 Add red same-principal cross-session tests: tokens, grants, purpose, revoke, and
   close from session A are rejected or isolated in session B; missing/unresolved session
   refuses without consuming or writing anything.
 - [ ] 5.10 Implement transactional schema v4
@@ -343,16 +343,16 @@ made before both PRs and their combined verification are complete.
   the standalone host registry uses the same schema. Implement authenticated per-replica
   attestation, admitted intersection, explicit drain/ack/epoch advance and current-epoch
   rejoin; gate issuance/resumption on cell identity and epoch, never observed liveness.
-- [ ] 5.13 Implement domain-separated verifier construction, bounded lookup, constant-time
+- [x] 5.13 Implement domain-separated verifier construction, bounded lookup, constant-time
   comparison, active/accepted key rotation, and row/presented-credential equality to the
   external cell/logical-vault/keyring identity.
-- [ ] 5.14 Implement server-issued open/status/rotate/close with cryptographic randomness,
+- [x] 5.14 Implement server-issued open/status/rotate/close with cryptographic randomness,
   typed issuance, keyed at-rest verifier, bounded TTL, atomic rotation, and close-time
   revocation of purpose, grants, and unconsumed tokens.
 - [ ] 5.15 Change escalation tokens, session grants, declarations, and revoke to bind the
   stable internal session ID plus principal/issuer/audience/purpose/expiry and exact
   path/fingerprint/scope bounds, never the raw bearer or a caller-selected handle.
-- [ ] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit
+- [x] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit
   open/status/rotate/close argument validation; treat legacy handles only as bounded
   echoes after capability verification and never as first-use authority.
 - [ ] 5.17 Run session, keyring/control/registry, membership epoch, migration/downmigration,
