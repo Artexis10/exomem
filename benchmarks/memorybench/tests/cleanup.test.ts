@@ -240,6 +240,38 @@ describe("guest cleanup v1", () => {
     await expect(cleanup.parseCleanupPlan(symlinkPath)).rejects.toThrow(/follow|regular|symbolic|symlink/)
   })
 
+  test("accepts the pinned registry dataset source used by the live run plan", async () => {
+    const cleanup = await load()
+    const f = await fixture()
+    const runPlan = structuredClone(f.runPlan)
+    runPlan.dataset.source = "xiaowu0162/longmemeval-cleaned"
+    await privateJson(f.runPlanPath, runPlan)
+    const cleanupPlan = structuredClone(f.cleanupPlan)
+    cleanupPlan.run_plan_sha256 = await digest(await readFile(f.runPlanPath))
+    await privateJson(f.cleanupPlanPath, cleanupPlan)
+
+    await expect(cleanup.parseCleanupPlan(f.cleanupPlanPath)).resolves.toEqual(cleanupPlan)
+  })
+
+  test("proves an already-cleared Exomem target and retires its empty owned root", async () => {
+    const cleanup = await load()
+    const f = await fixture()
+    await mkdir(join(f.runPlan.guest_work_root, "services", "exomem"), {
+      recursive: true,
+      mode: 0o700,
+    })
+
+    const proof = await cleanup.executeCleanup(f.cleanupPlan)
+
+    expect(proof.targets[0]).toMatchObject({
+      outcome: "already_absent",
+      failure_code: null,
+      absence: { namespace: true, descriptor: true, process_group: true, work_root: true },
+    })
+    expect(proof.final_absence.work_root).toBe(true)
+    expect(proof.all_absent).toBe(true)
+  })
+
   test("revalidates the exact run-plan digest and root/provider binding", async () => {
     const cleanup = await load()
     for (const mutation of ["digest", "work-root", "provider"] as const) {
@@ -985,9 +1017,12 @@ describe("guest cleanup v1", () => {
       expect(exit).toBe(3)
       expect(JSON.parse(stdout[0])).toEqual({ observed_absent: false })
     } finally {
+      const childExit = child.exitCode === null && child.signalCode === null
+        ? once(child, "exit")
+        : null
       try { process.kill(-group, "SIGKILL") } catch { /* exact group already absent */ }
-      await Promise.race([
-        once(child, "exit"),
+      if (childExit) await Promise.race([
+        childExit,
         new Promise<never>((_resolve, reject) =>
           setTimeout(() => reject(new Error("dumpable-zero guest reap timed out")), 2_000)),
       ])
@@ -1065,9 +1100,12 @@ describe("guest cleanup v1", () => {
       expect(exit).toBe(0)
       expect(JSON.parse(stdout[0])).toEqual({ observed_absent: true })
     } finally {
+      const childExit = child.exitCode === null && child.signalCode === null
+        ? once(child, "exit")
+        : null
       try { process.kill(-group, "SIGKILL") } catch { /* exact group already absent */ }
-      await Promise.race([
-        once(child, "exit"),
+      if (childExit) await Promise.race([
+        childExit,
         new Promise<never>((_resolve, reject) =>
           setTimeout(() => reject(new Error("unrelated dumpable-zero Python reap timed out")), 2_000)),
       ])

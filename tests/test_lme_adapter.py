@@ -38,6 +38,7 @@ def test_adapter_subclasses_product_core_and_keeps_default_capabilities_on() -> 
     assert adapter._search_kwargs() == {"scope": "kb", "detail": "full", "mode": "hybrid"}
     settings = lme_profile().settings
     assert settings["EXOMEM_DISABLE_EMBEDDINGS"] == ""
+    assert settings["EXOMEM_ALLOW_CPU_TORCH"] == "1"
     assert settings["HF_HUB_OFFLINE"] == "1"
     assert settings["TRANSFORMERS_OFFLINE"] == "1"
     assert "EXOMEM_DISABLE_CLIP" not in settings

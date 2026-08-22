@@ -20,7 +20,7 @@ from protocol.canary import canary_for, evaluate_probes
 from protocol.custody import HeldDirectory, hold_directory
 from protocol.leakage import scan_ingest
 from protocol.manifest import bind_started_manifest_provider, finalize_manifest, start_manifest
-from protocol.models import BudgetSummary, CaseGold, CaseHandle, DatasetIdentity, EventProvenance, LeakageSummary, ProtocolEvent, ProbeResult
+from protocol.models import BudgetSummary, CaseGold, CaseHandle, DatasetIdentity, EventProvenance, LaneReadiness, LeakageSummary, ProtocolEvent, ProbeResult
 from protocol.namespace import derive_namespace, namespace_pattern
 from protocol.readiness import validate as validate_readiness
 from protocol.trace import CaseTraceWriter
@@ -482,7 +482,6 @@ def _run_probes(
         )
 
     results: list[ProbeResult] = []
-    readiness: list[object] = []
     for ordinal, spec in enumerate(known_answer_probe_specs(), 1):
         case_id = f"__probe__-{spec.kind}"
         handle = CaseHandle(case_id=case_id, case_ordinal=ordinal, question_date="2026-01-01T00:00:00Z")
@@ -536,7 +535,39 @@ def _run_probes(
             hits=[str(getattr(hit, "hit_id", "")) for hit in hits],
             detail=detail,
         ))
-    return results, readiness
+    return results, _readiness_with_probe_evidence(provider.readiness(), results)
+
+
+def _readiness_with_probe_evidence(
+    readiness: list[LaneReadiness], probes: list[ProbeResult]
+) -> list[LaneReadiness]:
+    """Replace an explicit semantic-probe deferral with its measured result."""
+
+    semantic_passed = any(
+        probe.probe_kind == "semantic-zero-overlap" and probe.outcome == "pass"
+        for probe in probes
+    )
+    if not semantic_passed:
+        return list(readiness)
+    return [
+        LaneReadiness(
+            lane=lane.lane,
+            requested=True,
+            verified=True,
+            method="semantic-probe",
+            evidence="semantic-zero-overlap known-answer probe passed",
+            fallback_detected=False,
+        )
+        if (
+            lane.lane == "semantic"
+            and lane.requested
+            and not lane.verified
+            and lane.method == "readiness-unverifiable"
+            and not lane.fallback_detected
+        )
+        else lane
+        for lane in readiness
+    ]
 
 
 def _pilot_evidence(
@@ -869,8 +900,9 @@ def execute_run(
                 run_id,
                 check_variant=lambda: bind_observed_variant(diagnostic_context, candidate),
             )
-            probes, _ = diagnostic_result
+            probes, diagnostic_readiness = diagnostic_result
             probe_results.extend(probes)
+            readiness_list.extend(diagnostic_readiness)
             with (run_dir / "probes.jsonl").open("a", encoding="utf-8") as probe_file:
                 for probe in probes:
                     probe_file.write(probe.model_dump_json() + "\n")
@@ -1023,7 +1055,9 @@ def execute_run(
                         if session_ordinal not in canary_ordinals:
                             payload_shas.append(payload_sha)
                         get_case_trace().append({"record": "ingest", "session_ordinal": session_ordinal, "payload_sha256": payload_sha, "provider_ids": list(inserted or [])})
-                    per_case_readiness = candidate.readiness()
+                    per_case_readiness = _readiness_with_probe_evidence(
+                        candidate.readiness(), probe_results
+                    )
                     bind_observed_variant(context, candidate)
                     hits = candidate.retrieve(question.question, config.top_k, RetrievalPurpose.SCORED_RETRIEVAL)
                     bind_observed_variant(context, candidate)

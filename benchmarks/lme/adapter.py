@@ -36,6 +36,9 @@ def lme_profile() -> Profile:
             "EXOMEM_DISABLE_CORPUS_CACHE": "1",
             "EXOMEM_VEC_BACKEND": "numpy",
             "EXOMEM_LEXICAL_BACKEND": "python",
+            # The canonical lane is CPU/numpy even on hosts that expose an
+            # unusable NVIDIA driver (for example GPU-blocked sandboxes).
+            "EXOMEM_ALLOW_CPU_TORCH": "1",
             # Model weights must already exist in the local cache. A cache
             # miss is the semantic environment fault above, never a network
             # side effect hidden inside an otherwise offline benchmark run.

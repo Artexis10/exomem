@@ -192,7 +192,7 @@ def _memorybench_payloads() -> dict[str, dict]:
     dataset = {
         "id": "longmemeval",
         "variant": "cleaned",
-        "source": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned",
+        "source": "xiaowu0162/longmemeval-cleaned",
         "revision": "fixture-pin",
         "sha256": "4" * 64,
         "case_count": 1,

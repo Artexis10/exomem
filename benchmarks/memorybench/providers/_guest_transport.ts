@@ -38,6 +38,7 @@ export const EXOMEM_LME_ENV = {
   EXOMEM_DISABLE_CORPUS_CACHE: "1",
   EXOMEM_VEC_BACKEND: "numpy",
   EXOMEM_LEXICAL_BACKEND: "python",
+  EXOMEM_ALLOW_CPU_TORCH: "1",
   HF_HUB_OFFLINE: "1",
   TRANSFORMERS_OFFLINE: "1",
 } as const
@@ -207,6 +208,13 @@ function requireAbsoluteRoot(name: string, value: string | undefined): string {
   const normalized = resolve(value)
   if (normalized !== value) throw new Error(`${name} must be an absolute normalized path`)
   return normalized
+}
+
+export function exomemOwnedStateEnvironment(workRoot: string): Record<string, string> {
+  const ownedRoot = requireAbsoluteRoot("Exomem work root", workRoot)
+  return {
+    EXOMEM_WRITER_LEASE_STATE_DIR: join(ownedRoot, "writer-lease-state"),
+  }
 }
 
 export function configuredExomemMaxLiveServices(
@@ -829,6 +837,7 @@ async function exomemDescriptorExpectation(
     ...(port === undefined ? {} : { expected_command: exomemServiceCommand(exomemHome, port) }),
     expected_environment: {
       ...EXOMEM_LME_ENV,
+      ...exomemOwnedStateEnvironment(work),
       EXOMEM_VAULT_PATH: vault,
       MEMORYBENCH_GUEST_WORK_ROOT: work,
       MEMORYBENCH_GUEST_PROVIDER: "exomem",
@@ -1187,6 +1196,7 @@ export async function ensureExomemService(containerTag: string): Promise<Service
               {
                 cwd: roots.work,
                 env: buildExomemChildEnvironment(process.env, {
+                  ...exomemOwnedStateEnvironment(roots.work),
                   EXOMEM_VAULT_PATH: vault,
                   MEMORYBENCH_GUEST_PROVIDER: "exomem",
                   MEMORYBENCH_GUEST_INSTANCE_ID: expected.expected_instance_id!,
@@ -1210,6 +1220,7 @@ export async function ensureExomemService(containerTag: string): Promise<Service
                 cwd: roots.work,
                 detached: true,
                 env: buildExomemChildEnvironment(process.env, {
+                  ...exomemOwnedStateEnvironment(roots.work),
                   EXOMEM_VAULT_PATH: vault,
                   EXOMEM_REST_API_KEY: token,
                   MEMORYBENCH_GUEST_WORK_ROOT: roots.work,
@@ -1262,6 +1273,24 @@ export async function ensureExomemService(containerTag: string): Promise<Service
   }
 }
 
+export function parseExomemDoctorProcessResult(
+  result: { status: number | null; stdout: string }
+): unknown {
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(result.stdout)
+  } catch {
+    if (result.status !== 0) throw new Error("Exomem doctor failed")
+    throw new Error("Exomem doctor returned non-JSON output")
+  }
+  if (result.status !== 0) {
+    if (!decoded || typeof decoded !== "object" || (decoded as { success?: unknown }).success !== false) {
+      throw new Error("Exomem doctor failed")
+    }
+  }
+  return decoded
+}
+
 export async function runExomemDoctor(service: ServiceDescriptor): Promise<unknown> {
   if (!service.vault_root) throw new Error("Exomem vault binding missing")
   const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
@@ -1271,6 +1300,7 @@ export async function runExomemDoctor(service: ServiceDescriptor): Promise<unkno
     {
       cwd: service.work_root,
       env: buildExomemChildEnvironment(process.env, {
+        ...exomemOwnedStateEnvironment(service.work_root),
         EXOMEM_VAULT_PATH: service.vault_root,
         MEMORYBENCH_GUEST_PROVIDER: "exomem",
         MEMORYBENCH_GUEST_INSTANCE_ID: service.instance_id ?? "invalid-missing-instance",
@@ -1279,12 +1309,7 @@ export async function runExomemDoctor(service: ServiceDescriptor): Promise<unkno
       timeout: GUEST_TIMEOUTS_MS.search,
     }
   )
-  if (result.status !== 0) throw new Error("Exomem doctor failed")
-  try {
-    return JSON.parse(result.stdout)
-  } catch {
-    throw new Error("Exomem doctor returned non-JSON output")
-  }
+  return parseExomemDoctorProcessResult({ status: result.status, stdout: result.stdout })
 }
 
 async function processIsLive(pid: number): Promise<boolean> {

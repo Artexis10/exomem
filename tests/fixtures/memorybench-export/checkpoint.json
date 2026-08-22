@@ -3,8 +3,8 @@
   "provider": "exomem",
   "benchmark": "longmemeval",
   "status": "completed",
-  "questions": [
-    {
+  "questions": {
+    "q-01": {
       "questionId": "q-01",
       "question": "Where is the receipt?",
       "questionType": "single-session-user",
@@ -13,13 +13,17 @@
       "phases": {
         "ingest": {"status": "completed", "startedAt": "2026-01-02T00:00:00Z", "completedAt": "2026-01-02T00:00:01Z"},
         "indexing": {"status": "completed", "startedAt": "2026-01-02T00:00:01Z", "completedAt": "2026-01-02T00:00:02Z"},
-        "search": {"status": "completed", "startedAt": "2026-01-02T00:00:02Z", "completedAt": "2026-01-02T00:00:03Z"}
-      },
-      "resultFile": "results/q-01.json",
-      "results": [
-        {"content": "first", "score": 0.9},
-        {"content": "second", "score": 0.1}
-      ]
+        "search": {
+          "status": "completed",
+          "startedAt": "2026-01-02T00:00:02Z",
+          "completedAt": "2026-01-02T00:00:03Z",
+          "resultFile": "data/runs/run-01/results/q-01.json",
+          "results": [
+            {"content": "first", "score": 0.9},
+            {"content": "second", "score": 0.1}
+          ]
+        }
+      }
     }
-  ]
+  }
 }

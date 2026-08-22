@@ -568,7 +568,7 @@ class GapReport(StrictModel):
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
-_PUBLIC_SOURCE_PATTERN = r"^(?:https://[^\\\s]+|[A-Za-z0-9][A-Za-z0-9._+-]*(?::[A-Za-z0-9][A-Za-z0-9._/@+-]*)?)$"
+_PUBLIC_SOURCE_PATTERN = r"^(?:https://[^\\\s]+|[A-Za-z0-9][A-Za-z0-9._+-]*(?:(?::|/)[A-Za-z0-9][A-Za-z0-9._@+-]*)*)$"
 _ARTIFACT_PATH_PATTERN = r"^(?!/)(?!.*\\)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*//).+$"
 _ABSOLUTE_PATH_PATTERN = r"^(?:/|[A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.{1,2}(?:[\\/]|$))(?!.*[\\/]{2}).+$"
 

@@ -466,6 +466,62 @@ def test_a_failed_semantic_probe_invalidates_a_run_that_requested_semantics(
     assert outcomes["semantic-zero-overlap"] == "fail"
 
 
+def test_a_passed_semantic_probe_certifies_declared_probe_based_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider that delegates readiness to the diagnostic probe must become VALID."""
+
+    from lme.providers.base import ProviderHit, RetrievalPurpose
+    from lme.providers.hybrid_rag_direct import HybridRagDirectProvider
+    from protocol.models import LaneReadiness
+    from protocol.probes import known_answer_probe_specs
+
+    semantic = next(
+        spec for spec in known_answer_probe_specs() if spec.kind == "semantic-zero-overlap"
+    )
+
+    class _ProbeCertified(HybridRagDirectProvider):
+        def retrieve(self, question_text, top_k, purpose):
+            if purpose is RetrievalPurpose.POSITIVE_PROBE and question_text == semantic.query:
+                marker = next(
+                    chunk.text for chunk in self._chunks if semantic.fact in chunk.text
+                )
+                return [ProviderHit("semantic-probe", marker, 1.0)]
+            return super().retrieve(question_text, top_k, purpose)
+
+        def readiness(self):
+            return [LaneReadiness(
+                lane="semantic",
+                requested=True,
+                verified=False,
+                method="readiness-unverifiable",
+                evidence="semantic readiness is established by recorded known-answer probes",
+            )]
+
+    _install(monkeypatch, _ProbeCertified)
+    result = _execute(tmp_path, "probe-certified")
+    manifest = _manifest(result.run_dir)
+    assert manifest["status"] == "VALID"
+    assert manifest["readiness"]
+    assert all(
+        lane == {
+            "lane": "semantic",
+            "requested": True,
+            "verified": True,
+            "method": "semantic-probe",
+            "evidence": "semantic-zero-overlap known-answer probe passed",
+            "fallback_detected": False,
+        }
+        for lane in manifest["readiness"]
+    )
+    equivalence = json.loads((result.run_dir / "equivalence.json").read_text(encoding="utf-8"))
+    projected = [{
+        key: manifest["readiness"][0][key]
+        for key in ("lane", "requested", "verified", "method", "fallback_detected")
+    }]
+    assert all(case["readiness"] == projected for case in equivalence["cases"])
+
+
 # --------------------------------------------------------------------------
 # RM4: the runner emits the differ's input for two REAL run directories
 # --------------------------------------------------------------------------

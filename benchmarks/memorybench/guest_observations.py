@@ -23,6 +23,14 @@ SEARCH_PATH = "/api/ask_memory"
 INGEST_PATH = "/api/capture_source"
 READ_PATH = "/api/read_memory"
 DOCTOR_RESPONSE = "doctor-response"
+SEMANTIC_DOCTOR_CHECKS = frozenset({
+    "embeddings.enabled",
+    "dep.sentence-transformers",
+    "dep.torch",
+    "dep.pillow",
+    "models.cache",
+    "embeddings.sidecar",
+})
 
 SEARCH_LABELS = frozenset({
     "search.transmitted_query",
@@ -90,6 +98,10 @@ def read_guest_evidence(evidence_dir: Path) -> tuple[list[dict[str, Any]], set[s
     for child in evidence_dir.iterdir():
         match = _ENTRY_NAME.match(child.name)
         if match is None:
+            # The secure descriptor is a sibling input validated independently
+            # by the cleanup/export coordinator, never operation evidence.
+            if child.name == "service.json":
+                continue
             # Lock reservations and unrelated names are not evidence.
             if not child.name.startswith("."):
                 problems.add(_EVIDENCE_INVALID)
@@ -199,7 +211,7 @@ def _project_ingest(entries: Sequence[dict[str, Any]], problems: set[str]) -> di
 def _project_readiness(
     entries: Sequence[dict[str, Any]], problems: set[str]
 ) -> list[dict[str, Any]] | None:
-    checks: dict[str, Any] | None = None
+    checks: dict[str, str] | None = None
     for entry in entries:
         if entry["event"] != DOCTOR_RESPONSE:
             continue
@@ -208,17 +220,32 @@ def _project_readiness(
             problems.add(_EVIDENCE_INVALID)
             return None
         candidate = response.get("checks")
-        if not isinstance(candidate, dict):
+        if not isinstance(candidate, list):
             problems.add(_EVIDENCE_INVALID)
             return None
-        checks = candidate
+        projected: dict[str, str] = {}
+        for check in candidate:
+            if not isinstance(check, dict):
+                problems.add(_EVIDENCE_INVALID)
+                return None
+            check_id, status = check.get("id"), check.get("status")
+            if (
+                not isinstance(check_id, str)
+                or not check_id
+                or status not in {"pass", "warn", "fail"}
+                or check_id in projected
+            ):
+                problems.add(_EVIDENCE_INVALID)
+                return None
+            projected[check_id] = status
+        checks = projected
     if checks is None:
         return None
 
-    failed = sorted(name for name, outcome in checks.items() if outcome != "pass")
+    failed = sorted(name for name in SEMANTIC_DOCTOR_CHECKS if checks.get(name) != "pass")
     verified = not failed
     evidence = (
-        "hybrid doctor checks pass: " + ", ".join(sorted(checks))
+        "hybrid doctor checks pass: " + ", ".join(sorted(SEMANTIC_DOCTOR_CHECKS))
         if verified
         else "hybrid doctor checks failed: " + ", ".join(failed)
     )

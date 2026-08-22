@@ -31,9 +31,15 @@ type Post = (
   body: Record<string, unknown>
 ) => Promise<unknown>
 type Doctor = (service: ServiceDescriptor) => Promise<unknown>
+type PrepareRetirement = (service: ServiceDescriptor) => Promise<void>
 type ClearService = (containerTag: string) => Promise<void>
 type RetireService = (service: ServiceDescriptor) => Promise<void>
 type ClearAllServices = () => Promise<void>
+type RetirementRequest = (
+  service: ServiceDescriptor,
+  path: string,
+  body: Record<string, unknown>
+) => Promise<unknown>
 
 interface DoctorResult {
   success?: unknown
@@ -50,6 +56,27 @@ interface ReadResponse {
   body?: unknown
 }
 
+export async function prepareExomemRetirement(
+  service: ServiceDescriptor,
+  request: RetirementRequest
+): Promise<void> {
+  const requestId = crypto.randomUUID()
+  const raw = await request(service, "/api/maintain_memory", {
+    mode: "reconcile",
+    dry_run: false,
+    rebuild_graph: false,
+    request_id: requestId,
+    idempotency_key: requestId,
+  })
+  if (!raw || typeof raw !== "object") {
+    throw new Error("Exomem retirement barrier response is invalid")
+  }
+  const graphStatus = (raw as { graph_status?: unknown }).graph_status
+  if (graphStatus !== "current" && graphStatus !== "refreshed") {
+    throw new Error("Exomem retirement barrier did not prove graph-current state")
+  }
+}
+
 export class ExomemProvider implements Provider {
   name = "exomem"
   concurrency = { default: 1, ingest: 1, indexing: 1, search: 1 }
@@ -57,6 +84,7 @@ export class ExomemProvider implements Provider {
   private readonly ensureService: EnsureService
   private readonly post: Post
   private readonly doctor: Doctor
+  private readonly prepareRetirement: PrepareRetirement
   private readonly clearService: ClearService
   private readonly retireService: RetireService
   private readonly clearAllServices: ClearAllServices
@@ -69,6 +97,7 @@ export class ExomemProvider implements Provider {
     ensureService?: EnsureService
     post?: Post
     doctor?: Doctor
+    prepareRetirement?: PrepareRetirement
     clearService?: ClearService
     retireService?: RetireService
     clearAllServices?: ClearAllServices
@@ -76,11 +105,19 @@ export class ExomemProvider implements Provider {
   } = {}) {
     this.defaultTransport = dependencies.ensureService === undefined &&
       dependencies.post === undefined && dependencies.doctor === undefined &&
+      dependencies.prepareRetirement === undefined &&
       dependencies.clearService === undefined && dependencies.retireService === undefined &&
       dependencies.clearAllServices === undefined
     this.ensureService = dependencies.ensureService ?? ensureExomemService
     this.post = dependencies.post ?? postExomem
     this.doctor = dependencies.doctor ?? runExomemDoctor
+    this.prepareRetirement = dependencies.prepareRetirement ??
+      (this.defaultTransport
+        ? async (service) => prepareExomemRetirement(
+            service,
+            (bound, path, body) => this.request(bound, path, body)
+          )
+        : async () => {})
     this.clearService = dependencies.clearService ?? clearExomemService
     this.retireService = dependencies.retireService ??
       (this.defaultTransport ? retireExomemService : async () => {})
@@ -111,6 +148,7 @@ export class ExomemProvider implements Provider {
           | undefined
         if (!leastRecentlyUsed) break
         const [retiredTag, retiredService] = leastRecentlyUsed
+        await this.prepareRetirement(retiredService)
         await this.retireService(retiredService)
         this.services.delete(retiredTag)
         this.manifestsWritten.delete(retiredTag)
