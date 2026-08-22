@@ -25,10 +25,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -3620,6 +3621,57 @@ def active_direct_mutation_guard(
     return boundary in _ACTIVE_DIRECT_MUTATION_GUARDS.get()
 
 
+def _fixed_projected_command_completion(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    @wraps(function)
+    def wrapped(
+        command: Any,
+        *injected: Any,
+        idempotency_key: str | None = None,
+        public_idempotency_key: str | None | object = _PUBLIC_IDEMPOTENCY_KEY_UNSET,
+        idempotency_principal_scope: str | None = None,
+        implicit_idempotency_scope: str | None = None,
+        mutation_request_id: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        from .governance import projection_runtime, projection_timing
+
+        def invoke() -> Any:
+            return function(
+                command,
+                *injected,
+                idempotency_key=idempotency_key,
+                public_idempotency_key=public_idempotency_key,
+                idempotency_principal_scope=idempotency_principal_scope,
+                implicit_idempotency_scope=implicit_idempotency_scope,
+                mutation_request_id=mutation_request_id,
+                **kwargs,
+            )
+
+        if (
+            getattr(command, "name", None) not in {"ask_memory", "find"}
+            or not injected
+            or not isinstance(injected[0], (str, os.PathLike))
+            or not projection_runtime.has_preactivated_projection_runtime(
+                Path(injected[0])
+            )
+        ):
+            return invoke()
+        request_class = projection_timing.request_class_for_command(
+            command,
+            injected,
+            kwargs,
+        )
+        if request_class is None:
+            return invoke()
+        with projection_timing.fixed_public_completion(request_class):
+            return invoke()
+
+    return wrapped
+
+
+@_fixed_projected_command_completion
 def invoke_command(
     command: Any,
     *injected: Any,

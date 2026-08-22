@@ -7,7 +7,12 @@ from dataclasses import replace
 import pytest
 from governance_projection_support import verified_namespace
 
-from exomem.governance import projection_authorization, projection_store, projections
+from exomem.governance import (
+    projected_retrieval,
+    projection_authorization,
+    projection_store,
+    projections,
+)
 from exomem.governance.decisions import Decision
 from exomem.governance.policy import Policy, Rule, Scope
 
@@ -243,6 +248,78 @@ def test_session_grant_is_bound_to_one_exact_projection_item() -> None:
     }
     assert by_identity["granted-item"].projection_variant_id is not None
     assert by_identity["closed-sibling"].projection_variant_id is None
+
+
+def test_identical_scope_items_reuse_one_request_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy()
+    first = _input(
+        policy,
+        identity="closed-first",
+        content_hash="a" * 64,
+        scope_ids=("closed",),
+        body="first body",
+    )
+    second = _input(
+        policy,
+        identity="closed-second",
+        content_hash="b" * 64,
+        scope_ids=("closed",),
+        body="second body",
+    )
+    original = projection_authorization.decide
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(projection_authorization, "decide", counted)
+
+    authorization = projection_authorization.build_authorization_map(
+        _namespace(policy, first, second),
+        policy=policy,
+        audience="stranger",
+    )
+
+    assert calls == 1
+    assert all(
+        selection.projection_variant_id is None
+        for selection in authorization.selections
+    )
+
+
+def test_preverified_catalog_selects_without_request_variant_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy()
+    item = _input(
+        policy,
+        identity="visible-reader",
+        content_hash="c" * 64,
+        scope_ids=("closed",),
+        body="reader-visible body",
+    )
+    namespace = _namespace(policy, item)
+    catalog = projected_retrieval.ProjectionCatalog(namespace)
+    monkeypatch.setattr(
+        projections,
+        "projection_variant_ids_for_decision",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("request rehashed immutable projection variants")
+        ),
+    )
+
+    authorization = projection_authorization.build_authorization_map(
+        namespace,
+        policy=policy,
+        audience="reader",
+        catalog=catalog,
+    )
+
+    assert authorization.selections[0].projection_variant_id is not None
 
 
 def test_selector_refuses_stale_or_incomplete_catalog_variant() -> None:

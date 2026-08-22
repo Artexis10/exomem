@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -28,9 +29,28 @@ class ProjectionRuntimeUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class _PreactivatedProjectionRuntime:
+    root_key: str
+    cell_id: str
+    logical_vault_id: str
+    activation_store_id: str
+    activation_epoch: int
+    activation_state_digest: str
+    runtime: ActiveProjectionRuntime
+
+
+_PREACTIVATED_RUNTIMES: dict[str, _PreactivatedProjectionRuntime] = {}
+_PREACTIVATED_RUNTIME_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True, slots=True)
 class ActiveProjectionRuntime:
     snapshot: schema_v4.ActivePolicySnapshot
     namespace: projection_store.VerifiedProjectionNamespace
+    catalog: projected_retrieval.ProjectionCatalog = field(
+        init=False,
+        repr=False,
+    )
     lexical_index: projected_retrieval.ProjectedLexicalIndex = field(
         init=False,
         repr=False,
@@ -55,10 +75,12 @@ class ActiveProjectionRuntime:
             raise ProjectionRuntimeUnavailable(
                 "governed projected retrieval is unavailable"
             )
+        catalog = projected_retrieval.ProjectionCatalog(self.namespace)
+        object.__setattr__(self, "catalog", catalog)
         object.__setattr__(
             self,
             "lexical_index",
-            projected_retrieval.ProjectedLexicalIndex(self.namespace),
+            projected_retrieval.ProjectedLexicalIndex(catalog),
         )
 
 
@@ -70,6 +92,178 @@ class ProjectedFindResult:
     withheld_paths: frozenset[str]
     warming_components: tuple[str, ...] = ()
     declared_purpose: str | None = None
+
+
+def _root_key(vault_root: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(Path(vault_root))))
+
+
+def _control_activation(
+    custody: authorization_custody.AuthorizationCustody,
+) -> tuple[str, str, str, int, str] | None:
+    control = custody.control
+    if not control.governance_enrolled:
+        return None
+    if (
+        control.activation_store_id is None
+        or control.activation_epoch is None
+        or control.activation_state_digest is None
+    ):
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
+    return (
+        control.cell_id,
+        control.logical_vault_id,
+        control.activation_store_id,
+        control.activation_epoch,
+        control.activation_state_digest,
+    )
+
+
+def _configured_external_custody() -> bool:
+    return any(
+        variable in os.environ
+        for variable in (
+            authorization_custody.KEYRING_FILE_ENV,
+            authorization_custody.CONTROL_FILE_ENV,
+        )
+    )
+
+
+def _clear_preactivated_runtimes_for_tests() -> None:
+    """Clear process-local serving state between isolated unit tests."""
+
+    with _PREACTIVATED_RUNTIME_LOCK:
+        _PREACTIVATED_RUNTIMES.clear()
+
+
+def has_preactivated_projection_runtime(vault_root: Path) -> bool:
+    """Return process-local readiness without opening custody or catalog state."""
+
+    with _PREACTIVATED_RUNTIME_LOCK:
+        return _root_key(Path(vault_root)) in _PREACTIVATED_RUNTIMES
+
+
+def preactivate_projection_runtime(
+    vault_root: Path,
+) -> ActiveProjectionRuntime | None:
+    """Build one exact v4 runtime before a transport accepts requests.
+
+    An unconfigured or authenticated never-enrolled vault has no projected
+    runtime.  Configured but unverifiable custody and every incomplete v4
+    namespace refuse content-free; startup never relabels them as legacy.
+    """
+
+    root = Path(vault_root)
+    if not _configured_external_custody():
+        return None
+    connection: sqlite3.Connection | None = None
+    try:
+        custody = authorization_custody.load_authorization_custody(
+            root,
+            now=int(time.time()),
+        )
+        activation = _control_activation(custody)
+        if activation is None:
+            return None
+        cell_id, logical_vault_id, store_id, epoch, digest = activation
+        connection = store.open_active_governance_read_connection(root)
+        snapshot = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=logical_vault_id,
+            expected_activation_store_id=store_id,
+            expected_activation_epoch=epoch,
+            expected_activation_state_digest=digest,
+        )
+        expected_manifest = projection_store.manifest_from_namespace_evidence(
+            snapshot
+        )
+        manifest, items = projection_store.load_projection_catalog(
+            root,
+            key=expected_manifest.namespace_key,
+            expected_rows_digest=expected_manifest.rows_digest,
+        )
+        if manifest != expected_manifest:
+            raise ProjectionRuntimeUnavailable(
+                "governed projected retrieval is unavailable"
+            )
+        namespace = projection_store.bind_active_projection_namespace(
+            snapshot,
+            manifest=manifest,
+            items=items,
+        )
+        runtime = ActiveProjectionRuntime(snapshot, namespace)
+        record = _PreactivatedProjectionRuntime(
+            root_key=_root_key(root),
+            cell_id=cell_id,
+            logical_vault_id=logical_vault_id,
+            activation_store_id=store_id,
+            activation_epoch=epoch,
+            activation_state_digest=digest,
+            runtime=runtime,
+        )
+        with _PREACTIVATED_RUNTIME_LOCK:
+            _PREACTIVATED_RUNTIMES[record.root_key] = record
+        return runtime
+    except ProjectionRuntimeUnavailable:
+        raise
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        projection_store.ProjectionStoreError,
+        schema_v4.SchemaV4Error,
+        store.UnsupportedGovernanceSchema,
+        FileNotFoundError,
+        OSError,
+        RuntimeError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        ) from error
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _preactivated_runtime(vault_root: Path) -> ActiveProjectionRuntime | None:
+    root = Path(vault_root)
+    key = _root_key(root)
+    with _PREACTIVATED_RUNTIME_LOCK:
+        record = _PREACTIVATED_RUNTIMES.get(key)
+    if record is None:
+        return None
+    try:
+        custody = authorization_custody.load_authorization_custody(
+            root,
+            now=int(time.time()),
+        )
+        activation = _control_activation(custody)
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        ProjectionRuntimeUnavailable,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        ) from error
+    expected = (
+        record.cell_id,
+        record.logical_vault_id,
+        record.activation_store_id,
+        record.activation_epoch,
+        record.activation_state_digest,
+    )
+    if activation != expected:
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
+    return record.runtime
 
 
 def _external_custody_requires_projected_boundary(root: Path) -> bool:
@@ -143,6 +337,9 @@ def load_active_projection_runtime(
     """
 
     root = Path(vault_root)
+    preactivated = _preactivated_runtime(root)
+    if preactivated is not None:
+        return preactivated
     try:
         connection = store.open_active_governance_read_connection(root)
     except store.UnsupportedGovernanceSchema:
@@ -340,6 +537,7 @@ def find_projected_hits(
         audience=principal.audience_id,
         purpose=declared_purpose,
         verified_session_grants=verified_grants,
+        catalog=runtime.catalog,
     )
     withheld = frozenset(
         selection.item_identity
@@ -379,6 +577,8 @@ __all__ = [
     "ProjectedFindResult",
     "ProjectionRuntimeUnavailable",
     "find_projected_hits",
+    "has_preactivated_projection_runtime",
     "load_active_projection_runtime",
+    "preactivate_projection_runtime",
     "requires_projected_read_boundary",
 ]

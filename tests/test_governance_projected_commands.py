@@ -85,7 +85,6 @@ def test_v4_find_never_acquires_from_the_raw_corpus(monkeypatch, tmp_path) -> No
             AssertionError("v4 projected retrieval reopened the reference index")
         ),
     )
-
     with principal.request_scope(principal.owner_principal(surface="library")):
         response = commands.op_find(
             tmp_path,
@@ -190,6 +189,47 @@ def test_low_projection_never_enters_path_bearing_query_log(monkeypatch, tmp_pat
         }
     ]
     assert logged == []
+
+
+def test_projected_timings_use_one_stable_suppressed_shape(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    policy = Policy(
+        fingerprint="f" * 64,
+        scopes={"visible": Scope(id="visible", source="scopes/visible.yaml")},
+    )
+    runtime = SimpleNamespace(snapshot=SimpleNamespace(policy=policy))
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: runtime,
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "find_projected_hits",
+        lambda *_args, **_kwargs: projection_runtime.ProjectedFindResult(
+            hits=(),
+            withheld_paths=frozenset(),
+        ),
+    )
+
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        response = commands.op_find(
+            tmp_path,
+            query="projection-only term",
+            limit=1,
+            scope="vault",
+            mode="keyword",
+            graph=False,
+            rerank=False,
+            include_timings=True,
+        )
+
+    assert response == {
+        "hits": [],
+        "timings_suppressed": {"request_class": "projected-find-keyword-v1"},
+    }
 
 
 def test_projected_annotation_uses_bound_hash_without_reopening_item(

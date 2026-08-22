@@ -50,6 +50,15 @@ _VARIANT_VALUE_KEYS = frozenset(
         "projector_schema_version",
     }
 )
+_VARIANT_DESCRIPTOR_KEYS = frozenset(
+    {
+        "decision_level",
+        "options",
+        "release_strip",
+        "bridge_id",
+        "bridge_dependency_content_hash",
+    }
+)
 _SEARCH_FIELDS_BY_LEVEL = {
     1: frozenset({"notice"}),
     2: frozenset({"constraint"}),
@@ -539,28 +548,16 @@ def build_projection_variant(
     )
 
 
-def projection_variant_ids_for_decision(
-    *,
-    item_identity: str,
-    content_hash: str,
+def _projection_variant_descriptors_for_decision(
     decision: Decision,
-    projector_schema_version: int,
-) -> tuple[str, ...]:
-    """Return descending fixed variant identities without reopening source text."""
-
-    identity = _bounded_text(item_identity, "item_identity", maximum=4096)
-    digest = _digest(content_hash, "content_hash")
+) -> tuple[dict[str, Any], ...]:
     if not isinstance(decision, Decision):
         raise ProjectionCanonicalizationError("projection decision is invalid")
     if type(decision.level) is not int or not 0 <= decision.level <= 6:
         raise ProjectionCanonicalizationError("decision level is outside L0-L6")
-    if type(projector_schema_version) is not int or projector_schema_version <= 0:
-        raise ProjectionCanonicalizationError(
-            "projector_schema_version must be positive"
-        )
     options = _canonical_options(decision.options)
     release_strip = _canonical_strip(decision.release_strip)
-    identities: list[str] = []
+    descriptors: list[dict[str, Any]] = []
     for level in range(decision.level, 0, -1):
         if level == 1 and not (
             isinstance(decision.notice, str)
@@ -578,25 +575,74 @@ def projection_variant_ids_for_decision(
             and decision.release_dependency_digest
         ):
             continue
+        descriptors.append(
+            {
+                "decision_level": level,
+                "options": _options_at_level(options, level),
+                "release_strip": release_strip,
+                "bridge_id": (
+                    _bounded_text(decision.release_grant_id, "bridge_id", maximum=4096)
+                    if level == 4
+                    else None
+                ),
+                "bridge_dependency_content_hash": (
+                    _digest(
+                        decision.release_dependency_digest,
+                        "bridge_dependency_content_hash",
+                    )
+                    if level == 4
+                    else None
+                ),
+            }
+        )
+    return tuple(descriptors)
+
+
+def projection_variant_descriptors_for_decision(
+    decision: Decision,
+) -> tuple[bytes, ...]:
+    """Return item-independent selectors for one request decision."""
+
+    return tuple(
+        canonical_jcs(descriptor)
+        for descriptor in _projection_variant_descriptors_for_decision(decision)
+    )
+
+
+def projection_variant_descriptor(variant: ProjectionVariant) -> bytes:
+    """Return the verified item-independent selector for one immutable row."""
+
+    if not isinstance(variant, ProjectionVariant):
+        raise ProjectionCanonicalizationError("projection variant is invalid")
+    value = json.loads(variant.value_jcs)
+    descriptor = {
+        key: value[key]
+        for key in _VARIANT_DESCRIPTOR_KEYS
+    }
+    return canonical_jcs(descriptor)
+
+
+def projection_variant_ids_for_decision(
+    *,
+    item_identity: str,
+    content_hash: str,
+    decision: Decision,
+    projector_schema_version: int,
+) -> tuple[str, ...]:
+    """Return descending fixed variant identities without reopening source text."""
+
+    identity = _bounded_text(item_identity, "item_identity", maximum=4096)
+    digest = _digest(content_hash, "content_hash")
+    if type(projector_schema_version) is not int or projector_schema_version <= 0:
+        raise ProjectionCanonicalizationError(
+            "projector_schema_version must be positive"
+        )
+    identities: list[str] = []
+    for descriptor in _projection_variant_descriptors_for_decision(decision):
         value = {
             "item_identity": identity,
             "content_hash": digest,
-            "decision_level": level,
-            "options": _options_at_level(options, level),
-            "release_strip": release_strip,
-            "bridge_id": (
-                _bounded_text(decision.release_grant_id, "bridge_id", maximum=4096)
-                if level == 4
-                else None
-            ),
-            "bridge_dependency_content_hash": (
-                _digest(
-                    decision.release_dependency_digest,
-                    "bridge_dependency_content_hash",
-                )
-                if level == 4
-                else None
-            ),
+            **descriptor,
             "projector_schema_version": projector_schema_version,
         }
         identities.append(
@@ -827,6 +873,8 @@ __all__ = [
     "deduplicate_variants",
     "enumerate_projection_variants",
     "fixed_excerpt",
+    "projection_variant_descriptor",
+    "projection_variant_descriptors_for_decision",
     "projection_variant_ids_for_decision",
     "require_supported_capacity",
 ]

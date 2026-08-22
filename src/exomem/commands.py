@@ -124,6 +124,7 @@ from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
 from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
+from .governance import projection_timing as projection_timing_module
 from .governance import tool as governance_tool_module
 from .kbdir import kb_dirname
 from .vault import (
@@ -1179,7 +1180,6 @@ def _require_supported_projected_find_request(
         or prefer_used
         or pack
         or graph_enrich
-        or include_timings
         or explain
     ):
         raise projection_runtime_module.ProjectionRuntimeUnavailable(
@@ -1474,7 +1474,23 @@ def op_find(
         if explain
         else None
     )
-    timings = find_module.FindTimings() if include_timings else None
+    timings = (
+        find_module.FindTimings()
+        if include_timings and projection_runtime is None
+        else None
+    )
+    timings_suppressed = (
+        {
+            "request_class": projection_timing_module.request_class_for_find(
+                mode=mode,
+                scope=scope,
+                graph=graph,
+                rerank=rerank,
+            ).name
+        }
+        if include_timings and projection_runtime is not None
+        else None
+    )
     if timings is not None:
         from . import mode as mode_module
 
@@ -1638,6 +1654,7 @@ def op_find(
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
     if (
         timings_dict is None
+        and timings_suppressed is None
         and warming is None
         and degraded_marker is None
         and retrieval_trace is None
@@ -1650,6 +1667,8 @@ def op_find(
         out["pack"] = pack_obj
     if timings_dict is not None:
         out["timings"] = timings_dict
+    if timings_suppressed is not None:
+        out["timings_suppressed"] = timings_suppressed
     if warming is not None:
         out["warming"] = warming
     if degraded_marker is not None:
