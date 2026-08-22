@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.59.0](https://github.com/Artexis10/exomem/compare/v0.58.0...v0.59.0) (2026-08-22)
+
+
+### Features
+
+* **governance:** add projected timing gate foundation ([#749](https://github.com/Artexis10/exomem/issues/749)) ([a65dcd3](https://github.com/Artexis10/exomem/commit/a65dcd386ead1d1851abcf4129900574adf1ef85))
+* **governance:** build projected retrieval foundation ([#748](https://github.com/Artexis10/exomem/issues/748)) ([4216b44](https://github.com/Artexis10/exomem/commit/4216b44f601cd6fe508fabd7a9eca27c7781f4ed))
+* **governance:** integrate projected retrieval lanes ([#753](https://github.com/Artexis10/exomem/issues/753)) ([abd9357](https://github.com/Artexis10/exomem/commit/abd93571fd12030c9f886a8a9841076e9b1dc505))
+* **governance:** persist projected measurements ([#750](https://github.com/Artexis10/exomem/issues/750)) ([4a7a723](https://github.com/Artexis10/exomem/commit/4a7a72324502124639e1a4caacf581fde04fdd98))
+* **governance:** preactivate projected measurements ([#751](https://github.com/Artexis10/exomem/issues/751)) ([e4d62e4](https://github.com/Artexis10/exomem/commit/e4d62e41cc56c27ae662e2bd0ce08786ffe3f483))
+* **recall:** resolve vague entity referents from the registry and the typed graph ([bd8aa5b](https://github.com/Artexis10/exomem/commit/bd8aa5b1bcdba0d1d887f228382ffa576846979a))
+
+
+### Bug Fixes
+
+* **governance:** project session grants across content routes ([#741](https://github.com/Artexis10/exomem/issues/741)) ([60352ee](https://github.com/Artexis10/exomem/commit/60352eec92d0ff48c691aeaec825b43990efdae1))
+* **governance:** restore Windows session custody ([#745](https://github.com/Artexis10/exomem/issues/745)) ([b82322b](https://github.com/Artexis10/exomem/commit/b82322bcd179687502fb1b120f6f8a947e5d214f))
+* **hosted:** fail closed on reviewer lock drift ([#747](https://github.com/Artexis10/exomem/issues/747)) ([d4bbe01](https://github.com/Artexis10/exomem/commit/d4bbe010fecee221d26d8aeca80ff85bd1c8d46b))
+
 ## [0.58.0](https://github.com/Artexis10/exomem/compare/v0.57.2...v0.58.0) (2026-08-22)
 
 
