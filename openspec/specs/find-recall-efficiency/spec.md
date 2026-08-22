@@ -9,7 +9,9 @@ snapshots with delete/rename/backdated-aware corpus keys, per-page derived-text
 reuse, and startup cache warm-up. Measurement and caching only — any
 retrieval-architecture rewrite (ANN/LSH/new vector DB) is deferred until the timing
 diagnostics justify it.
+
 ## Requirements
+
 ### Requirement: Optional Find Timing Diagnostics
 
 The system SHALL expose opt-in timing diagnostics for `find` calls. When requested, the response
@@ -916,3 +918,14 @@ available from existing in-memory objects.
 - **WHEN** a BM25 corpus or parsed-page cache is not resident
 - **THEN** resource status reports it as absent or zero-sized
 - **AND** the status call does not build the cache to answer the query
+
+### Requirement: Optional recall stages remain checkpoint-bounded and post-cache
+The referents stage SHALL compute from released hits after the shared hit cache, SHALL never change the cache key or cached object, and SHALL record a `referents` timing span only when a deterministic cue is eligible.
+
+#### Scenario: Hot cache hit
+- **WHEN** a cue query is served from the find hot cache
+- **THEN** referents are recomputed post-cache and match the cold response
+
+#### Scenario: Scale bound
+- **WHEN** the warm stage is measured at 2k/125 and 8k/500 pages/entities
+- **THEN** 2k remains below 1000 ms and 8k remains within max(1.5x, +25 ms)

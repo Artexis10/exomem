@@ -79,5 +79,5 @@
 
 - [x] 4.1 Run the focused acceptance shard and governance/scaffold/schema invariants.
 - [x] 4.2 Run retrieval latency and golden quality gates.
-- [ ] 4.3 Run the full lean suite.
+- [x] 4.3 Run the full lean suite: 11,934 passed, 350 skipped, 7 failed — all seven reproduce on `origin/main` (issue #746: embeddings extra installed with `EXOMEM_DISABLE_EMBEDDINGS=1`).
 - [x] 4.4 Run write-latency, capability, benchmark, lint, types, and strict OpenSpec gates.

@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change fix-excluded-tier-read-paths. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Graph context excludes excluded-tier pages
 
 The graph-context lane (`connect_memory(operation="graph-context")` and the
@@ -51,3 +53,10 @@ apply the same guard to its seeds, nodes, and edge endpoints.
 
 - **WHEN** no governance rule matches any seed or neighbour
 - **THEN** graph expansion and its annotations are identical to current behavior
+
+### Requirement: Referent corroboration respects release decisions
+The optional referent composition stage MAY reuse the typed sidecar for one-hop corroboration over the top ten released hits, SHALL ignore superseded hits inside that prefix, SHALL drop withheld entity and seed paths, and SHALL not modify graph-lane scoring or hit ordering.
+
+#### Scenario: Withheld anchor
+- **WHEN** graph evidence names an anchor withheld for the current audience
+- **THEN** that evidence is removed before the referents block is emitted

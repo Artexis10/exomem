@@ -1,6 +1,6 @@
 # graph-find-ranking
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Referent corroboration respects release decisions
 The optional referent composition stage MAY reuse the typed sidecar for one-hop corroboration over the top ten released hits, SHALL ignore superseded hits inside that prefix, SHALL drop withheld entity and seed paths, and SHALL not modify graph-lane scoring or hit ordering.

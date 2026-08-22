@@ -1,6 +1,6 @@
 # find-recall-efficiency
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Optional recall stages remain checkpoint-bounded and post-cache
 The referents stage SHALL compute from released hits after the shared hit cache, SHALL never change the cache key or cached object, and SHALL record a `referents` timing span only when a deterministic cue is eligible.
