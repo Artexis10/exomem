@@ -110,6 +110,21 @@ def test_list_nested_fenced_example_does_not_hide_complete_tasks(tmp_path: Path)
     assert payload["unchecked_active_changes"] == []
 
 
+def test_unclosed_nested_fence_ends_with_its_list_container(tmp_path: Path) -> None:
+    _write_tasks(
+        tmp_path,
+        "genuinely-in-progress",
+        "- [x] done\n\n    ```markdown\n- [ ] genuinely remaining\n",
+    )
+
+    result = _run(tmp_path, json_output=True)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["complete_active_changes"] == []
+    assert payload["unchecked_active_changes"] == ["genuinely-in-progress"]
+
+
 def test_missing_empty_malformed_and_archived_tasks_do_not_claim_completion(
     tmp_path: Path,
 ) -> None:
