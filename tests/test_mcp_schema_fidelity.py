@@ -266,7 +266,12 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     schema = tool["inputSchema"]
     [command] = [cmd for cmd in commands_module.PRODUCT_COMMANDS if cmd.name == "process_media"]
     operation_param = next(param for param in command.params if param.name == "operation")
-    assert set(schema["properties"]) == {"path", "operation", "response_detail"}
+    assert set(schema["properties"]) == {
+        "authorization_session_credential",
+        "path",
+        "operation",
+        "response_detail",
+    }
     assert schema.get("required", []) == []
     assert schema["properties"]["operation"]["enum"] == list(operation_param.choices)
     assert schema["properties"]["response_detail"]["enum"] == [
@@ -285,7 +290,7 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     }
 
     result = asyncio.run(
-        mcp.call_tool("process_media", {"operation": "status"}, run_middleware=False)
+        mcp.call_tool("process_media", {"operation": "status"}, run_middleware=True)
     )
     structured = result.structured_content
     assert structured["operation"] == "status"
