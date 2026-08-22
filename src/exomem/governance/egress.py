@@ -2841,6 +2841,16 @@ def release_level_for_path_only(
             vault_root, rel_path, policy
         ).require_classified()
     except membership_module.MembershipUnresolved:
+        if receipt_decision is not None:
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=None,
+                policy=policy,
+                audience=who.audience_id,
+                outcome="withheld",
+                purpose=purpose,
+            )
         return DISCLOSURE_MIN
     decision = decide(
         scope_ids,
@@ -3260,15 +3270,15 @@ def release_allows_frames(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
 ) -> bool:
-    """True at the release floor and above.
+    """True only at full disclosure.
 
-    Sampled keyframes are a bounded excerpt of a video — the image-shaped
-    equivalent of the excerpt a hit already carries at L5 — so they ride the
-    same floor rather than requiring full disclosure. Below it there is no
-    'abstracted frame', so the answer is a refusal, not a degraded render.
+    Frames are a structured direct representation of the source video, not the
+    registered bounded Markdown excerpt projector. Until a typed image
+    projector exists, every level below L6 must refuse rather than decode or
+    return partial pixels.
     """
     return _binary_boundary(
-        vault_root, rel_path, boundary_name="video_frame", minimum_level=RELEASE_FLOOR,
+        vault_root, rel_path, boundary_name="video_frame", minimum_level=LEVEL_FULL,
         principal=principal, purpose=purpose,
     )
 

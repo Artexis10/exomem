@@ -74,6 +74,8 @@ from exomem.replace import replace as replace_page
         (".graph-commit-receipts/0123456789abcdef01234567.json", "graph-receipts"),
         (".review-state.json", "review-state"),
         ("..review-state.json.abc123_4.tmp", "review-state"),
+        (".due-state.json", "due-state"),
+        ("..due-state.json.abc123_4.tmp", "due-state"),
         (".lexical.sqlite.rebuild-0123456789abcdef0123456789abcdef.tmp", "lexical-rebuild"),
         (
             ".lexical.sqlite.rebuild-0123456789abcdef0123456789abcdef.tmp-wal",
@@ -122,6 +124,9 @@ def test_closed_registry_reserves_exact_static_sqlite_temp_and_quarantine_famili
         ".review-state.json.abc123_4.tmp",
         "..review-state.json.abc123-4.tmp",
         "..review-state.json.abc12345.tmp-more",
+        ".due-state.json.abc123_4.tmp",
+        "..due-state.json.abc123-4.tmp",
+        "..due-state.json.abc12345.tmp-more",
         ".lexical.sqlite.rebuild-0123.tmp",
         ".lexical.sqlite.rebuild-" + "g" * 32 + ".tmp",
         ".lexical.sqlite.quarantine-" + "0" * 31,
@@ -177,6 +182,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     from exomem import (
         claims,
         deferred_index,
+        due_state,
         epistemic_graph,
         graph_sync,
         index_paths,
@@ -195,6 +201,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "clip-store",
         "consolidation-tree",
         "deferred-index-store",
+        "due-state",
         "embeddings-store",
         "freshness-store",
         "governance-store",
@@ -252,6 +259,13 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
                 f".{review_state.STATE_FILENAME}.abc123_4.tmp"
             ),
             "review-state",
+        ),
+        (due_state.state_path(root), "due-state"),
+        (
+            due_state.state_path(root).with_name(
+                f".{due_state.STATE_FILENAME}.abc123_4.tmp"
+            ),
+            "due-state",
         ),
         (
             lexical_live.with_name(f"{lexical_live.name}.rebuild-{token32}.tmp"),
@@ -1623,6 +1637,42 @@ def test_directory_walk_structurally_omits_private_tree_and_hardlink_alias(
             include_hidden=True,
         )
     assert error.value.code == "NOT_FOUND"
+
+
+def test_due_state_projection_and_its_temporaries_are_not_reachable_vault_content(
+    tmp_path: Path,
+) -> None:
+    from exomem import due_state
+
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    (notes / "ordinary.md").write_text("ordinary", encoding="utf-8")
+    projection = due_state.state_path(tmp_path)
+    projection.write_text('{"categories":{},"version":1}\n', encoding="utf-8")
+    temporary = projection.with_name(f".{due_state.STATE_FILENAME}.abc123_4.tmp")
+    temporary.write_text("DUE-STATE-SENTINEL-9c1a\n", encoding="utf-8")
+
+    result = list_directory(
+        tmp_path,
+        path="Knowledge Base",
+        recursive=True,
+        include_hidden=True,
+    )
+
+    paths = {entry.path for entry in result.entries}
+    assert "Knowledge Base/Notes/ordinary.md" in paths
+    assert paths.isdisjoint(
+        {
+            projection.relative_to(tmp_path).as_posix(),
+            temporary.relative_to(tmp_path).as_posix(),
+        }
+    )
+
+    for private in (projection, temporary):
+        with pytest.raises(GetError) as error:
+            prepare_page_read(tmp_path, path=private.relative_to(tmp_path).as_posix())
+        assert error.value.code == "NOT_FOUND"
+        assert "DUE-STATE-SENTINEL-9c1a" not in error.value.reason
 
 
 def test_list_trash_treats_private_sidecar_alias_as_physically_absent(
@@ -4288,6 +4338,7 @@ def test_every_generic_command_path_role_routes_every_private_family() -> None:
             "Knowledge Base/.graph-commit-receipts/" + "1" * 24 + ".json"
         ),
         "review-state": "Knowledge Base/..review-state.json.abc123_4.tmp",
+        "due-state": "Knowledge Base/..due-state.json.abc123_4.tmp",
         "lexical-rebuild": (
             "Knowledge Base/.lexical.sqlite.rebuild-" + "2" * 32 + ".tmp-wal"
         ),

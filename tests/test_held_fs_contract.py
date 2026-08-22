@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 import os
@@ -289,12 +290,24 @@ def test_publish_bytes_is_no_replace_or_expected_identity_replace(tmp_path: Path
 
             with filesystem.file(parent, "item.txt").require() as current:
                 expected = current.identity
+            stale = held_fs.publish_bytes(
+                filesystem,
+                parent,
+                "item.txt",
+                b"two",
+                expected_identity=expected,
+                expected_sha256="0" * 64,
+            )
+            assert not stale.ok
+            assert stale.error is not None
+            assert stale.error.code == "IDENTITY_CHANGED"
             replaced = held_fs.publish_bytes(
                 filesystem,
                 parent,
                 "item.txt",
                 b"two",
                 expected_identity=expected,
+                expected_sha256=hashlib.sha256(b"one").hexdigest(),
             )
             assert replaced.ok
             with filesystem.file(parent, "item.txt").require() as current:

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem.governance import egress, scrubber
+from exomem.governance import authorization_sessions, egress, scrubber
 
 
 class _FakeAlias:
@@ -399,13 +399,15 @@ def test_arbitrary_content_scanning_calls_the_canonical_as1_parser(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[object] = []
-    real = scrubber._parse_authorization_bearer
+    real = authorization_sessions.parse_credential
 
-    def recording_parser(value: object) -> str | None:
+    def recording_parser(
+        value: object,
+    ) -> authorization_sessions.AuthorizationSessionCredential | None:
         calls.append(value)
         return real(value)
 
-    monkeypatch.setattr(scrubber, "_parse_authorization_bearer", recording_parser)
+    monkeypatch.setattr(authorization_sessions, "parse_credential", recording_parser)
 
     cleaned, blocked = scrubber.scrub_text(f"prefix {AS1_VECTOR_BEARER} suffix")
 
