@@ -413,7 +413,6 @@ _REGISTRY = (
     InternalStateDescriptor(
         "authorization-projections",
         "governance.projections",
-        authority_enabled=False,
         trees=(".authorization-projections",),
     ),
     InternalStateDescriptor(
