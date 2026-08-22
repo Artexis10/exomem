@@ -40,13 +40,15 @@ The due-state projection SHALL persist an emission ledger holding the number of 
 
 A journey driver SHALL execute the f23 scenario's operations against an installed envelope — seed, maintenance passes, a triage dismissal, an engine restart, prominence reconfiguration across the full level range, and one bulk ingest — and SHALL project the resulting review state and emission ledger into the snapshot pair the family's assertions evaluate. The vault projector SHALL declare `due_state_counters` available through the projection file. The driver SHALL refuse to run rather than fall back when no envelope is installed.
 
-#### Scenario: f23 is green on this runtime
+#### Scenario: f23 reports what this runtime can decide, and no more
 
 - **WHEN** the f23 journey runs against the current runtime
 - **THEN** `dismissal_respected_across_passes` passes for the dismissed subject
-- **AND** `counter_emission_not_repeated_per_write` passes for the bulk batch
+- **AND** `counter_emission_not_repeated_per_write` is evaluated only on a batch that owed something, and otherwise reports `unsupported` rather than passing vacuously
+- **AND** on this runtime it reports `unsupported`, because no product leaf reaches the write carrier, so the bulk batch delivers no block and the served denominator is zero
+- **AND** the batch-once requirement is proven where it is decidable: twelve write carriers inside one batch scope emit at most one block, plus the measured zero carrier trips at every product leaf
 
 #### Scenario: Removing the batch scope turns the counter assertion red
 
-- **WHEN** the batch scope is disabled and the f23 journey runs
-- **THEN** `counter_emission_not_repeated_per_write` fails
+- **WHEN** the batch scope is disabled and twelve write carriers run over one vault
+- **THEN** `counter_emission_not_repeated_per_write` fails with twelve emissions for twelve writes

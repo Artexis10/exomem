@@ -801,3 +801,77 @@ def test_compact_bootstrap_says_a_quiet_family_is_not_a_clean_one(vault: Path) -
     text = _post_write(vault)["family_disposition_reading"]
     assert "silent, not clean" in text
     assert "dispositions" in text
+
+
+# ==========================================================================
+# the count is composed by the SHARED composer, and resolves refs once
+# ==========================================================================
+
+
+def test_the_count_follows_the_shared_composer_rather_than_a_local_copy(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stub the one composer; the dispositions count must move with it.
+
+    The S1 blocker was a second hand-rolled derivation of the component
+    fingerprint drifting from the one `apply_for_item` records against, which
+    under-counts silently. A local copy passes every test written against real
+    fingerprints, because both derivations agree until one of them changes — so
+    the only test that can catch it stubs the canonical implementation and
+    asserts the caller returns the stub.
+    """
+    doubly_flagged(vault, "nag-shared")
+    scratch_page(vault)
+
+    monkeypatch.setattr(
+        review_state,
+        "component_fingerprints",
+        lambda _vault, _item, **_kwargs: [("prediction_window", "stubbed-value")],
+    )
+    keys = commands._review_keys_by_family(vault)
+
+    assert list(keys) == ["prediction_window"]
+    assert all(key.endswith(":stubbed-value") for key in keys["prediction_window"]), keys
+
+
+def test_the_counts_ref_lookups_do_not_scale_with_the_vault(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One `refs_for_paths` for the whole view, however many items it counts.
+
+    `refs_for_paths` opens a database connection. Asking it per item made the
+    cost of "which families are quiet" scale with the vault rather than with the
+    number of families, which is the wrong axis entirely for a view that returns
+    four rows.
+
+    Asserted as INVARIANCE across vault size rather than as an absolute count,
+    because the attention scan underneath does its own single resolution and
+    this test is not about that one. A per-item lookup shows up here as a count
+    that tracks the item count; a hoisted one does not move at all.
+    """
+
+    def lookups(count: int) -> tuple[int, int]:
+        for index in range(count):
+            overdue_prediction(vault, f"nag-many-{index}")
+        find_module.clear_cache()
+        calls: list[int] = []
+        real = review_state.refs_for_paths
+
+        def counting(vault_root, paths):
+            calls.append(len(paths))
+            return real(vault_root, paths)
+
+        monkeypatch.setattr(review_state, "refs_for_paths", counting)
+        keys = commands._review_keys_by_family(vault)
+        monkeypatch.setattr(review_state, "refs_for_paths", real)
+        return len(calls), len(keys.get(FAMILY, []))
+
+    scratch_page(vault)
+    few_calls, few_items = lookups(2)
+    many_calls, many_items = lookups(12)
+
+    assert (few_items, many_items) == (2, 12), (few_items, many_items)
+    assert few_calls == many_calls, (
+        f"{few_calls} ref lookups for {few_items} items but {many_calls} for "
+        f"{many_items}: the view is resolving refs per item"
+    )

@@ -431,37 +431,17 @@ def reconcile(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
     # The projection is derived and rebuilt from authored state; the emission
     # ledger is a MEASUREMENT of what this vault has told its callers, and a
     # heal is not a reason to forget it.
-    # The healer recomputes everything, so it is the one place the due total is
-    # known for free. Recording it here matters because the write carrier only
-    # records what it served, and the carrier returns early on a vault with no
-    # projection yet — so on a freshly reconciled vault the denominator would
-    # otherwise still read zero and make "nothing was emitted" unreadable.
-    payload["emission"] = _emission_delta(
-        existing, due_total=_due_total(payload, today or dt.date.today())
-    )
+    #
+    # `due_total` is deliberately NOT written here. It has exactly one
+    # definition — the size of the block a caller was actually handed — and a
+    # heal hands nobody anything. An earlier version recorded reconcile's own
+    # unfiltered count under the same name, which gave the field two meanings
+    # and let an anti-vacuity gate read a pre-dismissal number as evidence that
+    # a later batch had something to say. One writer, one meaning.
+    payload["emission"] = _emission_delta(existing)
     save(vault_root, payload)
     _remember_unpersisted(vault_root, payload)
     return payload
-
-
-def _due_total(payload: dict[str, Any], today: dt.date) -> int:
-    """How many projected entries are due on or before `today`, before egress.
-
-    Deliberately unfiltered: this is the denominator of an internal metric,
-    stored in the same file that already holds every entry, so an audience
-    filter here would make the number mean something different on every read.
-    What a given audience may SEE is what `served_entries` decides.
-    """
-    total = 0
-    for pages in (payload.get("categories") or {}).values():
-        if not isinstance(pages, dict):
-            continue
-        for entries in pages.values():
-            for entry in _unbucket(entries):
-                due = _date(entry.get("due"))
-                if due is not None and due <= today:
-                    total += 1
-    return total
 
 
 def _remember_unpersisted(vault_root: Path, payload: dict[str, Any]) -> None:
@@ -587,11 +567,14 @@ def _emission_section(payload: dict[str, Any] | None) -> dict[str, Any]:
         "writes": int(section.get("writes") or 0),
         "emissions": int(section.get("emissions") or 0),
         "last_digest": section.get("last_digest"),
-        # How many items the last write carrier actually had to report. Without
-        # it "0 emissions for 12 writes" is unreadable: it is the behaviour the
+        # The size of the last block a caller was actually HANDED — written by
+        # `_record_emission` and by nothing else. Without a denominator
+        # "0 emissions for 12 writes" is unreadable: it is the behaviour the
         # governance is supposed to produce AND the behaviour of a vault that
         # owed nothing, and a metric that cannot tell those apart cannot be
-        # used to claim either one.
+        # used to claim either one. A vault that delivered nothing therefore
+        # reports 0 here, which is the honest answer and the one that makes a
+        # counter assertion report `unsupported` rather than pass vacuously.
         "due_total": int(section.get("due_total") or 0),
     }
 
@@ -614,12 +597,18 @@ def _emission_delta(
     return section
 
 
-def _record_emission(vault_root: Path | None, digest: str) -> None:
-    """Persist that a block was DELIVERED. Best effort, never on the hot path.
+def _record_emission(
+    vault_root: Path | None, digest: str, *, due_total: int | None = None
+) -> None:
+    """Persist that a block was DELIVERED, and how big it was. Best effort.
 
     Called from `mark_emitted`, which the terminal reaches once per response
     that actually carried a block — so this is one small JSON replace per
     delivered advisory, and never inside a mutation critical section.
+
+    `due_total` rides along rather than getting its own write because it is a
+    property OF the delivery: the number of items in the block that was handed
+    over. Recording it anywhere else would give the field a second definition.
     """
     if not vault_root:
         return
@@ -629,35 +618,14 @@ def _record_emission(vault_root: Path | None, digest: str) -> None:
             return
         payload = {
             **payload,
-            "emission": _emission_delta(payload, emissions=1, last_digest=digest),
+            "emission": _emission_delta(
+                payload, emissions=1, last_digest=digest, due_total=due_total
+            ),
         }
         save(vault_root, payload)
         _remember_unpersisted(vault_root, payload)
     except Exception:  # noqa: BLE001 — a ledger write never breaks a response
         log.debug("could not record the due-state emission", exc_info=True)
-
-
-def _record_due_total(vault_root: Path | None, total: int) -> None:
-    """Persist how much this write carrier had to report. Best effort.
-
-    Written only when the number MOVES, so a run of writes that changes nothing
-    costs no extra file replace. The denominator has to be recorded whether or
-    not a block was emitted — that is the whole point of it — so this sits with
-    production rather than with `mark_emitted`.
-    """
-    if not vault_root:
-        return
-    try:
-        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
-        if payload is None:
-            return
-        if _emission_section(payload)["due_total"] == int(total):
-            return
-        payload = {**payload, "emission": _emission_delta(payload, due_total=int(total))}
-        save(vault_root, payload)
-        _remember_unpersisted(vault_root, payload)
-    except Exception:  # noqa: BLE001 — a ledger write never breaks a response
-        log.debug("could not record the due-state total", exc_info=True)
 
 
 def emission_ledger(vault_root: Path) -> dict[str, Any]:
@@ -767,7 +735,17 @@ def served_entries(
     try:
         state_payload = store.load()
     except ValueError:
-        state_payload = review_state_module.empty_state()
+        # Fail closed, exactly as the decision read does — but the carrier's
+        # safe direction is SILENCE, not a raise. Every row below is filtered
+        # by a triage decision and a family disposition read out of this store;
+        # substituting an empty state would serve every dismissed item as due,
+        # which is the nag this slice exists to stop, arriving because a file
+        # is corrupt. Serving nothing costs the caller an advisory they can get
+        # from `review_memory`; serving everything costs them the trust that
+        # dismissing works. The write itself is untouched: this is the advisory
+        # attached to the response, not the mutation.
+        log.debug("review state unreadable; serving no due state", exc_info=True)
+        return []
     excluded = _excluded_families(state_payload)
 
     order = {category: rank for rank, category in enumerate(PROJECTION_CATEGORIES)}
@@ -890,8 +868,23 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
 
 
 def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
-    """``ref -> fingerprint`` over the whole projection. One pass, no ordering."""
+    """``ref -> fingerprint`` over the whole projection. One pass, no ordering.
+
+    **The coupling this depends on.** A `ref` is a page-level identity and a
+    fingerprint is a per-finding one, so the map is only well defined while at
+    most one projection row per ref carries a fingerprint. That holds today
+    because every category except `unfinished_experiments` stamps a
+    `review_partition` into its ref, which makes the ref per-finding too. It is
+    a property of how the projection composes refs, not an invariant anything
+    else enforces — so a new category that omits the partition would silently
+    make this map ambiguous and stamp the wrong identity on the ledger.
+
+    Rather than take first-category-wins on a collision, a conflicting ref is
+    DROPPED and logged: an unstamped row is a measurement gap, a wrongly
+    stamped one is a false record of what a person was shown.
+    """
     out: dict[str, str] = {}
+    conflicted: set[str] = set()
     for pages in (payload.get("categories") or {}).values():
         if not isinstance(pages, dict):
             continue
@@ -899,8 +892,20 @@ def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
             for entry in _unbucket(entries):
                 ref = str(entry.get("ref") or "")
                 finger = str(entry.get("fingerprint") or "")
-                if ref and finger:
-                    out.setdefault(ref, finger)
+                if not ref or not finger:
+                    continue
+                seen = out.get(ref)
+                if seen is None:
+                    out[ref] = finger
+                elif seen != finger:
+                    conflicted.add(ref)
+    for ref in conflicted:
+        log.debug(
+            "projection ref %s carries more than one fingerprint; "
+            "not stamping the first-surfaced ledger for it",
+            ref,
+        )
+        out.pop(ref, None)
     return out
 
 
@@ -972,9 +977,7 @@ def block_for_write(
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        block_payload = served(vault_root, today=today)
-    _record_due_total(vault_root, int((block_payload or {}).get("total") or 0))
-    return block_payload
+        return served(vault_root, today=today)
 
 
 # --------------------------------------------------------------------------
@@ -1066,7 +1069,7 @@ def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = No
         _EMISSION[key] = digest
     # Outside the lock: the ledger write reads and replaces the projection file,
     # and `_remember_unpersisted` takes this same non-reentrant lock.
-    _record_emission(vault_root, digest)
+    _record_emission(vault_root, digest, due_total=int(payload.get("total") or 0))
     # This is the moment the block became something a person was shown, so it is
     # the moment the first-surfaced ledger may record its refs. See
     # `_record_delivered`.

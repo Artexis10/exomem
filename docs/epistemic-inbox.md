@@ -162,10 +162,23 @@ an `emission` section: `writes` counts the governed writes the projection has
 absorbed and `emissions` counts the due-state blocks actually delivered. A
 command that writes many pages at once is one batch, and a batch delivers at
 most one block rather than one per write — the counters are how that is
-checkable rather than merely claimed.
+checkable rather than merely claimed, and checking it is the point of writing
+them down.
 
-The section also carries `due_total`: how many items the last write carrier
-actually had to report. Without it "no blocks for twelve writes" is unreadable,
-because it is equally the shape of governance working and the shape of a vault
-that owed nothing, and a metric that cannot tell those apart cannot be used to
-claim either.
+The section also carries `due_total`: how many items were in the last block a
+caller was actually handed. Without a denominator "no blocks for twelve writes"
+is unreadable, because it is equally the shape of governance working and the
+shape of a batch that delivered nothing, and a metric that cannot tell those
+apart cannot be used to claim either. It has exactly one writer — the delivery
+path — so a vault that has delivered nothing reports `0`, which is the honest
+answer rather than a flattering one.
+
+Which is what it reports today. No product command commits more than one
+governed write through the write carrier: measured on `adoption_studio` apply,
+`maintain_memory(mode="fix")`, `preserve_artifacts` and `process_media`, each
+of which writes eight to twelve pages and reaches the carrier zero times. The
+batch scope those leaves hold is therefore a guard for a route nothing takes
+yet, not a mechanism doing work today; where the carrier IS reached — a single
+governed write, and the recall and bootstrap carriers — one scope over twelve
+runs still delivers at most one block, and that is where the requirement is
+proven.

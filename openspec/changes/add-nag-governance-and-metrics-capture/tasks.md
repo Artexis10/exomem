@@ -39,12 +39,17 @@
 - [x] 5.1 Bootstrap engagement guidance: reason codes, the family route for "stop suggesting this kind of thing", quiet ≠ clean; scaffold and plugin skill regenerated; compact byte ceiling holds (re-measure, do not guess).
 - [x] 5.2 `docs/epistemic-inbox.md`: dispositions, reason codes, the ledger, and compaction documented.
 - [x] 5.3 Bench projector: `due_state_counters` declared `available_via:due_state_file`, reading `emissions`/`writes`; decisions projection reads schema v2.
-- [x] 5.4 f23 journey driver against the installed envelope (seed, passes, dismiss, restart, prominence min/max, bulk ingest, snapshot pair); refuses without an envelope; both f23 assertions green on this runtime and the batch-scope removal turns the counter assertion red.
-  - Deviation: the batch-scope removal is exercised at the level the scope operates on — twelve write
-    carriers, in-process — not through the bulk CLI command the journey uses. A product command delivers
-    exactly one response and the emission decision lives at that response's terminal (D9), so a bulk
-    command emits at most one block with or without the scope; removing it there moves the count from one
-    to zero and could never turn the assertion red. See `.task/RESULT.md`.
+- [x] 5.4 f23 journey driver against the installed envelope (seed, passes, dismiss, restart, prominence across the full level range, bulk ingest, snapshot pair); refuses without an envelope; the dismissal assertion green on this runtime, the counter assertion honestly `unsupported`, and the batch-scope removal turns the counter assertion red at the carrier.
+  - Amended (round 2): the counter half is STRUCTURALLY undecidable here and the journey says so instead
+    of manufacturing a green. Measured: no product leaf reaches `due_state.block_for_write` —
+    `adopt_vault` 12 writes / 0 trips, `adoption_studio` apply 12 / 0, `maintain_memory(mode="fix")`
+    12 / 0, `preserve_artifacts` 8 / 0, `process_media` 12 / 0
+    (`.task/measurements/leaf_carrier_counts.py`). A batch therefore delivers no block, the served
+    `due_total` is 0, and "one emission rather than twelve" would be true for a reason unrelated to
+    governance. The journey keeps the bulk batch — the writes and the write counter are real — and the
+    test asserts `pass` for the dismissal and `unsupported` for the counter, which also goes red the day
+    a leaf starts carrying. The scope's own red stays where the scope operates: twelve write carriers in
+    one scope, 0 emissions with it and 12 without. See `.task/RESULT.md` "Round 2".
 
 ## 6. Gates
 

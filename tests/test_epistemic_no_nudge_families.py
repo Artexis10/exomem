@@ -1138,6 +1138,16 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     copy of the product's own sample vault, so the maintenance passes are also
     genuine engine restarts. If no envelope is installed the test says so and
     skips; an in-process run would measure the library rather than the runtime.
+
+    **The two halves get different verdicts, and that is the point.** The
+    dismissal half must pass. The counter half must report `unsupported`: no
+    product leaf reaches `due_state.block_for_write` (measured — see
+    `.task/measurements/leaf_carrier_counts.py`), so the bulk batch delivers no
+    block, the served denominator is 0, and a `pass` here would be the
+    assertion agreeing that twelve writes produced no repeat when nothing was
+    ever produced to repeat. Asserting `unsupported` pins the honest verdict AND
+    fails the day a leaf starts carrying, which is when the family becomes
+    decidable and someone must revisit this.
     """
 
     from epistemic.journeys import f23_dismissal
@@ -1157,16 +1167,22 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     ledger = run.later.item("surface-due_state_counters")
     assert ledger is not None and ledger.raw["projection"] == "complete"
     assert int(ledger.raw["writes"]) == f23_dismissal.BULK_DOCUMENTS
+    # The measured zero, recorded rather than smoothed: nothing was delivered,
+    # so the served denominator is 0 and no emission happened.
+    assert int(ledger.raw["emissions"]) == 0
+    assert int(ledger.raw["due_total"]) == 0
 
     context = AssertionContext(
         snapshot=run.later, prior=run.prior, subject=run.subject, family="f23"
     )
-    for name in (
-        "dismissal_respected_across_passes",
-        "counter_emission_not_repeated_per_write",
-    ):
-        result = resolve(name)(context)
-        assert result.outcome == "pass", f"{name}: {result.evidence}"
+    dismissal = resolve("dismissal_respected_across_passes")(context)
+    assert dismissal.outcome == "pass", dismissal.evidence
+
+    counters = resolve("counter_emission_not_repeated_per_write")(context)
+    assert counters.outcome == "unsupported", counters.evidence
+    # The evidence must name WHY it could not decide, or an `unsupported` is
+    # indistinguishable from a projector that simply did not look.
+    assert "due" in counters.evidence and "0" in counters.evidence, counters.evidence
 
 
 def _f23_carrier_pages(vault: Path, count: int) -> list[str]:
@@ -1207,9 +1223,16 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
 
     The scope governs the emission carriers a batch runs, so that is what this
     drives: twelve governed writes, each producing the block a caller would
-    receive. Inside the scope the ledger records twelve writes and no emission
-    and the counters assertion passes; without it the ledger records one block
-    per write and the same assertion fails.
+    receive, and then ONE delivery at the terminal after the scope exits — which
+    is what D9's response terminal does for a real command. Inside the scope the
+    ledger records twelve writes and one emission and the counters assertion
+    passes; without it, one block per write and the same assertion fails.
+
+    The terminal delivery is not decoration. Stopping at scope exit records zero
+    emissions and a zero denominator, which the assertion now correctly reports
+    as `unsupported` rather than `pass` — a batch that ends up telling the caller
+    nothing is a different outcome from one that tells them once, and only the
+    second is the behaviour being claimed.
 
     It is deliberately not driven through the bulk CLI command the journey uses.
     A product command delivers exactly one response, and the emission decision
@@ -1245,6 +1268,8 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
         for page in pages:
             block = due_state.block_for_write(vault, page)
             due_state.should_emit(block, vault_root=vault)
+    if scoped:
+        due_state.should_emit(due_state.served(vault), vault_root=vault)
 
     snapshot = f23_dismissal.project_run(
         vault,
@@ -1263,7 +1288,9 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
         AssertionContext(snapshot=snapshot, family="f23")
     )
     if scoped:
-        assert int(ledger.raw["emissions"]) == 0
+        assert int(ledger.raw["emissions"]) == 1
+        # Non-vacuous: the one delivered block genuinely had something in it.
+        assert int(ledger.raw["due_total"]) >= len(pages)
         assert result.outcome == "pass", result.evidence
         return
     assert int(ledger.raw["emissions"]) >= len(pages)

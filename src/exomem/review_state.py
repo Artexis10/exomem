@@ -340,28 +340,55 @@ def component_fingerprint(
     )
 
 
+def component_paths(item: Any) -> list[str]:
+    """Every vault path one fused item's components need resolved to a ref.
+
+    Separate and public so a caller counting over MANY items can resolve them
+    all in one `refs_for_paths` — that call opens a database connection, and
+    per-item resolution turned a 103-item view into 103 connections.
+    """
+    reasons = list(getattr(item, "reasons", None) or [])
+    if not reasons:
+        return []
+    paths = [str(getattr(item, "path", "") or "")]
+    for reason in reasons:
+        paths.extend(reason.get("related_paths") or [])
+    return paths
+
+
 def component_fingerprints(
     vault_root: Path,
     item: Any,
-) -> list[str]:
+    *,
+    with_category: bool = False,
+    refs: dict[str, str] | None = None,
+) -> list[Any]:
     """Every per-finding fingerprint folded into one fused attention item.
 
     Deduplicated and returned in a stable order. The item's own fused
     fingerprint is NOT included -- the caller records that one separately,
     because it is the identity attention itself reports and round-trips.
+
+    `with_category=True` returns `(category, fingerprint)` pairs instead of bare
+    fingerprints, in the same order and with the same dedup. It exists so a
+    caller that needs to know WHICH family a component belongs to does not
+    re-derive the composition by hand: a second derivation that drifts from this
+    one produces keys `apply_for_item` never recorded, which is silent
+    under-counting rather than a failure.
+
+    `refs` lets a caller that already resolved the paths (see `component_paths`)
+    supply the map instead of paying a lookup per item.
     """
     reasons = list(getattr(item, "reasons", None) or [])
     if not reasons:
         return []
     anchor = str(getattr(item, "path", "") or "")
-    paths = [anchor]
-    for reason in reasons:
-        paths.extend(reason.get("related_paths") or [])
-    refs = refs_for_paths(vault_root, paths)
+    if refs is None:
+        refs = refs_for_paths(vault_root, component_paths(item))
     target_ref = getattr(item, "target_ref", None) or refs.get(anchor)
     if not target_ref:
         return []
-    out: list[str] = []
+    out: list[Any] = []
     for reason in reasons:
         related = sorted(
             {
@@ -375,8 +402,9 @@ def component_fingerprints(
             reason=reason,
             related_refs=[refs[path] for path in related],
         )
-        if value not in out:
-            out.append(value)
+        entry = (str(reason.get("category") or ""), value) if with_category else value
+        if entry not in out:
+            out.append(entry)
     return out
 
 

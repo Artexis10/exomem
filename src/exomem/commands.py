@@ -2426,11 +2426,21 @@ def op_reconcile(
         # so without a higher ceiling here the refusal would be a permanent
         # lockout. This is the operator-invoked healer and the one path allowed
         # past.
+        # A failure here is REPORTED, not swallowed. Since the decision read
+        # started failing closed, this is the only road back from a store the
+        # runtime refuses — so an operator who runs the healer and is told
+        # nothing has no way to learn that the healer could not run either.
         try:
             result["review_state_compaction"] = review_state_module.ReviewStateStore(
                 vault_root
             ).compact(read_limit=review_state_module.recovery_read_limit())
-        except Exception:  # noqa: BLE001 — compaction never fails reconcile
+        except Exception as error:  # noqa: BLE001 — compaction never fails reconcile
+            # The code, not the message: the message carries the store's
+            # absolute path, and this value lands in a tool result.
+            text = str(error)
+            code = text.split(":", 1)[0].strip() if ":" in text else type(error).__name__
+            result["review_state_compaction"] = {"error": code}
+            log.warning("review-state compaction failed during reconcile: %s", code)
             log.debug("could not compact the review state", exc_info=True)
     if active_mutation_request_id() is None:
         return reconcile_module.finalize_graph_rebuild_handoff(vault_root, result)
@@ -5738,56 +5748,24 @@ def _review_keys_by_family(vault_root: Path) -> dict[str, list[str]]:
     except Exception:  # noqa: BLE001 — a count never breaks the view
         log.debug("dispositions view could not read the review surface", exc_info=True)
         return out
-    for item in report.items:
-        if not item.item_id:
-            continue
-        for category, value in _component_keys_by_category(vault_root, item).items():
-            out.setdefault(category, []).extend(value)
-    return out
-
-
-def _component_keys_by_category(
-    vault_root: Path, item: Any
-) -> dict[str, list[str]]:
-    """``category -> [record key]`` for ONE fused attention item.
-
-    One key per contributing finding, composed by the single shared composer
-    (`review_state.component_fingerprint`) so it matches exactly what
-    `apply_for_item` recorded. A single-flagged item's component fingerprint IS
-    its fused one, so the common case is unchanged; only a multi-flagged item
-    stops being counted once per family it happens to appear in.
-    """
-    reasons = list(getattr(item, "reasons", None) or [])
-    if not reasons:
-        return {}
-    anchor = str(getattr(item, "path", "") or "")
-    paths = [anchor]
-    for reason in reasons:
-        paths.extend(reason.get("related_paths") or [])
-    refs = review_state_module.refs_for_paths(vault_root, paths)
-    target_ref = getattr(item, "target_ref", None) or refs.get(anchor)
-    if not target_ref:
-        return {}
-    out: dict[str, list[str]] = {}
-    for reason in reasons:
-        category = str(reason.get("category") or "")
-        if not category:
-            continue
-        related = sorted(
-            {
-                path
-                for path in (reason.get("related_paths") or [])
-                if path != anchor and path in refs
-            }
-        )
-        value = review_state_module.component_fingerprint(
-            target_ref=str(target_ref),
-            reason=reason,
-            related_refs=[refs[path] for path in related],
-        )
-        key = f"{item.item_id}:{value}"
-        if key not in out.setdefault(category, []):
-            out[category].append(key)
+    items = [item for item in report.items if item.item_id]
+    # ONE ref resolution for the whole view. `refs_for_paths` opens a database
+    # connection, and asking it per item made a 103-item vault open 103 of them
+    # to answer a question about four families.
+    paths: list[str] = []
+    for item in items:
+        paths.extend(review_state_module.component_paths(item))
+    refs = review_state_module.refs_for_paths(vault_root, paths) if paths else {}
+    for item in items:
+        for category, value in review_state_module.component_fingerprints(
+            vault_root, item, with_category=True, refs=refs
+        ):
+            if not category:
+                continue
+            key = f"{item.item_id}:{value}"
+            keys = out.setdefault(category, [])
+            if key not in keys:
+                keys.append(key)
     return out
 
 

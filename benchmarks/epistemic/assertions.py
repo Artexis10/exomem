@@ -2801,8 +2801,10 @@ def counter_emission_not_repeated_per_write(ctx: AssertionContext) -> AssertionR
         return _result(
             name,
             "unsupported",
-            f"{block.id} had nothing due across the batch, so no block could have been "
-            "emitted; the absence of repetition is not evidence here",
+            f"{block.id} reports a served due_total of {due_total} across {writes} "
+            f"write(s) and {emissions} emission(s): nothing was delivered, so there was "
+            "nothing that could have repeated and the absence of repetition decides "
+            "nothing",
             ctx.subject,
         )
     if emissions >= writes:

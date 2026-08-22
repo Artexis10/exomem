@@ -176,6 +176,15 @@ def test_a_block_that_is_not_delivered_does_not_count(vault: Path) -> None:
 
 
 def test_a_twelve_write_batch_emits_at_most_once(vault: Path) -> None:
+    """Twelve carrier runs in one scope, then one delivery at the terminal.
+
+    The whole shape matters, not just the suppressed half. Inside the scope the
+    governor declines every block; the delivery happens once after it exits,
+    which is what D9's response terminal does for a real command. Stopping at
+    scope exit would assert "zero emissions" and call that governance — but a
+    batch that ends up telling the caller NOTHING is a different (and worse)
+    outcome than one that tells them once.
+    """
     overdue_prediction(vault)
     scratch_page(vault)
     commands.op_bootstrap(vault)
@@ -189,11 +198,15 @@ def test_a_twelve_write_batch_emits_at_most_once(vault: Path) -> None:
             block = due_state_module.block_for_write(vault, page)
             if due_state_module.should_emit(block, vault_root=vault):
                 emitted += 1
+    assert emitted == 0, "a block was delivered from inside the batch"
+
+    # The terminal, once, after the scope.
+    assert due_state_module.should_emit(due_state_module.served(vault), vault_root=vault)
 
     ledger = _projection(vault)["emission"]
     assert ledger["writes"] == before["writes"] + 12
-    assert emitted == 0
-    assert ledger["emissions"] - before["emissions"] <= 1
+    assert ledger["emissions"] == before["emissions"] + 1
+    assert ledger["due_total"] >= 12, ledger
 
 
 def test_removing_the_batch_scope_emits_once_per_write(vault: Path) -> None:
@@ -250,9 +263,12 @@ def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
     command path — so the mutation terminal that admits the block actually runs;
     calling the leaf directly skips the only code that can put one there.
 
-    What bounds this to one block is measured, not assumed, and it is NOT the
-    batch scope: see `test_the_batch_scope_on_this_leaf_suppresses_nothing_today`
-    immediately below.
+    The assertion is the MEASURED truth for this leaf — the response carries no
+    block at all — and not the weaker `<= 1`. A dict cannot hold a key twice, so
+    counting `due_state` keys in a response could only ever return 0 or 1 and
+    `<= 1` was a tautology dressed as a governance check. What actually bounds
+    this leaf is measured and is NOT the batch scope: see
+    `test_the_batch_scope_on_this_leaf_suppresses_nothing_today` below.
     """
     overdue_prediction(vault)
     scratch_page(vault)
@@ -262,11 +278,10 @@ def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
 
     response = _adopt_twelve(vault)
 
-    blocks = [key for key in response if key == "due_state"]
-    assert len(blocks) <= 1, response
+    assert "due_state" not in response, response
     ledger = _projection(vault)["emission"]
     assert ledger["writes"] - before["writes"] == 12
-    assert ledger["emissions"] - before["emissions"] <= 1
+    assert ledger["emissions"] - before["emissions"] == 0
 
 
 def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> None:
@@ -284,6 +299,11 @@ def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> N
     the difference between "defends nothing yet" and "defends nothing ever"
     matters: the day this leaf commits through `semantic_writes`, the carrier
     count below stops being zero and this test says so.
+
+    The unscoped leg is a real removal — `due_state.batch_scope` monkeypatched
+    to a no-op, so the leaf genuinely runs without it. An earlier version wrapped
+    the second call in `contextlib.nullcontext()`, which changed nothing and made
+    the A and the B the same run twice.
     """
     overdue_prediction(vault)
     scratch_page(vault)
@@ -291,52 +311,96 @@ def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> N
     due_state_module.reset_emission_state()
 
     carried: list[str] = []
-    real = due_state_module.block_for_write
+    real_block = due_state_module.block_for_write
+    real_scope = due_state_module.batch_scope
 
     def counting(vault_root, rel_path, **kwargs):
         carried.append(rel_path)
-        return real(vault_root, rel_path, **kwargs)
+        return real_block(vault_root, rel_path, **kwargs)
 
-    original = due_state_module.block_for_write
     due_state_module.block_for_write = counting
     try:
         scoped = _adopt_twelve(vault)
         scoped_calls = list(carried)
 
         carried.clear()
-        with contextlib.nullcontext():
+        due_state_module.batch_scope = lambda *a, **k: contextlib.nullcontext()
+        try:
             unscoped = _adopt_twelve(vault, directory="legacy2")
+        finally:
+            due_state_module.batch_scope = real_scope
+        unscoped_calls = list(carried)
     finally:
-        due_state_module.block_for_write = original
+        due_state_module.block_for_write = real_block
+        due_state_module.batch_scope = real_scope
 
     assert scoped_calls == [], "the scoped leaf reached the write carrier"
-    assert carried == [], "the leaf reached the write carrier after all"
-    assert [key for key in scoped if key == "due_state"] == []
-    assert [key for key in unscoped if key == "due_state"] == []
+    assert unscoped_calls == [], "the leaf reached the write carrier without the scope"
+    assert "due_state" not in scoped
+    assert "due_state" not in unscoped
 
 
-def test_the_ledger_records_how_much_was_due(vault: Path) -> None:
-    """The denominator, without which the other two counters are unreadable.
+def test_the_ledger_records_the_size_of_the_block_it_delivered(vault: Path) -> None:
+    """The denominator, with ONE definition: what the caller was handed.
 
     `writes=12, emissions=0` is equally the shape of governance working and the
-    shape of a vault that owed nothing. `due_total` is what separates them, so
-    it is recorded on production — whether or not anything was emitted — rather
-    than on delivery.
+    shape of a batch that delivered nothing. `due_total` separates them only if
+    it means one thing, so it is written at delivery and nowhere else. An
+    earlier version also wrote reconcile's own unfiltered count under the same
+    name, which let the field report a pre-dismissal number as the denominator
+    for a later batch that owed nothing at all.
     """
+    overdue_prediction(vault)
+    overdue_prediction(vault, "nag-second")
+    scratch_page(vault)
+    due_state_module.reconcile(vault)
+
+    block = due_state_module.served(vault)
+    assert block is not None and block["total"] == 2
+    due_state_module.reset_emission_state()
+    assert due_state_module.should_emit(block, vault_root=vault)
+
+    ledger = _projection(vault)["emission"]
+    assert ledger["due_total"] == 2
+    assert ledger["emissions"] == 1
+
+
+def test_a_heal_never_writes_the_denominator(vault: Path) -> None:
+    """Reconcile hands nobody anything, so it records no denominator.
+
+    This is the two-definitions bug pinned as a test. The vault genuinely owes
+    two items and a full recompute knows it — but a heal is not a delivery, and
+    a number that means "what a caller received" must not be written by a code
+    path where nobody received anything.
+    """
+    overdue_prediction(vault)
+    overdue_prediction(vault, "nag-second")
+    scratch_page(vault)
+    due_state_module.reconcile(vault)
+
+    assert _projection(vault)["emission"]["due_total"] == 0
+    # ...and the recompute really did find them, so the zero is about the
+    # writer and not about an empty vault.
+    assert due_state_module.served(vault)["total"] == 2
+
+
+def test_a_production_that_is_never_delivered_records_no_denominator(
+    vault: Path,
+) -> None:
+    """Producing a block inside a batch tells the ledger nothing about delivery."""
     overdue_prediction(vault)
     scratch_page(vault)
     due_state_module.reconcile(vault)
-    assert _projection(vault)["emission"]["due_total"] == 1
+    due_state_module.reset_emission_state()
 
-    overdue_prediction(vault, "nag-second")
-    due_state_module.reconcile(vault)
-    assert _projection(vault)["emission"]["due_total"] == 2
+    with due_state_module.batch_scope(vault):
+        produced = due_state_module.block_for_write(vault, _bulk_pages(vault, 1)[0])
+        assert produced is not None and produced["total"] >= 1
+        due_state_module.should_emit(produced, vault_root=vault)
 
-    # And the write carrier keeps it current without a full recompute.
-    due_state_module.block_for_write(
-        vault, _bulk_pages(vault, 1)[0]
-    )
-    assert _projection(vault)["emission"]["due_total"] == 3
+    ledger = _projection(vault)["emission"]
+    assert ledger["emissions"] == 0
+    assert ledger["due_total"] == 0
 
 
 def test_a_vault_that_owes_nothing_records_a_zero_denominator(vault: Path) -> None:

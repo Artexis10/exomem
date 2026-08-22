@@ -237,6 +237,87 @@ def test_reconcile_compacts_a_store_past_the_ordinary_read_limit(
     assert review_state.state_path(vault).stat().st_size < size
 
 
+def test_an_unreadable_store_makes_the_carrier_serve_nothing(vault: Path) -> None:
+    """Failing closed on the CARRIER means silence, not a raise and not a flood.
+
+    Every row `served_entries` returns has been filtered by a triage decision
+    and a family disposition read out of `.review-state.json`. Substituting an
+    empty state when the file cannot be read serves every dismissed item as due
+    — the nag this slice exists to stop, arriving because a file is corrupt.
+
+    Silence is the right direction here rather than the refusal the decision
+    read uses: this is an advisory attached to a response, the caller can still
+    get it from `review_memory`, and a write must not fail because its optional
+    advisory could not be computed. So: no block, and the write is untouched.
+    """
+    from exomem import commands
+    from exomem import due_state as due_state_module
+    from exomem import writer_lease
+
+    _dismiss_one(vault)
+    overdue_prediction(vault, "nag-open")
+    due_state_module.reconcile(vault)
+    assert due_state_module.served(vault) is not None
+
+    review_state.state_path(vault).write_text("{not json", encoding="utf-8")
+
+    assert due_state_module.served_entries(vault) == []
+    assert due_state_module.served(vault) is None
+    # The write itself still succeeds, and still carries no block: the advisory
+    # failing closed must not turn into a failed mutation.
+    written = writer_lease.invoke_command(
+        next(c for c in commands.PRODUCT_COMMANDS if c.name == "observe_memory"),
+        vault,
+        path="Knowledge Base/Notes/Research/Infrastructure/nag-scratch.md",
+        operation="add",
+        category="finding",
+        content="The pool saturates above 600 concurrent readers.",
+        tags=["infrastructure"],
+    )
+    assert isinstance(written, dict) and "due_state" not in written
+
+
+def test_a_readable_store_still_serves_the_open_item(vault: Path) -> None:
+    """The other half of the pair: silence is the FAILURE path, not the normal one."""
+    from exomem import due_state as due_state_module
+
+    _dismiss_one(vault)
+    overdue_prediction(vault, "nag-open")
+    due_state_module.reconcile(vault)
+
+    rows = due_state_module.served_entries(vault)
+    assert [row["path"].rsplit("/", 1)[-1] for row in rows] == ["nag-open.md"]
+
+
+def test_a_reconcile_that_cannot_compact_says_so(vault: Path) -> None:
+    """The healer's own failure is reported, not swallowed.
+
+    Since the decision read started failing closed, `maintain_memory(
+    mode="reconcile")` is the only road back from a store the runtime refuses.
+    An operator who runs it and is told nothing cannot tell "compacted, nothing
+    to drop" from "could not read the file either".
+    """
+    from exomem import commands
+
+    review_state.state_path(vault).write_text("{not json", encoding="utf-8")
+    result = commands.op_maintain_memory(vault, mode="reconcile", dry_run=False)
+
+    assert result["review_state_compaction"] == {"error": "REVIEW_STATE_INVALID"}
+
+
+def test_a_store_past_even_the_recovery_limit_says_so(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the other way a heal can fail: too big for the elevated limit too."""
+    from exomem import commands
+
+    _seeded(vault)
+    monkeypatch.setattr(review_state, "_STATE_READ_LIMIT", 8)
+    result = commands.op_maintain_memory(vault, mode="reconcile", dry_run=False)
+
+    assert result["review_state_compaction"] == {"error": "REVIEW_STATE_INVALID"}
+
+
 # ==========================================================================
 # retention and compaction
 # ==========================================================================

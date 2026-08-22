@@ -8,6 +8,19 @@ emission rather than N. Both are claims about what a runtime does, so this
 driver runs the episode against the installed CLI and projects only what the
 runtime produced.
 
+**The counter half is structurally undecidable on this runtime, and the journey
+says so rather than manufacturing a green.** It was measured: no product
+command commits more than one governed write through `due_state.block_for_write`
+— `adoption_studio` apply (12 writes), `maintain_memory` fix (12),
+`preserve_artifacts` (8) and `process_media` (12) each reach the write carrier
+ZERO times. A batch therefore delivers no block, the served denominator is 0,
+and "one emission rather than twelve" is true for a reason that has nothing to
+do with governance. The bulk batch stays — it exercises the writes and the
+write counter, which are real — and the assertion reports `unsupported`, which
+is the bench's word for "this run cannot decide the family". The batch-once
+requirement is proven where it is decidable: at the carrier, twelve runs inside
+one scope emitting at most once.
+
 **The envelope is discovered, never assumed.** The discovery, the refusal, and
 the subprocess wrapper are :mod:`.f26_carrier`'s, imported rather than copied:
 two journeys that disagree about what "the installed envelope" means would make
@@ -30,7 +43,9 @@ The episode, in order:
    each end of the prominence range. Every one of these is a separate process,
    which is what an engine restart is from the vault's point of view.
 5. One bulk ingest: ``adopt --mode copy-as-sources`` over
-   :data:`BULK_DOCUMENTS` legacy files in a single command.
+   :data:`BULK_DOCUMENTS` legacy files in a single command. Twelve governed
+   writes, zero trips through the write carrier, therefore zero delivered
+   blocks and a served ``due_total`` of 0 — recorded honestly, not smoothed.
 
 **What is projected as an unsolicited signal, and what is not.** Anything the
 default review union re-lists under the dismissed identity is projected as a
@@ -112,7 +127,10 @@ PROMINENCE_LEVELS: tuple[str, ...] = _prominence_levels()
 
 #: Files the single bulk-ingest command absorbs. Two would satisfy the
 #: assertion's `writes >= 2` floor; twelve makes the difference between one
-#: emission and one-per-write impossible to read as noise.
+#: emission and one-per-write impossible to read as noise — on a runtime where
+#: the leaf reaches the carrier at all. On this one it does not (see the module
+#: docstring), so twelve is what the write counter records and the emission
+#: comparison is reported `unsupported`.
 BULK_DOCUMENTS = 12
 BULK_DIRECTORY = "legacy"
 
@@ -189,11 +207,14 @@ def seed_bulk_documents(vault: Path, *, count: int = BULK_DOCUMENTS) -> tuple[st
     today = dt.date.today()
     for index in range(1, count + 1):
         relative = f"{BULK_DIRECTORY}/f23-bulk-{index:02d}.md"
-        # A DISTINCT overdue `check_by` per file, so each absorbed page adds one
-        # more due item and the counters digest therefore moves on every write.
-        # Identical (or absent) dates make the change-only rule produce the
-        # single-emission result for free, and a batch whose digest never moves
-        # cannot demonstrate that anything suppressed a repeat.
+        # A distinct overdue `check_by` per file. It does NOT make the digest
+        # move per write on this runtime, and an earlier comment here claiming
+        # it did was false: `adopt --mode copy-as-sources` wraps each original
+        # inside a fenced Capture block on a `type: source` page, so the
+        # prediction below is quoted text and the twelve pages add zero due
+        # items. The dates stay because they cost nothing and become load-
+        # bearing the day adoption produces compiled pages; the claim they
+        # supported does not.
         overdue = (today - dt.timedelta(days=index)).isoformat()
         (vault / relative).write_text(
             f"# Legacy note {index:02d}\n"

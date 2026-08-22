@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from _nag_governance_helpers import (
+    SCRATCH,
     advisory_candidate,
     overdue_prediction,
     scratch_page,
@@ -133,8 +134,21 @@ def test_a_block_produced_inside_a_batch_scope_is_never_stamped(vault: Path) -> 
     assert _ledger(vault) == {}
 
 
-def test_a_block_the_governor_keeps_quiet_is_never_stamped(vault: Path) -> None:
-    """The second identical block is not delivered, so it adds nothing."""
+def test_a_resurfacing_signal_keeps_its_original_stamp(vault: Path) -> None:
+    """An IDEMPOTENCE pin, which is all this can be — named as such.
+
+    It was written as "the governor keeps the second block quiet, so nothing is
+    stamped", and that framing cannot fail: the ledger records a FIRST
+    surfacing, so a second delivery of the same refs would leave it byte-
+    identical too. The stamp not moving is therefore evidence about the ledger's
+    idempotence, not about the governor, and the honest thing is to assert the
+    property that actually holds.
+
+    What it pins is worth pinning: a signal that keeps coming back keeps the
+    date it was first shown. A ledger that re-stamped on every surfacing would
+    make `first_surfaced_at` mean "last seen", and every age computed from it
+    would read zero forever.
+    """
     from exomem import due_state as due_state_module
 
     overdue_prediction(vault)
@@ -146,14 +160,26 @@ def test_a_block_the_governor_keeps_quiet_is_never_stamped(vault: Path) -> None:
     first = dict(_ledger(vault))
     assert first
 
+    # The governor declines the identical second block...
     assert not due_state_module.should_emit(
         due_state_module.served(vault), vault_root=vault
     )
     assert _ledger(vault) == first
+    # ...and so does the ledger, when the delivery is forced past the governor.
+    due_state_module.reset_emission_state()
+    assert due_state_module.should_emit(due_state_module.served(vault), vault_root=vault)
+    assert _ledger(vault) == first, "a resurfacing re-stamped its first-surfaced date"
 
 
 def test_a_legacy_response_that_strips_the_block_never_stamps(vault: Path) -> None:
-    """`legacy` drops the block at the terminal, so nothing was surfaced."""
+    """`legacy` drops the block at the terminal, so nothing was surfaced.
+
+    Driven through `project_terminal` at both detail levels on the same leaf,
+    because the earlier version of this test asserted `hasattr(...)` and an
+    empty ledger — which is true of a test that does nothing at all. The A/B is
+    what makes it a claim: same block, same vault, one detail level delivers and
+    stamps, the other returns the bare leaf and stamps nothing.
+    """
     from exomem import due_state as due_state_module
     from exomem import mutation_terminal
 
@@ -162,12 +188,28 @@ def test_a_legacy_response_that_strips_the_block_never_stamps(vault: Path) -> No
     due_state_module.reset_emission_state()
 
     block = due_state_module.served(vault)
-    assert block
-    # A `legacy` response never reaches `_admit_due_state`; the block is dropped
-    # before the terminal decides. Nothing is marked emitted, so nothing is
-    # stamped.
-    assert hasattr(mutation_terminal, "_admit_due_state")
-    assert _ledger(vault) == {}
+    assert block and block["total"] >= 1
+
+    def terminal() -> dict:
+        return mutation_terminal.committed_terminal(
+            # `_vault` rides INSIDE the block: that is where the terminal
+            # reads it from, and it is a server-internal key the projection
+            # strips before the block reaches the wire.
+            {"path": SCRATCH, "due_state": {**block, "_vault": str(vault)}},
+            request_id="request",
+            receipt_id="receipt",
+            idempotency_key=None,
+        )
+
+    legacy = mutation_terminal.project_terminal(terminal(), detail="legacy")
+    assert "due_state" not in legacy, legacy
+    assert _ledger(vault) == {}, "a legacy response stamped the ledger"
+
+    compact = mutation_terminal.project_terminal(terminal(), detail="compact")
+    assert compact["due_state"]["total"] == block["total"], compact
+    stamped = _ledger(vault)
+    assert stamped, "the delivered block did not stamp the ledger"
+    assert {row["surface"] for row in stamped.values()} == {"carrier"}
 
 
 def test_an_emitted_write_advisory_stamps_the_write_surface(vault: Path) -> None:
@@ -543,3 +585,87 @@ def test_removing_the_recorder_removes_the_stamp(
     )
     fresh = commands.op_attention(vault, limit=0)["items"]
     assert all("first_surfaced_at" not in item for item in fresh)
+
+
+# ==========================================================================
+# the carrier's ref -> fingerprint derivation, and the coupling it rests on
+# ==========================================================================
+
+
+def test_a_ref_carrying_two_fingerprints_stamps_neither(vault: Path) -> None:
+    """A collision is dropped, not resolved by whichever row came first.
+
+    The wire block carries refs; the ledger keys on fingerprints; the carrier
+    bridges them by reading `ref -> fingerprint` off the projection. That map is
+    only well defined because every projection category except
+    `unfinished_experiments` stamps a `review_partition` into its ref, which
+    makes the ref per-finding rather than per-page. Nothing enforces that — it
+    is a property of how refs are composed — so a future category that omits
+    the partition would make the map ambiguous.
+
+    First-category-wins would then stamp a real identity with the wrong
+    fingerprint, which is a false record in the one ledger whose entire purpose
+    is to say what a person was shown. Dropping the ref leaves a measurement
+    gap instead, which is recoverable and honest.
+    """
+    from exomem import due_state as due_state_module
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    due_state_module.reconcile(vault)
+
+    projection = due_state_module.load(vault)
+    rows = [
+        entry
+        for pages in (projection.get("categories") or {}).values()
+        for entries in pages.values()
+        for entry in due_state_module._unbucket(entries)
+        if entry.get("ref") and entry.get("fingerprint")
+    ]
+    assert rows, projection
+    ref = rows[0]["ref"]
+    finger = rows[0]["fingerprint"]
+    assert due_state_module._fingerprints_by_ref(projection)[ref] == finger
+
+    # The same ref appearing again under a DIFFERENT fingerprint.
+    collided = {
+        **projection,
+        "categories": {
+            **projection["categories"],
+            "unfinished_experiments": {
+                "Knowledge Base/Notes/Experiments/collide.md": {
+                    "open": [
+                        {
+                            "ref": ref,
+                            "fingerprint": "0" * 24,
+                            "due_since": rows[0].get("due_since") or "2026-01-01",
+                            "path": "Knowledge Base/Notes/Experiments/collide.md",
+                        }
+                    ]
+                }
+            },
+        },
+    }
+
+    assert ref not in due_state_module._fingerprints_by_ref(collided)
+
+
+def test_a_delivered_block_whose_ref_is_ambiguous_stamps_nothing(vault: Path) -> None:
+    """And the guard reaches the ledger, not just the helper."""
+    from exomem import due_state as due_state_module
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    due_state_module.reconcile(vault)
+    block = due_state_module.served(vault)
+    assert block
+
+    real = due_state_module._fingerprints_by_ref
+    due_state_module._fingerprints_by_ref = lambda _payload: {}
+    try:
+        due_state_module.reset_emission_state()
+        assert due_state_module.should_emit(block, vault_root=vault)
+    finally:
+        due_state_module._fingerprints_by_ref = real
+
+    assert _ledger(vault) == {}

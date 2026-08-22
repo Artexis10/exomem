@@ -655,12 +655,18 @@ class VaultProjector(Projector):
 
         `writes` is how many governed writes the projection absorbed,
         `emissions` how many due-state blocks were actually delivered, and
-        `due_total` how many items the last write carrier had to report. The
-        counter-repetition assertion is exactly the comparison of the first two,
-        so a projector that guessed either would decide the family's verdict —
-        and `due_total` is what stops the pass being vacuous, because "0
-        emissions for 12 writes" is equally the shape of working governance and
-        the shape of a vault that owed nothing.
+        `due_total` how many items were in the last block a caller was HANDED.
+        The counter-repetition assertion is exactly the comparison of the first
+        two, so a projector that guessed either would decide the family's
+        verdict — and `due_total` is what stops the pass being vacuous, because
+        "0 emissions for 12 writes" is equally the shape of working governance
+        and the shape of a batch that delivered nothing at all.
+
+        One definition, one writer: the runtime records it where a block is
+        marked emitted and nowhere else. An earlier version also recorded a
+        full-recompute count under the same name, which let this field report a
+        pre-dismissal denominator for a batch that owed nothing — the projector
+        cannot detect that, so the fix belongs upstream and is pinned there.
         """
         path = self._state_file(DUE_STATE_FILE)
         payload = _read_json(path) if path is not None else None
