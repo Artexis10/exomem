@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import yaml
+
 
 def _registry():
     return importlib.import_module("exomem.entity_registry")
@@ -79,3 +81,38 @@ def test_registry_cache_hits_on_same_freshness_key_and_rebuilds_on_new_key(
     assert first is second
     assert third is not second
     assert calls == 2
+
+
+def test_registry_enumerates_extension_type_folders(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "Knowledge Base/_Schema/entity-types.yaml",
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "place": {
+                        "folder": "Places",
+                        "label": "Place",
+                        "aliases": ["location"],
+                        "cue_nouns": ["venue"],
+                        "capture_guidance": "A stable place identity.",
+                        "parent": "concept",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+    )
+    rel = "Knowledge Base/Entities/Places/aster-hall.md"
+    _write(
+        tmp_path,
+        rel,
+        "---\ntype: entity\ntitle: Aster Hall\nentity_type: place\n"
+        "status: active\ntags: [local]\n---\n# Aster Hall\n",
+    )
+
+    records = _registry().load_entity_registry(tmp_path, freshness_key=("extension",))
+
+    assert records[rel].entity_type == "place"
+    assert records[rel].tags == ("local",)

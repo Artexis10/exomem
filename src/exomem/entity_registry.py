@@ -9,7 +9,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from . import memory_refs, recall_policy
-from .entity_types import ENTITY_TYPE_REGISTRY, resolve_entity_type
+from .entity_types import EntityTypeRegistry, load_entity_types
 from .find_corpus import CACHE
 from .referent_resolution import EntityRecord
 from .vault import kb_root
@@ -51,10 +51,14 @@ def _attribute_strings(value: object) -> tuple[str, ...]:
     )
 
 
-def _build_registry(vault_root: Path) -> Mapping[str, EntityRecord]:
+def _build_registry(
+    vault_root: Path,
+    type_registry: EntityTypeRegistry | None = None,
+) -> Mapping[str, EntityRecord]:
     records: dict[str, EntityRecord] = {}
     entities_root = kb_root(vault_root) / "Entities"
-    for definition in ENTITY_TYPE_REGISTRY:
+    registry = type_registry or load_entity_types(vault_root)
+    for definition in registry.active_definitions:
         folder = entities_root / definition.folder
         if not folder.is_dir():
             continue
@@ -69,7 +73,7 @@ def _build_registry(vault_root: Path) -> Mapping[str, EntityRecord]:
             frontmatter = page.frontmatter
             if str(frontmatter.get("type") or "").casefold() != "entity":
                 continue
-            registered = resolve_entity_type(str(frontmatter.get("entity_type") or ""))
+            registered = registry.resolve(str(frontmatter.get("entity_type") or ""))
             if registered is None:
                 continue
             rel_path = page.rel_path
@@ -95,17 +99,24 @@ def _build_registry(vault_root: Path) -> Mapping[str, EntityRecord]:
 
 
 def load_entity_registry(
-    vault_root: Path, *, freshness_key: tuple
+    vault_root: Path,
+    *,
+    freshness_key: tuple,
+    type_registry: EntityTypeRegistry | None = None,
 ) -> Mapping[str, EntityRecord]:
     """Return one immutable registry per vault/checkpoint identity."""
     root = Path(vault_root).absolute()
-    key = (root, tuple(freshness_key))
+    type_registry = type_registry or load_entity_types(root)
+    key = (
+        root,
+        (*tuple(freshness_key), type_registry.core_version, type_registry.extension_hash),
+    )
     with _REGISTRY_CACHE_LOCK:
         cached = _REGISTRY_CACHE.get(key)
         if cached is not None:
             _REGISTRY_CACHE.move_to_end(key)
             return cached
-    built = _build_registry(root)
+    built = _build_registry(root, type_registry)
     with _REGISTRY_CACHE_LOCK:
         existing = _REGISTRY_CACHE.get(key)
         if existing is not None:
