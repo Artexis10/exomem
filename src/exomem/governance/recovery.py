@@ -433,7 +433,10 @@ def _actual_component_value(
 
 
 def _proposal_guard_actual(
-    vault_root: Path, conn: sqlite3.Connection, proposal_id: str, event_id: str | None
+    vault_root: Path,
+    conn: sqlite3.Connection,
+    proposal_id: str,
+    event_id: str | None,
 ) -> dict[str, Any]:
     """Rebuild the proposal's pre-image before testing its live membership proof."""
     try:
@@ -470,8 +473,20 @@ def _proposal_guard_actual(
             prior_documents[path] = prior_bytes.decode("utf-8")
         if set(prior_documents) != set(documents):
             return {"status": "invalid"}
-        prior = policy_module.compile_prospective(vault_root, prior_documents)
-        prospective = policy_module.compile_prospective(vault_root, documents)
+        prior_compile = policy_module.compile_prospective(
+            vault_root,
+            prior_documents,
+            _expected_pending_event_id=event_id,
+        )
+        prospective_compile = policy_module.compile_prospective(
+            vault_root,
+            documents,
+            _expected_pending_event_id=event_id,
+        )
+        if prior_compile is None or prospective_compile is None:
+            return {"status": "invalid"}
+        prior = prior_compile.policy
+        prospective = prospective_compile.policy
         if prior.blocked or prospective.blocked:
             return {"status": "invalid"}
         if (

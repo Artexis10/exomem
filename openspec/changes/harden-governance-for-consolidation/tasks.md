@@ -108,10 +108,10 @@
 
 ## 3. Conflict- And Fingerprint-Bound Prospective Compile
 
-- [ ] 3.1 Add red tests in `tests/test_governance_policy.py` for every supported conflict
+- [x] 3.1 Add red tests in `tests/test_governance_policy.py` for every supported conflict
   marker present before prospective compile and appearing/disappearing between its two
   probes; assert no reviewable target and no state creation.
-- [ ] 3.2 Add red tests for timestamp-preserving byte replacement, added/deleted policy
+- [x] 3.2 Add red tests for timestamp-preserving byte replacement, added/deleted policy
   files, pending-guard generation changes, symlink/non-regular policy paths, and mixed
   before/after document sets during prospective acquisition.
 - [ ] 3.3 Add red `tests/test_govern_memory_tool.py` coverage proving proposals persist
@@ -144,7 +144,7 @@
   preparation, receipt intent, narrowing overlay, tuple publication, external digest
   acknowledgement, response, and mirror. Assert predecessor-or-complete-target only,
   one tuple winner, no stale grant/catalog hybrid, and no semantic replay.
-- [ ] 3.8 Split the pure pinned-byte compiler from guarded live prospective acquisition;
+- [x] 3.8 Split the pure pinned-byte compiler from guarded live prospective acquisition;
   implement a before/read/after `AuthoringSnapshot` and return a bound
   `ProspectiveCompile` only for a stable conflict-free regular-file tree.
 - [ ] 3.9 Add append-only `compiled_policy_generations`, immutable catalog descriptors,
