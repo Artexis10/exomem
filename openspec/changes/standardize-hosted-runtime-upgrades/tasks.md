@@ -14,6 +14,7 @@
 - [x] 2.4 Add read-only Substrate, provisioner, and Kubernetes collectors with bounded timeouts and content-free diagnostics
 - [x] 2.5 Make preflight refuse expand, rollforward, contract, or promotion when authoritative views disagree
 - [x] 2.6 Record a zero-cell rollout as an explicit no-op only when every collector agrees; otherwise require repair and a fresh inventory
+- [x] 2.7 Bootstrap the first pre-expand provisioner observation from one exact incoming image in a minimum-authority, tokenless, deadline-bounded Job when the installed legacy image lacks the collector
 
 ## 3. Substrate per-cell rollforward companion
 

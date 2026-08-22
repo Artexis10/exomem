@@ -426,6 +426,265 @@ def test_provisioner_collector_runs_only_the_read_only_command_with_a_timeout() 
     ]
 
 
+def _legacy_provisioner_deployment() -> dict[str, object]:
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "exomem-provisioner-api", "namespace": "exomem-platform"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "api",
+                            "env": [
+                                {
+                                    "name": "EXOMEM_PROVISIONER_BEARER",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": "exomem-provisioner-auth",
+                                            "key": "credential",
+                                        }
+                                    },
+                                },
+                                {
+                                    "name": "EXOMEM_PROVISIONER_DATABASE_URL",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": "exomem-provisioner-database",
+                                            "key": "url",
+                                        }
+                                    },
+                                },
+                                {
+                                    "name": "EXOMEM_PROVISIONER_ENVELOPE_KEY",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": "exomem-provisioner-wrapping-key",
+                                            "key": "key-material",
+                                        }
+                                    },
+                                },
+                                {
+                                    "name": "EXOMEM_PROVISIONER_DATABASE_SCHEMA",
+                                    "value": "exomem_provisioner",
+                                },
+                                {
+                                    "name": "EXOMEM_PROVISIONER_DATABASE_ROLE",
+                                    "value": "exomem_provisioner_runtime",
+                                },
+                                {
+                                    "name": "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH",
+                                    "value": (
+                                        "/etc/exomem/deployment-lock/"
+                                        "exomem-hosted-deployment-lock-v2.json"
+                                    ),
+                                },
+                                {
+                                    "name": "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": "exomem-provider-recovery-signer",
+                                            "key": "private-key",
+                                        }
+                                    },
+                                },
+                            ],
+                            "volumeMounts": [
+                                {
+                                    "name": "deployment-lock",
+                                    "mountPath": "/etc/exomem/deployment-lock",
+                                    "readOnly": True,
+                                }
+                            ],
+                        }
+                    ],
+                    "volumes": [
+                        {
+                            "name": "deployment-lock",
+                            "configMap": {
+                                "name": "exomem-hosted-deployment-lock-v2-0123456789abcdef",
+                                "defaultMode": 420,
+                                "items": [
+                                    {
+                                        "key": "exomem-hosted-deployment-lock-v2.json",
+                                        "path": "exomem-hosted-deployment-lock-v2.json",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            }
+        },
+    }
+
+
+def test_first_upgrade_observer_uses_a_digest_pinned_minimum_authority_job() -> None:
+    module = _module()
+    observation = _empty_sources()["provisioner"]
+    image = f"ghcr.io/artexis10/exomem-provisioner@sha256:{'a' * 64}"
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def runner(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[-3:] == ["deployment/exomem-provisioner-api", "-o", "json"]:
+            output = json.dumps(_legacy_provisioner_deployment()).encode()
+        elif command[-5:] == ["create", "-f", "-", "-o", "json"]:
+            manifest = json.loads(kwargs["input"])
+            pod = manifest["spec"]["template"]["spec"]
+            container = pod["containers"][0]
+            assert manifest["metadata"]["generateName"] == "exomem-fleet-observer-"
+            assert manifest["metadata"]["labels"] == {
+                "app.kubernetes.io/name": "exomem-fleet-observer",
+                "app.kubernetes.io/part-of": "exomem-hosted",
+            }
+            assert pod["automountServiceAccountToken"] is False
+            assert pod["restartPolicy"] == "Never"
+            assert container["image"] == image
+            assert container["command"] == ["exomem-provisioner-fleet-observe"]
+            assert {item["name"] for item in container["env"]} == {
+                "EXOMEM_PROVISIONER_BEARER",
+                "EXOMEM_PROVISIONER_DATABASE_URL",
+                "EXOMEM_PROVISIONER_ENVELOPE_KEY",
+                "EXOMEM_PROVISIONER_DATABASE_SCHEMA",
+                "EXOMEM_PROVISIONER_DATABASE_ROLE",
+                "EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS",
+                "EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH",
+                "HOME",
+            }
+            assert (
+                next(
+                    item for item in container["env"] if item["name"] == "EXOMEM_PROVISIONER_BEARER"
+                )["value"]
+                == "observer-has-no-api-authority-0000"
+            )
+            assert all(
+                item["name"] != "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY" for item in container["env"]
+            )
+            assert pod["volumes"] == [
+                {
+                    "name": "temporary",
+                    "emptyDir": {"sizeLimit": "16Mi"},
+                },
+                _legacy_provisioner_deployment()["spec"]["template"]["spec"]["volumes"][0],
+            ]
+            output = json.dumps(
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {
+                        "name": "exomem-fleet-observer-abc12",
+                        "namespace": "exomem-platform",
+                        "labels": manifest["metadata"]["labels"],
+                    },
+                }
+            ).encode()
+        elif "wait" in command:
+            output = b""
+        elif "logs" in command:
+            output = json.dumps(observation).encode()
+        elif "delete" in command:
+            output = b""
+        else:  # pragma: no cover - makes an unexpected effect obvious
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, output, b"")
+
+    collected = module.collect_provisioner(
+        timeout_seconds=9,
+        bootstrap_image=image,
+        runner=runner,
+    )
+
+    assert collected == observation
+    assert [command for command, _kwargs in calls] == [
+        [
+            "kubectl",
+            "-n",
+            "exomem-platform",
+            "get",
+            "deployment/exomem-provisioner-api",
+            "-o",
+            "json",
+        ],
+        ["kubectl", "-n", "exomem-platform", "create", "-f", "-", "-o", "json"],
+        [
+            "kubectl",
+            "-n",
+            "exomem-platform",
+            "wait",
+            "--for=condition=complete",
+            "--timeout=9s",
+            "job/exomem-fleet-observer-abc12",
+        ],
+        [
+            "kubectl",
+            "-n",
+            "exomem-platform",
+            "logs",
+            "job/exomem-fleet-observer-abc12",
+        ],
+        [
+            "kubectl",
+            "-n",
+            "exomem-platform",
+            "delete",
+            "job/exomem-fleet-observer-abc12",
+            "--ignore-not-found=true",
+            "--wait=true",
+            "--timeout=9s",
+        ],
+    ]
+
+
+def test_first_upgrade_observer_rejects_mutable_or_foreign_images() -> None:
+    module = _module()
+
+    for image in (
+        "ghcr.io/artexis10/exomem-provisioner:latest",
+        f"ghcr.io/other/exomem-provisioner@sha256:{'a' * 64}",
+    ):
+        with pytest.raises(module.InventoryError, match="bootstrap image is invalid"):
+            module.collect_provisioner(bootstrap_image=image)
+
+
+def test_first_upgrade_observer_cleanup_failure_fails_closed() -> None:
+    module = _module()
+    image = f"ghcr.io/artexis10/exomem-provisioner@sha256:{'a' * 64}"
+
+    def runner(command, **kwargs):
+        if command[-3:] == ["deployment/exomem-provisioner-api", "-o", "json"]:
+            output = json.dumps(_legacy_provisioner_deployment()).encode()
+            return subprocess.CompletedProcess(command, 0, output, b"")
+        if command[-5:] == ["create", "-f", "-", "-o", "json"]:
+            output = json.dumps(
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {
+                        "name": "exomem-fleet-observer-abc12",
+                        "namespace": "exomem-platform",
+                        "labels": {
+                            "app.kubernetes.io/name": "exomem-fleet-observer",
+                            "app.kubernetes.io/part-of": "exomem-hosted",
+                        },
+                    },
+                }
+            ).encode()
+            return subprocess.CompletedProcess(command, 0, output, b"")
+        if "wait" in command:
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        if "logs" in command:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps(_empty_sources()["provisioner"]).encode(), b""
+            )
+        assert "delete" in command
+        return subprocess.CompletedProcess(command, 1, b"", b"cleanup detail must stay private")
+
+    with pytest.raises(module.InventoryError, match="provisioner collector failed"):
+        module.collect_provisioner(bootstrap_image=image, runner=runner)
+
+
 def _kubernetes_documents(runtime: dict[str, str]) -> dict[str, object]:
     cell_id = "cell_1809ce5c"
     namespace = "exo-a"
@@ -642,9 +901,16 @@ def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
     catalog_path.write_text(json.dumps({"runtimes": [target]}), encoding="utf-8")
     inventory_path = tmp_path / "inventory.json"
     facts_path = tmp_path / "facts.json"
+    observer_image = f"ghcr.io/artexis10/exomem-provisioner@sha256:{'f' * 64}"
+    provisioner_arguments: dict[str, object] = {}
 
     monkeypatch.setattr(module, "collect_substrate", lambda *_args, **_kwargs: sources["substrate"])
-    monkeypatch.setattr(module, "collect_provisioner", lambda **_kwargs: sources["provisioner"])
+
+    def collect_provisioner(**kwargs):
+        provisioner_arguments.update(kwargs)
+        return sources["provisioner"]
+
+    monkeypatch.setattr(module, "collect_provisioner", collect_provisioner)
     monkeypatch.setattr(module, "collect_kubernetes", lambda **_kwargs: sources["kubernetes"])
 
     assert (
@@ -665,6 +931,8 @@ def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
                 os.fspath(inventory_path),
                 "--facts-output",
                 os.fspath(facts_path),
+                "--provisioner-bootstrap-image",
+                observer_image,
             ]
         )
         == 0
@@ -679,6 +947,10 @@ def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
         "status": "consistent",
     }
     assert facts == module.execution_inventory_facts(inventory)
+    assert provisioner_arguments == {
+        "timeout_seconds": 15,
+        "bootstrap_image": observer_image,
+    }
     assert stat.S_IMODE(inventory_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(facts_path.stat().st_mode) == 0o600
 

@@ -69,6 +69,14 @@ Before expand deployment or any cell rollforward, the workflow SHALL reconcile S
 - **THEN** the upgrade stops before platform or tenant mutation
 - **AND** continuation requires an explicit repair followed by a fresh reconciled inventory
 
+#### Scenario: The installed provisioner predates fleet observation
+
+- **WHEN** the current provisioner image does not contain the fixed fleet-observation command during a first upgrade to this workflow
+- **THEN** inventory MAY run that command in one bounded Job from the exact digest-pinned, signed, and reviewed incoming provisioner candidate
+- **AND** the Job receives only the current database reference, envelope-key reference, database identity, and selected deployment-lock ConfigMap needed to decrypt and classify operation history
+- **AND** it receives no API bearer, provider signer, Kubernetes service-account token, tenant credential, or mutation command
+- **AND** inventory is refused if the Job, its fixed security shape, its output, or its cleanup cannot be proven
+
 ### Requirement: Expand adoption changes only the future-cell target
 
 Deploying target trust or the expand lock SHALL select the target runtime for future provisioning and admit every authoritative legacy runtime required by the reconciled inventory. Adoption itself MUST NOT enqueue a tenant lifecycle operation or mutate, restart, migrate, replace, delete, relabel, or re-route an existing cell, namespace, workload, persistent volume, canonical vault, derived state, binding, security state, credential, OAuth grant, entitlement, assignment, or lifecycle generation.

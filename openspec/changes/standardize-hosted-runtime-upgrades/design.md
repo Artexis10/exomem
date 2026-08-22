@@ -67,6 +67,19 @@ The inventory classifies each cell as target, legacy, reviewer-purpose, terminal
 
 Relying only on the routable table was rejected because prior out-of-band upgrades and destroy-path ghosts have already proven that one view can be stale.
 
+The first release adopting this workflow has one bootstrap asymmetry: the installed
+legacy provisioner cannot execute a collector introduced by the incoming image. In
+that case only, the inventory CLI runs the fixed observation command in a bounded
+one-shot Job from the exact digest-pinned, signed provisioner candidate. It derives
+only the runtime database reference, envelope-key reference, database identity, and
+current deployment-lock ConfigMap from the installed API deployment; supplies a
+non-authoritative dummy API bearer; disables service-account token mounting; and
+retains the same non-root, read-only, no-capability security boundary. The Job has no
+tenant mutation command or provider signer, is deadline/TTL bounded, and must be
+deleted before its observation is accepted. Mutable or foreign images, unexpected
+deployment shapes, failed output, and failed cleanup all stop the upgrade. Once the
+installed provisioner contains the collector, the ordinary in-place path is used.
+
 ### 4. Compose trust before deployment and retain every referenced legacy runtime
 
 Substrate imports the target's exact signed agent and gateway fixtures into every release-pinned mapping before Exomem composes a deployment lock naming the reviewed consumer commit. The expand lock's legacy catalog contains every release/protocol unit referenced by a routable cell, active assignment, or unfinished legacy operation at preflight—not merely the immediately previous release.

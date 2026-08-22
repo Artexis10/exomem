@@ -59,12 +59,29 @@ closed; add it only after recovering its exact retained compatibility evidence.
 
 Collect Substrate, provisioner, and Kubernetes authority in one pass:
 
+Normally the collector executes inside the installed provisioner API. For the first
+upgrade from a provisioner that predates `exomem-provisioner-fleet-observe`, verify
+the incoming provisioner candidate and set
+`EXOMEM_PROVISIONER_BOOTSTRAP_IMAGE` to its exact digest-pinned image. This selects a
+one-shot, tokenless observer Job that carries no real API bearer or provider signer
+and is deleted before its observation is accepted. Never use a mutable tag or an
+image that did not pass the signed-candidate checks. Omit the option once the
+installed provisioner contains the collector.
+
 ```bash
+provisioner_observer_args=()
+if test -n "${EXOMEM_PROVISIONER_BOOTSTRAP_IMAGE:-}"; then
+  provisioner_observer_args+=(
+    --provisioner-bootstrap-image "$EXOMEM_PROVISIONER_BOOTSTRAP_IMAGE"
+    --timeout-seconds 60
+  )
+fi
 infra/scripts/hosted_fleet_inventory.py collect \
   --substrate-endpoint "${EXOMEM_SUBSTRATE_FLEET_ENDPOINT:?set the operator endpoint}" \
   --substrate-token-file "${EXOMEM_SUBSTRATE_OPERATOR_TOKEN_FILE:?set the private token file}" \
   --runtime-catalog "$operation_dir/runtime-catalog.json" \
   --target "$target" --observed-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "${provisioner_observer_args[@]}" \
   --inventory-output "$operation_dir/inventory-before-expand.json" \
   --facts-output "$operation_dir/inventory-before-expand-facts.json"
 ```

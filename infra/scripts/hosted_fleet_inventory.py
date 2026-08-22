@@ -24,10 +24,14 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _RELEASE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 _IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$")
+_PROVISIONER_IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$")
 _PROTOCOL = re.compile(r"^[1-9][0-9]{0,7}$")
 _PROFILE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _OPAQUE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_KUBERNETES_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+_DATABASE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{2,62}$")
+_LOCK_PATH = re.compile(r"^/etc/exomem/deployment-lock/exomem-hosted-deployment-lock-v[23]\.json$")
 _MAX_COLLECTOR_BYTES = 1024 * 1024
 _RUNTIME_FIELDS = {
     "releaseVersion",
@@ -402,6 +406,26 @@ def _run_json_command(
     label: str,
     runner: Callable[..., subprocess.CompletedProcess[bytes]],
 ) -> dict[str, Any]:
+    result = _run_command(
+        command,
+        timeout_seconds=timeout_seconds,
+        label=label,
+        runner=runner,
+    )
+    try:
+        return _decode_json(result.stdout, label=label)
+    except InventoryError:
+        raise InventoryError(f"{label} collector failed") from None
+
+
+def _run_command(
+    command: list[str],
+    *,
+    timeout_seconds: float,
+    label: str,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]],
+    input_bytes: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes]:
     if (
         not isinstance(timeout_seconds, (int, float))
         or isinstance(timeout_seconds, bool)
@@ -410,21 +434,347 @@ def _run_json_command(
     ):
         _error(f"{label} collector timeout is invalid")
     try:
-        result = runner(
-            command,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        arguments: dict[str, object] = {
+            "capture_output": True,
+            "timeout": timeout_seconds,
+            "check": False,
+        }
+        if input_bytes is not None:
+            arguments["input"] = input_bytes
+        result = runner(command, **arguments)
     # subprocess.run and injected runners may raise platform-specific subclasses.
     except Exception:  # noqa: BLE001
         raise InventoryError(f"{label} collector failed") from None
     if result.returncode != 0:
         _error(f"{label} collector failed")
+    return result
+
+
+def _observer_environment(container: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    raw_environment = container.get("env")
+    if not isinstance(raw_environment, list) or any(
+        not isinstance(item, dict) for item in raw_environment
+    ):
+        _error("provisioner bootstrap deployment is invalid")
+    environment = {
+        item.get("name"): item
+        for item in cast(list[dict[str, Any]], raw_environment)
+        if isinstance(item.get("name"), str)
+    }
+    if len(environment) != len(raw_environment):
+        _error("provisioner bootstrap deployment is invalid")
+
+    selected: list[dict[str, Any]] = [
+        {
+            "name": "EXOMEM_PROVISIONER_BEARER",
+            "value": "observer-has-no-api-authority-0000",
+        }
+    ]
+    for name in (
+        "EXOMEM_PROVISIONER_DATABASE_URL",
+        "EXOMEM_PROVISIONER_ENVELOPE_KEY",
+    ):
+        item = environment.get(name)
+        source = item.get("valueFrom") if isinstance(item, dict) else None
+        reference = source.get("secretKeyRef") if isinstance(source, dict) else None
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "valueFrom"}
+            or not isinstance(source, dict)
+            or set(source) != {"secretKeyRef"}
+            or not isinstance(reference, dict)
+            or set(reference) != {"name", "key"}
+            or not all(
+                isinstance(reference.get(field), str)
+                and _KUBERNETES_NAME.fullmatch(cast(str, reference[field]))
+                for field in ("name", "key")
+            )
+        ):
+            _error("provisioner bootstrap deployment is invalid")
+        selected.append(copy.deepcopy(item))
+
+    for name in (
+        "EXOMEM_PROVISIONER_DATABASE_SCHEMA",
+        "EXOMEM_PROVISIONER_DATABASE_ROLE",
+    ):
+        item = environment.get(name)
+        value = item.get("value") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "value"}
+            or not isinstance(value, str)
+            or not _DATABASE_IDENTIFIER.fullmatch(value)
+            or value in {"postgres", "public", "neondb_owner"}
+        ):
+            _error("provisioner bootstrap deployment is invalid")
+        selected.append(copy.deepcopy(item))
+
+    lock_item = environment.get("EXOMEM_PROVISIONER_DEPLOYMENT_LOCK_PATH")
+    lock_path = lock_item.get("value") if isinstance(lock_item, dict) else None
+    if (
+        not isinstance(lock_item, dict)
+        or set(lock_item) != {"name", "value"}
+        or not isinstance(lock_path, str)
+        or not _LOCK_PATH.fullmatch(lock_path)
+    ):
+        _error("provisioner bootstrap deployment is invalid")
+    selected.extend(
+        [
+            {
+                "name": "EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS",
+                "value": "127.0.0.1/32",
+            },
+            copy.deepcopy(lock_item),
+            {"name": "HOME", "value": "/tmp"},
+        ]
+    )
+    return selected, lock_path
+
+
+def _observer_lock_volume(
+    pod: dict[str, Any], container: dict[str, Any], *, lock_path: str
+) -> dict[str, Any]:
+    raw_mounts = container.get("volumeMounts")
+    if not isinstance(raw_mounts, list):
+        _error("provisioner bootstrap deployment is invalid")
+    mounts = [
+        item
+        for item in raw_mounts
+        if isinstance(item, dict) and item.get("name") == "deployment-lock"
+    ]
+    if mounts != [
+        {
+            "name": "deployment-lock",
+            "mountPath": "/etc/exomem/deployment-lock",
+            "readOnly": True,
+        }
+    ]:
+        _error("provisioner bootstrap deployment is invalid")
+    if Path(lock_path).parent != Path("/etc/exomem/deployment-lock"):
+        _error("provisioner bootstrap deployment is invalid")
+
+    raw_volumes = pod.get("volumes")
+    if not isinstance(raw_volumes, list):
+        _error("provisioner bootstrap deployment is invalid")
+    volumes = [
+        item
+        for item in raw_volumes
+        if isinstance(item, dict) and item.get("name") == "deployment-lock"
+    ]
+    if len(volumes) != 1:
+        _error("provisioner bootstrap deployment is invalid")
+    volume = volumes[0]
+    config_map = volume.get("configMap")
+    if (
+        set(volume) != {"name", "configMap"}
+        or not isinstance(config_map, dict)
+        or set(config_map) not in ({"name", "items"}, {"name", "items", "defaultMode"})
+        or config_map.get("defaultMode", 420) != 420
+        or not isinstance(config_map.get("name"), str)
+        or not _KUBERNETES_NAME.fullmatch(config_map["name"])
+        or config_map.get("items") != [{"key": Path(lock_path).name, "path": Path(lock_path).name}]
+    ):
+        _error("provisioner bootstrap deployment is invalid")
+    return copy.deepcopy(volume)
+
+
+def _bootstrap_observer_job(
+    deployment: dict[str, Any],
+    *,
+    namespace: str,
+    workload: str,
+    image: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    metadata = deployment.get("metadata")
+    spec = deployment.get("spec")
+    template = spec.get("template") if isinstance(spec, dict) else None
+    pod = template.get("spec") if isinstance(template, dict) else None
+    containers = pod.get("containers") if isinstance(pod, dict) else None
+    if (
+        deployment.get("apiVersion") != "apps/v1"
+        or deployment.get("kind") != "Deployment"
+        or not isinstance(metadata, dict)
+        or metadata.get("name") != workload.removeprefix("deployment/")
+        or metadata.get("namespace") != namespace
+        or not isinstance(pod, dict)
+        or not isinstance(containers, list)
+    ):
+        _error("provisioner bootstrap deployment is invalid")
+    api_containers = [
+        item for item in containers if isinstance(item, dict) and item.get("name") == "api"
+    ]
+    if len(api_containers) != 1:
+        _error("provisioner bootstrap deployment is invalid")
+    container = api_containers[0]
+    environment, lock_path = _observer_environment(container)
+    lock_volume = _observer_lock_volume(pod, container, lock_path=lock_path)
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "generateName": "exomem-fleet-observer-",
+            "namespace": namespace,
+            "labels": {
+                "app.kubernetes.io/name": "exomem-fleet-observer",
+                "app.kubernetes.io/part-of": "exomem-hosted",
+            },
+        },
+        "spec": {
+            "activeDeadlineSeconds": max(1, int(timeout_seconds)),
+            "backoffLimit": 0,
+            "ttlSecondsAfterFinished": 300,
+            "template": {
+                "metadata": {
+                    "labels": {
+                        "app.kubernetes.io/name": "exomem-fleet-observer",
+                        "app.kubernetes.io/part-of": "exomem-hosted",
+                    }
+                },
+                "spec": {
+                    "automountServiceAccountToken": False,
+                    "restartPolicy": "Never",
+                    "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                    "containers": [
+                        {
+                            "name": "observer",
+                            "image": image,
+                            "imagePullPolicy": "IfNotPresent",
+                            "command": ["exomem-provisioner-fleet-observe"],
+                            "env": environment,
+                            "resources": {
+                                "requests": {"cpu": "25m", "memory": "96Mi"},
+                                "limits": {"cpu": "500m", "memory": "256Mi"},
+                            },
+                            "securityContext": {
+                                "allowPrivilegeEscalation": False,
+                                "readOnlyRootFilesystem": True,
+                                "runAsNonRoot": True,
+                                "capabilities": {"drop": ["ALL"]},
+                            },
+                            "volumeMounts": [
+                                {"name": "temporary", "mountPath": "/tmp"},
+                                {
+                                    "name": "deployment-lock",
+                                    "mountPath": "/etc/exomem/deployment-lock",
+                                    "readOnly": True,
+                                },
+                            ],
+                        }
+                    ],
+                    "volumes": [
+                        {"name": "temporary", "emptyDir": {"sizeLimit": "16Mi"}},
+                        lock_volume,
+                    ],
+                },
+            },
+        },
+    }
+
+
+def _collect_provisioner_bootstrap(
+    *,
+    image: str,
+    timeout_seconds: float,
+    kubectl: str,
+    namespace: str,
+    workload: str,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]],
+) -> dict[str, Any]:
+    deployment = _run_json_command(
+        [kubectl, "-n", namespace, "get", workload, "-o", "json"],
+        timeout_seconds=timeout_seconds,
+        label="provisioner",
+        runner=runner,
+    )
+    manifest = _bootstrap_observer_job(
+        deployment,
+        namespace=namespace,
+        workload=workload,
+        image=image,
+        timeout_seconds=timeout_seconds,
+    )
+    job_name: str | None = None
+    observation: dict[str, Any] | None = None
+    failed = False
     try:
-        return _decode_json(result.stdout, label=label)
-    except InventoryError:
-        raise InventoryError(f"{label} collector failed") from None
+        created = _decode_json(
+            _run_command(
+                [kubectl, "-n", namespace, "create", "-f", "-", "-o", "json"],
+                timeout_seconds=timeout_seconds,
+                label="provisioner",
+                runner=runner,
+                input_bytes=_canonical(manifest),
+            ).stdout,
+            label="provisioner",
+        )
+        created_metadata = created.get("metadata")
+        created_labels = (
+            created_metadata.get("labels") if isinstance(created_metadata, dict) else None
+        )
+        candidate_name = (
+            created_metadata.get("name") if isinstance(created_metadata, dict) else None
+        )
+        if (
+            created.get("apiVersion") != "batch/v1"
+            or created.get("kind") != "Job"
+            or not isinstance(created_metadata, dict)
+            or created_metadata.get("namespace") != namespace
+            or created_labels != manifest["metadata"]["labels"]
+            or not isinstance(candidate_name, str)
+            or not re.fullmatch(r"exomem-fleet-observer-[a-z0-9]{5,20}", candidate_name)
+        ):
+            _error("provisioner collector failed")
+        job_name = candidate_name
+        timeout = f"{timeout_seconds:g}s"
+        _run_command(
+            [
+                kubectl,
+                "-n",
+                namespace,
+                "wait",
+                "--for=condition=complete",
+                f"--timeout={timeout}",
+                f"job/{job_name}",
+            ],
+            timeout_seconds=timeout_seconds,
+            label="provisioner",
+            runner=runner,
+        )
+        observation = _decode_json(
+            _run_command(
+                [kubectl, "-n", namespace, "logs", f"job/{job_name}"],
+                timeout_seconds=timeout_seconds,
+                label="provisioner",
+                runner=runner,
+            ).stdout,
+            label="provisioner",
+        )
+    except Exception:  # noqa: BLE001 - preserve only one content-free boundary error
+        failed = True
+    finally:
+        if job_name is not None:
+            try:
+                _run_command(
+                    [
+                        kubectl,
+                        "-n",
+                        namespace,
+                        "delete",
+                        f"job/{job_name}",
+                        "--ignore-not-found=true",
+                        "--wait=true",
+                        f"--timeout={timeout_seconds:g}s",
+                    ],
+                    timeout_seconds=timeout_seconds,
+                    label="provisioner",
+                    runner=runner,
+                )
+            except Exception:  # noqa: BLE001 - cleanup failure blocks inventory use
+                failed = True
+    if failed or observation is None:
+        _error("provisioner collector failed")
+    return observation
 
 
 def collect_provisioner(
@@ -433,6 +783,7 @@ def collect_provisioner(
     kubectl: str = "kubectl",
     namespace: str = "exomem-platform",
     workload: str = "deployment/exomem-provisioner-api",
+    bootstrap_image: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
 ) -> dict[str, Any]:
     """Run the fixed read-only provisioner inventory command through kubectl."""
@@ -443,20 +794,32 @@ def collect_provisioner(
         or not re.fullmatch(r"deployment/[a-z0-9][a-z0-9-]{0,62}", workload)
     ):
         _error("provisioner collector target is invalid")
-    observation = _run_json_command(
-        [
-            kubectl,
-            "-n",
-            namespace,
-            "exec",
-            workload,
-            "--",
-            "exomem-provisioner-fleet-observe",
-        ],
-        timeout_seconds=timeout_seconds,
-        label="provisioner",
-        runner=runner,
-    )
+    if bootstrap_image is not None:
+        if not _PROVISIONER_IMAGE.fullmatch(bootstrap_image):
+            _error("provisioner bootstrap image is invalid")
+        observation = _collect_provisioner_bootstrap(
+            image=bootstrap_image,
+            timeout_seconds=timeout_seconds,
+            kubectl=kubectl,
+            namespace=namespace,
+            workload=workload,
+            runner=runner,
+        )
+    else:
+        observation = _run_json_command(
+            [
+                kubectl,
+                "-n",
+                namespace,
+                "exec",
+                workload,
+                "--",
+                "exomem-provisioner-fleet-observe",
+            ],
+            timeout_seconds=timeout_seconds,
+            label="provisioner",
+            runner=runner,
+        )
     return _source(
         observation,
         name="provisioner",
@@ -1362,6 +1725,7 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--inventory-output", type=Path, required=True)
     collect.add_argument("--facts-output", type=Path, required=True)
     collect.add_argument("--timeout-seconds", type=float, default=15)
+    collect.add_argument("--provisioner-bootstrap-image")
     return parser
 
 
@@ -1386,7 +1750,10 @@ def main(argv: list[str] | None = None) -> int:
                 token_file=args.substrate_token_file,
                 timeout_seconds=args.timeout_seconds,
             ),
-            "provisioner": collect_provisioner(timeout_seconds=args.timeout_seconds),
+            "provisioner": collect_provisioner(
+                timeout_seconds=args.timeout_seconds,
+                bootstrap_image=args.provisioner_bootstrap_image,
+            ),
             "kubernetes": collect_kubernetes(
                 runtime_catalog=runtime_catalog,
                 observed_at=args.observed_at,
