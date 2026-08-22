@@ -209,6 +209,13 @@ function requireAbsoluteRoot(name: string, value: string | undefined): string {
   return normalized
 }
 
+export function exomemOwnedStateEnvironment(workRoot: string): Record<string, string> {
+  const ownedRoot = requireAbsoluteRoot("Exomem work root", workRoot)
+  return {
+    EXOMEM_WRITER_LEASE_STATE_DIR: join(ownedRoot, "writer-lease-state"),
+  }
+}
+
 export function configuredExomemMaxLiveServices(
   environment: Record<string, string | undefined> = process.env
 ): number {
@@ -829,6 +836,7 @@ async function exomemDescriptorExpectation(
     ...(port === undefined ? {} : { expected_command: exomemServiceCommand(exomemHome, port) }),
     expected_environment: {
       ...EXOMEM_LME_ENV,
+      ...exomemOwnedStateEnvironment(work),
       EXOMEM_VAULT_PATH: vault,
       MEMORYBENCH_GUEST_WORK_ROOT: work,
       MEMORYBENCH_GUEST_PROVIDER: "exomem",
@@ -1187,6 +1195,7 @@ export async function ensureExomemService(containerTag: string): Promise<Service
               {
                 cwd: roots.work,
                 env: buildExomemChildEnvironment(process.env, {
+                  ...exomemOwnedStateEnvironment(roots.work),
                   EXOMEM_VAULT_PATH: vault,
                   MEMORYBENCH_GUEST_PROVIDER: "exomem",
                   MEMORYBENCH_GUEST_INSTANCE_ID: expected.expected_instance_id!,
@@ -1210,6 +1219,7 @@ export async function ensureExomemService(containerTag: string): Promise<Service
                 cwd: roots.work,
                 detached: true,
                 env: buildExomemChildEnvironment(process.env, {
+                  ...exomemOwnedStateEnvironment(roots.work),
                   EXOMEM_VAULT_PATH: vault,
                   EXOMEM_REST_API_KEY: token,
                   MEMORYBENCH_GUEST_WORK_ROOT: roots.work,
@@ -1271,6 +1281,7 @@ export async function runExomemDoctor(service: ServiceDescriptor): Promise<unkno
     {
       cwd: service.work_root,
       env: buildExomemChildEnvironment(process.env, {
+        ...exomemOwnedStateEnvironment(service.work_root),
         EXOMEM_VAULT_PATH: service.vault_root,
         MEMORYBENCH_GUEST_PROVIDER: "exomem",
         MEMORYBENCH_GUEST_INSTANCE_ID: service.instance_id ?? "invalid-missing-instance",

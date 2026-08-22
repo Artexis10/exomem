@@ -467,6 +467,34 @@ describe("guest transport", () => {
     expect(environment.EXOMEM_REST_API_KEY).toBe("owned-key")
   })
 
+  test("Exomem writer-lease state is bound inside the owned service root", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const bind = transport.exomemOwnedStateEnvironment as undefined |
+      ((workRoot: string) => Record<string, string>)
+    expect(typeof bind).toBe("function")
+    const work = join(await root(), "service")
+    expect(bind!(work)).toEqual({
+      EXOMEM_WRITER_LEASE_STATE_DIR: join(work, "writer-lease-state"),
+    })
+
+    const source = await readFile(new URL("../_guest_transport.ts", import.meta.url), "utf8")
+    const expectation = source.slice(
+      source.indexOf("async function exomemDescriptorExpectation"),
+      source.indexOf("const exomemRetirements")
+    )
+    const launch = source.slice(
+      source.indexOf("export async function ensureExomemService"),
+      source.indexOf("export async function runExomemDoctor")
+    )
+    const doctor = source.slice(
+      source.indexOf("export async function runExomemDoctor"),
+      source.indexOf("async function processIsLive")
+    )
+    expect(expectation).toContain("...exomemOwnedStateEnvironment(work)")
+    expect(launch.match(/\.\.\.exomemOwnedStateEnvironment\(roots\.work\)/g)).toHaveLength(2)
+    expect(doctor).toContain("...exomemOwnedStateEnvironment(service.work_root)")
+  })
+
   test("Exomem REST transport moves stable mutation identities to authenticated headers", async () => {
     const received: Array<{ headers: Record<string, string | string[] | undefined>; body: string }> = []
     const server = createServer((request, response) => {
