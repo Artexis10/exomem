@@ -32,7 +32,7 @@ def _release_manifest() -> dict[str, object]:
             {
                 "name": "projected-find-keyword-v1",
                 "padding_ms": 250,
-                "deadline_ms": 250,
+                "deadline_ms": 300,
             }
         ],
         "routes": [
@@ -69,7 +69,7 @@ def test_keyword_request_class_is_closed_and_repository_owned() -> None:
 
     assert request_class.name == "projected-find-keyword-v1"
     assert request_class.padding_ms == 250
-    assert request_class.deadline_ms == 250
+    assert request_class.deadline_ms == 300
     assert request_class.max_hidden_delta_ms == projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS
     assert (
         request_class.max_hidden_delta_ratio
@@ -82,7 +82,7 @@ def test_keyword_request_class_is_closed_and_repository_owned() -> None:
 def test_completion_uses_the_fixed_target_without_observation_adaptation() -> None:
     timing = _timing_module()
     request_class = timing.PUBLIC_REQUEST_CLASSES["projected-find-keyword-v1"]
-    readings = iter((10.0, 10.1))
+    readings = iter((10.0, 10.1, 10.25))
     sleeps: list[float] = []
 
     timing.complete_public_request(
@@ -103,8 +103,22 @@ def test_completion_refuses_a_missed_fixed_deadline() -> None:
         timing.complete_public_request(
             request_class,
             started_at=20.0,
-            clock=lambda: 20.251,
+            clock=lambda: 20.301,
             sleeper=lambda _seconds: pytest.fail("deadline overrun slept"),
+        )
+
+
+def test_completion_refuses_padding_sleep_that_misses_deadline() -> None:
+    timing = _timing_module()
+    request_class = timing.PUBLIC_REQUEST_CLASSES["projected-find-keyword-v1"]
+    readings = iter((30.240, 30.301))
+
+    with pytest.raises(timing.ProjectedRequestDeadlineExceeded):
+        timing.complete_public_request(
+            request_class,
+            started_at=30.0,
+            clock=lambda: next(readings),
+            sleeper=lambda _seconds: None,
         )
 
 
@@ -243,6 +257,9 @@ def test_unactivated_command_skips_projected_class_selection(
         lambda manifest: manifest["request_classes"][0].__setitem__(
             "padding_ms", 300
         ),
+        lambda manifest: manifest["request_classes"][0].__setitem__(
+            "deadline_ms", 301
+        ),
     ],
 )
 def test_release_manifest_cannot_self_waive_timing_contract(mutate) -> None:
@@ -266,14 +283,12 @@ def test_bootstrap_wire_oracle_enforces_absolute_and_relative_bounds() -> None:
         request_class_name="projected-find-keyword-v1",
         hidden_present_ms=equivalent,
         physically_absent_ms=absent,
-        deadline_misses=0,
     )
     refused = timing.evaluate_wire_differential(
         manifest,
         request_class_name="projected-find-keyword-v1",
         hidden_present_ms=displaced,
         physically_absent_ms=absent,
-        deadline_misses=0,
     )
 
     assert accepted.passed is True
@@ -281,3 +296,42 @@ def test_bootstrap_wire_oracle_enforces_absolute_and_relative_bounds() -> None:
     assert accepted.p95_delta_upper_99_ms == 0.0
     assert refused.passed is False
     assert refused.p95_delta_upper_99_ms > 25.0
+
+
+def test_wire_oracle_derives_deadline_misses_from_actual_samples() -> None:
+    timing = _timing_module()
+    manifest = timing.validate_release_manifest(_release_manifest())
+
+    report = timing.evaluate_wire_differential(
+        manifest,
+        request_class_name="projected-find-keyword-v1",
+        hidden_present_ms=tuple(301.0 for _ in range(200)),
+        physically_absent_ms=tuple(301.0 for _ in range(200)),
+    )
+
+    assert report.deadline_misses == 400
+    assert report.passed is False
+
+
+def test_wire_oracle_rejects_directly_constructed_manifest() -> None:
+    timing = _timing_module()
+
+    with pytest.raises(timing.ProjectedRequestTimingUnavailable):
+        manifest = timing.TimingReleaseManifest(
+            hidden_corpus_wire_delta_ms=25,
+            sample_count_per_condition=1,
+            bootstrap_resamples=1,
+            bootstrap_seed=0,
+            hardware_runtime_profile="caller-selected",
+            request_class_names=("projected-find-keyword-v1",),
+            routes=frozenset(),
+            catalog_items=0,
+            searchable_bytes_per_item=0,
+            graph_edges=0,
+        )
+        timing.evaluate_wire_differential(
+            manifest,
+            request_class_name="projected-find-keyword-v1",
+            hidden_present_ms=(1.0,),
+            physically_absent_ms=(1.0,),
+        )

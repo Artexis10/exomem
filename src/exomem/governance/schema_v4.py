@@ -1208,6 +1208,58 @@ def load_active_state(
     )
 
 
+def load_active_tuple_pointer(
+    connection: sqlite3.Connection,
+) -> VerifiedActiveGovernanceState:
+    """Load only the bounded active pointer from one pinned exact-v4 snapshot.
+
+    Startup performs the full immutable-row verification.  This request-time
+    probe exists solely to prove that the SQLite pointer has not crossed a CAS
+    boundary while the external registry still names its predecessor; it never
+    reads source documents, compiled policy bytes, catalog descriptors, or
+    projection evidence.
+    """
+
+    try:
+        rows = connection.execute(
+            "SELECT activation.logical_vault_id, activation.activation_store_id, "
+            "activation.activation_epoch, activation.activation_state_digest, "
+            "active.policy_generation_id, active.policy_fingerprint, "
+            "active.projector_schema_version, active.catalog_generation, "
+            "namespace.namespace_id "
+            "FROM governance_activation_store AS activation "
+            "JOIN active_governance_tuple AS active "
+            "ON active.singleton=activation.singleton "
+            "JOIN governance_projection_namespaces AS namespace "
+            "ON namespace.policy_fingerprint=active.policy_fingerprint "
+            "AND namespace.projector_schema_version=active.projector_schema_version "
+            "AND namespace.catalog_generation=active.catalog_generation "
+            "WHERE activation.singleton=1"
+        ).fetchall()
+        if len(rows) != 1:
+            raise SchemaV4Error("active tuple pointer is incomplete")
+        row = tuple(rows[0])
+        return VerifiedActiveGovernanceState(
+            logical_vault_id=_text(row[0], "active.logical_vault_id"),
+            activation_store_id=_text(row[1], "active.activation_store_id"),
+            activation_epoch=_integer(row[2], "active.activation_epoch"),
+            activation_state_digest=_digest(
+                row[3], "active.activation_state_digest"
+            ),
+            policy_generation_id=_text(row[4], "active.policy_generation_id"),
+            policy_fingerprint=_digest(row[5], "active.policy_fingerprint"),
+            projector_schema_version=_integer(
+                row[6], "active.projector_schema_version"
+            ),
+            catalog_generation=_integer(row[7], "active.catalog_generation"),
+            projection_namespace_id=_text(
+                row[8], "active.projection_namespace_id"
+            ),
+        )
+    except (IndexError, TypeError, ValueError, sqlite3.Error, SchemaV4Error):
+        raise SchemaV4Error("governance active tuple pointer is unavailable") from None
+
+
 def load_active_policy(
     connection: sqlite3.Connection,
     *,

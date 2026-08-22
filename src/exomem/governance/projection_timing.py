@@ -38,7 +38,7 @@ class PublicRequestClass:
             or type(self.padding_ms) is not int
             or type(self.deadline_ms) is not int
             or self.padding_ms <= 0
-            or self.deadline_ms != self.padding_ms
+            or self.deadline_ms < self.padding_ms
             or self.max_hidden_delta_ms
             != projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS
             or self.max_hidden_delta_ratio
@@ -52,7 +52,7 @@ class PublicRequestClass:
 _PROJECTED_FIND_KEYWORD_V1 = PublicRequestClass(
     name="projected-find-keyword-v1",
     padding_ms=250,
-    deadline_ms=250,
+    deadline_ms=300,
     max_hidden_delta_ms=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS,
     max_hidden_delta_ratio=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO,
 )
@@ -87,9 +87,10 @@ _REQUIRED_ROUTES = frozenset(
 _HARDWARE_RUNTIME_PROFILE = "github-hosted-ubuntu-latest-x64-python3.13"
 _MIN_SAMPLE_COUNT_PER_CONDITION = 200
 _MIN_BOOTSTRAP_RESAMPLES = 2_000
+_TIMING_RELEASE_MANIFEST_PROOF = object()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class TimingReleaseManifest:
     """Validated, non-waivable inputs for one actual-wire release gate."""
 
@@ -103,6 +104,40 @@ class TimingReleaseManifest:
     catalog_items: int
     searchable_bytes_per_item: int
     graph_edges: int
+
+    def __init__(
+        self,
+        *,
+        hidden_corpus_wire_delta_ms: int,
+        sample_count_per_condition: int,
+        bootstrap_resamples: int,
+        bootstrap_seed: int,
+        hardware_runtime_profile: str,
+        request_class_names: tuple[str, ...],
+        routes: frozenset[str],
+        catalog_items: int,
+        searchable_bytes_per_item: int,
+        graph_edges: int,
+        _proof: object | None = None,
+    ) -> None:
+        if _proof is not _TIMING_RELEASE_MANIFEST_PROOF:
+            raise ProjectedRequestTimingUnavailable(
+                "governed projected request timing is unavailable"
+            )
+        values = {
+            "hidden_corpus_wire_delta_ms": hidden_corpus_wire_delta_ms,
+            "sample_count_per_condition": sample_count_per_condition,
+            "bootstrap_resamples": bootstrap_resamples,
+            "bootstrap_seed": bootstrap_seed,
+            "hardware_runtime_profile": hardware_runtime_profile,
+            "request_class_names": request_class_names,
+            "routes": routes,
+            "catalog_items": catalog_items,
+            "searchable_bytes_per_item": searchable_bytes_per_item,
+            "graph_edges": graph_edges,
+        }
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +283,7 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
         catalog_items=expected_capacity["catalog_items"],
         searchable_bytes_per_item=expected_capacity["searchable_bytes_per_item"],
         graph_edges=expected_capacity["graph_edges"],
+        _proof=_TIMING_RELEASE_MANIFEST_PROOF,
     )
 
 
@@ -287,7 +323,6 @@ def evaluate_wire_differential(
     request_class_name: str,
     hidden_present_ms: Sequence[float],
     physically_absent_ms: Sequence[float],
-    deadline_misses: int,
 ) -> WireDifferentialReport:
     """Evaluate hidden-present versus absent actual-wire distributions."""
 
@@ -300,12 +335,11 @@ def evaluate_wire_differential(
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
-    if type(deadline_misses) is not int or deadline_misses < 0:
-        raise ProjectedRequestTimingUnavailable(
-            "governed projected request timing is unavailable"
-        )
     present = _wire_samples(hidden_present_ms, manifest.sample_count_per_condition)
     absent = _wire_samples(physically_absent_ms, manifest.sample_count_per_condition)
+    deadline_misses = sum(
+        sample > request_class.deadline_ms for sample in (*present, *absent)
+    )
 
     present_median = float(statistics.median(present))
     absent_median = float(statistics.median(absent))
@@ -433,6 +467,13 @@ def complete_public_request(
     remaining = max(0.0, (request_class.padding_ms - elapsed_ms) / 1000.0)
     if remaining:
         sleeper(remaining)
+    completed_at = clock()
+    if completed_at < finished_at or (
+        completed_at - float(started_at)
+    ) * 1000.0 > request_class.deadline_ms:
+        raise ProjectedRequestDeadlineExceeded(
+            "governed projected request deadline was exceeded"
+        )
 
 
 @contextmanager

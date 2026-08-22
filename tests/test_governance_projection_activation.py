@@ -88,9 +88,22 @@ def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
         expires_at=2_000_000_000,
         signing_key_id="key-1",
     )
-    connection = SimpleNamespace(close=lambda: None)
     events: list[str] = []
     current_control = [control]
+
+    class Connection:
+        in_transaction = False
+
+        def execute(self, statement: str) -> None:
+            assert statement == "BEGIN"
+            assert not self.in_transaction
+            self.in_transaction = True
+            events.append("begin")
+
+        def close(self) -> None:
+            self.in_transaction = False
+
+    connection = Connection()
 
     monkeypatch.setenv(authorization_custody.KEYRING_FILE_ENV, str(tmp_path / "keyring"))
     monkeypatch.setenv(authorization_custody.CONTROL_FILE_ENV, str(tmp_path / "control"))
@@ -121,11 +134,22 @@ def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
             items,
         )[1:],
     )
+    store_pointer = [runtime.snapshot.active]
+    monkeypatch.setattr(
+        schema_v4,
+        "load_active_tuple_pointer",
+        lambda _connection: store_pointer[0],
+        raising=False,
+    )
 
     projection_runtime._clear_preactivated_runtimes_for_tests()
     activated = projection_runtime.preactivate_projection_runtime(tmp_path)
     assert activated.snapshot is runtime.snapshot
-    assert events == [f"policy:{control.activation_state_digest}", "catalog"]
+    assert events == [
+        "begin",
+        f"policy:{control.activation_state_digest}",
+        "catalog",
+    ]
 
     monkeypatch.setattr(
         schema_v4,
@@ -155,6 +179,17 @@ def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
     assert projection_runtime.load_active_projection_runtime(tmp_path) is activated
 
     current_control[0] = replace(control, activation_epoch=control.activation_epoch + 1)
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="governed projected retrieval is unavailable",
+    ):
+        projection_runtime.load_active_projection_runtime(tmp_path)
+
+    current_control[0] = control
+    store_pointer[0] = replace(
+        runtime.snapshot.active,
+        activation_epoch=runtime.snapshot.active.activation_epoch + 1,
+    )
     with pytest.raises(
         projection_runtime.ProjectionRuntimeUnavailable,
         match="governed projected retrieval is unavailable",

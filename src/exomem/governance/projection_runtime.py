@@ -174,6 +174,7 @@ def preactivate_projection_runtime(
             return None
         cell_id, logical_vault_id, store_id, epoch, digest = activation
         connection = store.open_active_governance_read_connection(root)
+        connection.execute("BEGIN")
         snapshot = schema_v4.load_active_policy(
             connection,
             expected_logical_vault_id=logical_vault_id,
@@ -265,6 +266,31 @@ def _preactivated_runtime(vault_root: Path) -> ActiveProjectionRuntime | None:
         record.activation_state_digest,
     )
     if activation != expected:
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = store.open_active_governance_read_connection(root)
+        connection.execute("BEGIN")
+        current = schema_v4.load_active_tuple_pointer(connection)
+    except (
+        schema_v4.SchemaV4Error,
+        store.UnsupportedGovernanceSchema,
+        FileNotFoundError,
+        OSError,
+        RuntimeError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        ) from error
+    finally:
+        if connection is not None:
+            connection.close()
+    if current != record.runtime.snapshot.active:
         raise ProjectionRuntimeUnavailable(
             "governed projected retrieval is unavailable"
         )
