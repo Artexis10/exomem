@@ -80,6 +80,15 @@ deleted before its observation is accepted. Mutable or foreign images, unexpecte
 deployment shapes, failed output, and failed cleanup all stop the upgrade. Once the
 installed provisioner contains the collector, the ordinary in-place path is used.
 
+Provisioner operation history outlives destroyed tenants. The observer therefore
+validates every stored runtime identity structurally while deferring catalog
+resolution until it knows which operations still contribute to desired state or
+unfinished work. A finalized destroy or discard may remove a dead historical
+runtime from the live dependency set; it does not force that runtime into every
+future lock forever. Any surviving desired or unfinished identity must still resolve
+exactly against the selected runtime or retained legacy catalog, otherwise inventory
+fails closed.
+
 ### 4. Compose trust before deployment and retain every referenced legacy runtime
 
 Substrate imports the target's exact signed agent and gateway fixtures into every release-pinned mapping before Exomem composes a deployment lock naming the reviewed consumer commit. The expand lock's legacy catalog contains every release/protocol unit referenced by a routable cell, active assignment, or unfinished legacy operation at preflight—not merely the immediately previous release.

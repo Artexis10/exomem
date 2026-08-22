@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from exomem_provisioner.fleet_observation import build_fleet_observation
+import pytest
+
+from exomem_provisioner.fleet_observation import FleetObservationError, build_fleet_observation
 from exomem_provisioner.models import OperationAction, OperationState
 from exomem_provisioner.repository import FleetOperationSnapshot
 
@@ -168,3 +170,53 @@ def test_terminal_destroy_removes_provisioner_desired_state() -> None:
 
     assert observation["desiredCells"] == []
     assert observation["unfinishedOperations"] == []
+
+
+def test_terminal_destroy_does_not_make_dead_runtime_history_a_catalog_dependency() -> None:
+    operations = (
+        _operation(
+            operation_id="provision-alpha",
+            action=OperationAction.PROVISION,
+            state=OperationState.FINAL,
+            runtime={"releaseVersion": "0.24.0", "protocolVersion": "1"},
+            offset=0,
+        ),
+        _operation(
+            operation_id="destroy-alpha",
+            action=OperationAction.DESTROY,
+            state=OperationState.FINAL,
+            runtime=None,
+            offset=1,
+        ),
+    )
+
+    observation = build_fleet_observation(
+        operations,
+        lock=_lock(),
+        observed_at="2026-08-21T11:00:00Z",
+    )
+
+    assert observation["desiredCells"] == []
+    assert observation["unfinishedOperations"] == []
+
+
+def test_live_desired_state_still_requires_a_reviewed_runtime() -> None:
+    operations = (
+        _operation(
+            operation_id="provision-alpha",
+            action=OperationAction.PROVISION,
+            state=OperationState.FINAL,
+            runtime={"releaseVersion": "0.24.0", "protocolVersion": "1"},
+            offset=0,
+        ),
+    )
+
+    with pytest.raises(
+        FleetObservationError,
+        match="runtime-setting operation has no reviewed deployment identity",
+    ):
+        build_fleet_observation(
+            operations,
+            lock=_lock(),
+            observed_at="2026-08-21T11:00:00Z",
+        )

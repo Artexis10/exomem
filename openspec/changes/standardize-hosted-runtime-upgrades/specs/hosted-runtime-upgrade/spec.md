@@ -77,6 +77,12 @@ Before expand deployment or any cell rollforward, the workflow SHALL reconcile S
 - **AND** it receives no API bearer, provider signer, Kubernetes service-account token, tenant credential, or mutation command
 - **AND** inventory is refused if the Job, its fixed security shape, its output, or its cleanup cannot be proven
 
+#### Scenario: Destroyed operation history names an older runtime
+
+- **WHEN** a finalized destroy or discard removes the last desired, unfinished, and cluster dependency on an older reviewed runtime
+- **THEN** the provisioner observer retains the terminal operation history without requiring that dead runtime in the next deployment lock
+- **AND** any runtime that still contributes to desired state or unfinished work remains exactly resolvable or inventory fails closed
+
 ### Requirement: Expand adoption changes only the future-cell target
 
 Deploying target trust or the expand lock SHALL select the target runtime for future provisioning and admit every authoritative legacy runtime required by the reconciled inventory. Adoption itself MUST NOT enqueue a tenant lifecycle operation or mutate, restart, migrate, replace, delete, relabel, or re-route an existing cell, namespace, workload, persistent volume, canonical vault, derived state, binding, security state, credential, OAuth grant, entitlement, assignment, or lifecycle generation.

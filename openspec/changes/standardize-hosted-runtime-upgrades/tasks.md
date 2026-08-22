@@ -15,6 +15,7 @@
 - [x] 2.5 Make preflight refuse expand, rollforward, contract, or promotion when authoritative views disagree
 - [x] 2.6 Record a zero-cell rollout as an explicit no-op only when every collector agrees; otherwise require repair and a fresh inventory
 - [x] 2.7 Bootstrap the first pre-expand provisioner observation from one exact incoming image in a minimum-authority, tokenless, deadline-bounded Job when the installed legacy image lacks the collector
+- [x] 2.8 Keep terminal operation history observable without retaining dead runtime catalogs forever, while requiring every live desired or unfinished runtime to resolve exactly
 
 ## 3. Substrate per-cell rollforward companion
 

@@ -94,6 +94,7 @@ def _resolve_runtime(
     exact: dict[tuple[tuple[str, str], ...], dict[str, str]],
     legacy: dict[tuple[str, str], dict[str, str]],
 ) -> dict[str, str] | None:
+    identity = _runtime_identity(identity)
     if identity is None:
         return None
     if frozenset(identity) in {
@@ -104,6 +105,22 @@ def _resolve_runtime(
     if set(identity) == {"releaseVersion", "protocolVersion"}:
         return legacy.get((identity["releaseVersion"], identity["protocolVersion"]))
     _error("operation runtime identity is invalid")
+
+
+def _runtime_identity(identity: dict[str, str] | None) -> dict[str, str] | None:
+    if identity is None:
+        return None
+    if not isinstance(identity, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in identity.items()
+    ):
+        _error("operation runtime identity is invalid")
+    if frozenset(identity) not in {
+        frozenset(_BASE_RUNTIME_FIELDS),
+        frozenset(_BASE_RUNTIME_FIELDS | {_COMPATIBILITY_FIELD}),
+        frozenset({"releaseVersion", "protocolVersion"}),
+    }:
+        _error("operation runtime identity is invalid")
+    return dict(identity)
 
 
 def build_fleet_observation(
@@ -126,15 +143,15 @@ def build_fleet_observation(
     exact, legacy = _catalog(lock)
     desired: dict[str, dict[str, Any]] = {}
     rollforward_priors: dict[tuple[str, str], dict[str, Any]] = {}
-    resolved: dict[int, dict[str, str] | None] = {}
+    identities: dict[int, dict[str, str] | None] = {}
     ordered = sorted(operations, key=lambda item: (item.created_at, item.external_operation_id))
     for index, operation in enumerate(ordered):
         if not _OPAQUE.fullmatch(operation.cell_id):
             _error("fleet cell identity is invalid")
-        runtime = _resolve_runtime(operation.runtime_identity, exact=exact, legacy=legacy)
-        resolved[index] = runtime
+        identity = _runtime_identity(operation.runtime_identity)
+        identities[index] = identity
         if operation.action in {OperationAction.PROVISION, OperationAction.ROLLFORWARD}:
-            if runtime is None:
+            if identity is None:
                 _error("runtime-setting operation has no reviewed deployment identity")
             if operation.action is OperationAction.ROLLFORWARD:
                 prior = desired.get(operation.cell_id)
@@ -144,7 +161,7 @@ def build_fleet_observation(
             state = "ready" if operation.state is OperationState.FINAL else operation.state.value
             desired[operation.cell_id] = {
                 "cellId": operation.cell_id,
-                "runtime": runtime,
+                "runtimeIdentity": identity,
                 "state": state,
             }
         elif (
@@ -161,16 +178,29 @@ def build_fleet_observation(
         ):
             desired.pop(operation.cell_id, None)
 
+    resolved_desired: list[dict[str, Any]] = []
+    for item in desired.values():
+        runtime = _resolve_runtime(item["runtimeIdentity"], exact=exact, legacy=legacy)
+        if runtime is None:
+            _error("runtime-setting operation has no reviewed deployment identity")
+        resolved_desired.append(
+            {"cellId": item["cellId"], "runtime": runtime, "state": item["state"]}
+        )
+
     unfinished: list[dict[str, Any]] = []
     for index, operation in enumerate(ordered):
         if operation.state not in {OperationState.PENDING, OperationState.CLAIMED}:
             continue
         if not _OPAQUE.fullmatch(operation.external_operation_id):
             _error("fleet operation identity is invalid")
-        runtime = resolved[index]
+        runtime = _resolve_runtime(identities[index], exact=exact, legacy=legacy)
         if runtime is None:
             current = desired.get(operation.cell_id)
-            runtime = current["runtime"] if current is not None else None
+            runtime = (
+                _resolve_runtime(current["runtimeIdentity"], exact=exact, legacy=legacy)
+                if current is not None
+                else None
+            )
         if runtime is None:
             _error("unfinished operation has no reviewed deployment identity")
         unfinished.append(
@@ -187,7 +217,7 @@ def build_fleet_observation(
         "artifact": "exomem-hosted-provisioner-fleet-observation",
         "schemaVersion": 1,
         "observedAt": observed_at,
-        "desiredCells": sorted(desired.values(), key=lambda item: item["cellId"]),
+        "desiredCells": sorted(resolved_desired, key=lambda item: item["cellId"]),
         "unfinishedOperations": sorted(
             unfinished,
             key=lambda item: (item["cellId"], item["operationId"]),
