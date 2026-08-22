@@ -135,7 +135,10 @@ def _trusted_issuance_projection(
         context = _new_issuance_context(arguments["session_action"], bearer)
     except (KeyError, TypeError, ValueError):
         return projected_result
-    checked, blocked = _scrub_issuance_response(context.action, leaf, context)
+    checked, blocked = _scrub_issuance_projection(
+        _IssuanceProjection(leaf, context),
+        context,
+    )
     if blocked or checked != leaf:
         return projected_result
     wire_projection = dict(projected_result)
@@ -784,9 +787,15 @@ def _scrub_issuance_projection(
     if type(public) is not dict:
         return scrub_value(public)
 
-    if type(public.get("diagnostics")) is dict:
+    if (
+        type(public.get("diagnostics")) is dict
+        and type(public["diagnostics"].get("issued_credential")) is dict
+    ):
         location = "diagnostics"
-        response = public[location]
+        response = {
+            "status": public[location].get("status"),
+            "issued_credential": public[location]["issued_credential"],
+        }
     elif set(public) == {"status", "issued_credential"}:
         location = "root"
         response = public
@@ -815,7 +824,10 @@ def _scrub_issuance_projection(
     if location == "root":
         protected = protected_response
     elif location == "diagnostics":
-        protected[location] = protected_response
+        protected[location] = {
+            **public[location],
+            "issued_credential": protected_credential,
+        }
     else:
         protected["issued_credential"] = protected_credential
 

@@ -544,12 +544,25 @@ def test_live_success_and_control_envelopes_never_receive_issuance_exception(
 def test_dispatcher_marked_issuance_survives_both_mcp_postfilter_passes(
     vault: Path,
 ) -> None:
+    _govern_patterns_shut(vault)
     response = _issuance_response()
-    projected = {"ok": True, "diagnostics": response}
+    projected = {
+        "ok": True,
+        "state": "committed",
+        "terminal": True,
+        "status": "committed",
+        "mutated": True,
+        "paths": [],
+        "request_id": "request-issuance",
+        "receipt_id": "receipt-issuance",
+        "graph_sync": "completed",
+        "warnings_count": 0,
+        "diagnostics": {**response, "graph_sync": "completed"},
+    }
     marked = scrubber._trusted_issuance_projection(
         "govern_memory",
         {"operation": "session", "session_action": "open"},
-        {"leaf_result": response},
+        {"leaf_result": {**response, "graph_sync": "completed"}},
         projected,
     )
 
