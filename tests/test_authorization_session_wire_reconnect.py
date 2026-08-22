@@ -542,13 +542,13 @@ def test_stateless_mcp_session_resumes_on_another_replica(
     assert bearer not in caplog.text
 
 
-def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
+def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
     vault: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Only the granted capability survives reconnect across content families."""
+    """Only the granted capability survives reconnect on activated routes."""
 
     audience, _issuer_family = _service_identity()
     policy_fingerprint, grant_paths = _write_route_fixture(vault, audience)
@@ -616,18 +616,6 @@ def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
     collection = COLLECTION_PATH
     routes = (
         (
-            "ask_memory",
-            "ask_memory",
-            {
-                "query": NOTE_MARKER,
-                "mode": "keyword",
-                "graph": False,
-                "limit": 5,
-                "detail": "full",
-            },
-            NOTE_MARKER,
-        ),
-        (
             "read_memory",
             "read_memory",
             {"path": NOTE_PATH, "include_raw": True},
@@ -686,6 +674,25 @@ def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
         sibling_bearer = sibling_issued["bearer"]
         assert isinstance(sibling_bearer, str)
         assert sibling_bearer != granted_bearer
+
+        projected_refusal = _tool_response(
+            client,
+            request_id,
+            "ask_memory",
+            {
+                "query": NOTE_MARKER,
+                "mode": "keyword",
+                "graph": False,
+                "limit": 5,
+                "detail": "full",
+                "authorization_session_credential": granted_bearer,
+            },
+        )
+        request_id += 1
+        observed_wire.append(projected_refusal.text)
+        assert projected_refusal.json()["result"].get("isError") is True
+        assert "governed projected retrieval is unavailable" in projected_refusal.text
+        assert NOTE_MARKER not in projected_refusal.text
 
         for label, tool_name, arguments, marker in routes:
             valid = _tool_response(
