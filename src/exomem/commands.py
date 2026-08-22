@@ -86,6 +86,7 @@ from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
+from . import referent_runtime as referent_runtime_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
@@ -998,6 +999,11 @@ def op_bootstrap(
                     "set explain=true only when ranking interpretation is useful; it adds "
                     "a bounded retrieval profile and per-hit evidence without changing recall"
                 ),
+                "referents": (
+                    "partial ambiguous unresolved; never guess"
+                    if profile == "compact"
+                    else "resolved names; partial N unresolved; ambiguous ask; unresolved never guess"
+                ),
                 "score_interpretation": {
                     "bm25": "backend relevance value; interpret using the returned direction and range",
                     "cosine": "vector similarity measurement, not probability",
@@ -1220,7 +1226,7 @@ def op_find(
     explain: bool = False,
     purpose: str | None = None,
 ) -> list[RetrievalHit] | FindEnvelope:
-    """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.
+    """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Deterministic entity cues may add an abstention-aware `referents` envelope block without changing hits. Filters are AND'd; tag/project lists are OR'd within.
 
     Args:
         query: Free-text search string. In "hybrid"/"vector" mode it's
@@ -1579,6 +1585,26 @@ def op_find(
                 vault_root, hits, limit=limit, purpose=purpose
             )
             hits = release.hits
+    referents: dict[str, Any] | None = None
+    if projection_runtime is None:
+        # Referents compose over the released vault hits; the projected (hosted
+        # runtime) path has no vault registry or graph sidecar to resolve against.
+        referent_cue = referent_runtime_module.cue_for_find(query=query, mode=mode)
+        if referent_cue is not None:
+            with find_module._span(timings, "referents"):
+                try:
+                    referents = referent_runtime_module.resolve_for_find(
+                        vault_root,
+                        query=query,
+                        hits=hits,
+                        mode=mode,
+                        graph=graph,
+                        release=release,
+                        purpose=purpose,
+                        cue=referent_cue,
+                    )
+                except Exception:
+                    referents = None
     pack_obj: dict | None = None
     if pack:
         with find_module._span(timings, "pack"):
@@ -1645,9 +1671,14 @@ def op_find(
         and degraded_marker is None
         and retrieval_trace is None
     ):
-        if not pack:
+        if not pack and referents is None:
             return hit_dicts
-        return {"hits": hit_dicts, "pack": pack_obj}
+        out = {"hits": hit_dicts}
+        if pack:
+            out["pack"] = pack_obj
+        if referents is not None:
+            out["referents"] = referents
+        return out
     out: dict = {"hits": hit_dicts}
     if pack:
         out["pack"] = pack_obj
@@ -1659,6 +1690,8 @@ def op_find(
         out["degraded"] = degraded_marker
     if retrieval_trace is not None:
         out["retrieval_profile"] = retrieval_trace.profile()
+    if referents is not None:
+        out["referents"] = referents
     return out
 
 

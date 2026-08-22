@@ -147,6 +147,15 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "Progressive disclosure" not in serialized
 
 
+def test_search_guidance_teaches_referents_contract(vault: Path) -> None:
+    out = commands.op_bootstrap(vault, profile="compact")
+    guidance = out["search_guidance"]["semantic_recall"]["referents"]
+    assert "partial" in guidance
+    assert "ambiguous" in guidance
+    assert "unresolved" in guidance
+    assert "never guess" in guidance
+
+
 def test_bootstrap_full_teaches_copyable_direct_and_fallback_artifact_calls(vault: Path) -> None:
     examples = commands.op_bootstrap(vault, profile="full")["examples"]
     calls = [example["call"] for example in examples]

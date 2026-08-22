@@ -7,7 +7,9 @@ OpenAPI document, and the CLI, so adding or removing an operation requires no
 per-surface code and MCP tool schemas stay byte-identical to their committed
 baseline. The CLI and REST facade share one result/error envelope so a given
 failure carries the same machine-readable code on both surfaces.
+
 ## Requirements
+
 ### Requirement: Single Command Registry Generates Every Surface
 
 The system SHALL define a single declarative product command registry that
@@ -1542,3 +1544,10 @@ A move that stays within one append-only tree SHALL be permitted, carrying bytes
 - **WHEN** a caller moves a page from a non-append-only location into `Sources/` or `Evidence/`
 - **THEN** the move is refused
 - **AND** the refusal directs the caller to `add` or `preserve`
+
+### Requirement: Referents is an additive shared envelope key
+Eligible cue queries SHALL expose the same optional `referents` block through the existing find and ask-memory leaf on MCP, CLI, and REST without adding an MCP, CLI, or REST parameter.
+
+#### Scenario: Compact and full detail
+- **WHEN** the same cue query is requested with compact and full hit detail
+- **THEN** the envelope-level referents block is identical

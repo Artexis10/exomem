@@ -6,7 +6,9 @@ operating contract instead of guessing conventions: a read-only `bootstrap`
 operation that returns workflow guidance, tool defaults, performance profiles,
 and search guidance as structured JSON, without inspecting or summarizing any
 private vault content.
+
 ## Requirements
+
 ### Requirement: Agent Bootstrap Contract
 The system SHALL expose a read-only `bootstrap` operation that returns a
 versioned operating contract for agents using Exomem without a native skill.
@@ -589,3 +591,10 @@ Compact bootstrap SHALL serialize beginner/front-door actions and the bounded Re
 #### Scenario: Compact budget rejects salience regression
 - **WHEN** unrelated bootstrap material grows enough to push Records beyond its byte-position or total-size budget
 - **THEN** the bootstrap contract test fails even though a Records key still exists somewhere in the payload
+
+### Requirement: Bootstrap teaches referent abstention
+Bootstrap and the shipped scaffold SHALL teach agents to name only resolved entities, report the unresolved remainder for partial results, ask on ambiguity, and never guess on unresolved results.
+
+#### Scenario: Partial referent result
+- **WHEN** an agent receives partial with unresolved_count one
+- **THEN** it names the resolved entity and says one identity remains unresolved

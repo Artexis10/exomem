@@ -2547,6 +2547,30 @@ def _print_human(result, *, op: str | None = None) -> None:
     if op == "triage_memory" and isinstance(result, dict):
         _print_triage_human(result)
         return
+    if (
+        isinstance(result, dict)
+        and isinstance(result.get("hits"), list)
+        and isinstance(result.get("referents"), dict)
+        and not (
+            set(result)
+            - {"hits", "referents", "timings", "pack", "warming", "degraded"}
+        )
+    ):
+        _print_human(result["hits"], op=op)
+        referents = result["referents"]
+        resolved = ", ".join(
+            str(item.get("title") or item.get("path") or "")
+            for item in referents.get("resolved") or []
+            if isinstance(item, dict)
+        )
+        unresolved = referents.get("unresolved_count")
+        if not isinstance(unresolved, int):
+            unresolved = 0
+        print(
+            f"referents: {referents.get('status', 'unresolved')}; "
+            f"resolved: {resolved or '(none)'}; unresolved: {unresolved}"
+        )
+        return
     if isinstance(result, list):
         if not result:
             print("(no results)")
