@@ -589,6 +589,27 @@ def test_preflight_binds_real_setup_provider_checkout_and_dataset_before_first_s
     assert terminal_manifest["preregistration_identity"]["contract_revision"] == payload["contract_revision"]
 
 
+def test_new_output_root_may_have_an_absent_parent(tmp_path: Path) -> None:
+    plan = _plan(tmp_path / "fixture")
+    payload = json.loads(plan.read_text(encoding="utf-8"))
+    output = tmp_path / "runs" / "nested" / "output"
+    payload.update({
+        "output_root": str(output),
+        "guest_work_root": str(output / "guest-work"),
+        "guest_evidence_root": str(output / "guest-evidence"),
+    })
+    plan.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    plan.chmod(0o600)
+    dependencies = _valid_dependencies(tmp_path)
+    dependencies["cleanup_runner"] = _cleanup(output)
+
+    result = _run(plan, **dependencies)
+
+    assert result.status == "VALID" and result.exit_code == 0
+    assert output.is_dir()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+
+
 def test_exomem_stage_environment_preserves_explicit_model_cache_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

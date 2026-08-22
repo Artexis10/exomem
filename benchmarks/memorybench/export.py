@@ -1575,7 +1575,7 @@ def run_export(
     except Exception:
         return ExportResult("BLOCKED", 2)
 
-    output_root.mkdir(mode=0o700)
+    output_root.mkdir(mode=0o700, parents=True)
     manifest_path = output_root / "manifest.json"
     write = (
         (lambda path, payload, *, mode=0o600: _protected_atomic_write(
