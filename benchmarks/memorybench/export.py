@@ -568,6 +568,8 @@ def _stage_environment(plan: MemoryBenchRunPlan, controlled_path: str = os.defpa
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
     }
+    if value := os.environ.get("UV_CACHE_DIR"):
+        values["UV_CACHE_DIR"] = value
     if plan.provider == "exomem":
         for variable in ("HF_HOME", "HF_HUB_CACHE"):
             if value := os.environ.get(variable):

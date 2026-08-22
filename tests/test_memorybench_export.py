@@ -610,6 +610,24 @@ def test_exomem_stage_environment_preserves_explicit_model_cache_binding(
     assert environment["HF_HUB_CACHE"] == str(hub)
 
 
+def test_stage_environment_preserves_explicit_uv_cache_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memorybench.export import _stage_environment
+    from protocol.models import MemoryBenchRunPlan
+
+    cache = tmp_path / "uv-cache"
+    cache.mkdir()
+    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+
+    environment = _stage_environment(
+        MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path)),
+        "/controlled",
+    )
+
+    assert environment["UV_CACHE_DIR"] == str(cache)
+
+
 def test_preregistration_plan_digest_is_only_an_assertion_against_derived_identity(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
