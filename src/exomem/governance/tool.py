@@ -94,6 +94,18 @@ def _require_owner(value: RequestPrincipal | None) -> RequestPrincipal:
     return who
 
 
+def _prospective_policy(
+    vault_root: Path, documents: Mapping[str, str | None]
+) -> policy_module.Policy:
+    prospective = policy_module.compile_prospective(vault_root, dict(documents))
+    if prospective is None:
+        raise GovernanceError(
+            "GOVERNANCE_AUTHORING_UNSTABLE",
+            "the policy workspace changed or could not be acquired safely",
+        )
+    return prospective.policy
+
+
 def _require_authorization_session(
     value: RequestPrincipal | None, supplied: Any
 ) -> tuple[RequestPrincipal, str]:
@@ -493,7 +505,7 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     current_policy = policy_module.load(vault_root)
     if current_policy.blocked:
         raise GovernanceError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
-    prospective = policy_module.compile_prospective(vault_root, documents)
+    prospective = _prospective_policy(vault_root, documents)
     if prospective.blocked:
         raise GovernanceError(
             "INVALID_GOVERNANCE_POLICY",
@@ -844,7 +856,7 @@ def _standing_grant(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         sort_keys=False,
         allow_unicode=True,
     )
-    prospective = policy_module.compile_prospective(vault_root, {rel: document})
+    prospective = _prospective_policy(vault_root, {rel: document})
     if prospective.blocked:
         raise GovernanceError(
             "INVALID_STANDING_GRANT", _canonical_json(list(prospective.findings))
@@ -1534,8 +1546,8 @@ def _effective_transition_direction(
     if current.blocked:
         return "widening"
     try:
-        prospective = policy_module.compile_prospective(vault_root, dict(documents))
-    except (OSError, TypeError, ValueError):
+        prospective = _prospective_policy(vault_root, documents)
+    except (GovernanceError, OSError, TypeError, ValueError):
         return "widening"
     if prospective.blocked or current.release_grants != prospective.release_grants:
         return "widening"
@@ -1959,7 +1971,7 @@ def _proposal_matches_exact_prior(
         current_policy = policy_module.load(vault_root)
         if current_policy.blocked:
             return False
-        prospective = policy_module.compile_prospective(vault_root, documents)
+        prospective = _prospective_policy(vault_root, documents)
         if prospective.blocked:
             return False
         current_manifest = _membership_manifest(
@@ -1992,7 +2004,15 @@ def _validate_proposal_values(
     if current_policy.blocked:
         raise GovernanceError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
     documents = dict(payload["documents"])
-    prospective = policy_module.compile_prospective(vault_root, documents)
+    try:
+        prospective = _prospective_policy(vault_root, documents)
+    except GovernanceError as exc:
+        if exc.code != "GOVERNANCE_AUTHORING_UNSTABLE":
+            raise
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_TARGET",
+            "the policy workspace cannot be acquired through stable regular-file identities",
+        ) from exc
     if prospective.blocked:
         raise GovernanceError(
             "INVALID_GOVERNANCE_POLICY", _canonical_json(list(prospective.findings))
@@ -2772,7 +2792,7 @@ def _undo(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         str(path): (None if prior_bytes is None else bytes(prior_bytes).decode("utf-8"))
         for path, prior_bytes in archive_rows
     }
-    restored_policy = policy_module.compile_prospective(vault_root, documents)
+    restored_policy = _prospective_policy(vault_root, documents)
     if restored_policy.blocked:
         raise GovernanceError("ARCHIVE_INVALID", "the restored policy does not compile")
     dependent_targets: dict[str, str] = {}
@@ -2881,10 +2901,9 @@ def op_govern_memory(vault_root: Path, operation: str, **kwargs: Any) -> dict[st
     if not spec.read_only:
         _authorize_operation(selection, kwargs)
         # One registry-driven gate for every authoring operation, rather than
-        # thirteen `.blocked` sites. `compile_prospective` filters conflict
-        # copies out of the temp tree it compiles, so without this a mutation
-        # under a sync conflict is accepted, receipted, and silently overridden
-        # by whichever document the next real compile picks.
+        # thirteen `.blocked` sites. Prospective policy paths independently
+        # re-probe the conflict set around their held-handle byte acquisition;
+        # this fast gate also covers authoring variants that do not compile.
         if policy_module.has_conflict_copy(root):
             raise GovernanceError(
                 "GOVERNANCE_CONFLICTED",
