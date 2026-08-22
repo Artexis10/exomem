@@ -16,6 +16,11 @@
     {"id": "G", "query": "which basalt person", "status": "unresolved", "resolved": []},
     {"id": "H", "query": "my two old-harbour friends", "status": "partial", "resolved": ["h-one"], "expected_count": 2, "unresolved_count": 1},
     {"id": "I", "query": "which person was Inara Quill", "status": "unresolved", "resolved": []},
-    {"id": "J", "query": "which crystal friend", "status": "resolved", "resolved": ["j-one"], "graph_required": true}
+    {"id": "J", "query": "which crystal friend", "status": "resolved", "resolved": ["j-one"], "graph_required": true},
+    {"id": "K", "query": "the two observatory companies we evaluated", "status": "resolved", "resolved": ["k-one", "k-two"], "expected_count": 2},
+    {"id": "L", "query": "the rendering library we picked for the atlas project", "status": "resolved", "resolved": ["l-one"]},
+    {"id": "M", "query": "that decision about the harbour tariff", "status": "resolved", "resolved": ["m-one"]},
+    {"id": "N", "query": "the two concepts behind the tide model", "status": "partial", "resolved": ["n-one"], "expected_count": 2, "unresolved_count": 1},
+    {"id": "O", "query": "the quay library we reviewed", "status": "unresolved", "resolved": []}
   ]
 }

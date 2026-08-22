@@ -3,11 +3,16 @@
 ## ADDED Requirements
 
 ### Requirement: Deterministic Referent Cue Detection
-The system SHALL detect entity cues from a closed person-noun set and the existing entity-type registry aliases, SHALL bind counts only within three preceding tokens, and SHALL run no model.
+The system SHALL detect entity cues from a closed person-noun set, resolver-local supplementary nouns, and the existing entity-type registry aliases, SHALL bind counts only within three preceding tokens, and SHALL run no model.
 
 #### Scenario: Counted plural cue
 - **WHEN** a query says "my two coastal friends"
 - **THEN** the cue identifies person referents with expected count two
+
+#### Scenario: Every registry entity type stays type-constrained
+- **WHEN** the cue noun names any entity type in the registry
+- **THEN** candidates are restricted to that entity type unless exact-name rules apply
+- **AND** organization, library, decision, concept, and person cues are covered by the benchmark
 
 ### Requirement: Evidence Kinds Are Categorical And Transient
 Evidence SHALL use only exact-name, fuzzy-name, retrieval, graph, and attribute categories, SHALL contain no confidence floats, and SHALL never be written to the vault.

@@ -60,6 +60,11 @@ def test_every_case_meets_expected_outcome_with_graph_on(tmp_path: Path) -> None
         "H",
         "I",
         "J",
+        "K",
+        "L",
+        "M",
+        "N",
+        "O",
     ]
     assert all(case["graph_on"]["expected"] for case in report["_case_results"])
 
@@ -77,6 +82,14 @@ def test_negative_control_and_ambiguity_cases_abstain(tmp_path: Path) -> None:
     assert cases["F"]["graph_on"]["status"] == "ambiguous"
     assert cases["G"]["graph_on"]["status"] == "unresolved"
     assert cases["I"]["graph_on"]["status"] == "unresolved"
+    assert cases["O"]["graph_on"]["status"] == "unresolved"
+    assert all(
+        not Path(path).stem.startswith("o-person-")
+        for path in cases["O"]["graph_on"]["candidates"]
+    )
+    assert cases["N"]["graph_on"]["status"] == "partial"
+    assert cases["N"]["graph_on"]["unresolved_count"] == 1
+    assert [Path(path).stem for path in cases["N"]["graph_on"]["candidates"]] == ["n-noise"]
 
 
 def test_metric_floors_hold(tmp_path: Path) -> None:

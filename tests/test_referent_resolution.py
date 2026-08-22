@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
+from exomem.entity_types import ENTITY_TYPE_REGISTRY
+
 
 def _rr():
     return importlib.import_module("exomem.referent_resolution")
@@ -75,6 +79,34 @@ def test_cue_organization_from_registry_aliases() -> None:
     assert cue is not None
     assert cue.entity_type == "organization"
     assert cue.expected_count == 2
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "noun"),
+    [(definition.id, definition.id) for definition in ENTITY_TYPE_REGISTRY],
+)
+def test_cue_fires_for_every_registry_type_noun(entity_type: str, noun: str) -> None:
+    cue = _rr().detect_cue(f"which {noun}")
+    assert cue is not None
+    assert cue.entity_type == entity_type
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "noun"),
+    [
+        ("organization", "firm"),
+        ("concept", "principle"),
+        ("library", "framework"),
+        ("decision", "choice"),
+    ],
+)
+def test_cue_fires_for_supplementary_type_nouns(entity_type: str, noun: str) -> None:
+    rr = _rr()
+    assert noun not in rr._COUNT_WORDS
+    assert noun not in rr._STOP_WORDS
+    cue = rr.detect_cue(f"which {noun}")
+    assert cue is not None
+    assert cue.entity_type == entity_type
 
 
 def test_cue_prefers_typed_noun_over_leading_interrogative() -> None:
@@ -179,6 +211,35 @@ def test_attribute_overlap_matches_stem_or_prefix() -> None:
     out = _resolve("which robotic colleague", entities=(stemmed,))
     evidence = next(e for e in out.candidates[0].evidence if e.kind == "attribute")
     assert set(evidence.detail["matched"]) == {"colleague", "robotic"}
+
+
+def test_attribute_evidence_reads_type_specific_frontmatter(tmp_path) -> None:
+    rel = "Knowledge Base/Entities/Libraries/aster-render.md"
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        "type: entity\n"
+        "title: Aster Render\n"
+        "entity_type: library\n"
+        "status: active\n"
+        "language: Rust\n"
+        "---\n\n"
+        "# Aster Render\n\nA synthetic rendering dependency.\n",
+        encoding="utf-8",
+    )
+    registry = importlib.import_module("exomem.entity_registry")
+    registry.clear_entity_registry_cache()
+    entity = registry.load_entity_registry(
+        tmp_path, freshness_key=("type-specific-attribute",)
+    )[rel]
+    out = _resolve(
+        "which rust library",
+        entities=(entity,),
+        hits=(_hit(entity.path, type="entity"),),
+    )
+    evidence = {item.kind: item.detail for item in out.resolved[0].evidence}
+    assert evidence["attribute"] == {"matched": ["rust"]}
 
 
 def test_retrieval_presence_alone_is_candidate_not_resolved() -> None:

@@ -105,6 +105,29 @@ _PERSON_NOUNS = frozenset(
         "whose",
     }
 )
+_TYPE_NOUNS: dict[str, frozenset[str]] = {
+    "organization": frozenset(
+        {"firm", "firms", "vendor", "vendors", "supplier", "suppliers", "org", "orgs"}
+    ),
+    "concept": frozenset(
+        {"approach", "approaches", "pattern", "patterns", "principle", "principles"}
+    ),
+    "library": frozenset(
+        {
+            "framework",
+            "frameworks",
+            "sdk",
+            "sdks",
+            "tool",
+            "tools",
+            "dependency",
+            "dependencies",
+            "lib",
+            "libs",
+        }
+    ),
+    "decision": frozenset({"choice", "choices", "call", "calls", "ruling", "rulings"}),
+}
 _INTERROGATIVE_NOUNS = frozenset({"who", "whom", "whose"})
 
 REFERENT_CANDIDATE_CAP = 25
@@ -116,6 +139,10 @@ def _tokens(text: object) -> tuple[str, ...]:
 
 def _cue_nouns() -> dict[str, str]:
     nouns = {noun: "person" for noun in _PERSON_NOUNS}
+    for entity_type, supplementary in _TYPE_NOUNS.items():
+        for noun in supplementary:
+            if noun not in _COUNT_WORDS and noun not in _STOP_WORDS:
+                nouns[noun] = entity_type
     for definition in ENTITY_TYPE_REGISTRY:
         values = (
             definition.id,
@@ -153,6 +180,7 @@ class EntityRecord:
     tags: tuple[str, ...] = ()
     relationship: str = ""
     affiliation: str = ""
+    attributes: tuple[str, ...] = ()
     ref: str | None = None
 
 
@@ -329,7 +357,7 @@ def _matches_attribute(descriptor: str, attribute: str) -> bool:
 def _attribute_matches(cue: ReferentCue, entity: EntityRecord) -> tuple[str, ...]:
     attributes = tuple(
         token
-        for value in (*entity.tags, entity.relationship, entity.affiliation)
+        for value in (*entity.tags, entity.relationship, entity.affiliation, *entity.attributes)
         for token in _tokens(value)
     )
     return tuple(

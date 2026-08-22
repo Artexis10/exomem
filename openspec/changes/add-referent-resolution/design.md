@@ -19,10 +19,11 @@ released hits without entering the cache or changing rank.
 
 ## The predicate
 
-`detect_cue` recognizes a closed set of person nouns plus aliases from the
-existing entity-type registry. Count words or integers apply only within the
-three tokens preceding the cue noun. The runtime is eligible only for hybrid or
-vector recall and is skipped under `EXOMEM_DISABLE_REFERENTS`.
+`detect_cue` recognizes a closed set of person nouns, supplementary natural
+nouns for non-person types, and aliases from the existing entity-type registry.
+Count words or integers apply only within the three tokens preceding the cue
+noun. The runtime is eligible only for hybrid or vector recall and is skipped
+under `EXOMEM_DISABLE_REFERENTS`.
 
 Active entities produce categorical evidence:
 
@@ -31,7 +32,8 @@ Active entities produce categorical evidence:
 - `retrieval`: the entity itself occurs in a released hit lane;
 - `graph`: a one-hop typed or `links_to` edge joins the entity to one of the
   top ten released hits, provided that hit is not superseded;
-- `attribute`: cue descriptors match tags, relationship, or affiliation by
+- `attribute`: cue descriptors match tags, relationship, affiliation, or any
+  type-specific optional frontmatter field declared by the entity registry by
   stem equality or a four-character-or-longer prefix.
 
 Exact name resolves alone. Otherwise the entity type must match the cue and at
@@ -67,6 +69,10 @@ omission counters unconditionally. Key presence follows gate state rather than
 whether this query withheld a match, preventing the counters from becoming an
 existence oracle for governed or tombstoned entities.
 
+## Generality
+
+The supported type set comes from the entity registry, supplementary natural-language nouns live only in the resolver, and the benchmark covers person, organization, library, decision, and concept cues.
+
 ## Validation against the real case
 
 For the synthetic equivalent of the product sentence, the travel topic is a
@@ -76,6 +82,10 @@ attribute evidence kind. With an expected count of two, exactly one represented
 person produces `partial` and `unresolved_count: 1`. A noise person retrieved by
 wording alone remains in candidates, so the agent names the represented person
 and states that one identity remains unresolved.
+
+### Validation against the real case — live measurement (2026-08-22)
+
+On the production service running the released code without this change, data maintenance added aliases to the friend's entity page and authored an `about_entity` edge from the travel note to that entity. The query "my two Japanese friends" still returned the entity page outside the top eight with an unrelated person at rank six, and the misspelled first name still ranked the entity sixth behind video noise. Data maintenance alone therefore does not produce resolution; the referents stage is what turns the authored edge and aliases into a resolved or partial answer. The post-release measurement with this change deployed will be recorded when it exists; this design does not invent it.
 
 ## Performance
 

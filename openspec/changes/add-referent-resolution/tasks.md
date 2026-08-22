@@ -29,6 +29,9 @@
 - [x] 1.25 test_cue_count_survives_interrogative_prefix: a leading interrogative cannot discard the typed noun's count.
 - [x] 1.26 test_partial_name_token_is_fuzzy_name_evidence: an exact token within a longer identity remains partial-name evidence.
 - [x] 1.27 test_candidates_are_capped_deterministically_with_omitted_count: serialized matches are path-stable and bounded.
+- [x] 1.28 test_cue_fires_for_every_registry_type_noun: each registry type supplies a working cue noun.
+- [x] 1.29 test_cue_fires_for_supplementary_type_nouns: resolver-local natural nouns cover every non-person type.
+- [x] 1.30 test_attribute_evidence_reads_type_specific_frontmatter: registry-declared optional fields contribute attribute evidence.
 
 ## 2. Runtime, envelope, and governance
 
@@ -61,7 +64,7 @@
 
 - [x] 3.1 test_fixture_render_is_deterministic_for_seed: seeded corpus bytes are reproducible.
 - [x] 3.2 test_fixture_passes_public_artifact_privacy_scan: committed fixture content is synthetic/public-safe.
-- [x] 3.3 test_every_case_meets_expected_outcome_with_graph_on: cases A, A2, B, C, D, D2, E, F, G, H, I, and J meet their graph-on contract.
+- [x] 3.3 test_every_case_meets_expected_outcome_with_graph_on: cases A through O, including all five entity types, meet their graph-on contract.
 - [x] 3.4 test_graph_only_cases_fail_without_graph_and_pass_with_graph: graph value is measured by ablation.
 - [x] 3.5 test_negative_control_and_ambiguity_cases_abstain: unsafe cases never false-resolve.
 - [x] 3.6 test_metric_floors_hold: aggregate quality floors are enforced.

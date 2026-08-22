@@ -29,6 +29,15 @@ def _strings(value: object) -> tuple[str, ...]:
     return ()
 
 
+def _attribute_strings(value: object) -> tuple[str, ...]:
+    if value is None or isinstance(value, dict):
+        return ()
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    rendered = str(value).strip()
+    return (rendered,) if rendered else ()
+
+
 def _build_registry(vault_root: Path) -> Mapping[str, EntityRecord]:
     records: dict[str, EntityRecord] = {}
     entities_root = kb_root(vault_root) / "Entities"
@@ -61,6 +70,12 @@ def _build_registry(vault_root: Path) -> Mapping[str, EntityRecord]:
                 tags=_strings(frontmatter.get("tags")),
                 relationship=str(frontmatter.get("relationship") or "").strip(),
                 affiliation=str(frontmatter.get("affiliation") or "").strip(),
+                attributes=tuple(
+                    item
+                    for field in registered.optional_frontmatter
+                    if field not in {"relationship", "affiliation"}
+                    for item in _attribute_strings(frontmatter.get(field))
+                ),
                 ref=memory_refs.memory_ref(exomem_id) if exomem_id else None,
             )
     return MappingProxyType(dict(sorted(records.items())))

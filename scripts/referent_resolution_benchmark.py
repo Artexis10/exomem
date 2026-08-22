@@ -16,6 +16,7 @@ from typing import Any
 
 from exomem import commands, epistemic_graph, public_artifact_privacy
 from exomem import find as find_module
+from exomem.entity_types import ENTITY_TYPES_BY_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "tests" / "fixtures" / "referent_resolution" / "manifest.json"
@@ -51,10 +52,14 @@ def _entity(
     relationship: str = "",
     tags: tuple[str, ...] = (),
     aliases: tuple[str, ...] = (),
+    attributes: tuple[tuple[str, str], ...] = (),
     body: str = "A synthetic benchmark identity.",
     relations: tuple[str, ...] = (),
 ) -> str:
-    folder = "People" if entity_type == "person" else "Organizations"
+    definition = ENTITY_TYPES_BY_ID.get(entity_type)
+    if definition is None:
+        raise ValueError(f"unknown entity type: {entity_type}")
+    folder = definition.folder
     rel = f"Knowledge Base/Entities/{folder}/{entity_id}.md"
     optional = ""
     if relationship:
@@ -65,6 +70,10 @@ def _entity(
         optional += "tags: [synthetic]\n"
     if aliases:
         optional += f"aliases: [{', '.join(aliases)}]\n"
+    for key, value in attributes:
+        if key not in definition.optional_frontmatter:
+            raise ValueError(f"unsupported {entity_type} attribute: {key}")
+        optional += f"{key}: {value}\n"
     relation_text = ""
     if relations:
         relation_text = (
@@ -229,6 +238,101 @@ def _render_cases(root: Path) -> dict[str, str]:
     paths["j-one"] = _entity(
         root, "j-one", "Jora Pell", relationship="friend", relations=(j_topic,)
     )
+
+    paths["k-one"] = _entity(
+        root,
+        "k-one",
+        "Orvane Scope",
+        entity_type="organization",
+        tags=("observatory",),
+    )
+    k_topic = _note(
+        root,
+        "k-observatory",
+        "The two observatory companies we evaluated supplied synthetic instruments.",
+        relations=(paths["k-one"],),
+    )
+    paths["k-two"] = _entity(
+        root,
+        "k-two",
+        "Pelune Array",
+        entity_type="organization",
+        tags=("observatory",),
+        relations=(k_topic,),
+    )
+
+    l_topic = _note(
+        root,
+        "l-atlas",
+        "The rendering library we picked for the atlas project handled synthetic maps.",
+    )
+    paths["l-one"] = _entity(
+        root,
+        "l-one",
+        "Lumera Draw",
+        entity_type="library",
+        tags=("rendering", "atlas"),
+        attributes=(("language", "Luma"),),
+        relations=(l_topic,),
+    )
+
+    paths["m-one"] = _entity(
+        root,
+        "m-one",
+        "Tariff Boundary",
+        entity_type="decision",
+        tags=("harbour", "tariff"),
+        attributes=(("decision_status", "accepted"),),
+    )
+    _note(
+        root,
+        "m-tariff",
+        "That decision about the harbour tariff fixed a synthetic boundary.",
+        relations=(paths["m-one"],),
+    )
+
+    paths["n-one"] = _entity(
+        root,
+        "n-one",
+        "Tidal Coupling",
+        entity_type="concept",
+        tags=("tide", "model"),
+    )
+    _note(
+        root,
+        "n-tide",
+        "The two concepts behind the tide model explain a synthetic forecast.",
+        relations=(paths["n-one"],),
+    )
+    paths["n-noise"] = _entity(
+        root,
+        "n-noise",
+        "Tide Residue",
+        entity_type="concept",
+        tags=("tide",),
+        body="A background concept with one matching attribute only.",
+    )
+
+    paths["o-person-one"] = _entity(
+        root,
+        "o-person-one",
+        "Quen Loris",
+        tags=("quay",),
+        relationship="colleague",
+    )
+    paths["o-person-two"] = _entity(
+        root,
+        "o-person-two",
+        "Ralen Voss",
+        tags=("quay",),
+        relationship="colleague",
+    )
+    _note(
+        root,
+        "o-library-negative",
+        "The quay library we reviewed was discussed only by synthetic people.",
+        relations=(paths["o-person-one"], paths["o-person-two"]),
+    )
     return paths
 
 
@@ -301,6 +405,9 @@ def _arm(vault: Path, case: dict[str, Any], *, graph: bool) -> dict[str, Any]:
         block = {"status": "unresolved", "resolved": [], "candidates": []}
     expected_paths = sorted(case["_expected_paths"])
     resolved_paths = sorted(str(item.get("path") or "") for item in block.get("resolved", []))
+    candidate_paths = sorted(
+        str(item.get("path") or "") for item in block.get("candidates", [])
+    )
     expected_status = str(case["status"])
     expected_unresolved = case.get("unresolved_count")
     actual_unresolved = block.get("unresolved_count")
@@ -313,6 +420,7 @@ def _arm(vault: Path, case: dict[str, Any], *, graph: bool) -> dict[str, Any]:
     return {
         "status": str(block.get("status") or "unresolved"),
         "resolved": resolved_paths,
+        "candidates": candidate_paths,
         "unresolved_count": actual_unresolved,
         "expected": expected,
         "false_resolution": bool(set(resolved_paths) - set(expected_paths)),
@@ -340,8 +448,8 @@ def _run_benchmark(manifest_path: Path, *, work_root: Path) -> dict[str, Any]:
         )
 
     total = len(case_results)
-    abstention_ids = {"F", "G", "I"}
-    partial_ids = {"E", "H"}
+    abstention_ids = {"F", "G", "I", "O"}
+    partial_ids = {"E", "H", "N"}
     stage_samples = [
         float(case["graph_on"]["referents_stage_ms"])
         for case in case_results
