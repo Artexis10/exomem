@@ -10,12 +10,22 @@ import pytest
 from exomem.governance import (
     authorization_custody,
     authorization_session_lifecycle,
+    policy,
     schema_v4,
     store,
 )
 
 NOW = 1_800_000_000
-POLICY_FINGERPRINT = "3" * 64
+POLICY_DOCUMENTS = (
+    (
+        "scopes/migration.yaml",
+        b"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths:\n  - Notes/**\n",
+    ),
+)
+COMPILED_POLICY = policy.compile_documents(dict(POLICY_DOCUMENTS))
+assert not COMPILED_POLICY.empty and not COMPILED_POLICY.blocked
+POLICY_FINGERPRINT = COMPILED_POLICY.fingerprint
+COMPILED_POLICY_BYTES = policy.canonical_compiled_bytes(COMPILED_POLICY)
 
 
 def _seed() -> schema_v4.MigrationSeed:
@@ -25,10 +35,10 @@ def _seed() -> schema_v4.MigrationSeed:
         activation_epoch=1,
         policy=schema_v4.PolicyGenerationSeed(
             generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            source_documents=(("rules/release.yaml", b"governance_version: 1\n"),),
-            source_fingerprint="1" * 64,
+            source_documents=POLICY_DOCUMENTS,
+            source_fingerprint=POLICY_FINGERPRINT,
             conflict_digest="2" * 64,
-            compiled_policy=b'{"rules":[]}',
+            compiled_policy=COMPILED_POLICY_BYTES,
             policy_fingerprint=POLICY_FINGERPRINT,
             compiler_schema_version=1,
             projector_schema_version=1,
