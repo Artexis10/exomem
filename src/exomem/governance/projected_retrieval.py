@@ -281,6 +281,26 @@ def _selected_variants(
     return tuple(selected)
 
 
+class ProjectionCatalog:
+    """One immutable catalog snapshot shared by projected measurement lanes."""
+
+    def __init__(
+        self,
+        namespace_key: projections.ProjectionNamespaceKey,
+        items: Iterable[projection_store.ProjectionItemVariants],
+    ) -> None:
+        self.namespace_key = namespace_key
+        self.items = _catalog_items(namespace_key, items)
+
+    def select(
+        self,
+        authorization: AuthorizationProjectionMap,
+    ) -> tuple[projections.ProjectionVariant, ...]:
+        """Resolve the exact request-local non-L0 variant set."""
+
+        return _selected_variants(self.namespace_key, self.items, authorization)
+
+
 def _variant_text(variant: projections.ProjectionVariant) -> str:
     return " ".join(
         variant.search_fields[key]
@@ -735,6 +755,7 @@ __all__ = [
     "ProjectedRetrievalUnavailable",
     "ProjectedVectorIndex",
     "ProjectionClipMeasurement",
+    "ProjectionCatalog",
     "ProjectionVectorMeasurement",
     "ProjectionSelection",
 ]
