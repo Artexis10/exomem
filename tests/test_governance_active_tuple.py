@@ -312,6 +312,32 @@ def test_tuple_publication_schema_is_closed_and_append_only(tmp_path: Path) -> N
         connection.close()
 
 
+def test_migration_refuses_noncanonical_compiled_seed_before_schema_write(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    connection = store.open_connection(vault)
+    invalid = dataclasses.replace(
+        _migration_seed(now=now),
+        policy=dataclasses.replace(
+            _migration_seed(now=now).policy,
+            compiled_policy=b'{"schema":"caller-selected"}',
+        ),
+    )
+    try:
+        with pytest.raises(schema_v4.SchemaV4Error, match="source parity"):
+            schema_v4.migrate_v3_connection(connection, invalid)
+
+        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='compiled_policy_generations'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
 def test_v4_policy_load_uses_the_verified_immutable_generation_not_live_yaml(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
