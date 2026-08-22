@@ -173,6 +173,29 @@ def test_hosted_principal_is_stable_for_same_scope() -> None:
     assert a.audience_id != c.audience_id
 
 
+def test_trusted_surface_resolvers_bind_closed_issuer_families(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        principal_module,
+        "_mcp_identity_claims",
+        lambda: ({"sub": SUBJECT, "iss": ISSUER}, None),
+    )
+    issuer_digest = hashlib.sha256(ISSUER.encode()).hexdigest()
+
+    assert resolve_mcp_principal().issuer_family == f"mcp-oauth:{issuer_digest}"
+    assert resolve_rest_principal(None).issuer_family == "rest-api-key"
+    assert (
+        resolve_rest_principal("cf-access:principal-digest").issuer_family
+        == "rest-cf-access"
+    )
+    assert (
+        resolve_hosted_principal("principal-scope-abc").issuer_family
+        == "hosted-gateway"
+    )
+    assert owner_principal(surface="cli").issuer_family == "cli-local-owner"
+
+
 # --------------------------------------------------------------------------
 # Contextvar scope (clone of capabilities.active_surface)
 # --------------------------------------------------------------------------
@@ -299,11 +322,10 @@ def test_request_principal_is_frozen() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_bind_vault_wrapper_binds_the_mcp_principal(
+def test_bind_vault_wrapper_preserves_dispatcher_bound_mcp_principal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`command_surface.bind_vault` is the MCP set-point — the leaf it wraps
-    must see a bound principal, not the unbound default."""
+    """The raw dispatcher is the set-point; wrappers consume trusted context."""
     from exomem import command_surface
 
     monkeypatch.setattr(
@@ -318,7 +340,9 @@ def test_bind_vault_wrapper_binds_the_mcp_principal(
         return value
 
     wrapper = command_surface.bind_vault(leaf, "/vault")
-    assert wrapper(value="ok") == "ok"
+    principal = resolve_mcp_principal()
+    with request_scope(principal):
+        assert wrapper(value="ok") == "ok"
     assert seen and seen[0] is not None
     assert seen[0].audience_id == _expected_oauth_audience()
     assert seen[0].surface == "mcp"
@@ -326,38 +350,23 @@ def test_bind_vault_wrapper_binds_the_mcp_principal(
     assert current_principal() is None
 
 
-def test_bind_vault_wrapper_falls_back_to_owner_on_stdio(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_bind_vault_wrapper_refuses_unbound_stdio_adapter() -> None:
     from exomem import command_surface
-
-    monkeypatch.setattr(principal_module, "_mcp_identity_claims", lambda: (None, None))
-    seen: list[RequestPrincipal | None] = []
+    from exomem.governance.authorization_request import AuthorizationContextUnavailable
 
     def leaf(vault_root: str) -> str:
-        seen.append(current_principal())
         return "ok"
 
-    command_surface.bind_vault(leaf, "/vault")()
-    assert seen[0] is not None
-    assert seen[0].audience_id == OWNER_AUDIENCE
+    with pytest.raises(AuthorizationContextUnavailable):
+        command_surface.bind_vault(leaf, "/vault")()
 
 
-def test_bind_vault_wrapper_denies_when_identity_expected_but_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_bind_vault_wrapper_refuses_unbound_remote_adapter() -> None:
     from exomem import command_surface
-
-    monkeypatch.setattr(
-        principal_module, "_mcp_identity_claims", lambda: (None, "authenticated")
-    )
-    seen: list[RequestPrincipal | None] = []
+    from exomem.governance.authorization_request import AuthorizationContextUnavailable
 
     def leaf(vault_root: str) -> str:
-        seen.append(current_principal())
         return "ok"
 
-    command_surface.bind_vault(leaf, "/vault")()
-    assert seen[0] is not None
-    assert seen[0].resolved is False
-    assert seen[0].audience_id == MOST_RESTRICTIVE_AUDIENCE
+    with pytest.raises(AuthorizationContextUnavailable):
+        command_surface.bind_vault(leaf, "/vault")()

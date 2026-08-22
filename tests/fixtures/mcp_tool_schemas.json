@@ -3,7 +3,20 @@
     "description": "Report this replica's writer-lease role and coordinator health.\n\nRead-only and safe during coordinator outages. Credentials and vault content\nare never included.",
     "inputSchema": {
       "additionalProperties": false,
-      "properties": {},
+      "properties": {
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
+        }
+      },
       "type": "object"
     }
   },
@@ -93,6 +106,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -319,6 +344,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -635,6 +672,18 @@
           ],
           "default": null,
           "description": "Optional declared purpose for this request, e.g. \"audit\" or \"due-diligence\". Governance rules may widen or narrow what a given audience may see for a stated purpose; leaving it unset is deterministic, not a wildcard. Never affects ranking, and never enters the recall cache key."
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -661,6 +710,18 @@
           ],
           "default": null,
           "description": "Optional caller-selected workflow label. Returned as context only; it does not change server behavior."
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -700,6 +761,18 @@
           "default": false,
           "description": "In list mode, walk subfolders.",
           "type": "boolean"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -846,6 +919,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -878,6 +963,18 @@
           ],
           "default": null,
           "description": "Optional title override."
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -1352,6 +1449,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -2025,6 +2134,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -2358,6 +2479,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -2438,6 +2571,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -2747,6 +2892,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -2974,6 +3131,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -3351,6 +3520,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -3412,6 +3593,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -3464,6 +3657,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -3511,6 +3716,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -3642,6 +3859,18 @@
           ],
           "default": null,
           "description": "Date column name."
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -3687,6 +3916,18 @@
           ],
           "default": null,
           "description": "Optional end timestamp in seconds."
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -3747,6 +3988,18 @@
           ],
           "default": null,
           "description": "Optional declared purpose for this request, e.g. \"audit\" or \"due-diligence\". Governance rules may widen or narrow what a given audience may see for a stated purpose; leaving it unset is deterministic, not a wildcard. Never affects ranking, and never enters the recall cache key."
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -4149,6 +4402,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -4554,6 +4819,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -4971,6 +5248,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -5031,6 +5320,18 @@
           "default": 10,
           "description": "Maximum recorded supersession versions.",
           "type": "integer"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -5181,6 +5482,18 @@
           "maximum": 50,
           "minimum": 0,
           "type": "integer"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -5297,6 +5610,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [
@@ -5324,6 +5649,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "type": "object"
@@ -5387,6 +5724,18 @@
             "legacy"
           ],
           "type": "string"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
         }
       },
       "required": [

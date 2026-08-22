@@ -60,6 +60,15 @@ def test_gateway_contract_is_canonical_versioned_and_registry_derived() -> None:
     assert contract["envelopes"]["success"]["required"] == ["success", "data"]
     assert contract["envelopes"]["error"]["required"] == ["success", "error"]
     assert "tenant" not in contract["trusted_headers"]
+    assert contract["authorization_session"] == {
+        "carrier": "header",
+        "name": "X-Exomem-Authorization-Session",
+        "service_authorization_header": "Authorization",
+        "body_allowed": False,
+        "query_allowed": False,
+        "min_length": 70,
+        "max_length": 70,
+    }
     with pytest.raises(gateway.HostedGatewayError) as unsupported:
         gateway.build_gateway_contract(protocol_version="2.alpha")
     assert unsupported.value.code == "HOSTED_PROTOCOL_UNSUPPORTED"

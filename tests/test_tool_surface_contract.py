@@ -16,6 +16,7 @@ from exomem import commands, semantic_authoring, semantic_index
 from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.__main__ import main
+from exomem.governance import principal as principal_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUTHORING_TOOLS = (
@@ -66,14 +67,20 @@ def _mcp_tools(mcp) -> dict[str, dict]:
 
 
 def _call_bootstrap(mcp) -> dict:
-    result = asyncio.run(mcp.call_tool("bootstrap", {}, run_middleware=False))
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        result = asyncio.run(mcp.call_tool("bootstrap", {}, run_middleware=False))
     if isinstance(result.structured_content, dict):
         return result.structured_content
     return json.loads(result.content[0].text)
 
 
 def _call_tool(mcp, name: str, arguments: dict) -> dict:
-    result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=False))
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=False))
     if isinstance(result.structured_content, dict):
         return result.structured_content
     return json.loads(result.content[0].text)

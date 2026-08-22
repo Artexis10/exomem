@@ -32,6 +32,7 @@ from starlette.testclient import TestClient
 from exomem import capabilities, cli_ops, commands, freshness, lexstore, schema, server
 from exomem import find as find_module
 from exomem.__main__ import main as cli_main
+from exomem.governance import principal as principal_module
 
 _ALLOWED_WARMING_ERROR_KEYS = frozenset(
     {"code", "message", "remediation", "ok", "error_code", "status", "complete", "retry_after_ms"}
@@ -54,7 +55,10 @@ def _fresh_state() -> Any:
     lexstore.clear_stores()
     find_module.clear_cache()
     freshness.clear()
-    yield
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        yield
     lexstore.reset_memo()
     lexstore.clear_stores()
     find_module.clear_cache()

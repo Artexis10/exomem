@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +22,12 @@ from exomem import commands
 from exomem import find as find_module
 from exomem import query_data as query_data_module
 from exomem.find_types import GraphProvenance, Hit
-from exomem.governance import egress, receipts
+from exomem.governance import (
+    authorization_session_authority,
+    authorization_session_lifecycle,
+    egress,
+    receipts,
+)
 from exomem.governance.decisions import Decision
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
@@ -127,6 +133,32 @@ def _hit(path: str, *, title: str = "t", excerpt: str = "e") -> Hit:
 
 def _external(purpose: str | None = None) -> RequestPrincipal:
     return RequestPrincipal(audience_id=EXTERNAL, surface="mcp", purpose=purpose)
+
+
+def _verified_external_session() -> tuple[
+    RequestPrincipal,
+    authorization_session_lifecycle.AuthorizationSessionContext,
+]:
+    context = authorization_session_lifecycle.AuthorizationSessionContext(
+        session_id="authorization-session:0123456789abcdef0123456789abcdef",
+        principal_id=EXTERNAL,
+        issuer_family="mcp-oauth",
+        cell_id="cell-7",
+        logical_vault_id="logical-vault-7",
+        keyring_id="keyring-7",
+        credential_generation=1,
+        expires_at=1_900_000_000,
+    )
+    return (
+        RequestPrincipal(
+            audience_id=EXTERNAL,
+            surface="mcp",
+            purpose="support",
+            issuer_family="mcp-oauth",
+            verified_authorization_session=context,
+        ),
+        context,
+    )
 
 
 def _reset_caches() -> None:
@@ -715,6 +747,263 @@ def test_decision_memo_is_keyed_on_audience_and_purpose(vault: Path) -> None:
         limit=5,
     )
     assert egress.decision_memo_size() > first
+
+
+def test_verified_session_grant_raises_only_its_bound_scope(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    principal, context = _verified_external_session()
+
+    class Connection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = Connection()
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        egress.store,
+        "open_authorization_session_connection",
+        lambda _vault: connection,
+    )
+
+    def active_session_grants(**kwargs: object):
+        calls.append(kwargs)
+        assert kwargs["connection"] is connection
+        assert kwargs["context"] is context
+        return (
+            (
+                authorization_session_authority.SessionGrant(
+                    grant_id="8" * 64,
+                    authorization_session_id=context.session_id,
+                    principal_id=EXTERNAL,
+                    issuer_family="mcp-oauth",
+                    audience=EXTERNAL,
+                    purpose="support",
+                    ceiling=egress.LEVEL_EXCERPT,
+                    paths=(RESTRICTED_PATH,),
+                    fingerprints=(str(kwargs["fingerprint"]),),
+                    scope_ids=(SCOPE_ID,),
+                    membership=(
+                        authorization_session_authority.SessionMembership(
+                            path=RESTRICTED_PATH,
+                            fingerprint=str(kwargs["fingerprint"]),
+                            scope_ids=(SCOPE_ID,),
+                        ),
+                    ),
+                    policy_fingerprint=str(kwargs["policy_fingerprint"]),
+                    token_jti="token-7",
+                    created_at=1_800_000_000,
+                    expires_at=1_900_000_000,
+                ),
+            ),
+            "session-grants-7",
+        )
+
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "active_session_grants",
+        active_session_grants,
+    )
+
+    result = egress.annotate_hits(
+        vault,
+        [_hit(RESTRICTED_PATH)],
+        principal=principal,
+        limit=1,
+    )
+
+    assert [hit.path for hit in result.hits] == [RESTRICTED_PATH]
+    assert result.hits[0].decision.level == egress.LEVEL_EXCERPT
+    assert len(calls) == 1
+    assert connection.closed
+
+
+def test_verified_session_grant_cannot_cross_into_an_overlapping_scope(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second_scope = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    (_gov_dir(vault) / "scopes" / "overlap.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {second_scope}\n"
+        "name: Overlap\n"
+        f'paths: ["{PATTERNS_GLOB}"]\n',
+        encoding="utf-8",
+    )
+    (_gov_dir(vault) / "rules" / "overlap-external.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FC1\n"
+        f'scope_ids: ["{second_scope}"]\n'
+        f"audience: {EXTERNAL}\n"
+        f"ceiling: {egress.LEVEL_NONE}\n",
+        encoding="utf-8",
+    )
+    principal, context = _verified_external_session()
+
+    class Connection:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        egress.store,
+        "open_authorization_session_connection",
+        lambda _vault: Connection(),
+    )
+
+    def active_session_grants(**kwargs: object):
+        fingerprint = str(kwargs["fingerprint"])
+        assert kwargs["scope_ids"] == tuple(sorted((SCOPE_ID, second_scope)))
+        return (
+            (
+                authorization_session_authority.SessionGrant(
+                    grant_id="8" * 64,
+                    authorization_session_id=context.session_id,
+                    principal_id=EXTERNAL,
+                    issuer_family="mcp-oauth",
+                    audience=EXTERNAL,
+                    purpose="support",
+                    ceiling=egress.LEVEL_EXCERPT,
+                    paths=(RESTRICTED_PATH,),
+                    fingerprints=(fingerprint,),
+                    scope_ids=(SCOPE_ID,),
+                    membership=(
+                        authorization_session_authority.SessionMembership(
+                            path=RESTRICTED_PATH,
+                            fingerprint=fingerprint,
+                            scope_ids=tuple(sorted((SCOPE_ID, second_scope))),
+                        ),
+                    ),
+                    policy_fingerprint=str(kwargs["policy_fingerprint"]),
+                    token_jti="token-7",
+                    created_at=1_800_000_000,
+                    expires_at=1_900_000_000,
+                ),
+            ),
+            "session-grants-7",
+        )
+
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "active_session_grants",
+        active_session_grants,
+    )
+
+    result = egress.annotate_hits(
+        vault,
+        [_hit(RESTRICTED_PATH)],
+        principal=principal,
+        limit=1,
+    )
+
+    assert result.hits == []
+    assert result.notices == []
+
+
+def test_verified_session_notice_mints_token_from_internal_context(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NOTICE)
+    principal, context = _verified_external_session()
+
+    class Connection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = Connection()
+    key = SimpleNamespace(key=b"k" * 32)
+    custody = SimpleNamespace(
+        keyring=SimpleNamespace(
+            cell_id=context.cell_id,
+            logical_vault_id=context.logical_vault_id,
+            keyring_id=context.keyring_id,
+            active_key=key,
+        )
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        egress.authorization_custody,
+        "load_authorization_custody",
+        lambda _vault, *, now: custody,
+    )
+    monkeypatch.setattr(
+        egress.store,
+        "open_authorization_session_connection",
+        lambda _vault: connection,
+    )
+
+    def mint_escalation_token(**kwargs: object) -> str:
+        calls.append(kwargs)
+        assert kwargs["connection"] is connection
+        assert kwargs["context"] is context
+        assert kwargs["signing_key"] == b"k" * 32
+        assert kwargs["scope_ids"] == (SCOPE_ID,)
+        assert kwargs["max_level"] == egress.RELEASE_FLOOR
+        return "wh1.bound-token"
+
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "mint_escalation_token",
+        mint_escalation_token,
+    )
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "active_session_grants",
+        lambda **_kwargs: ((), "no-session-grants"),
+    )
+
+    result = egress.annotate_hits(
+        vault,
+        [_hit(RESTRICTED_PATH)],
+        principal=principal,
+        limit=1,
+    )
+
+    assert result.hits == []
+    assert result.notices[0]["escalation_token"] == "wh1.bound-token"
+    assert len(calls) == 1
+    assert connection.closed
+
+
+def test_verified_session_purpose_store_failure_refuses_instead_of_broadening(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    principal, _context = _verified_external_session()
+    principal = RequestPrincipal(
+        audience_id=principal.audience_id,
+        surface=principal.surface,
+        issuer_family=principal.issuer_family,
+        verified_authorization_session=principal.verified_authorization_session,
+    )
+    monkeypatch.setattr(
+        egress.store,
+        "open_authorization_session_connection",
+        lambda _vault: (_ for _ in ()).throw(OSError("store unavailable")),
+    )
+
+    with pytest.raises(egress.AuthorizationSessionDecisionUnavailable) as error:
+        egress.annotate_hits(
+            vault,
+            [_hit(RESTRICTED_PATH)],
+            principal=principal,
+            limit=1,
+        )
+
+    assert str(error.value) == "AUTHORIZATION_SESSION_UNAVAILABLE"
 
 
 # --------------------------------------------------------------------------

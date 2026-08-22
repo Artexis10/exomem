@@ -105,6 +105,7 @@ def invoke_prepared(
     kwargs: dict[str, Any],
     *,
     vault_root: Path | str | None = None,
+    principal=None,
     expose_tier2: bool | None = None,
     idempotency_key: str | None = None,
 ):
@@ -134,13 +135,78 @@ def invoke_prepared(
         injected = (root,)
 
     descriptor = cli_surface_descriptor(expose_tier2=expose_tier2)
-    # CLI-family surfaces run in the vault owner's own process: the canonical
-    # audience is `owner` (design D5), bound explicitly rather than left to the
-    # unbound-contextvar default so the surface label is accurate.
+    if principal is None:
+        from .governance.authorization_request import AuthorizationContextUnavailable
+
+        raise AuthorizationContextUnavailable
     with capabilities.active_surface(descriptor), principal_module.request_scope(
-        principal_module.owner_principal(surface="cli")
+        principal
     ):
         return invoke_command(cmd, *injected, idempotency_key=idempotency_key, **kwargs)
+
+
+def prepare_local_authorization(
+    cmd,
+    raw: dict[str, Any],
+    *,
+    surface: str,
+    vault_root: Path | str | None = None,
+    authorization_session_fd: str | None = None,
+    authorization_carrier=None,
+):
+    """Resolve local owner and optional protected-FD capability before coercion."""
+    root, admission = verify_local_authorization_transport(
+        cmd,
+        raw_for_vault=raw,
+        surface=surface,
+        vault_root=vault_root,
+        authorization_session_fd=authorization_session_fd,
+        authorization_carrier=authorization_carrier,
+    )
+    principal = enforce_local_authorization_route(cmd, raw, admission)
+    return root, principal
+
+
+def verify_local_authorization_transport(
+    cmd,
+    *,
+    raw_for_vault: dict[str, Any],
+    surface: str,
+    vault_root: Path | str | None = None,
+    authorization_session_fd: str | None = None,
+    authorization_carrier=None,
+):
+    """Consume and verify the protected carrier before argument validation."""
+    import time
+
+    from .governance import authorization_request, authorization_transport
+    from .governance import principal as principal_module
+
+    root = resolve_vault_for(cmd.name, raw_for_vault, vault_root)
+    carrier = authorization_carrier
+    if carrier is None:
+        carrier = (
+            authorization_transport.CredentialCarrier.absent()
+            if authorization_session_fd is None
+            else authorization_transport.read_cli_authorization_fd(
+                authorization_session_fd
+            )
+        )
+    admission = authorization_request.verify_authorization_context(
+        root,
+        principal=principal_module.owner_principal(surface=surface),
+        credential=carrier.consume(),
+        now=int(time.time()),
+    )
+    return root, admission
+
+
+def enforce_local_authorization_route(cmd, raw: dict[str, Any], admission):
+    """Apply the closed route rule after argument parsing identifies the variant."""
+    from .governance import authorization_request
+
+    rule = authorization_request.credential_rule(cmd.name, raw)
+    return authorization_request.enforce_credential_rule(admission, rule)
 
 
 def invoke_product(
@@ -158,9 +224,16 @@ def invoke_product(
     relaxation (it coerces for itself before `invoke_prepared`).
     """
     cmd = product_command(op, expose_tier2=expose_tier2)
+    request = dict(raw or {})
+    root, principal = prepare_local_authorization(
+        cmd,
+        request,
+        surface="library",
+        vault_root=vault_root,
+    )
     kwargs = cli_ops.coerce(
         cmd.params,
-        dict(raw or {}),
+        request,
         guarded_fields=cmd.guarded_fields,
         tool=cmd.name,
         cli=False,
@@ -168,7 +241,8 @@ def invoke_product(
     return invoke_prepared(
         cmd,
         kwargs,
-        vault_root=vault_root,
+        vault_root=root,
+        principal=principal,
         expose_tier2=expose_tier2,
         idempotency_key=idempotency_key,
     )

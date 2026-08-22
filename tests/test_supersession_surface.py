@@ -30,6 +30,7 @@ from exomem import find as find_module
 from exomem import get_page as get_module
 from exomem import server as server_module
 from exomem import vault as vault_module
+from exomem.governance import principal as principal_module
 
 TODAY = dt.date(2026, 6, 23)
 TOKEN = "zqxconflicttoken"  # rare → only the notes we plant here match it
@@ -193,7 +194,10 @@ def _build_server(monkeypatch: pytest.MonkeyPatch):
 
 
 def _call(mcp, name: str, args: dict) -> dict:
-    result = asyncio.run(mcp.call_tool(name, args, run_middleware=False))
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        result = asyncio.run(mcp.call_tool(name, args, run_middleware=False))
     sc = getattr(result, "structured_content", None)
     if isinstance(sc, dict):
         return sc
