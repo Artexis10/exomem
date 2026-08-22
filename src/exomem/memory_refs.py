@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,9 @@ SCHEMA_VERSION = 3
 REF_PREFIX = "exomem://memory/"
 ID_FIELD = "exomem_id"
 _REFERENCE_REBUILD_LOCK = threading.Lock()
+#: SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 999 on older builds, so a
+#: batch resolver chunks its `IN` clause rather than trusting the batch size.
+_ID_QUERY_CHUNK = 400
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -463,6 +467,71 @@ class ReferenceIndex:
             for value, path in malformed
         )
         return sorted(issues, key=lambda item: (item["kind"], item["value"], item["path"]))
+
+
+def paths_for_ids_read_only(
+    vault_root: Path, ids: Iterable[Any]
+) -> dict[str, tuple[str, ...]]:
+    """Resolve many memory ids to every page holding each, writing nothing.
+
+    The reverse direction of `refs_for_paths`, and read-only in the strict
+    sense that separates it from every other resolver here: it never creates,
+    rebuilds, or refreshes the sidecar, so a caller that must leave the vault
+    byte-identical can use it. `.refs.sqlite` is registered internal state and
+    a canonical byte census skips it, which is exactly why an accidental
+    rebuild inside a read has to be impossible rather than merely unlikely.
+
+    Every path holding an id is returned, so a duplicated identity reads as a
+    tuple of length two. This function never raises `AMBIGUOUS_REFERENCE`: that
+    message states in how many pages the id appears, and a caller may hold no
+    release decision over those pages, so a caller forbidden to disclose the
+    count cannot afford to catch the exception and must see the shape instead.
+
+    Cost is one sidecar query per chunk plus, at most, one whole-corpus scan
+    for the entire batch — never one scan per id. The scan is the same
+    fallback `ReferenceIndex.resolve` already takes when the sidecar is absent,
+    incompatible, or simply behind a page written outside a governed write.
+    """
+    wanted: list[str] = []
+    seen: set[str] = set()
+    for value in ids:
+        normalized = normalize_id(value)
+        if normalized is not None and normalized not in seen:
+            seen.add(normalized)
+            wanted.append(normalized)
+    if not wanted:
+        return {}
+
+    found: dict[str, set[str]] = {}
+    index = ReferenceIndex(vault_root)
+    conn = index._current_readonly_connection()
+    if conn is not None:
+        try:
+            for start in range(0, len(wanted), _ID_QUERY_CHUNK):
+                chunk = wanted[start : start + _ID_QUERY_CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
+                    f"WHERE status = 'valid' AND exomem_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for exomem_id, path in rows:
+                    found.setdefault(str(exomem_id), set()).add(str(path))
+        except (OSError, RuntimeError, sqlite3.Error):
+            found = {}
+        finally:
+            conn.close()
+
+    if any(identifier not in found for identifier in wanted):
+        by_id: dict[str, set[str]] = {}
+        for path, exomem_id, _raw, _hash, status in _scan_pages(vault_root):
+            if status == "valid" and exomem_id is not None:
+                by_id.setdefault(exomem_id, set()).add(path)
+        for identifier in wanted:
+            if identifier not in found and identifier in by_id:
+                found[identifier] = by_id[identifier]
+
+    return {identifier: tuple(sorted(found.get(identifier, ()))) for identifier in wanted}
 
 
 def resolve_identifier(vault_root: Path, value: str) -> str:
