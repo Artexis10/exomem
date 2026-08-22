@@ -200,7 +200,7 @@ def test_terminal_destroy_does_not_make_dead_runtime_history_a_catalog_dependenc
     assert observation["unfinishedOperations"] == []
 
 
-def test_live_desired_state_still_requires_a_reviewed_runtime() -> None:
+def test_unresolved_desired_history_is_redacted_for_cross_authority_reconciliation() -> None:
     operations = (
         _operation(
             operation_id="provision-alpha",
@@ -211,9 +211,32 @@ def test_live_desired_state_still_requires_a_reviewed_runtime() -> None:
         ),
     )
 
+    observation = build_fleet_observation(
+        operations,
+        lock=_lock(),
+        observed_at="2026-08-21T11:00:00Z",
+    )
+
+    assert observation["desiredCells"] == [
+        {"cellId": "cell-alpha", "runtime": None, "state": "ready"}
+    ]
+    assert observation["unfinishedOperations"] == []
+
+
+def test_unresolved_unfinished_runtime_still_fails_closed() -> None:
+    operations = (
+        _operation(
+            operation_id="provision-alpha",
+            action=OperationAction.PROVISION,
+            state=OperationState.PENDING,
+            runtime={"releaseVersion": "0.24.0", "protocolVersion": "1"},
+            offset=0,
+        ),
+    )
+
     with pytest.raises(
         FleetObservationError,
-        match="runtime-setting operation has no reviewed deployment identity",
+        match="unfinished operation has no reviewed deployment identity",
     ):
         build_fleet_observation(
             operations,

@@ -93,8 +93,10 @@ Before expand deployment or any cell rollforward, the workflow SHALL reconcile S
 
 - **WHEN** Substrate marks a tenant binding destroyed, Kubernetes reports no namespace, Helm release, workload, or volume for that cell, and no route, assignment, unfinished operation, capacity claim, or reviewer authority remains
 - **AND** the provisioner operation ledger is the only authority that still projects desired state for the cell
-- **THEN** inventory retains that redacted desired-state surface as terminal evidence but excludes the cell and its runtime from live and legacy dependency counts
+- **THEN** the provisioner observer MAY redact an identity absent from the reviewed active and legacy catalogs to a null runtime solely for cross-authority reconciliation
+- **AND** inventory retains that redacted desired-state surface as terminal evidence but excludes the cell and its runtime from live and legacy dependency counts
 - **AND** any remaining control-plane, reviewer, operation, capacity, or Kubernetes surface keeps the cell inconsistent and blocks the upgrade
+- **AND** every unfinished operation or desired state with an independently live surface still requires an exact reviewed runtime identity or inventory fails closed
 
 ### Requirement: Expand adoption changes only the future-cell target
 

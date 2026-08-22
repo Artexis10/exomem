@@ -181,8 +181,6 @@ def build_fleet_observation(
     resolved_desired: list[dict[str, Any]] = []
     for item in desired.values():
         runtime = _resolve_runtime(item["runtimeIdentity"], exact=exact, legacy=legacy)
-        if runtime is None:
-            _error("runtime-setting operation has no reviewed deployment identity")
         resolved_desired.append(
             {"cellId": item["cellId"], "runtime": runtime, "state": item["state"]}
         )

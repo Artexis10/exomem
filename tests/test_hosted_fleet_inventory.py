@@ -910,6 +910,30 @@ def test_destroyed_binding_prunes_provisioner_only_desired_residue(
     assert facts["legacyCellCount"] == 0
 
 
+def test_destroyed_binding_prunes_unresolved_provisioner_only_residue() -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    sources = _empty_sources()
+    sources["substrate"]["tenantBindings"].append(
+        {"cellId": "cell_destroyed", "status": "destroyed"}
+    )
+    sources["provisioner"]["desiredCells"].append(
+        {"cellId": "cell_destroyed", "runtime": None, "state": "ready"}
+    )
+
+    inventory = module.reconcile_inventory(sources, target=target)
+    facts = module.execution_inventory_facts(inventory)
+
+    assert inventory["status"] == "empty"
+    assert inventory["issues"] == []
+    assert inventory["counts"]["cells"] == 0
+    assert inventory["counts"]["legacyCells"] == 0
+    assert inventory["counts"]["terminalCells"] == 1
+    assert inventory["legacyRuntimes"] == []
+    assert inventory["cells"][0]["runtime"] is None
+    assert facts["cellCount"] == 0
+
+
 def test_provisioner_only_desired_state_without_a_destroyed_binding_stays_blocked() -> None:
     module = _module()
     target = _runtime("0.57.2", "a")
@@ -924,6 +948,23 @@ def test_provisioner_only_desired_state_without_a_destroyed_binding_stays_blocke
     assert inventory["counts"]["cells"] == 1
     assert inventory["counts"]["terminalCells"] == 0
     assert "missing_active_binding" in inventory["issues"]
+
+
+def test_unresolved_provisioner_desired_state_without_destruction_stays_blocked() -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    sources = _empty_sources()
+    sources["provisioner"]["desiredCells"].append(
+        {"cellId": "cell_unbound", "runtime": None, "state": "ready"}
+    )
+
+    inventory = module.reconcile_inventory(sources, target=target)
+
+    assert inventory["status"] == "inconsistent"
+    assert inventory["counts"]["cells"] == 1
+    assert inventory["counts"]["terminalCells"] == 0
+    assert "missing_active_binding" in inventory["issues"]
+    assert "missing_runtime_identity" in inventory["issues"]
 
 
 def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
