@@ -451,14 +451,22 @@ class ProjectedLexicalIndex:
         *,
         k: int,
     ) -> tuple[ProjectedLexicalHit, ...]:
-        """Match all normalized query tokens before applying the result cap."""
+        """Apply keyword mode's strict substring gate before the result cap."""
 
         limit = _result_limit(k)
-        query_tokens = tuple(bm25.tokenize(query)) if isinstance(query, str) else ()
         documents = self._selected_documents(authorization)
+        query_tokens = (
+            tuple(token for token in query.casefold().split() if token)
+            if isinstance(query, str)
+            else ()
+        )
         if not query_tokens:
             return ()
-        matches = list(self._candidate_documents(documents, query_tokens))
+        matches = [
+            document
+            for document in documents
+            if all(token in document.text.casefold() for token in query_tokens)
+        ]
         matches.sort(
             key=lambda document: (
                 _sort_key(document.variant.item_identity),

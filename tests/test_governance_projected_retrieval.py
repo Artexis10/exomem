@@ -209,3 +209,18 @@ def test_same_persistent_rows_support_distinct_request_local_maps() -> None:
 
     assert index.search_bm25(low_map, "complete", k=1) == ()
     assert [hit.decision_level for hit in index.search_bm25(full_map, "complete", k=1)] == [6]
+
+
+def test_keyword_mode_retains_strict_substring_not_stem_semantics() -> None:
+    variant = _variant("keyword", "a" * 64, level=6, text="compounding approved")
+    item = _item("keyword", "a" * 64, variant)
+    index = projected_retrieval.ProjectedLexicalIndex(_key(), (item,))
+    authorization = projected_retrieval.AuthorizationProjectionMap(
+        _key(), (_selection(item, variant),)
+    )
+
+    assert [
+        hit.item_identity
+        for hit in index.search_keyword(authorization, "compound approve", k=1)
+    ] == ["keyword"]
+    assert index.search_keyword(authorization, "compounded", k=1) == ()
