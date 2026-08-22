@@ -199,6 +199,7 @@ def build_authorization_map(
     purpose: str | None = None,
     verified_session_grants: tuple[VerifiedProjectionGrant, ...] = (),
     resolve_decision: DecisionResolver | None = None,
+    catalog: projected_retrieval.ProjectionCatalog | None = None,
 ) -> projected_retrieval.AuthorizationProjectionMap:
     """Select one prebuilt variant or L0 for every exact catalog artifact."""
 
@@ -230,8 +231,19 @@ def build_authorization_map(
             "authorization decision resolver is invalid"
         )
 
-    catalog = projected_retrieval.ProjectionCatalog(namespace)
-    by_identity = catalog.items
+    active_catalog = (
+        projected_retrieval.ProjectionCatalog(namespace)
+        if catalog is None
+        else catalog
+    )
+    if (
+        not isinstance(active_catalog, projected_retrieval.ProjectionCatalog)
+        or active_catalog.namespace is not namespace
+    ):
+        raise ProjectionAuthorizationUnavailable(
+            "authorization catalog does not match the active namespace"
+        )
+    by_identity = active_catalog.items
     for item in by_identity.values():
         unknown_scopes = set(item.scope_ids) - set(policy.scopes)
         if unknown_scopes:
@@ -262,6 +274,14 @@ def build_authorization_map(
         grants_by_item.setdefault(grant.item_identity, []).append(grant)
 
     selections: list[projected_retrieval.ProjectionSelection] = []
+    decision_cache: dict[
+        tuple[tuple[str, ...], tuple[StandingGrant, ...]],
+        Decision,
+    ] = {}
+    descriptor_cache: dict[
+        tuple[tuple[str, ...], tuple[StandingGrant, ...]],
+        tuple[bytes, ...],
+    ] = {}
     for identity in sorted(by_identity, key=lambda value: value.encode("utf-16-be")):
         request_item = by_identity[identity]
         item_grants = tuple(
@@ -274,35 +294,51 @@ def build_authorization_map(
             )
             for grant in grants_by_item.get(identity, ())
         )
-        decision = decide(
-            request_item.scope_ids,
-            audience=principal,
-            purpose=purpose,
-            policy=policy,
-            active_grants=(*policy.grants, *item_grants),
-        )
-        if resolve_decision is not None:
-            decision = resolve_decision(principal, purpose, decision)
-            if not isinstance(decision, Decision):
-                raise ProjectionAuthorizationUnavailable(
-                    "authorization decision resolution is unavailable"
+        decision_key = (request_item.scope_ids, item_grants)
+        decision = decision_cache.get(decision_key)
+        if decision is None:
+            decision = decide(
+                request_item.scope_ids,
+                audience=principal,
+                purpose=purpose,
+                policy=policy,
+                active_grants=(*policy.grants, *item_grants),
+            )
+            if resolve_decision is not None:
+                decision = resolve_decision(principal, purpose, decision)
+                if not isinstance(decision, Decision):
+                    raise ProjectionAuthorizationUnavailable(
+                        "authorization decision resolution is unavailable"
+                    )
+            decision_cache[decision_key] = decision
+        if decision.level == 0:
+            selections.append(
+                projected_retrieval.ProjectionSelection(
+                    item_identity=request_item.item_identity,
+                    content_hash=request_item.content_hash,
+                    projection_variant_id=None,
+                    decision=decision,
                 )
-        candidate_ids = projections.projection_variant_ids_for_decision(
-            item_identity=request_item.item_identity,
-            content_hash=request_item.content_hash,
-            decision=decision,
-            projector_schema_version=namespace_key.projector_schema_version,
-        )
-        available = {
-            candidate.projection_variant_id: candidate
-            for candidate in request_item.variants
-        }
+            )
+            continue
+        candidate_descriptors = descriptor_cache.get(decision_key)
+        if candidate_descriptors is None:
+            candidate_descriptors = (
+                projections.projection_variant_descriptors_for_decision(
+                    decision
+                )
+            )
+            descriptor_cache[decision_key] = candidate_descriptors
         variant_id: str | None = None
         selected_variant: projections.ProjectionVariant | None = None
-        for ordinal, candidate_id in enumerate(candidate_ids):
-            if candidate_id in available:
-                variant_id = candidate_id
-                selected_variant = available[candidate_id]
+        for ordinal, descriptor in enumerate(candidate_descriptors):
+            candidate = active_catalog.variant_for_descriptor(
+                request_item.item_identity,
+                descriptor,
+            )
+            if candidate is not None:
+                variant_id = candidate.projection_variant_id
+                selected_variant = candidate
                 break
             # L5 can legitimately lower only when the fixed source body was
             # absent at namespace construction. Every other viable candidate
@@ -310,7 +346,10 @@ def build_authorization_map(
             if not (
                 decision.level == 5
                 and ordinal == 0
-                and not any("body" in variant.search_fields for variant in available.values())
+                and not any(
+                    "body" in variant.search_fields
+                    for variant in request_item.variants
+                )
             ):
                 raise ProjectionAuthorizationUnavailable(
                     "selected projection variant is unavailable from the active namespace"

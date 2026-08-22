@@ -304,6 +304,21 @@ class ProjectionCatalog:
         self.namespace = namespace
         self.namespace_key = namespace.namespace_key
         self.items = _catalog_items(namespace.namespace_key, namespace.items)
+        variants_by_descriptor: dict[
+            str,
+            Mapping[bytes, projections.ProjectionVariant],
+        ] = {}
+        for identity, item in self.items.items():
+            indexed: dict[bytes, projections.ProjectionVariant] = {}
+            for variant in item.variants:
+                descriptor = projections.projection_variant_descriptor(variant)
+                if descriptor in indexed:
+                    raise projections.ProjectionCanonicalizationError(
+                        "projection item contains duplicate decision variants"
+                    )
+                indexed[descriptor] = variant
+            variants_by_descriptor[identity] = MappingProxyType(indexed)
+        self._variants_by_descriptor = MappingProxyType(variants_by_descriptor)
 
     def select(
         self,
@@ -312,6 +327,20 @@ class ProjectionCatalog:
         """Resolve the exact request-local non-L0 variant set."""
 
         return _selected_variants(self.namespace_key, self.items, authorization)
+
+    def variant_for_descriptor(
+        self,
+        item_identity: str,
+        descriptor: bytes,
+    ) -> projections.ProjectionVariant | None:
+        """Resolve one preverified immutable row without request-time rehashing."""
+
+        variants = self._variants_by_descriptor.get(item_identity)
+        if variants is None:
+            raise ProjectedRetrievalUnavailable(
+                "projection catalog item is unavailable"
+            )
+        return variants.get(descriptor)
 
 
 def _variant_text(variant: projections.ProjectionVariant) -> str:
@@ -341,9 +370,14 @@ class ProjectedLexicalIndex:
 
     def __init__(
         self,
-        namespace: projection_store.VerifiedProjectionNamespace,
+        namespace: projection_store.VerifiedProjectionNamespace | ProjectionCatalog,
     ) -> None:
-        catalog = ProjectionCatalog(namespace)
+        catalog = (
+            namespace
+            if isinstance(namespace, ProjectionCatalog)
+            else ProjectionCatalog(namespace)
+        )
+        self.catalog = catalog
         self.namespace_key = catalog.namespace_key
         self._items = catalog.items
         documents: dict[str, _SelectedDocument] = {}
