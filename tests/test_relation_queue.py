@@ -284,3 +284,51 @@ def test_read_never_writes_to_the_vault(tmp_path: Path) -> None:
     before = _tree_hash(tmp_path)
     relation_queue.build_queue(tmp_path)
     assert _tree_hash(tmp_path) == before
+
+
+def test_dismissed_shared_open_question_resurfaces_when_the_other_page_changes(
+    tmp_path: Path,
+) -> None:
+    # `shared_open_question` is driven by the OTHER page's semantic unit, so its
+    # evidence must carry that unit's identity. If it did not, dismissing the
+    # candidate would be permanent through arbitrary later edits to the page
+    # that produced it — exactly the failure `_evidence_signal_version` exists
+    # to prevent, but here with a real graph-backed generator rather than a
+    # stubbed one.
+    from exomem import epistemic_graph
+
+    question = "Why is the tail latency spiky?"
+    _write_page(tmp_path, "alpha", f"## Open Question\n- id: q-alpha\n\n{question}")
+    beta = _write_page(tmp_path, "beta", f"## Open Question\n- id: q-beta\n\n{question}")
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    alpha_bytes = (
+        tmp_path / "Knowledge Base" / "Notes" / "Insights" / "alpha.md"
+    ).read_bytes()
+
+    first = relation_queue.build_queue(tmp_path)
+    item = next(
+        it
+        for it in _all_items(first)
+        if it["from"].endswith("alpha.md") and it["method"] == "shared_open_question"
+    )
+    relation_queue.triage(tmp_path, ref=item["ref"], action="dismiss")
+    assert item["ref"] not in {it["ref"] for it in _all_items(relation_queue.build_queue(tmp_path))}
+
+    # Re-anchor beta's question. alpha.md is untouched on disk, and the shared
+    # normalized question text is unchanged, so the candidate must come back.
+    beta.write_text(
+        beta.read_text(encoding="utf-8").replace("q-beta", "q-beta-renamed"),
+        encoding="utf-8",
+    )
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    assert (
+        tmp_path / "Knowledge Base" / "Notes" / "Insights" / "alpha.md"
+    ).read_bytes() == alpha_bytes
+
+    resurfaced = next(
+        it
+        for it in _all_items(relation_queue.build_queue(tmp_path))
+        if it["from"].endswith("alpha.md") and it["method"] == "shared_open_question"
+    )
+    assert resurfaced["ref"] == item["ref"]
+    assert resurfaced["fingerprint"] != item["fingerprint"]

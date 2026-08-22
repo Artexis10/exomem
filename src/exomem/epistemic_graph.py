@@ -4862,6 +4862,13 @@ def suggest_relations(
             candidates.extend(_wikilink_candidates(vault_root, page.body, rel))
             candidates.extend(_frontmatter_source_candidates(page))
             candidates.extend(_shared_source_candidates(vault_root, rel))
+            # Deliberately here: `_wikilink_candidates` is unbounded and the
+            # truncation below is at `limit`, so on a link-heavy page a
+            # structural candidate registered any later would never reach the
+            # acceptance queue. After the three deterministic generators (which
+            # are cheap and already relied upon) and before the optional
+            # embedding lane. Pinned by the suggestion-order test.
+            candidates.extend(_structural_candidates(vault_root, rel))
             candidates.extend(_embedding_proximity_candidates(vault_root, page))
     elif draft_body:
         candidates.extend(
@@ -6482,6 +6489,364 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
             }
         )
     return out
+
+
+#: Relation families the unit-relation lift may promote to a page-level
+#: proposal.  Causality is deliberately absent: `causes`/`caused_by` are the
+#: family where promoting one unit's claim to the whole page would assert a
+#: mechanism between the *pages* that the author never wrote.
+_LIFT_RELATION_FAMILIES: frozenset[str] = frozenset(
+    {
+        "answer",
+        "resolution",
+        "question",
+        "support",
+        "contradiction",
+        "refinement",
+        "evidence",
+        "duplication",
+    }
+)
+
+#: Registry statuses a lift may promote.  The allowlist above is by *family*,
+#: and a family can admit a deprecated (or scope-violating, or unregistered)
+#: extension kind — we must never propose a bullet the writer will reject.
+_LIFT_REGISTRY_STATUSES: tuple[str, ...] = ("core", "alias", "extension")
+
+#: The resolution graph: unit-level relation kinds that answer or close a
+#: question.  Result-adjacency is defined over these, NOT over a `result` block
+#: kind — "both pages hold a result unit" fires on nearly every compiled note.
+_RESOLUTION_RELATION_TYPES: tuple[str, ...] = ("answers", "resolves")
+
+#: Row cap per structural query.  The bound lives in the sidecar, not in
+#: Python, so a corpus with hundreds of matches never materializes more.
+_STRUCTURAL_ROW_LIMIT = 200
+#: Candidates emitted per structural generator, per page.
+_STRUCTURAL_CANDIDATE_LIMIT = 3
+#: Match entries folded into one candidate's evidence.
+_STRUCTURAL_EVIDENCE_MATCHES = 5
+
+#: Deterministic question normalization, expressed in SQL on BOTH sides of the
+#: join so no Python normalizer can drift from it.  Two deliberate recall
+#: limits, asserted by `tests/test_structural_relation_suggestions.py`: SQLite's
+#: `lower()` is ASCII-only, so `Élan` and `élan` stay distinct questions; and
+#: `rtrim(..., '?')` drops trailing question marks only.
+_NORMALIZED_QUESTION_SQL = "trim(rtrim(lower(trim({column})), '?'))"
+
+
+def _placeholders(values: tuple[str, ...]) -> str:
+    return ", ".join("?" * len(values))
+
+
+_UNIT_RELATION_LIFT_SQL = f"""
+    SELECT e.dst_key, e.raw_relation, e.relation_type, e.source_anchor, n.unit_ref
+    FROM graph_edges AS e
+    LEFT JOIN graph_nodes AS n ON n.node_key = e.src_key
+    WHERE e.source_path = ?
+      AND e.origin = 'semantic_relation'
+      AND e.src_key <> ?
+      AND e.dst_key <> ?
+      AND e.dst_key LIKE 'file:%'
+      AND e.relation_type IS NOT NULL
+      AND e.registry_status IN ({_placeholders(_LIFT_REGISTRY_STATUSES)})
+      AND NOT EXISTS (
+          SELECT 1 FROM graph_edges AS p
+          WHERE p.src_key = ? AND p.dst_key = e.dst_key
+            AND p.relation_type = e.relation_type
+      )
+    ORDER BY e.dst_key, e.raw_relation, e.source_anchor
+    LIMIT ?
+"""
+
+_SHARED_OPEN_QUESTION_SQL = """
+    WITH mine AS (
+        SELECT {norm} AS question, unit_ref AS unit_ref, anchor AS anchor
+        FROM graph_nodes
+        WHERE path = ? AND unit_kind = 'open_question'
+        UNION
+        SELECT {norm}, unit_ref, anchor
+        FROM graph_nodes
+        WHERE path = ? AND unit_category IN ('question', 'open_question')
+    ),
+    theirs AS (
+        SELECT {norm} AS question, path AS path, unit_ref AS unit_ref, anchor AS anchor
+        FROM graph_nodes
+        WHERE path <> ? AND unit_kind = 'open_question'
+        UNION
+        SELECT {norm}, path, unit_ref, anchor
+        FROM graph_nodes
+        WHERE path <> ? AND unit_category IN ('question', 'open_question')
+    )
+    SELECT theirs.path, mine.question, mine.unit_ref, mine.anchor,
+           theirs.unit_ref, theirs.anchor
+    FROM mine JOIN theirs ON theirs.question = mine.question
+    WHERE mine.question <> ''
+    ORDER BY theirs.path, mine.question, theirs.unit_ref
+    LIMIT ?
+""".format(norm=_NORMALIZED_QUESTION_SQL.format(column="text"))
+
+_SHARED_RESOLUTION_TARGET_SQL = f"""
+    SELECT e2.source_path, e1.dst_key,
+           e1.raw_relation, e1.source_anchor, n1.unit_ref,
+           e2.raw_relation, e2.source_anchor, n2.unit_ref
+    FROM graph_edges AS e1
+    JOIN graph_edges AS e2 ON e2.dst_key = e1.dst_key
+    LEFT JOIN graph_nodes AS n1 ON n1.node_key = e1.src_key
+    LEFT JOIN graph_nodes AS n2 ON n2.node_key = e2.src_key
+    WHERE e1.source_path = ?
+      AND e1.origin = 'semantic_relation'
+      AND e1.src_key <> ?
+      AND e1.relation_type IN ({_placeholders(_RESOLUTION_RELATION_TYPES)})
+      AND e2.origin = 'semantic_relation'
+      AND e2.relation_type IN ({_placeholders(_RESOLUTION_RELATION_TYPES)})
+      AND e2.source_path <> ?
+      AND e2.src_key <> ('file:' || e2.source_path)
+    ORDER BY e2.source_path, e1.dst_key, e2.source_anchor
+    LIMIT ?
+"""
+
+
+def _structural_candidates(vault_root: Path, rel_path: str) -> list[dict[str, Any]]:
+    """Three structural generators over ONE validated read snapshot.
+
+    `_open_read_snapshot` re-checks freshness, recall-policy identity and graph
+    status on every call, and `relation_queue.build_queue` runs
+    `suggest_relations` for up to 50 pages, so the three generators share a
+    single connection rather than opening three. Soft-fails to `[]` when the
+    snapshot is unavailable, exactly like `_shared_source_candidates`.
+
+    All three target PAGES. That is why the two co-participation generators
+    propose only `relates_to`: "both pages carry the same question" would look
+    like `duplicates`, but with a page-level target the accepted bullet would
+    read `- duplicates [[B]]` and assert that the *pages* duplicate, which is
+    false — only their question units do. Revisit once `to` can address a unit.
+    """
+    index = EpistemicGraphIndex(vault_root)
+    conn = index._open_read_snapshot()
+    if conn is None:
+        return []
+    try:
+        rel = _with_md(rel_path)
+        file_key = _file_key(rel)
+        return [
+            *_unit_relation_lift_candidates(conn, index.registry, rel, file_key),
+            *_shared_open_question_candidates(conn, rel),
+            *_shared_resolution_target_candidates(conn, rel, file_key),
+        ]
+    except sqlite3.Error:  # a structural suggestion must never break a read
+        return []
+    finally:
+        conn.close()
+
+
+def _unit_relation_lift_candidates(
+    conn: sqlite3.Connection,
+    registry: relation_registry.RelationRegistry,
+    rel_path: str,
+    file_key: str,
+) -> list[dict[str, Any]]:
+    """Propose the kinds the author already typed on this page's own units.
+
+    A typed unit relation (`- relations: answers: [[Q]]`) produces a
+    BLOCK-level edge and no page-level edge at all, while a plain
+    `- supports [[X]]` bullet inside a block produces the opposite. The scaffold
+    documents the metadata form as *the* way to write typed unit relations, so
+    every one of them is an author-written directional epistemic claim the
+    page-level graph, relation-filtered recall, and contract inference cannot
+    see. `src_key <> file_key` selects exactly the first form; the `NOT EXISTS`
+    drops any unit relation the page has already promoted by hand.
+
+    This infers nothing: the proposed kind is the authored label itself, taken
+    verbatim from `raw_relation` on that unit edge. The generator can only fail
+    to promote a meaning, never manufacture one.
+    """
+    rows = conn.execute(
+        _UNIT_RELATION_LIFT_SQL,
+        (
+            rel_path,
+            file_key,
+            file_key,
+            *_LIFT_REGISTRY_STATUSES,
+            file_key,
+            _STRUCTURAL_ROW_LIMIT,
+        ),
+    ).fetchall()
+    # `_dedupe_candidates` keys on (from, to, relation_type, method) and
+    # EXCLUDES evidence, so one row per match would silently drop every unit
+    # after the first. Aggregate to one candidate per (to, relation_type).
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for dst_key, raw_relation, relation_type, source_anchor, unit_ref in rows:
+        definition = registry.definition(str(relation_type or ""))
+        if definition is None or definition.family not in _LIFT_RELATION_FAMILIES:
+            continue
+        authored = str(raw_relation or "").strip()
+        if not authored:
+            continue
+        target = _with_md(str(dst_key or "").removeprefix("file:"))
+        if not target or target == rel_path:
+            continue
+        entry = grouped.setdefault(
+            (target, authored), {"family": definition.family, "units": []}
+        )
+        entry["units"].append(
+            {
+                "unit_ref": unit_ref,
+                "anchor": source_anchor,
+                "raw_relation": authored,
+                "relation_type": str(relation_type),
+            }
+        )
+    out: list[dict[str, Any]] = []
+    for (target, authored), entry in sorted(grouped.items())[
+        :_STRUCTURAL_CANDIDATE_LIMIT
+    ]:
+        units = sorted(
+            entry["units"],
+            key=lambda unit: (str(unit["anchor"] or ""), str(unit["unit_ref"] or "")),
+        )
+        out.append(
+            {
+                "from": rel_path,
+                "to": target,
+                "relation_type": authored,
+                "method": "unit_relation_lift",
+                "evidence": {
+                    "source_path": rel_path,
+                    "relation_family": entry["family"],
+                    "authoring_units": len(units),
+                    "units": units[:_STRUCTURAL_EVIDENCE_MATCHES],
+                },
+            }
+        )
+    return out
+
+
+def _shared_open_question_candidates(
+    conn: sqlite3.Connection, rel_path: str
+) -> list[dict[str, Any]]:
+    """Pages carrying the same normalized open question.
+
+    Question units land on two different axes: a rich `## Open Question` has
+    `unit_kind = 'open_question'` but a `- category:` metadata row overrides its
+    category, while a compact `- [question]` has `unit_kind = 'observation'` and
+    `unit_category = 'question'`. A predicate on either column alone misses
+    cases, and an `OR` across them defeats both indexes — so the query UNIONs
+    two indexed branches, per the precedent in `_connect`'s index comments.
+
+    Evidence carries the OTHER page's unit identity (`unit_ref` and anchor)
+    because `relation_queue._evidence_signal_version` hashes the evidence: a
+    candidate driven by another page whose evidence omitted that page's identity
+    would never resurface after dismissal, no matter how that page later changed.
+    """
+    rows = conn.execute(
+        _SHARED_OPEN_QUESTION_SQL,
+        (rel_path, rel_path, rel_path, rel_path, _STRUCTURAL_ROW_LIMIT),
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for other_path, question, unit_ref, anchor, other_unit_ref, other_anchor in rows:
+        target = _with_md(str(other_path or ""))
+        if not target or target == rel_path:
+            continue
+        grouped.setdefault(target, []).append(
+            {
+                "question": question,
+                "unit_ref": unit_ref,
+                "anchor": anchor,
+                "other_unit_ref": other_unit_ref,
+                "other_anchor": other_anchor,
+            }
+        )
+    return [
+        {
+            "from": rel_path,
+            "to": target,
+            "relation_type": "relates_to",
+            "method": "shared_open_question",
+            "evidence": {
+                "shared_questions": len(matches),
+                "matches": _ordered_matches(
+                    matches, ("question", "other_unit_ref", "unit_ref")
+                ),
+            },
+        }
+        for target, matches in sorted(grouped.items())[:_STRUCTURAL_CANDIDATE_LIMIT]
+    ]
+
+
+def _shared_resolution_target_candidates(
+    conn: sqlite3.Connection, rel_path: str, file_key: str
+) -> list[dict[str, Any]]:
+    """Pages whose units answer or resolve the same target as this page's.
+
+    Adjacency is defined over the resolution graph, not over a `result` block
+    kind: two pages are adjacent when each carries a UNIT-level `answers` or
+    `resolves` edge to the same target — competing or complementary answers to
+    one thing. That mirrors `_shared_source_candidates` and, like it, observes
+    nothing directional, so the proposal is `relates_to`.
+
+    Evidence carries the other page's unit identity and the relation kinds both
+    sides used, for the same fingerprint reason as `shared_open_question`.
+    """
+    rows = conn.execute(
+        _SHARED_RESOLUTION_TARGET_SQL,
+        (
+            rel_path,
+            file_key,
+            *_RESOLUTION_RELATION_TYPES,
+            *_RESOLUTION_RELATION_TYPES,
+            rel_path,
+            _STRUCTURAL_ROW_LIMIT,
+        ),
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        (
+            other_path,
+            target_key,
+            relation,
+            anchor,
+            unit_ref,
+            other_relation,
+            other_anchor,
+            other_unit_ref,
+        ) = row
+        target = _with_md(str(other_path or ""))
+        if not target or target == rel_path:
+            continue
+        grouped.setdefault(target, []).append(
+            {
+                "target": _with_md(str(target_key or "").removeprefix("file:")),
+                "relation": relation,
+                "anchor": anchor,
+                "unit_ref": unit_ref,
+                "other_relation": other_relation,
+                "other_anchor": other_anchor,
+                "other_unit_ref": other_unit_ref,
+            }
+        )
+    return [
+        {
+            "from": rel_path,
+            "to": target,
+            "relation_type": "relates_to",
+            "method": "shared_resolution_target",
+            "evidence": {
+                "shared_targets": len(matches),
+                "matches": _ordered_matches(
+                    matches, ("target", "other_unit_ref", "unit_ref")
+                ),
+            },
+        }
+        for target, matches in sorted(grouped.items())[:_STRUCTURAL_CANDIDATE_LIMIT]
+    ]
+
+
+def _ordered_matches(
+    matches: list[dict[str, Any]], keys: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """Deterministically order and cap one candidate's folded evidence."""
+    ordered = sorted(matches, key=lambda match: tuple(str(match[key] or "") for key in keys))
+    return ordered[:_STRUCTURAL_EVIDENCE_MATCHES]
 
 
 def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, Any]]:
