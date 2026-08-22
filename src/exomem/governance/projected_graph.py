@@ -15,7 +15,7 @@ from types import MappingProxyType
 
 from . import projected_retrieval, projection_store, projections
 
-_MAX_GRAPH_RESULTS = 1_000
+_MAX_GRAPH_RESULTS = projections.MAX_GOVERNED_CATALOG_ITEMS
 
 
 def _text(value: object, name: str, *, maximum: int = 4096) -> str:
@@ -107,6 +107,11 @@ class AuthorizedProjectedGraph:
         repr=False,
         compare=False,
     )
+    _edges_by_source: Mapping[str, tuple[ProjectionGraphEdge, ...]] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _in_degrees: Mapping[str, int] = field(init=False, repr=False, compare=False)
     _out_degrees: Mapping[str, int] = field(init=False, repr=False, compare=False)
 
@@ -117,6 +122,9 @@ class AuthorizedProjectedGraph:
                 "authorized projected graph contains duplicate vertices"
             )
         neighbors: dict[str, set[str]] = {vertex: set() for vertex in self.vertices}
+        edges_by_source: dict[str, list[ProjectionGraphEdge]] = {
+            vertex: [] for vertex in self.vertices
+        }
         in_degrees = dict.fromkeys(self.vertices, 0)
         out_degrees = dict.fromkeys(self.vertices, 0)
         for edge in self.edges:
@@ -128,6 +136,7 @@ class AuthorizedProjectedGraph:
                     "authorized projected graph edge names an unavailable vertex"
                 )
             neighbors[edge.source_item_identity].add(edge.target_item_identity)
+            edges_by_source[edge.source_item_identity].append(edge)
             in_degrees[edge.target_item_identity] += 1
             out_degrees[edge.source_item_identity] += 1
         object.__setattr__(self, "_vertex_set", vertex_set)
@@ -143,6 +152,16 @@ class AuthorizedProjectedGraph:
         )
         object.__setattr__(self, "_in_degrees", MappingProxyType(in_degrees))
         object.__setattr__(self, "_out_degrees", MappingProxyType(out_degrees))
+        object.__setattr__(
+            self,
+            "_edges_by_source",
+            MappingProxyType(
+                {
+                    source: tuple(values)
+                    for source, values in edges_by_source.items()
+                }
+            ),
+        )
 
     def _require_vertex(self, item_identity: str) -> None:
         if item_identity not in self._vertex_set:
@@ -167,6 +186,15 @@ class AuthorizedProjectedGraph:
 
         self._require_vertex(item_identity)
         return self._neighbors[item_identity]
+
+    def outgoing_edges(
+        self,
+        item_identity: str,
+    ) -> tuple[ProjectionGraphEdge, ...]:
+        """Return admitted outbound edges without discarding relation semantics."""
+
+        self._require_vertex(item_identity)
+        return self._edges_by_source[item_identity]
 
     def relation_matches(self, relation_type: str) -> tuple[ProjectionGraphEdge, ...]:
         """Match one relation only after edge admission."""

@@ -23,6 +23,7 @@ def _variant(
     *,
     level: int,
     text: str,
+    media_type: str | None = "image",
 ) -> projections.ProjectionVariant:
     option_key = {1: "notice", 2: "constraint", 3: "abstract"}.get(level)
     variant = projections.build_projection_variant(
@@ -33,7 +34,11 @@ def _variant(
             options={} if option_key is None else {option_key: text},
         ),
         projector_schema_version=1,
-        full_search_fields={"body": text, "title": item_identity},
+        full_search_fields={
+            "body": text,
+            "title": item_identity,
+            **({} if media_type is None else {"media_type": media_type}),
+        },
     )
     assert variant is not None
     return variant
@@ -150,6 +155,32 @@ def test_missing_selected_l6_clip_measurement_disables_lane() -> None:
 
     with pytest.raises(projected_retrieval.ProjectedLaneUnavailable, match="selected"):
         index.search_clip(_map((item, full)), (1.0, 0.0), k=1)
+
+
+def test_l6_text_note_does_not_require_a_pixel_measurement() -> None:
+    image = _variant("image", "5" * 64, level=6, text="image")
+    note = _variant(
+        "note",
+        "6" * 64,
+        level=6,
+        text="ordinary note",
+        media_type=None,
+    )
+    image_item, note_item = _item(image), _item(note)
+    index = projected_retrieval.ProjectedClipIndex(
+        _namespace(image_item, note_item),
+        (_measurement(image, (1.0, 0.0)),),
+        extractor_version="pixels-v1",
+        model_version="clip-test-v1",
+    )
+
+    hits = index.search_clip(
+        _map((image_item, image), (note_item, note)),
+        (1.0, 0.0),
+        k=2,
+    )
+
+    assert [hit.item_identity for hit in hits] == [image.item_identity]
 
 
 def test_clip_measurement_lane_and_versions_are_closed_subkeys() -> None:

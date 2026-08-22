@@ -32,7 +32,11 @@ def _fixture(tmp_path: Path):
         content_hash="1" * 64,
         decision=Decision(level=6, scope_ids=(scope.id,)),
         projector_schema_version=key.projector_schema_version,
-        full_search_fields={"title": "Visible", "body": "projected term"},
+        full_search_fields={
+            "title": "Visible",
+            "body": "projected term",
+            "media_type": "image",
+        },
     )
     assert variant is not None
     items = (

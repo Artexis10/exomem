@@ -1169,9 +1169,8 @@ def _require_supported_projected_find_request(
         or filters
         or result_level != "auto"
         or not query
-        or mode != "keyword"
-        or graph
-        or rerank is not False
+        or mode not in {"keyword", "hybrid", "vector"}
+        or (graph and mode == "keyword")
         or scope != "vault"
         or rerank_max_candidates is not None
         or not prefer_compiled
@@ -1508,6 +1507,10 @@ def op_find(
             mode=mode,
             graph=graph,
             rerank=rerank,
+            auto_rerank=auto_rerank,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            rank_config=find_module._active_ranking(),
             principal=who,
             purpose=purpose,
         )

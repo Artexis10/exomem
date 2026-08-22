@@ -5,15 +5,18 @@ from __future__ import annotations
 import heapq
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from datetime import date, timedelta
 
 from .find_types import Hit
 from .ranking_config import DEFAULT_RANKING, RankingConfig
+
 # Names imported directly rather than the `temporal` module: this file already
 # has a parameter called `temporal` in `apply_post_rrf_multipliers`, and a
 # module of the same name would sit one refactor away from being shadowed.
-from .temporal import Moment, Order, compare as compare_moments, parse as parse_moment
+from .temporal import Moment, Order
+from .temporal import compare as compare_moments
+from .temporal import parse as parse_moment
 
 COMPILED_TYPES = frozenset(
     {
@@ -47,6 +50,68 @@ RELATIONSHIP_MARKERS = re.compile(
 EXACT_LEADING = re.compile(r"^(who|whose|what|which)\b", re.IGNORECASE)
 
 PageOf = Callable[[str], object | None]
+
+# Function words that cannot, by themselves, satisfy degraded BM25-only
+# retention.  Keep this policy next to the rank/retrieval policy rather than a
+# corpus reader so projected retrieval can apply the same rule without opening
+# a raw page.
+_FUNCTION_WORDS = frozenset(
+    """a an the this that these those all any some each no not
+    i we you he she it they me us them my our your their his her its
+    what which who whom whose when where why how
+    of in on at to for from by with about as into over under
+    and or but if then than so
+    is are was were be been being am
+    do does did done doing have has had having
+    can could will would shall should may might must""".split()
+)
+_FUNCTION_WORD_STEMS: frozenset[str] | None = None
+
+
+def _function_word_stems() -> frozenset[str]:
+    """Return the function-word lexicon in the canonical BM25 stem space."""
+
+    global _FUNCTION_WORD_STEMS
+    if _FUNCTION_WORD_STEMS is None:
+        from . import bm25
+
+        _FUNCTION_WORD_STEMS = frozenset(
+            bm25.stem_word(word) for word in _FUNCTION_WORDS
+        )
+    return _FUNCTION_WORD_STEMS
+
+
+def query_word_stem_groups(query: str) -> list[tuple[list[str], bool]]:
+    """Return BM25 subtoken stems and function-word status per query word."""
+
+    from . import bm25
+
+    function_stems = _function_word_stems()
+    groups: list[tuple[list[str], bool]] = []
+    for word in query.split():
+        subtoken_stems = bm25.tokenize(word)
+        if not subtoken_stems:
+            continue
+        groups.append(
+            (subtoken_stems, all(stem in function_stems for stem in subtoken_stems))
+        )
+    return groups
+
+
+def stem_word_coverage(
+    text_stems: Set[str],
+    word_stem_groups: list[tuple[list[str], bool]],
+) -> tuple[int, int, int]:
+    """Return present, total, and content-word coverage for stemmed text."""
+
+    present = 0
+    content_present = 0
+    for subtoken_stems, is_function in word_stem_groups:
+        if all(stem in text_stems for stem in subtoken_stems):
+            present += 1
+            if not is_function:
+                content_present += 1
+    return present, len(word_stem_groups), content_present
 
 
 def type_multiplier(

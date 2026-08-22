@@ -444,14 +444,11 @@ def test_projected_wire_hit_never_emits_the_full_search_body() -> None:
 @pytest.mark.parametrize(
     ("query", "mode", "graph", "rerank"),
     [
-        ("term", "hybrid", False, False),
-        ("term", "vector", False, False),
         ("term", "keyword", True, False),
-        ("term", "keyword", False, True),
         ("", "keyword", False, False),
     ],
 )
-def test_projected_runtime_refuses_unimplemented_public_lanes(
+def test_projected_runtime_refuses_still_unsupported_public_lanes(
     tmp_path,
     query: str,
     mode: str,
