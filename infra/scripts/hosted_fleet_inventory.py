@@ -1274,9 +1274,14 @@ def reconcile_inventory(
             cell=current,
             issues=issues,
         )
-        desired_runtime = _deployment_runtime(item["runtime"], label="desired runtime")
+        desired_runtime = (
+            None
+            if item["runtime"] is None
+            else _deployment_runtime(item["runtime"], label="desired runtime")
+        )
         current["desiredState"] = True
-        current["runtimeDeployments"].append(desired_runtime)
+        if desired_runtime is not None:
+            current["runtimeDeployments"].append(desired_runtime)
         current["desiredReady"] = _code(item["state"], label="desired state") == "ready"
 
     seen = set()
