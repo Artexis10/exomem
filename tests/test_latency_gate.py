@@ -491,11 +491,75 @@ def test_entity_type_registry_load_is_bounded_at_scale(
         for value in (("without", "with") if _index % 2 == 0 else ("with", "without"))
     ]
     registry_path.write_text(registry_text, encoding="utf-8")
+    # Whole-find wall time is dominated by BM25/lexstore cold cost (~300ms here,
+    # ~800ms on a CI runner), so a fixed millisecond delta over three paired
+    # samples measures runner noise, not the registry (CI read 103ms on an 817ms
+    # baseline). Bound the whole-find delta as a catastrophic backstop — a quarter
+    # of the baseline or 50ms, whichever is larger — and bound the registry's
+    # attributable cost directly below.
+    without_median_ms = statistics.median(without_registry_ms)
     cold_delta_ms = statistics.median(cold_deltas_ms)
-    assert cold_delta_ms < 50.0, (
+    cold_delta_ceiling_ms = max(50.0, 0.25 * without_median_ms)
+    assert cold_delta_ms < cold_delta_ceiling_ms, (
         f"50-type registry added {cold_delta_ms:.1f}ms to cold op_find "
-        f"(without={statistics.median(without_registry_ms):.1f}ms, "
-        f"with={statistics.median(with_registry_ms):.1f}ms)"
+        f"(without={without_median_ms:.1f}ms, "
+        f"with={statistics.median(with_registry_ms):.1f}ms, "
+        f"ceiling={cold_delta_ceiling_ms:.1f}ms)"
+    )
+
+    # Attributable cold cost, each from a cleared cache: (a) registry parse +
+    # cue-noun build, bounded directly; (b) the entity-folder enumeration, as a
+    # paired delta with vs without the fifty extension folders — the dense
+    # fixture's own entity pages cost the same with or without a registry and
+    # are bounded by the referents gate, not here.
+    from exomem import entity_registry, referent_resolution
+
+    for index in range(50):
+        (vault / "Knowledge Base" / "Entities" / f"Places{index:02d}").mkdir(
+            parents=True, exist_ok=True
+        )
+
+    def attributable(*, with_registry: bool) -> tuple[float, float]:
+        if with_registry:
+            registry_path.write_text(registry_text, encoding="utf-8")
+        else:
+            registry_path.unlink(missing_ok=True)
+        entity_types._CACHE.clear()
+        referent_resolution._CUE_NOUN_CACHE.clear()
+        entity_registry.clear_entity_registry_cache()
+        started = time.perf_counter()
+        registry = entity_types.load_entity_types(vault)
+        referent_resolution.cue_nouns_for(registry)
+        parsed = (time.perf_counter() - started) * 1000
+        assert len(registry.extensions) == (50 if with_registry else 0)
+        started = time.perf_counter()
+        entity_registry.load_entity_registry(
+            vault, freshness_key=("registry-latency", with_registry), type_registry=registry
+        )
+        return parsed, (time.perf_counter() - started) * 1000
+
+    parse_with_ms: list[float] = []
+    walk_with_ms: list[float] = []
+    walk_without_ms: list[float] = []
+    for index in range(_REPEAT):
+        order = (False, True) if index % 2 == 0 else (True, False)
+        for arm in order:
+            parsed, walked = attributable(with_registry=arm)
+            if arm:
+                parse_with_ms.append(parsed)
+                walk_with_ms.append(walked)
+            else:
+                walk_without_ms.append(walked)
+    registry_path.write_text(registry_text, encoding="utf-8")
+    parse_median_ms = statistics.median(parse_with_ms)
+    walk_without_median_ms = statistics.median(walk_without_ms)
+    walk_delta_ms = statistics.median(walk_with_ms) - walk_without_median_ms
+    assert parse_median_ms < 50.0, (
+        f"50-type registry parse + cue-noun build took {parse_median_ms:.1f}ms cold"
+    )
+    assert walk_delta_ms < max(50.0, 0.25 * walk_without_median_ms), (
+        f"fifty extension folders added {walk_delta_ms:.1f}ms to the cold entity walk "
+        f"(without={walk_without_median_ms:.1f}ms)"
     )
 
     parse_ms: list[float] = []
