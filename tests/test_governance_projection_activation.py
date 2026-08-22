@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -89,13 +90,14 @@ def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
     )
     connection = SimpleNamespace(close=lambda: None)
     events: list[str] = []
+    current_control = [control]
 
     monkeypatch.setenv(authorization_custody.KEYRING_FILE_ENV, str(tmp_path / "keyring"))
     monkeypatch.setenv(authorization_custody.CONTROL_FILE_ENV, str(tmp_path / "control"))
     monkeypatch.setattr(
         authorization_custody,
         "load_authorization_custody",
-        lambda *_args, **_kwargs: SimpleNamespace(control=control),
+        lambda *_args, **_kwargs: SimpleNamespace(control=current_control[0]),
     )
     monkeypatch.setattr(
         projection_runtime.store,
@@ -139,6 +141,20 @@ def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
             AssertionError("request reloaded projection catalog")
         ),
     )
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="governed projected retrieval is unavailable",
+    ):
+        projection_runtime.load_active_projection_runtime(tmp_path)
+
+    monkeypatch.setattr(
+        projection_runtime,
+        "_PROJECTED_SERVING_RELEASE_ACCEPTED",
+        True,
+    )
+    assert projection_runtime.load_active_projection_runtime(tmp_path) is activated
+
+    current_control[0] = replace(control, activation_epoch=control.activation_epoch + 1)
     with pytest.raises(
         projection_runtime.ProjectionRuntimeUnavailable,
         match="governed projected retrieval is unavailable",
