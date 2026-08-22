@@ -21,6 +21,20 @@ EXTENSION_SCHEMA_VERSION = 1
 CORE_REGISTRY_VERSION = 1
 _ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _STATUSES = frozenset({"active", "deprecated"})
+SUPPORTED_OPTIONAL_FRONTMATTER = frozenset(
+    {
+        "affiliation",
+        "relationship",
+        "domain",
+        "language",
+        "repo",
+        "license",
+        "used_in",
+        "decided",
+        "project",
+        "decision_status",
+    }
+)
 _RESERVED_PATH_CHARS = frozenset('<>:"/\\|?*')
 _RESERVED_WINDOWS_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}
@@ -106,8 +120,14 @@ ENTITY_TYPE_REGISTRY: tuple[EntityTypeDefinition, ...] = (
 )
 
 
-def _normalized(value: str) -> str:
+def normalize_entity_token(value: str) -> str:
+    """Return the canonical comparison token for entity registry values."""
     return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _normalized(value: str) -> str:
+    """Backward-compatible private alias for older internal callers."""
+    return normalize_entity_token(value)
 
 
 def _core_indexes() -> tuple[
@@ -171,10 +191,20 @@ class EntityTypeRegistry:
 
     def resolve(self, value: str) -> EntityTypeDefinition | None:
         normalized = _normalized(value)
-        return (
+        direct = (
             self.by_id.get(normalized)
             or self.by_alias.get(normalized)
             or self.by_folder.get(str(value or "").strip().casefold())
+        )
+        if direct is not None:
+            return direct
+        return next(
+            (
+                definition
+                for folder, definition in self.by_folder.items()
+                if _normalized(folder) == normalized
+            ),
+            None,
         )
 
 
@@ -304,8 +334,8 @@ def empty_proposal() -> dict[str, Any]:
     return {"schema_version": EXTENSION_SCHEMA_VERSION, "entity_types": {}}
 
 
-def observed_entity_type_ids(vault_root: Path) -> frozenset[str]:
-    """Return entity-type IDs already authored under ``Entities``."""
+def observed_extension_ids(vault_root: Path) -> frozenset[str]:
+    """Return currently registered extension IDs authored under ``Entities``."""
     entities = Path(vault_root) / kb_dirname() / "Entities"
     registry = load_entity_types(vault_root)
     observed: set[str] = set()
@@ -325,7 +355,8 @@ def observed_entity_type_ids(vault_root: Path) -> frozenset[str]:
         raw = frontmatter.get("entity_type")
         if isinstance(raw, str) and raw.strip():
             resolved = registry.resolve(raw)
-            observed.add(resolved.id if resolved is not None else _normalized(raw))
+            if resolved is not None and resolved.id in registry.extensions:
+                observed.add(resolved.id)
     return frozenset(observed)
 
 
@@ -447,6 +478,18 @@ def _parse_extension_data(
             local,
             type_id,
         )
+        unsupported_optional = sorted(
+            set(optional_frontmatter) - SUPPORTED_OPTIONAL_FRONTMATTER
+        )
+        if unsupported_optional:
+            local.append(
+                _finding(
+                    "unsupported_optional_frontmatter",
+                    f"{span}.optional_frontmatter",
+                    f"unsupported field(s): {unsupported_optional}",
+                    entity_type=type_id,
+                )
+            )
         if not _safe_folder(folder):
             local.append(
                 _finding(

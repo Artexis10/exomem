@@ -262,14 +262,14 @@ class AuditReport:
         validate_presentation_controls(detail, legacy_sample_limit)
         upstream = _semantic_upstream_facts(self.metadata)
         if detail == "full":
-            value = self.as_dict()
-            value["detail"] = "full"
-            value["presentation"] = {
+            full_value = self.as_dict()
+            full_value["detail"] = "full"
+            full_value["presentation"] = {
                 "grouped_legacy_backlog": False,
                 "upstream_findings_complete": upstream["findings_complete"],
                 "upstream_omitted_count": upstream["omitted_count"],
             }
-            return value
+            return full_value
 
         legacy = _unique_legacy_backlog_findings(self.findings)
         actionable = sorted(
@@ -1163,7 +1163,7 @@ def semantic_recall_isolation_census(
     vault_root: Path,
     *,
     limit: int = _SEMANTIC_ISOLATION_CENSUS_LIMIT,
-    after: dict[str, str] | None = None,
+    after: dict[str, dict[str, str]] | None = None,
 ) -> SemanticRecallIsolationCensus:
     """Inventory live suppressed Markdown that survives in semantic sidecars.
 
@@ -1627,14 +1627,45 @@ def _check_unregistered_entity_types(
         if separator and folder:
             entities.append((page, folder))
 
-    def proposed_entry(folder: str, page_count: int) -> dict[str, Any]:
-        return {
-            "id": entity_types_module._normalized(folder),
+    def proposed_entry(
+        type_id: str,
+        folder: str,
+        label: str,
+        page_count: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        guidance = f"A stable {label.lower()} identity with reusable context."
+        entry = {
+            "id": type_id,
             "folder": folder,
-            "label": folder.title(),
+            "label": label,
             "aliases": [],
+            "capture_guidance": guidance,
+            "parent": "concept",
             "page_count": page_count,
         }
+        proposal = {
+            "schema_version": 1,
+            "entity_types": {
+                type_id: {
+                    key: value
+                    for key, value in entry.items()
+                    if key not in {"id", "page_count"}
+                }
+            },
+        }
+        validation = entity_types_module.validate_proposal(proposal)
+        if validation:
+            reason = "; ".join(
+                f"{finding['path']}: {finding['detail']}" for finding in validation
+            )
+            return None, reason
+        return entry, None
+
+    def derived_folder(type_id: str) -> str:
+        label = type_id.replace("-", " ").title()
+        if label.casefold().endswith("s"):
+            return label
+        return f"{label}s"
 
     folder_pages: dict[str, list[find_module.ParsedPage]] = {}
     folder_spelling: dict[str, str] = {}
@@ -1649,6 +1680,20 @@ def _check_unregistered_entity_types(
         if not isinstance(raw_type, str) or registry.resolve(raw_type) is not None:
             continue
         count = len(folder_pages[folder.casefold()])
+        type_id = entity_types_module.normalize_entity_token(raw_type)
+        label = type_id.replace("-", " ").title()
+        candidate_folder = (
+            folder
+            if registry.by_folder.get(folder.casefold()) is None
+            else derived_folder(type_id)
+        )
+        proposal, reason = proposed_entry(type_id, candidate_folder, label, count)
+        meta: dict[str, Any] = {
+            "proposed_entry": proposal,
+            "signal_version": _page_signal_version(page),
+        }
+        if reason is not None:
+            meta["reason"] = reason
         findings.append(
             AuditFinding(
                 category="entity_type_unregistered",
@@ -1661,10 +1706,7 @@ def _check_unregistered_entity_types(
                     "Review the proposed entry, then use the governed "
                     "save-entity-types operation with why, or move the page."
                 ),
-                meta={
-                    "proposed_entry": proposed_entry(folder, count),
-                    "signal_version": _page_signal_version(page),
-                },
+                meta=meta,
             )
         )
 
@@ -1684,6 +1726,19 @@ def _check_unregistered_entity_types(
         folder = folder_spelling[key]
         paths = [page.rel_path for page in members]
         signal = content_hash("\n".join(paths))[:16]
+        type_id = entity_types_module.normalize_entity_token(folder)
+        proposal, reason = proposed_entry(
+            type_id,
+            folder,
+            folder.title(),
+            len(paths),
+        )
+        meta = {
+            "proposed_entry": proposal,
+            "signal_version": signal,
+        }
+        if reason is not None:
+            meta["reason"] = reason
         findings.append(
             AuditFinding(
                 category="entity_type_unregistered",
@@ -1697,10 +1752,7 @@ def _check_unregistered_entity_types(
                     "Review the proposed entry, then use the governed "
                     "save-entity-types operation with why, or move the pages."
                 ),
-                meta={
-                    "proposed_entry": proposed_entry(folder, len(paths)),
-                    "signal_version": signal,
-                },
+                meta=meta,
             )
         )
     return sorted(findings, key=lambda finding: (finding.path, finding.detail))
@@ -1811,7 +1863,9 @@ def _check_wikilinks(
 
             immutable = in_append_only_tree(str(page.rel_path)) is not None
             if not broken:
-                meta = {"signal_version": _page_signal_version(page)}
+                meta: dict[str, Any] = {
+                    "signal_version": _page_signal_version(page)
+                }
                 if immutable:
                     meta["immutable"] = True
                 findings.append(AuditFinding(

@@ -429,27 +429,59 @@ def test_entity_type_registry_load_is_bounded_at_scale(
     vault = _build_dense_vault(tmp_path, N_NOTES_LARGE)
     registry_path = vault / "Knowledge Base" / "_Schema" / "entity-types.yaml"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "entity_types": {
-                    f"place-{index:02d}": {
-                        "folder": f"Places{index:02d}",
-                        "label": f"Place {index:02d}",
-                        "aliases": [f"location{index:02d}"],
-                        "cue_nouns": [f"venue{index:02d}"],
-                        "capture_guidance": "A stable synthetic place identity.",
-                        "parent": "concept",
-                    }
-                    for index in range(50)
-                },
+    registry_text = yaml.safe_dump(
+        {
+            "schema_version": 1,
+            "entity_types": {
+                f"place-{index:02d}": {
+                    "folder": f"Places{index:02d}",
+                    "label": f"Place {index:02d}",
+                    "aliases": [f"location{index:02d}"],
+                    "cue_nouns": [f"venue{index:02d}"],
+                    "capture_guidance": "A stable synthetic place identity.",
+                    "parent": "concept",
+                }
+                for index in range(50)
             },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
+        },
+        sort_keys=False,
     )
+
+    def cold_find_ms() -> float:
+        find_module.clear_cache()
+        entity_types._CACHE.clear()
+        _seed_freshness_live(vault)
+        started = time.perf_counter()
+        commands.op_find(
+            vault,
+            query="which venue00",
+            mode="hybrid",
+            graph=False,
+            rerank=False,
+        )
+        return (time.perf_counter() - started) * 1000
+
+    cold_deltas_ms: list[float] = []
+    without_registry_ms: list[float] = []
+    with_registry_ms: list[float] = []
+    for _ in range(_REPEAT):
+        if registry_path.exists():
+            registry_path.unlink()
+        without_ms = cold_find_ms()
+        registry_path.write_text(registry_text, encoding="utf-8")
+        with_ms = cold_find_ms()
+        without_registry_ms.append(without_ms)
+        with_registry_ms.append(with_ms)
+        cold_deltas_ms.append(with_ms - without_ms)
+    cold_delta_ms = statistics.median(cold_deltas_ms)
+    assert cold_delta_ms < 50.0, (
+        f"50-type registry added {cold_delta_ms:.1f}ms to cold op_find "
+        f"(without={statistics.median(without_registry_ms):.1f}ms, "
+        f"with={statistics.median(with_registry_ms):.1f}ms)"
+    )
+
     parse_ms: list[float] = []
+
     def timed_parse(*args, **kwargs):
         started = time.perf_counter()
         try:
@@ -458,6 +490,7 @@ def test_entity_type_registry_load_is_bounded_at_scale(
             parse_ms.append((time.perf_counter() - started) * 1000)
 
     monkeypatch.setattr(entity_types, "_parse_extension_data", timed_parse)
+    entity_types._CACHE.clear()
 
     commands.op_find(
         vault,

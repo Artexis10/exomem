@@ -20,7 +20,6 @@ from pathlib import Path
 
 from . import entity_candidates, indexes, memory_refs, semantic_writes, temporal
 from .entity_types import (
-    ENTITY_TYPE_IDS,
     EntityTypeDefinition,
     load_entity_types,
 )
@@ -46,8 +45,6 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 
-ENTITY_TYPES = ENTITY_TYPE_IDS
-
 DECISION_STATUS_VALUES = ("proposed", "accepted", "superseded")
 
 
@@ -63,7 +60,11 @@ class LinkResult:
     slug: str = ""
 
     def as_dict(self) -> dict:
-        value = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
+        value: dict[str, object] = {
+            "path": self.path,
+            "ref": self.ref,
+            "warnings": self.warnings,
+        }
         if self.slug:
             value["slug"] = self.slug
         if self.creation is not None:
@@ -321,7 +322,7 @@ def _legacy_link(
         path=rel_entity,
         ref=memory_refs.memory_ref(exomem_id),
         warnings=warnings,
-        slug=filename_slug,
+        slug=filename_slug or "",
     )
 
 
@@ -794,5 +795,5 @@ def link(
         memory_refs.memory_ref(identity),
         warnings,
         committed.as_dict(),
-        slug=filename_slug,
+        slug=filename_slug or "",
     )

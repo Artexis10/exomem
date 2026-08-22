@@ -59,6 +59,8 @@ def test_public_entity_writer_guidance_covers_every_registered_kind() -> None:
     assert "stable entity registry returned" in guidance
     assert "active entity registry" in guidance
     assert "_Schema/entity-types.yaml" in guidance
+    assert "ENTITY_TYPE_UNKNOWN" in guidance
+    assert "INVALID_LINK (bad entity_type" not in guidance
     assert "One of person" not in guidance
 
     for command_name in ("link", "connect_memory"):
@@ -303,6 +305,93 @@ def test_save_registry_refuses_observed_deletion_and_stale_hash(tmp_path: Path) 
             expected_hash="stale",
             observed_ids=("place",),
         )
+
+
+def test_save_registry_ignores_unregistered_authored_types(tmp_path: Path) -> None:
+    for name in ("Aster Hall", "Beryl Room"):
+        _entity_page(
+            tmp_path,
+            f"Knowledge Base/Entities/Places/{name}.md",
+            title=name,
+        )
+        page = tmp_path / "Knowledge Base" / "Entities" / "Places" / f"{name}.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "entity_type: person", "entity_type: place"
+            ),
+            encoding="utf-8",
+        )
+
+    venue = _proposal(
+        {
+            "venue": _extension(
+                folder="Venues", label="Venue", aliases=[], parent="concept"
+            )
+        }
+    )
+    created = commands.op_schema_memory(
+        tmp_path,
+        operation="save-entity-types",
+        proposal=venue,
+        why="Register the synthetic venue type.",
+    )
+
+    _entity_page(
+        tmp_path,
+        "Knowledge Base/Entities/Venues/Cedar Room.md",
+        title="Cedar Room",
+    )
+    venue_page = (
+        tmp_path / "Knowledge Base" / "Entities" / "Venues" / "Cedar Room.md"
+    )
+    venue_page.write_text(
+        venue_page.read_text(encoding="utf-8").replace(
+            "entity_type: person", "entity_type: venue"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="OBSERVED_ENTITY_TYPE_DELETION"):
+        commands.op_schema_memory(
+            tmp_path,
+            operation="save-entity-types",
+            proposal=_proposal({}),
+            why="Exercise observed extension deletion protection.",
+            expected_hash=created["saved"]["content_hash"],
+        )
+
+
+def test_resolve_accepts_normalized_extension_folder(tmp_path: Path) -> None:
+    _write_registry(
+        tmp_path,
+        _proposal(
+            {
+                "place": _extension(
+                    folder="My Places", label="Place", aliases=[]
+                )
+            }
+        ),
+    )
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert registry.resolve("my-places").id == "place"
+
+
+def test_unsupported_optional_frontmatter_is_a_finding(tmp_path: Path) -> None:
+    extension = _extension()
+    extension["optional_frontmatter"] = ["domain", "opening_hours"]
+    _write_registry(tmp_path, _proposal({"place": extension}))
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert registry.extensions == {}
+    assert any(
+        finding["code"] == "unsupported_optional_frontmatter"
+        and finding["path"] == "entity_types.place.optional_frontmatter"
+        and "opening_hours" in finding["detail"]
+        for finding in registry.findings
+    )
 
 
 def test_schema_memory_saves_entity_types_only_with_why(tmp_path: Path) -> None:

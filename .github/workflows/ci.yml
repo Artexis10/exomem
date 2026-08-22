@@ -445,6 +445,8 @@ jobs:
           tests/test_reclassify_source.py
           tests/test_referent_resolution.py
           tests/test_entity_registry.py
+          tests/test_indexes.py
+          tests/test_knowledge_packs.py
           tests/test_find_referents_envelope.py
           tests/test_referent_resolution_benchmark.py
           --select E,F,I,B,UP,BLE

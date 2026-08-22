@@ -3320,7 +3320,8 @@ def op_link(
         {path, warnings}.
 
     Errors:
-        INVALID_LINK (bad entity_type, decision_status, missing required);
+        ENTITY_TYPE_UNKNOWN (entity_type not in the active registry);
+        INVALID_LINK (bad decision_status, missing required);
         ENTITY_EXISTS (update/link the returned active entity instead);
         ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
     """
@@ -5828,6 +5829,13 @@ def op_triage_memory(
             "categories": item.categories,
         }
     )
+    state_resolved_only = [
+        category
+        for category in item.categories
+        if category == "entity_type_unregistered"
+    ]
+    if state_resolved_only:
+        result["state_resolved_only_categories"] = state_resolved_only
     return result
 
 
@@ -6396,7 +6404,7 @@ def op_schema_memory(
             vault_root,
             proposal,
             expected_hash=expected_hash,
-            observed_ids=entity_types_module.observed_entity_type_ids(vault_root),
+            observed_ids=entity_types_module.observed_extension_ids(vault_root),
         )
         return {
             "subject": "entity-types",

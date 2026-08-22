@@ -37,6 +37,8 @@ Alternatives considered and rejected: direct file edits would bypass shared vali
 
 Every named consumer loads the registry for its vault. Folder/index structures and referent cue maps are cached by `(core_version, extension_hash)`, in addition to the vault/corpus freshness keys already needed by those subsystems. Initialization creates extension folders only when an extension file is present; entity creation lazily creates the selected extension folder. Tool schemas accept strings and runtime validation reports `ENTITY_TYPE_UNKNOWN` with active IDs.
 
+Vault-aware `default_entity_types` validation is a forward hook for user-authored knowledge packs. Pack admission currently loads built-in product packs only, so there is no production custom-pack caller to receive `vault_root` yet; the validation seam is ready when that admission path exists.
+
 Alternatives considered and rejected: enumerating values in the static MCP schema would require schema regeneration on every user vault change and cannot represent per-vault state; unconditional init-time folder creation would materialize unused extension schema; uncached reparsing would violate the latency contract.
 
 ### The predicate

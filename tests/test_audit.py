@@ -7,10 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-
 from exomem import attention as attention_module
 from exomem import audit as audit_module
+from exomem import commands
 from exomem import review_state as review_state_module
 
 
@@ -43,27 +42,24 @@ def _write_entity(
     return path
 
 
-def _write_entity_registry(vault: Path, type_id: str, folder: str) -> None:
-    path = vault / "Knowledge Base" / "_Schema" / "entity-types.yaml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "entity_types": {
-                    type_id: {
-                        "folder": folder,
-                        "label": folder.title(),
-                        "aliases": [],
-                        "capture_guidance": "A stable synthetic entity identity.",
-                        "parent": "concept",
-                    }
-                },
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
+def _save_proposed_entry(vault: Path, entry: dict) -> None:
+    type_id = entry["id"]
+    definition = {
+        key: value
+        for key, value in entry.items()
+        if key not in {"id", "page_count"}
+    }
+    result = commands.op_schema_memory(
+        vault,
+        operation="save-entity-types",
+        proposal={
+            "schema_version": 1,
+            "entity_types": {type_id: definition},
+        },
+        why=f"Register the synthetic {type_id} type from attention.",
+        expected_hash=None,
     )
+    assert result["valid"] is True
 
 
 def test_unregistered_entity_type_is_an_attention_finding_with_proposed_entry(
@@ -86,10 +82,12 @@ def test_unregistered_entity_type_is_an_attention_finding_with_proposed_entry(
     assert item.path == page.relative_to(tmp_path).as_posix()
     assert item.categories == ["entity_type_unregistered"]
     assert item.reasons[0]["meta"]["proposed_entry"] == {
-        "id": "places",
+        "id": "place",
         "folder": "Places",
-        "label": "Places",
+        "label": "Place",
         "aliases": [],
+        "capture_guidance": "A stable place identity with reusable context.",
+        "parent": "concept",
         "page_count": 1,
     }
 
@@ -101,12 +99,35 @@ def test_unregistered_type_finding_resolves_when_the_type_is_registered(
         tmp_path,
         folder="Places",
         name="Aster Hall",
-        entity_type="places",
+        entity_type="place",
     )
     before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
     assert len(before.findings) == 1
 
-    _write_entity_registry(tmp_path, "places", "Places")
+    proposed_entry = before.findings[0].meta["proposed_entry"]
+    _save_proposed_entry(tmp_path, proposed_entry)
+    after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert after.findings == []
+
+
+def test_unregistered_type_under_a_core_folder_proposes_a_non_colliding_entry(
+    tmp_path: Path,
+) -> None:
+    _write_entity(
+        tmp_path,
+        folder="People",
+        name="Aster Mentor",
+        entity_type="mentor",
+    )
+    before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(before.findings) == 1
+    proposed_entry = before.findings[0].meta["proposed_entry"]
+    assert proposed_entry["id"] == "mentor"
+    assert proposed_entry["folder"] != "People"
+
+    _save_proposed_entry(tmp_path, proposed_entry)
     after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
 
     assert after.findings == []
@@ -160,6 +181,8 @@ def test_three_pages_under_an_unregistered_folder_trigger_the_finding_two_do_not
         "folder": "Venues",
         "label": "Venues",
         "aliases": [],
+        "capture_guidance": "A stable venues identity with reusable context.",
+        "parent": "concept",
         "page_count": 3,
     }
 

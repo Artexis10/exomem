@@ -482,6 +482,11 @@ entity_types:
 The `parent` is a one-level roll-up to a core type; it does not create a deeper
 type hierarchy.
 
+Extension `optional_frontmatter` may name only fields supported by the entity
+writer: `affiliation`, `relationship`, `domain`, `language`, `repo`, `license`,
+`used_in`, `decided`, `project`, and `decision_status`. Any other field is a
+registry finding rather than silently inert metadata.
+
 ### People
 
 Optional frontmatter: `affiliation`, `relationship` (e.g., colleague, public-figure, source-author),

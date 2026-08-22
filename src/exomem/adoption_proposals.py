@@ -51,6 +51,7 @@ _WORK_ITEM_CONSTRAINTS = (
     "deleted."
 )
 
+
 def _proposal_kind_summary(root: Path) -> dict[str, str]:
     active_ids = "|".join(load_entity_types(root).active_ids)
     return {

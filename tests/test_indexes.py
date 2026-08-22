@@ -53,9 +53,16 @@ def test_entity_index_includes_extension_folders_and_rebuilds_on_registry_change
         counts_by_type=first_counts,
         registry=first_registry,
     )
+    entities_index = tmp_path / "Knowledge Base" / "Entities" / "index.md"
+    entities_index.write_text("# Entities\n\n## By type\n", encoding="utf-8")
+    planned, _top = indexes.compute_subindex_writes(tmp_path)
+    planned_entities_index = next(
+        write for write in planned if write.path == entities_index
+    )
 
     assert first_counts["place"] == 1
     assert "Entities/Places/|Places" in first_index
+    assert "Entities/Places/|Places" in planned_entities_index.content
 
     _write_registry(tmp_path, _proposal("venue", "Venues", "Venue"))
     _write_entity(tmp_path, "Venues", "venue", "Beryl Room")
