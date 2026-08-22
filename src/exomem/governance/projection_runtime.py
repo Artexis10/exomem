@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from numbers import Real
 from pathlib import Path, PurePosixPath
 
-from .. import bm25, embeddings, find_policy, fusion, ranking_config, readiness
+from .. import bm25, find_policy, fusion, ranking_config
 from ..find_types import GraphProvenance, Hit
 from ..kbdir import kb_dirname
 from . import (
@@ -803,6 +803,8 @@ def find_projected_hits(
     purpose: str | None,
 ) -> ProjectedFindResult:
     """Acquire public candidates without opening a raw corpus/index lane."""
+
+    from .. import embeddings, readiness
 
     if not isinstance(runtime, ActiveProjectionRuntime):
         raise ProjectionRuntimeUnavailable(
