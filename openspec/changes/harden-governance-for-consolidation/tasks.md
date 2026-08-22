@@ -366,9 +366,10 @@ made before both PRs and their combined verification are complete.
   repeated/changed `Mcp-Session-Id`, `Context.session_id`, request UUID, connection, or
   arbitrary session id; stable stdio/SSE context is supplementary only. Assert the only
   public MCP bearer placeholder is `authorization_session_credential`.
-- [ ] 6.2 Add an actual-wire stateless MCP reconnect suite: open and grant, disconnect,
-  route the bearer to another replica, then exercise `ask_memory`/find,
-  `read_memory`/get, Records read/query, `query_dataset`, `read_media`, and frame routes.
+- [x] 6.2 Add an actual-wire stateless MCP reconnect suite: open and grant, disconnect,
+  route the bearer to another replica, then exercise the registered `ask_memory` search,
+  `read_memory` direct page, Records read/query, `query_dataset`, and frame-bearing
+  `read_media` routes.
   For every route compare valid bearer, absent bearer, transport-session-only, invalid,
   cross-principal, and same-principal-cross-session credentials and scan all wire/server
   copies for the raw bearer.

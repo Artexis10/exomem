@@ -1200,6 +1200,70 @@ def _mint_escalation_quietly(
             connection.close()
 
 
+def _active_grants_for_snapshot(
+    vault_root: Path,
+    *,
+    policy: Policy,
+    audience: str,
+    purpose: str | None,
+    rel_path: str,
+    content_hash: str | None,
+    scope_ids: Iterable[str],
+    authorization_context: authorization_session_lifecycle.AuthorizationSessionContext
+    | None,
+) -> tuple[list[policy_module.StandingGrant], str]:
+    """Resolve request-local grants against one exact content/membership snapshot."""
+
+    active_grants = list(policy.grants)
+    session_identity = (
+        "v3-session-grants-unscoped"
+        if authorization_context is None
+        else "no-session-grants"
+    )
+    if authorization_context is None or content_hash is None:
+        return active_grants, session_identity
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = store.open_authorization_session_connection(vault_root)
+        session_grants, session_identity = (
+            authorization_session_authority.active_session_grants(
+                connection=connection,
+                context=authorization_context,
+                audience=audience,
+                purpose=purpose,
+                path=rel_path,
+                fingerprint=content_hash,
+                scope_ids=tuple(sorted(scope_ids)),
+                policy_fingerprint=policy.fingerprint,
+                now=int(__import__("time").time()),
+            )
+        )
+    except (
+        authorization_session_lifecycle.AuthorizationSessionUnavailable,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        store.UnsupportedGovernanceSchema,
+    ):
+        session_grants = ()
+        session_identity = "session-authority-unavailable"
+    finally:
+        if connection is not None:
+            connection.close()
+    active_grants.extend(
+        policy_module.StandingGrant(
+            id=grant.grant_id,
+            source="authorization-session",
+            scope_ids=grant.scope_ids,
+            audience=grant.audience,
+            ceiling=grant.ceiling,
+        )
+        for grant in session_grants
+    )
+    return active_grants, session_identity
+
+
 def _decide_path(
     vault_root: Path,
     rel_path: str,
@@ -1292,51 +1356,16 @@ def _decide_path(
         except OSError:
             return None
 
-    active_grants = list(policy.grants)
-    session_identity = (
-        "v3-session-grants-unscoped"
-        if authorization_context is None
-        else "no-session-grants"
+    active_grants, session_identity = _active_grants_for_snapshot(
+        vault_root,
+        policy=policy,
+        audience=audience,
+        purpose=purpose,
+        rel_path=rel_path,
+        content_hash=live_content_hash,
+        scope_ids=scope_ids,
+        authorization_context=authorization_context,
     )
-    if authorization_context is not None and live_content_hash is not None:
-        connection: sqlite3.Connection | None = None
-        try:
-            connection = store.open_authorization_session_connection(vault_root)
-            session_grants, session_identity = (
-                authorization_session_authority.active_session_grants(
-                    connection=connection,
-                    context=authorization_context,
-                    audience=audience,
-                    purpose=purpose,
-                    path=rel_path,
-                    fingerprint=live_content_hash,
-                    scope_ids=tuple(sorted(scope_ids)),
-                    policy_fingerprint=policy.fingerprint,
-                    now=int(__import__("time").time()),
-                )
-            )
-        except (
-            authorization_session_lifecycle.AuthorizationSessionUnavailable,
-            FileNotFoundError,
-            OSError,
-            sqlite3.Error,
-            store.UnsupportedGovernanceSchema,
-        ):
-            session_grants = ()
-            session_identity = "session-authority-unavailable"
-        finally:
-            if connection is not None:
-                connection.close()
-        active_grants.extend(
-            policy_module.StandingGrant(
-                id=grant.grant_id,
-                source="authorization-session",
-                scope_ids=grant.scope_ids,
-                audience=grant.audience,
-                ceiling=grant.ceiling,
-            )
-            for grant in session_grants
-        )
 
     key = (
         str(vault_root),
@@ -1943,12 +1972,22 @@ def annotate_page(
         scope_ids = membership_module.evaluate_snapshot(
             parsed, policy, content_hash=snapshot_hash
         )
+        active_grants, _session_identity = _active_grants_for_snapshot(
+            vault_root,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            rel_path=rel_path,
+            content_hash=snapshot_hash,
+            scope_ids=scope_ids,
+            authorization_context=who.verified_authorization_session,
+        )
         decision = decide(
             scope_ids,
             audience=who.audience_id,
             purpose=declared_purpose,
             policy=policy,
-            active_grants=policy.grants,
+            active_grants=active_grants,
         )
         admission = bridges.admit(
             vault_root,
@@ -2325,6 +2364,7 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """
     if result is None:
         return None
+    issuance_context = scrubber._issuance_projection_context(result)
     vault_root = Path(vault_root)
     result = _withheld_cross_check(vault_root, result)
     # Free text and nested resource/prompt strings have no structural entry
@@ -2342,7 +2382,13 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
         if blocked:
             _record_credential_block()
         return cleaned
-    cleaned, blocked = scrubber.scrub_value(result)
+    if issuance_context is not None:
+        cleaned, blocked = scrubber._scrub_issuance_projection(
+            result,
+            issuance_context,
+        )
+    else:
+        cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
     return cleaned
@@ -3152,11 +3198,39 @@ def release_level_for_path_only(
                 purpose=purpose,
             )
         return DISCLOSURE_MIN
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    content_hash: str | None = None
+    if who.verified_authorization_session is not None:
+        try:
+            content_hash = hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+        except OSError:
+            if receipt_decision is not None:
+                _outcome_for_decision(
+                    vault_root,
+                    rel_path,
+                    decision=None,
+                    policy=policy,
+                    audience=who.audience_id,
+                    outcome="withheld",
+                    purpose=declared_purpose,
+                )
+            return DISCLOSURE_MIN
+    active_grants, _session_identity = _active_grants_for_snapshot(
+        vault_root,
+        policy=policy,
+        audience=who.audience_id,
+        purpose=declared_purpose,
+        rel_path=rel_path,
+        content_hash=content_hash,
+        scope_ids=scope_ids,
+        authorization_context=who.verified_authorization_session,
+    )
     decision = decide(
         scope_ids,
         audience=who.audience_id,
-        purpose=_declared_purpose(vault_root, who, purpose),
+        purpose=declared_purpose,
         policy=policy,
+        active_grants=active_grants,
     )
     if receipt_decision is not None:
         _outcome_for_decision(
@@ -3166,7 +3240,7 @@ def release_level_for_path_only(
             policy=policy,
             audience=who.audience_id,
             outcome=receipt_decision if decision.level >= LEVEL_FULL else "withheld",
-            purpose=purpose,
+            purpose=declared_purpose,
         )
     return decision.level
 

@@ -78,6 +78,17 @@ class _IssuanceContext:
         raise TypeError("issuance context is process-local")
 
 
+class _IssuanceProjection(dict[Any, Any]):
+    """JSON-shaped terminal retaining process-local issuance authority."""
+
+    def __init__(self, value: Mapping[Any, Any], context: _IssuanceContext) -> None:
+        super().__init__(value)
+        self._issuance_context = context
+
+    def __reduce__(self) -> object:
+        raise TypeError("issuance projection is process-local")
+
+
 def _new_issuance_context(action: object, bearer: object) -> _IssuanceContext:
     if action not in _ISSUANCE_ACTIONS:
         raise ValueError("issuance action must be open or rotate")
@@ -85,6 +96,58 @@ def _new_issuance_context(action: object, bearer: object) -> _IssuanceContext:
     if canonical is None:
         raise ValueError("issued bearer is not canonical")
     return _IssuanceContext(str(action), canonical, _ISSUANCE_CONTEXT_SEAL)
+
+
+def _issuance_projection_context(value: object) -> _IssuanceContext | None:
+    if type(value) is not _IssuanceProjection:
+        return None
+    context = value._issuance_context
+    if (
+        type(context) is not _IssuanceContext
+        or context._seal is not _ISSUANCE_CONTEXT_SEAL
+    ):
+        return None
+    return context
+
+
+def _trusted_issuance_projection(
+    command_name: object,
+    arguments: Mapping[str, Any],
+    canonical_result: object,
+    projected_result: object,
+) -> object:
+    """Mark only a dispatcher-produced open/rotate terminal for wire issuance."""
+
+    if (
+        command_name != "govern_memory"
+        or arguments.get("operation") != "session"
+        or arguments.get("session_action") not in _ISSUANCE_ACTIONS
+        or not isinstance(canonical_result, Mapping)
+        or not isinstance(projected_result, Mapping)
+    ):
+        return projected_result
+    leaf = canonical_result.get("leaf_result")
+    if type(leaf) is not dict:
+        return projected_result
+    credential = leaf.get("issued_credential")
+    bearer = credential.get("bearer") if type(credential) is dict else None
+    try:
+        context = _new_issuance_context(arguments["session_action"], bearer)
+    except (KeyError, TypeError, ValueError):
+        return projected_result
+    checked, blocked = _scrub_issuance_projection(
+        _IssuanceProjection(leaf, context),
+        context,
+    )
+    if blocked or checked != leaf:
+        return projected_result
+    wire_projection = dict(projected_result)
+    if "diagnostics" not in wire_projection and set(wire_projection) != {
+        "status",
+        "issued_credential",
+    }:
+        wire_projection["issued_credential"] = dict(credential)
+    return _IssuanceProjection(wire_projection, context)
 
 
 def _valid_rfc3339(value: object) -> bool:
@@ -681,8 +744,9 @@ def _scrub_issuance_response(
 ) -> tuple[Any, bool]:
     """Allow exactly one typed open/rotate bearer; scrub every other shape.
 
-    No public route wires this yet. The terminal postfilter supplies no
-    context, so the production default remains unconditional scrubbing.
+    The dispatcher supplies the sealed context only for a just-committed
+    open/rotate terminal. Every other caller supplies no context, so the
+    production default remains unconditional scrubbing.
     """
     context_valid = (
         type(context) is _IssuanceContext
@@ -711,6 +775,89 @@ def _scrub_issuance_response(
     cleaned, blocked = _scrub_issuance_candidates(response)
     fallback, fallback_blocked = scrub_value(cleaned)
     return fallback, blocked or fallback_blocked
+
+
+def _scrub_issuance_projection(
+    value: Any,
+    context: _IssuanceContext,
+) -> tuple[Any, bool]:
+    """Release one exact issued bearer and reject every additional credential."""
+
+    public = dict(value) if isinstance(value, Mapping) else value
+    if type(public) is not dict:
+        return scrub_value(public)
+
+    if (
+        type(public.get("diagnostics")) is dict
+        and type(public["diagnostics"].get("issued_credential")) is dict
+    ):
+        location = "diagnostics"
+        response = {
+            "status": public[location].get("status"),
+            "issued_credential": public[location]["issued_credential"],
+        }
+    elif set(public) == {"status", "issued_credential"}:
+        location = "root"
+        response = public
+    elif type(public.get("issued_credential")) is dict:
+        location = "compact"
+        response = {
+            "status": "ok",
+            "issued_credential": public["issued_credential"],
+        }
+    else:
+        return scrub_value(public)
+
+    checked, issuance_blocked = _scrub_issuance_response(
+        context.action,
+        response,
+        context,
+    )
+    if issuance_blocked or checked != response:
+        return scrub_value(public)
+
+    protected_response = dict(response)
+    protected_credential = dict(protected_response["issued_credential"])
+    protected_credential["bearer"] = "[authorized session credential]"
+    protected_response["issued_credential"] = protected_credential
+    protected = dict(public)
+    if location == "root":
+        protected = protected_response
+    elif location == "diagnostics":
+        protected[location] = {
+            **public[location],
+            "issued_credential": protected_credential,
+        }
+    else:
+        protected["issued_credential"] = protected_credential
+
+    cleaned, blocked = scrub_value(protected)
+    if blocked or not isinstance(cleaned, dict):
+        return scrub_value(public)
+    if location == "compact":
+        cleaned_response = None
+        cleaned_credential = cleaned.get("issued_credential")
+    else:
+        cleaned_response = cleaned if location == "root" else cleaned.get(location)
+        if not isinstance(cleaned_response, dict):
+            return scrub_value(public)
+        cleaned_credential = cleaned_response.get("issued_credential")
+    if not isinstance(cleaned_credential, dict):
+        return scrub_value(public)
+    restored_credential = dict(cleaned_credential)
+    restored_credential["bearer"] = context.bearer
+    restored = dict(cleaned)
+    if location == "compact":
+        restored["issued_credential"] = restored_credential
+    else:
+        assert isinstance(cleaned_response, dict)
+        restored_response = dict(cleaned_response)
+        restored_response["issued_credential"] = restored_credential
+    if location == "root":
+        restored = restored_response
+    elif location == "diagnostics":
+        restored[location] = restored_response
+    return _IssuanceProjection(restored, context), False
 
 
 def enabled(vault_root: Path) -> bool:
