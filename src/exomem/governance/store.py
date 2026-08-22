@@ -158,29 +158,6 @@ def open_authorization_session_connection(
                     raise
 
 
-def authorization_session_schema_version(vault_root: Path) -> int | None:
-    """Return exact v3/v4 for an existing protected store, never creating one."""
-
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = open_authorization_session_connection(vault_root)
-    except UnsupportedGovernanceSchema:
-        legacy = open_readonly_connection(vault_root)
-        if legacy is None:
-            return None
-        legacy.close()
-        return SCHEMA_USER_VERSION
-    except (FileNotFoundError, OSError, sqlite3.Error):
-        return None
-    else:
-        from . import schema_v4
-
-        return schema_v4.SCHEMA_USER_VERSION
-    finally:
-        if connection is not None:
-            connection.close()
-
-
 def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connection:
     """Open one existing exact-v4 activation store as a pinned read source.
 
@@ -233,6 +210,29 @@ def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connecti
                 raise UnsupportedGovernanceSchema(
                     "active governance store is absent"
                 ) from exc
+
+
+def authorization_session_schema_version(vault_root: Path) -> int | None:
+    """Return exact v3/v4 for an existing protected store, never creating one."""
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = open_authorization_session_connection(vault_root)
+    except UnsupportedGovernanceSchema:
+        legacy = open_readonly_connection(vault_root)
+        if legacy is None:
+            return None
+        legacy.close()
+        return SCHEMA_USER_VERSION
+    except (FileNotFoundError, OSError, sqlite3.Error):
+        return None
+    else:
+        from . import schema_v4
+
+        return schema_v4.SCHEMA_USER_VERSION
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _open_connection_owned(

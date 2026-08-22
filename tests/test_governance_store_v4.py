@@ -5,7 +5,18 @@ import sqlite3
 
 import pytest
 
-from exomem.governance import authorization_sessions, schema_v4, store
+from exomem.governance import authorization_sessions, policy, schema_v4, store
+
+POLICY_DOCUMENTS = (
+    (
+        "scopes/migration.yaml",
+        b"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths:\n  - Notes/**\n",
+    ),
+)
+COMPILED_POLICY = policy.compile_documents(dict(POLICY_DOCUMENTS))
+assert not COMPILED_POLICY.empty and not COMPILED_POLICY.blocked
+POLICY_FINGERPRINT = COMPILED_POLICY.fingerprint
+COMPILED_POLICY_BYTES = policy.canonical_compiled_bytes(COMPILED_POLICY)
 
 
 def _v3_connection() -> sqlite3.Connection:
@@ -19,16 +30,11 @@ def _v3_connection() -> sqlite3.Connection:
 def _seed(**changes: object) -> schema_v4.MigrationSeed:
     policy = schema_v4.PolicyGenerationSeed(
         generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        source_documents=(
-            (
-                "rules/release.yaml",
-                b"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n",
-            ),
-        ),
-        source_fingerprint="1" * 64,
+        source_documents=POLICY_DOCUMENTS,
+        source_fingerprint=POLICY_FINGERPRINT,
         conflict_digest="2" * 64,
-        compiled_policy=b'{"rules":[]}',
-        policy_fingerprint="3" * 64,
+        compiled_policy=COMPILED_POLICY_BYTES,
+        policy_fingerprint=POLICY_FINGERPRINT,
         compiler_schema_version=1,
         projector_schema_version=1,
         predecessor_generation_id=None,
@@ -304,7 +310,7 @@ def test_v4_seed_publishes_one_complete_tuple_and_activation_digest() -> None:
         projector_schema_version=1,
         catalog_generation=int(catalog[0]),
         catalog_descriptor_digest=str(catalog[1]),
-        projection_namespace_identity=str(namespace[0]),
+        projection_namespace_identity=str(namespace[1]),
     )
 
 
@@ -344,7 +350,7 @@ def test_v4_active_state_verifies_the_complete_external_tuple() -> None:
         activation_epoch=1,
         activation_state_digest=result.activation_state_digest,
         policy_generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        policy_fingerprint="3" * 64,
+        policy_fingerprint=POLICY_FINGERPRINT,
         projector_schema_version=1,
         catalog_generation=7,
         projection_namespace_id="projection-namespace-7",

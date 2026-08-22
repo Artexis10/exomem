@@ -922,8 +922,19 @@ def migrate_v3_connection(
 ) -> MigrationResult:
     """Atomically replace one exact quiesced v3 authority with exact schema v4."""
 
-    material = _seed_material(seed)
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if version not in {3, SCHEMA_USER_VERSION}:
+        raise SchemaV4Error(
+            f"explicit governance migration requires exact schema v3, found v{version}"
+        )
+    if version == 3 and connection.in_transaction:
+        raise SchemaV4Error("schema v3 migration requires a clean transaction boundary")
+
+    # Validate the content-bearing seed only after the source database has
+    # proven it is an admissible migration/replay target.  Unsupported schema
+    # versions must refuse without parsing attacker-controlled seed material,
+    # and the clean-transaction precondition must remain effect-free.
+    material = _seed_material(seed)
     if version == SCHEMA_USER_VERSION:
         try:
             matches = _replay_matches(connection, seed, material)
@@ -932,12 +943,6 @@ def migrate_v3_connection(
         if not matches:
             raise SchemaV4Error("schema v4 migration seed does not match active state")
         return MigrationResult(4, seed.activation_store_id, material.activation_digest)
-    if version != 3:
-        raise SchemaV4Error(
-            f"explicit governance migration requires exact schema v3, found v{version}"
-        )
-    if connection.in_transaction:
-        raise SchemaV4Error("schema v3 migration requires a clean transaction boundary")
 
     connection.execute("BEGIN IMMEDIATE")
     try:
