@@ -16,6 +16,7 @@
 - [x] 2.6 Record a zero-cell rollout as an explicit no-op only when every collector agrees; otherwise require repair and a fresh inventory
 - [x] 2.7 Bootstrap the first pre-expand provisioner observation from one exact incoming image in a minimum-authority, tokenless, deadline-bounded Job when the installed legacy image lacks the collector
 - [x] 2.8 Keep terminal operation history observable without retaining dead runtime catalogs forever, while requiring every live desired or unfinished runtime to resolve exactly
+- [x] 2.9 Treat provisioner-only desired-state residue as terminal only when Substrate proves destruction and every independently live control-plane and Kubernetes surface is absent
 
 ## 3. Substrate per-cell rollforward companion
 
@@ -52,6 +53,7 @@
 - [x] 5.6 Gate contract deployment on a fresh zero-legacy proof across every collector and exact expand/contract lineage equality
 - [x] 5.7 Implement phase-aware stop/recovery output that keeps expand active whenever any target cell or unresolved transition exists
 - [x] 5.8 Update the Hosted alpha runbook so operators execute the CLI phases and evidence checks rather than manually editing release-specific command blocks
+- [x] 5.9 Keep an empty authoritative legacy catalog empty while independently validating the digest-bound historical rollback manifest
 
 ## 6. Reviewer promotion and release acceptance
 

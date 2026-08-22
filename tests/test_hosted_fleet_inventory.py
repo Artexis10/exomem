@@ -876,6 +876,56 @@ def test_execution_facts_retain_terminal_evidence_but_exclude_destroyed_cells() 
     assert facts["cells"] == []
 
 
+@pytest.mark.parametrize("desired_state", ["ready", "error"])
+def test_destroyed_binding_prunes_provisioner_only_desired_residue(
+    desired_state: str,
+) -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    legacy = _runtime("0.54.1", "b")
+    sources = _empty_sources()
+    sources["substrate"]["tenantBindings"].append(
+        {"cellId": "cell_destroyed", "status": "destroyed"}
+    )
+    sources["provisioner"]["desiredCells"].append(
+        {
+            "cellId": "cell_destroyed",
+            "runtime": legacy,
+            "state": desired_state,
+        }
+    )
+
+    inventory = module.reconcile_inventory(sources, target=target)
+    facts = module.execution_inventory_facts(inventory)
+
+    assert inventory["status"] == "empty"
+    assert inventory["issues"] == []
+    assert inventory["counts"]["cells"] == 0
+    assert inventory["counts"]["legacyCells"] == 0
+    assert inventory["counts"]["terminalCells"] == 1
+    assert inventory["legacyRuntimes"] == []
+    assert inventory["cells"][0]["classification"] == "terminal"
+    assert inventory["cells"][0]["surfaces"]["desiredState"] is True
+    assert facts["cellCount"] == 0
+    assert facts["legacyCellCount"] == 0
+
+
+def test_provisioner_only_desired_state_without_a_destroyed_binding_stays_blocked() -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    sources = _empty_sources()
+    sources["provisioner"]["desiredCells"].append(
+        {"cellId": "cell_unbound", "runtime": target, "state": "ready"}
+    )
+
+    inventory = module.reconcile_inventory(sources, target=target)
+
+    assert inventory["status"] == "inconsistent"
+    assert inventory["counts"]["cells"] == 1
+    assert inventory["counts"]["terminalCells"] == 0
+    assert "missing_active_binding" in inventory["issues"]
+
+
 def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
