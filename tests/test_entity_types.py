@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -152,9 +153,41 @@ def test_public_entity_type_schema_and_cli_choices_come_from_registry() -> None:
 
 
 def test_supported_optional_frontmatter_matches_the_entity_writer() -> None:
-    writer_fields = set(link._entity_writer_optional_values())
+    writer_fields = tuple(
+        inspect.signature(link._entity_writer_optional_values).parameters
+    )
 
-    assert entity_types.SUPPORTED_OPTIONAL_FRONTMATTER == writer_fields
+    assert entity_types.ENTITY_WRITER_OPTIONAL_FRONTMATTER == writer_fields
+    assert entity_types.SUPPORTED_OPTIONAL_FRONTMATTER == frozenset(writer_fields)
+
+    distinct_values = {
+        field: [f"{field}-value"] if field == "used_in" else f"{field}-value"
+        for field in writer_fields
+    }
+    rendered = link._render_entity(
+        entity_type="place",
+        name="Aster Hall",
+        summary="A synthetic place used to pin optional entity frontmatter.",
+        why_in_kb=None,
+        date_iso="2026-08-22",
+        tags=[],
+        connections=[],
+        exomem_id="00000000-0000-4000-8000-000000000001",
+        definition=entity_types.EntityTypeDefinition(
+            id="place",
+            folder="Places",
+            label="Place",
+            aliases=(),
+            capture_guidance="A stable synthetic place identity.",
+            optional_frontmatter=writer_fields,
+            core=False,
+        ),
+        **distinct_values,
+    )
+    frontmatter = yaml.safe_load(rendered.split("---", 2)[1])
+
+    for field, value in distinct_values.items():
+        assert frontmatter[field] == value
 
 
 def _extension(

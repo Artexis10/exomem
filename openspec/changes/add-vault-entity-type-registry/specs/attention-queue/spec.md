@@ -22,6 +22,7 @@ The default `attention` category union SHALL preserve the existing review queues
 
 - **WHEN** an unregistered-type attention item is dismissed or snoozed without changing the registry or pages
 - **THEN** unchanged audit state remains eligible to surface
+- **AND** every reason reports a `decision` key, with the recorded action on ordinary reasons and `null` on state-resolved-only reasons
 - **AND** registering the type or moving the pages clears the item on the next pass
 
 #### Scenario: Source drift produces a private bridge finding

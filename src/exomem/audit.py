@@ -1675,7 +1675,6 @@ def _check_unregistered_entity_types(
                 cached_result["page_count"] = page_count
             return cached_result, cached_proposal, reason
 
-        guidance = f"A stable {label.lower()} identity with reusable context."
         owner = registry.by_folder.get(source_folder.casefold())
         parent = owner.id if owner is not None and owner.id in registry.core else None
 
@@ -1696,13 +1695,15 @@ def _check_unregistered_entity_types(
                 "folder": folder,
                 "label": label,
                 "aliases": [],
-                "capture_guidance": guidance,
             }
             if parent is not None:
                 candidate_entry["parent"] = parent
             definition = {
                 key: value for key, value in candidate_entry.items() if key != "id"
             }
+            definition["capture_guidance"] = (
+                f"A stable {label.lower()} identity with reusable context."
+            )
             proposal = {
                 "schema_version": entity_types_module.EXTENSION_SCHEMA_VERSION,
                 "entity_types": {**current_extensions, type_id: definition},
@@ -1736,7 +1737,10 @@ def _check_unregistered_entity_types(
     folder_pages: dict[str, list[find_module.ParsedPage]] = {}
     folder_spelling: dict[str, str] = {}
     authored_type_counts: dict[str, int] = {}
-    for page, folder in entities:
+    authored_type_folder_counts: dict[str, dict[str, int]] = {}
+    authored_type_folder_spelling: dict[tuple[str, str], str] = {}
+    unknown_entities: list[tuple[find_module.ParsedPage, str, str]] = []
+    for page, folder in sorted(entities, key=lambda item: item[0].rel_path):
         key = folder.casefold()
         folder_pages.setdefault(key, []).append(page)
         folder_spelling.setdefault(key, folder)
@@ -1744,27 +1748,91 @@ def _check_unregistered_entity_types(
         if isinstance(raw_type, str):
             type_id = entity_types_module.normalize_entity_token(raw_type)
             authored_type_counts[type_id] = authored_type_counts.get(type_id, 0) + 1
+            if registry.resolve(raw_type) is None:
+                unknown_entities.append((page, folder, type_id))
+                folder_counts = authored_type_folder_counts.setdefault(type_id, {})
+                folder_counts[key] = folder_counts.get(key, 0) + 1
+                authored_type_folder_spelling.setdefault((type_id, key), folder)
 
-    findings: list[AuditFinding] = []
-    for page, folder in entities:
-        raw_type = page.frontmatter.get("entity_type")
-        if not isinstance(raw_type, str) or registry.resolve(raw_type) is not None:
-            continue
-        type_id = entity_types_module.normalize_entity_token(raw_type)
-        label = type_id.replace("-", " ").title()
-        entry, proposal, reason = proposed_entry(
-            type_id,
-            folder,
-            label,
-            authored_type_counts[type_id],
+    preferred_folder_by_type = {
+        type_id: authored_type_folder_spelling[
+            (
+                type_id,
+                min(
+                    folder_counts,
+                    key=lambda folder_key: (
+                        -folder_counts[folder_key],
+                        authored_type_folder_spelling[(type_id, folder_key)].casefold(),
+                    ),
+                ),
+            )
+        ]
+        for type_id, folder_counts in authored_type_folder_counts.items()
+    }
+
+    carrier_path_by_type_folder: dict[tuple[str, str], str] = {}
+    for page, folder, type_id in unknown_entities:
+        carrier_path_by_type_folder.setdefault(
+            (type_id, folder.casefold()), page.rel_path
         )
+
+    def proposal_meta(
+        *,
+        entry: dict[str, Any] | None,
+        proposal: dict[str, Any] | None,
+        reason: str | None,
+        signal_version: str,
+        carrier_path: str,
+        finding_path: str,
+    ) -> tuple[dict[str, Any], str]:
         meta: dict[str, Any] = {
             "proposed_entry": entry,
-            "proposal": proposal,
-            "signal_version": _page_signal_version(page),
+            "signal_version": signal_version,
         }
         if reason is not None:
             meta["reason"] = reason
+        if proposal is None:
+            return (
+                meta,
+                "Resolve the reported registry conflict or move the affected page(s).",
+            )
+        if finding_path == carrier_path:
+            meta["proposal"] = proposal
+            meta["expected_hash"] = registry.extension_hash
+            return (
+                meta,
+                "Save `meta.proposal` — the full registry with this entry merged — "
+                "via `schema_memory(operation=\"save-entity-types\", "
+                "proposal=meta.proposal, why=..., "
+                "expected_hash=meta.expected_hash)`. Do not save "
+                "`proposed_entry` on its own; it is a description, not a registry.",
+            )
+        meta["proposal_carrier"] = carrier_path
+        return (
+            meta,
+            f"Use `meta.proposal` and `meta.expected_hash` from the carrying finding "
+            f"at {carrier_path!r}. Do not save `proposed_entry` on its own; it is a "
+            "description, not a registry.",
+        )
+
+    findings: list[AuditFinding] = []
+    for page, folder, type_id in unknown_entities:
+        raw_type = str(page.frontmatter["entity_type"])
+        label = type_id.replace("-", " ").title()
+        entry, proposal, reason = proposed_entry(
+            type_id,
+            preferred_folder_by_type[type_id],
+            label,
+            authored_type_counts[type_id],
+        )
+        meta, proposed_fix = proposal_meta(
+            entry=entry,
+            proposal=proposal,
+            reason=reason,
+            signal_version=_page_signal_version(page),
+            carrier_path=carrier_path_by_type_folder[(type_id, folder.casefold())],
+            finding_path=page.rel_path,
+        )
         findings.append(
             AuditFinding(
                 category="entity_type_unregistered",
@@ -1773,10 +1841,7 @@ def _check_unregistered_entity_types(
                 detail=(
                     f"Entity type {raw_type!r} is not in the active entity registry."
                 ),
-                proposed_fix=(
-                    "Review the proposed entry, then use the governed "
-                    "save-entity-types operation with why, or move the page."
-                ),
+                proposed_fix=proposed_fix,
                 meta=meta,
             )
         )
@@ -1804,13 +1869,14 @@ def _check_unregistered_entity_types(
             folder.title(),
             len(paths),
         )
-        meta = {
-            "proposed_entry": entry,
-            "proposal": proposal,
-            "signal_version": signal,
-        }
-        if reason is not None:
-            meta["reason"] = reason
+        meta, proposed_fix = proposal_meta(
+            entry=entry,
+            proposal=proposal,
+            reason=reason,
+            signal_version=signal,
+            carrier_path=paths[0],
+            finding_path=paths[0],
+        )
         findings.append(
             AuditFinding(
                 category="entity_type_unregistered",
@@ -1820,10 +1886,7 @@ def _check_unregistered_entity_types(
                 detail=(
                     f"{len(paths)} entity pages live under unregistered folder {folder!r}."
                 ),
-                proposed_fix=(
-                    "Review the proposed entry, then use the governed "
-                    "save-entity-types operation with why, or move the pages."
-                ),
+                proposed_fix=proposed_fix,
                 meta=meta,
             )
         )

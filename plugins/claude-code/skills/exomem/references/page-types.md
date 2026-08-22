@@ -463,7 +463,10 @@ active entity registry exposed by bootstrap.
 Vaults extend the five core kinds through the user-owned
 `_Schema/entity-types.yaml` registry. The governed save operation validates the
 whole proposal before writing it; deprecated types stay recorded rather than
-being deleted. For example:
+being deleted. An unregistered-type finding supplies `proposal` and
+`expected_hash`; save those exact values with a `why` through
+`schema_memory(operation="save-entity-types")`. Its `proposed_entry` is only a
+description, not a registry payload. For example:
 
 ```yaml
 schema_version: 1

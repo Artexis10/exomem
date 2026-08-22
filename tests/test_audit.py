@@ -3,9 +3,12 @@ parent-vault wikilinks must resolve (SKILL.md rule 1 allows them)."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from exomem import attention as attention_module
 from exomem import audit as audit_module
@@ -83,9 +86,166 @@ def test_unregistered_entity_type_is_an_attention_finding_with_proposed_entry(
         "folder": "Places",
         "label": "Place",
         "aliases": [],
-        "capture_guidance": "A stable place identity with reusable context.",
         "page_count": 1,
     }
+
+
+def test_unregistered_type_finding_guides_to_the_full_proposal(
+    tmp_path: Path,
+) -> None:
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                "venue": {
+                    "folder": "Venues",
+                    "label": "Venue",
+                    "aliases": [],
+                    "capture_guidance": "A stable synthetic venue identity.",
+                }
+            },
+        },
+    )
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+
+    finding = audit_module.audit(
+        tmp_path, categories=["entity_type_unregistered"]
+    ).findings[0]
+    meta = finding.meta
+
+    assert "meta.proposal" in finding.proposed_fix
+    assert "expected_hash" in finding.proposed_fix
+    assert "capture_guidance" not in meta["proposed_entry"]
+    _save_proposal(
+        tmp_path,
+        meta["proposal"],
+        expected_hash=meta["expected_hash"],
+    )
+    assert set(entity_types_module.load_entity_types(tmp_path).extensions) == {
+        "place",
+        "venue",
+    }
+
+
+def test_stale_offer_is_refused_after_an_interleaving_registration(
+    tmp_path: Path,
+) -> None:
+    _write_entity(
+        tmp_path,
+        folder="Halls",
+        name="Aster Hall",
+        entity_type="hall",
+    )
+    offer = audit_module.audit(
+        tmp_path, categories=["entity_type_unregistered"]
+    ).findings[0].meta
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                "gadget": {
+                    "folder": "Gadgets",
+                    "label": "Gadget",
+                    "aliases": [],
+                    "capture_guidance": "A stable synthetic gadget identity.",
+                }
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="STALE_ENTITY_TYPE_REGISTRY"):
+        _save_proposal(
+            tmp_path,
+            offer["proposal"],
+            expected_hash=offer["expected_hash"],
+        )
+
+    assert set(entity_types_module.load_entity_types(tmp_path).extensions) == {
+        "gadget"
+    }
+
+
+def test_proposal_is_emitted_once_per_distinct_type_and_folder(
+    tmp_path: Path,
+) -> None:
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                f"kind-{index:02d}": {
+                    "folder": f"Kind{index:02d}s",
+                    "label": f"Kind {index:02d}",
+                    "aliases": [],
+                    "capture_guidance": "A stable synthetic identity.",
+                }
+                for index in range(40)
+            },
+        },
+    )
+    for index in range(30):
+        _write_entity(
+            tmp_path,
+            folder="Places",
+            name=f"Aster Hall {index:02d}",
+            entity_type="place",
+        )
+
+    findings = audit_module.audit(
+        tmp_path, categories=["entity_type_unregistered"]
+    ).findings
+    carriers = [finding for finding in findings if "proposal" in finding.meta]
+    references = [
+        finding for finding in findings if "proposal_carrier" in finding.meta
+    ]
+
+    assert len(carriers) == 1
+    assert len(references) == 29
+    assert all(
+        finding.meta["proposal_carrier"] == carriers[0].path
+        for finding in references
+    )
+    carrier_bytes = len(json.dumps(carriers[0].meta, sort_keys=True))
+    total_bytes = sum(
+        len(json.dumps(finding.meta, sort_keys=True)) for finding in findings
+    )
+    assert total_bytes < 4 * carrier_bytes
+
+
+def test_one_unregistered_id_across_folders_yields_one_proposal(
+    tmp_path: Path,
+) -> None:
+    for folder, names in (
+        ("Rooms", ("Aster", "Beryl")),
+        ("Halls", ("Cedar", "Dahlia", "Elm")),
+    ):
+        for name in names:
+            _write_entity(
+                tmp_path,
+                folder=folder,
+                name=name,
+                entity_type="place",
+            )
+
+    findings = audit_module.audit(
+        tmp_path, categories=["entity_type_unregistered"]
+    ).findings
+    carriers = [finding for finding in findings if "proposal" in finding.meta]
+
+    assert len(carriers) == 2
+    assert {finding.meta["proposed_entry"]["folder"] for finding in findings} == {
+        "Halls"
+    }
+    assert len(
+        {json.dumps(finding.meta["proposal"], sort_keys=True) for finding in carriers}
+    ) == 1
 
 
 def test_unregistered_type_finding_resolves_when_the_type_is_registered(
@@ -282,7 +442,6 @@ def test_three_pages_under_an_unregistered_folder_trigger_the_finding_two_do_not
         "folder": "Venues",
         "label": "Venues",
         "aliases": [],
-        "capture_guidance": "A stable venues identity with reusable context.",
         "page_count": 3,
     }
 

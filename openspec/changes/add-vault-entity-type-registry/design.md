@@ -48,7 +48,7 @@ An `entity_type_unregistered` finding exists when either predicate is true for c
 1. An `Entities/**` Markdown page declares an `entity_type` that does not resolve to an active registry ID.
 2. At least three pages are present beneath an immediate `Entities/<Folder>` directory whose folder does not resolve to an active registry type.
 
-The finding is deterministic, carries the affected path/count and a ready `proposed_entry`, and is composed into attention as audit state. It has no portable dismissal state: registering the type or moving/correcting the pages makes the predicate false.
+The finding is deterministic, carries the affected path/count and a ready `proposed_entry`, and is composed into attention as audit state. Attention deliberately adds a `decision` key to every reason: ordinary reasons carry the recorded action while state-resolved-only reasons carry `null`. It has no portable dismissal state: registering the type or moving/correcting the pages makes the predicate false.
 
 Alternatives considered and rejected: a two-page threshold is too eager for incidental staging; dismissing the finding would conceal unchanged authored state; automatic registration would turn a measurement into an unreviewed mutation.
 
