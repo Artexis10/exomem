@@ -27,7 +27,6 @@ _DESCRIPTOR_ID = "authorization-projections"
 _OWNER = "governance.projections"
 _STORE_FILENAME = "rows.sqlite"
 _STORE_STATUS = "measurement-rows-ready"
-_FAMILY_DOMAIN = b"exomem.authorization-projection-measurement-family.v1"
 _ROW_DOMAIN = b"exomem.authorization-projection-measurement-row.v1"
 _STORE_DOMAIN = b"exomem.authorization-projection-measurements.v1"
 _LANES = frozenset({"vector", "clip", "graph"})
@@ -133,17 +132,11 @@ class MeasurementFamilyKey:
 
     @property
     def family_id(self) -> str:
-        key = self.namespace_key
-        return _framed_digest(
-            _FAMILY_DOMAIN,
-            (
-                key.policy_fingerprint.encode("ascii"),
-                str(key.projector_schema_version).encode("ascii"),
-                str(key.catalog_generation).encode("ascii"),
-                self.lane.encode("ascii"),
-                self.extractor_version.encode("utf-8"),
-                self.model_version.encode("utf-8"),
-            ),
+        return projection_store.projection_measurement_family_id(
+            self.namespace_key,
+            lane=self.lane,
+            extractor_version=self.extractor_version,
+            model_version=self.model_version,
         )
 
 
@@ -163,6 +156,27 @@ class _StoredRow:
     measurement: ProjectionMeasurement
     payload: bytes
     row_digest: str
+
+
+def measurement_root(
+    manifest: MeasurementStoreManifest,
+) -> projection_store.ProjectionMeasurementRoot:
+    """Return the exact active-tuple commitment for one verified family."""
+
+    if not isinstance(manifest, MeasurementStoreManifest):
+        raise MeasurementStoreMismatch("measurement store manifest is unavailable")
+    family = manifest.family
+    return projection_store.ProjectionMeasurementRoot(
+        namespace_key=family.namespace_key,
+        family_id=family.family_id,
+        lane=family.lane,
+        extractor_version=family.extractor_version,
+        model_version=family.model_version,
+        measurement_count=manifest.measurement_count,
+        vector_dimension=manifest.vector_dimension,
+        graph_edge_count=manifest.graph_edge_count,
+        rows_digest=manifest.rows_digest,
+    )
 
 
 def measurement_store_path(vault_root: Path, family: MeasurementFamilyKey) -> Path:
@@ -917,6 +931,7 @@ __all__ = [
     "load_graph_index",
     "load_measurement_store",
     "load_vector_index",
+    "measurement_root",
     "measurement_store_path",
     "stage_measurement_store",
     "verify_measurement_store",
