@@ -31,7 +31,7 @@ exomem_id: {IDENTITY}
     return path
 
 
-def test_attention_adds_stable_review_and_target_refs_without_state_write(
+def test_attention_adds_stable_review_and_target_refs_without_a_decision(
     tmp_path: Path,
 ) -> None:
     _write_isolated(tmp_path)
@@ -47,7 +47,10 @@ def test_attention_adds_stable_review_and_target_refs_without_state_write(
         second.items[0].ref,
         second.items[0].fingerprint,
     )
-    assert not review_state.state_path(tmp_path).exists()
+    # Listing records no DECISION. The store itself is no longer absent after a
+    # listing — attention stamps the first-surfaced ledger — but `records`, the
+    # triage state, stays empty until somebody actually triages something.
+    assert review_state.ReviewStateStore(tmp_path).load()["records"] == {}
 
 
 def test_dismiss_filters_matching_fingerprint_and_changed_content_resurfaces(

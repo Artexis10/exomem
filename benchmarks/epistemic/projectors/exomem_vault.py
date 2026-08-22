@@ -224,8 +224,11 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     ),
     FieldDeclaration(
         field="due_state_counters",
-        status="unavailable",
-        evidence="docs/product-gap-matrix.md:100",
+        # Flipped from `unavailable` by the nag-governance slice: the emission
+        # governor used to be per-process memory no projector could read, and
+        # the projection file now persists the write and emission counts.
+        status="available_via:due_state_file",
+        evidence="docs/epistemic-inbox.md:146",
     ),
     FieldDeclaration(
         field="continuation_packet",
@@ -236,7 +239,16 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
 
 #: The documented triage store. Decisions live here, not in note frontmatter,
 #: so the dismissal projection reads it rather than inferring from pages.
+#:
+#: A real vault keeps it inside the governed Knowledge Base directory; the
+#: synthetic corpora write it at the vault root. Both are looked for, in that
+#: order, because a projector that only knew the fixture layout reported every
+#: real run's triage store as unavailable.
 REVIEW_STATE_FILE = ".review-state.json"
+#: The maintained due-state projection, carrying the persisted emission ledger.
+DUE_STATE_FILE = ".due-state.json"
+#: Where a vault-local state file may live, relative to the vault root.
+STATE_DIRECTORIES: tuple[str, ...] = ("Knowledge Base", "")
 
 #: ``surface name -> (projection status, why)`` for the four surfaces a quiet
 #: assertion must prove absence on. Only ``review_queue`` has a file surface at
@@ -246,8 +258,41 @@ REVIEW_STATE_FILE = ".review-state.json"
 UNPROJECTABLE_SURFACES: Mapping[str, str] = {
     "audit_findings": "governance receipts are not a file surface; see completeness notes",
     "proposal_queue": "relation/compile proposals are computed server-side, not stored as files",
-    "due_state_counters": "no due-state counters block exists in the product",
 }
+
+#: Why the due-state counters surface reports nothing on a vault that has none.
+NO_DUE_STATE_LEDGER = (
+    f"{DUE_STATE_FILE} carries no emission ledger; nothing has been counted or emitted"
+)
+
+
+#: The triage store records the *verb* a person used; the neutral schema names
+#: the resulting *state*. Without the mapping a real vault's dismissal projects
+#: as ``dismiss``, which is in none of the schema's review-state vocabularies,
+#: so a genuine decision reads as no decision at all. The synthetic corpora
+#: write the state directly, which is why only a real vault exposed this.
+ACTION_TO_REVIEW_STATE: Mapping[str, str] = MappingProxyType(
+    {
+        "dismiss": "dismissed",
+        "snooze": "snoozed",
+        "reopen": "reopened",
+        "competing": "conflict",
+    }
+)
+
+
+def _review_state_of(decision: Mapping[str, Any]) -> str:
+    """The neutral review state a stored decision means."""
+
+    raw = str(decision.get("action") or decision.get("state") or "").strip()
+    return ACTION_TO_REVIEW_STATE.get(raw.casefold(), raw)
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -533,17 +578,22 @@ class VaultProjector(Projector):
                 )
             )
 
-        triage_path = self.vault_root / REVIEW_STATE_FILE
+        projected.append(self._project_due_state_counters())
+
+        triage_path = self._state_file(REVIEW_STATE_FILE)
         decisions: dict[str, Any] = {}
         projection = "unavailable"
-        if triage_path.is_file():
-            try:
-                loaded = json.loads(triage_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                loaded = None
+        if triage_path is not None:
+            loaded = _read_json(triage_path)
             if isinstance(loaded, dict):
-                raw_decisions = loaded.get("decisions")
-                decisions = raw_decisions if isinstance(raw_decisions, dict) else {}
+                # Schema 2 sections the store; schema 1 was flat. The synthetic
+                # corpora write `decisions`. Read all three rather than pinning
+                # one, so a projection is not silently empty after a migration.
+                for key in ("records", "decisions"):
+                    raw_decisions = loaded.get(key)
+                    if isinstance(raw_decisions, dict) and raw_decisions:
+                        decisions = raw_decisions
+                        break
                 projection = "complete"
         projected.append(
             StateItem(
@@ -557,7 +607,7 @@ class VaultProjector(Projector):
         for target, decision in sorted(decisions.items()):
             if not isinstance(decision, dict):
                 continue
-            state = str(decision.get("action") or decision.get("state") or "").strip()
+            state = _review_state_of(decision)
             fingerprint = str(decision.get("fingerprint") or "").strip()
             if not state or not fingerprint:
                 continue
@@ -576,6 +626,53 @@ class VaultProjector(Projector):
                 )
             )
         return tuple(projected)
+
+    def _state_file(self, filename: str) -> Path | None:
+        for directory in STATE_DIRECTORIES:
+            candidate = (
+                self.vault_root / directory / filename
+                if directory
+                else self.vault_root / filename
+            )
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _project_due_state_counters(self) -> StateItem:
+        """The persisted emission ledger, or an honest absence.
+
+        `writes` is how many governed writes the projection absorbed and
+        `emissions` how many due-state blocks were actually delivered. The
+        counter-repetition assertion is exactly the comparison of those two, so
+        a projector that guessed either would decide the family's verdict.
+        """
+        path = self._state_file(DUE_STATE_FILE)
+        payload = _read_json(path) if path is not None else None
+        ledger = payload.get("emission") if isinstance(payload, dict) else None
+        if not isinstance(ledger, dict):
+            return StateItem(
+                id="surface-due_state_counters",
+                kind="container",
+                title="due_state_counters",
+                text=NO_DUE_STATE_LEDGER,
+                raw={
+                    "surface": "due_state_counters",
+                    "projection": "unavailable",
+                    "reason": NO_DUE_STATE_LEDGER,
+                },
+            )
+        return StateItem(
+            id="surface-due_state_counters",
+            kind="container",
+            title="due_state_counters",
+            text=f"{DUE_STATE_FILE} emission ledger",
+            raw={
+                "surface": "due_state_counters",
+                "projection": "complete",
+                "writes": str(int(ledger.get("writes") or 0)),
+                "emissions": str(int(ledger.get("emissions") or 0)),
+            },
+        )
 
     def declarations(self) -> tuple[FieldDeclaration, ...]:
         return FIELD_DECLARATIONS

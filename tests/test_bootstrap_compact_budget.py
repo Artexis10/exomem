@@ -78,7 +78,37 @@ from exomem import commands
 #: 31.46% recorded for the previous raise is stale: the payload has moved since,
 #: and the two figures here are both measured on the current tree, which is why
 #: they do not chain onto it.)
-COMPACT_BYTE_CEILING = 59_500
+#:
+#: Raised a third time, measured on the final tree with the same method. The floor
+#: at 59,500 measured 59,096 — exactly what the previous raise recorded, so nothing
+#: else moved in between. Nag governance adds three `authoring_contract.post_write`
+#: entries: `review_reason` (220 B), `family_disposition` (396 B) and
+#: `family_disposition_reading` (290 B), 912 bytes with separators, taking compact
+#: to 60,008. The dispositions and the ledger they describe cost this measurement
+#: nothing: both are vault-derived and empty on the fixture.
+#:
+#: Why these bytes earn their place. The change gives a user a way to say "stop
+#: suggesting this kind of thing" and gives the runtime a reason code to count. An
+#: agent that has not been taught either does the two things this change exists to
+#: prevent: it answers the request by lowering prominence, which silences every
+#: family including the ones the user still wants, and it writes free-text `why`
+#: strings that record `unspecified`, leaving the metrics with no denominator. A
+#: hookless client receives this payload and nothing else, so untaught here is
+#: untaught anywhere.
+#:
+#: Fitting under 59,500 was examined and rejected. It needed roughly 508 bytes,
+#: which is two of the three entries. `review_reason` (220 B) is the vocabulary
+#: itself; without it no code is ever composed. `family_disposition_reading`
+#: (290 B) is the line saying a quiet family is silent rather than clean, which is
+#: precisely the misreading a per-family silence introduces and the reason the
+#: spec requires it. Collapsing `family_disposition` to the reference form alone
+#: (~200 B) would drop "rather than lowering prominence" — the wrong answer the
+#: guidance exists to displace.
+#:
+#: The new ceiling is 60,400: 392 bytes of headroom, again deliberately less than
+#: the 404 the last raise left, and ~3.7 KB below the 64,070-byte regression point.
+#: `MINIMUM_SAVING_RATIO` is untouched; the saving moved 35.63% -> 34.63%.
+COMPACT_BYTE_CEILING = 60_400
 
 #: The defect was compact and full being near-identical. A profile that does not
 #: measurably differ from full is not a profile.

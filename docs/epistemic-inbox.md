@@ -74,3 +74,78 @@ changes.
 Existing vaults are repaired incrementally through this loop. There is no
 automatic bulk rewrite, and semantic similarity alone never becomes a durable
 typed relation.
+
+## Reason codes
+
+Every triage decision records *why*, as a closed code. Lead the free text with
+one of `intentional:`, `false_positive:`, `handled:`, `deferred:`, or
+`too_frequent:`; anything else records `unspecified` and is never an error for
+an item decision. The CLI composes the token for you:
+
+```bash
+exomem review dismiss exomem://review/0123456789abcdef01234567 \
+  --reason handled --why "closed in the incident review"
+```
+
+The code rides inside the existing free-text `why` rather than a parameter of
+its own, so no tool input schema moves and a client that only ever sends `why`
+keeps working unchanged. The `why` is stored verbatim either way: a closed code
+alone does not say what you actually meant.
+
+Each record also carries an `origin`: `manual` when a person decided through
+the triage surface, `automatic` when the runtime wrote it itself. Records
+migrated from the older schema carry `manual`, because that schema could only
+be written by the triage surface.
+
+## Silencing a whole signal family
+
+Triage is per item. When a *kind* of signal is noise for your corpus, set that
+family's disposition instead of lowering prominence, which silences everything:
+
+```bash
+exomem review quiet prediction_window --reason too_frequent --why "fires more than it helps"
+exomem review off near-duplicate --reason false_positive
+exomem review normal prediction_window
+```
+
+Agents use the same `triage_memory` command with a family reference,
+`exomem://review/family/<family>`, and the `quiet`, `off`, or `normal` action.
+`quiet` and `off` require a reason code.
+
+- `quiet` drops the family from the default review union, from every due-state
+  carrier, and from write-path advisories, while it stays reachable on an
+  explicit category request.
+- `off` additionally drops it from explicit category review; only the
+  all-states view still shows it.
+- `normal` restores it.
+
+**A quiet family is silent, not clean.** The full audit still measures it, and a
+due-state block that omits a family is never evidence that family has nothing
+due. `review_memory(mode="dispositions")` lists every non-default family with
+its reason, `why`, timestamp, origin, and the number of items of that family
+you had already dismissed by hand before quieting it.
+
+## What the review store records, and how it stays small
+
+`Knowledge Base/.review-state.json` holds three things: the triage decisions,
+the family dispositions, and a first-surfaced ledger recording when each signal
+first reached a served surface — the review list, a due-state carrier, or a
+write advisory. Nothing withheld by governance, filtered by a disposition, or
+seen only by the audit is ever recorded, the ledger is never backfilled, and a
+store that cannot be written changes nothing a reader acts on.
+
+The store compacts itself. Expired snoozes older than 90 days and ledger
+entries older than 400 days are dropped once the file passes its size or record
+threshold; a standing decision is never dropped, whatever its age. The drop is
+reported under `stats.compaction` with `origin: automatic`, and
+`maintain_memory(mode="reconcile")` returns the same report so a compaction is
+never silent.
+
+## Emission counters
+
+`Knowledge Base/.due-state.json` carries the maintained due-state projection and
+an `emission` section: `writes` counts the governed writes the projection has
+absorbed and `emissions` counts the due-state blocks actually delivered. A
+command that writes many pages at once is one batch, and a batch delivers at
+most one block rather than one per write — the counters are how that is
+checkable rather than merely claimed.

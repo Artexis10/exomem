@@ -71,7 +71,14 @@ class Envelope:
     executable: Path
     version: str
 
-    def run(self, args: Sequence[str], *, cwd: Path, timeout: float = 60.0) -> str:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        timeout: float = 60.0,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> str:
         completed = subprocess.run(  # noqa: S603 - resolved executable, fixed argv
             [str(self.executable), *args],
             cwd=str(cwd),
@@ -86,6 +93,9 @@ class Envelope:
                 # well-formed refusal that looked like a product failure and was
                 # in fact a harness one.
                 "EXOMEM_VAULT_PATH": str(cwd),
+                # Documented configuration a journey varies deliberately, such
+                # as the prominence level f23 sweeps across its declared range.
+                **dict(extra_env or {}),
             },
         )
         if completed.returncode != 0:
