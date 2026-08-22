@@ -12,7 +12,7 @@ from typing import Any
 
 _TASK = re.compile(r"^\s*-\s+\[([ xX])\]\s+\S")
 _CHECKBOX_LIKE = re.compile(r"^\s*-\s+\[[^]]*\]")
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 
 
 def _task_content(lines: Sequence[str]) -> list[str]:

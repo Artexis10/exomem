@@ -95,6 +95,21 @@ def test_fenced_checked_example_is_not_a_task_list(tmp_path: Path) -> None:
     ]
 
 
+def test_list_nested_fenced_example_does_not_hide_complete_tasks(tmp_path: Path) -> None:
+    _write_tasks(
+        tmp_path,
+        "shipped-with-nested-example",
+        "- [x] implementation\n\n- Example:\n    ```markdown\n    - [ ] example only\n    ```\n",
+    )
+
+    result = _run(tmp_path, json_output=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["complete_active_changes"] == ["shipped-with-nested-example"]
+    assert payload["unchecked_active_changes"] == []
+
+
 def test_missing_empty_malformed_and_archived_tasks_do_not_claim_completion(
     tmp_path: Path,
 ) -> None:
