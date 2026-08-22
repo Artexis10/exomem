@@ -431,10 +431,37 @@ def reconcile(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
     # The projection is derived and rebuilt from authored state; the emission
     # ledger is a MEASUREMENT of what this vault has told its callers, and a
     # heal is not a reason to forget it.
-    payload["emission"] = _emission_section(existing)
+    # The healer recomputes everything, so it is the one place the due total is
+    # known for free. Recording it here matters because the write carrier only
+    # records what it served, and the carrier returns early on a vault with no
+    # projection yet — so on a freshly reconciled vault the denominator would
+    # otherwise still read zero and make "nothing was emitted" unreadable.
+    payload["emission"] = _emission_delta(
+        existing, due_total=_due_total(payload, today or dt.date.today())
+    )
     save(vault_root, payload)
     _remember_unpersisted(vault_root, payload)
     return payload
+
+
+def _due_total(payload: dict[str, Any], today: dt.date) -> int:
+    """How many projected entries are due on or before `today`, before egress.
+
+    Deliberately unfiltered: this is the denominator of an internal metric,
+    stored in the same file that already holds every entry, so an audience
+    filter here would make the number mean something different on every read.
+    What a given audience may SEE is what `served_entries` decides.
+    """
+    total = 0
+    for pages in (payload.get("categories") or {}).values():
+        if not isinstance(pages, dict):
+            continue
+        for entries in pages.values():
+            for entry in _unbucket(entries):
+                due = _date(entry.get("due"))
+                if due is not None and due <= today:
+                    total += 1
+    return total
 
 
 def _remember_unpersisted(vault_root: Path, payload: dict[str, Any]) -> None:
@@ -555,11 +582,17 @@ def apply_write_delta(
 def _emission_section(payload: dict[str, Any] | None) -> dict[str, Any]:
     section = (payload or {}).get("emission")
     if not isinstance(section, dict):
-        return {"writes": 0, "emissions": 0, "last_digest": None}
+        return {"writes": 0, "emissions": 0, "last_digest": None, "due_total": 0}
     return {
         "writes": int(section.get("writes") or 0),
         "emissions": int(section.get("emissions") or 0),
         "last_digest": section.get("last_digest"),
+        # How many items the last write carrier actually had to report. Without
+        # it "0 emissions for 12 writes" is unreadable: it is the behaviour the
+        # governance is supposed to produce AND the behaviour of a vault that
+        # owed nothing, and a metric that cannot tell those apart cannot be
+        # used to claim either one.
+        "due_total": int(section.get("due_total") or 0),
     }
 
 
@@ -569,12 +602,15 @@ def _emission_delta(
     writes: int = 0,
     emissions: int = 0,
     last_digest: str | None = None,
+    due_total: int | None = None,
 ) -> dict[str, Any]:
     section = _emission_section(payload)
     section["writes"] += writes
     section["emissions"] += emissions
     if last_digest is not None:
         section["last_digest"] = last_digest
+    if due_total is not None:
+        section["due_total"] = int(due_total)
     return section
 
 
@@ -601,8 +637,31 @@ def _record_emission(vault_root: Path | None, digest: str) -> None:
         log.debug("could not record the due-state emission", exc_info=True)
 
 
+def _record_due_total(vault_root: Path | None, total: int) -> None:
+    """Persist how much this write carrier had to report. Best effort.
+
+    Written only when the number MOVES, so a run of writes that changes nothing
+    costs no extra file replace. The denominator has to be recorded whether or
+    not a block was emitted — that is the whole point of it — so this sits with
+    production rather than with `mark_emitted`.
+    """
+    if not vault_root:
+        return
+    try:
+        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+        if payload is None:
+            return
+        if _emission_section(payload)["due_total"] == int(total):
+            return
+        payload = {**payload, "emission": _emission_delta(payload, due_total=int(total))}
+        save(vault_root, payload)
+        _remember_unpersisted(vault_root, payload)
+    except Exception:  # noqa: BLE001 — a ledger write never breaks a response
+        log.debug("could not record the due-state total", exc_info=True)
+
+
 def emission_ledger(vault_root: Path) -> dict[str, Any]:
-    """The persisted `{writes, emissions, last_digest}` a projector reads."""
+    """The persisted `{writes, emissions, last_digest, due_total}` a projector reads."""
     return _emission_section(load(vault_root) or _UNPERSISTED.get(str(vault_root)))
 
 
@@ -772,7 +831,6 @@ def served_entries(
             row["ref"],
         )
     )
-    _record_served(vault_root, rows, known=state_payload)
     return rows
 
 
@@ -787,28 +845,63 @@ def _excluded_families(state_payload: dict[str, Any]) -> frozenset[str]:
     return frozenset(review_state_module.disposition_map(state_payload))
 
 
-def _record_served(
-    vault_root: Path, rows: list[dict[str, Any]], *, known: dict | None = None
-) -> None:
-    """Stamp the first surfacing of the references this carrier actually serves.
+def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> None:
+    """Stamp the references a DELIVERED block actually put on the wire.
 
-    `TOP_LIMIT` rather than every row, because `top` is what a carrier puts on
-    the wire; a row that only contributed to a count was never shown to anybody.
-    Everything here is already past egress, the triage filter and the
-    disposition filter, so nothing withheld or excluded can reach the ledger.
+    Called from `mark_emitted` and from nowhere else, because producing a block
+    is not surfacing it. Four things between production and delivery can drop
+    it — a batch scope, the change-only governor, a `legacy` detail level, and
+    terminal validation — and each of them means the caller was shown nothing.
+    Stamping at production time recorded a first surfacing for references that
+    reached no one, which is a false measurement in the one ledger whose whole
+    purpose is to say what reached a person.
+
+    The block's own `top` is the wire content, so it is exactly the right set:
+    a row that only contributed to `total` was never shown. Everything in it is
+    already past egress, the triage filter and the disposition filter, because
+    that is where `served_entries` put it.
+
+    The fingerprints come from the projection the block was built from: the wire
+    block deliberately carries refs and dates only, and widening it to carry a
+    fingerprint would put an internal identity on a public surface for the sake
+    of a ledger write.
     """
-    served_rows = rows[:TOP_LIMIT]
-    if not served_rows:
+    if not vault_root or not block:
+        return
+    rows = [row for row in (block.get("top") or []) if isinstance(row, dict)]
+    if not rows:
         return
     try:
-        review_state_module.record_surfaced(
-            vault_root,
-            [(_ref_id(row["ref"]), row["fingerprint"]) for row in served_rows],
-            surface="carrier",
-            known=known,
-        )
+        projection = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+        if projection is None:
+            return
+        fingerprints = _fingerprints_by_ref(projection)
+        entries = []
+        for row in rows:
+            ref = str(row.get("ref") or "")
+            finger = fingerprints.get(ref)
+            if ref and finger:
+                entries.append((_ref_id(ref), finger))
+        if not entries:
+            return
+        review_state_module.record_surfaced(vault_root, entries, surface="carrier")
     except Exception:  # noqa: BLE001 — a ledger write never breaks a carrier
         log.debug("first-surfaced ledger not recorded for the carrier", exc_info=True)
+
+
+def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
+    """``ref -> fingerprint`` over the whole projection. One pass, no ordering."""
+    out: dict[str, str] = {}
+    for pages in (payload.get("categories") or {}).values():
+        if not isinstance(pages, dict):
+            continue
+        for entries in pages.values():
+            for entry in _unbucket(entries):
+                ref = str(entry.get("ref") or "")
+                finger = str(entry.get("fingerprint") or "")
+                if ref and finger:
+                    out.setdefault(ref, finger)
+    return out
 
 
 def _ref_id(ref: str) -> str:
@@ -879,7 +972,9 @@ def block_for_write(
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        return served(vault_root, today=today)
+        block_payload = served(vault_root, today=today)
+    _record_due_total(vault_root, int((block_payload or {}).get("total") or 0))
+    return block_payload
 
 
 # --------------------------------------------------------------------------
@@ -972,6 +1067,10 @@ def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = No
     # Outside the lock: the ledger write reads and replaces the projection file,
     # and `_remember_unpersisted` takes this same non-reentrant lock.
     _record_emission(vault_root, digest)
+    # This is the moment the block became something a person was shown, so it is
+    # the moment the first-surfaced ledger may record its refs. See
+    # `_record_delivered`.
+    _record_delivered(vault_root, payload)
 
 
 def should_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> bool:

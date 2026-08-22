@@ -50,6 +50,7 @@ caller so a journey artifact is reproducible from its inputs.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -83,13 +84,31 @@ OPEN_TITLE = "f23 open probe conclusion"
 DISMISSAL_REASON = "handled"
 DISMISSAL_WHY = "settled outside the vault by the journey"
 
+def _prominence_levels() -> tuple[str, ...]:
+    """The product's own declared level range, or the two ends if it moves.
+
+    Read from `exomem.prominence.CANON` rather than restated, so a level added
+    to the product is swept without anyone remembering to update the bench. The
+    fallback is deliberate and narrow: this module is importable without the
+    product installed (the registry imports it to enumerate journeys), and a
+    hard import error there would take the whole family down rather than one
+    journey.
+    """
+    try:
+        from exomem.prominence import CANON
+    except Exception:  # noqa: BLE001 — the bench runs without the product installed
+        return ("off", "maximal")
+    return tuple(str(level) for level in CANON)
+
+
 #: Review passes run *after* the dismissal. Three rather than one because the
 #: family's claim is about repetition, and one pass cannot show a repeat.
 DEFAULT_PASSES = 3
 
-#: Both ends of the declared prominence range. A dismissal that only survives
-#: the default level has not survived reconfiguration.
-PROMINENCE_LEVELS: tuple[str, ...] = ("off", "maximal")
+#: The WHOLE declared prominence range, read from the product rather than
+#: restated. A dismissal that only survives the two ends has not survived
+#: reconfiguration; the spec says the level range, so the sweep is the range.
+PROMINENCE_LEVELS: tuple[str, ...] = _prominence_levels()
 
 #: Files the single bulk-ingest command absorbs. Two would satisfy the
 #: assertion's `writes >= 2` floor; twelve makes the difference between one
@@ -167,12 +186,26 @@ def seed_bulk_documents(vault: Path, *, count: int = BULK_DOCUMENTS) -> tuple[st
     directory = vault / BULK_DIRECTORY
     directory.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
+    today = dt.date.today()
     for index in range(1, count + 1):
         relative = f"{BULK_DIRECTORY}/f23-bulk-{index:02d}.md"
+        # A DISTINCT overdue `check_by` per file, so each absorbed page adds one
+        # more due item and the counters digest therefore moves on every write.
+        # Identical (or absent) dates make the change-only rule produce the
+        # single-emission result for free, and a batch whose digest never moves
+        # cannot demonstrate that anything suppressed a repeat.
+        overdue = (today - dt.timedelta(days=index)).isoformat()
         (vault / relative).write_text(
             f"# Legacy note {index:02d}\n"
             "\n"
-            "A legacy document absorbed by the f23 bulk ingest.\n",
+            "A legacy document absorbed by the f23 bulk ingest.\n"
+            "\n"
+            "## Prediction\n"
+            "\n"
+            f"- id: f23-bulk-{index:02d}\n"
+            f"- check_by: {overdue}\n"
+            "\n"
+            f"The legacy claim {index:02d} still holds.\n",
             encoding="utf-8",
         )
         written.append(relative)

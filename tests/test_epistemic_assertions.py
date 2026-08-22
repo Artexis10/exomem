@@ -722,34 +722,42 @@ def dismissal_respected_across_passes_fail() -> AssertionContext:
     )
 
 
-def counter_emission_not_repeated_per_write_pass() -> AssertionContext:
+def _counters(**raw: str) -> AssertionContext:
     block = item(
         "surface-due_state_counters",
         kind="container",
-        raw={
-            "surface": "due_state_counters",
-            "projection": "complete",
-            "emissions": "1",
-            "writes": "12",
-        },
+        raw={"surface": "due_state_counters", "projection": "complete", **raw},
     )
     return AssertionContext(snapshot=snapshot((block,)))
+
+
+def counter_emission_not_repeated_per_write_pass() -> AssertionContext:
+    return _counters(emissions="1", writes="12", due_total="4")
 
 
 def counter_emission_not_repeated_per_write_fail() -> AssertionContext:
     """Mechanism removed: batching is gone, so one block is emitted per write."""
 
-    block = item(
-        "surface-due_state_counters",
-        kind="container",
-        raw={
-            "surface": "due_state_counters",
-            "projection": "complete",
-            "emissions": "12",
-            "writes": "12",
-        },
-    )
-    return AssertionContext(snapshot=snapshot((block,)))
+    return _counters(emissions="12", writes="12", due_total="4")
+
+
+def test_a_batch_that_owed_nothing_cannot_pass_the_counter_assertion() -> None:
+    """Anti-vacuity: `writes=12, emissions=0` on an empty queue decides nothing.
+
+    Governance suppressing eleven repeats and a vault with nothing to say
+    produce the identical counter pair. The denominator is what separates them,
+    so a reported `due_total` of zero yields `unsupported` — the bench's word
+    for "this run cannot decide the family" — rather than a free pass.
+    """
+
+    def outcome(**raw: str) -> str:
+        return resolve("counter_emission_not_repeated_per_write")(_counters(**raw)).outcome
+
+    assert outcome(emissions="0", writes="12", due_total="0") == "unsupported"
+    assert outcome(emissions="0", writes="12", due_total="4") == "pass"
+    # A projector that cannot report the denominator is not penalised for it;
+    # the gate only bites on a denominator that is present and empty.
+    assert outcome(emissions="0", writes="12") == "pass"
 
 
 def _packet_units() -> tuple[StateItem, ...]:

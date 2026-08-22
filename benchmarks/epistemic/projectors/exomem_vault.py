@@ -228,7 +228,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
         # governor used to be per-process memory no projector could read, and
         # the projection file now persists the write and emission counts.
         status="available_via:due_state_file",
-        evidence="docs/epistemic-inbox.md:146",
+        evidence="docs/epistemic-inbox.md:160",
     ),
     FieldDeclaration(
         field="continuation_packet",
@@ -271,12 +271,24 @@ NO_DUE_STATE_LEDGER = (
 #: as ``dismiss``, which is in none of the schema's review-state vocabularies,
 #: so a genuine decision reads as no decision at all. The synthetic corpora
 #: write the state directly, which is why only a real vault exposed this.
+#:
+#: There is no ``reopen`` row because there is no such record: reopening CLEARS
+#: every record under the item id, so a stored decision can only ever be one of
+#: the three below. A row for it would be a claim about the store that is false.
+#:
+#: ``competing`` maps to ``resolved`` rather than ``conflict`` because the
+#: neutral schema treats ``conflict`` as an OPEN state, and a competing-
+#: alternatives stance is the opposite: somebody decided, deliberately, that
+#: both rivals stand. Projected as ``conflict`` it read as outstanding review
+#: work, so a dismissal-respected assertion would see the item as still open.
+#: The trade is that the projection no longer says the decision was about a
+#: contradiction — which the neutral vocabulary has no closed word for, and
+#: which the item's own reasons carry anyway.
 ACTION_TO_REVIEW_STATE: Mapping[str, str] = MappingProxyType(
     {
         "dismiss": "dismissed",
         "snooze": "snoozed",
-        "reopen": "reopened",
-        "competing": "conflict",
+        "competing": "resolved",
     }
 )
 
@@ -641,10 +653,14 @@ class VaultProjector(Projector):
     def _project_due_state_counters(self) -> StateItem:
         """The persisted emission ledger, or an honest absence.
 
-        `writes` is how many governed writes the projection absorbed and
-        `emissions` how many due-state blocks were actually delivered. The
-        counter-repetition assertion is exactly the comparison of those two, so
-        a projector that guessed either would decide the family's verdict.
+        `writes` is how many governed writes the projection absorbed,
+        `emissions` how many due-state blocks were actually delivered, and
+        `due_total` how many items the last write carrier had to report. The
+        counter-repetition assertion is exactly the comparison of the first two,
+        so a projector that guessed either would decide the family's verdict —
+        and `due_total` is what stops the pass being vacuous, because "0
+        emissions for 12 writes" is equally the shape of working governance and
+        the shape of a vault that owed nothing.
         """
         path = self._state_file(DUE_STATE_FILE)
         payload = _read_json(path) if path is not None else None
@@ -671,6 +687,7 @@ class VaultProjector(Projector):
                 "projection": "complete",
                 "writes": str(int(ledger.get("writes") or 0)),
                 "emissions": str(int(ledger.get("emissions") or 0)),
+                "due_total": str(int(ledger.get("due_total") or 0)),
             },
         )
 

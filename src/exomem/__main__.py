@@ -2089,7 +2089,7 @@ def _simple_review_main(argv: list[str]) -> int:
     triage_actions = {"dismiss", "snooze", "reopen", "competing"}
     disposition_actions = {"quiet", "off", "normal"}
     if argv and argv[0] in triage_actions | disposition_actions:
-        from .review_state import REASON_CODES, family_ref
+        from .review_state import DEFAULT_REASON, REASON_CODES, family_ref
 
         action = argv[0]
         family = action in disposition_actions
@@ -2111,10 +2111,24 @@ def _simple_review_main(argv: list[str]) -> int:
         )
         if action == "snooze":
             parser.add_argument("--until", required=True, help="snooze through YYYY-MM-DD")
+        # `quiet` and `off` refuse `unspecified` in the store, so the CLI must
+        # refuse it at the parser. Accepting a value and then failing on it a
+        # layer down turns a spelling mistake into a runtime error with a
+        # different message, and hides the real vocabulary from `--help`.
+        reason_choices = (
+            tuple(code for code in REASON_CODES if code != DEFAULT_REASON)
+            if action in {"quiet", "off"}
+            else REASON_CODES
+        )
         parser.add_argument(
             "--reason",
-            choices=REASON_CODES,
-            help="closed reason code; required for quiet and off",
+            choices=reason_choices,
+            required=action in {"quiet", "off"},
+            help=(
+                "closed reason code (required)"
+                if action in {"quiet", "off"}
+                else "closed reason code"
+            ),
         )
         parser.add_argument("--why", help="optional review rationale")
         parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")

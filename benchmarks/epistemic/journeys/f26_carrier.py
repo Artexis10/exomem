@@ -87,15 +87,19 @@ class Envelope:
             timeout=timeout,
             env={
                 **os.environ,
+                # Documented configuration a journey varies deliberately, such
+                # as the prominence level f23 sweeps across its declared range.
+                # FIRST, so the pinned keys below win: a journey that could
+                # override `EXOMEM_VAULT_PATH` or re-enable embeddings would be
+                # measuring a different runtime than the harness set up, and the
+                # failure would look like a product one.
+                **dict(extra_env or {}),
                 "EXOMEM_DISABLE_EMBEDDINGS": "1",
                 # The envelope locates the vault from the environment, not from
                 # the working directory. Passing only ``cwd`` produced a
                 # well-formed refusal that looked like a product failure and was
                 # in fact a harness one.
                 "EXOMEM_VAULT_PATH": str(cwd),
-                # Documented configuration a journey varies deliberately, such
-                # as the prominence level f23 sweeps across its declared range.
-                **dict(extra_env or {}),
             },
         )
         if completed.returncode != 0:

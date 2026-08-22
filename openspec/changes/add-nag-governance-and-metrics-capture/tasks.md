@@ -6,8 +6,9 @@
 
 ## 2. Review-state store
 
-- [x] 2.1 Schema v2 with `records`, `dispositions`, `surfaced`, `stats`; v1 migration on load with rewrite on next write; older-runtime refusal unchanged; read limit raised to 16 MiB.
-  - Deviation: the read limit is **64 MiB**, not 16 MiB. 16 MiB is arithmetically unreachable at 50,000 records + 150,000 ledger entries — the keys alone are 10.1 MiB and the actual encoded store is 41.3 MiB. Measurements and reasoning are in `review_state._STATE_READ_LIMIT`'s docstring and in `.task/RESULT.md`.
+- [x] 2.1 Schema v2 with `records`, `dispositions`, `surfaced`, `stats`; v1 migration on load with rewrite on next write; older-runtime refusal unchanged; read limit raised to 64 MiB (D7, amended in round 1 from the proposed 16 MiB).
+  - Round 1 (M2a/m7): design.md D7 now carries the measured truth rather than the proposal — 16 MiB is arithmetically unreachable at 50,000 records + 150,000 ledger entries (keys alone 10.1 MiB, store as written 41.28 MiB), compaction bounds the ledger and lapsed snoozes but NOT standing decisions, and the migration trigger is therefore unbounded standing decisions rather than read-limit arithmetic.
+  - Round 1 (B2): the reconcile healer reads at 4x the limit (`review_state.recovery_read_limit`), because failing closed on an over-limit store would otherwise be a permanent lockout.
 - [x] 2.2 Reason-token parsing (closed vocabulary, `unspecified` fallback, verbatim `why`) and `origin` on every record; migrated records carry `manual`.
 - [x] 2.3 Dispositions: registry of valid families (registered attention categories ∪ write-advisory kinds), set/clear with reason requirement, read API for the filters in §3.
 - [x] 2.4 First-surfaced ledger: best-effort, lock-scoped, failure-isolated recording API; never written for withheld or disposition-excluded signals; never by audit.
@@ -28,6 +29,9 @@
 - [x] 4.3 CLI `exomem review quiet|off|normal <family> --reason <code> [--why …]` and `--reason` on `dismiss`, composing the token.
 - [x] 4.4 Batch scope on every multi-write leaf (adopt_vault apply/copy, adoption_studio apply, maintain_memory fix/reconcile, multi-page compile_source, preserve_artifacts, multi-page process_media); emission ledger persisted in `.due-state.json`.
   - Deviation: `compile_source` is **not** wrapped. It is read-only (`op_propose_compilation` returns a plan; the agent writes with `remember`), so there is no batch to scope.
+  - Round 1: `maintain_memory(mode="backfill-ids")` is scoped too — it rewrites frontmatter across the corpus, which is a batch by the same definition as `fix` and `reconcile`. Listed here so the scope set in the code and the scope set in this task match.
+  - Round 1 (M3): the scope is verified rather than assumed, and the measurement is uncomfortable — `op_adopt_vault` reaches the write carrier ZERO times, so the scope on that leaf suppresses nothing today and the single block a caller can receive is bounded by the response terminal (D9). Pinned by `test_the_batch_scope_on_this_leaf_suppresses_nothing_today`, which goes red the day that leaf commits through `semantic_writes`. The scope IS load-bearing at the carrier (`test_removing_the_batch_scope_emits_once_per_write`).
+  - Round 1 (m10): the emission section also persists `due_total`, so "no blocks for twelve writes" can be distinguished from "nothing was due"; the f23 assertion is `unsupported` rather than a vacuous pass when the denominator is zero.
 - [x] 4.5 Tool descriptions updated; `scripts/dump-tool-schemas.py` regenerated; packaged contract, fixture, and plugin pending digest recorded with `refresh_required: true`; the hosted-profile pin tests pass.
 
 ## 5. Teaching and bench

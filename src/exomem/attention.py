@@ -418,11 +418,17 @@ def attention(
 
 
 def _review_state_payload(vault_root: Path) -> dict:
-    """The review state, or an empty one. A read surface never fails on it."""
-    try:
-        return review_state_module.ReviewStateStore(vault_root).load()
-    except ValueError:
-        return review_state_module.empty_state()
+    """The review state. Raises `REVIEW_STATE_INVALID` rather than answering empty.
+
+    Loaded once per request so the disposition filter, the state view and the
+    ledger annotation all read the same snapshot. It deliberately does NOT
+    swallow the failure: this payload is what tells attention which items were
+    dismissed, and an unreadable store answered as an empty one reports every
+    standing dismissal in the vault as open — the precise regression this slice
+    exists to prevent, delivered silently. The LEDGER write is best-effort
+    (losing a measurement is cheap); the DECISION read is not, and never was.
+    """
+    return review_state_module.ReviewStateStore(vault_root).load()
 
 
 def _excluded_families(
@@ -485,9 +491,24 @@ def activation(
             f"INVALID_REVIEW_STATE: state must be one of "
             f"{sorted(review_state_module.VALID_VIEWS)}"
         )
+    # Activation is a SERVED review surface, not an internal measurement: it
+    # ranks, it is reachable through `review_memory`, and it shares
+    # `_apply_review_state` — so it also shares the ledger write. A disposition
+    # therefore binds it exactly as it binds attention, and for the same two
+    # reasons: a silenced family must not come back on another surface, and the
+    # ledger must not record a first surfacing for a signal nobody was shown.
+    # Filtering before `_rank` for the same reason attention does: an excluded
+    # family's votes would otherwise still move a wanted item's position.
+    state_payload = _review_state_payload(vault_root)
+    excluded, annotations = _excluded_families(
+        state_payload,
+        requested=(set(categories) if categories else None),
+        state=state,
+    )
     scan = activation_module.scan(vault_root)
+    findings = [f for f in scan.findings if f.category not in excluded]
     ranked = _rank(
-        scan.findings,
+        findings,
         categories=resolved,
         limit=0,
         category_order=activation_module.ACTIVATION_CATEGORIES,
@@ -501,6 +522,8 @@ def activation(
         limit=limit,
         today=today,
         identity_namespace="activation",
+        payload=state_payload,
+        annotations=annotations,
         record_surfacing=record_surfacing,
     )
 
@@ -631,14 +654,7 @@ def _stamp_first_surfaced(
     """
     if not items:
         return
-    keep = _egress_keep(vault_root)
-    entries = [
-        (item.item_id, item.fingerprint)
-        for item in items
-        if item.item_id
-        and item.fingerprint
-        and (keep is None or keep(item.path))
-    ]
+    entries = _recordable(vault_root, items)
     if not entries:
         return
     stamps = review_state_module.record_surfaced(
@@ -648,6 +664,30 @@ def _stamp_first_surfaced(
         value = stamps.get(f"{item.item_id}:{item.fingerprint}")
         if value:
             item.first_surfaced_at = value
+
+
+def _recordable(vault_root: Path, items: list[AttentionItem]) -> list[tuple[str, str]]:
+    """The `(item_id, fingerprint)` pairs this audience may have a ledger row for.
+
+    The egress consult runs inside its OWN disclosure boundary, mirroring
+    `due_state.block_for_write` and for the same reason: `release_walk_filter`
+    records one decision per page it judges, and judging them inside an
+    enclosing collector would attach N pages the caller never touched to that
+    caller's governance receipt. A write's receipt would then list every item
+    on the review surface. Those decisions are real and are collected; they
+    belong to this ledger write rather than to whatever ran around it.
+    """
+    from .governance import egress as egress_module
+
+    with egress_module.disclosure_boundary(Path(vault_root), "review_ledger"):
+        keep = _egress_keep(vault_root)
+        return [
+            (item.item_id, item.fingerprint)
+            for item in items
+            if item.item_id
+            and item.fingerprint
+            and (keep is None or keep(item.path))
+        ]
 
 
 def _egress_keep(vault_root: Path):

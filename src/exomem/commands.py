@@ -2420,10 +2420,16 @@ def op_reconcile(
         # guaranteed to run on a vault that writes decisions rarely. Reported
         # rather than silent: a purge nobody can see is the failure mode this
         # repository has already paid for once.
+        # Read at the ELEVATED limit. Every ordinary read of this store fails
+        # closed past `_STATE_READ_LIMIT`, which is right — but compaction is
+        # the only way back under it and has to read the file to do its work,
+        # so without a higher ceiling here the refusal would be a permanent
+        # lockout. This is the operator-invoked healer and the one path allowed
+        # past.
         try:
             result["review_state_compaction"] = review_state_module.ReviewStateStore(
                 vault_root
-            ).compact()
+            ).compact(read_limit=review_state_module.recovery_read_limit())
         except Exception:  # noqa: BLE001 — compaction never fails reconcile
             log.debug("could not compact the review state", exc_info=True)
     if active_mutation_request_id() is None:
@@ -5707,6 +5713,18 @@ def _review_keys_by_family(vault_root: Path) -> dict[str, list[str]]:
     produced a signal. Read over the all-states view of the triageable
     categories, so a dismissed item still counts — it is precisely the thing
     being counted.
+
+    `record_surfacing=False`: this is a COUNT, not a surface. It runs the whole
+    fusion to read one number out of it and shows nobody anything, so stamping
+    the ledger here would record a first surfacing for every item in the vault
+    every time somebody asked which families are quiet.
+
+    Attribution is by COMPONENT fingerprint, not by the item's fused one. A page
+    flagged by two families carries one fused key that `apply_for_item` records
+    against, and counting that key under both families would report one
+    dismissal twice. The component fingerprint is the per-finding identity
+    `apply_for_item` also records, so each family is charged for its own signal
+    and for nothing else.
     """
     out: dict[str, list[str]] = {}
     try:
@@ -5715,15 +5733,61 @@ def _review_keys_by_family(vault_root: Path) -> dict[str, list[str]]:
             categories=list(attention_module._TRIAGEABLE_CATEGORIES),
             limit=0,
             state="all",
+            record_surfacing=False,
         )
     except Exception:  # noqa: BLE001 — a count never breaks the view
         log.debug("dispositions view could not read the review surface", exc_info=True)
         return out
     for item in report.items:
-        if not item.item_id or not item.fingerprint:
+        if not item.item_id:
             continue
-        for category in item.categories:
-            out.setdefault(category, []).append(f"{item.item_id}:{item.fingerprint}")
+        for category, value in _component_keys_by_category(vault_root, item).items():
+            out.setdefault(category, []).extend(value)
+    return out
+
+
+def _component_keys_by_category(
+    vault_root: Path, item: Any
+) -> dict[str, list[str]]:
+    """``category -> [record key]`` for ONE fused attention item.
+
+    One key per contributing finding, composed by the single shared composer
+    (`review_state.component_fingerprint`) so it matches exactly what
+    `apply_for_item` recorded. A single-flagged item's component fingerprint IS
+    its fused one, so the common case is unchanged; only a multi-flagged item
+    stops being counted once per family it happens to appear in.
+    """
+    reasons = list(getattr(item, "reasons", None) or [])
+    if not reasons:
+        return {}
+    anchor = str(getattr(item, "path", "") or "")
+    paths = [anchor]
+    for reason in reasons:
+        paths.extend(reason.get("related_paths") or [])
+    refs = review_state_module.refs_for_paths(vault_root, paths)
+    target_ref = getattr(item, "target_ref", None) or refs.get(anchor)
+    if not target_ref:
+        return {}
+    out: dict[str, list[str]] = {}
+    for reason in reasons:
+        category = str(reason.get("category") or "")
+        if not category:
+            continue
+        related = sorted(
+            {
+                path
+                for path in (reason.get("related_paths") or [])
+                if path != anchor and path in refs
+            }
+        )
+        value = review_state_module.component_fingerprint(
+            target_ref=str(target_ref),
+            reason=reason,
+            related_refs=[refs[path] for path in related],
+        )
+        key = f"{item.item_id}:{value}"
+        if key not in out.setdefault(category, []):
+            out[category].append(key)
     return out
 
 

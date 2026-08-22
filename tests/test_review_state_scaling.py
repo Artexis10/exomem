@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from _nag_governance_helpers import overdue_prediction, scratch_page
+
 from exomem import review_state
 
 # --------------------------------------------------------------------------
@@ -147,6 +149,92 @@ def test_the_read_limit_holds_the_stress_cardinality() -> None:
     what the gate builds fails here rather than in a confusing OSError.
     """
     assert review_state._STATE_READ_LIMIT >= 42 * 1024 * 1024
+
+
+# ==========================================================================
+# the decision read fails closed
+# ==========================================================================
+
+
+def _dismiss_one(vault: Path) -> str:
+    """Dismiss the one overdue prediction and return its page name."""
+    from exomem import commands
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    item = [
+        entry
+        for entry in commands.op_attention(vault, limit=0, state="all")["items"]
+        if "nag-backlog" in entry["path"]
+    ][0]
+    commands.op_triage_memory(
+        vault, ref=item["ref"], action="dismiss", why="handled: dealt with elsewhere"
+    )
+    states = {
+        entry["path"].rsplit("/", 1)[-1]: entry["state"]
+        for entry in commands.op_attention(vault, limit=0, state="all")["items"]
+    }
+    assert states["nag-backlog.md"] == "dismissed"
+    return "nag-backlog.md"
+
+
+def test_a_corrupt_store_refuses_rather_than_reopening_every_dismissal(
+    vault: Path,
+) -> None:
+    """An unreadable DECISION store must fail, not answer "nothing was decided".
+
+    The ledger write is best-effort because losing a measurement is cheap. The
+    decision read is the opposite: treating an unreadable store as an empty one
+    silently resurrects every dismissal in the vault, which is the exact
+    behaviour this whole slice exists to prevent, and it does it without a word
+    to the user. Failing closed is what `main` did and what it keeps doing.
+    """
+    from exomem import commands
+
+    _dismiss_one(vault)
+    review_state.state_path(vault).write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="REVIEW_STATE_INVALID"):
+        commands.op_attention(vault, limit=0, state="all")
+
+
+def test_an_over_limit_store_refuses_rather_than_reopening_every_dismissal(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rule for the other way a read can fail: too big to read."""
+    from exomem import commands
+
+    _dismiss_one(vault)
+    monkeypatch.setattr(review_state, "_STATE_READ_LIMIT", 64)
+
+    with pytest.raises(ValueError, match="REVIEW_STATE_INVALID"):
+        commands.op_attention(vault, limit=0, state="all")
+
+
+def test_reconcile_compacts_a_store_past_the_ordinary_read_limit(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failing closed is only safe if there is a way back.
+
+    A store past the limit cannot be read, so it cannot be compacted either --
+    which would make the fail-closed read a permanent lockout rather than a
+    refusal. The reconcile path reads at an elevated limit for exactly this: it
+    is the operator-invoked healer, it runs once, and its whole job is to bring
+    the file back under the ceiling every other read enforces.
+    """
+    from exomem import commands
+
+    _seeded(vault)
+    size = review_state.state_path(vault).stat().st_size
+    # Under the recovery limit, over the ordinary one: the store an operator is
+    # locked out of.
+    monkeypatch.setattr(review_state, "_STATE_READ_LIMIT", size - 1)
+    with pytest.raises(ValueError, match="REVIEW_STATE_INVALID"):
+        review_state.ReviewStateStore(vault).load()
+
+    result = commands.op_maintain_memory(vault, mode="reconcile", dry_run=False)
+    assert result["review_state_compaction"]["dropped"]["records"] == 1
+    assert review_state.state_path(vault).stat().st_size < size
 
 
 # ==========================================================================
@@ -287,6 +375,108 @@ def test_compaction_never_drops_a_standing_decision_or_a_disposition(
     assert "prediction_window" in payload["dispositions"]
 
 
+def test_a_permanently_tripped_threshold_does_not_rescan_on_every_write(
+    vault: Path,
+) -> None:
+    """Standing dismissals are unbounded, so the threshold gate never un-trips.
+
+    30,000 standing dismissals put the store permanently past
+    `_COMPACT_RECORD_THRESHOLD`, and nothing in it is ever eligible to be
+    dropped — a dismissal is a decision nothing is entitled to forget. Without
+    the rescan gate every subsequent decision would walk all 30,000 records and
+    every ledger entry to rediscover that, on the one path a user is waiting on.
+
+    MEASURED on this lane, two consecutive runs (WSL2 on ext4, CPython 3.14),
+    30,000 standing dismissals and 20,000 ledger entries, a 13.24 MiB store:
+
+                                 run 1     run 2
+      first apply (scans once)   0.163 s   0.159 s
+      second apply (no rescan)   0.137 s   0.144 s
+      scans on the second apply   0         0
+
+    The saving is the retention walk, not the write: the whole-file rewrite is
+    unavoidable and dominates both numbers. What the gate removes is a scan
+    whose answer cannot change.
+    """
+    store = review_state.ReviewStateStore(vault)
+    records = {
+        f"{index:024x}:{index:024x}": {
+            "item_id": f"{index:024x}",
+            "fingerprint": f"{index:024x}",
+            "action": "dismiss",
+            "until": None,
+            "why": "intentional: deliberate",
+            "reason": "intentional",
+            "origin": "manual",
+            "updated_at": _stamp(30),
+        }
+        for index in range(30_000)
+    }
+    surfaced = {
+        f"{index:024x}:{index:024x}": {
+            "first_surfaced_at": _stamp(30),
+            "surface": "review",
+            "origin": "automatic",
+        }
+        for index in range(20_000)
+    }
+    store._write(
+        {
+            "version": 2,
+            "records": records,
+            "dispositions": {},
+            "surfaced": surfaced,
+            "stats": {},
+        }
+    )
+
+    scans: list[int] = []
+    real = review_state._compact_payload
+
+    def counting(payload, *, now):
+        scans.append(1)
+        return real(payload, now=now)
+
+    original = review_state._compact_payload
+    review_state._compact_payload = counting
+    try:
+        start = time.perf_counter()
+        store.apply("a" * 24, "a" * 24, action="dismiss", why="handled: one")
+        first_seconds = time.perf_counter() - start
+        assert scans == [1], "the first write past the threshold must scan"
+
+        scans.clear()
+        start = time.perf_counter()
+        store.apply("b" * 24, "b" * 24, action="dismiss", why="handled: two")
+        second_seconds = time.perf_counter() - start
+    finally:
+        review_state._compact_payload = original
+
+    assert scans == [], "a second write must not rescan what cannot have changed"
+    assert second_seconds < APPLY_BUDGET_SECONDS, f"apply took {second_seconds:.3f}s"
+    assert first_seconds < APPLY_BUDGET_SECONDS, f"apply took {first_seconds:.3f}s"
+
+    payload = store.load()
+    assert payload["stats"]["compaction_scan"]["records"] == 30_001
+    # Nothing was eligible, so nothing claims a compaction happened.
+    assert "compaction" not in payload["stats"]
+
+
+def test_growth_past_the_rescan_margin_arms_another_scan(vault: Path) -> None:
+    """The gate is a rate limiter, not an off switch."""
+    marker = {"at": _stamp(0), "records": 100, "surfaced": 100}
+    payload = {"records": dict.fromkeys(range(105)), "surfaced": {}}
+    assert not review_state._rescan_warranted(marker, payload, now=_now())
+    payload = {"records": dict.fromkeys(range(120)), "surfaced": {}}
+    assert review_state._rescan_warranted(marker, payload, now=_now())
+    payload = {"records": {}, "surfaced": dict.fromkeys(range(120))}
+    assert review_state._rescan_warranted(marker, payload, now=_now())
+    # A day elapsed re-arms it whatever the counts did.
+    stale = {"at": _stamp(2), "records": 100, "surfaced": 100}
+    payload = {"records": dict.fromkeys(range(100)), "surfaced": dict.fromkeys(range(100))}
+    assert review_state._rescan_warranted(stale, payload, now=_now())
+
+
 # ==========================================================================
 # the stress gate
 # ==========================================================================
@@ -350,6 +540,9 @@ def test_the_stress_gate_holds_at_multi_year_cardinality(vault: Path) -> None:
     store._write(_stress_payload())
     size = review_state.state_path(vault).stat().st_size
     assert size < review_state._STATE_READ_LIMIT, size
+    # The store the gate builds is real, not a toy: if a future change makes it
+    # trivially small the timings below stop meaning anything.
+    assert size > 30 * 1024 * 1024, size
 
     start = time.perf_counter()
     payload = store.load()
@@ -379,3 +572,11 @@ def test_the_stress_gate_holds_at_multi_year_cardinality(vault: Path) -> None:
 
     compacted = review_state.state_path(vault).stat().st_size
     assert compacted < review_state._STATE_READ_LIMIT, compacted
+    # A bound compaction can actually FAIL, derived from the gate's own
+    # measurement rather than from the ceiling. `compacted < _STATE_READ_LIMIT`
+    # is satisfied by doing nothing at all — 41.28 MiB is already under 64 MiB —
+    # so it pinned the ceiling, not the compaction. The measured ratio for this
+    # retention mix (one third lapsed snoozes, half the ledger past 400 days) is
+    # 23.44 / 41.28 = 0.568; 0.6 is that with a little margin, and it goes red
+    # the moment compaction stops removing what retention allows.
+    assert compacted <= 0.6 * size, f"compacted {compacted} vs {size} uncompacted"

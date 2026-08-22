@@ -1097,13 +1097,20 @@ def _lane_envelope(monkeypatch):
 
     from epistemic.journeys import f23_dismissal
 
-    scripts = Path(sys.executable).parent
+    # Resolve the DIRECTORY, not the interpreter. A venv reached through a
+    # symlink (or a `bin` that is one) makes the literal paths differ while
+    # naming the same directory, and the comparison below would then skip the
+    # journey on the box where it is most worth running. Resolving
+    # `sys.executable` itself is the wrong fix and was tried: in a uv venv the
+    # interpreter is a symlink to the shared CPython, so its resolved parent is
+    # the toolchain's `bin` and the console scripts are not there at all.
+    scripts = Path(sys.executable).parent.resolve()
     monkeypatch.setenv("PATH", f"{scripts}{os.pathsep}{os.environ.get('PATH', '')}")
     try:
         envelope = f23_dismissal.discover_envelope()
     except f23_dismissal.EnvelopeNotDiscovered as error:
         pytest.skip(f"no installed CLI envelope: {error}")
-    if envelope.executable.parent != scripts:
+    if envelope.executable.resolve().parent != scripts:
         pytest.skip(
             f"the discovered envelope is {envelope.executable}, which is outside this "
             f"interpreter's {scripts}; the journey would measure another install"

@@ -11,6 +11,7 @@ The first test is the GAP PROOF: today no surface stamps anything.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -26,6 +27,10 @@ from exomem import attention as attention_module
 from exomem import commands, corpus_aware, review_state
 
 FAMILY_REF = "exomem://review/family/prediction_window"
+
+
+def _parsed(value: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
 def _ledger(vault: Path) -> dict:
@@ -89,15 +94,80 @@ def test_the_first_listing_stamps_the_ledger_once(vault: Path) -> None:
     assert {row["surface"] for row in ledger_after_first.values()} == {"review"}
 
 
-def test_a_served_due_state_reference_stamps_the_carrier_surface(vault: Path) -> None:
+def test_a_delivered_carrier_block_stamps_the_carrier_surface(vault: Path) -> None:
+    """PRODUCING a block is not surfacing it; DELIVERING it is.
+
+    The stamp lives with `mark_emitted`, the one place a block is recorded as
+    handed over, because everything between production and delivery can drop it:
+    a batch scope, the change-only governor, a `legacy` detail level, terminal
+    validation. Stamping at production recorded a first surfacing for references
+    nobody was ever shown.
+    """
     from exomem import due_state as due_state_module
 
     overdue_prediction(vault)
     scratch_page(vault)
-    due_state_module.served(vault)
+    due_state_module.reset_emission_state()
 
-    surfaces = {row["surface"] for row in _ledger(vault).values()}
-    assert surfaces == {"carrier"}
+    block = due_state_module.served(vault)
+    assert block
+    assert _ledger(vault) == {}, "production alone must record nothing"
+
+    assert due_state_module.should_emit(block, vault_root=vault)
+    ledger = _ledger(vault)
+    assert ledger
+    assert {row["surface"] for row in ledger.values()} == {"carrier"}
+
+
+def test_a_block_produced_inside_a_batch_scope_is_never_stamped(vault: Path) -> None:
+    from exomem import due_state as due_state_module
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    due_state_module.reset_emission_state()
+
+    with due_state_module.batch_scope(vault):
+        block = due_state_module.served(vault)
+        assert block
+        assert not due_state_module.should_emit(block, vault_root=vault)
+    assert _ledger(vault) == {}
+
+
+def test_a_block_the_governor_keeps_quiet_is_never_stamped(vault: Path) -> None:
+    """The second identical block is not delivered, so it adds nothing."""
+    from exomem import due_state as due_state_module
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    due_state_module.reset_emission_state()
+
+    block = due_state_module.served(vault)
+    assert due_state_module.should_emit(block, vault_root=vault)
+    first = dict(_ledger(vault))
+    assert first
+
+    assert not due_state_module.should_emit(
+        due_state_module.served(vault), vault_root=vault
+    )
+    assert _ledger(vault) == first
+
+
+def test_a_legacy_response_that_strips_the_block_never_stamps(vault: Path) -> None:
+    """`legacy` drops the block at the terminal, so nothing was surfaced."""
+    from exomem import due_state as due_state_module
+    from exomem import mutation_terminal
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    due_state_module.reset_emission_state()
+
+    block = due_state_module.served(vault)
+    assert block
+    # A `legacy` response never reaches `_admit_due_state`; the block is dropped
+    # before the terminal decides. Nothing is marked emitted, so nothing is
+    # stamped.
+    assert hasattr(mutation_terminal, "_admit_due_state")
+    assert _ledger(vault) == {}
 
 
 def test_an_emitted_write_advisory_stamps_the_write_surface(vault: Path) -> None:
@@ -137,6 +207,62 @@ def test_resolving_one_reference_records_nothing(vault: Path) -> None:
         commands.op_review_item_context(vault, ref=item["ref"])
 
     assert _ledger(vault) == {}
+
+
+# ==========================================================================
+# the general invariant: a surface that shows nothing records nothing
+# ==========================================================================
+
+
+def _dispositions_view(vault: Path) -> None:
+    commands.op_review_memory(vault, mode="dispositions")
+
+
+def _resolve_every_reference(vault: Path) -> None:
+    for ref in _LISTED_REFS:
+        commands.op_review_item_context(vault, ref=ref)
+
+
+def _fallback_lookup(vault: Path) -> None:
+    for ref in _LISTED_REFS:
+        attention_module._item_by_ref_fallback(
+            vault, review_state.parse_review_ref(ref)
+        )
+
+
+#: Filled by the fixture below, so each lookup asks for references that exist.
+_LISTED_REFS: list[str] = []
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [_dispositions_view, _resolve_every_reference, _fallback_lookup],
+    ids=["dispositions-view", "item-by-ref", "fallback-lookup"],
+)
+def test_a_surface_that_returns_no_items_records_nothing(vault: Path, lookup) -> None:
+    """The general invariant, not one caller's version of it.
+
+    Three call sites resolve or count by running the whole fusion at
+    ``limit=0, state="all"`` and then reading one thing out of the result. None
+    of them SHOWS a review surface, so none of them may stamp one — and the
+    ledger measures what reached a person, so a stamp from any of them is a
+    false measurement, not a harmless extra row. Each was written separately and
+    the flag has to be remembered at each; the invariant is what catches the
+    next one.
+
+    The store is deleted after the listing that populates ``_LISTED_REFS``, so
+    the assertion cannot be satisfied by rows the listing itself had recorded.
+    """
+    overdue_prediction(vault)
+    scratch_page(vault)
+    listed = commands.op_attention(vault, limit=0)["items"]
+    assert listed
+    _LISTED_REFS[:] = [item["ref"] for item in listed]
+    review_state.state_path(vault).unlink()
+
+    lookup(vault)
+
+    assert not review_state.state_path(vault).exists() or _ledger(vault) == {}
 
 
 def test_audit_never_records(vault: Path) -> None:
@@ -189,6 +315,147 @@ def test_a_withheld_signal_is_never_recorded(
     assert _ledger(vault) == {}
 
 
+def test_a_withheld_page_is_never_stamped_by_a_listing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attention consults egress ITSELF, because it is not the boundary.
+
+    The governance plane projects attention's payload after it returns, so at
+    the moment the ledger is written nothing has yet decided what this audience
+    may see. Without `_egress_keep` the ledger would record a first surfacing
+    for a page the requesting audience is about to be told nothing about — a
+    row that both leaks the page's existence into a durable file and records a
+    surfacing that never happened.
+    """
+    from exomem.governance import egress as egress_module
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    monkeypatch.setattr(
+        egress_module,
+        "release_walk_filter",
+        lambda *args, **kwargs: (lambda _path: False),
+    )
+
+    commands.op_attention(vault, limit=0)
+
+    assert _ledger(vault) == {}
+
+
+def test_removing_the_egress_consult_records_the_withheld_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mechanism-removal pair for `_egress_keep`."""
+    from exomem.governance import egress as egress_module
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    monkeypatch.setattr(
+        egress_module,
+        "release_walk_filter",
+        lambda *args, **kwargs: (lambda _path: False),
+    )
+    commands.op_attention(vault, limit=0)
+    assert _ledger(vault) == {}
+
+    # `None` is `_stamp_first_surfaced`'s "no filter, keep everything" value, so
+    # this is exactly the code with the consult taken out.
+    monkeypatch.setattr(attention_module, "_egress_keep", lambda _vault: None)
+    commands.op_attention(vault, limit=0)
+    assert _ledger(vault)
+
+
+def test_an_undecidable_release_plane_records_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail CLOSED: a ledger row is cheap to miss and impossible to unsee."""
+    from exomem.governance import egress as egress_module
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("release plane unavailable")
+
+    monkeypatch.setattr(egress_module, "release_walk_filter", unavailable)
+
+    listed = commands.op_attention(vault, limit=0)["items"]
+    assert listed, "the surface still answers; only the ledger is withheld"
+    assert _ledger(vault) == {}
+
+
+def _govern(vault: Path) -> None:
+    """A real (permissive) release policy, so the egress filter actually runs.
+
+    Without a policy `release_walk_filter` takes its empty-policy fast path and
+    records nothing, which would make any receipt assertion vacuous.
+    """
+    from exomem.governance import egress as egress_module, membership, policy
+
+    gov = vault / "Knowledge Base" / "_Governance"
+    (gov / "scopes").mkdir(parents=True, exist_ok=True)
+    (gov / "scopes" / "notes.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Patterns\n"
+        'paths: ["Notes/Patterns/**"]\n',
+        encoding="utf-8",
+    )
+    (gov / "rules").mkdir(parents=True, exist_ok=True)
+    (gov / "rules" / "notes-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 3\n',
+        encoding="utf-8",
+    )
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress_module.clear_decision_memo()
+
+
+def test_the_ledgers_egress_consult_stays_out_of_an_enclosing_receipt(
+    vault: Path,
+) -> None:
+    """The ledger's own disclosure boundary, measured as an A/B.
+
+    `release_walk_filter` records one decision per page it judges, so consulting
+    it inside somebody else's collector attaches every item on the review
+    surface to THEIR receipt. A one-page write whose receipt lists twelve pages
+    it never touched is a false governance record, which is worse than a missing
+    one. `due_state.block_for_write` already opens its own boundary for exactly
+    this; the ledger now does too.
+
+    The A/B is the same shape as the carrier's: the enclosing receipt must be
+    the same size whether the surface inside it had items to stamp or not.
+    """
+    from exomem.governance import egress as egress_module
+    from exomem.governance.principal import owner_principal, request_scope
+
+    _govern(vault)
+    assert egress_module.release_walk_filter(vault) is not None, (
+        "an ungoverned vault takes the empty-policy fast path and records nothing, "
+        "which would make this assertion vacuous"
+    )
+
+    with request_scope(owner_principal(surface="cli")):
+        with egress_module.disclosure_boundary(vault, "caller") as light:
+            few = commands.op_attention(vault, limit=0)["items"]
+            before = len(light.outcomes)
+        assert few, "the light leg must still stamp something"
+        light_rows = len(_ledger(vault))
+
+        for slug in ("nag-one", "nag-two", "nag-three", "nag-four", "nag-five"):
+            overdue_prediction(vault, slug)
+        scratch_page(vault)
+        with egress_module.disclosure_boundary(vault, "caller") as heavy:
+            many = commands.op_attention(vault, limit=0)["items"]
+            after = len(heavy.outcomes)
+
+    assert len(many) > len(few), "the heavy leg must judge strictly more pages"
+    assert len(_ledger(vault)) > light_rows, "and must actually have stamped them"
+    assert after == before, (
+        f"the caller's receipt grew from {before} to {after} outcomes because the "
+        "ledger's egress consult joined its collector"
+    )
+
+
 def test_an_unwritable_ledger_does_not_change_the_surface(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -230,15 +497,28 @@ def test_an_unwritable_ledger_does_not_change_the_surface(
 
 
 def test_the_ledger_is_never_backfilled(vault: Path) -> None:
-    """A signal that existed before the ledger did is stamped when it is next
-    surfaced, not retroactively at the moment it was authored."""
+    """A signal older than the ledger is stamped NOW, not at its authored date.
+
+    The assertion is the two bounds that make "not backfilled" mean something:
+    the stamp is inside the window of the call that produced it, and it is
+    strictly later than the page's own `created` date. Asserting the stamp ends
+    in `Z` — which every stamp this module can produce does — would pass against
+    a backfill just as happily.
+    """
+    authored = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
     overdue_prediction(vault)
     scratch_page(vault)
     assert _ledger(vault) == {}
 
+    before = dt.datetime.now(dt.UTC)
     items = commands.op_attention(vault, limit=0)["items"]
-    stamps = {item["first_surfaced_at"] for item in items}
-    assert all(stamp.endswith("Z") for stamp in stamps)
+    after = dt.datetime.now(dt.UTC)
+
+    stamps = [_parsed(item["first_surfaced_at"]) for item in items]
+    assert stamps
+    for stamp in stamps:
+        assert before - dt.timedelta(seconds=5) <= stamp <= after + dt.timedelta(seconds=5), stamp
+        assert stamp > authored, stamp
 
 
 # ==========================================================================

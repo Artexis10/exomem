@@ -166,12 +166,25 @@ def test_what_the_runtime_writes_itself_is_automatic(vault: Path) -> None:
     The standing dismissal it preserves keeps `manual` — it was a person's
     decision and compaction did not change it. What compaction itself authors is
     the drop report, and that carries `automatic`.
+
+    The lapsed snooze is here so compaction has something to DROP: a walk that
+    removes nothing no longer stamps `stats`, because a store whose thresholds
+    are permanently tripped would otherwise rewrite itself on every write for a
+    timestamp saying nothing happened.
     """
     result = _dismiss(vault, "handled: dealt with elsewhere")
     store = review_state.ReviewStateStore(vault)
+    store.apply(
+        "d" * 24,
+        "e" * 24,
+        action="snooze",
+        until=(dt.date.today() - dt.timedelta(days=200)).isoformat(),
+        why="deferred: later",
+    )
     report = store.compact(force=True)
 
     payload = store.load()
+    assert report["dropped"]["records"] == 1
     assert _record(vault, result)["origin"] == "manual"
     assert payload["stats"]["compaction"]["origin"] == "automatic"
     assert report["origin"] == "automatic"

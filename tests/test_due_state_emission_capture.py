@@ -12,6 +12,7 @@ there is no batch scope to wrap a bulk command in.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 from pathlib import Path
@@ -52,6 +53,29 @@ def _observe(vault: Path, content: str) -> dict:
         content=content,
         tags=["infrastructure"],
     )
+
+
+def _adopt_twelve(vault: Path, *, directory: str = "legacy") -> dict:
+    """Twelve legacy files absorbed by ONE `adopt_vault` through the real terminal."""
+    source = vault / directory
+    source.mkdir(exist_ok=True)
+    for index in range(12):
+        (source / f"note-{index}.md").write_text(
+            f"---\ntitle: legacy {index}\n---\n\n"
+            "## Prediction\n\n"
+            f"- id: q{index}\n"
+            f"- check_by: {(dt.date.today() - dt.timedelta(days=index + 1)).isoformat()}\n\n"
+            "A legacy claim.\n",
+            encoding="utf-8",
+        )
+    response = writer_lease.invoke_command(
+        _command("adopt_vault"),
+        vault,
+        mode="copy-as-sources",
+        selected_paths=[f"{directory}/note-{index}.md" for index in range(12)],
+    )
+    assert isinstance(response, dict), response
+    return response
 
 
 def _bulk_pages(vault: Path, count: int) -> list[str]:
@@ -218,33 +242,109 @@ def test_a_batch_scope_is_per_vault(vault: Path, tmp_path: Path) -> None:
 
 
 def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
-    """The product-level statement of the same property."""
+    """The product-level statement, read off the RESPONSE rather than the ledger.
+
+    The scenario is about what the caller receives, so this inspects the
+    command's own response for `due_state` blocks instead of inferring delivery
+    from a counter. Driven through `writer_lease.invoke_command` — the normal
+    command path — so the mutation terminal that admits the block actually runs;
+    calling the leaf directly skips the only code that can put one there.
+
+    What bounds this to one block is measured, not assumed, and it is NOT the
+    batch scope: see `test_the_batch_scope_on_this_leaf_suppresses_nothing_today`
+    immediately below.
+    """
     overdue_prediction(vault)
     scratch_page(vault)
     commands.op_bootstrap(vault)
     due_state_module.reset_emission_state()
     before = _projection(vault)["emission"]
 
-    legacy = vault / "legacy"
-    legacy.mkdir(exist_ok=True)
-    for index in range(12):
-        (legacy / f"note-{index}.md").write_text(
-            f"---\ntitle: legacy {index}\n---\n\n"
-            "## Prediction\n\n"
-            f"- id: q{index}\n- check_by: 2020-01-01\n\nA legacy claim.\n",
-            encoding="utf-8",
-        )
+    response = _adopt_twelve(vault)
 
-    result = commands.op_adopt_vault(
-        vault,
-        mode="copy-as-sources",
-        selected_paths=[f"legacy/note-{index}.md" for index in range(12)],
-    )
-    assert len(result["copy"]["copied_sources"]) == 12
-
+    blocks = [key for key in response if key == "due_state"]
+    assert len(blocks) <= 1, response
     ledger = _projection(vault)["emission"]
     assert ledger["writes"] - before["writes"] == 12
     assert ledger["emissions"] - before["emissions"] <= 1
+
+
+def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> None:
+    """Measured, because "the scope keeps it to one block" was never verified.
+
+    `op_adopt_vault` reaches the write carrier ZERO times: `op_adopt` copies
+    files through the vault writer and `_apply_batch_deltas` then applies the
+    projection deltas with `apply_write_delta`, which produces no block. So the
+    scope on this leaf suppresses nothing, and removing it changes nothing — the
+    one block the caller can receive is bounded by the response terminal (D9),
+    which runs once per invocation whatever the scope did.
+
+    This is pinned rather than left implicit because the scope IS load-bearing
+    at the carrier (`test_removing_the_batch_scope_emits_once_per_write`), and
+    the difference between "defends nothing yet" and "defends nothing ever"
+    matters: the day this leaf commits through `semantic_writes`, the carrier
+    count below stops being zero and this test says so.
+    """
+    overdue_prediction(vault)
+    scratch_page(vault)
+    commands.op_bootstrap(vault)
+    due_state_module.reset_emission_state()
+
+    carried: list[str] = []
+    real = due_state_module.block_for_write
+
+    def counting(vault_root, rel_path, **kwargs):
+        carried.append(rel_path)
+        return real(vault_root, rel_path, **kwargs)
+
+    original = due_state_module.block_for_write
+    due_state_module.block_for_write = counting
+    try:
+        scoped = _adopt_twelve(vault)
+        scoped_calls = list(carried)
+
+        carried.clear()
+        with contextlib.nullcontext():
+            unscoped = _adopt_twelve(vault, directory="legacy2")
+    finally:
+        due_state_module.block_for_write = original
+
+    assert scoped_calls == [], "the scoped leaf reached the write carrier"
+    assert carried == [], "the leaf reached the write carrier after all"
+    assert [key for key in scoped if key == "due_state"] == []
+    assert [key for key in unscoped if key == "due_state"] == []
+
+
+def test_the_ledger_records_how_much_was_due(vault: Path) -> None:
+    """The denominator, without which the other two counters are unreadable.
+
+    `writes=12, emissions=0` is equally the shape of governance working and the
+    shape of a vault that owed nothing. `due_total` is what separates them, so
+    it is recorded on production — whether or not anything was emitted — rather
+    than on delivery.
+    """
+    overdue_prediction(vault)
+    scratch_page(vault)
+    due_state_module.reconcile(vault)
+    assert _projection(vault)["emission"]["due_total"] == 1
+
+    overdue_prediction(vault, "nag-second")
+    due_state_module.reconcile(vault)
+    assert _projection(vault)["emission"]["due_total"] == 2
+
+    # And the write carrier keeps it current without a full recompute.
+    due_state_module.block_for_write(
+        vault, _bulk_pages(vault, 1)[0]
+    )
+    assert _projection(vault)["emission"]["due_total"] == 3
+
+
+def test_a_vault_that_owes_nothing_records_a_zero_denominator(vault: Path) -> None:
+    scratch_page(vault)
+    due_state_module.reconcile(vault)
+    ledger = _projection(vault)["emission"]
+    assert ledger["due_total"] == 0
+    assert ledger["emissions"] == 0
 
 
 # ==========================================================================

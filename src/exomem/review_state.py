@@ -25,25 +25,51 @@ _READABLE_SCHEMA_VERSIONS = frozenset({1, 2})
 STATE_FILENAME = ".review-state.json"
 #: Raised from 4 MiB with the sectioned schema, and MEASURED rather than picked.
 #:
-#: The surfaced ledger is the first section that grows per SIGNAL rather than per
-#: decision, and it is the section that decides this number. At the cardinality
-#: the design's stress gate names — 50,000 decision records and 150,000 ledger
-#: entries, a decade of heavy use — the store measures 41.3 MiB as written
-#: (indented) and 32.7 MiB compact. The design proposed 16 MiB; that was chosen
-#: before anything was measured and it cannot hold this store. The floor is
-#: arithmetic, not encoding style: the keys alone are `review_id:fingerprint`,
-#: 49 hex characters plus quoting, so 200,000 of them cost 10.1 MiB before a
-#: single value, and the leanest plausible record and ledger values take the
-#: total to 29.0 MiB. A 16 MiB ceiling would refuse to read the very store the
-#: gate exists to prove is still viable.
+#: The number. At the cardinality the design's stress gate names — 50,000
+#: decision records and 150,000 ledger entries, a decade of heavy use — the
+#: store measures 41.28 MiB as written (indented) and 32.7 MiB compact. The
+#: design proposed 16 MiB; that was chosen before anything was measured and it
+#: cannot hold this store. The floor is arithmetic, not encoding style: the keys
+#: alone are `review_id:fingerprint`, 49 hex characters plus quoting, so 200,000
+#: of them cost 10.1 MiB before a single value, and the leanest plausible record
+#: and ledger values take the total to 29.0 MiB. 64 MiB is the measured worst
+#: case with roughly 1.5x margin over the written size.
 #:
-#: 64 MiB is the measured worst case with roughly 1.5x margin over the written
-#: size. It is a ceiling on a pathological store, not an expectation: compaction
-#: runs on write past 1 MiB, so a live store sits two orders of magnitude below
-#: it. The cost of the ceiling being high is memory on the read of a store that
-#: has somehow never been compacted; the cost of it being low is that such a
-#: store can never be compacted at all, because compaction has to read it first.
+#: What this ceiling does NOT do, stated plainly because the previous wording
+#: implied otherwise. It does not bound the store, and neither does compaction.
+#: Compaction bounds the LEDGER (an entry with no standing decision behind it
+#: goes at 400 days) and lapsed snoozes (90 days). It does not bound standing
+#: decisions and it must not: a dismissal is a decision somebody made and
+#: nothing here is entitled to forget it. Because the file is a whole-file
+#: rewrite, its size grows linearly with the standing decisions a vault
+#: accumulates, and no retention rule will ever bring it back down.
+#:
+#: So the migration trigger is unbounded standing decisions, not this
+#: arithmetic. Raising the ceiling buys headroom for the ledger's transient
+#: bulk; the day the stress gate fails is the day the sectioned schema has to
+#: become append-plus-compaction or SQLite. This constant is a ceiling on a
+#: pathological store, not an expectation — a live store compacts past 1 MiB
+#: and sits orders of magnitude below it.
 _STATE_READ_LIMIT = 64 * 1024 * 1024
+#: How much further the RECOVERY path may read.
+#:
+#: Failing closed on an over-limit store is only safe if there is a way back,
+#: and there is exactly one: compaction, which has to read the file first. With
+#: a single limit a store that crossed the ceiling could never be compacted, so
+#: the refusal would be a permanent lockout rather than a refusal. The reconcile
+#: path — operator-invoked, once, whose entire job is to bring the file back
+#: under the ceiling — reads at four times the ordinary limit. Four rather than
+#: unbounded because a recovery read is still a read into memory; it is the
+#: margin that covers a store that drifted past the ceiling, not one that is
+#: pathological in a different way.
+_RECOVERY_READ_LIMIT_FACTOR = 4
+
+
+def recovery_read_limit() -> int:
+    """The elevated limit the reconcile healer reads at. Derived, never restated."""
+    return _STATE_READ_LIMIT * _RECOVERY_READ_LIMIT_FACTOR
+
+
 REVIEW_PREFIX = "exomem://review/"
 #: The family namespace, alongside `corpus_aware`'s write-advisory namespace. A
 #: family reference addresses a KIND of signal rather than one occurrence of it.
@@ -86,6 +112,17 @@ _LEDGER_RETENTION_DAYS = 400
 #: Compaction runs on write past either threshold, and on reconcile.
 _COMPACT_BYTE_THRESHOLD = 1 * 1024 * 1024
 _COMPACT_RECORD_THRESHOLD = 20_000
+#: When a scan is worth REPEATING, once a threshold is permanently tripped.
+#:
+#: Standing dismissals are unbounded by design — nothing is entitled to forget
+#: a decision somebody made — so a vault that crosses the record threshold never
+#: comes back under it, and a naive "compact on every write past the threshold"
+#: rescans 30,000 records on every single decision for the rest of the vault's
+#: life, finding nothing, forever. The threshold says the store is big; these
+#: say whether anything has changed enough for another walk to be worth it.
+#: Growth in either section, or a day elapsed, whichever comes first.
+_COMPACT_RESCAN_GROWTH = 0.10
+_COMPACT_RESCAN_AFTER = dt.timedelta(days=1)
 # Every effective state a decision can resolve to, in report order. `all` is a view
 # over these, never a state an item is in.
 VALID_STATES: tuple[str, ...] = ("open", "snoozed", "dismissed", "competing")
@@ -396,7 +433,15 @@ class ReviewStateStore:
         self.vault_root = Path(vault_root)
         self.path = state_path(vault_root)
 
-    def load(self) -> dict[str, Any]:
+    def load(self, *, read_limit: int | None = None) -> dict[str, Any]:
+        """The store, or an empty one when the file is absent.
+
+        Raises `REVIEW_STATE_INVALID` on anything else. That is deliberate and
+        it is what every caller that reads DECISIONS must inherit: an unreadable
+        decision store answered as an empty one silently resurrects every
+        dismissal in the vault. `read_limit` raises the ceiling for the one
+        recovery path allowed past it (see `recovery_read_limit`).
+        """
         from . import reserved_paths
 
         try:
@@ -405,7 +450,7 @@ class ReviewStateStore:
                     self.vault_root,
                     self.path,
                     "review-state",
-                    limit=_STATE_READ_LIMIT,
+                    limit=_STATE_READ_LIMIT if read_limit is None else int(read_limit),
                 )
             payload = json.loads(raw.decode("utf-8"))
         except FileNotFoundError:
@@ -601,7 +646,11 @@ class ReviewStateStore:
     # ------------------------------------------------------------------
 
     def compact(
-        self, *, force: bool = False, now: dt.datetime | None = None
+        self,
+        *,
+        force: bool = False,
+        now: dt.datetime | None = None,
+        read_limit: int | None = None,
     ) -> dict[str, Any]:
         """Drop what retention allows and report it. Runs under the store lock.
 
@@ -612,7 +661,7 @@ class ReviewStateStore:
         """
         moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
         with _LOCK:
-            payload = self.load()
+            payload = self.load(read_limit=read_limit)
             report = _compact_payload(payload, now=moment)
             if force or report["dropped"]["records"] or report["dropped"]["surfaced"]:
                 self._write(payload)
@@ -782,6 +831,16 @@ def record_surfaced(
     unwritable store simply records the entry on a later surfacing, and the
     caller still gets a value to annotate with — the timestamp is what this
     pass observed, which is the honest answer when nothing can be persisted.
+
+    Concurrency, stated rather than implied. `_LOCK` is in-process; the file is
+    a whole-file rewrite, so two PROCESSES writing it in the same instant can
+    lose one of the writes. That race is the pre-existing one every decision
+    write has always had, and this function does not close it. What it does do
+    is stay out of it: `known=` makes the steady state — a signal that keeps
+    resurfacing — cost no write at all, so the window is opened only by a
+    genuine first surfacing, and what is at risk is one ledger row that the
+    next surfacing re-adds. A file lock here would put cross-process contention
+    on a read surface's latency budget to protect a best-effort measurement.
     """
     if surface not in SURFACES:
         raise ValueError(f"INVALID_SURFACE: surface must be one of {list(SURFACES)}")
@@ -912,30 +971,77 @@ def _compact_payload(payload: dict[str, Any], *, now: dt.datetime) -> dict[str, 
             "surfaced": _LEDGER_RETENTION_DAYS,
         },
     }
-    payload["stats"]["compaction"] = report
+    # Only a compaction that REMOVED something records itself. A no-op that
+    # stamped `stats` would make the payload differ from the file on every
+    # scan, so a store that can never drop anything again — the ordinary end
+    # state, since standing decisions are permanent — would rewrite itself for
+    # the sake of a timestamp saying nothing happened.
+    if dropped_records or dropped_ledger:
+        payload["stats"]["compaction"] = report
     return report
 
 
 def _compact_if_due(
     payload: dict[str, Any], *, now: dt.datetime, path: Path | None = None
 ) -> None:
-    """Compact on write past a declared size or record threshold. Lock held.
+    """Compact on write past a declared threshold, but never pointlessly. Lock held.
 
-    The size test reads the file already on disk rather than re-encoding the
+    Two gates, and both are needed.
+
+    The THRESHOLD gate says the store is large enough to be worth walking. The
+    size test reads the file already on disk rather than re-encoding the
     payload: re-encoding to decide whether to encode costs a second full
     serialization of a store that can be tens of megabytes, on the one path a
     user is waiting on. The file is the previous write's bytes, which for a
     threshold is exactly as good an answer and free.
+
+    The RESCAN gate says anything has changed since the last walk. It exists
+    because the threshold gate is permanently tripped on any vault that reaches
+    it: standing dismissals are never dropped, so a store that crossed 20,000
+    records stays across it forever, and without this every subsequent decision
+    would pay a full scan of every record and every ledger entry to discover
+    that retention still allows nothing. Ten percent growth in either section,
+    or a day since the last walk, is what makes another one worth its cost.
     """
-    if len(payload["records"]) >= _COMPACT_RECORD_THRESHOLD:
-        _compact_payload(payload, now=now)
+    if not _past_threshold(payload, path=path):
         return
+    if not _rescan_warranted(payload["stats"].get("compaction_scan"), payload, now=now):
+        return
+    _compact_payload(payload, now=now)
+    # The post-compaction counts, deliberately: growth is measured from what the
+    # last walk left behind, so a store that drops nothing does not re-arm
+    # itself on its own leftovers.
+    payload["stats"]["compaction_scan"] = {
+        "at": _stamp(now),
+        "records": len(payload["records"]),
+        "surfaced": len(payload["surfaced"]),
+    }
+
+
+def _past_threshold(payload: dict[str, Any], *, path: Path | None) -> bool:
+    if len(payload["records"]) >= _COMPACT_RECORD_THRESHOLD:
+        return True
     try:
         size = path.stat().st_size if path is not None else 0
     except OSError:
         size = 0
-    if size >= _COMPACT_BYTE_THRESHOLD:
-        _compact_payload(payload, now=now)
+    return size >= _COMPACT_BYTE_THRESHOLD
+
+
+def _rescan_warranted(
+    marker: Any, payload: dict[str, Any], *, now: dt.datetime
+) -> bool:
+    """Whether another retention walk can plausibly find anything new."""
+    if not isinstance(marker, dict):
+        return True
+    records = len(payload["records"])
+    surfaced = len(payload["surfaced"])
+    if records > int(marker.get("records") or 0) * (1 + _COMPACT_RESCAN_GROWTH):
+        return True
+    if surfaced > int(marker.get("surfaced") or 0) * (1 + _COMPACT_RESCAN_GROWTH):
+        return True
+    stamped = _parse_stamp(marker.get("at"))
+    return stamped is None or (now - stamped) >= _COMPACT_RESCAN_AFTER
 
 
 def _safe_date(value: Any) -> dt.date | None:

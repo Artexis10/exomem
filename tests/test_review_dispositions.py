@@ -22,12 +22,14 @@ from pathlib import Path
 import pytest
 from _nag_governance_helpers import (
     advisory_candidate,
+    doubly_flagged,
     overdue_prediction,
     scratch_page,
     seed_page,
 )
 
 from exomem import attention as attention_module
+from exomem import find as find_module
 from exomem import commands, corpus_aware, review_state
 
 FAMILY = "prediction_window"
@@ -301,6 +303,53 @@ def test_a_quiet_family_counts_zero_for_every_audience(
         assert due_state_module.served(vault) is None
 
 
+def test_a_disposition_governs_the_activation_surface_too(vault: Path) -> None:
+    """`activation` is a served review surface, so a disposition binds it.
+
+    It ranks its own measurements and shares `_apply_review_state` with
+    `attention`, which means it was already STAMPING the first-surfaced ledger
+    for signals a disposition had removed everywhere else. A surface that
+    records a first surfacing for a family the user silenced is both leaking the
+    family back onto a review surface and writing a false measurement about it.
+    """
+    seed_page(vault, "nag-orphan", "A page with no relations at all.")
+    default = commands.op_review_memory(vault, mode="activation", limit=0)
+    assert any("relation_debt" in item["categories"] for item in default["items"])
+
+    commands.op_triage_memory(
+        vault,
+        ref="exomem://review/family/relation_debt",
+        action="off",
+        why="intentional: this vault does not use relations",
+    )
+
+    after = commands.op_review_memory(vault, mode="activation", limit=0)
+    assert not any("relation_debt" in item["categories"] for item in after["items"])
+    ledger = review_state.ReviewStateStore(vault).load()["surfaced"]
+    assert all(
+        not key.startswith("relation_debt") for key in ledger
+    )  # nothing keyed by a silenced family reached the ledger
+
+
+def test_an_explicit_activation_request_annotates_rather_than_pretends(
+    vault: Path,
+) -> None:
+    """Same asymmetry as attention: asking by name is asking anyway."""
+    seed_page(vault, "nag-orphan", "A page with no relations at all.")
+    commands.op_triage_memory(
+        vault,
+        ref="exomem://review/family/relation_debt",
+        action="quiet",
+        why="too_frequent: every page trips this",
+    )
+    named = commands.op_review_memory(
+        vault, mode="activation", categories=["relation_debt"], limit=0
+    )
+    listed = [item for item in named["items"] if "relation_debt" in item["categories"]]
+    assert listed
+    assert {item.get("disposition") for item in listed} == {"quiet"}
+
+
 def test_a_quiet_kind_emits_no_write_advisory(vault: Path) -> None:
     assert _write_advisories(vault)
     commands.op_triage_memory(
@@ -391,6 +440,53 @@ def test_dispositions_and_item_decisions_compose(vault: Path) -> None:
     assert states["nag-two.md"] == "open"
 
 
+def test_a_multi_flagged_item_resurfaces_when_a_family_returns(vault: Path) -> None:
+    """The compose rule the singly-flagged case does not exercise.
+
+    The user dismissed a signal composed of `relation_debt` alone, because
+    `prediction_window` was quiet and its reason had been dropped before fusion.
+    When the family returns the item's composed reasons become both — a signal
+    the user has never seen and never decided about — so it is open. Recording
+    the restored composition against the earlier decision would leak a dismissal
+    across a signal the user never saw, which is the exact hazard the
+    fused/component split exists to prevent.
+
+    The decision is not lost: the record still stands under the fingerprint it
+    was taken against, and so do the component records the fan-out wrote.
+    """
+    doubly_flagged(vault)
+    scratch_page(vault)
+
+    commands.op_triage_memory(vault, ref=FAMILY_REF, action="quiet", why=WHY)
+    quieted = [
+        item
+        for item in commands.op_attention(vault, limit=0, state="all")["items"]
+        if "nag-double" in item["path"]
+    ][0]
+    assert quieted["categories"] == ["relation_debt"], quieted["categories"]
+    commands.op_triage_memory(
+        vault, ref=quieted["ref"], action="dismiss", why="handled: dealt with elsewhere"
+    )
+    dismissed_fingerprint = quieted["fingerprint"]
+
+    commands.op_triage_memory(vault, ref=FAMILY_REF, action="normal")
+
+    restored = [
+        item
+        for item in commands.op_attention(vault, limit=0, state="all")["items"]
+        if "nag-double" in item["path"]
+    ][0]
+    assert restored["categories"] == ["prediction_window", "relation_debt"]
+    assert restored["fingerprint"] != dismissed_fingerprint
+    assert restored["state"] == "open"
+
+    records = review_state.ReviewStateStore(vault).load()["records"]
+    key = f"{quieted['item_id']}:{dismissed_fingerprint}"
+    assert key in records, sorted(records)
+    assert records[key]["action"] == "dismiss"
+    assert records[key]["reason"] == "handled"
+
+
 def test_the_dispositions_view_lists_what_is_quiet_and_why(vault: Path) -> None:
     overdue_prediction(vault)
     scratch_page(vault)
@@ -412,6 +508,63 @@ def test_the_dispositions_view_lists_what_is_quiet_and_why(vault: Path) -> None:
     assert families[FAMILY]["origin"] == "manual"
     assert families[FAMILY]["updated_at"]
     assert families[FAMILY]["manual_dismissals"] >= 1
+
+
+def test_manual_dismissals_are_attributed_by_component_not_by_the_fused_key(
+    vault: Path,
+) -> None:
+    """The count follows the per-finding identity, so it survives recomposition.
+
+    Keyed on the FUSED fingerprint the count is charged to whichever families
+    the item happens to be flagged by at read time, and it disappears entirely
+    the moment the item's composition moves — because the fused key the view
+    looks up is then a key nothing was ever recorded against. Here the page is
+    dismissed while `prediction_window` is its only flag and then loses its
+    relations, which earns it `relation_debt` and changes the fused fingerprint.
+
+    The component fingerprint is the one `apply_for_item` fanned the decision
+    out to, so `prediction_window` keeps its one dismissal and `relation_debt`
+    — whose signal nobody put down — correctly has none.
+    """
+    overdue_prediction(vault, "nag-evolving")
+    scratch_page(vault)
+    item = [
+        entry
+        for entry in commands.op_attention(vault, limit=0, state="all")["items"]
+        if "nag-evolving" in entry["path"]
+    ][0]
+    assert item["categories"] == [FAMILY]
+    commands.op_triage_memory(
+        vault, ref=item["ref"], action="dismiss", why="handled: dealt with elsewhere"
+    )
+
+    page = vault / "Knowledge Base/Notes/Insights/nag-evolving.md"
+    page.write_text(
+        page.read_text(encoding="utf-8").split("## Relations")[0], encoding="utf-8"
+    )
+    find_module.clear_cache()
+
+    keys = commands._review_keys_by_family(vault)
+    payload = review_state.ReviewStateStore(vault).load()
+    counts = review_state.manual_dismissals_by_family(payload, keys)
+    assert counts[FAMILY] == 1
+    assert counts["relation_debt"] == 0
+
+    # The fused key the item now reports is not the one the decision was
+    # recorded against — which is exactly why attributing by it loses the count.
+    recomposed = [
+        entry
+        for entry in commands.op_attention(vault, limit=0, state="all")["items"]
+        if "nag-evolving" in entry["path"]
+    ][0]
+    fused = {
+        category: [f"{recomposed['item_id']}:{recomposed['fingerprint']}"]
+        for category in recomposed["categories"]
+    }
+    assert review_state.manual_dismissals_by_family(payload, fused) == {
+        FAMILY: 0,
+        "relation_debt": 0,
+    }
 
 
 # ==========================================================================
@@ -522,10 +675,33 @@ def test_the_cli_also_takes_the_full_family_reference(vault: Path, capsys) -> No
 
 
 def test_the_cli_refuses_to_quiet_a_family_with_no_reason(vault: Path, capsys) -> None:
+    """Refused at the PARSER, so `--help` shows the requirement and the words.
+
+    The store refuses it too (`INVALID_REVIEW_REASON`) and that stays the
+    backstop for every other caller; what changed is that the CLI no longer
+    accepts an argument it is going to reject a layer down.
+    """
     code, _out, err = _cli(["review", "quiet", FAMILY, "--why", "just stop"], capsys)
     assert code != 0
-    assert "INVALID_REVIEW_REASON" in err
+    assert "--reason" in err
     assert _disposition(vault) is None
+
+
+def test_the_cli_refuses_unspecified_as_a_reason_for_quiet(vault: Path, capsys) -> None:
+    """`unspecified` is a valid code for an ITEM decision and never for a family.
+
+    Offering it in `--choices` and then failing on it is the specific shape this
+    fixes: argparse accepted the word, the store rejected it, and the user was
+    told about a vocabulary the parser had just implied was fine.
+    """
+    code, _out, err = _cli(
+        ["review", "quiet", FAMILY, "--reason", "unspecified"], capsys
+    )
+    assert code != 0
+    assert "unspecified" in err
+    assert _disposition(vault) is None
+    # Still valid on an item decision, which is why it stays in `REASON_CODES`.
+    assert "unspecified" in review_state.REASON_CODES
 
 
 def test_the_cli_rejects_a_word_outside_the_vocabulary(vault: Path, capsys) -> None:

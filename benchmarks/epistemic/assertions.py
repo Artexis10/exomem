@@ -263,6 +263,9 @@ FINGERPRINT_RAW_KEYS: frozenset[str] = frozenset(
 PASS_COUNT_RAW_KEYS: frozenset[str] = frozenset({"passes", "pass_count", "maintenance_passes"})
 EMISSION_COUNT_RAW_KEYS: frozenset[str] = frozenset({"emissions", "emission_count"})
 WRITE_COUNT_RAW_KEYS: frozenset[str] = frozenset({"writes", "write_count", "batch_size"})
+#: How many items the carrier had to report. A zero here means the batch had
+#: nothing to emit, which makes "no repetition" true for the wrong reason.
+DUE_TOTAL_RAW_KEYS: frozenset[str] = frozenset({"due_total", "outstanding_total"})
 #: Attribute keys marking an item as the continuation packet, and the response
 #: detail level a carrier journey ran at.
 PACKET_RAW_KEYS: frozenset[str] = frozenset({"packet", "continuation_packet", "packet_id"})
@@ -2788,6 +2791,18 @@ def counter_emission_not_repeated_per_write(ctx: AssertionContext) -> AssertionR
             name,
             "unsupported",
             f"{block.id} records {writes} write(s); counter repetition needs a bulk batch",
+            ctx.subject,
+        )
+    due_total = _raw_int(block, DUE_TOTAL_RAW_KEYS)
+    if due_total is not None and due_total < 1:
+        # Anti-vacuity. Zero emissions for a batch that owed nothing is not
+        # governance working; it is a batch with nothing to say. A projector
+        # that reports the denominator gets held to it.
+        return _result(
+            name,
+            "unsupported",
+            f"{block.id} had nothing due across the batch, so no block could have been "
+            "emitted; the absence of repetition is not evidence here",
             ctx.subject,
         )
     if emissions >= writes:

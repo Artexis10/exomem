@@ -130,16 +130,30 @@ you had already dismissed by hand before quieting it.
 `Knowledge Base/.review-state.json` holds three things: the triage decisions,
 the family dispositions, and a first-surfaced ledger recording when each signal
 first reached a served surface — the review list, a due-state carrier, or a
-write advisory. Nothing withheld by governance, filtered by a disposition, or
-seen only by the audit is ever recorded, the ledger is never backfilled, and a
-store that cannot be written changes nothing a reader acts on.
+write advisory. "Reached" means DELIVERED, not produced: a carrier block that a
+batch, the change-only rule, or a `legacy` response dropped was shown to nobody
+and is not recorded. Neither is anything withheld by governance, filtered by a
+disposition, seen only by the audit, or merely looked up — resolving one
+reference scans every queue to find it, and a scan is not a surface. The ledger
+is never backfilled, and a store that cannot be written changes nothing a
+reader acts on.
 
-The store compacts itself. Expired snoozes older than 90 days and ledger
-entries older than 400 days are dropped once the file passes its size or record
-threshold; a standing decision is never dropped, whatever its age. The drop is
-reported under `stats.compaction` with `origin: automatic`, and
-`maintain_memory(mode="reconcile")` returns the same report so a compaction is
-never silent.
+Reading the store is the other way round. The ledger write is best effort, but
+the DECISIONS are not: a `.review-state.json` that cannot be read or parsed
+makes the review surfaces refuse with `REVIEW_STATE_INVALID` rather than answer
+as though nothing had ever been decided, because the second one silently
+resurrects every dismissal in the vault. `maintain_memory(mode="reconcile")` is
+the way back — it reads at a raised limit precisely so a store that outgrew the
+ordinary one can still be compacted.
+
+The store compacts itself, within limits worth stating plainly. Expired snoozes
+older than 90 days and ledger entries older than 400 days are dropped once the
+file passes its size or record threshold; a standing decision is never dropped,
+whatever its age. So compaction bounds the ledger and it does not bound the
+store: a vault that accumulates dismissals grows, and no retention rule brings
+it back down. The drop is reported under `stats.compaction` with
+`origin: automatic`, and `maintain_memory(mode="reconcile")` returns the same
+report so a compaction is never silent.
 
 ## Emission counters
 
@@ -149,3 +163,9 @@ absorbed and `emissions` counts the due-state blocks actually delivered. A
 command that writes many pages at once is one batch, and a batch delivers at
 most one block rather than one per write — the counters are how that is
 checkable rather than merely claimed.
+
+The section also carries `due_total`: how many items the last write carrier
+actually had to report. Without it "no blocks for twelve writes" is unreadable,
+because it is equally the shape of governance working and the shape of a vault
+that owed nothing, and a metric that cannot tell those apart cannot be used to
+claim either.

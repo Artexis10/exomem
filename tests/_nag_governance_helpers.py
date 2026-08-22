@@ -57,6 +57,31 @@ def overdue_prediction(
     )
 
 
+def doubly_flagged(vault: Path, slug: str = "nag-double") -> str:
+    """A page two families flag at once: `prediction_window` AND `relation_debt`.
+
+    Same overdue prediction as `overdue_prediction`, minus the Relations
+    section, which is what earns the second flag. Multi-flagged items are where
+    the fused/component fingerprint split actually bites, so the compose rules
+    need one.
+    """
+    return write(
+        vault,
+        f"{INSIGHTS}/{slug}.md",
+        "---\n"
+        f"title: {slug}\n"
+        "type: insight\n"
+        "status: active\n"
+        "created: 2026-01-01\n"
+        "updated: 2026-01-01\n"
+        "---\n\n"
+        "## Prediction\n\n"
+        "- id: p1\n"
+        f"- check_by: {yesterday()}\n\n"
+        "An isolated claim with no relations at all.\n",
+    )
+
+
 def scratch_page(vault: Path) -> str:
     return write(
         vault,

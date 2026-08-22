@@ -4,7 +4,7 @@
 
 The portable review state SHALL record, per registered signal family, a disposition of `normal`, `quiet`, or `off`, with the reason code, the free-text why, the timestamp, and the origin of the decision. A family SHALL be any registered attention category or write-advisory kind; any other name SHALL be refused. A disposition SHALL persist across engine restarts and across prominence-level changes, and SHALL change only through an explicit decision or a reset to `normal`.
 
-A `quiet` family SHALL be excluded from the default attention union, SHALL contribute nothing to the due-state projection or to any carrier, and SHALL emit no write-path advisory of its kind, while remaining included when its category is requested explicitly, annotated with its disposition. An `off` family SHALL additionally be excluded from explicit category review except under the all-states view, where it is annotated. Exclusion SHALL be applied before cross-queue fusion, so an item flagged only by excluded families is absent and a multi-flagged item keeps its remaining reasons. Audit measurement SHALL be unaffected by any disposition. Per-item decisions and pair stances SHALL compose unchanged with dispositions.
+A `quiet` family SHALL be excluded from the default attention union, SHALL contribute nothing to the due-state projection or to any carrier, and SHALL emit no write-path advisory of its kind, while remaining included when its category is requested explicitly, annotated with its disposition. An `off` family SHALL additionally be excluded from explicit category review except under the all-states view, where it is annotated. Exclusion SHALL be applied before cross-queue fusion, so an item flagged only by excluded families is absent and a multi-flagged item keeps its remaining reasons. Audit measurement SHALL be unaffected by any disposition. Per-item decisions and pair stances SHALL compose unchanged with dispositions. A disposition SHALL NOT rewrite a decision: an item whose composed reasons change when a family returns to `normal` SHALL resurface under the existing new-reason rule, with the earlier record still standing under the fingerprint it was recorded against.
 
 #### Scenario: A quiet family leaves the default union and the carriers
 
@@ -30,6 +30,12 @@ A `quiet` family SHALL be excluded from the default attention union, SHALL contr
 - **WHEN** an item in a `quiet` family is dismissed and the family is later reset to `normal`
 - **THEN** the item stays dismissed under its fingerprint
 - **AND** a different item in the same family is open
+
+#### Scenario: A multi-flagged item resurfaces under the new-reason rule when a family returns
+
+- **WHEN** an item flagged by two families is dismissed while one of them is `quiet`, and that family is later reset to `normal`
+- **THEN** the item is open, because its composed reasons now include one the decision was never taken against
+- **AND** the earlier record still stands under the fingerprint it was recorded against
 
 #### Scenario: An unregistered family is refused
 
