@@ -504,6 +504,8 @@ def _connect(
             connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
+        if readonly:
+            connection.execute("BEGIN")
         return connection
     except BaseException:
         connection.close()
@@ -541,6 +543,7 @@ def stage_variant_store(
                 try:
                     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
                     if version == SCHEMA_USER_VERSION:
+                        connection.execute("BEGIN")
                         return _verify_connection(
                             connection,
                             key=key,
@@ -560,6 +563,7 @@ def stage_variant_store(
                         connection.rollback()
                         raise
                     _crash_point("after-commit")
+                    connection.execute("BEGIN")
                     return _verify_connection(
                         connection,
                         key=key,
