@@ -921,7 +921,7 @@ def _build_export(
     try:
         checkpoint_bytes = _secure_run_read(plan, "checkpoint.json")
         loaded = _load_json_bytes(checkpoint_bytes, "checkpoint")
-        if not isinstance(loaded, dict) or not isinstance(loaded.get("questions"), list):
+        if not isinstance(loaded, dict) or not isinstance(loaded.get("questions"), dict):
             raise ValueError("checkpoint shape is invalid")
         checkpoint = loaded
         checkpoint_sha = _sha256_bytes(checkpoint_bytes)
@@ -950,14 +950,16 @@ def _build_export(
             elif checkpoint_targets is not None and checkpoint_targets != selected_ids:
                 failures.add("case_set_mismatch")
                 checkpoint_selection_mismatch = True
-            for question in checkpoint["questions"]:
-                if not isinstance(question, dict) or not isinstance(question.get("questionId"), str):
+            for checkpoint_id, question in checkpoint["questions"].items():
+                if (
+                    not isinstance(checkpoint_id, str)
+                    or not isinstance(question, dict)
+                    or question.get("questionId") != checkpoint_id
+                ):
                     failures.add("checkpoint_invalid")
                     checkpoint_by_id = {}
                     break
-                if question["questionId"] in checkpoint_by_id:
-                    failures.add("case_set_mismatch")
-                checkpoint_by_id[question["questionId"]] = question
+                checkpoint_by_id[checkpoint_id] = question
             if checkpoint_selection_mismatch:
                 checkpoint_by_id = {}
 
@@ -1020,7 +1022,9 @@ def _build_export(
             }
             phases, phase_failures = _phase_projection(source.get("phases"))
             case_failures.update(phase_failures)
-            result_file = source.get("resultFile")
+            source_phases = source.get("phases")
+            search_phase = source_phases.get("search") if isinstance(source_phases, dict) else None
+            result_file = search_phase.get("resultFile") if isinstance(search_phase, dict) else None
             if isinstance(result_file, str):
                 candidate = Path(result_file)
                 if candidate.is_absolute() or "\\" in result_file or ".." in candidate.parts:
@@ -1067,7 +1071,8 @@ def _build_export(
                 except ValueError:
                     case_failures.add("hit_invalid")
                     hits = []
-                if source.get("results") != result.get("results"):
+                checkpoint_results = search_phase.get("results") if isinstance(search_phase, dict) else None
+                if checkpoint_results != result.get("results"):
                     case_failures.add("checkpoint_result_mismatch")
 
                 case_failures.update(result_failures)
@@ -1375,12 +1380,16 @@ def _discover_cleanup_targets(plan: MemoryBenchRunPlan) -> list[dict[str, Any]]:
             and checkpoint.get("runId") == plan.upstream_run_id
             and checkpoint.get("provider") == plan.provider
             and checkpoint.get("benchmark") == plan.benchmark
-            and isinstance(checkpoint.get("questions"), list)
+            and isinstance(checkpoint.get("questions"), dict)
         ):
-            for question in checkpoint["questions"]:
-                if not isinstance(question, dict) or not isinstance(question.get("questionId"), str):
+            for checkpoint_id, question in checkpoint["questions"].items():
+                if (
+                    not isinstance(checkpoint_id, str)
+                    or not isinstance(question, dict)
+                    or question.get("questionId") != checkpoint_id
+                ):
                     raise ValueError("checkpoint target discovery is invalid")
-                checkpoint_by_id[question["questionId"]] = question
+                checkpoint_by_id[checkpoint_id] = question
     except Exception:
         checkpoint_by_id = {}
 
@@ -1415,13 +1424,18 @@ def _privacy_forbidden_values(plan: MemoryBenchRunPlan) -> tuple[set[str], set[s
         pass
     try:
         checkpoint = _load_json_bytes(_secure_run_read(plan, "checkpoint.json"), "checkpoint")
-        if isinstance(checkpoint, dict) and isinstance(checkpoint.get("questions"), list):
-            for question in checkpoint["questions"]:
+        if isinstance(checkpoint, dict) and isinstance(checkpoint.get("questions"), dict):
+            for question in checkpoint["questions"].values():
                 if isinstance(question, dict):
-                    for key in ("questionId", "containerTag", "resultFile"):
+                    for key in ("questionId", "containerTag"):
                         value = question.get(key)
                         if isinstance(value, str) and value:
                             opaque.add(value)
+                    phases = question.get("phases")
+                    search = phases.get("search") if isinstance(phases, dict) else None
+                    result_file = search.get("resultFile") if isinstance(search, dict) else None
+                    if isinstance(result_file, str) and result_file:
+                        opaque.add(result_file)
                     ground_truth = question.get("groundTruth")
                     if isinstance(ground_truth, str) and ground_truth:
                         content.add(ground_truth)
