@@ -17,8 +17,15 @@ import re
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from exomem import mutation_lock
+from exomem import held_fs, mutation_lock
+
+if TYPE_CHECKING:
+    from .schema_v4 import (
+        ActivationRegistryAcknowledgement,
+        VerifiedActiveGovernanceState,
+    )
 
 KEYRING_FILE_ENV = "EXOMEM_AUTH_SESSION_KEYRING_FILE"
 CONTROL_FILE_ENV = "EXOMEM_AUTH_SESSION_CONTROL_FILE"
@@ -537,3 +544,194 @@ def load_authorization_custody(
         keyring=keyring,
         control=control,
     )
+
+
+def _control_value(record: AuthorizationControlRecord) -> dict[str, object]:
+    return {
+        "version": record.version,
+        "keyring_id": record.keyring_id,
+        "cell_id": record.cell_id,
+        "logical_vault_id": record.logical_vault_id,
+        "registry_attachment_id": record.registry_attachment_id,
+        "attachment_epoch": record.attachment_epoch,
+        "governance_enrolled": record.governance_enrolled,
+        "activation_store_id": record.activation_store_id,
+        "activation_epoch": record.activation_epoch,
+        "activation_state_digest": record.activation_state_digest,
+        "serving_membership_epoch": record.serving_membership_epoch,
+        "serving_membership_digest": record.serving_membership_digest,
+        "issued_at": record.issued_at,
+        "expires_at": record.expires_at,
+        "signing_key_id": record.signing_key_id,
+    }
+
+
+def _signed_control_bytes(
+    record: AuthorizationControlRecord,
+    *,
+    signing_key: bytes,
+) -> bytes:
+    value = _control_value(record)
+    value["mac"] = (
+        base64.urlsafe_b64encode(
+            hmac.new(signing_key, _control_mac_input(value), hashlib.sha256).digest()
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if not 1 <= len(encoded) <= MAX_CUSTODY_FILE_BYTES:
+        raise AuthorizationCustodyUnavailable
+    return encoded
+
+
+def _prepare_private_control_stage(control_path: Path, staged: held_fs.HeldFile) -> None:
+    descriptor = getattr(staged, "descriptor", None)
+    if not isinstance(descriptor, int):
+        raise AuthorizationCustodyUnavailable
+    if os.name == "nt":
+        name = getattr(staged, "name", None)
+        if not isinstance(name, str) or not name:
+            raise AuthorizationCustodyUnavailable
+        mutation_lock._windows_apply_private_dacl(
+            control_path.parent / name,
+            mutation_lock._windows_current_user_sid(),
+        )
+    info = os.fstat(descriptor)
+    if not _file_is_owner_protected(descriptor, info):
+        raise AuthorizationCustodyUnavailable
+
+
+def _replace_control_bytes(
+    path: Path,
+    *,
+    expected: bytes,
+    target: bytes,
+) -> None:
+    parent_path = path.parent
+    anchor = parent_path.parent
+    if anchor == parent_path or not parent_path.name or not path.name:
+        raise AuthorizationCustodyUnavailable
+    try:
+        acquired = held_fs.acquire(anchor)
+        if not acquired.ok:
+            raise AuthorizationCustodyUnavailable
+        with acquired.require() as filesystem:
+            parent_result = filesystem.parent(parent_path.name, access="flush")
+            if not parent_result.ok:
+                raise AuthorizationCustodyUnavailable
+            with parent_result.require() as parent:
+                current_result = filesystem.file(parent, path.name)
+                if not current_result.ok:
+                    raise AuthorizationCustodyUnavailable
+                with current_result.require() as current:
+                    observed = filesystem.read(current)
+                    if (
+                        current.identity.link_count != 1
+                        or not observed.ok
+                        or not hmac.compare_digest(observed.require(), expected)
+                    ):
+                        raise AuthorizationCustodyUnavailable
+                    identity = current.identity
+                published = held_fs.publish_bytes(
+                    filesystem,
+                    parent,
+                    path.name,
+                    target,
+                    expected_identity=identity,
+                    expected_sha256=hashlib.sha256(expected).hexdigest(),
+                    prepare=lambda staged: _prepare_private_control_stage(path, staged),
+                )
+                if not published.ok:
+                    raise AuthorizationCustodyUnavailable
+                flushed = filesystem.flush_directory(parent)
+                if not flushed.ok:
+                    raise AuthorizationCustodyUnavailable
+        installed = _load_file(path)
+        if not hmac.compare_digest(installed.data, target):
+            raise AuthorizationCustodyUnavailable
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError, held_fs.HeldFsError):
+        raise AuthorizationCustodyUnavailable from None
+
+
+def acknowledge_activation_tuple(
+    vault_root: Path,
+    *,
+    expected_control: AuthorizationControlRecord,
+    target: VerifiedActiveGovernanceState,
+    now: int,
+) -> ActivationRegistryAcknowledgement:
+    """CAS the protected external registry to one exact committed successor."""
+
+    from . import schema_v4
+
+    if (
+        not isinstance(expected_control, AuthorizationControlRecord)
+        or not isinstance(target, schema_v4.VerifiedActiveGovernanceState)
+        or not expected_control.governance_enrolled
+        or expected_control.activation_store_id is None
+        or expected_control.activation_epoch is None
+        or expected_control.activation_state_digest is None
+        or target.logical_vault_id != expected_control.logical_vault_id
+        or target.activation_store_id != expected_control.activation_store_id
+        or target.activation_epoch != expected_control.activation_epoch + 1
+    ):
+        raise AuthorizationCustodyUnavailable
+
+    external = load_external_custody(Path(vault_root))
+    keyring = parse_keyring(external.keyring)
+    current = parse_control_record(external.control, keyring=keyring, now=now)
+    target_control = AuthorizationControlRecord(
+        version=expected_control.version,
+        keyring_id=expected_control.keyring_id,
+        cell_id=expected_control.cell_id,
+        logical_vault_id=expected_control.logical_vault_id,
+        registry_attachment_id=expected_control.registry_attachment_id,
+        attachment_epoch=expected_control.attachment_epoch,
+        governance_enrolled=True,
+        activation_store_id=target.activation_store_id,
+        activation_epoch=target.activation_epoch,
+        activation_state_digest=target.activation_state_digest,
+        serving_membership_epoch=expected_control.serving_membership_epoch,
+        serving_membership_digest=expected_control.serving_membership_digest,
+        issued_at=expected_control.issued_at,
+        expires_at=expected_control.expires_at,
+        signing_key_id=expected_control.signing_key_id,
+    )
+    acknowledgement = schema_v4.ActivationRegistryAcknowledgement(
+        activation_store_id=target.activation_store_id,
+        activation_epoch=target.activation_epoch,
+        activation_state_digest=target.activation_state_digest,
+    )
+    if current == target_control:
+        return acknowledgement
+    if current != expected_control:
+        raise AuthorizationCustodyUnavailable
+    signing_key = next(
+        (
+            key.key
+            for key in keyring.accepted_keys
+            if key.key_id == target_control.signing_key_id
+        ),
+        None,
+    )
+    if signing_key is None:
+        raise AuthorizationCustodyUnavailable
+    encoded = _signed_control_bytes(target_control, signing_key=signing_key)
+    _replace_control_bytes(
+        external.control_path,
+        expected=external.control,
+        target=encoded,
+    )
+    verified = load_authorization_custody(Path(vault_root), now=now)
+    if verified.control != target_control:
+        raise AuthorizationCustodyUnavailable
+    return acknowledgement
