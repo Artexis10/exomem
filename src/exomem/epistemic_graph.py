@@ -4859,16 +4859,28 @@ def suggest_relations(
             else None
         )
         if page is not None:
+            # Structural candidates go FIRST, ahead of the unbounded wikilink
+            # generator. The truncation below is at `limit` (10 by default in
+            # the acceptance queue), so ordering is a budget, not a cosmetic:
+            # a dense compiled note with a dozen body wikilinks would otherwise
+            # yield zero structural candidates -- and that is precisely the page
+            # that carries typed unit relations, so the change would be silent
+            # on its own motivating case. Worse, wikilink candidates are
+            # generated before `relation_queue._classify_candidate` drops the
+            # already-authored ones, so the budget can be spent on candidates
+            # that are then discarded.
+            #
+            # The ranking that follows from that: an author-written typed unit
+            # relation is the highest-evidence signal in the set, and a body
+            # wikilink is the lowest-cost to regenerate on the next read. The
+            # three structural generators are individually capped, so they can
+            # take at most nine of ten slots; the existing four keep their
+            # relative order among themselves. Pinned in both directions by the
+            # suggestion-order test.
+            candidates.extend(_structural_candidates(vault_root, rel))
             candidates.extend(_wikilink_candidates(vault_root, page.body, rel))
             candidates.extend(_frontmatter_source_candidates(page))
             candidates.extend(_shared_source_candidates(vault_root, rel))
-            # Deliberately here: `_wikilink_candidates` is unbounded and the
-            # truncation below is at `limit`, so on a link-heavy page a
-            # structural candidate registered any later would never reach the
-            # acceptance queue. After the three deterministic generators (which
-            # are cheap and already relied upon) and before the optional
-            # embedding lane. Pinned by the suggestion-order test.
-            candidates.extend(_structural_candidates(vault_root, rel))
             candidates.extend(_embedding_proximity_candidates(vault_root, page))
     elif draft_body:
         candidates.extend(
@@ -6628,7 +6640,7 @@ def _structural_candidates(vault_root: Path, rel_path: str) -> list[dict[str, An
     try:
         rel = _with_md(rel_path)
         file_key = _file_key(rel)
-        return [
+        produced = [
             *_unit_relation_lift_candidates(conn, index.registry, rel, file_key),
             *_shared_open_question_candidates(conn, rel),
             *_shared_resolution_target_candidates(conn, rel, file_key),
@@ -6637,6 +6649,22 @@ def _structural_candidates(vault_root: Path, rel_path: str) -> list[dict[str, An
         return []
     finally:
         conn.close()
+    # The two co-participation generators routinely find the SAME peer — pages
+    # that share a question usually also answer the same thing — and both
+    # propose `relates_to`, so they emit the identical bullet. `_dedupe_candidates`
+    # keys on `method` and would keep both, spending two of ten slots on one
+    # edge the reviewer can only accept once (after which the second is filtered
+    # as an authored edge anyway). Suppress the later duplicate here, where the
+    # collision is visible, rather than shipping the noise.
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in produced:
+        key = (str(candidate["to"]), str(candidate["relation_type"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
 
 
 def _unit_relation_lift_candidates(
@@ -6656,9 +6684,19 @@ def _unit_relation_lift_candidates(
     see. `src_key <> file_key` selects exactly the first form; the `NOT EXISTS`
     drops any unit relation the page has already promoted by hand.
 
-    This infers nothing: the proposed kind is the authored label itself, taken
-    verbatim from `raw_relation` on that unit edge. The generator can only fail
-    to promote a meaning, never manufacture one.
+    This infers nothing: the proposed kind is the author's own label from
+    `raw_relation` on that unit edge, put through the registry's own
+    `normalize_relation`. The generator can only fail to promote a meaning,
+    never manufacture one.
+
+    Normalizing is not cosmetic. `- relations: Answers: [[T]]` parses with no
+    diagnostic and resolves to core standing, but the canonical relation-bullet
+    grammar (`markdown_relations`) accepts only `[a-z][a-z0-9_.-]{1,80}`. Emitting
+    the label verbatim would therefore produce `- Answers [[T]]`, which
+    `relation_queue.accept` refuses with `SEMANTIC_CONTRACT_BLOCKED` — a queue
+    item that can never be accepted and recurs on every `build_queue`.
+    `normalize_relation` is the same function the registry used to resolve the
+    edge in the first place, so the proposal stays the authored kind.
     """
     rows = conn.execute(
         _UNIT_RELATION_LIFT_SQL,
@@ -6679,7 +6717,7 @@ def _unit_relation_lift_candidates(
         definition = registry.definition(str(relation_type or ""))
         if definition is None or definition.family not in _LIFT_RELATION_FAMILIES:
             continue
-        authored = str(raw_relation or "").strip()
+        authored = relation_registry.normalize_relation(str(raw_relation or ""))
         if not authored:
             continue
         target = _with_md(str(dst_key or "").removeprefix("file:"))

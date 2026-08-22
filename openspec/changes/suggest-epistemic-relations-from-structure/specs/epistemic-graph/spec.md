@@ -108,6 +108,16 @@ identical candidates.
 - **WHEN** two hundred pages each carry the same open question as the requested page
 - **THEN** at most three `shared_open_question` candidates are returned
 
+#### Scenario: Folded evidence is capped and the total stays honest
+
+- **WHEN** two pages share more open questions than one candidate's evidence may carry
+- **THEN** the candidate's evidence lists the capped number of matches and separately reports the true total
+
+#### Scenario: Two co-participation methods do not propose the same edge twice
+
+- **WHEN** two pages both share an open question and both answer the same target, so `shared_open_question` and `shared_resolution_target` would each propose `relates_to` to the same page
+- **THEN** exactly one structural candidate is returned for that relation type and target
+
 ### Requirement: Structural Evidence Identifies The Driving Unit
 
 A structural candidate whose evidence is derived from a page other than the
@@ -127,15 +137,23 @@ remains byte-identical.
 - **WHEN** a `unit_relation_lift` candidate is returned
 - **THEN** its evidence names the authoring unit's unit reference and anchor, the authored relation label, and the resolved relation family
 
-### Requirement: Structural Generators Run After Deterministic And Before Optional Generators
+### Requirement: Structural Generators Are Ordered Ahead Of Wikilink Suggestions
 
-Structural generators SHALL be invoked after the wikilink, frontmatter-source
-and shared-source generators and before the optional embedding-proximity
-generator, so that the deterministic candidates users already depend on are
-never displaced and structural candidates are never ranked behind an optional
-lane. This ordering interacts with the response truncation limit deliberately.
+Structural generators SHALL be invoked before the wikilink, frontmatter-source,
+shared-source and embedding-proximity generators, and those four SHALL retain
+their existing order relative to one another. Because the response is truncated
+at the requested limit, this ordering is a budget: an author-written typed
+relation is the highest-evidence signal available and SHALL NOT be displaced by
+unbounded body-wikilink candidates, which are the lowest-cost to regenerate on a
+later read.
 
-#### Scenario: Candidate order places structural candidates between the two groups
+#### Scenario: A link-heavy page still yields its structural candidates
+
+- **WHEN** a page carries more body wikilinks than the requested limit and also carries a typed unit relation with no page-level counterpart
+- **THEN** the response still contains the unit-relation-lift candidate
+
+#### Scenario: Candidate order places structural candidates first
 
 - **WHEN** `suggest_relations` returns candidates from every generator for one page
-- **THEN** the first structural candidate appears after the first shared-source candidate and before the first embedding-proximity candidate
+- **THEN** every first structural candidate appears before the first wikilink candidate
+- **AND** the first wikilink, frontmatter-source, shared-source and embedding-proximity candidates remain in that relative order

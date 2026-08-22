@@ -82,11 +82,22 @@ flood the queue. Adjacency is instead defined as: each page carries a
 complementary answers to one thing. That is a real shared observation and
 mirrors `shared_sources` directly.
 
-### The lift proposes the authored label, gated by family
+### The lift proposes the authored label, normalized, gated by family
 
-The proposed relation type is the `raw_relation` recorded on the unit edge —
-the label the author actually typed. The generator cannot manufacture a meaning,
-only fail to promote one.
+The proposed relation type is the `raw_relation` recorded on the unit edge — the
+label the author actually typed — put through `relation_registry.normalize_relation`.
+The generator cannot manufacture a meaning, only fail to promote one.
+
+Normalizing is not cosmetic. `- relations: Answers: [[T]]` parses with no
+diagnostic and resolves to `registry_status='core'`, but the canonical
+relation-bullet grammar in `markdown_relations` accepts only
+`[a-z][a-z0-9_.-]{1,80}`. Proposing the label verbatim therefore authors
+`- Answers [[T]]`, and the governed accept refuses it with
+`SEMANTIC_CONTRACT_BLOCKED: malformed_relation` — naming nothing the reader can
+act on, and leaving a queue item that is permanently unacceptable and reappears
+on every `build_queue`. The same holds for `EVIDENCED BY:` and `evidenced by:`.
+`normalize_relation` is the same function the registry used to resolve the edge
+in the first place, so the proposal is still the authored kind.
 
 The family allowlist (`answer`, `resolution`, `question`, `support`,
 `contradiction`, `refinement`, `evidence`, `duplication`) is resolved through
@@ -122,24 +133,64 @@ generator therefore aggregates to one candidate per `(target, relation type)`
 and folds all matches into a list inside `evidence`. The three method names are
 fresh, so they cannot collide with the existing four either.
 
-### Registration order is load-bearing
+### Registration order is load-bearing, and structural goes first
 
-`_wikilink_candidates` is unbounded and `suggest_relations` truncates at
-`limit`, so on a link-heavy page a structural candidate registered any later
-would never reach the acceptance queue. The three are registered after the
-deterministic generators (cheap, already relied upon) and before the optional
-embedding lane. The interaction is accepted deliberately and pinned by a test,
-so it is not incidental.
+`_wikilink_candidates` is unbounded and `suggest_relations` truncates at `limit`
+(10 by default in the acceptance queue), so ordering is a budget rather than a
+presentation choice.
+
+An earlier revision of this design placed the structural generators after the
+three deterministic ones, reasoning that the deterministic candidates were cheap
+and already relied upon. **That reasoning ran backwards and has been reversed.**
+A page with twelve body wikilinks and one typed unit relation yielded zero
+structural candidates — and a dense compiled note is exactly the page that
+carries typed unit relations, so the change would have been silent on its own
+motivating case. The interaction is worse than simple truncation: wikilink
+candidates are generated before `relation_queue._classify_candidate` drops the
+already-authored ones, so the budget can be spent on candidates that are then
+discarded.
+
+The ranking that follows: an author-written typed unit relation is the
+highest-evidence signal in the set, and a body wikilink is the lowest-cost to
+regenerate on the next read. Structural generators therefore run first, and the
+existing four keep their order relative to one another. Pinned in both
+directions, plus a dedicated link-heavy-page regression.
+
+The residual risk is the mirror of the one being fixed: the three structural
+generators are capped at three candidates each, so on a page rich in both
+semantic units and wikilinks they can occupy nine of ten slots. That is bounded
+by construction, it can only happen on a page whose author has written a great
+deal of structure, and the displaced `links_to` candidates are regenerated on
+the next read once these are accepted or dismissed.
 
 ### Bounds
 
 One SQL statement per generator, each with a row `LIMIT`; at most three
 candidates per generator per page; at most five folded matches inside one
-candidate's evidence. A test proves the query count is constant between a
-two-page corpus and a 201-page corpus.
+candidate's evidence, with the true total reported alongside. A test proves the
+query count is constant between a two-page corpus and a 201-page corpus.
+
+### The two co-participation generators suppress each other's duplicates
+
+Pages that share an open question very often also answer the same target, so
+`shared_open_question` and `shared_resolution_target` frequently find the same
+peer — and both propose `relates_to`, meaning the identical bullet. Since
+`_dedupe_candidates` keys on `method`, both would survive and spend two of ten
+slots on one edge that can be accepted only once (after which the second is
+filtered as an authored edge anyway). `_structural_candidates` therefore drops a
+later structural candidate whose `(target, relation type)` an earlier one has
+already claimed. The surviving candidate still carries the peer's unit identity,
+so dismissal semantics for the edge that is actually proposed are unaffected.
 
 ## Risks / Trade-offs
 
+- **The causality exclusion rests on a stated principle, not on a count.** The
+  allowlisted families express an epistemic stance between bodies of knowledge,
+  which a page can hold as a whole; causality asserts a mechanism between the
+  things described, which is a property of the referents, not the documents.
+  Broadening a stance yields a reviewable statement; broadening a mechanism
+  relocates it onto subjects that cannot bear it. Widening the allowlist to
+  causality would need a different argument, not one more entry.
 - **Page-level targets force `relates_to`.** "Both pages hold the same question"
   looks like it licenses `duplicates`, but the accepted bullet would read
   `- duplicates [[B]]` and assert that the *pages* duplicate. This is the

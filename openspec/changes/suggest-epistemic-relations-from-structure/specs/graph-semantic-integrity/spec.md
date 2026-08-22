@@ -27,14 +27,27 @@ units.
 A structural method that proposes a directional epistemic relation SHALL do so
 only by promoting a relation kind that is already present on a unit-level
 relation edge of that same source page. The proposed relation type SHALL be the
-label the author wrote on that unit edge. The method MUST NOT propose a relation
-kind absent from the source page's own unit-level edges, and MUST NOT derive a
-relation kind from similarity, proximity, or any other measurement.
+normalized form of the label the author wrote on that unit edge, using the
+relation registry's own label normalization, so that the proposed bullet always
+satisfies the canonical relation grammar and can therefore be accepted. The
+method MUST NOT propose a relation kind absent from the source page's own
+unit-level edges, and MUST NOT derive a relation kind from similarity,
+proximity, or any other measurement.
 
 #### Scenario: Only authored kinds are proposed
 
 - **WHEN** a unit-relation-lift candidate is returned for a page
-- **THEN** its proposed relation type appears verbatim as the authored relation label on a unit-level relation edge of that page
+- **THEN** its proposed relation type is the normalized form of an authored relation label on a unit-level relation edge of that page
+
+#### Scenario: A kind authored on another page is not proposed here
+
+- **WHEN** one page authors a unit-level relation of an allowed kind and a second page authors none of that kind
+- **THEN** no structural candidate proposing that kind is returned for the second page
+
+#### Scenario: A non-canonical authored label yields an acceptable proposal
+
+- **WHEN** a semantic unit authors a relation whose label differs from canonical form only in case or separators
+- **THEN** the proposed relation type is its normalized form, and accepting the candidate through the governed write path succeeds rather than being refused as a malformed relation
 
 #### Scenario: An unauthored kind is never proposed
 
@@ -45,9 +58,17 @@ relation kind from similarity, proximity, or any other measurement.
 
 No structural relation-suggestion method SHALL propose `causes`, `caused_by`, or
 any other relation in the causality family, even when the author has written
-such a relation on one of the page's semantic units. Promoting a unit's causal
-claim to a page-level proposal would assert a mechanism between the pages that
-the author did not write.
+such a relation on one of the page's semantic units.
+
+The allowlisted families each express an **epistemic stance between bodies of
+knowledge** — answering, resolving, questioning, supporting, contradicting,
+refining, evidencing, duplicating. A page can coherently hold such a stance as a
+whole, so broadening a unit's stance to its page yields a statement a reviewer
+can judge. Causality instead asserts a **mechanism between the things
+described**, which is a property of the referents rather than of the documents:
+broadening it does not weaken the claim, it relocates it onto subjects that
+cannot bear it. That is the distinction, and it is why widening the allowlist to
+causality would require a different justification rather than one more entry.
 
 #### Scenario: An authored causal unit relation is not lifted
 

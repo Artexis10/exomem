@@ -21,7 +21,13 @@ from pathlib import Path
 
 import pytest
 
-from exomem import corpus_aware, epistemic_graph, relation_queue
+from exomem import (
+    commands,
+    corpus_aware,
+    epistemic_graph,
+    relation_queue,
+    relation_registry,
+)
 
 KB = "Knowledge Base/Notes/Insights"
 
@@ -136,6 +142,14 @@ def test_lift_is_suppressed_when_the_page_already_authored_the_edge(
 def test_lift_only_proposes_kinds_present_on_the_pages_own_unit_edges(
     tmp_path: Path,
 ) -> None:
+    """A kind authored on ANOTHER page must never surface here.
+
+    `foreign` is load-bearing. Deriving the expected set from the same
+    `source_path` filter the query uses proves nothing: relaxing that filter
+    (`e.source_path = ? OR 1=1`) would make every page's authored relations
+    liftable onto every page, and a fixture holding only one authoring page has
+    no foreign kind to catch it.
+    """
     vault = tmp_path / "vault"
     _page(vault, "target", "A target page.")
     _page(
@@ -147,20 +161,33 @@ def test_lift_only_proposes_kinds_present_on_the_pages_own_unit_edges(
         "\n"
         "A claim with two typed unit relations.\n",
     )
+    _page(
+        vault,
+        "foreign",
+        "## Claim\n"
+        "- id: c-f\n"
+        f"- relations: contradicts: [[{KB}/target]]\n"
+        "\n"
+        "A third in-allowlist kind, to the same target, on a different page.\n",
+    )
     index = _build(vault)
 
     lifted = _by_method(_candidates(vault, f"{KB}/source.md"), "unit_relation_lift")
-    assert lifted
+    foreign = _by_method(_candidates(vault, f"{KB}/foreign.md"), "unit_relation_lift")
 
-    authored_raw = {
-        edge["raw_relation"]
+    assert sorted(c["relation_type"] for c in lifted) == ["answers", "refines"]
+    assert [c["relation_type"] for c in foreign] == ["contradicts"]
+
+    authored = {
+        relation_registry.normalize_relation(edge["raw_relation"])
         for edge in index.edges()
         if edge["source_path"] == f"{KB}/source.md"
         and edge["origin"] == "semantic_relation"
         and edge["src_key"] != f"file:{KB}/source.md"
     }
+    assert "contradicts" not in authored
     for candidate in lifted:
-        assert candidate["relation_type"] in authored_raw
+        assert candidate["relation_type"] in authored
 
 
 def test_lift_never_proposes_causality_or_unregistered_kinds(tmp_path: Path) -> None:
@@ -238,6 +265,121 @@ def test_lift_folds_several_authoring_units_into_one_candidate(
 
     assert len(lifted) == 1
     assert [unit["anchor"] for unit in lifted[0]["evidence"]["units"]] == ["c-1", "f-1"]
+
+
+def test_lift_normalizes_the_authored_label_so_the_proposal_is_acceptable(
+    tmp_path: Path,
+) -> None:
+    """`- relations: Answers:` parses with no diagnostic and resolves to core
+    standing, but the canonical relation-bullet grammar accepts only
+    `[a-z][a-z0-9_.-]{1,80}`. A verbatim proposal would author `- Answers [[T]]`,
+    which the governed edit refuses as `malformed_relation` — leaving a queue
+    item that can never be accepted and recurs on every read. The normalized
+    label is still the authored kind."""
+    vault = tmp_path
+    source = _page(
+        vault,
+        "source",
+        f"## Claim\n- id: c-1\n- relations: Answers: [[{KB}/target]]\n\nA claim.\n",
+    )
+    _page(vault, "target", "A target page.")
+    _build(vault)
+
+    queue = relation_queue.build_queue(vault)
+    group = next(g for g in queue["groups"] if g["path"] == f"{KB}/source.md")
+    item = next(i for i in group["items"] if i["method"] == "unit_relation_lift")
+
+    assert item["relation_type"] == "answers"
+    assert item["bullet"] == f"- answers [[{KB}/target]]"
+
+    # The whole governed accept path, not an injected writer.
+    commands.op_connect_memory(
+        vault,
+        operation="accept-relation",
+        ref=item["ref"],
+        expected_hash=group["content_hash"],
+        why="Accepted a lifted unit relation",
+        expected_fingerprint=item["fingerprint"],
+    )
+
+    assert f"- answers [[{KB}/target]]" in source.read_text(encoding="utf-8")
+
+
+def _write_extension_registry(vault: Path) -> None:
+    path = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "schema_version: 1\n"
+        "extensions:\n"
+        "  lab.answers_partially:\n"
+        "    parent: answers\n"
+        "    description: Partially answers\n"
+        "  lab.answers_retired:\n"
+        "    parent: answers\n"
+        "    description: Retired in favour of the parent\n"
+        "    status: deprecated\n"
+        "  lab.answers_sourceonly:\n"
+        "    parent: answers\n"
+        "    description: Only meaningful on source pages\n"
+        "    scope:\n"
+        "      page_types: [source]\n",
+        encoding="utf-8",
+    )
+
+
+def test_lift_takes_a_vault_extension_kind_without_a_code_change(
+    tmp_path: Path,
+) -> None:
+    """The family allowlist is resolved through the registry at call time, so an
+    extension parented into an allowed family lifts with no code change."""
+    vault = tmp_path / "vault"
+    _write_extension_registry(vault)
+    _page(vault, "target", "A target page.")
+    _page(
+        vault,
+        "source",
+        "## Claim\n- id: c-1\n"
+        f"- relations: lab.answers_partially: [[{KB}/target]]\n\nA claim.\n",
+    )
+    _build(vault)
+
+    lifted = _by_method(_candidates(vault, f"{KB}/source.md"), "unit_relation_lift")
+
+    assert [c["relation_type"] for c in lifted] == ["lab.answers_partially"]
+    assert lifted[0]["evidence"]["relation_family"] == "answer"
+
+
+def test_lift_refuses_deprecated_and_scope_violating_kinds_in_an_allowed_family(
+    tmp_path: Path,
+) -> None:
+    """The family allowlist and the registry-standing gate are independent: an
+    allowed family readily admits a deprecated or out-of-scope extension, and
+    proposing one would author a bullet the writer rejects."""
+    vault = tmp_path / "vault"
+    _write_extension_registry(vault)
+    _page(vault, "target", "A target page.")
+    _page(
+        vault,
+        "source",
+        "## Claim\n- id: c-1\n"
+        f"- relations: lab.answers_retired: [[{KB}/target]], "
+        f"lab.answers_sourceonly: [[{KB}/target]], "
+        f"lab.answers_partially: [[{KB}/target]]\n\nA claim.\n",
+    )
+    index = _build(vault)
+
+    statuses = {
+        edge["raw_relation"]: edge["registry_status"]
+        for edge in index.edges()
+        if edge["source_path"] == f"{KB}/source.md"
+        and edge["origin"] == "semantic_relation"
+    }
+    lifted = _by_method(_candidates(vault, f"{KB}/source.md"), "unit_relation_lift")
+
+    # All three are in family `answer`; only their standing differs.
+    assert statuses["lab.answers_retired"] == "deprecated"
+    assert statuses["lab.answers_sourceonly"] == "scope_violation"
+    assert [c["relation_type"] for c in lifted] == ["lab.answers_partially"]
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +482,31 @@ def test_shared_open_question_normalization_is_ascii_lower_and_trailing_question
     assert gamma == []
 
 
+def test_shared_open_question_evidence_fold_is_capped(tmp_path: Path) -> None:
+    """Eight shared questions, five folded matches, and an honest total.
+
+    A fixture where every candidate carries one match cannot tell a cap of five
+    from a cap of a thousand.
+    """
+    questions = [f"Why does subsystem {n} stall?" for n in range(8)]
+    blocks = "\n\n".join(
+        f"## Open Question\n- id: q-{side}-{n}\n\n{question}"
+        for side in ("x",)
+        for n, question in enumerate(questions)
+    )
+    vault = tmp_path / "vault"
+    _page(vault, "alpha", blocks)
+    _page(vault, "beta", blocks.replace("q-x-", "q-y-"))
+    _build(vault)
+
+    candidate = _by_method(
+        _candidates(vault, f"{KB}/alpha.md"), "shared_open_question"
+    )[0]
+
+    assert candidate["evidence"]["shared_questions"] == 8
+    assert len(candidate["evidence"]["matches"]) == 5
+
+
 # --------------------------------------------------------------------------
 # Shared resolution target: co-participation over the resolution graph.
 # --------------------------------------------------------------------------
@@ -392,10 +559,14 @@ def test_shared_resolution_target_ignores_page_level_resolution_edges(
         "## Claim\n- id: c-alpha\n"
         f"- relations: answers: [[{KB}/question]]\n\nOne answer.\n",
     )
+    # A plain relation bullet INSIDE a block body, NOT under `## Relations`.
+    # That form keeps `origin = 'semantic_relation'` and is excluded only by the
+    # `src_key <> file_key` guard; the `## Relations` form would be excluded by
+    # the origin filter alone and would prove nothing about the guard.
     _page(
         vault,
         "beta",
-        f"## Relations\n\n- answers [[{KB}/question]]\n",
+        f"## Claim\n- id: c-beta\n\n- answers [[{KB}/question]]\n",
     )
     _page(
         vault,
@@ -412,6 +583,39 @@ def test_shared_resolution_target_ignores_page_level_resolution_edges(
     # gamma is the positive control: beta's page-level edge must be the only
     # thing missing, not the generator itself.
     assert [c["to"] for c in candidates] == [f"{KB}/gamma.md"]
+
+
+def test_co_participation_generators_do_not_propose_the_same_edge_twice(
+    tmp_path: Path,
+) -> None:
+    """Two pages that share a question usually also answer the same thing, and
+    both generators then propose the identical `relates_to` bullet. Keeping both
+    spends two scarce slots on one edge the reviewer can accept only once."""
+    vault = tmp_path / "vault"
+    question = "Why is the tail latency spiky?"
+    _page(vault, "topic", "The thing being answered.")
+    _page(
+        vault,
+        "alpha",
+        f"## Open Question\n- id: q-alpha\n\n{question}\n\n"
+        f"## Claim\n- id: c-alpha\n- relations: answers: [[{KB}/topic]]\n\nOne answer.\n",
+    )
+    _page(
+        vault,
+        "beta",
+        f"## Open Question\n- id: q-beta\n\n{question}\n\n"
+        f"## Claim\n- id: c-beta\n- relations: answers: [[{KB}/topic]]\n\nAnother answer.\n",
+    )
+    _build(vault)
+
+    candidates = _candidates(vault, f"{KB}/alpha.md")
+    to_beta = [
+        c
+        for c in candidates
+        if c["to"] == f"{KB}/beta.md" and c["relation_type"] == "relates_to"
+    ]
+
+    assert [c["method"] for c in to_beta] == ["shared_open_question"]
 
 
 # --------------------------------------------------------------------------
@@ -473,7 +677,6 @@ def test_structural_candidates_are_bounded_and_query_count_is_constant(
     _candidates(small, f"{KB}/alpha.md", limit=500)
 
     assert len(candidates) == 3
-    assert len(candidates[0]["evidence"]["matches"]) <= 5
     assert big_corpus_queries == len(calls)
 
 
@@ -536,13 +739,50 @@ def test_structural_generators_run_after_deterministic_and_before_embeddings(
         "embedding_proximity",
     ):
         assert method in first, method
+    # Structural first: an author-written typed relation outranks a body
+    # wikilink, and `limit` makes that a budget rather than a preference.
     assert (
-        first["shared_sources"]
-        < first["unit_relation_lift"]
+        first["unit_relation_lift"]
         < first["shared_open_question"]
         < first["shared_resolution_target"]
+        < first["wikilink"]
+    )
+    # ...and the pre-existing four keep their relative order among themselves.
+    assert (
+        first["wikilink"]
+        < first["frontmatter_sources"]
+        < first["shared_sources"]
         < first["embedding_proximity"]
     )
+
+
+def test_structural_candidates_survive_a_link_heavy_page(tmp_path: Path) -> None:
+    """The motivating case: a dense compiled note with more wikilinks than the
+    response limit. Registered after `_wikilink_candidates`, every structural
+    candidate would be truncated away and the change would be silent on exactly
+    the pages it exists to serve."""
+    vault = tmp_path / "vault"
+    _page(vault, "target", "A target page.")
+    for n in range(12):
+        _page(vault, f"link-{n:02d}", "A linked page.")
+    links = " ".join(f"[[{KB}/link-{n:02d}]]" for n in range(12))
+    _page(
+        vault,
+        "dense",
+        f"A dense compiled note citing {links}.\n\n"
+        f"## Claim\n- id: c-1\n- relations: answers: [[{KB}/target]]\n\nA claim.\n",
+    )
+    _build(vault)
+
+    # `relation_queue._DEFAULT_LIMIT_PER_PAGE` is 10; use it verbatim.
+    candidates = _candidates(
+        vault, f"{KB}/dense.md", limit=relation_queue._DEFAULT_LIMIT_PER_PAGE
+    )
+
+    assert len([c for c in candidates if c["method"] == "wikilink"]) >= 1
+    assert [c["relation_type"] for c in _by_method(candidates, "unit_relation_lift")] == [
+        "answers"
+    ]
 
 
 def test_structural_generators_soft_fail_when_the_snapshot_is_unavailable(

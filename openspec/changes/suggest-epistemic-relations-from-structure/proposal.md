@@ -29,16 +29,20 @@ observations that mirror the existing `shared_sources` method.
   snapshot and soft-failing to no candidates when the sidecar is unavailable:
   - `unit_relation_lift` — promote a kind the author already typed on one of
     this page's own semantic units to a page-level proposal, when no page-level
-    edge of that kind to that target exists. Gated to an allowlist of relation
+    edge of that kind to that target exists. The proposal is the authored label
+    in the registry's normalized form, so the bullet it would author always
+    satisfies the canonical relation grammar. Gated to an allowlist of relation
     **families** resolved through the registry at call time, and to registry
     statuses `core`, `alias` and `extension`.
   - `shared_open_question` — two pages carrying the same normalized open
     question, proposed as `relates_to`.
   - `shared_resolution_target` — two pages whose semantic units each `answers`
     or `resolves` the same target, proposed as `relates_to`.
-- Register the three after the existing deterministic generators and before the
-  optional embedding lane, because `suggest_relations` truncates at `limit` and
-  the wikilink generator is unbounded.
+- Register the three ahead of the existing generators, because
+  `suggest_relations` truncates at `limit` and the unbounded wikilink generator
+  would otherwise consume the whole budget on exactly the dense pages that carry
+  typed unit relations. The existing four keep their order relative to one
+  another.
 - Carry the driving page's unit identity (`unit_ref`, anchor, relation kinds
   used) in each candidate's evidence, so a dismissed candidate resurfaces when
   the page that produced it changes.

@@ -37,6 +37,20 @@
 - [x] 4.3 Run `ruff check` on every changed file.
 - [x] 4.4 Run `openspec validate suggest-epistemic-relations-from-structure --strict` and `openspec validate --specs --strict`.
 
-## 5. Orchestrator-owned (NOT for the implementation lane)
+## 5. Independent-Review Fixes
 
-- [ ] 5.1 After this change merges, sync both delta specs into `openspec/specs/` and archive it with `openspec archive`. It cannot be archived from the implementation lane: the change is not shipped until it is on the default branch, and a sibling lane is authoring specs concurrently, so an early sync would collide in `openspec/specs/`.
+- [x] 5.1 Normalize the lifted label through `relation_registry.normalize_relation`, so a non-canonical authored kind (`Answers:`, `EVIDENCED BY:`) cannot produce a bullet the governed write refuses as `malformed_relation`; add an end-to-end test through `op_connect_memory`.
+- [x] 5.2 Amend the `graph-semantic-integrity` delta, which mandated the verbatim label, to require the normalized authored label.
+- [x] 5.3 Add a foreign authoring page to the lift-honesty test so relaxing the `source_path` filter is caught; the previous expectation was derived from the same filter and could not fail.
+- [x] 5.4 Register the structural generators ahead of the unbounded wikilink generator, pin the new order in both directions, and add a link-heavy-page regression; record the reversal and its reason in `design.md`.
+- [x] 5.5 Switch the page-level-edge fixture to the block-body bullet form, so the `src_key <> file_key` guard is what the test actually exercises.
+- [x] 5.6 Replace the vacuous evidence-fold assertion with a fixture where the cap bites (eight shared questions, five folded matches, honest total).
+- [x] 5.7 Cover the registry-standing gate: a vault extension kind lifts without a code change, and deprecated or scope-violating kinds in the same allowed family do not.
+- [x] 5.8 Suppress a later co-participation candidate that duplicates an earlier one's `(target, relation type)`, and add the scenario and a test.
+- [x] 5.9 State the principle that distinguishes causality from the eight allowlisted families rather than asserting it.
+- [x] 5.10 Update `_scaffold/_Schema/references/operations.md` to list the structural generators.
+- [x] 5.11 Re-run the mutation battery: each of the eight behaviours above must fail its own test when reverted.
+
+## 6. Orchestrator-owned (NOT for the implementation lane)
+
+- [ ] 6.1 After this change merges, sync both delta specs into `openspec/specs/` and archive it with `openspec archive`. It cannot be archived from the implementation lane: the change is not shipped until it is on the default branch, and a sibling lane is authoring specs concurrently, so an early sync would collide in `openspec/specs/`.
