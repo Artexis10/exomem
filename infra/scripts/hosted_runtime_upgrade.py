@@ -462,11 +462,12 @@ def _write_atomic(path: Path, data: bytes) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name != "nt":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         if temporary.exists():
             temporary.unlink()

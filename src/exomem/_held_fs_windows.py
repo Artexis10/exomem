@@ -65,6 +65,7 @@ FILE_WRITE_ATTRIBUTES = 0x00000100
 GENERIC_WRITE = 0x40000000
 READ_CONTROL = 0x00020000
 DELETE = 0x00010000
+READ_CONTROL = 0x00020000
 SYNCHRONIZE = 0x00100000
 OBJ_CASE_INSENSITIVE = 0x00000040
 FILE_RENAME_INFORMATION = 10
@@ -690,7 +691,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
         try:
             checked = self._check_directory(parent)
             parent_descriptor = os.dup(checked.descriptor)
-            desired = FILE_READ_DATA | FILE_READ_ATTRIBUTES
+            desired = FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL
             descriptor_access = "read"
             if access == "write":
                 desired |= FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | READ_CONTROL
