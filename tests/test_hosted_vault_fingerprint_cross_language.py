@@ -88,6 +88,7 @@ def test_provisioner_classifier_covers_every_reserved_descriptor_family(tmp_path
         "graph-handoff": ".graph-sync.json",
         "graph-receipts": ".graph-commit-receipts/private.json",
         "review-state": ".review-state.json",
+        "due-state": ".due-state.json",
         "lexical-rebuild": ".lexical.sqlite.rebuild-" + "a" * 32 + ".tmp",
         "lexical-quarantine": ".lexical.sqlite.quarantine-" + "b" * 32,
         "graph-rebuild": ".graph-rebuild-" + "c" * 64 + "-" + "d" * 24 + ".sqlite",
