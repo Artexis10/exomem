@@ -261,6 +261,21 @@ def test_compiled_policy_authority_bytes_have_a_fixed_vector() -> None:
     )
 
 
+def test_activation_state_digest_has_a_cross_runtime_fixed_vector() -> None:
+    assert schema_v4.activation_state_digest(
+        logical_vault_id=LOGICAL_VAULT_ID,
+        activation_store_id=ACTIVATION_STORE_ID,
+        activation_epoch=7,
+        policy_generation_id=FIRST_GENERATION_ID,
+        policy_fingerprint="1" * 64,
+        policy_row_digest="2" * 64,
+        projector_schema_version=3,
+        catalog_generation=11,
+        catalog_descriptor_digest="4" * 64,
+        projection_namespace_identity="5" * 64,
+    ) == "07a35c70829d9486f876aed26c650e3aeb3eaf064a676ba842e7dbc97ebb878b"
+
+
 def test_tuple_publication_schema_is_closed_and_append_only(tmp_path: Path) -> None:
     now = int(time.time())
     vault = tmp_path / "vault"
