@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import commands, epistemic_graph
 from exomem import embeddings as embeddings_module
@@ -215,3 +216,42 @@ def test_product_case_two_counted_friends_one_captured(referent_vault: Path) -> 
     assert [item["path"] for item in block["resolved"]] == [ENTITY]
     assert block["unresolved_count"] == 1
     assert NOISE in [item["path"] for item in block["candidates"]]
+
+
+def test_referents_resolve_a_vault_defined_entity_type_end_to_end(
+    referent_vault: Path,
+) -> None:
+    _write(
+        referent_vault,
+        "Knowledge Base/_Schema/entity-types.yaml",
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "place": {
+                        "folder": "Places",
+                        "label": "Place",
+                        "aliases": ["location"],
+                        "cue_nouns": ["venue"],
+                        "capture_guidance": "A stable place identity.",
+                        "parent": "concept",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+    )
+    place = "Knowledge Base/Entities/Places/aster-hall.md"
+    _write(
+        referent_vault,
+        place,
+        "---\ntype: entity\ntitle: Aster Hall\nentity_type: place\n"
+        "status: active\ntags: [local]\nupdated: 2026-08-04\n---\n# Aster Hall\n",
+    )
+    find_module.clear_cache()
+    importlib.import_module("exomem.entity_registry").clear_entity_registry_cache()
+
+    block = _block(_call(referent_vault, "which venue is Aster Hall"))
+
+    assert block["entity_type"] == "place"
+    assert [item["path"] for item in block["resolved"]] == [place]

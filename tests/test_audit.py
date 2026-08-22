@@ -7,7 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
+from exomem import attention as attention_module
 from exomem import audit as audit_module
+from exomem import review_state as review_state_module
 
 
 def test_audit_and_reconcile_import_in_fresh_process() -> None:
@@ -19,6 +23,145 @@ def test_audit_and_reconcile_import_in_fresh_process() -> None:
     )
 
     assert imported.returncode == 0, imported.stderr
+
+
+def _write_entity(
+    vault: Path,
+    *,
+    folder: str,
+    name: str,
+    entity_type: str,
+) -> Path:
+    path = vault / "Knowledge Base" / "Entities" / folder / f"{name}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: entity\ntitle: {name}\nentity_type: {entity_type}\n"
+        "status: active\ncreated: 2026-08-22\nupdated: 2026-08-22\n---\n"
+        f"# {name}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_entity_registry(vault: Path, type_id: str, folder: str) -> None:
+    path = vault / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    type_id: {
+                        "folder": folder,
+                        "label": folder.title(),
+                        "aliases": [],
+                        "capture_guidance": "A stable synthetic entity identity.",
+                        "parent": "concept",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_unregistered_entity_type_is_an_attention_finding_with_proposed_entry(
+    tmp_path: Path,
+) -> None:
+    page = _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+
+    report = attention_module.attention(
+        tmp_path,
+        categories=["entity_type_unregistered"],
+    )
+
+    assert len(report.items) == 1
+    item = report.items[0]
+    assert item.path == page.relative_to(tmp_path).as_posix()
+    assert item.categories == ["entity_type_unregistered"]
+    assert item.reasons[0]["meta"]["proposed_entry"] == {
+        "id": "places",
+        "folder": "Places",
+        "label": "Places",
+        "aliases": [],
+        "page_count": 1,
+    }
+
+
+def test_unregistered_type_finding_resolves_when_the_type_is_registered(
+    tmp_path: Path,
+) -> None:
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="places",
+    )
+    before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+    assert len(before.findings) == 1
+
+    _write_entity_registry(tmp_path, "places", "Places")
+    after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert after.findings == []
+
+
+def test_unregistered_type_finding_cannot_be_dismissed_to_silence(
+    tmp_path: Path,
+) -> None:
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+    item = attention_module.attention(
+        tmp_path,
+        categories=["entity_type_unregistered"],
+    ).items[0]
+    review_state_module.ReviewStateStore(tmp_path).apply(
+        item.item_id,
+        item.fingerprint,
+        action="dismiss",
+        why="Leave the authored state unchanged.",
+    )
+
+    refreshed = attention_module.attention(
+        tmp_path,
+        categories=["entity_type_unregistered"],
+        state="open",
+    )
+
+    assert len(refreshed.items) == 1
+    assert refreshed.items[0].state == "open"
+
+
+def test_three_pages_under_an_unregistered_folder_trigger_the_finding_two_do_not(
+    tmp_path: Path,
+) -> None:
+    for name in ("Aster", "Beryl"):
+        _write_entity(tmp_path, folder="Venues", name=name, entity_type="concept")
+
+    two = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+    assert two.findings == []
+
+    _write_entity(tmp_path, folder="Venues", name="Cedar", entity_type="concept")
+    three = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(three.findings) == 1
+    assert three.findings[0].meta["proposed_entry"] == {
+        "id": "venues",
+        "folder": "Venues",
+        "label": "Venues",
+        "aliases": [],
+        "page_count": 3,
+    }
 
 
 def test_forward_reference_findings_have_non_empty_path(vault: Path) -> None:

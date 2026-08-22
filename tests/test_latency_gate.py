@@ -36,9 +36,11 @@ from __future__ import annotations
 import json
 import statistics
 import sys
+import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import find as find_module
 from exomem import freshness
@@ -413,3 +415,65 @@ def test_referent_stage_does_not_scale_linearly(tmp_path: Path, model_free) -> N
         f"referents stage scaled {small_ms:.1f}ms @ {N_NOTES} to "
         f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)"
     )
+
+
+@pytest.mark.timeout(600)
+def test_entity_type_registry_load_is_bounded_at_scale(
+    tmp_path: Path,
+    model_free,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands, entity_types
+
+    original_parse = entity_types._parse_extension_data
+    vault = _build_dense_vault(tmp_path, N_NOTES_LARGE)
+    registry_path = vault / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    f"place-{index:02d}": {
+                        "folder": f"Places{index:02d}",
+                        "label": f"Place {index:02d}",
+                        "aliases": [f"location{index:02d}"],
+                        "cue_nouns": [f"venue{index:02d}"],
+                        "capture_guidance": "A stable synthetic place identity.",
+                        "parent": "concept",
+                    }
+                    for index in range(50)
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    parse_ms: list[float] = []
+    def timed_parse(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return original_parse(*args, **kwargs)
+        finally:
+            parse_ms.append((time.perf_counter() - started) * 1000)
+
+    monkeypatch.setattr(entity_types, "_parse_extension_data", timed_parse)
+
+    commands.op_find(
+        vault,
+        query="which venue00",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+    )
+    assert len(parse_ms) == 1
+    assert parse_ms[0] < 50.0
+
+    commands.op_find(
+        vault,
+        query="which venue00",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+    )
+    assert len(parse_ms) == 1, "warm registry load reparsed instead of costing 0 ms"

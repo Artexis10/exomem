@@ -104,6 +104,9 @@ carried out and the user reports how it went** — capture it:
   relation workflow for a new connection. If none matches, use
   `connect_memory(operation="create-entity")` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
+  Register an unknown type through the governed
+  `schema_memory(operation="save-entity-types")` leaf with `why`; never edit
+  frontmatter around the registry rule.
   A single incidental mention, unresolved identity, or transient participant
   stays in source/note context.
 - The guardrails that remain are the ones that matter: dedupe (prefer

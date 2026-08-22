@@ -9,7 +9,7 @@ from typing import Any
 
 from .bm25 import stem_word
 from .entity_candidates import identity_key
-from .entity_types import ENTITY_TYPE_REGISTRY
+from .entity_types import EntityTypeRegistry, core_registry
 from .project_keys import _levenshtein
 
 _WORD_RE = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
@@ -137,27 +137,37 @@ def _tokens(text: object) -> tuple[str, ...]:
     return tuple(match.group(0).casefold() for match in _WORD_RE.finditer(str(text or "")))
 
 
-def _cue_nouns() -> dict[str, str]:
+_CUE_NOUN_CACHE: dict[tuple[int, str], dict[str, str]] = {}
+
+
+def cue_nouns_for(registry: EntityTypeRegistry) -> dict[str, str]:
+    """Return deterministic cue nouns for one immutable registry identity."""
+    cache_key = (registry.core_version, registry.extension_hash)
+    cached = _CUE_NOUN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     nouns = {noun: "person" for noun in _PERSON_NOUNS}
     for entity_type, supplementary in _TYPE_NOUNS.items():
         for noun in supplementary:
             if noun not in _COUNT_WORDS and noun not in _STOP_WORDS:
                 nouns[noun] = entity_type
-    for definition in ENTITY_TYPE_REGISTRY:
+    for definition in registry.active_definitions:
         values = (
             definition.id,
             definition.label,
             definition.folder,
             *definition.aliases,
+            *definition.cue_nouns,
         )
         for value in values:
             key = value.casefold().replace("-", " ")
             if " " not in key:
                 nouns[key] = definition.id
+    _CUE_NOUN_CACHE[cache_key] = nouns
     return nouns
 
 
-_CUE_NOUNS = _cue_nouns()
+_CUE_NOUNS = cue_nouns_for(core_registry())
 _COUNT_TOKENS = frozenset(_COUNT_WORDS) | frozenset(str(i) for i in range(1, 11))
 
 
@@ -168,6 +178,7 @@ class ReferentCue:
     expected_count: int | None
     descriptors: tuple[str, ...]
     query: str
+    cue_nouns: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,13 +273,18 @@ class ReferentResolution:
         return out
 
 
-def detect_cue(query: str) -> ReferentCue | None:
+def detect_cue(
+    query: str,
+    *,
+    registry: EntityTypeRegistry | None = None,
+) -> ReferentCue | None:
     """Return the first deterministic entity cue, or ``None``."""
+    cue_nouns = cue_nouns_for(registry or core_registry())
     tokens = _tokens(query)
     selected: tuple[int, str, str] | None = None
     fallback: tuple[int, str, str] | None = None
     for index, token in enumerate(tokens):
-        entity_type = _CUE_NOUNS.get(token)
+        entity_type = cue_nouns.get(token)
         if entity_type is None:
             continue
         match = (index, token, entity_type)
@@ -296,7 +312,7 @@ def detect_cue(query: str) -> ReferentCue | None:
         for token in tokens
         if token not in _STOP_WORDS
         and token not in _COUNT_TOKENS
-        and token not in _CUE_NOUNS
+        and token not in cue_nouns
         and len(token) >= 3
     )
     return ReferentCue(
@@ -305,6 +321,7 @@ def detect_cue(query: str) -> ReferentCue | None:
         expected_count=expected_count,
         descriptors=descriptors,
         query=query,
+        cue_nouns=frozenset(cue_nouns),
     )
 
 
@@ -321,7 +338,9 @@ def _fuzzy_name(cue: ReferentCue, entity: EntityRecord) -> tuple[str, str, int] 
     query_tokens = tuple(
         token
         for token in _tokens(cue.query)
-        if token not in _STOP_WORDS and token not in _COUNT_TOKENS and token not in _CUE_NOUNS
+        if token not in _STOP_WORDS
+        and token not in _COUNT_TOKENS
+        and token not in (cue.cue_nouns or frozenset(_CUE_NOUNS))
     )
     identity_tokens = tuple(
         token for value in (entity.title, *entity.aliases) for token in _tokens(value)

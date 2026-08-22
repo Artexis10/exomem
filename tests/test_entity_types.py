@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from typing import get_args
+from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import commands, entity_candidates, entity_types
 
@@ -56,7 +57,8 @@ def test_public_entity_writer_guidance_covers_every_registered_kind() -> None:
     guidance = commands.op_link.__doc__ or ""
 
     assert "stable entity registry returned" in guidance
-    assert "bootstrap.entity_registry" in guidance
+    assert "active entity registry" in guidance
+    assert "_Schema/entity-types.yaml" in guidance
     assert "One of person" not in guidance
 
     for command_name in ("link", "connect_memory"):
@@ -65,7 +67,7 @@ def test_public_entity_writer_guidance_covers_every_registered_kind() -> None:
             command for command in registry if command.name == command_name
         )
         entity_param = next(param for param in command.params if param.name == "entity_type")
-        assert entity_param.choices == entity_types.ENTITY_TYPE_IDS
+        assert entity_param.choices == ()
 
 
 def _entity_page(
@@ -136,7 +138,7 @@ def test_entity_candidate_resolution_returns_ambiguity_without_mutation(tmp_path
 
 
 def test_public_entity_type_schema_and_cli_choices_come_from_registry() -> None:
-    assert get_args(entity_types.EntityTypeId) == entity_types.ENTITY_TYPE_IDS
+    assert entity_types.EntityTypeId is str
 
     for command_name, registry in (
         ("link", commands.COMMANDS),
@@ -144,4 +146,191 @@ def test_public_entity_type_schema_and_cli_choices_come_from_registry() -> None:
     ):
         command = next(command for command in registry if command.name == command_name)
         parameter = next(param for param in command.params if param.name == "entity_type")
-        assert parameter.choices == entity_types.ENTITY_TYPE_IDS
+        assert parameter.choices == ()
+
+
+def _extension(
+    *,
+    folder: str = "Places",
+    label: str = "Place",
+    aliases: list[str] | None = None,
+    cue_nouns: list[str] | None = None,
+    parent: str | None = "concept",
+    status: str = "active",
+) -> dict:
+    value: dict = {
+        "folder": folder,
+        "label": label,
+        "aliases": aliases if aliases is not None else ["location"],
+        "capture_guidance": "A stable place identity used across notes.",
+        "status": status,
+    }
+    if cue_nouns is not None:
+        value["cue_nouns"] = cue_nouns
+    if parent is not None:
+        value["parent"] = parent
+    return value
+
+
+def _proposal(entity_types_map: dict[str, dict] | None = None) -> dict:
+    return {
+        "schema_version": 1,
+        "entity_types": entity_types_map if entity_types_map is not None else {"place": _extension()},
+    }
+
+
+def _write_registry(vault: Path, proposal: dict) -> Path:
+    path = vault / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(proposal, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def test_extension_type_loads_beside_core(tmp_path: Path) -> None:
+    _write_registry(tmp_path, _proposal())
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert registry.active_ids == (*entity_types.ENTITY_TYPE_IDS, "place")
+    assert registry.extensions["place"].folder == "Places"
+    for value in ("place", "Place", "Places", "location"):
+        assert registry.resolve(value).id == "place"
+
+
+def test_extension_id_folder_alias_collisions_with_core_are_findings_not_exceptions(
+    tmp_path: Path,
+) -> None:
+    proposal = _proposal(
+        {
+            "person": _extension(folder="Guests", label="Guest", aliases=[]),
+            "crew": _extension(folder="People", label="Crew", aliases=[]),
+            "human": _extension(folder="Humans", label="Human Kind", aliases=[]),
+            "collective": _extension(
+                folder="Collectives", label="Collective", aliases=["company"]
+            ),
+            "place": _extension(),
+        }
+    )
+    _write_registry(tmp_path, proposal)
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert set(registry.extensions) == {"place"}
+    assert len(registry.findings) == 5
+    assert {item["code"] for item in registry.findings} == {"collision"}
+    assert registry.resolve("location").id == "place"
+
+
+def test_invalid_folder_segment_is_a_finding(tmp_path: Path) -> None:
+    _write_registry(
+        tmp_path,
+        _proposal({"place": _extension(folder="../Places")}),
+    )
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert registry.extensions == {}
+    assert any(
+        item["code"] == "invalid_folder" and item["path"] == "entity_types.place.folder"
+        for item in registry.findings
+    )
+
+
+def test_deprecated_extension_is_excluded_from_active_ids(tmp_path: Path) -> None:
+    _write_registry(
+        tmp_path,
+        _proposal({"place": _extension(status="deprecated")}),
+    )
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert "place" in registry.extensions
+    assert "place" not in registry.active_ids
+    assert registry.resolve("place") is None
+
+
+def test_parent_must_name_a_core_type(tmp_path: Path) -> None:
+    _write_registry(
+        tmp_path,
+        _proposal(
+            {
+                "place": _extension(),
+                "venue": _extension(
+                    folder="Venues", label="Venue", aliases=[], parent="place"
+                ),
+            }
+        ),
+    )
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert set(registry.extensions) == {"place"}
+    assert any(
+        item["code"] == "invalid_parent" and item["entity_type"] == "venue"
+        for item in registry.findings
+    )
+
+
+def test_loader_is_cached_by_extension_hash(tmp_path: Path) -> None:
+    path = _write_registry(tmp_path, _proposal())
+
+    first = entity_types.load_entity_types(tmp_path)
+    second = entity_types.load_entity_types(tmp_path)
+    assert first is second
+
+    changed = _proposal()
+    changed["entity_types"]["place"]["aliases"] = ["location", "site"]
+    path.write_text(yaml.safe_dump(changed, sort_keys=False), encoding="utf-8")
+    third = entity_types.load_entity_types(tmp_path)
+    assert third is not second
+    assert third.extension_hash != second.extension_hash
+
+
+def test_save_registry_refuses_observed_deletion_and_stale_hash(tmp_path: Path) -> None:
+    created = entity_types.save_registry(tmp_path, _proposal(), expected_hash=None, observed_ids=())
+
+    with pytest.raises(ValueError, match="OBSERVED_ENTITY_TYPE_DELETION"):
+        entity_types.save_registry(
+            tmp_path,
+            _proposal({}),
+            expected_hash=created["content_hash"],
+            observed_ids=("place",),
+        )
+    with pytest.raises(ValueError, match="STALE_ENTITY_TYPE_REGISTRY"):
+        entity_types.save_registry(
+            tmp_path,
+            _proposal(),
+            expected_hash="stale",
+            observed_ids=("place",),
+        )
+
+
+def test_schema_memory_saves_entity_types_only_with_why(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="WHY_REQUIRED"):
+        commands.op_schema_memory(
+            tmp_path,
+            operation="save-entity-types",
+            proposal=_proposal(),
+        )
+
+    result = commands.op_schema_memory(
+        tmp_path,
+        operation="save-entity-types",
+        proposal=_proposal(),
+        why="Add a stable synthetic place identity.",
+    )
+
+    assert result["valid"] is True
+    assert result["why"] == "Add a stable synthetic place identity."
+    assert entity_types.load_entity_types(tmp_path).active_ids[-1] == "place"
+
+
+def test_cue_nouns_default_to_aliases(tmp_path: Path) -> None:
+    _write_registry(
+        tmp_path,
+        _proposal({"place": _extension(aliases=["location", "site"], cue_nouns=None)}),
+    )
+
+    definition = entity_types.load_entity_types(tmp_path).extensions["place"]
+
+    assert definition.cue_nouns == ("location", "site")

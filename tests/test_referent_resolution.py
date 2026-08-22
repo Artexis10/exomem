@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem.entity_types import ENTITY_TYPE_REGISTRY
 
@@ -122,6 +124,78 @@ def test_cue_count_survives_interrogative_prefix() -> None:
     assert cue is not None
     assert cue.noun == "friends"
     assert cue.expected_count == 2
+
+
+def test_cue_fires_for_vault_defined_type_noun(tmp_path: Path) -> None:
+    path = tmp_path / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "place": {
+                        "folder": "Places",
+                        "label": "Place",
+                        "aliases": ["location"],
+                        "cue_nouns": ["venue"],
+                        "capture_guidance": "A stable place identity.",
+                        "parent": "concept",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    from exomem import entity_types
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    cue = _rr().detect_cue("which local venue", registry=registry)
+
+    assert cue is not None
+    assert cue.entity_type == "place"
+    assert cue.noun == "venue"
+
+
+def test_vault_defined_type_restricts_candidates_to_that_type(tmp_path: Path) -> None:
+    from exomem import entity_types
+
+    registry = entity_types.load_entity_types(
+        proposal={
+            "schema_version": 1,
+            "entity_types": {
+                "place": {
+                    "folder": "Places",
+                    "label": "Place",
+                    "aliases": ["location"],
+                    "cue_nouns": ["venue"],
+                    "capture_guidance": "A stable place identity.",
+                    "parent": "concept",
+                }
+            },
+        }
+    )
+    cue = _rr().detect_cue("which local venue", registry=registry)
+    assert cue is not None
+    place = _entity(
+        "Knowledge Base/Entities/Places/aster-hall.md",
+        title="Aster Hall",
+        entity_type="place",
+        tags=("local",),
+    )
+    person = _entity(tags=("local",), relationship="venue")
+
+    result = _rr().resolve_referents(
+        cue=cue,
+        hits=(_hit(place.path, type="entity"), _hit(person.path, type="entity", rank=2)),
+        entities=(person, place),
+        edges=(),
+    )
+
+    assert [item.path for item in result.resolved] == [place.path]
+    assert result.reasons["type_mismatch"] == 1
 
 
 def test_exact_name_resolves_alone() -> None:

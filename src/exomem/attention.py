@@ -1,9 +1,10 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the seven default measurement-only queues that `audit` already produces —
+Composes the eight default measurement-only queues that `audit` already produces —
 `bridge_review`, `prediction_window`, `supersession_integrity`,
 `corpus_contradictions`, `stale_review`,
-`unprocessed_source`, and `relation_debt` — into a single ranked list while retaining
+`unprocessed_source`, `relation_debt`, and `entity_type_unregistered` — into a
+single ranked list while retaining
 opt-in registered semantic and epistemic-lifecycle categories. The composition is pure
 measurement: each queue already emits its findings
 in intra-queue rank order, and this module fuses those ranks with Reciprocal Rank Fusion
@@ -57,6 +58,7 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "stale_review",
     "unprocessed_source",
     "relation_debt",
+    "entity_type_unregistered",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large
@@ -582,7 +584,10 @@ def _apply_review_state(
             today=today,
             payload=state_payload,
         )
-        if effective == "open":
+        state_resolved_only = "entity_type_unregistered" in item.categories
+        if state_resolved_only:
+            effective, decision = "open", None
+        if effective == "open" and not state_resolved_only:
             # No item-level decision APPLIES (none recorded, or a snooze that has
             # since lapsed), so a competing-alternatives stance recorded on the
             # contradiction pair itself still governs. The item-level record is

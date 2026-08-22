@@ -820,9 +820,10 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     connect_schema = doc["paths"]["/api/connect_memory"]["post"]["requestBody"][
         "content"
     ]["application/json"]["schema"]
-    assert connect_schema["properties"]["entity_type"]["enum"] == list(
-        commands.entity_types_module.ENTITY_TYPE_IDS
-    )
+    entity_type_schema = connect_schema["properties"]["entity_type"]
+    assert "enum" not in entity_type_schema
+    assert "active entity registry" in entity_type_schema["description"]
+    assert "_Schema/entity-types.yaml" in entity_type_schema["description"]
     success = doc["paths"]["/api/ask_memory"]["post"]["responses"]["200"]
     response_schema = success["content"]["application/json"]["schema"]
     encoded_response = json.dumps(

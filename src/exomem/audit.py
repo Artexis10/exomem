@@ -101,6 +101,7 @@ from . import (
     semantic_units,
     temporal,
 )
+from . import entity_types as entity_types_module
 from . import find as find_module
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
@@ -123,7 +124,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "relation_debt", "governance_receipts", "bridge_review",
     "duplicated_sidecar", "semantic_recall_isolation",
     "unfinished_experiments", "prediction_window",
-    "question_aging", "supersession_integrity",
+    "question_aging", "supersession_integrity", "entity_type_unregistered",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -450,6 +451,8 @@ def audit(
         findings.extend(_check_tag_inconsistency(pages))
     if "frontmatter_compliance" in selected:
         findings.extend(_check_frontmatter_compliance(pages))
+    if "entity_type_unregistered" in selected:
+        findings.extend(_check_unregistered_entity_types(vault_root, pages))
     if "unregistered_project_key" in selected:
         findings.extend(_check_unregistered_project_keys(vault_root, pages))
     if "embedding_drift" in selected:
@@ -1606,6 +1609,101 @@ def _page_signal_version(page: find_module.ParsedPage) -> str:
     """Stable content version for fingerprint-bound review decisions."""
     frontmatter = yaml.safe_dump(page.frontmatter, sort_keys=True, allow_unicode=True)
     return content_hash(frontmatter + "\n" + page.body)[:16]
+
+
+def _check_unregistered_entity_types(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Surface authored entity kinds/folders absent from the active registry."""
+    registry = entity_types_module.load_entity_types(vault_root)
+    prefix = f"{kb_prefix()}Entities/"
+    entities: list[tuple[find_module.ParsedPage, str]] = []
+    for page in pages:
+        if not page.rel_path.startswith(prefix):
+            continue
+        remainder = page.rel_path[len(prefix):]
+        folder, separator, _tail = remainder.partition("/")
+        if separator and folder:
+            entities.append((page, folder))
+
+    def proposed_entry(folder: str, page_count: int) -> dict[str, Any]:
+        return {
+            "id": entity_types_module._normalized(folder),
+            "folder": folder,
+            "label": folder.title(),
+            "aliases": [],
+            "page_count": page_count,
+        }
+
+    folder_pages: dict[str, list[find_module.ParsedPage]] = {}
+    folder_spelling: dict[str, str] = {}
+    for page, folder in entities:
+        key = folder.casefold()
+        folder_pages.setdefault(key, []).append(page)
+        folder_spelling.setdefault(key, folder)
+
+    findings: list[AuditFinding] = []
+    for page, folder in entities:
+        raw_type = page.frontmatter.get("entity_type")
+        if not isinstance(raw_type, str) or registry.resolve(raw_type) is not None:
+            continue
+        count = len(folder_pages[folder.casefold()])
+        findings.append(
+            AuditFinding(
+                category="entity_type_unregistered",
+                severity="warn",
+                path=page.rel_path,
+                detail=(
+                    f"Entity type {raw_type!r} is not in the active entity registry."
+                ),
+                proposed_fix=(
+                    "Review the proposed entry, then use the governed "
+                    "save-entity-types operation with why, or move the page."
+                ),
+                meta={
+                    "proposed_entry": proposed_entry(folder, count),
+                    "signal_version": _page_signal_version(page),
+                },
+            )
+        )
+
+    for key in sorted(folder_pages):
+        members = sorted(folder_pages[key], key=lambda page: page.rel_path)
+        if len(members) < 3 or registry.by_folder.get(key) is not None:
+            continue
+        # Page-level unknown-type findings already expose this folder. The
+        # threshold signal is for registered-looking pages stored under a new
+        # folder, so do not duplicate the same proposal on one attention pass.
+        if any(
+            isinstance(page.frontmatter.get("entity_type"), str)
+            and registry.resolve(str(page.frontmatter["entity_type"])) is None
+            for page in members
+        ):
+            continue
+        folder = folder_spelling[key]
+        paths = [page.rel_path for page in members]
+        signal = content_hash("\n".join(paths))[:16]
+        findings.append(
+            AuditFinding(
+                category="entity_type_unregistered",
+                severity="info",
+                path=paths[0],
+                paths=paths,
+                detail=(
+                    f"{len(paths)} entity pages live under unregistered folder {folder!r}."
+                ),
+                proposed_fix=(
+                    "Review the proposed entry, then use the governed "
+                    "save-entity-types operation with why, or move the pages."
+                ),
+                meta={
+                    "proposed_entry": proposed_entry(folder, len(paths)),
+                    "signal_version": signal,
+                },
+            )
+        )
+    return sorted(findings, key=lambda finding: (finding.path, finding.detail))
 
 
 # ---------------- checks: broken_wikilink / forward_reference ----------------

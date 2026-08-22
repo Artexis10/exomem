@@ -21,9 +21,8 @@ from pathlib import Path
 from . import entity_candidates, indexes, memory_refs, semantic_writes, temporal
 from .entity_types import (
     ENTITY_TYPE_IDS,
-    ENTITY_TYPE_TO_FOLDER,
-    ENTITY_TYPES_BY_ID,
-    resolve_entity_type,
+    EntityTypeDefinition,
+    load_entity_types,
 )
 from .kbdir import kb_prefix
 from .vault import (
@@ -117,9 +116,18 @@ def _legacy_link(
     today: dt.date | None = None,
 ) -> LinkResult:
     """Create a typed entity page + update top index + log."""
-    definition = resolve_entity_type(entity_type)
-    if definition is not None:
-        entity_type = definition.id
+    registry = load_entity_types(vault_root)
+    definition = registry.resolve(entity_type)
+    if definition is None:
+        raise LinkError(
+            code="ENTITY_TYPE_UNKNOWN",
+            missing=["entity_type"],
+            reason=(
+                f"entity_type {entity_type!r} is not active. "
+                f"Active ids: {list(registry.active_ids)}"
+            ),
+        )
+    entity_type = definition.id
     slug_warnings: list[str] = []
     filename_slug: str | None = None
     if slug is not None:
@@ -165,7 +173,7 @@ def _legacy_link(
 
     display_name = name.strip()
     name_safe = _sanitize_name(name)
-    folder = kb_root(vault_root) / "Entities" / ENTITY_TYPE_TO_FOLDER[entity_type]
+    folder = kb_root(vault_root) / "Entities" / definition.folder
     entity_path = folder / f"{filename_slug or name_safe}.md"
 
     if entity_path.exists():
@@ -227,6 +235,7 @@ def _legacy_link(
         project=project,
         decision_status=decision_status,
         exomem_id=exomem_id,
+        definition=definition,
     )
 
     rel_entity = entity_path.relative_to(vault_root).as_posix()
@@ -329,15 +338,6 @@ class _Err:
 def _validate(
     *, entity_type: str, name: str, summary: str, decision_status: str | None
 ) -> _Err | None:
-    if entity_type not in ENTITY_TYPES:
-        return _Err(
-            code="INVALID_LINK",
-            missing=["entity_type"],
-            reason=(
-                f"entity_type {entity_type!r} not valid. "
-                f"Valid: {list(ENTITY_TYPES)}"
-            ),
-        )
     missing: list[str] = []
     reasons: list[str] = []
     if not name or not name.strip():
@@ -399,6 +399,7 @@ def _render_entity(
     project: str | None,
     decision_status: str | None,
     exomem_id: str,
+    definition: EntityTypeDefinition,
 ) -> str:
     lines = ["---"]
     lines.append("type: entity")
@@ -421,8 +422,8 @@ def _render_entity(
         "project": project,
         "decision_status": decision_status,
     }
-    for field in ENTITY_TYPES_BY_ID[entity_type].optional_frontmatter:
-        value = optional_values[field]
+    for field in definition.optional_frontmatter:
+        value = optional_values.get(field)
         if not value:
             continue
         if isinstance(value, list):
@@ -587,9 +588,15 @@ def link(
     today: dt.date | None = None,
 ) -> LinkResult:
     """Create an entity through detached structural preflight."""
-    definition = resolve_entity_type(entity_type)
-    if definition is not None:
-        entity_type = definition.id
+    registry = load_entity_types(vault_root)
+    definition = registry.resolve(entity_type)
+    if definition is None:
+        raise LinkError(
+            "ENTITY_TYPE_UNKNOWN",
+            ["entity_type"],
+            f"entity_type {entity_type!r} is not active. Active ids: {list(registry.active_ids)}",
+        )
+    entity_type = definition.id
     slug_warnings: list[str] = []
     filename_slug: str | None = None
     if slug is not None:
@@ -639,7 +646,7 @@ def link(
             "the exact title or alias matches multiple active entities; reconcile the identity first",
             list(identity_resolution["candidates"]),
         )
-    folder = kb_root(vault_root) / "Entities" / ENTITY_TYPE_TO_FOLDER[entity_type]
+    folder = kb_root(vault_root) / "Entities" / definition.folder
     entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
     # Re-spell the destination to the real on-disk casing *before* it is bound
     # into the draft token: creating into an existing but differently-cased
@@ -691,6 +698,7 @@ def link(
         project=project,
         decision_status=decision_status,
         exomem_id=identity,
+        definition=definition,
     )
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)

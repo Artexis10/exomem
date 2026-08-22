@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 from starlette.testclient import TestClient
 
 from exomem import commands, entity_types, semantic_authoring, server
@@ -25,6 +26,37 @@ def _client(vault: Path, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestCli
         monkeypatch.setenv(key, value)
     mcp = server.build_server(require_auth=False)
     return TestClient(mcp.http_app())
+
+
+def test_entity_capture_types_include_vault_defined_types(tmp_path: Path) -> None:
+    path = tmp_path / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "place": {
+                        "folder": "Places",
+                        "label": "Place",
+                        "aliases": ["location"],
+                        "capture_guidance": "A stable place identity.",
+                        "parent": "concept",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = commands.op_bootstrap(tmp_path)
+
+    assert [item["id"] for item in result["entity_registry"]["types"]] == [
+        *entity_types.ENTITY_TYPE_IDS,
+        "place",
+    ]
+    assert "save-entity-types" in result["entity_registry"]["capture_rule"]
 
 
 def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:

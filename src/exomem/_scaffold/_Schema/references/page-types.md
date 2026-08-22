@@ -460,6 +460,28 @@ active entity registry exposed by bootstrap.
 
 **Required frontmatter:** `type: entity`, `entity_type`, `status`, `created`, `updated`, `tags`. Optional fields by entity-type.
 
+Vaults extend the five core kinds through the user-owned
+`_Schema/entity-types.yaml` registry. The governed save operation validates the
+whole proposal before writing it; deprecated types stay recorded rather than
+being deleted. For example:
+
+```yaml
+schema_version: 1
+entity_types:
+  place:
+    folder: Places
+    label: Place
+    aliases: [location]
+    cue_nouns: [venue]
+    optional_frontmatter: [domain]
+    capture_guidance: A stable place identity with reusable context or relations.
+    parent: concept
+    status: active
+```
+
+The `parent` is a one-level roll-up to a core type; it does not create a deeper
+type hierarchy.
+
 ### People
 
 Optional frontmatter: `affiliation`, `relationship` (e.g., colleague, public-figure, source-author),

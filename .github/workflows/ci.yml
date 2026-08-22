@@ -429,6 +429,7 @@ jobs:
           src/exomem/referent_resolution.py
           src/exomem/entity_registry.py
           src/exomem/referent_runtime.py
+          src/exomem/entity_types.py
           scripts/e2e_product_loop.py
           scripts/e2e_http_server.py
           scripts/smoke-media-pipeline.py
@@ -463,6 +464,7 @@ jobs:
           src/exomem/referent_resolution.py
           src/exomem/entity_registry.py
           src/exomem/referent_runtime.py
+          src/exomem/entity_types.py
 
   gate:
     name: required CI gate
