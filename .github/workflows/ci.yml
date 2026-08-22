@@ -429,6 +429,7 @@ jobs:
           src/exomem/referent_resolution.py
           src/exomem/entity_registry.py
           src/exomem/referent_runtime.py
+          src/exomem/entity_types.py
           scripts/e2e_product_loop.py
           scripts/e2e_http_server.py
           scripts/smoke-media-pipeline.py
@@ -444,6 +445,8 @@ jobs:
           tests/test_reclassify_source.py
           tests/test_referent_resolution.py
           tests/test_entity_registry.py
+          tests/test_indexes.py
+          tests/test_knowledge_packs.py
           tests/test_find_referents_envelope.py
           tests/test_referent_resolution_benchmark.py
           --select E,F,I,B,UP,BLE
@@ -463,6 +466,7 @@ jobs:
           src/exomem/referent_resolution.py
           src/exomem/entity_registry.py
           src/exomem/referent_runtime.py
+          src/exomem/entity_types.py
 
   gate:
     name: required CI gate

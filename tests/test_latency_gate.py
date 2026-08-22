@@ -36,9 +36,11 @@ from __future__ import annotations
 import json
 import statistics
 import sys
+import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import find as find_module
 from exomem import freshness
@@ -413,3 +415,180 @@ def test_referent_stage_does_not_scale_linearly(tmp_path: Path, model_free) -> N
         f"referents stage scaled {small_ms:.1f}ms @ {N_NOTES} to "
         f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)"
     )
+
+
+@pytest.mark.timeout(600)
+def test_entity_type_registry_load_is_bounded_at_scale(
+    tmp_path: Path,
+    model_free,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands, entity_types
+
+    original_parse = entity_types._parse_extension_data
+    vault = _build_dense_vault(tmp_path, N_NOTES_LARGE)
+    registry_path = vault / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_text = yaml.safe_dump(
+        {
+            "schema_version": 1,
+            "entity_types": {
+                f"place-{index:02d}": {
+                    "folder": f"Places{index:02d}",
+                    "label": f"Place {index:02d}",
+                    "aliases": [f"location{index:02d}"],
+                    "cue_nouns": [f"venue{index:02d}"],
+                    "capture_guidance": "A stable synthetic place identity.",
+                    "parent": "concept",
+                }
+                for index in range(50)
+            },
+        },
+        sort_keys=False,
+    )
+
+    def cold_find_ms() -> float:
+        find_module.clear_cache()
+        entity_types._CACHE.clear()
+        _seed_freshness_live(vault)
+        started = time.perf_counter()
+        commands.op_find(
+            vault,
+            query="which venue00",
+            mode="hybrid",
+            graph=False,
+            rerank=False,
+        )
+        return (time.perf_counter() - started) * 1000
+
+    cold_deltas_ms: list[float] = []
+    without_registry_ms: list[float] = []
+    with_registry_ms: list[float] = []
+    measurement_order: list[str] = []
+
+    def measure(*, with_registry: bool) -> float:
+        if with_registry:
+            registry_path.write_text(registry_text, encoding="utf-8")
+            measurement_order.append("with")
+        else:
+            registry_path.unlink(missing_ok=True)
+            measurement_order.append("without")
+        return cold_find_ms()
+
+    for index in range(_REPEAT):
+        if index % 2 == 0:
+            without_ms = measure(with_registry=False)
+            with_ms = measure(with_registry=True)
+        else:
+            with_ms = measure(with_registry=True)
+            without_ms = measure(with_registry=False)
+        without_registry_ms.append(without_ms)
+        with_registry_ms.append(with_ms)
+        cold_deltas_ms.append(with_ms - without_ms)
+    assert measurement_order == [
+        value
+        for _index in range(_REPEAT)
+        for value in (("without", "with") if _index % 2 == 0 else ("with", "without"))
+    ]
+    registry_path.write_text(registry_text, encoding="utf-8")
+    # Whole-find wall time is dominated by BM25/lexstore cold cost (~300ms here,
+    # ~800ms on a CI runner), so a fixed millisecond delta over three paired
+    # samples measures runner noise, not the registry (CI read 103ms on an 817ms
+    # baseline). Bound the whole-find delta as a catastrophic backstop — a quarter
+    # of the baseline or 50ms, whichever is larger — and bound the registry's
+    # attributable cost directly below.
+    without_median_ms = statistics.median(without_registry_ms)
+    cold_delta_ms = statistics.median(cold_deltas_ms)
+    cold_delta_ceiling_ms = max(50.0, 0.25 * without_median_ms)
+    assert cold_delta_ms < cold_delta_ceiling_ms, (
+        f"50-type registry added {cold_delta_ms:.1f}ms to cold op_find "
+        f"(without={without_median_ms:.1f}ms, "
+        f"with={statistics.median(with_registry_ms):.1f}ms, "
+        f"ceiling={cold_delta_ceiling_ms:.1f}ms)"
+    )
+
+    # Attributable cold cost, each from a cleared cache: (a) registry parse +
+    # cue-noun build, bounded directly; (b) the entity-folder enumeration, as a
+    # paired delta with vs without the fifty extension folders — the dense
+    # fixture's own entity pages cost the same with or without a registry and
+    # are bounded by the referents gate, not here.
+    from exomem import entity_registry, referent_resolution
+
+    for index in range(50):
+        (vault / "Knowledge Base" / "Entities" / f"Places{index:02d}").mkdir(
+            parents=True, exist_ok=True
+        )
+
+    def attributable(*, with_registry: bool) -> tuple[float, float]:
+        if with_registry:
+            registry_path.write_text(registry_text, encoding="utf-8")
+        else:
+            registry_path.unlink(missing_ok=True)
+        entity_types._CACHE.clear()
+        referent_resolution._CUE_NOUN_CACHE.clear()
+        entity_registry.clear_entity_registry_cache()
+        started = time.perf_counter()
+        registry = entity_types.load_entity_types(vault)
+        referent_resolution.cue_nouns_for(registry)
+        parsed = (time.perf_counter() - started) * 1000
+        assert len(registry.extensions) == (50 if with_registry else 0)
+        started = time.perf_counter()
+        entity_registry.load_entity_registry(
+            vault, freshness_key=("registry-latency", with_registry), type_registry=registry
+        )
+        return parsed, (time.perf_counter() - started) * 1000
+
+    parse_with_ms: list[float] = []
+    walk_with_ms: list[float] = []
+    walk_without_ms: list[float] = []
+    for index in range(_REPEAT):
+        order = (False, True) if index % 2 == 0 else (True, False)
+        for arm in order:
+            parsed, walked = attributable(with_registry=arm)
+            if arm:
+                parse_with_ms.append(parsed)
+                walk_with_ms.append(walked)
+            else:
+                walk_without_ms.append(walked)
+    registry_path.write_text(registry_text, encoding="utf-8")
+    parse_median_ms = statistics.median(parse_with_ms)
+    walk_without_median_ms = statistics.median(walk_without_ms)
+    walk_delta_ms = statistics.median(walk_with_ms) - walk_without_median_ms
+    assert parse_median_ms < 50.0, (
+        f"50-type registry parse + cue-noun build took {parse_median_ms:.1f}ms cold"
+    )
+    assert walk_delta_ms < max(50.0, 0.25 * walk_without_median_ms), (
+        f"fifty extension folders added {walk_delta_ms:.1f}ms to the cold entity walk "
+        f"(without={walk_without_median_ms:.1f}ms)"
+    )
+
+    parse_ms: list[float] = []
+
+    def timed_parse(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return original_parse(*args, **kwargs)
+        finally:
+            parse_ms.append((time.perf_counter() - started) * 1000)
+
+    monkeypatch.setattr(entity_types, "_parse_extension_data", timed_parse)
+    entity_types._CACHE.clear()
+
+    commands.op_find(
+        vault,
+        query="which venue00",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+    )
+    assert len(parse_ms) == 1
+    assert parse_ms[0] < 50.0
+
+    commands.op_find(
+        vault,
+        query="which venue00",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+    )
+    assert len(parse_ms) == 1, "warm registry load reparsed instead of costing 0 ms"
