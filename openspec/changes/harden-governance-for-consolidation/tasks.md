@@ -275,7 +275,7 @@ made before both PRs and their combined verification are complete.
 
 ## 5. Durable Authorization-Session Capability Core
 
-- [ ] 5.1 Add red pure tests in `tests/test_authorization_session_binding.py` for exact
+- [x] 5.1 Add red pure tests in `tests/test_authorization_session_binding.py` for exact
   70-byte `as1.<22-char canonical b64url 16-byte locator>.<43-char canonical b64url
   32-byte secret>` issuance, bounded decode/re-encode parser, parser-derived scrubber
   matcher, constant-time verifier success/
@@ -298,7 +298,7 @@ made before both PRs and their combined verification are complete.
   vault+sidecar+keyring/control copies, copied external files without registry ownership,
   exact offline restore, clone with new ids, and detach-ack/attachment-epoch move; no
   colliding pair may serve simultaneously or synthesize identity.
-- [ ] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
+- [x] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
   status, close, replay of the old bearer, restart/resume, and two v4 processes/replicas.
   Add malformed/extra-copy/raised issuance tests proving the terminal scrubber exception
   activates only after exact response validation and otherwise scrubs/refuses.
@@ -343,10 +343,10 @@ made before both PRs and their combined verification are complete.
   the standalone host registry uses the same schema. Implement authenticated per-replica
   attestation, admitted intersection, explicit drain/ack/epoch advance and current-epoch
   rejoin; gate issuance/resumption on cell identity and epoch, never observed liveness.
-- [ ] 5.13 Implement domain-separated verifier construction, bounded lookup, constant-time
+- [x] 5.13 Implement domain-separated verifier construction, bounded lookup, constant-time
   comparison, active/accepted key rotation, and row/presented-credential equality to the
   external cell/logical-vault/keyring identity.
-- [ ] 5.14 Implement server-issued open/status/rotate/close with cryptographic randomness,
+- [x] 5.14 Implement server-issued open/status/rotate/close with cryptographic randomness,
   typed issuance, keyed at-rest verifier, bounded TTL, atomic rotation, and close-time
   revocation of purpose, grants, and unconsumed tokens.
 - [ ] 5.15 Change escalation tokens, session grants, declarations, and revoke to bind the
