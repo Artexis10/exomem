@@ -26,6 +26,12 @@ The upgrade workflow SHALL select one exact stable runtime from its release tag 
 - **THEN** the runtime closure remains anchored to its own candidate source and the provisioner closure reaches the platform composition commit
 - **AND** the lock does not claim that later runtime-source changes produced the older image
 
+#### Scenario: The authoritative legacy dependency set is empty
+
+- **WHEN** reconciled fleet authority proves that no live cell, assignment, or unfinished operation depends on a legacy runtime
+- **THEN** composition emits no legacy catalog unit merely to satisfy rollback verification
+- **AND** the historical rollback manifest remains fixed by its reviewed digest and independently passes its strict release self-consistency checks
+
 ### Requirement: Every upgrade has a durable redacted execution record
 
 The workflow SHALL persist an execution record with an explicit phase, exact release and repository identities, lock and inventory hashes, bounded operation identifiers, evidence hashes, timestamps, stable result codes, and the next safe action. Retrying a phase MUST revalidate current facts against that record before advancing. The record MUST NOT contain tenant content, vault paths, note titles, credentials, browser tokens, or raw control-plane secrets.

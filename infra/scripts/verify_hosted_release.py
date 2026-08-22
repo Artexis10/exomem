@@ -751,11 +751,14 @@ def _evidence_file(
 
 
 def _validate_legacy_manifest(manifest: dict[str, Any], lock: dict[str, Any]) -> None:
-    """Bind the reviewed v1 rollback manifest to exactly one embedded legacy unit."""
+    """Validate rollback evidence and bind it when a live legacy unit remains."""
 
     validate_release_manifest(manifest, manifest)
+    legacy_catalog = lock["composition"]["legacyCatalog"]
+    if not legacy_catalog:
+        return
     matches = []
-    for unit in lock["composition"]["legacyCatalog"]:
+    for unit in legacy_catalog:
         contract = unit["contract"]
         if (
             manifest["release"] == contract["releaseVersion"]

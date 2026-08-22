@@ -53,6 +53,7 @@
 - [x] 5.6 Gate contract deployment on a fresh zero-legacy proof across every collector and exact expand/contract lineage equality
 - [x] 5.7 Implement phase-aware stop/recovery output that keeps expand active whenever any target cell or unresolved transition exists
 - [x] 5.8 Update the Hosted alpha runbook so operators execute the CLI phases and evidence checks rather than manually editing release-specific command blocks
+- [x] 5.9 Keep an empty authoritative legacy catalog empty while independently validating the digest-bound historical rollback manifest
 
 ## 6. Reviewer promotion and release acceptance
 

@@ -387,6 +387,19 @@ def test_fixed_lock_evidence_revalidates_all_reviewed_inputs(tmp_path: Path) -> 
     )
 
 
+def test_empty_legacy_catalog_still_accepts_a_valid_rollback_manifest() -> None:
+    verifier = _module(VERIFIER)
+    lock = _member("expand")
+    lock["composition"]["legacyCatalog"] = []  # type: ignore[index]
+    manifest = json.loads(LEGACY_MANIFEST.read_text(encoding="utf-8"))
+
+    verifier._validate_legacy_manifest(manifest, lock)
+
+    manifest["sourceCommit"] = "not-a-commit"
+    with pytest.raises(ValueError, match="source commit"):
+        verifier._validate_legacy_manifest(manifest, lock)
+
+
 def test_fixed_lock_evidence_rejects_substituted_runtime_trust(tmp_path: Path) -> None:
     verifier = _module(VERIFIER)
     lock = _member("expand")
