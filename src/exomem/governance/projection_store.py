@@ -10,6 +10,7 @@ tuple may point at it; variant-row readiness alone is never serving authority.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import sqlite3
 from collections.abc import Iterable, Sequence
@@ -18,9 +19,9 @@ from pathlib import Path
 
 from .. import reserved_paths
 from ..kbdir import kb_dirname
-from . import projections
+from . import projections, schema_v4
 
-SCHEMA_USER_VERSION = 1
+SCHEMA_USER_VERSION = 2
 _DESCRIPTOR_ID = "authorization-projections"
 _OWNER = "governance.projections"
 _STORE_FILENAME = "rows.sqlite"
@@ -28,12 +29,14 @@ _STORE_STATUS = "variant-rows-ready"
 _ROW_DOMAIN = b"exomem.authorization-projection-row.v1"
 _ITEM_DOMAIN = b"exomem.authorization-projection-item.v1"
 _STORE_DOMAIN = b"exomem.authorization-projection-rows.v1"
+_CATALOG_SCHEMA = "exomem.authorization-projection-catalog/v1"
+_EVIDENCE_SCHEMA = "exomem.authorization-projection-namespace-evidence/v1"
 _HEX = frozenset("0123456789abcdef")
 _TABLES = frozenset({"namespace_meta", "projection_items", "projection_variants"})
 _TRIGGERS = frozenset(
     f"{table}_no_{operation}"
     for table in _TABLES
-    for operation in ("update", "delete")
+    for operation in ("insert", "update", "delete")
 )
 
 
@@ -52,10 +55,25 @@ class ProjectionItemVariants:
     item_identity: str
     content_hash: str
     variants: tuple[projections.ProjectionVariant, ...]
+    scope_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         identity = _bounded_text(self.item_identity, "item identity", maximum=4096)
         content_hash = _digest(self.content_hash, "content hash")
+        if not isinstance(self.scope_ids, tuple):
+            raise projections.ProjectionCanonicalizationError(
+                "item scope ids must be an immutable tuple"
+            )
+        scope_ids = tuple(
+            sorted(
+                {_bounded_text(scope, "item scope id", maximum=4096) for scope in self.scope_ids},
+                key=lambda value: value.encode("utf-16-be"),
+            )
+        )
+        if len(scope_ids) != len(self.scope_ids):
+            raise projections.ProjectionCanonicalizationError(
+                "item scope ids must be a canonical set"
+            )
         if not isinstance(self.variants, tuple):
             raise projections.ProjectionCanonicalizationError(
                 "item variants must be an immutable tuple"
@@ -90,6 +108,7 @@ class ProjectionItemVariants:
             "variants",
             tuple(sorted(ordered, key=lambda item: item.projection_variant_id)),
         )
+        object.__setattr__(self, "scope_ids", scope_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +122,37 @@ class VariantStoreManifest:
     rows_digest: str
 
 
+_VERIFIED_NAMESPACE_PROOF = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class VerifiedProjectionNamespace:
+    """One projection catalog proven against the active governance snapshot."""
+
+    namespace_key: projections.ProjectionNamespaceKey
+    active_state_digest: str
+    manifest: VariantStoreManifest
+    items: tuple[ProjectionItemVariants, ...]
+
+    def __init__(
+        self,
+        namespace_key: projections.ProjectionNamespaceKey,
+        active_state_digest: str,
+        manifest: VariantStoreManifest,
+        items: tuple[ProjectionItemVariants, ...],
+        *,
+        _proof: object,
+    ) -> None:
+        if _proof is not _VERIFIED_NAMESPACE_PROOF:
+            raise ProjectionStoreMismatch(
+                "projection namespace requires verified active-tuple evidence"
+            )
+        object.__setattr__(self, "namespace_key", namespace_key)
+        object.__setattr__(self, "active_state_digest", active_state_digest)
+        object.__setattr__(self, "manifest", manifest)
+        object.__setattr__(self, "items", items)
+
+
 @dataclass(frozen=True, slots=True)
 class _VariantRow:
     variant: projections.ProjectionVariant
@@ -114,6 +164,7 @@ class _VariantRow:
 class _ItemMaterial:
     item: ProjectionItemVariants
     rows: tuple[_VariantRow, ...]
+    scope_ids_jcs: bytes
     item_digest: str
 
 
@@ -212,6 +263,7 @@ def _materialize(
                 "projection catalog contains a duplicate item identity"
             )
         by_identity[item.item_identity] = item
+        projections.require_supported_capacity(catalog_items=len(by_identity))
     material: list[_ItemMaterial] = []
     for identity in sorted(by_identity, key=lambda value: value.encode("utf-16-be")):
         item = by_identity[identity]
@@ -222,16 +274,18 @@ def _materialize(
                     "variant projector schema does not match namespace"
                 )
         rows = tuple(_row_material(variant) for variant in item.variants)
+        scope_ids_jcs = projections.canonical_jcs(list(item.scope_ids))
         item_digest = _framed_digest(
             _ITEM_DOMAIN,
             (
                 item.item_identity.encode("utf-8"),
                 item.content_hash.encode("ascii"),
+                scope_ids_jcs,
                 str(len(rows)).encode("ascii"),
                 *(row.row_digest.encode("ascii") for row in rows),
             ),
         )
-        material.append(_ItemMaterial(item, rows, item_digest))
+        material.append(_ItemMaterial(item, rows, scope_ids_jcs, item_digest))
     variant_count = sum(len(item.rows) for item in material)
     rows_digest = _framed_digest(
         _STORE_DOMAIN,
@@ -251,6 +305,178 @@ def _materialize(
         item_count=len(material),
         variant_count=variant_count,
         rows_digest=rows_digest,
+    )
+
+
+def catalog_descriptor_bytes(
+    key: projections.ProjectionNamespaceKey,
+    items: Iterable[ProjectionItemVariants],
+) -> bytes:
+    """Return the canonical immutable content catalog for one generation."""
+
+    material, _manifest = _materialize(key, items)
+    return projections.canonical_jcs(
+        {
+            "schema": _CATALOG_SCHEMA,
+            "catalog_generation": key.catalog_generation,
+            "items": [
+                {
+                    "item_identity": entry.item.item_identity,
+                    "content_hash": entry.item.content_hash,
+                    "scope_ids": list(entry.item.scope_ids),
+                }
+                for entry in material
+            ],
+        }
+    )
+
+
+def projection_namespace_evidence_bytes(manifest: VariantStoreManifest) -> bytes:
+    """Bind the ready lexical row root to one exact namespace tuple."""
+
+    if not isinstance(manifest, VariantStoreManifest):
+        raise projections.ProjectionCanonicalizationError(
+            "projection namespace manifest is invalid"
+        )
+    key = manifest.namespace_key
+    return projections.canonical_jcs(
+        {
+            "schema": _EVIDENCE_SCHEMA,
+            "policy_fingerprint": key.policy_fingerprint,
+            "projector_schema_version": key.projector_schema_version,
+            "catalog_generation": key.catalog_generation,
+            "namespace_id": manifest.namespace_id,
+            "item_count": manifest.item_count,
+            "variant_count": manifest.variant_count,
+            "rows_digest": manifest.rows_digest,
+            "required_lane_roots": {"lexical": manifest.rows_digest},
+        }
+    )
+
+
+def manifest_from_namespace_evidence(
+    snapshot: schema_v4.ActivePolicySnapshot,
+) -> VariantStoreManifest:
+    """Decode the exact active row-root commitment without sampling a store."""
+
+    if not isinstance(snapshot, schema_v4.ActivePolicySnapshot):
+        raise ProjectionStoreMismatch("active governance snapshot is unavailable")
+    raw = snapshot.projection_namespace_evidence
+    try:
+        value = json.loads(raw)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProjectionStoreMismatch(
+            "projection namespace evidence does not verify"
+        ) from error
+    expected_fields = {
+        "schema",
+        "policy_fingerprint",
+        "projector_schema_version",
+        "catalog_generation",
+        "namespace_id",
+        "item_count",
+        "variant_count",
+        "rows_digest",
+        "required_lane_roots",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise ProjectionStoreMismatch("projection namespace evidence does not verify")
+    try:
+        key = projections.ProjectionNamespaceKey(
+            policy_fingerprint=value["policy_fingerprint"],
+            projector_schema_version=value["projector_schema_version"],
+            catalog_generation=value["catalog_generation"],
+        )
+        item_count = value["item_count"]
+        variant_count = value["variant_count"]
+        if (
+            type(item_count) is not int
+            or item_count < 0
+            or type(variant_count) is not int
+            or variant_count < 0
+        ):
+            raise ProjectionStoreMismatch(
+                "projection namespace evidence does not verify"
+            )
+        manifest = VariantStoreManifest(
+            namespace_key=key,
+            namespace_id=_digest(value["namespace_id"], "namespace id"),
+            item_count=item_count,
+            variant_count=variant_count,
+            rows_digest=_digest(value["rows_digest"], "projection rows digest"),
+        )
+    except (projections.ProjectionError, ProjectionStoreMismatch) as error:
+        raise ProjectionStoreMismatch(
+            "projection namespace evidence does not verify"
+        ) from error
+    active = snapshot.active
+    if (
+        key.policy_fingerprint != active.policy_fingerprint
+        or key.projector_schema_version != active.projector_schema_version
+        or key.catalog_generation != active.catalog_generation
+        or manifest.namespace_id != key.namespace_id
+        or active.projection_namespace_id != key.namespace_id
+        or value["schema"] != _EVIDENCE_SCHEMA
+        or value["required_lane_roots"] != {"lexical": manifest.rows_digest}
+        or projections.canonical_jcs(value) != raw
+        or projection_namespace_evidence_bytes(manifest) != raw
+    ):
+        raise ProjectionStoreMismatch("projection namespace evidence does not verify")
+    return manifest
+
+
+def bind_active_projection_namespace(
+    snapshot: schema_v4.ActivePolicySnapshot,
+    *,
+    manifest: VariantStoreManifest,
+    items: Iterable[ProjectionItemVariants],
+) -> VerifiedProjectionNamespace:
+    """Bind serving rows to one already-verified active policy/catalog tuple."""
+
+    if not isinstance(snapshot, schema_v4.ActivePolicySnapshot):
+        raise ProjectionStoreMismatch("active governance snapshot is unavailable")
+    if not isinstance(manifest, VariantStoreManifest):
+        raise ProjectionStoreMismatch("projection store manifest is unavailable")
+    active = snapshot.active
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=active.policy_fingerprint,
+        projector_schema_version=active.projector_schema_version,
+        catalog_generation=active.catalog_generation,
+    )
+    material, recomputed = _materialize(key, items)
+    canonical_items = tuple(entry.item for entry in material)
+    if (
+        snapshot.policy.fingerprint != active.policy_fingerprint
+        or active.projection_namespace_id != key.namespace_id
+        or manifest.namespace_key != key
+        or manifest.namespace_id != key.namespace_id
+        or recomputed != manifest
+    ):
+        raise ProjectionStoreMismatch(
+            "projection namespace does not match the verified active tuple"
+        )
+    expected_catalog = catalog_descriptor_bytes(key, canonical_items)
+    expected_evidence = projection_namespace_evidence_bytes(manifest)
+    if not hmac.compare_digest(snapshot.catalog_descriptor, expected_catalog):
+        raise ProjectionStoreMismatch(
+            "projection catalog does not match the verified active tuple"
+        )
+    if not hmac.compare_digest(
+        snapshot.projection_namespace_evidence,
+        expected_evidence,
+    ):
+        raise ProjectionStoreMismatch(
+            "projection evidence does not match the verified active tuple"
+        )
+    return VerifiedProjectionNamespace(
+        namespace_key=key,
+        active_state_digest=_digest(
+            active.activation_state_digest,
+            "active state digest",
+        ),
+        manifest=manifest,
+        items=canonical_items,
+        _proof=_VERIFIED_NAMESPACE_PROOF,
     )
 
 
@@ -283,7 +509,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE projection_items ("
         "item_identity TEXT PRIMARY KEY, content_hash TEXT NOT NULL "
-        "CHECK(length(content_hash)=64), variant_count INTEGER NOT NULL "
+        "CHECK(length(content_hash)=64), scope_ids_jcs BLOB NOT NULL, "
+        "variant_count INTEGER NOT NULL "
         "CHECK(variant_count>=0), item_digest TEXT NOT NULL CHECK(length(item_digest)=64))"
     )
     connection.execute(
@@ -295,13 +522,16 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "CHECK(length(row_digest)=64), PRIMARY KEY(item_identity, projection_variant_id), "
         "FOREIGN KEY(item_identity) REFERENCES projection_items(item_identity))"
     )
+    connection.execute(f"PRAGMA user_version={SCHEMA_USER_VERSION}")
+
+
+def _create_immutable_triggers(connection: sqlite3.Connection) -> None:
     for table in sorted(_TABLES):
-        for operation in ("update", "delete"):
+        for operation in ("insert", "update", "delete"):
             connection.execute(
                 f"CREATE TRIGGER {table}_no_{operation} BEFORE {operation.upper()} "
                 f"ON {table} BEGIN SELECT RAISE(ABORT, '{table} rows are immutable'); END"
             )
-    connection.execute(f"PRAGMA user_version={SCHEMA_USER_VERSION}")
 
 
 def _insert_material(
@@ -329,10 +559,12 @@ def _insert_material(
     for item in material:
         connection.execute(
             "INSERT INTO projection_items "
-            "(item_identity, content_hash, variant_count, item_digest) VALUES (?, ?, ?, ?)",
+            "(item_identity, content_hash, scope_ids_jcs, variant_count, item_digest) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
                 item.item.item_identity,
                 item.item.content_hash,
+                item.scope_ids_jcs,
                 len(item.rows),
                 item.item_digest,
             ),
@@ -416,6 +648,65 @@ def _verified_variant(
     return variant
 
 
+def _verified_bundles(
+    connection: sqlite3.Connection,
+) -> tuple[ProjectionItemVariants, ...]:
+    bundles: list[ProjectionItemVariants] = []
+    item_rows = connection.execute(
+        "SELECT item_identity, content_hash, scope_ids_jcs, variant_count, item_digest "
+        "FROM projection_items ORDER BY item_identity"
+    ).fetchall()
+    for item_row in item_rows:
+        item_identity = str(item_row[0])
+        content_hash = _digest(item_row[1], "stored content hash")
+        try:
+            scope_ids_value = json.loads(bytes(item_row[2]))
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ProjectionStoreMismatch(
+                "projection item membership does not verify"
+            ) from error
+        if (
+            not isinstance(scope_ids_value, list)
+            or not all(isinstance(scope, str) for scope in scope_ids_value)
+            or projections.canonical_jcs(scope_ids_value) != bytes(item_row[2])
+        ):
+            raise ProjectionStoreMismatch(
+                "projection item membership does not verify"
+            )
+        variant_rows = connection.execute(
+            "SELECT item_identity, projection_variant_id, decision_level, value_jcs, "
+            "search_fields_jcs, row_digest FROM projection_variants "
+            "WHERE item_identity=? ORDER BY projection_variant_id",
+            (item_identity,),
+        ).fetchall()
+        variants = tuple(
+            _verified_variant(tuple(row), content_hash=content_hash)
+            for row in variant_rows
+        )
+        bundle = ProjectionItemVariants(
+            item_identity,
+            content_hash,
+            variants,
+            tuple(scope_ids_value),
+        )
+        rows = tuple(_row_material(variant) for variant in bundle.variants)
+        scope_ids_jcs = projections.canonical_jcs(list(bundle.scope_ids))
+        item_digest = _framed_digest(
+            _ITEM_DOMAIN,
+            (
+                item_identity.encode("utf-8"),
+                content_hash.encode("ascii"),
+                scope_ids_jcs,
+                str(len(rows)).encode("ascii"),
+                *(row.row_digest.encode("ascii") for row in rows),
+            ),
+        )
+        if int(item_row[3]) != len(rows) or item_row[4] != item_digest:
+            raise ProjectionStoreMismatch("projection item row does not verify")
+        bundles.append(bundle)
+    return tuple(bundles)
+
+
 def _verify_connection(
     connection: sqlite3.Connection,
     *,
@@ -438,38 +729,7 @@ def _verify_connection(
         or stored_variant_count != metadata.variant_count
     ):
         raise ProjectionStoreMismatch("projection store row counts do not verify")
-    bundles: list[ProjectionItemVariants] = []
-    item_rows = connection.execute(
-        "SELECT item_identity, content_hash, variant_count, item_digest "
-        "FROM projection_items ORDER BY item_identity"
-    ).fetchall()
-    for item_row in item_rows:
-        item_identity = str(item_row[0])
-        content_hash = _digest(item_row[1], "stored content hash")
-        variant_rows = connection.execute(
-            "SELECT item_identity, projection_variant_id, decision_level, value_jcs, "
-            "search_fields_jcs, row_digest FROM projection_variants "
-            "WHERE item_identity=? ORDER BY projection_variant_id",
-            (item_identity,),
-        ).fetchall()
-        variants = tuple(
-            _verified_variant(tuple(row), content_hash=content_hash)
-            for row in variant_rows
-        )
-        bundle = ProjectionItemVariants(item_identity, content_hash, variants)
-        rows = tuple(_row_material(variant) for variant in bundle.variants)
-        item_digest = _framed_digest(
-            _ITEM_DOMAIN,
-            (
-                item_identity.encode("utf-8"),
-                content_hash.encode("ascii"),
-                str(len(rows)).encode("ascii"),
-                *(row.row_digest.encode("ascii") for row in rows),
-            ),
-        )
-        if int(item_row[2]) != len(rows) or item_row[3] != item_digest:
-            raise ProjectionStoreMismatch("projection item row does not verify")
-        bundles.append(bundle)
+    bundles = _verified_bundles(connection)
     material, recomputed = _materialize(key, bundles)
     del material
     if recomputed != metadata:
@@ -558,6 +818,7 @@ def stage_variant_store(
                     try:
                         _create_schema(connection)
                         _insert_material(connection, material, expected)
+                        _create_immutable_triggers(connection)
                         _crash_point("before-commit")
                         connection.commit()
                     except BaseException:
@@ -633,6 +894,55 @@ def verify_variant_store(
                     connection.close()
 
 
+def load_projection_catalog(
+    vault_root: Path,
+    *,
+    key: projections.ProjectionNamespaceKey,
+    expected_rows_digest: str,
+) -> tuple[VariantStoreManifest, tuple[ProjectionItemVariants, ...]]:
+    """Load the complete catalog only after its immutable store verifies."""
+
+    root = Path(vault_root)
+    database = variant_store_path(root, key)
+    with reserved_paths._subsystem_authority_scope(_OWNER):
+        with reserved_paths._identity_coordination_scope(
+            root,
+            descriptor_ids=(_DESCRIPTOR_ID,),
+        ):
+            with reserved_paths._sqlite_owner_target_scope(
+                root,
+                database,
+                _DESCRIPTOR_ID,
+                create=False,
+            ) as retained:
+                connection = _connect(
+                    retained,
+                    readonly=True,
+                    vault_root=root,
+                    database=database,
+                )
+                try:
+                    manifest = _verify_connection(
+                        connection,
+                        key=key,
+                        expected_rows_digest=expected_rows_digest,
+                    )
+                    return manifest, _verified_bundles(connection)
+                except sqlite3.Error as error:
+                    raise ProjectionStoreMismatch(
+                        "projection catalog read does not verify"
+                    ) from error
+                finally:
+                    reserved_paths._publish_sqlite_owner_family(
+                        root,
+                        database,
+                        _DESCRIPTOR_ID,
+                        connection,
+                        preserve_existing=True,
+                    )
+                    connection.close()
+
+
 def load_projection_variant(
     vault_root: Path,
     *,
@@ -667,14 +977,11 @@ def load_projection_variant(
                     database=database,
                 )
                 try:
-                    metadata = _metadata_manifest(connection, key)
-                    if metadata.rows_digest != _digest(
-                        expected_rows_digest,
-                        "expected rows digest",
-                    ):
-                        raise ProjectionStoreMismatch(
-                            "projection store digest does not match active tuple"
-                        )
+                    _verify_connection(
+                        connection,
+                        key=key,
+                        expected_rows_digest=expected_rows_digest,
+                    )
                     item = connection.execute(
                         "SELECT content_hash FROM projection_items WHERE item_identity=?",
                         (identity,),
@@ -712,7 +1019,13 @@ __all__ = [
     "ProjectionStoreError",
     "ProjectionStoreMismatch",
     "VariantStoreManifest",
+    "VerifiedProjectionNamespace",
+    "bind_active_projection_namespace",
+    "catalog_descriptor_bytes",
+    "load_projection_catalog",
     "load_projection_variant",
+    "projection_namespace_evidence_bytes",
+    "manifest_from_namespace_evidence",
     "stage_variant_store",
     "variant_store_path",
     "verify_variant_store",

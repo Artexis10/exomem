@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import pytest
+from governance_projection_support import verified_namespace
 
 from exomem.governance import projected_retrieval, projection_store, projections
 from exomem.governance.decisions import Decision
@@ -52,6 +53,12 @@ def _item(
     )
 
 
+def _namespace(
+    *items: projection_store.ProjectionItemVariants,
+) -> projection_store.VerifiedProjectionNamespace:
+    return verified_namespace(_key(), items)
+
+
 def _map(
     *pairs: tuple[
         projection_store.ProjectionItemVariants,
@@ -77,7 +84,7 @@ def test_reranker_receives_only_the_selected_projection_fields() -> None:
     low = _variant("shared", "1" * 64, level=2, text="approved abstraction")
     full = _variant("shared", "1" * 64, level=6, text="raw hidden body")
     item = _item("shared", "1" * 64, low, full)
-    reranker = projected_retrieval.ProjectedReranker(_key(), (item,))
+    reranker = projected_retrieval.ProjectedReranker(_namespace(item))
     observed: list[Mapping[str, str]] = []
 
     def scorer(_query: str, fields: Mapping[str, str]) -> float:
@@ -103,7 +110,7 @@ def test_raw_or_l0_candidate_is_refused_before_scorer_invocation() -> None:
     visible_item = _item("visible", "2" * 64, visible)
     hidden_item = _item("hidden", "3" * 64, hidden)
     reranker = projected_retrieval.ProjectedReranker(
-        _key(), (visible_item, hidden_item)
+        _namespace(visible_item, hidden_item)
     )
     calls = 0
 
@@ -140,7 +147,7 @@ def test_reranking_scores_complete_projected_candidates_before_top_k() -> None:
         _item(variant.item_identity, variant.content_hash, variant)
         for variant in variants
     )
-    reranker = projected_retrieval.ProjectedReranker(_key(), items)
+    reranker = projected_retrieval.ProjectedReranker(_namespace(*items))
 
     hits = reranker.rerank(
         _map(*zip(items, variants, strict=True)),
@@ -161,7 +168,7 @@ def test_rerank_score_must_be_finite_and_ties_preserve_projected_order() -> None
     first_item = _item("first", "4" * 64, first)
     second_item = _item("second", "5" * 64, second)
     reranker = projected_retrieval.ProjectedReranker(
-        _key(), (first_item, second_item)
+        _namespace(first_item, second_item)
     )
     authorization = _map((first_item, first), (second_item, second))
 

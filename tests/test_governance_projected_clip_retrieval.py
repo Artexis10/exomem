@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from governance_projection_support import verified_namespace
 
 from exomem.governance import projected_retrieval, projection_store, projections
 from exomem.governance.decisions import Decision
@@ -49,6 +50,12 @@ def _item(
     )
 
 
+def _namespace(
+    *items: projection_store.ProjectionItemVariants,
+) -> projection_store.VerifiedProjectionNamespace:
+    return verified_namespace(_key(), items)
+
+
 def _map(
     *pairs: tuple[
         projection_store.ProjectionItemVariants,
@@ -91,15 +98,13 @@ def test_l0_pixel_match_is_equivalent_to_absence_before_clip_cap() -> None:
     visible_item = _item(visible)
     hidden_item = _item(hidden)
     present = projected_retrieval.ProjectedClipIndex(
-        _key(),
-        (visible_item, hidden_item),
+        _namespace(visible_item, hidden_item),
         (_measurement(visible, (0.1, 0.9)), _measurement(hidden, (1.0, 0.0))),
         extractor_version="pixels-v1",
         model_version="clip-test-v1",
     )
     absent = projected_retrieval.ProjectedClipIndex(
-        _key(),
-        (visible_item,),
+        _namespace(visible_item),
         (_measurement(visible, (0.1, 0.9)),),
         extractor_version="pixels-v1",
         model_version="clip-test-v1",
@@ -121,8 +126,7 @@ def test_below_l6_is_excluded_from_binary_lane_even_if_measurement_exists() -> N
     full = _variant("media", "3" * 64, level=6, text="full media")
     item = _item(lower, full)
     index = projected_retrieval.ProjectedClipIndex(
-        _key(),
-        (item,),
+        _namespace(item),
         (_measurement(full, (1.0, 0.0)),),
         extractor_version="pixels-v1",
         model_version="clip-test-v1",
@@ -138,8 +142,7 @@ def test_missing_selected_l6_clip_measurement_disables_lane() -> None:
     full = _variant("media", "4" * 64, level=6, text="full media")
     item = _item(full)
     index = projected_retrieval.ProjectedClipIndex(
-        _key(),
-        (item,),
+        _namespace(item),
         (),
         extractor_version="pixels-v1",
         model_version="clip-test-v1",
@@ -156,8 +159,7 @@ def test_clip_measurement_lane_and_versions_are_closed_subkeys() -> None:
         _measurement(full, (1.0, 0.0), lane="vector")
     with pytest.raises(projections.ProjectionCanonicalizationError, match="model"):
         projected_retrieval.ProjectedClipIndex(
-            _key(),
-            (item,),
+            _namespace(item),
             (_measurement(full, (1.0, 0.0)),),
             extractor_version="pixels-v1",
             model_version="different-model",

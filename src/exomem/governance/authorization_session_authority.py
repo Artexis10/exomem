@@ -25,6 +25,7 @@ _TOKEN_DOMAIN: Final = b"exomem.withhold-token.v4\0"
 _GRANT_ID_DOMAIN: Final = b"exomem.session-grant.v4\0"
 _MAX_SQLITE_INTEGER: Final = (1 << 63) - 1
 _MAX_ITEMS: Final = 1_024
+_MAX_PROJECTION_CATALOG_ITEMS: Final = 16_384
 _MAX_TEXT_BYTES: Final = 4_096
 _HEX = frozenset("0123456789abcdef")
 
@@ -703,6 +704,110 @@ def active_session_grants(
         )
     ).hexdigest()
     return tuple(active), identity
+
+
+def active_session_grants_for_projection_catalog(
+    connection: sqlite3.Connection,
+    *,
+    context: AuthorizationSessionContext,
+    audience: str,
+    purpose: str | None,
+    catalog: tuple[SessionMembership, ...],
+    policy_fingerprint: str,
+    now: int,
+) -> tuple[tuple[str, SessionGrant], ...]:
+    """Verify all catalog-bound session grants with one authority snapshot."""
+
+    current = _active_context(connection, context, now=now)
+    canonical_audience = _text(audience)
+    canonical_purpose = _purpose(purpose)
+    current_policy = _digest(policy_fingerprint)
+    if canonical_audience != current.principal_id:
+        raise _unavailable()
+    if not isinstance(catalog, tuple) or len(catalog) > _MAX_PROJECTION_CATALOG_ITEMS:
+        raise _unavailable()
+    catalog_by_path: dict[str, SessionMembership] = {}
+    for item in catalog:
+        if not isinstance(item, SessionMembership):
+            raise _unavailable()
+        canonical = SessionMembership(
+            path=_text(item.path),
+            fingerprint=_digest(item.fingerprint),
+            scope_ids=_sequence(item.scope_ids, allow_empty=True),
+        )
+        if canonical.path in catalog_by_path:
+            raise _unavailable()
+        catalog_by_path[canonical.path] = canonical
+    try:
+        active_policy = connection.execute(
+            "SELECT policy_fingerprint FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        rows = connection.execute(
+            "SELECT grant_id, purpose, ceiling, paths, fingerprints, scope_ids, "
+            "membership_manifest, policy_fingerprint, token_jti, created_at, expires_at "
+            "FROM governance_session_grants WHERE authorization_session_id=? "
+            "AND principal_id=? AND issuer_family=? AND audience=? AND status='active' "
+            "AND expires_at>=? ORDER BY grant_id",
+            (
+                current.session_id,
+                current.principal_id,
+                current.issuer_family,
+                canonical_audience,
+                now,
+            ),
+        ).fetchall()
+    except sqlite3.Error:
+        raise _unavailable() from None
+    if active_policy != (current_policy,):
+        return ()
+
+    matched: list[tuple[str, SessionGrant]] = []
+    for row in rows:
+        try:
+            row_purpose = _purpose(row[1])
+            paths, fingerprints = _path_fingerprint_pairs(
+                tuple(json.loads(str(row[3]))),
+                tuple(json.loads(str(row[4]))),
+            )
+            grant_scopes = _sequence(tuple(json.loads(str(row[5]))))
+            reviewed = _load_membership(row[6])
+            if row_purpose != canonical_purpose or _digest(row[7]) != current_policy:
+                continue
+            grant = SessionGrant(
+                grant_id=_digest(row[0]),
+                authorization_session_id=current.session_id,
+                principal_id=current.principal_id,
+                issuer_family=current.issuer_family,
+                audience=canonical_audience,
+                purpose=row_purpose,
+                ceiling=_integer(row[2], maximum=6),
+                paths=paths,
+                fingerprints=fingerprints,
+                scope_ids=grant_scopes,
+                membership=reviewed,
+                policy_fingerprint=current_policy,
+                token_jti=_text(row[8]),
+                created_at=_integer(row[9], minimum=1),
+                expires_at=_integer(row[10], minimum=1),
+            )
+            fingerprints_by_path = dict(zip(paths, fingerprints, strict=True))
+            for reviewed_item in reviewed:
+                current_item = catalog_by_path.get(reviewed_item.path)
+                if (
+                    current_item is not None
+                    and reviewed_item == current_item
+                    and fingerprints_by_path.get(reviewed_item.path)
+                    == reviewed_item.fingerprint
+                ):
+                    matched.append((reviewed_item.path, grant))
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            AuthorizationSessionUnavailable,
+        ):
+            raise _unavailable() from None
+    return tuple(sorted(matched, key=lambda item: (item[0], item[1].grant_id)))
 
 
 def declare_purpose(

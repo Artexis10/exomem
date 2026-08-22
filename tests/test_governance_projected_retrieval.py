@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from governance_projection_support import verified_namespace
 
 from exomem.governance import projected_retrieval, projection_store, projections
 from exomem.governance.decisions import Decision
@@ -51,6 +52,12 @@ def _item(
     )
 
 
+def _namespace(
+    *items: projection_store.ProjectionItemVariants,
+) -> projection_store.VerifiedProjectionNamespace:
+    return verified_namespace(_key(), items)
+
+
 def _selection(
     item: projection_store.ProjectionItemVariants,
     variant: projections.ProjectionVariant | None,
@@ -73,9 +80,9 @@ def test_hidden_present_and_physically_absent_have_identical_bm25_envelopes() ->
     hidden_item = _item("hidden", "3" * 64, hidden)
 
     present_index = projected_retrieval.ProjectedLexicalIndex(
-        _key(), (item_a, item_b, hidden_item)
+        _namespace(item_a, item_b, hidden_item)
     )
-    absent_index = projected_retrieval.ProjectedLexicalIndex(_key(), (item_a, item_b))
+    absent_index = projected_retrieval.ProjectedLexicalIndex(_namespace(item_a, item_b))
     present_map = projected_retrieval.AuthorizationProjectionMap(
         _key(),
         (
@@ -102,7 +109,7 @@ def test_projection_only_term_acquires_before_cap_and_raw_only_term_does_not() -
         text="approved-projection-term",
     )
     item = _item("projected", "4" * 64, projected)
-    index = projected_retrieval.ProjectedLexicalIndex(_key(), (item,))
+    index = projected_retrieval.ProjectedLexicalIndex(_namespace(item))
     authorization = projected_retrieval.AuthorizationProjectionMap(
         _key(), (_selection(item, projected),)
     )
@@ -111,14 +118,32 @@ def test_projection_only_term_acquires_before_cap_and_raw_only_term_does_not() -
 
     assert [hit.item_identity for hit in hits] == ["projected"]
     assert hits[0].search_fields == {"constraint": "approved-projection-term"}
-    assert index.search_bm25(authorization, "raw-hidden-term", k=1) == ()
+    assert index.search_bm25(authorization, "raw-secret-source", k=1) == ()
+
+
+def test_bm25_query_terms_keep_any_term_candidate_semantics() -> None:
+    alpha = _variant("alpha-item", "b" * 64, level=6, text="alpha only")
+    beta = _variant("beta-item", "c" * 64, level=6, text="beta only")
+    alpha_item = _item("alpha-item", "b" * 64, alpha)
+    beta_item = _item("beta-item", "c" * 64, beta)
+    index = projected_retrieval.ProjectedLexicalIndex(
+        _namespace(alpha_item, beta_item)
+    )
+    authorization = projected_retrieval.AuthorizationProjectionMap(
+        _key(),
+        (_selection(alpha_item, alpha), _selection(beta_item, beta)),
+    )
+
+    hits = index.search_bm25(authorization, "alpha beta", k=2)
+
+    assert {hit.item_identity for hit in hits} == {"alpha-item", "beta-item"}
 
 
 def test_l5_later_source_term_cannot_acquire_or_open_a_hidden_snippet() -> None:
     body = " ".join(["visible"] * 100) + " raw-hidden-later-term"
     l5 = _variant("l5", "5" * 64, level=5, text=body)
     item = _item("l5", "5" * 64, l5)
-    index = projected_retrieval.ProjectedLexicalIndex(_key(), (item,))
+    index = projected_retrieval.ProjectedLexicalIndex(_namespace(item))
     authorization = projected_retrieval.AuthorizationProjectionMap(
         _key(), (_selection(item, l5),)
     )
@@ -146,7 +171,7 @@ def test_hidden_items_do_not_consume_keyword_or_bm25_candidate_caps() -> None:
         for index in range(80)
     )
     index = projected_retrieval.ProjectedLexicalIndex(
-        _key(), (*hidden_items, visible_item)
+        _namespace(*hidden_items, visible_item)
     )
     authorization = projected_retrieval.AuthorizationProjectionMap(
         _key(),
@@ -169,7 +194,9 @@ def test_authorization_map_is_exact_total_and_namespace_bound() -> None:
     second = _variant("second", "8" * 64, level=1, text="second")
     first_item = _item("first", "7" * 64, first)
     second_item = _item("second", "8" * 64, second)
-    index = projected_retrieval.ProjectedLexicalIndex(_key(), (first_item, second_item))
+    index = projected_retrieval.ProjectedLexicalIndex(
+        _namespace(first_item, second_item)
+    )
 
     incomplete = projected_retrieval.AuthorizationProjectionMap(
         _key(), (_selection(first_item, first),)
@@ -199,7 +226,7 @@ def test_same_persistent_rows_support_distinct_request_local_maps() -> None:
     low = _variant("shared", "9" * 64, level=1, text="limited notice")
     full = _variant("shared", "9" * 64, level=6, text="complete permitted body")
     item = _item("shared", "9" * 64, low, full)
-    index = projected_retrieval.ProjectedLexicalIndex(_key(), (item,))
+    index = projected_retrieval.ProjectedLexicalIndex(_namespace(item))
     low_map = projected_retrieval.AuthorizationProjectionMap(
         _key(), (_selection(item, low),)
     )
@@ -214,7 +241,7 @@ def test_same_persistent_rows_support_distinct_request_local_maps() -> None:
 def test_keyword_mode_retains_strict_substring_not_stem_semantics() -> None:
     variant = _variant("keyword", "a" * 64, level=6, text="compounding approved")
     item = _item("keyword", "a" * 64, variant)
-    index = projected_retrieval.ProjectedLexicalIndex(_key(), (item,))
+    index = projected_retrieval.ProjectedLexicalIndex(_namespace(item))
     authorization = projected_retrieval.AuthorizationProjectionMap(
         _key(), (_selection(item, variant),)
     )

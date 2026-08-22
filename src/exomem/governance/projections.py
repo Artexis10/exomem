@@ -23,6 +23,11 @@ from .principal import OWNER_AUDIENCE
 
 MAX_PROJECTION_VARIANTS_PER_ITEM = 256
 PROJECTOR_SCHEMA_VERSION = 1
+MAX_HIDDEN_CORPUS_WIRE_DELTA_MS = 25
+MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO = 0.10
+MAX_GOVERNED_CATALOG_ITEMS = 16_384
+MAX_GOVERNED_SEARCH_BYTES_PER_ITEM = 1_048_576
+MAX_GOVERNED_GRAPH_EDGES = 262_144
 
 _NAMESPACE_DOMAIN = b"exomem.authorization-projection-namespace-key.v1"
 _VARIANT_DOMAIN = b"exomem.authorization-projection.v1\0"
@@ -68,6 +73,40 @@ class ProjectionVariantOverflow(ProjectionError):
 
 class ProjectionVariantMismatch(ProjectionError):
     """One variant identity names two different immutable representations."""
+
+
+class ProjectionCapacityExceeded(ProjectionError):
+    """A governed retrieval namespace exceeds one repository-owned hard limit."""
+
+
+def require_supported_capacity(
+    *,
+    catalog_items: int | None = None,
+    searchable_bytes: int | None = None,
+    graph_edges: int | None = None,
+) -> None:
+    """Enforce the non-overridable governed retrieval capacity contract."""
+
+    values = (
+        ("catalog_items", catalog_items, MAX_GOVERNED_CATALOG_ITEMS),
+        (
+            "searchable_bytes",
+            searchable_bytes,
+            MAX_GOVERNED_SEARCH_BYTES_PER_ITEM,
+        ),
+        ("graph_edges", graph_edges, MAX_GOVERNED_GRAPH_EDGES),
+    )
+    for name, value, maximum in values:
+        if value is None:
+            continue
+        if type(value) is not int or value < 0:
+            raise ProjectionCanonicalizationError(
+                f"{name} ({name.replace('_', ' ')}) capacity must be a non-negative integer"
+            )
+        if value > maximum:
+            raise ProjectionCapacityExceeded(
+                f"{name} ({name.replace('_', ' ')}) exceeds the repository governed retrieval capacity"
+            )
 
 
 def _digest(value: str, name: str) -> str:
@@ -252,6 +291,9 @@ class ProjectionVariant:
         for key, value in copied.items():
             _bounded_text(key, "search field name", maximum=128)
             _bounded_text(value, f"search field {key}", maximum=1_048_576)
+        require_supported_capacity(
+            searchable_bytes=sum(len(value.encode("utf-8")) for value in copied.values())
+        )
         expected_fields = _SEARCH_FIELDS_BY_LEVEL.get(self.decision_level)
         if expected_fields is not None and frozenset(copied) != expected_fields:
             raise ProjectionCanonicalizationError(
@@ -390,6 +432,9 @@ def _canonical_full_fields(value: Mapping[str, str]) -> dict[str, str]:
         fields[_bounded_text(key, "search field name", maximum=128)] = _bounded_text(
             value[key], f"search field {key}", maximum=1_048_576
         )
+    require_supported_capacity(
+        searchable_bytes=sum(len(item.encode("utf-8")) for item in fields.values())
+    )
     return fields
 
 
@@ -492,6 +537,72 @@ def build_projection_variant(
         value_jcs=value_jcs,
         search_fields=fields,
     )
+
+
+def projection_variant_ids_for_decision(
+    *,
+    item_identity: str,
+    content_hash: str,
+    decision: Decision,
+    projector_schema_version: int,
+) -> tuple[str, ...]:
+    """Return descending fixed variant identities without reopening source text."""
+
+    identity = _bounded_text(item_identity, "item_identity", maximum=4096)
+    digest = _digest(content_hash, "content_hash")
+    if not isinstance(decision, Decision):
+        raise ProjectionCanonicalizationError("projection decision is invalid")
+    if type(decision.level) is not int or not 0 <= decision.level <= 6:
+        raise ProjectionCanonicalizationError("decision level is outside L0-L6")
+    if type(projector_schema_version) is not int or projector_schema_version <= 0:
+        raise ProjectionCanonicalizationError(
+            "projector_schema_version must be positive"
+        )
+    options = _canonical_options(decision.options)
+    release_strip = _canonical_strip(decision.release_strip)
+    identities: list[str] = []
+    for level in range(decision.level, 0, -1):
+        if level == 1 and not (
+            isinstance(decision.notice, str)
+            or isinstance(options.get("notice"), str)
+        ):
+            continue
+        if level == 2 and not isinstance(options.get("constraint"), str):
+            continue
+        if level == 3 and not isinstance(options.get("abstract"), str):
+            continue
+        if level == 4 and not (
+            isinstance(decision.bridge_abstraction, str)
+            and decision.bridge_abstraction
+            and decision.release_grant_id
+            and decision.release_dependency_digest
+        ):
+            continue
+        value = {
+            "item_identity": identity,
+            "content_hash": digest,
+            "decision_level": level,
+            "options": _options_at_level(options, level),
+            "release_strip": release_strip,
+            "bridge_id": (
+                _bounded_text(decision.release_grant_id, "bridge_id", maximum=4096)
+                if level == 4
+                else None
+            ),
+            "bridge_dependency_content_hash": (
+                _digest(
+                    decision.release_dependency_digest,
+                    "bridge_dependency_content_hash",
+                )
+                if level == 4
+                else None
+            ),
+            "projector_schema_version": projector_schema_version,
+        }
+        identities.append(
+            hashlib.sha256(_VARIANT_DOMAIN + canonical_jcs(value)).hexdigest()
+        )
+    return tuple(identities)
 
 
 def deduplicate_variants(
@@ -696,10 +807,16 @@ def enumerate_projection_variants(
 
 
 __all__ = [
+    "MAX_GOVERNED_CATALOG_ITEMS",
+    "MAX_GOVERNED_GRAPH_EDGES",
+    "MAX_GOVERNED_SEARCH_BYTES_PER_ITEM",
+    "MAX_HIDDEN_CORPUS_WIRE_DELTA_MS",
+    "MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO",
     "MAX_PROJECTION_VARIANTS_PER_ITEM",
     "PROJECTOR_SCHEMA_VERSION",
     "MeasurementKey",
     "ProjectionCanonicalizationError",
+    "ProjectionCapacityExceeded",
     "ProjectionError",
     "ProjectionNamespaceKey",
     "ProjectionVariant",
@@ -710,4 +827,6 @@ __all__ = [
     "deduplicate_variants",
     "enumerate_projection_variants",
     "fixed_excerpt",
+    "projection_variant_ids_for_decision",
+    "require_supported_capacity",
 ]

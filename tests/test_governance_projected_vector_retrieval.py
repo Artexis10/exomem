@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from governance_projection_support import verified_namespace
 
 from exomem.governance import projected_retrieval, projection_store, projections
 from exomem.governance.decisions import Decision
@@ -48,6 +49,12 @@ def _item(
         content_hash=content_hash,
         variants=variants,
     )
+
+
+def _namespace(
+    *items: projection_store.ProjectionItemVariants,
+) -> projection_store.VerifiedProjectionNamespace:
+    return verified_namespace(_key(), items)
 
 
 def _selection(
@@ -100,8 +107,7 @@ def test_hidden_present_and_absent_have_identical_vector_envelopes() -> None:
     second_item = _item("second", "2" * 64, second)
     hidden_item = _item("hidden", "3" * 64, hidden)
     present = projected_retrieval.ProjectedVectorIndex(
-        _key(),
-        (first_item, second_item, hidden_item),
+        _namespace(first_item, second_item, hidden_item),
         (
             _measurement(first, (1.0, 0.0)),
             _measurement(second, (0.8, 0.2)),
@@ -111,8 +117,7 @@ def test_hidden_present_and_absent_have_identical_vector_envelopes() -> None:
         model_version="test-model-v1",
     )
     absent = projected_retrieval.ProjectedVectorIndex(
-        _key(),
-        (first_item, second_item),
+        _namespace(first_item, second_item),
         (
             _measurement(first, (1.0, 0.0)),
             _measurement(second, (0.8, 0.2)),
@@ -137,8 +142,7 @@ def test_selected_projection_vector_not_raw_body_controls_relevance() -> None:
     full = _variant("shared", "4" * 64, level=6, text="raw body")
     item = _item("shared", "4" * 64, low, full)
     index = projected_retrieval.ProjectedVectorIndex(
-        _key(),
-        (item,),
+        _namespace(item),
         (_measurement(low, (1.0, 0.0)), _measurement(full, (0.0, 1.0))),
         extractor_version="projected-text-v1",
         model_version="test-model-v1",
@@ -173,8 +177,10 @@ def test_hidden_high_scores_do_not_consume_the_vector_cap() -> None:
         for index in range(80)
     )
     index = projected_retrieval.ProjectedVectorIndex(
-        _key(),
-        (*(item for item, _variant_row in hidden_pairs), visible_item),
+        _namespace(
+            *(item for item, _variant_row in hidden_pairs),
+            visible_item,
+        ),
         (
             *(_measurement(variant, (1.0, 0.0)) for _item_row, variant in hidden_pairs),
             _measurement(visible, (0.1, 0.9)),
@@ -198,8 +204,7 @@ def test_missing_selected_vector_disables_the_visible_lane_without_fallback() ->
     raw = _variant("projected", "6" * 64, level=6, text="raw")
     item = _item("projected", "6" * 64, projected, raw)
     index = projected_retrieval.ProjectedVectorIndex(
-        _key(),
-        (item,),
+        _namespace(item),
         (_measurement(raw, (1.0, 0.0)),),
         extractor_version="projected-text-v1",
         model_version="test-model-v1",
@@ -214,8 +219,7 @@ def test_measurement_versions_are_subkeys_not_namespace_aliases() -> None:
     item = _item("item", "7" * 64, variant)
     with pytest.raises(projections.ProjectionCanonicalizationError, match="model"):
         projected_retrieval.ProjectedVectorIndex(
-            _key(),
-            (item,),
+            _namespace(item),
             (_measurement(variant, (1.0, 0.0), model_version="other-model"),),
             extractor_version="projected-text-v1",
             model_version="test-model-v1",
@@ -229,8 +233,7 @@ def test_vector_dimension_and_finiteness_are_closed() -> None:
     variant = _variant("item", "8" * 64, level=6, text="item")
     item = _item("item", "8" * 64, variant)
     index = projected_retrieval.ProjectedVectorIndex(
-        _key(),
-        (item,),
+        _namespace(item),
         (_measurement(variant, (1.0, 0.0)),),
         extractor_version="projected-text-v1",
         model_version="test-model-v1",

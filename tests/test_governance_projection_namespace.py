@@ -65,6 +65,42 @@ def test_projection_identities_refuse_type_confusion_content_free() -> None:
         )
 
 
+def test_repository_governed_retrieval_limits_are_fixed() -> None:
+    assert projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS == 25
+    assert projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO == 0.10
+    assert projections.MAX_GOVERNED_CATALOG_ITEMS == 16_384
+    assert projections.MAX_GOVERNED_SEARCH_BYTES_PER_ITEM == 1_048_576
+    assert projections.MAX_GOVERNED_GRAPH_EDGES == 262_144
+
+    for name, value in (
+        ("catalog_items", projections.MAX_GOVERNED_CATALOG_ITEMS + 1),
+        ("searchable_bytes", projections.MAX_GOVERNED_SEARCH_BYTES_PER_ITEM + 1),
+        ("graph_edges", projections.MAX_GOVERNED_GRAPH_EDGES + 1),
+    ):
+        with pytest.raises(projections.ProjectionCapacityExceeded, match=name):
+            projections.require_supported_capacity(**{name: value})
+
+
+@pytest.mark.parametrize(
+    "fields",
+    (
+        {"body": "é" * 524_289},
+        {"body": "a" * 600_000, "title": "b" * 600_000},
+    ),
+)
+def test_searchable_item_capacity_is_aggregate_utf8_bytes(
+    fields: dict[str, str],
+) -> None:
+    with pytest.raises(projections.ProjectionCapacityExceeded, match="searchable bytes"):
+        projections.build_projection_variant(
+            item_identity="oversized",
+            content_hash="f" * 64,
+            decision=Decision(level=6),
+            projector_schema_version=1,
+            full_search_fields=fields,
+        )
+
+
 def test_projection_variant_id_has_one_fixed_cross_runtime_preimage() -> None:
     decision = Decision(
         level=4,

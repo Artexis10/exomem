@@ -76,12 +76,20 @@ class ProjectionSelection:
     item_identity: str
     content_hash: str
     projection_variant_id: str | None
+    decision: object | None = None
 
     def __post_init__(self) -> None:
         _bounded_text(self.item_identity, "item identity", maximum=4096)
         _digest(self.content_hash, "content hash")
         if self.projection_variant_id is not None:
             _digest(self.projection_variant_id, "projection variant id")
+        if self.decision is not None:
+            from .decisions import Decision
+
+            if not isinstance(self.decision, Decision):
+                raise projections.ProjectionCanonicalizationError(
+                    "projection selection decision is invalid"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +243,7 @@ def _catalog_items(
                     "variant projector schema does not match retrieval namespace"
                 )
         by_identity[item.item_identity] = item
+        projections.require_supported_capacity(catalog_items=len(by_identity))
     return MappingProxyType(by_identity)
 
 
@@ -286,11 +295,15 @@ class ProjectionCatalog:
 
     def __init__(
         self,
-        namespace_key: projections.ProjectionNamespaceKey,
-        items: Iterable[projection_store.ProjectionItemVariants],
+        namespace: projection_store.VerifiedProjectionNamespace,
     ) -> None:
-        self.namespace_key = namespace_key
-        self.items = _catalog_items(namespace_key, items)
+        if not isinstance(namespace, projection_store.VerifiedProjectionNamespace):
+            raise ProjectedRetrievalUnavailable(
+                "projected retrieval requires a verified active namespace"
+            )
+        self.namespace = namespace
+        self.namespace_key = namespace.namespace_key
+        self.items = _catalog_items(namespace.namespace_key, namespace.items)
 
     def select(
         self,
@@ -328,11 +341,11 @@ class ProjectedLexicalIndex:
 
     def __init__(
         self,
-        namespace_key: projections.ProjectionNamespaceKey,
-        items: Iterable[projection_store.ProjectionItemVariants],
+        namespace: projection_store.VerifiedProjectionNamespace,
     ) -> None:
-        self.namespace_key = namespace_key
-        self._items = _catalog_items(namespace_key, items)
+        catalog = ProjectionCatalog(namespace)
+        self.namespace_key = catalog.namespace_key
+        self._items = catalog.items
         documents: dict[str, _SelectedDocument] = {}
         postings: dict[str, set[str]] = {}
         for item in self._items.values():
@@ -372,9 +385,11 @@ class ProjectedLexicalIndex:
             document.variant.projection_variant_id for document in documents
         )
         posting_sets = [self._postings.get(token, frozenset()) for token in query_tokens]
-        if not posting_sets or any(not posting for posting in posting_sets):
+        if not posting_sets:
             return ()
-        candidate_ids = selected_ids.intersection(*posting_sets)
+        candidate_ids = selected_ids.intersection(
+            frozenset().union(*posting_sets)
+        )
         return tuple(
             document
             for document in documents
@@ -481,15 +496,15 @@ class ProjectedVectorIndex:
 
     def __init__(
         self,
-        namespace_key: projections.ProjectionNamespaceKey,
-        items: Iterable[projection_store.ProjectionItemVariants],
+        namespace: projection_store.VerifiedProjectionNamespace,
         measurements: Iterable[ProjectionVectorMeasurement],
         *,
         extractor_version: str,
         model_version: str,
     ) -> None:
-        self.namespace_key = namespace_key
-        self._items = _catalog_items(namespace_key, items)
+        catalog = ProjectionCatalog(namespace)
+        self.namespace_key = catalog.namespace_key
+        self._items = catalog.items
         self.extractor_version = _bounded_text(
             extractor_version,
             "vector extractor version",
@@ -599,15 +614,15 @@ class ProjectedClipIndex:
 
     def __init__(
         self,
-        namespace_key: projections.ProjectionNamespaceKey,
-        items: Iterable[projection_store.ProjectionItemVariants],
+        namespace: projection_store.VerifiedProjectionNamespace,
         measurements: Iterable[ProjectionClipMeasurement],
         *,
         extractor_version: str,
         model_version: str,
     ) -> None:
-        self.namespace_key = namespace_key
-        self._items = _catalog_items(namespace_key, items)
+        catalog = ProjectionCatalog(namespace)
+        self.namespace_key = catalog.namespace_key
+        self._items = catalog.items
         self.extractor_version = _bounded_text(
             extractor_version,
             "CLIP extractor version",
@@ -722,11 +737,11 @@ class ProjectedReranker:
 
     def __init__(
         self,
-        namespace_key: projections.ProjectionNamespaceKey,
-        items: Iterable[projection_store.ProjectionItemVariants],
+        namespace: projection_store.VerifiedProjectionNamespace,
     ) -> None:
-        self.namespace_key = namespace_key
-        self._items = _catalog_items(namespace_key, items)
+        catalog = ProjectionCatalog(namespace)
+        self.namespace_key = catalog.namespace_key
+        self._items = catalog.items
 
     def rerank(
         self,

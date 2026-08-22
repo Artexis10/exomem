@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from governance_projection_support import verified_namespace
 
 from exomem.governance import projected_graph, projected_retrieval, projection_store, projections
 from exomem.governance.decisions import Decision
@@ -38,6 +39,12 @@ def _item(variant: projections.ProjectionVariant) -> projection_store.Projection
         variant.content_hash,
         (variant,),
     )
+
+
+def _namespace(
+    *items: projection_store.ProjectionItemVariants,
+) -> projection_store.VerifiedProjectionNamespace:
+    return verified_namespace(_key(), items)
 
 
 def _map(
@@ -90,8 +97,7 @@ def test_hidden_intermediary_is_equivalent_to_physical_absence() -> None:
     last = _variant("last", "3" * 64)
     first_item, hidden_item, last_item = _item(first), _item(hidden), _item(last)
     present = projected_graph.ProjectedGraphIndex(
-        _key(),
-        (first_item, hidden_item, last_item),
+        _namespace(first_item, hidden_item, last_item),
         (
             _measurement(first, _edge("first", "hidden")),
             _measurement(hidden, _edge("hidden", "last")),
@@ -101,8 +107,7 @@ def test_hidden_intermediary_is_equivalent_to_physical_absence() -> None:
         model_version="graph-schema-v1",
     ).authorize(_map((first_item, first), (hidden_item, None), (last_item, last)))
     absent = projected_graph.ProjectedGraphIndex(
-        _key(),
-        (first_item, last_item),
+        _namespace(first_item, last_item),
         (_measurement(first), _measurement(last)),
         extractor_version="relations-v1",
         model_version="graph-schema-v1",
@@ -119,8 +124,7 @@ def test_hidden_edges_do_not_change_degree_or_graph_rank() -> None:
     target = _variant("target", "6" * 64)
     first_item, hidden_item, target_item = _item(first), _item(hidden), _item(target)
     graph = projected_graph.ProjectedGraphIndex(
-        _key(),
-        (first_item, hidden_item, target_item),
+        _namespace(first_item, hidden_item, target_item),
         (
             _measurement(first, _edge("first", "target")),
             _measurement(
@@ -145,8 +149,7 @@ def test_edges_to_hidden_targets_are_removed_before_relation_matching() -> None:
     hidden = _variant("hidden", "9" * 64)
     source_item, visible_item, hidden_item = _item(source), _item(visible), _item(hidden)
     graph = projected_graph.ProjectedGraphIndex(
-        _key(),
-        (source_item, visible_item, hidden_item),
+        _namespace(source_item, visible_item, hidden_item),
         (
             _measurement(
                 source,
@@ -173,8 +176,7 @@ def test_missing_selected_graph_measurement_disables_lane_without_raw_fallback()
     source = _variant("source", "a" * 64)
     source_item = _item(source)
     index = projected_graph.ProjectedGraphIndex(
-        _key(),
-        (source_item,),
+        _namespace(source_item),
         (),
         extractor_version="relations-v1",
         model_version="graph-schema-v1",
@@ -190,8 +192,7 @@ def test_lower_projection_edges_and_mismatched_subkeys_are_refused() -> None:
     lower_item, target_item = _item(lower), _item(target)
     with pytest.raises(projections.ProjectionCanonicalizationError, match="below L6"):
         projected_graph.ProjectedGraphIndex(
-            _key(),
-            (lower_item, target_item),
+            _namespace(lower_item, target_item),
             (
                 _measurement(lower, _edge("lower", "target")),
                 _measurement(target),
@@ -201,8 +202,7 @@ def test_lower_projection_edges_and_mismatched_subkeys_are_refused() -> None:
         )
     with pytest.raises(projections.ProjectionCanonicalizationError, match="model"):
         projected_graph.ProjectedGraphIndex(
-            _key(),
-            (target_item,),
+            _namespace(target_item),
             (_measurement(target, model_version="other-graph"),),
             extractor_version="relations-v1",
             model_version="graph-schema-v1",

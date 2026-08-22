@@ -78,6 +78,7 @@ class ProjectionGraphMeasurement:
             raise projections.ProjectionCanonicalizationError(
                 "graph measurement edges must be an immutable tuple"
             )
+        projections.require_supported_capacity(graph_edges=len(self.edges))
         seen: set[ProjectionGraphEdge] = set()
         for edge in self.edges:
             if not isinstance(edge, ProjectionGraphEdge):
@@ -244,14 +245,13 @@ class ProjectedGraphIndex:
 
     def __init__(
         self,
-        namespace_key: projections.ProjectionNamespaceKey,
-        items: tuple[projection_store.ProjectionItemVariants, ...],
+        namespace: projection_store.VerifiedProjectionNamespace,
         measurements: tuple[ProjectionGraphMeasurement, ...],
         *,
         extractor_version: str,
         model_version: str,
     ) -> None:
-        self.catalog = projected_retrieval.ProjectionCatalog(namespace_key, items)
+        self.catalog = projected_retrieval.ProjectionCatalog(namespace)
         self.extractor_version = _text(
             extractor_version,
             "graph extractor version",
@@ -269,11 +269,14 @@ class ProjectedGraphIndex:
         }
         identities = frozenset(self.catalog.items)
         by_variant: dict[str, ProjectionGraphMeasurement] = {}
+        graph_edge_count = 0
         for measurement in measurements:
             if not isinstance(measurement, ProjectionGraphMeasurement):
                 raise projections.ProjectionCanonicalizationError(
                     "projected graph measurement has an invalid type"
                 )
+            graph_edge_count += len(measurement.edges)
+            projections.require_supported_capacity(graph_edges=graph_edge_count)
             key = measurement.measurement_key
             if key.extractor_version != self.extractor_version:
                 raise projections.ProjectionCanonicalizationError(
