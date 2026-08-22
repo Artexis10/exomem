@@ -164,6 +164,30 @@ class ProjectionVectorMeasurement:
         object.__setattr__(self, "vector", vector)
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectionClipMeasurement:
+    """One principal-free CLIP measurement beneath an L6 projection row."""
+
+    measurement_key: projections.MeasurementKey
+    vector: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.measurement_key, projections.MeasurementKey):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP measurement key is invalid"
+            )
+        if self.measurement_key.lane != "clip":
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP measurement key has an invalid lane"
+            )
+        vector = _vector(self.vector, "CLIP projection vector")
+        if math.sqrt(sum(value * value for value in vector)) == 0:
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP projection vector must have non-zero magnitude"
+            )
+        object.__setattr__(self, "vector", vector)
+
+
 def _vector(value: object, name: str) -> tuple[float, ...]:
     if not isinstance(value, tuple) or not 1 <= len(value) <= 4096:
         raise projections.ProjectionCanonicalizationError(
@@ -507,6 +531,129 @@ class ProjectedVectorIndex:
         return tuple(_projected_hit(variant, score) for variant, score in scored[:limit])
 
 
+class ProjectedClipIndex:
+    """Score pixels/keyframes only for request-selected L6 projection rows."""
+
+    def __init__(
+        self,
+        namespace_key: projections.ProjectionNamespaceKey,
+        items: Iterable[projection_store.ProjectionItemVariants],
+        measurements: Iterable[ProjectionClipMeasurement],
+        *,
+        extractor_version: str,
+        model_version: str,
+    ) -> None:
+        self.namespace_key = namespace_key
+        self._items = _catalog_items(namespace_key, items)
+        self.extractor_version = _bounded_text(
+            extractor_version,
+            "CLIP extractor version",
+            maximum=256,
+        )
+        self.model_version = _bounded_text(
+            model_version,
+            "CLIP model version",
+            maximum=256,
+        )
+        l6_variant_ids = {
+            variant.projection_variant_id
+            for item in self._items.values()
+            for variant in item.variants
+            if variant.decision_level == 6
+        }
+        by_variant: dict[str, ProjectionClipMeasurement] = {}
+        dimension: int | None = None
+        for measurement in measurements:
+            if not isinstance(measurement, ProjectionClipMeasurement):
+                raise projections.ProjectionCanonicalizationError(
+                    "projected CLIP measurement has an invalid type"
+                )
+            key = measurement.measurement_key
+            if key.extractor_version != self.extractor_version:
+                raise projections.ProjectionCanonicalizationError(
+                    "CLIP measurement extractor version does not match index"
+                )
+            if key.model_version != self.model_version:
+                raise projections.ProjectionCanonicalizationError(
+                    "CLIP measurement model version does not match index"
+                )
+            if key.projection_variant_id not in l6_variant_ids:
+                raise projections.ProjectionCanonicalizationError(
+                    "CLIP measurement variant is not an L6 catalog projection"
+                )
+            if key.projection_variant_id in by_variant:
+                raise projections.ProjectionCanonicalizationError(
+                    "projected CLIP index contains a duplicate variant measurement"
+                )
+            if dimension is None:
+                dimension = len(measurement.vector)
+            elif len(measurement.vector) != dimension:
+                raise projections.ProjectionCanonicalizationError(
+                    "projected CLIP measurements have inconsistent dimensions"
+                )
+            by_variant[key.projection_variant_id] = measurement
+        self._measurements = MappingProxyType(by_variant)
+        self._dimension = dimension
+
+    def search_clip(
+        self,
+        authorization: AuthorizationProjectionMap,
+        query_vector: tuple[float, ...],
+        *,
+        k: int,
+    ) -> tuple[ProjectedLexicalHit, ...]:
+        """Authorize L6 variants inside the CLIP lane before applying its cap."""
+
+        limit = _result_limit(k)
+        selected = tuple(
+            variant
+            for variant in _selected_variants(
+                self.namespace_key,
+                self._items,
+                authorization,
+            )
+            if variant.decision_level == 6
+        )
+        if not selected:
+            return ()
+        if self._dimension is None:
+            raise ProjectedLaneUnavailable(
+                "selected projection CLIP measurement is unavailable"
+            )
+        query = _vector(query_vector, "CLIP query vector")
+        if len(query) != self._dimension:
+            raise ProjectedLaneUnavailable(
+                "CLIP query dimension does not match projected measurements"
+            )
+        query_magnitude = math.sqrt(sum(value * value for value in query))
+        if query_magnitude == 0:
+            raise ProjectedLaneUnavailable("CLIP query vector has zero magnitude")
+
+        scored: list[tuple[projections.ProjectionVariant, float]] = []
+        for variant in selected:
+            measurement = self._measurements.get(variant.projection_variant_id)
+            if measurement is None:
+                raise ProjectedLaneUnavailable(
+                    "selected projection CLIP measurement is unavailable"
+                )
+            measurement_magnitude = math.sqrt(
+                sum(value * value for value in measurement.vector)
+            )
+            score = sum(
+                left * right
+                for left, right in zip(query, measurement.vector, strict=True)
+            ) / (query_magnitude * measurement_magnitude)
+            scored.append((variant, score))
+        scored.sort(
+            key=lambda item: (
+                -item[1],
+                _sort_key(item[0].item_identity),
+                item[0].projection_variant_id,
+            )
+        )
+        return tuple(_projected_hit(variant, score) for variant, score in scored[:limit])
+
+
 class ProjectedReranker:
     """Rerank complete projected-lane candidates without reopening raw content."""
 
@@ -580,12 +727,14 @@ class ProjectedReranker:
 
 __all__ = [
     "AuthorizationProjectionMap",
+    "ProjectedClipIndex",
     "ProjectedLaneUnavailable",
     "ProjectedLexicalHit",
     "ProjectedLexicalIndex",
     "ProjectedReranker",
     "ProjectedRetrievalUnavailable",
     "ProjectedVectorIndex",
+    "ProjectionClipMeasurement",
     "ProjectionVectorMeasurement",
     "ProjectionSelection",
 ]
