@@ -64,6 +64,18 @@ live replacement.
 - **AND** arbitrary-editor linearizability is not claimed because it requires
   an out-of-scope broker/journal
 
+#### Scenario: Concurrent commands from different product surfaces
+
+- **WHEN** MCP and REST submit write-capable commands against the same vault at the same time
+- **THEN** at most one command executes its mutation section at a time
+- **AND** both commands reach the same existing command leaves after acquiring the shared boundary
+
+#### Scenario: Separate processes target the same vault
+
+- **WHEN** two Exomem processes resolve different path spellings to the same canonical vault and attempt mutations concurrently
+- **THEN** they contend on the same process-safe vault boundary
+- **AND** they cannot both enter their mutation sections
+
 ### Requirement: Mutation Boundary Composes With Receipted Transactional Writes
 
 The boundary SHALL retain existing transactional rollback semantics for each

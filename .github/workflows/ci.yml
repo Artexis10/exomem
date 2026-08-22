@@ -367,8 +367,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Validate specs
-        run: npm exec --yes @fission-ai/openspec -- validate --specs --strict
+      - name: Validate all OpenSpec records
+        run: npm exec --yes @fission-ai/openspec -- validate --all --strict
+      - name: Refuse task-complete active changes
+        run: python scripts/check_openspec_archive_discipline.py
 
   build:
     name: package build

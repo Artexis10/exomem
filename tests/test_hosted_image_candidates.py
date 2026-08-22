@@ -602,7 +602,8 @@ def test_verify_cli_emits_one_exact_runtime_target_after_both_attestations(
         "schemaDigest": "d" * 64,
         "compatibilityDigest": "e" * 64,
     }
-    assert output.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert output.stat().st_mode & 0o777 == 0o600
 
 
 def test_verify_cli_refuses_partial_or_mismatched_runtime_target_evidence(
