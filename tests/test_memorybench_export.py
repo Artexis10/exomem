@@ -2270,6 +2270,57 @@ def test_feedback3_shard_corruption_persists_partial_export_cleanup_and_final_ma
     assert manifest["finalized_at"] is not None
 
 
+def test_failed_indexing_without_a_result_persists_a_valid_partial_export_and_terminal_manifest(
+    tmp_path: Path,
+) -> None:
+    plan = _fresh_plan(tmp_path)
+    materialized = False
+
+    def stage(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal materialized
+        home = Path(kwargs["cwd"])
+        if not materialized:
+            _materialize_native_runtime(home)
+            checkpoint_path = home / "data/runs/run-01/checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            phases = checkpoint["questions"][RAW_QID]["phases"]
+            phases["indexing"] = {
+                "status": "failed",
+                "startedAt": "2026-01-02T00:00:01Z",
+                "completedAt": "2026-01-02T00:00:02Z",
+                "error": "doctor failed",
+            }
+            phases["search"] = {
+                "status": "pending",
+                "startedAt": None,
+                "completedAt": None,
+            }
+            checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+            (home / "data/runs/run-01/results/q-01.json").unlink()
+            materialized = True
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    result = _run(
+        plan,
+        checkout_verifier=lambda **_kwargs: "materialized",
+        provider_checkout_verifier=lambda _identity: None,
+        stage_runner=stage,
+        cleanup_runner=_cleanup(tmp_path / "output"),
+    )
+
+    assert result.status == "INVALID" and result.exit_code == 1
+    public_path = tmp_path / "output/memorybench-export.v1.json"
+    public = json.loads(public_path.read_text())
+    assert public["status"] == "partial"
+    assert "result_missing" in public["failure_codes"]
+    from memorybench.export import validate_export
+
+    validate_export(public, run_plan_path=plan)
+    manifest = json.loads((tmp_path / "output/manifest.json").read_text())
+    assert manifest["status"] == "INVALID"
+    assert manifest["finalized_at"] is not None
+
+
 def test_feedback3_manifest_timestamps_use_the_injected_aware_utc_clock_at_each_write(
     tmp_path: Path,
 ) -> None:

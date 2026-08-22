@@ -1135,6 +1135,13 @@ def _build_export(
             result_ref = None
             private_ref = None
             hits = []
+        if private_ref is None:
+            # MemoryBench source paths are private.  A partial case without the
+            # private mapping must not retain either source reference: the
+            # failure codes and phase projection remain the durable evidence.
+            checkpoint_ref = None
+            result_ref = None
+            hits = []
 
         # The Exomem guest already logs a request/response pair per call, so
         # publishing those facts reads its own evidence rather than adding

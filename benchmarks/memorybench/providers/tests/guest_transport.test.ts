@@ -468,6 +468,27 @@ describe("guest transport", () => {
     expect(environment.EXOMEM_REST_API_KEY).toBe("owned-key")
   })
 
+  test("Exomem doctor preserves a structured nonzero report for fail-closed inspection", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const parse = transport.parseExomemDoctorProcessResult as undefined |
+      ((result: { status: number | null; stdout: string }) => unknown)
+    expect(typeof parse).toBe("function")
+    const report = {
+      success: false,
+      profile: "hybrid",
+      checks: [{ id: "embeddings.sidecar", status: "fail" }],
+    }
+
+    expect(parse!({ status: 1, stdout: JSON.stringify(report) })).toEqual(report)
+    expect(() => parse!({ status: 1, stdout: JSON.stringify({ success: true }) })).toThrow(
+      "Exomem doctor failed"
+    )
+    expect(() => parse!({ status: 1, stdout: "not-json" })).toThrow("Exomem doctor failed")
+    expect(() => parse!({ status: 0, stdout: "not-json" })).toThrow(
+      "Exomem doctor returned non-JSON output"
+    )
+  })
+
   test("Exomem writer-lease state is bound inside the owned service root", async () => {
     const transport = await import("../_guest_transport") as Record<string, unknown>
     const bind = transport.exomemOwnedStateEnvironment as undefined |

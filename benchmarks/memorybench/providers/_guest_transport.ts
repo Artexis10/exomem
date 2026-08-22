@@ -1273,6 +1273,24 @@ export async function ensureExomemService(containerTag: string): Promise<Service
   }
 }
 
+export function parseExomemDoctorProcessResult(
+  result: { status: number | null; stdout: string }
+): unknown {
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(result.stdout)
+  } catch {
+    if (result.status !== 0) throw new Error("Exomem doctor failed")
+    throw new Error("Exomem doctor returned non-JSON output")
+  }
+  if (result.status !== 0) {
+    if (!decoded || typeof decoded !== "object" || (decoded as { success?: unknown }).success !== false) {
+      throw new Error("Exomem doctor failed")
+    }
+  }
+  return decoded
+}
+
 export async function runExomemDoctor(service: ServiceDescriptor): Promise<unknown> {
   if (!service.vault_root) throw new Error("Exomem vault binding missing")
   const exomemHome = requireAbsoluteRoot("EXOMEM_HOME", process.env.EXOMEM_HOME)
@@ -1291,12 +1309,7 @@ export async function runExomemDoctor(service: ServiceDescriptor): Promise<unkno
       timeout: GUEST_TIMEOUTS_MS.search,
     }
   )
-  if (result.status !== 0) throw new Error("Exomem doctor failed")
-  try {
-    return JSON.parse(result.stdout)
-  } catch {
-    throw new Error("Exomem doctor returned non-JSON output")
-  }
+  return parseExomemDoctorProcessResult({ status: result.status, stdout: result.stdout })
 }
 
 async function processIsLive(pid: number): Promise<boolean> {
