@@ -63,6 +63,7 @@ FILE_WRITE_DATA = 0x00000002
 FILE_READ_ATTRIBUTES = 0x00000080
 FILE_WRITE_ATTRIBUTES = 0x00000100
 GENERIC_WRITE = 0x40000000
+READ_CONTROL = 0x00020000
 DELETE = 0x00010000
 SYNCHRONIZE = 0x00100000
 OBJ_CASE_INSENSITIVE = 0x00000040
@@ -692,7 +693,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
             desired = FILE_READ_DATA | FILE_READ_ATTRIBUTES
             descriptor_access = "read"
             if access == "write":
-                desired |= FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES
+                desired |= FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | READ_CONTROL
                 descriptor_access = "write"
             if access == "mutate":
                 desired |= DELETE
