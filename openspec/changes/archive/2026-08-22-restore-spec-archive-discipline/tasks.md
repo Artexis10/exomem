@@ -22,6 +22,6 @@
 
 ## 4. Verification and closure
 
-- [ ] 4.1 Run the focused archive-audit/workflow tests, strict OpenSpec validation, Ruff, `git diff --check`, and the lean project suite with embeddings disabled.
-- [ ] 4.2 Review the complete migration diff independently for requirement/scenario loss and verify the required checks from a clean process.
-- [ ] 4.3 Synchronize and archive `restore-spec-archive-discipline` itself so `openspec-record-discipline` is canonical and no task-complete active change remains.
+- [x] 4.1 Run the focused archive-audit/workflow tests, strict OpenSpec validation, Ruff, `git diff --check`, and the lean project suite with embeddings disabled.
+- [x] 4.2 Review the complete migration diff independently for requirement/scenario loss and verify the required checks from a clean process.
+- [x] 4.3 Synchronize and archive `restore-spec-archive-discipline` itself so `openspec-record-discipline` is canonical and no task-complete active change remains.

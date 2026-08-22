@@ -67,12 +67,54 @@ before archive; the requirement content itself was unchanged.
 
 ## Post-migration canonical inspection
 
-- 82 delivered changes were archived in total, leaving 56 active changes and
-  raising the archive from 39 to 121 records.
+- 82 delivered changes were archived in total, raising the archive from 39 to
+  121 records. On the final `origin/main` base, the pre-closure tree contains
+  57 active changes, including this closure record and records added to main
+  after the original census.
 - The canonical capability set grew from 36 to 101 specs.
 - Every requirement and scenario title present in the `origin/main` canonical
   baseline remains present after migration.
 - No canonical spec contains a duplicate requirement name or a duplicate
   scenario name within the same requirement. Repeated scenario names in separate
   requirements remain intentionally scoped by their parent requirement.
-- `openspec validate --all --strict`: 157 passed, 0 failed.
+- `openspec validate --all --strict`: 158 passed, 0 failed.
+
+## Closure verification
+
+- Final integration base before self-archive: `origin/main` at
+  `b82322bcd179687502fb1b120f6f8a947e5d214f`.
+- `tests/test_openspec_archive_discipline.py`: 9 passed. The parser covers
+  ordinary, nested, and deindented unclosed fenced examples without treating
+  example checkboxes as task state.
+- The archive audit reports 57 active changes and no task-complete active
+  change before this record is archived.
+- The GitHub lean suite on the pre-archive branch completed all 21 substantive
+  CI jobs successfully, including both Python matrices, the native-NTFS held
+  filesystem job, packaging, Docker, product E2E, retrieval quality and
+  latency, graph convergence, OpenSpec, lint, and targeted types (run
+  `32560404851`).
+- Windows diagnosis established two independent mainline portability gaps.
+  The branch guards POSIX-only hosted mode assertions and directory fsync;
+  merged PR #745 supplies protected custody fixtures plus least-privilege DACL
+  inspection. Post-rebase local verification passed 90 authorization-session,
+  mutation-lock, and held-filesystem tests with 12 platform-specific skips.
+- Independent review accounted for all 82 migrated records, found no lost
+  baseline or archived requirement/scenario headings, no duplicate canonical
+  requirement/scenario names, and no privacy leak. All 819 final canonical
+  requirement blocks matched a baseline or archived source block exactly.
+- Repository privacy validation passed across 3,117 files and 3,163 text
+  payloads immediately before self-archive.
+
+## Post self-archive state
+
+- `restore-spec-archive-discipline` is preserved at
+  `openspec/changes/archive/2026-08-22-restore-spec-archive-discipline`, and its
+  six requirements are canonical in `openspec-record-discipline`.
+- Final counts: 56 active changes, 122 archived records, and 102 canonical
+  capability specs. The strict validation total remains 158 passed, 0 failed.
+- The archive-debt audit reports no task-complete active change.
+- Relative to the final `origin/main` base: zero baseline requirement losses,
+  zero baseline scenario losses, zero duplicate requirement names, and zero
+  duplicate scenario names within a requirement.
+- Post-archive repository privacy validation passed across 3,118 files and
+  3,164 text payloads.
