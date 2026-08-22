@@ -432,12 +432,12 @@ made before both PRs and their combined verification are complete.
 - [x] 7.2 Add red provenance fixtures covering forward/reverse citations, sources,
   history, links, relation/supersession, and parent-media fields; prove no raw option or
   direct-read variant restores them below L6.
-- [ ] 7.3 Add red Tier-2 direct-content coverage for dataset rows, media bytes,
+- [x] 7.3 Add red Tier-2 direct-content coverage for dataset rows, media bytes,
   video frames, Records values/reductions, and companion metadata below L6, including
   unresolved non-Markdown membership and every registered internal-state path. Assert each
   structured direct route is byte-identical to missing at L0-L5—no partial row,
   aggregate/profile, record, byte, or pixel projection exists in this change.
-- [ ] 7.4 Add red paired tests proving a valid bound companion may be discovered/read at its
+- [x] 7.4 Add red paired tests proving a valid bound companion may be discovered/read at its
   lower Markdown projection through recall/get while direct dataset/Records/media/frame
   routes stay missing and never silently substitute the companion.
 - [ ] 7.5 Refactor direct get to decide and project one immutable file snapshot before

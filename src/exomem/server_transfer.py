@@ -320,16 +320,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             abs_path, rel = resolve_under_vault(
                 vault_root, path, must_exist=True, must_be_file=True
             )
-            try:
-                snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
-            except reserved_paths.ReservedPathLeafError:
-                raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
-            # Release gate on the download TARGET, after the path resolves and
-            # before any retained bytes are handed to the response (design D1: the
+            # Release gate on the download TARGET after path resolution but before
+            # the response snapshot is opened or its bytes are read (design D1: the
             # transfer routes bypass `invoke_command`, so they carry the gate
-            # explicitly). A download hands over the item's COMPLETE bytes, so
-            # only full disclosure authorizes one — otherwise any ceiling
-            # could be escaped by asking for the artifact instead of the text.
+            # explicitly). A download hands over the item's COMPLETE bytes, so only
+            # full disclosure authorizes one — otherwise any ceiling could be
+            # escaped by asking for the artifact instead of the text.
             #
             # Raised as the route's own NOT_FOUND rather than a new code, so a
             # withheld artifact is byte-identical to one that never existed:
@@ -338,6 +334,10 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 vault_root, rel, principal=download_principal(request, config)
             ):
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
+            try:
+                snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+            except reserved_paths.ReservedPathLeafError:
+                raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
         except VaultPathError as exc:
             status = 404 if exc.code == "NOT_FOUND" else 400
             return JSONResponse({"code": exc.code, "reason": exc.reason}, status_code=status)
