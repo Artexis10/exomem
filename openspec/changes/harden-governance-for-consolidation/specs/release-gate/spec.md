@@ -332,6 +332,13 @@ identity or authorization bearers.
 - **THEN** that projected item may participate in public count and order using only its
   authorized fields, while an L0 item remains counterfactually absent
 
+#### Scenario: Withholding does not change the visible count
+
+- **WHEN** a query would return N permitted items and some candidates are withheld
+  while the over-fetch pool can still fill N
+- **THEN** exactly N items are returned and the count does not reveal that any
+  were withheld
+
 ### Requirement: Terminal secret scrubber at the shared dispatcher
 
 An always-on deterministic secret and authorization-bearer scrubber SHALL run at the
@@ -423,6 +430,13 @@ and malformed issuance SHALL refuse.
 - **AND** any otherwise-authorized `content_hash` and every stale-edit comparison remain
   computed over the complete unmodified raw file bytes
 
+#### Scenario: Every surface is covered
+
+- **WHEN** the same restricted query is issued over MCP, REST, and CLI (including
+  the retrieve-inject hook path)
+- **THEN** all three responses carry field-identical projections with no
+  sub-notice paths or excerpts
+
 ### Requirement: Empty-policy fast path
 
 The release plane MAY short-circuit to OPEN only when a fresh authenticated protected
@@ -467,6 +481,12 @@ OPEN.
   running
 - **THEN** warm and restart requests both receive the BLOCKED floor and no cached OPEN or
   last-good policy is served
+
+#### Scenario: Ungoverned recall is baseline
+
+- **WHEN** a query runs on a vault with no `_Governance/` directory
+- **THEN** results match baseline except that credential-shaped strings are
+  blocked, and the latency gate is unchanged
 
 ### Requirement: Canonical audience resolution, threaded and fail-closed
 
@@ -533,6 +553,11 @@ verified session.
 - **THEN** the whole request receives the common credential refusal before validation,
   cache, idempotency, membership, decision, or content work
 
+#### Scenario: Same principal across surfaces
+
+- **WHEN** the same human queries via MCP and via REST
+- **THEN** a grant authored for that principal applies on both
+
 ### Requirement: Error Payloads Cross The Same Terminal Boundary
 
 The terminal filter at the shared dispatcher is the last thing between a command result
@@ -579,6 +604,25 @@ that applies a disclosure decision.
 - **THEN** the error text is unchanged apart from the always-on secret scrubbing that
   already applies
 
+#### Scenario: an identity collision does not name the colliding pages
+
+- **WHEN** a caller resolves an identifier that matches more than one stored item
+- **THEN** the error carries the ambiguity code and the number of matches
+- **AND** the error carries no vault path, title, or reference of any match
+
+#### Scenario: a raised error is filtered like a returned result
+
+- **WHEN** a governed content-returning command raises an error whose payload names a vault
+  item withheld from the caller
+- **THEN** the reference is removed before the error crosses the dispatcher boundary
+- **AND** the caller cannot distinguish the withheld item from one that does not exist
+
+#### Scenario: an ungoverned vault keeps its error text
+
+- **WHEN** a vault has no governance configured and a command raises
+- **THEN** the error text is unchanged apart from the always-on secret scrubbing that
+  already applies
+
 ### Requirement: Reverse Provenance Is Stripped Below Full Release
 
 Provenance runs in both directions: a compiled item records what it cites, and a cited
@@ -611,6 +655,26 @@ second unprojected representation; at L0, the entire read remains identical to m
   projection
 - **THEN** no raw `content` field or exact provenance is returned and the response is the
   same level projection as if raw had not been requested
+
+#### Scenario: a released source does not enumerate the compiled items that cited it
+
+- **WHEN** a source item is released to an audience below full level and a compiled item
+  withheld from that audience cites it
+- **THEN** the reverse citation field is absent from the released representation
+- **AND** the withheld compiled item's path, title and reference do not appear anywhere in
+  the response
+
+#### Scenario: full release to a permitted audience is unchanged
+
+- **WHEN** the same source item is released at full level to a permitted audience
+- **THEN** the reverse citation field is present and complete
+
+#### Scenario: the guarantee is stated over the projected representation
+
+- **WHEN** a caller requests the raw stored bytes of a page alongside its projection
+- **THEN** the projected representation still omits the reverse citation field
+- **AND** the raw-bytes surface is out of scope for this requirement and is governed
+  separately
 
 ### Requirement: Operational Run State Is Not Released As Knowledge
 
@@ -662,5 +726,25 @@ governed owning command.
 
 - **WHEN** the owner requests the status of a run through the command that owns it
 - **THEN** the full per-item detail is returned without exposing an authorization bearer
+- **AND** the response is subject to the same disclosure decision as any other governed
+  content-returning result
+
+#### Scenario: run state does not appear in recall
+
+- **WHEN** a run has recorded state naming items in the vault and a caller issues a recall
+  query whose terms match that state
+- **THEN** no run-state item is returned
+- **AND** the result counts are the same as for a vault with no run present
+
+#### Scenario: a released run summary carries no per-item detail
+
+- **WHEN** a run records a summary into a released page
+- **THEN** the summary carries counts and the run reference
+- **AND** it carries no source path, target path, or content hash of any individual item
+
+#### Scenario: the owner still reads full run detail through the governed command
+
+- **WHEN** the owner requests the status of a run through the command that owns it
+- **THEN** the full per-item detail is returned
 - **AND** the response is subject to the same disclosure decision as any other governed
   content-returning result
