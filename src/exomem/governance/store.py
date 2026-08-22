@@ -235,6 +235,29 @@ def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connecti
                 ) from exc
 
 
+def authorization_session_schema_version(vault_root: Path) -> int | None:
+    """Return exact v3/v4 for an existing protected store, never creating one."""
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = open_authorization_session_connection(vault_root)
+    except UnsupportedGovernanceSchema:
+        legacy = open_readonly_connection(vault_root)
+        if legacy is None:
+            return None
+        legacy.close()
+        return SCHEMA_USER_VERSION
+    except (FileNotFoundError, OSError, sqlite3.Error):
+        return None
+    else:
+        from . import schema_v4
+
+        return schema_v4.SCHEMA_USER_VERSION
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _open_connection_owned(
     vault_root: Path, *, check_same_thread: bool
 ) -> sqlite3.Connection:
