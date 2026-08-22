@@ -30,7 +30,7 @@ def _build(monkeypatch: pytest.MonkeyPatch):
     return server_module.build_server(require_auth=False)
 
 
-def _call(mcp, name: str, args: dict, *, run_middleware: bool = False) -> dict:
+def _call(mcp, name: str, args: dict, *, run_middleware: bool = True) -> dict:
     result = asyncio.run(mcp.call_tool(name, args, run_middleware=run_middleware))
     sc = getattr(result, "structured_content", None)
     if isinstance(sc, dict):
@@ -107,6 +107,7 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
     assert "not supported relation syntax" in description
 
     assert set(schema["properties"]) == {
+        "authorization_session_credential",
         "path",
         "why",
         "operation",

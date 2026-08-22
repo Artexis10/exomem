@@ -306,7 +306,7 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
     )
     mcp = _build_server(monkeypatch)
     result = asyncio.run(
-        mcp.call_tool("read_media", {"path": VIDEO}, run_middleware=False)
+        mcp.call_tool("read_media", {"path": VIDEO}, run_middleware=True)
     )
     meta = result.structured_content
     assert meta["path"] == VIDEO
@@ -358,7 +358,7 @@ def test_mcp_tool_error_carries_code(video_vault, monkeypatch) -> None:
     with pytest.raises(Exception) as exc:
         asyncio.run(
             mcp.call_tool(
-                "read_media", {"path": "../escape.mp4"}, run_middleware=False
+                "read_media", {"path": "../escape.mp4"}, run_middleware=True
             )
         )
     assert "INVALID_PATH" in str(exc.value)

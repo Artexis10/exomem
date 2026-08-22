@@ -19,6 +19,7 @@ from starlette.testclient import TestClient
 from exomem import command_surface, metrics, server
 from exomem import server as server_module
 from exomem.cli_ops import OpError
+from exomem.governance import principal as principal_module
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +34,14 @@ def _clear_tool_failures():
     command_surface._TOOL_FAILURES.clear()
     yield
     command_surface._TOOL_FAILURES.clear()
+
+
+@pytest.fixture(autouse=True)
+def _bind_trusted_mcp_principal():
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        yield
 
 
 def _bound(monkeypatch, *, read_only: bool = False):

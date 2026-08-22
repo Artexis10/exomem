@@ -402,7 +402,9 @@ def bind_vault(
             len(visible),
         )
         visible.insert(insert_at, response_detail)
-    if command is not None:
+    if command is not None and (
+        surface_descriptor is None or surface_descriptor.surface == "mcp"
+    ):
         authorization_credential = inspect.Parameter(
             "authorization_session_credential",
             kind=inspect.Parameter.KEYWORD_ONLY,
