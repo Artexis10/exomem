@@ -681,7 +681,7 @@ def test_private_gold_preserves_canonical_numeric_ground_truth() -> None:
 
 
 @pytest.mark.parametrize("invalid", [None, True, 1.5, ["answer"]])
-def test_private_gold_rejects_noncanonical_ground_truth_types(invalid: Any) -> None:
+def test_private_gold_rejects_noncanonical_ground_truth_types(invalid: object) -> None:
     payload = _memorybench_payloads()["MemoryBenchPrivateGold"]
     payload["ground_truth"] = invalid
     _rejects_both("MemoryBenchPrivateGold", payload)
