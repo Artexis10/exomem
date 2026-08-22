@@ -302,7 +302,13 @@ def test_attach_refuses_an_unproven_already_attached_response(monkeypatch) -> No
     assert "could not prove" in str(raised.value)
 
 
-def test_load_locks_rejects_cross_platform_contract_drift(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    "field",
+    ("command_surface_sha256", "schema_contract_sha256", "compatibility_sha256"),
+)
+def test_load_locks_rejects_cross_platform_contract_drift(
+    tmp_path: pathlib.Path, field: str
+) -> None:
     module = _load_module()
     generated = tmp_path / "plugins" / "hosted" / "generated"
     generated.mkdir(parents=True)
@@ -315,7 +321,7 @@ def test_load_locks_rejects_cross_platform_contract_drift(tmp_path: pathlib.Path
     }
     openai_lock = {
         **OPENAI_PACKAGE_LOCK,
-        "schema_contract_sha256": "aa" * 32,
+        field: "aa" * 32,
     }
     (generated / "claude.lock.json").write_text(json.dumps(claude_lock))
     (generated / "claude.zip.lock.json").write_text(
@@ -328,7 +334,7 @@ def test_load_locks_rejects_cross_platform_contract_drift(tmp_path: pathlib.Path
     with pytest.raises(SystemExit) as raised:
         module.load_locks(tmp_path)
 
-    assert "schema_contract_sha256" in str(raised.value)
+    assert field in str(raised.value)
 
 
 def test_prepare_attaches_the_openai_locks_before_anything_else(monkeypatch) -> None:
