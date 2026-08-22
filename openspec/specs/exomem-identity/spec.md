@@ -65,4 +65,3 @@ line when legacy names were promoted.
 
 - **WHEN** a legacy variable is set after import and `promote_legacy()` is called again
 - **THEN** the corresponding `EXOMEM_*` variable becomes visible
-

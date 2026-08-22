@@ -172,4 +172,3 @@ pending scene work.
   uniform sampler with no persisted frames
 - **THEN** the first run writes frames and replaces the video's ClipIndex rows with scene-aware
   ones, and the second run makes no changes
-

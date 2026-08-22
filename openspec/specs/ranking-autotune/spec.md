@@ -145,4 +145,3 @@ coordinate descent — so the same inputs always produce the same proposed confi
 - **WHEN** the loop mines pairs, scores candidates, and proposes a config
 - **THEN** no language model is invoked at any stage
 - **AND** re-running over identical logs and vault produces the same proposed config
-
