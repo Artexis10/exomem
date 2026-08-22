@@ -23,10 +23,14 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import functools
 import hashlib
 import json
+import os
 import re
+import sqlite3
 import stat
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -396,6 +400,200 @@ class _AuthoringTreeProbe:
 
 
 EMPTY_POLICY = Policy(fingerprint="missing")
+
+
+def _activation_store_family_probe(vault_root: Path) -> tuple[bool, bool]:
+    """Return ``(present, unsafe_without_v4)`` for the activation-store family."""
+
+    primary = store_module.sidecar_path(vault_root)
+    family = tuple(Path(f"{primary}{suffix}") for suffix in ("", "-wal", "-shm", "-journal"))
+    present = tuple(os.path.lexists(path) for path in family)
+    if not any(present):
+        return False, False
+    if not present[0]:
+        return True, True
+    try:
+        primary_stat = primary.lstat()
+    except OSError:
+        return True, True
+    return True, not stat.S_ISREG(primary_stat.st_mode)
+
+
+def canonical_compiled_bytes(policy: Policy) -> bytes:
+    """Serialize one compiled policy into its immutable authority bytes.
+
+    These bytes are deliberately derived from the already-validated dataclass
+    graph rather than mutable YAML.  The active-generation reader recompiles
+    the generation's stored source byte map and requires this representation
+    to match byte-for-byte before returning the policy as authority.
+    """
+
+    if not isinstance(policy, Policy) or policy.empty or policy.blocked:
+        raise ValueError("only a complete compiled policy has canonical authority bytes")
+    value = {
+        "schema": "exomem.compiled-policy/v1",
+        "fingerprint": policy.fingerprint,
+        "scopes": [
+            dataclasses.asdict(scope)
+            for _scope_id, scope in sorted(policy.scopes.items())
+        ],
+        "rules": [dataclasses.asdict(rule) for rule in policy.rules],
+        "grants": [dataclasses.asdict(grant) for grant in policy.grants],
+        "release_grants": [
+            dataclasses.asdict(grant) for grant in policy.release_grants
+        ],
+        "findings": list(policy.findings),
+    }
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _load_v4_active_policy(vault_root: Path) -> Policy | None:
+    """Return v4 authority, ``None`` for a legacy store, or BLOCKED on fault."""
+
+    from . import authorization_custody, schema_v4
+
+    custody_configured = any(
+        os.environ.get(name)
+        for name in (
+            authorization_custody.KEYRING_FILE_ENV,
+            authorization_custody.CONTROL_FILE_ENV,
+        )
+    )
+    activation_state_present, unsafe_legacy_state = _activation_store_family_probe(
+        vault_root
+    )
+    if not custody_configured and not activation_state_present:
+        return None
+    custody = None
+    if custody_configured:
+        try:
+            custody = authorization_custody.load_authorization_custody(
+                vault_root,
+                now=int(time.time()),
+            )
+        except (
+            authorization_custody.AuthorizationCustodyUnavailable,
+            OSError,
+            RuntimeError,
+            ValueError,
+        ):
+            return _blocked(
+                (
+                    _finding(
+                        "active_governance_unavailable",
+                        ".governance.sqlite",
+                        "the enrolled active governance tuple is unavailable",
+                    ),
+                )
+            )
+        if not custody.control.governance_enrolled:
+            if activation_state_present or os.path.lexists(governance_root(vault_root)):
+                return _blocked(
+                    (
+                        _finding(
+                            "governance_enrollment_mismatch",
+                            ".governance.sqlite",
+                            "unenrolled registry state contradicts local governance state",
+                        ),
+                    )
+                )
+            return EMPTY_POLICY
+
+    try:
+        connection = store_module.open_active_governance_read_connection(vault_root)
+    except store_module.UnsupportedGovernanceSchema:
+        if unsafe_legacy_state or (
+            custody is not None and custody.control.governance_enrolled
+        ):
+            return _blocked(
+                (
+                    _finding(
+                        "active_governance_unavailable",
+                        ".governance.sqlite",
+                        "the enrolled active governance tuple is unavailable",
+                    ),
+                )
+            )
+        return None
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _blocked(
+            (
+                _finding(
+                    "active_governance_unavailable",
+                    ".governance.sqlite",
+                    "the enrolled active governance tuple is unavailable",
+                ),
+            )
+        )
+    try:
+        if custody is None:
+            custody = authorization_custody.load_authorization_custody(
+                vault_root,
+                now=int(time.time()),
+            )
+        control = custody.control
+        if (
+            not control.governance_enrolled
+            or control.activation_store_id is None
+            or control.activation_epoch is None
+            or control.activation_state_digest is None
+        ):
+            raise schema_v4.SchemaV4Error("external enrollment is incomplete")
+        connection.execute("BEGIN")
+        snapshot = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=control.logical_vault_id,
+            expected_activation_store_id=control.activation_store_id,
+            expected_activation_epoch=control.activation_epoch,
+            expected_activation_state_digest=control.activation_state_digest,
+        )
+        connection.commit()
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        schema_v4.SchemaV4Error,
+        sqlite3.Error,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ):
+        if connection.in_transaction:
+            connection.rollback()
+        return _blocked(
+            (
+                _finding(
+                    "active_governance_unavailable",
+                    ".governance.sqlite",
+                    "the enrolled active governance tuple is unavailable",
+                ),
+            )
+        )
+    finally:
+        connection.close()
+
+    # An enrolled workspace remains reviewable pending input.  It must still
+    # be a stable, present, parseable tree, but it never selects live authority.
+    prospective = compile_prospective(vault_root, {})
+    if (
+        prospective is None
+        or prospective.snapshot.governance_root_identity is None
+        or prospective.policy.blocked
+    ):
+        return _blocked(
+            (
+                _finding(
+                    "governance_workspace_unavailable",
+                    GOVERNANCE_DIRNAME,
+                    "the enrolled governance workspace is unavailable or invalid",
+                ),
+            )
+        )
+    return snapshot.policy
 
 
 def _blocked(findings: tuple[dict[str, str], ...]) -> Policy:
@@ -772,6 +970,9 @@ def _guarded_policy(vault_root: Path, code: str, detail: str) -> Policy:
 def load(vault_root: Path) -> Policy:
     """Load policy behind a non-creating seqlock-style authoring guard."""
     vault_root = Path(vault_root)
+    active = _load_v4_active_policy(vault_root)
+    if active is not None:
+        return active
     key = str(governance_root(vault_root))
     for _attempt in range(3):
         before = store_module.guard_generation_probe(vault_root)
@@ -970,14 +1171,13 @@ def _compile_document_bytes(
     return findings, scopes, tuple(rules), tuple(grants), tuple(release_grants)
 
 
-def compile_documents(documents: Mapping[str, bytes]) -> Policy:
-    """Compile only the supplied immutable workspace bytes."""
+@functools.lru_cache(maxsize=64)
+def _compile_pinned_documents(
+    documents: tuple[tuple[str, bytes], ...],
+) -> Policy:
+    """Compile one exact immutable source map with bounded process reuse."""
 
-    pinned: dict[str, bytes] = {}
-    for relative, raw in documents.items():
-        if not isinstance(relative, str) or not isinstance(raw, bytes):
-            raise TypeError("policy documents must map relative string paths to bytes")
-        pinned[relative.replace("\\", "/")] = raw
+    pinned = dict(documents)
     findings, scopes, rules, grants, release_grants = _compile_document_bytes(pinned)
     if any(finding["severity"] == "error" for finding in findings):
         return _blocked(tuple(findings))
@@ -989,6 +1189,17 @@ def compile_documents(documents: Mapping[str, bytes]) -> Policy:
         release_grants=release_grants,
         findings=tuple(findings),
     )
+
+
+def compile_documents(documents: Mapping[str, bytes]) -> Policy:
+    """Compile only the supplied immutable workspace bytes."""
+
+    pinned: dict[str, bytes] = {}
+    for relative, raw in documents.items():
+        if not isinstance(relative, str) or not isinstance(raw, bytes):
+            raise TypeError("policy documents must map relative string paths to bytes")
+        pinned[relative.replace("\\", "/")] = raw
+    return _compile_pinned_documents(tuple(sorted(pinned.items())))
 
 
 def compile_prospective(

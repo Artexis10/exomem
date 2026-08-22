@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem.governance import authorization_custody
+from exomem.governance import authorization_custody, schema_v4
 
 
 @pytest.fixture(autouse=True)
@@ -121,6 +121,87 @@ def _control_document(*, signing_key: bytes = b"k" * 32, **changes: object) -> b
     ).digest()
     document["mac"] = base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
     return json.dumps(document, separators=(",", ":")).encode()
+
+
+def test_activation_registry_acknowledgement_is_exact_atomic_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_800_000_100
+    prior_digest = "1" * 64
+    target_digest = "2" * 64
+    keyring_path, control_path = _configure(
+        monkeypatch,
+        tmp_path / "external" / "custody",
+        keyring=_keyring_document(),
+        control=_control_document(
+            governance_enrolled=True,
+            activation_store_id="activation-store-7",
+            activation_epoch=7,
+            activation_state_digest=prior_digest,
+        ),
+    )
+    vault = tmp_path / "vault"
+    expected = authorization_custody.load_authorization_custody(vault, now=now)
+    target = schema_v4.VerifiedActiveGovernanceState(
+        logical_vault_id=expected.control.logical_vault_id,
+        activation_store_id="activation-store-7",
+        activation_epoch=8,
+        activation_state_digest=target_digest,
+        policy_generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        policy_fingerprint="3" * 64,
+        projector_schema_version=1,
+        catalog_generation=2,
+        projection_namespace_id="namespace-2",
+    )
+    before_keyring = keyring_path.read_bytes()
+
+    first = authorization_custody.acknowledge_activation_tuple(
+        vault,
+        expected_control=expected.control,
+        target=target,
+        now=now,
+    )
+    replay = authorization_custody.acknowledge_activation_tuple(
+        vault,
+        expected_control=expected.control,
+        target=target,
+        now=now,
+    )
+    loaded = authorization_custody.load_authorization_custody(vault, now=now)
+
+    assert first == replay == schema_v4.ActivationRegistryAcknowledgement(
+        activation_store_id="activation-store-7",
+        activation_epoch=8,
+        activation_state_digest=target_digest,
+    )
+    assert loaded.control.activation_epoch == 8
+    assert loaded.control.activation_state_digest == target_digest
+    assert keyring_path.read_bytes() == before_keyring
+    assert control_path.stat().st_nlink == 1
+    if os.name != "nt":
+        assert stat.S_IMODE(control_path.stat().st_mode) == 0o600
+
+    stale = schema_v4.VerifiedActiveGovernanceState(
+        logical_vault_id=target.logical_vault_id,
+        activation_store_id=target.activation_store_id,
+        activation_epoch=8,
+        activation_state_digest="4" * 64,
+        policy_generation_id=target.policy_generation_id,
+        policy_fingerprint=target.policy_fingerprint,
+        projector_schema_version=target.projector_schema_version,
+        catalog_generation=target.catalog_generation,
+        projection_namespace_id=target.projection_namespace_id,
+    )
+    committed = control_path.read_bytes()
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.acknowledge_activation_tuple(
+            vault,
+            expected_control=expected.control,
+            target=stale,
+            now=now,
+        )
+    assert control_path.read_bytes() == committed
 
 
 @pytest.mark.parametrize(
