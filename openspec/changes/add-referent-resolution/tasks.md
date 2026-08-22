@@ -32,6 +32,7 @@
 - [x] 1.28 test_cue_fires_for_every_registry_type_noun: each registry type supplies a working cue noun.
 - [x] 1.29 test_cue_fires_for_supplementary_type_nouns: resolver-local natural nouns cover every non-person type.
 - [x] 1.30 test_attribute_evidence_reads_type_specific_frontmatter: registry-declared optional fields contribute attribute evidence.
+- [x] 1.31 test_attribute_evidence_ignores_url_shaped_frontmatter: URL-shaped frontmatter values never become attribute evidence.
 
 ## 2. Runtime, envelope, and governance
 

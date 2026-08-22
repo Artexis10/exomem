@@ -87,6 +87,8 @@ def test_negative_control_and_ambiguity_cases_abstain(tmp_path: Path) -> None:
         not Path(path).stem.startswith("o-person-")
         for path in cases["O"]["graph_on"]["candidates"]
     )
+    # O abstains because the persons fail the cue type, not because nothing matched.
+    assert cases["O"]["graph_on"]["reasons"]["type_mismatch"] >= 2
     assert cases["N"]["graph_on"]["status"] == "partial"
     assert cases["N"]["graph_on"]["unresolved_count"] == 1
     assert [Path(path).stem for path in cases["N"]["graph_on"]["candidates"]] == ["n-noise"]

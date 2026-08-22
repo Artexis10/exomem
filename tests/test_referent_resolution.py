@@ -242,6 +242,36 @@ def test_attribute_evidence_reads_type_specific_frontmatter(tmp_path) -> None:
     assert evidence["attribute"] == {"matched": ["rust"]}
 
 
+def test_attribute_evidence_ignores_url_shaped_frontmatter(tmp_path) -> None:
+    rel = "Knowledge Base/Entities/Libraries/aster-parse.md"
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        "type: entity\n"
+        "title: Aster Parse\n"
+        "entity_type: library\n"
+        "status: active\n"
+        "language: Rust\n"
+        "repo: https://github.com/synthetic/aster-parse\n"
+        "---\n\n"
+        "# Aster Parse\n\nA synthetic parsing dependency.\n",
+        encoding="utf-8",
+    )
+    registry = importlib.import_module("exomem.entity_registry")
+    registry.clear_entity_registry_cache()
+    entity = registry.load_entity_registry(tmp_path, freshness_key=("url-attribute",))[rel]
+    assert entity.attributes == ("Rust",)
+    out = _resolve(
+        "which github library",
+        entities=(entity,),
+        hits=(_hit(entity.path, type="entity"),),
+    )
+    assert out.resolved == ()
+    assert [item.path for item in out.candidates] == [entity.path]
+    assert {item.kind for item in out.candidates[0].evidence} == {"retrieval"}
+
+
 def test_retrieval_presence_alone_is_candidate_not_resolved() -> None:
     entity = _entity()
     out = _resolve("which person", entities=(entity,), hits=(_hit(entity.path, type="entity"),))

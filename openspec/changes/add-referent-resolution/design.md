@@ -34,7 +34,9 @@ Active entities produce categorical evidence:
   top ten released hits, provided that hit is not superseded;
 - `attribute`: cue descriptors match tags, relationship, affiliation, or any
   type-specific optional frontmatter field declared by the entity registry by
-  stem equality or a four-character-or-longer prefix.
+  stem equality or a four-character-or-longer prefix; URL-shaped values (a
+  repository link, a homepage) are identifiers shared across many pages and
+  never become attribute evidence.
 
 Exact name resolves alone. Otherwise the entity type must match the cue and at
 least two distinct evidence kinds are required. One kind remains a candidate.

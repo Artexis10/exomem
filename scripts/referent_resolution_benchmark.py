@@ -422,6 +422,7 @@ def _arm(vault: Path, case: dict[str, Any], *, graph: bool) -> dict[str, Any]:
         "resolved": resolved_paths,
         "candidates": candidate_paths,
         "unresolved_count": actual_unresolved,
+        "reasons": dict(block.get("reasons") or {}),
         "expected": expected,
         "false_resolution": bool(set(resolved_paths) - set(expected_paths)),
         "referents_stage_ms": stage.get("ms"),

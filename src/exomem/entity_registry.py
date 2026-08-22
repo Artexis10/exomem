@@ -29,13 +29,26 @@ def _strings(value: object) -> tuple[str, ...]:
     return ()
 
 
+def _is_opaque(value: str) -> bool:
+    """URL-shaped values are identifiers, not descriptors.
+
+    A repository URL tokenises to its host (``github``), which every library
+    in a vault shares; treating it as attribute evidence would promote any
+    retrieved library on evidence that distinguishes nothing.
+    """
+    lowered = value.casefold()
+    return "://" in lowered or lowered.startswith("www.")
+
+
 def _attribute_strings(value: object) -> tuple[str, ...]:
     if value is None or isinstance(value, dict):
         return ()
-    if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    rendered = str(value).strip()
-    return (rendered,) if rendered else ()
+    items = value if isinstance(value, list) else [value]
+    return tuple(
+        rendered
+        for rendered in (str(item).strip() for item in items)
+        if rendered and not _is_opaque(rendered)
+    )
 
 
 def _build_registry(vault_root: Path) -> Mapping[str, EntityRecord]:
