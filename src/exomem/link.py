@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import entity_candidates, indexes, memory_refs, semantic_writes, temporal
 from .entity_types import (
+    ENTITY_WRITER_OPTIONAL_FRONTMATTER,
     EntityTypeDefinition,
     load_entity_types,
 )
@@ -411,18 +412,18 @@ def _render_entity(
     lines.append(f"created: {date_iso}")
     lines.append(f"updated: {date_iso}")
 
-    optional_values: dict[str, str | list[str] | None] = {
-        "affiliation": affiliation,
-        "relationship": relationship,
-        "domain": domain,
-        "language": language,
-        "repo": repo,
-        "license": license,
-        "used_in": used_in,
-        "decided": decided,
-        "project": project,
-        "decision_status": decision_status,
-    }
+    optional_values = _entity_writer_optional_values(
+        affiliation=affiliation,
+        relationship=relationship,
+        domain=domain,
+        language=language,
+        repo=repo,
+        license=license,
+        used_in=used_in,
+        decided=decided,
+        project=project,
+        decision_status=decision_status,
+    )
     for field in definition.optional_frontmatter:
         value = optional_values.get(field)
         if not value:
@@ -456,6 +457,41 @@ def _render_entity(
             lines.append(f"- relates_to [[{c}]]")
     lines.append("")
     return "\n".join(lines)
+
+
+def _entity_writer_optional_values(
+    *,
+    affiliation: str | None = None,
+    relationship: str | None = None,
+    domain: str | None = None,
+    language: str | None = None,
+    repo: str | None = None,
+    license: str | None = None,
+    used_in: list[str] | None = None,
+    decided: str | None = None,
+    project: str | None = None,
+    decision_status: str | None = None,
+) -> dict[str, str | list[str] | None]:
+    """Map the entity writer's supported optional values from one field registry."""
+    values: tuple[str | list[str] | None, ...] = (
+        affiliation,
+        relationship,
+        domain,
+        language,
+        repo,
+        license,
+        used_in,
+        decided,
+        project,
+        decision_status,
+    )
+    return dict(
+        zip(
+            ENTITY_WRITER_OPTIONAL_FRONTMATTER,
+            values,
+            strict=True,
+        )
+    )
 
 
 # ---------------- helpers ----------------

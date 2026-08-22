@@ -232,15 +232,94 @@ def test_dismissing_a_fused_item_keeps_the_decision_for_other_reasons(
     refreshed = attention_module.attention(
         tmp_path,
         categories=[S, E],
-        state="all",
+        state="open",
     ).items[0]
 
-    assert refreshed.state == "dismissed"
+    assert refreshed.state == "open"
     assert refreshed.state_detail["action"] == "dismiss"
+    stale_reason = next(
+        reason for reason in refreshed.reasons if reason["category"] == S
+    )
     entity_reason = next(
         reason for reason in refreshed.reasons if reason["category"] == E
     )
+    assert stale_reason["decision"] == "dismiss"
+    assert entity_reason["decision"] is None
     assert entity_reason["state_resolved_only"] is True
+
+
+def test_registering_the_type_lets_the_stored_dismiss_take_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = tmp_path / "Knowledge Base" / "Entities" / "Places" / "Aster Hall.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\ntype: entity\ntitle: Aster Hall\nentity_type: place\n"
+        "status: active\n---\n# Aster Hall\n",
+        encoding="utf-8",
+    )
+    rel_path = page.relative_to(tmp_path).as_posix()
+    original_audit = attention_module.audit_module.audit
+
+    def fused_audit(vault_root, *_args, **_kwargs) -> AuditReport:
+        entity_report = original_audit(vault_root, categories=[E])
+        findings = [_f(S, rel_path), *entity_report.findings]
+        return AuditReport(
+            findings=findings,
+            summary={S: 1, E: len(entity_report.findings)},
+        )
+
+    monkeypatch.setattr(
+        attention_module.audit_module,
+        "audit",
+        fused_audit,
+    )
+    item = attention_module.attention(
+        tmp_path,
+        categories=[S, E],
+        state="open",
+    ).items[0]
+    commands.op_triage_memory(
+        tmp_path,
+        ref=item.ref,
+        action="dismiss",
+        why="Reviewed the stale reason.",
+        expected_fingerprint=item.fingerprint,
+    )
+
+    surviving = attention_module.attention(
+        tmp_path,
+        categories=[S, E],
+        state="open",
+    ).items
+    assert len(surviving) == 1
+    assert surviving[0].state_detail["action"] == "dismiss"
+
+    entity_reason = next(
+        reason for reason in surviving[0].reasons if reason["category"] == E
+    )
+    saved = commands.op_schema_memory(
+        tmp_path,
+        operation="save-entity-types",
+        proposal=entity_reason["meta"]["proposal"],
+        why="Register the synthetic place type.",
+        expected_hash=None,
+    )
+    assert saved["valid"] is True
+
+    assert attention_module.attention(
+        tmp_path,
+        categories=[S, E],
+        state="open",
+    ).items == []
+    dismissed = attention_module.attention(
+        tmp_path,
+        categories=[S, E],
+        state="all",
+    ).items[0]
+    assert dismissed.state == "dismissed"
+    assert dismissed.state_detail["action"] == "dismiss"
 
 
 def test_relation_debt_is_composed_after_other_rank_ties():

@@ -10,6 +10,7 @@ from pathlib import Path
 from exomem import attention as attention_module
 from exomem import audit as audit_module
 from exomem import commands
+from exomem import entity_types as entity_types_module
 from exomem import review_state as review_state_module
 
 
@@ -42,22 +43,18 @@ def _write_entity(
     return path
 
 
-def _save_proposed_entry(vault: Path, entry: dict) -> None:
-    type_id = entry["id"]
-    definition = {
-        key: value
-        for key, value in entry.items()
-        if key not in {"id", "page_count"}
-    }
+def _save_proposal(
+    vault: Path,
+    proposal: dict,
+    *,
+    expected_hash: str | None = None,
+) -> None:
     result = commands.op_schema_memory(
         vault,
         operation="save-entity-types",
-        proposal={
-            "schema_version": 1,
-            "entity_types": {type_id: definition},
-        },
-        why=f"Register the synthetic {type_id} type from attention.",
-        expected_hash=None,
+        proposal=proposal,
+        why="Register the synthetic type offered by attention.",
+        expected_hash=expected_hash,
     )
     assert result["valid"] is True
 
@@ -87,7 +84,6 @@ def test_unregistered_entity_type_is_an_attention_finding_with_proposed_entry(
         "label": "Place",
         "aliases": [],
         "capture_guidance": "A stable place identity with reusable context.",
-        "parent": "concept",
         "page_count": 1,
     }
 
@@ -104,8 +100,8 @@ def test_unregistered_type_finding_resolves_when_the_type_is_registered(
     before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
     assert len(before.findings) == 1
 
-    proposed_entry = before.findings[0].meta["proposed_entry"]
-    _save_proposed_entry(tmp_path, proposed_entry)
+    offer = before.findings[0].meta
+    _save_proposal(tmp_path, offer["proposal"])
     after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
 
     assert after.findings == []
@@ -123,14 +119,119 @@ def test_unregistered_type_under_a_core_folder_proposes_a_non_colliding_entry(
     before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
 
     assert len(before.findings) == 1
-    proposed_entry = before.findings[0].meta["proposed_entry"]
+    offer = before.findings[0].meta
+    proposed_entry = offer["proposed_entry"]
     assert proposed_entry["id"] == "mentor"
     assert proposed_entry["folder"] != "People"
+    assert proposed_entry["parent"] == "person"
 
-    _save_proposed_entry(tmp_path, proposed_entry)
+    _save_proposal(tmp_path, offer["proposal"])
     after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
 
     assert after.findings == []
+
+
+def test_proposed_entry_avoids_folders_owned_by_existing_extensions(
+    tmp_path: Path,
+) -> None:
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                "venue": {
+                    "folder": "Places",
+                    "label": "Venue",
+                    "aliases": [],
+                    "capture_guidance": "A stable synthetic venue identity.",
+                }
+            },
+        },
+    )
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Beryl Hall",
+        entity_type="venue",
+    )
+
+    before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(before.findings) == 1
+    offer = before.findings[0].meta
+    assert offer["proposed_entry"]["folder"] != "Places"
+    assert offer["proposed_entry"]["page_count"] == 1
+    current_hash = entity_types_module.load_entity_types(tmp_path).extension_hash
+    _save_proposal(
+        tmp_path,
+        offer["proposal"],
+        expected_hash=current_hash,
+    )
+
+    registry = entity_types_module.load_entity_types(tmp_path)
+    assert set(registry.extensions) == {"place", "venue"}
+    after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+    assert after.findings == []
+
+
+def test_proposed_entry_is_null_with_reason_when_no_clean_entry_exists(
+    tmp_path: Path,
+) -> None:
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                "venue": {
+                    "folder": "Venues",
+                    "label": "Venue",
+                    "aliases": ["places"],
+                    "capture_guidance": "A stable synthetic venue identity.",
+                }
+            },
+        },
+    )
+    for name in ("Aster", "Beryl", "Cedar"):
+        _write_entity(tmp_path, folder="Places", name=name, entity_type="concept")
+
+    report = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(report.findings) == 1
+    assert report.findings[0].meta["proposed_entry"] is None
+    assert report.findings[0].meta["reason"]
+
+
+def test_proposed_entry_validation_is_memoized_per_type_and_folder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    for name in ("Aster Hall", "Beryl Hall"):
+        _write_entity(
+            tmp_path,
+            folder="Places",
+            name=name,
+            entity_type="place",
+        )
+    calls = 0
+    original = entity_types_module.validate_proposal
+
+    def counted_validate(proposal: dict) -> list[dict[str, str]]:
+        nonlocal calls
+        calls += 1
+        return original(proposal)
+
+    monkeypatch.setattr(entity_types_module, "validate_proposal", counted_validate)
+
+    report = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(report.findings) == 2
+    assert calls == 1
 
 
 def test_unregistered_type_finding_cannot_be_dismissed_to_silence(
@@ -182,7 +283,6 @@ def test_three_pages_under_an_unregistered_folder_trigger_the_finding_two_do_not
         "label": "Venues",
         "aliases": [],
         "capture_guidance": "A stable venues identity with reusable context.",
-        "parent": "concept",
         "page_count": 3,
     }
 

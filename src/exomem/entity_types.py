@@ -21,20 +21,19 @@ EXTENSION_SCHEMA_VERSION = 1
 CORE_REGISTRY_VERSION = 1
 _ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _STATUSES = frozenset({"active", "deprecated"})
-SUPPORTED_OPTIONAL_FRONTMATTER = frozenset(
-    {
-        "affiliation",
-        "relationship",
-        "domain",
-        "language",
-        "repo",
-        "license",
-        "used_in",
-        "decided",
-        "project",
-        "decision_status",
-    }
+ENTITY_WRITER_OPTIONAL_FRONTMATTER = (
+    "affiliation",
+    "relationship",
+    "domain",
+    "language",
+    "repo",
+    "license",
+    "used_in",
+    "decided",
+    "project",
+    "decision_status",
 )
+SUPPORTED_OPTIONAL_FRONTMATTER = frozenset(ENTITY_WRITER_OPTIONAL_FRONTMATTER)
 _RESERVED_PATH_CHARS = frozenset('<>:"/\\|?*')
 _RESERVED_WINDOWS_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}

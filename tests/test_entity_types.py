@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import commands, entity_candidates, entity_types
+from exomem import commands, entity_candidates, entity_types, link
 
 
 def test_core_entity_registry_is_complete_unique_and_immutable() -> None:
@@ -149,6 +149,12 @@ def test_public_entity_type_schema_and_cli_choices_come_from_registry() -> None:
         command = next(command for command in registry if command.name == command_name)
         parameter = next(param for param in command.params if param.name == "entity_type")
         assert parameter.choices == ()
+
+
+def test_supported_optional_frontmatter_matches_the_entity_writer() -> None:
+    writer_fields = set(link._entity_writer_optional_values())
+
+    assert entity_types.SUPPORTED_OPTIONAL_FRONTMATTER == writer_fields
 
 
 def _extension(

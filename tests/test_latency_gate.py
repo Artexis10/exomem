@@ -464,15 +464,33 @@ def test_entity_type_registry_load_is_bounded_at_scale(
     cold_deltas_ms: list[float] = []
     without_registry_ms: list[float] = []
     with_registry_ms: list[float] = []
-    for _ in range(_REPEAT):
-        if registry_path.exists():
-            registry_path.unlink()
-        without_ms = cold_find_ms()
-        registry_path.write_text(registry_text, encoding="utf-8")
-        with_ms = cold_find_ms()
+    measurement_order: list[str] = []
+
+    def measure(*, with_registry: bool) -> float:
+        if with_registry:
+            registry_path.write_text(registry_text, encoding="utf-8")
+            measurement_order.append("with")
+        else:
+            registry_path.unlink(missing_ok=True)
+            measurement_order.append("without")
+        return cold_find_ms()
+
+    for index in range(_REPEAT):
+        if index % 2 == 0:
+            without_ms = measure(with_registry=False)
+            with_ms = measure(with_registry=True)
+        else:
+            with_ms = measure(with_registry=True)
+            without_ms = measure(with_registry=False)
         without_registry_ms.append(without_ms)
         with_registry_ms.append(with_ms)
         cold_deltas_ms.append(with_ms - without_ms)
+    assert measurement_order == [
+        value
+        for _index in range(_REPEAT)
+        for value in (("without", "with") if _index % 2 == 0 else ("with", "without"))
+    ]
+    registry_path.write_text(registry_text, encoding="utf-8")
     cold_delta_ms = statistics.median(cold_deltas_ms)
     assert cold_delta_ms < 50.0, (
         f"50-type registry added {cold_delta_ms:.1f}ms to cold op_find "

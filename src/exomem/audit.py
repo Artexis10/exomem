@@ -1627,39 +1627,105 @@ def _check_unregistered_entity_types(
         if separator and folder:
             entities.append((page, folder))
 
+    def definition_payload(
+        definition: entity_types_module.EntityTypeDefinition,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "folder": definition.folder,
+            "label": definition.label,
+            "aliases": list(definition.aliases),
+            "cue_nouns": list(definition.cue_nouns),
+            "capture_guidance": definition.capture_guidance,
+        }
+        if definition.optional_frontmatter:
+            payload["optional_frontmatter"] = list(definition.optional_frontmatter)
+        if definition.parent is not None:
+            payload["parent"] = definition.parent
+        if definition.status != "active":
+            payload["status"] = definition.status
+        if definition.replaced_by is not None:
+            payload["replaced_by"] = definition.replaced_by
+        return payload
+
+    current_extensions = {
+        type_id: definition_payload(definition)
+        for type_id, definition in registry.extensions.items()
+    }
+    occupied_folders = {
+        definition.folder.casefold()
+        for definition in (*registry.core.values(), *registry.extensions.values())
+    }
+    proposal_cache: dict[
+        tuple[str, str],
+        tuple[dict[str, Any] | None, dict[str, Any] | None, str | None],
+    ] = {}
+
     def proposed_entry(
         type_id: str,
-        folder: str,
+        source_folder: str,
         label: str,
         page_count: int,
-    ) -> tuple[dict[str, Any] | None, str | None]:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+        cache_key = (type_id, source_folder.casefold())
+        cached = proposal_cache.get(cache_key)
+        if cached is not None:
+            cached_entry, cached_proposal, reason = cached
+            cached_result = dict(cached_entry) if cached_entry is not None else None
+            if cached_result is not None:
+                cached_result["page_count"] = page_count
+            return cached_result, cached_proposal, reason
+
         guidance = f"A stable {label.lower()} identity with reusable context."
-        entry = {
-            "id": type_id,
-            "folder": folder,
-            "label": label,
-            "aliases": [],
-            "capture_guidance": guidance,
-            "parent": "concept",
-            "page_count": page_count,
-        }
-        proposal = {
-            "schema_version": 1,
-            "entity_types": {
-                type_id: {
-                    key: value
-                    for key, value in entry.items()
-                    if key not in {"id", "page_count"}
-                }
-            },
-        }
-        validation = entity_types_module.validate_proposal(proposal)
-        if validation:
+        owner = registry.by_folder.get(source_folder.casefold())
+        parent = owner.id if owner is not None and owner.id in registry.core else None
+
+        base = derived_folder(type_id)
+        attempt = 0
+        while attempt <= 1000:
+            if attempt == 0:
+                folder = source_folder
+            elif attempt == 1:
+                folder = base
+            else:
+                folder = f"{base}{attempt}"
+            attempt += 1
+            if folder.casefold() in occupied_folders:
+                continue
+            candidate_entry: dict[str, Any] = {
+                "id": type_id,
+                "folder": folder,
+                "label": label,
+                "aliases": [],
+                "capture_guidance": guidance,
+            }
+            if parent is not None:
+                candidate_entry["parent"] = parent
+            definition = {
+                key: value for key, value in candidate_entry.items() if key != "id"
+            }
+            proposal = {
+                "schema_version": entity_types_module.EXTENSION_SCHEMA_VERSION,
+                "entity_types": {**current_extensions, type_id: definition},
+            }
+            validation = entity_types_module.validate_proposal(proposal)
+            if not validation:
+                proposal_cache[cache_key] = (candidate_entry, proposal, None)
+                result = dict(candidate_entry)
+                result["page_count"] = page_count
+                return result, proposal, None
+            if all(
+                finding["path"].endswith(f".{type_id}.folder")
+                for finding in validation
+            ):
+                continue
             reason = "; ".join(
                 f"{finding['path']}: {finding['detail']}" for finding in validation
             )
-            return None, reason
-        return entry, None
+            proposal_cache[cache_key] = (None, None, reason)
+            return None, None, reason
+        reason = "No collision-free entity folder could be derived."
+        proposal_cache[cache_key] = (None, None, reason)
+        return None, None, reason
 
     def derived_folder(type_id: str) -> str:
         label = type_id.replace("-", " ").title()
@@ -1669,27 +1735,32 @@ def _check_unregistered_entity_types(
 
     folder_pages: dict[str, list[find_module.ParsedPage]] = {}
     folder_spelling: dict[str, str] = {}
+    authored_type_counts: dict[str, int] = {}
     for page, folder in entities:
         key = folder.casefold()
         folder_pages.setdefault(key, []).append(page)
         folder_spelling.setdefault(key, folder)
+        raw_type = page.frontmatter.get("entity_type")
+        if isinstance(raw_type, str):
+            type_id = entity_types_module.normalize_entity_token(raw_type)
+            authored_type_counts[type_id] = authored_type_counts.get(type_id, 0) + 1
 
     findings: list[AuditFinding] = []
     for page, folder in entities:
         raw_type = page.frontmatter.get("entity_type")
         if not isinstance(raw_type, str) or registry.resolve(raw_type) is not None:
             continue
-        count = len(folder_pages[folder.casefold()])
         type_id = entity_types_module.normalize_entity_token(raw_type)
         label = type_id.replace("-", " ").title()
-        candidate_folder = (
-            folder
-            if registry.by_folder.get(folder.casefold()) is None
-            else derived_folder(type_id)
+        entry, proposal, reason = proposed_entry(
+            type_id,
+            folder,
+            label,
+            authored_type_counts[type_id],
         )
-        proposal, reason = proposed_entry(type_id, candidate_folder, label, count)
         meta: dict[str, Any] = {
-            "proposed_entry": proposal,
+            "proposed_entry": entry,
+            "proposal": proposal,
             "signal_version": _page_signal_version(page),
         }
         if reason is not None:
@@ -1727,14 +1798,15 @@ def _check_unregistered_entity_types(
         paths = [page.rel_path for page in members]
         signal = content_hash("\n".join(paths))[:16]
         type_id = entity_types_module.normalize_entity_token(folder)
-        proposal, reason = proposed_entry(
+        entry, proposal, reason = proposed_entry(
             type_id,
             folder,
             folder.title(),
             len(paths),
         )
         meta = {
-            "proposed_entry": proposal,
+            "proposed_entry": entry,
+            "proposal": proposal,
             "signal_version": signal,
         }
         if reason is not None:

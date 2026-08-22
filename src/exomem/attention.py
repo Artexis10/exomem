@@ -584,10 +584,8 @@ def _apply_review_state(
             today=today,
             payload=state_payload,
         )
-        state_resolved_only = item.categories == ["entity_type_unregistered"]
-        if state_resolved_only:
-            effective, decision = "open", None
-        if effective == "open" and not state_resolved_only:
+        state_resolved_only = "entity_type_unregistered" in item.categories
+        if effective == "open":
             # No item-level decision APPLIES (none recorded, or a snooze that has
             # since lapsed), so a competing-alternatives stance recorded on the
             # contradiction pair itself still governs. The item-level record is
@@ -609,9 +607,14 @@ def _apply_review_state(
             if stances and all(stance is not None for stance in stances.values()):
                 effective = "competing"
                 decision = stances[min(stances)]
+        if state_resolved_only:
+            effective = "open"
         for reason in item.reasons:
             if reason.get("category") == "entity_type_unregistered":
                 reason["state_resolved_only"] = True
+                reason["decision"] = None
+            else:
+                reason["decision"] = decision.action if decision is not None else None
         item.item_id = review_id
         item.ref = review_state_module.review_ref(review_id)
         item.target_ref = target_ref
