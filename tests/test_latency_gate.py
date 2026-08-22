@@ -70,7 +70,13 @@ _REPEAT = 3  # passes over the query set → ~9 samples per lane for a stable me
 # CI-speed variance over the warm baseline does not.
 CEIL_GRAPH_MS = 1000.0  # warm ~222ms; a per-query resolver rebuild → ~1.9s trips this
 CEIL_TOTAL_MS = 5000.0  # warm ~805ms; catastrophic-blowup backstop, CI-robust
-CEIL_REFERENTS_MS = 1000.0
+CEIL_REFERENTS_MS = 1000.0  # warm median ~8ms at 2k notes + 500 entities
+# The cold first call pays the one-time Entities/ walk (500 pages ≈ 256ms on the
+# reference box) plus the cold graph-sidecar open: ≈474ms here, 1.3–1.4s on a CI
+# runner. Warm calls never pay it again (registry keyed on the freshness
+# checkpoint), so it gets the same catastrophic-blowup backstop as CEIL_TOTAL_MS
+# rather than the warm ceiling; a per-query walk (~500ms × N) would trip it.
+CEIL_REFERENTS_COLD_MS = 5000.0
 # Relation-filtered recall adds one indexed sidecar lookup (two indexed edge
 # queries + graph_nodes joins) to find(); it must not turn into an O(corpus)
 # walk. This is a generous catastrophic-blowup backstop, not a tight bound —
@@ -348,7 +354,7 @@ def test_referent_stage_stays_bounded_at_scale(
     gen_entity_overlay(vault, 500, seed=19)
     _seed_freshness_live(vault)
     cold_referents_ms, referents_ms, block = _measure_referent_stage(vault)
-    assert cold_referents_ms < CEIL_REFERENTS_MS
+    assert cold_referents_ms < CEIL_REFERENTS_COLD_MS
     assert referents_ms < CEIL_REFERENTS_MS
     assert len(json.dumps(block)) < 16_000
 
