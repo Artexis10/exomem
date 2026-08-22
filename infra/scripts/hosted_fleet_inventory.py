@@ -282,6 +282,7 @@ def _new_cell() -> dict[str, Any]:
         "routable": False,
         "capacityClaim": False,
         "desiredState": False,
+        "desiredReady": True,
         "namespace": False,
         "helmRelease": False,
         "workload": False,
@@ -1276,9 +1277,7 @@ def reconcile_inventory(
         desired_runtime = _deployment_runtime(item["runtime"], label="desired runtime")
         current["desiredState"] = True
         current["runtimeDeployments"].append(desired_runtime)
-        if _code(item["state"], label="desired state") != "ready":
-            current["issues"].add("provisioner_not_ready")
-            issues.add("provisioner_not_ready")
+        current["desiredReady"] = _code(item["state"], label="desired state") == "ready"
 
     seen = set()
     for raw in kubernetes["namespaces"]:
@@ -1413,12 +1412,11 @@ def reconcile_inventory(
         binding_statuses = set(current["bindingStatuses"])
         active_binding = "active" in binding_statuses
         destroyed_binding = "destroyed" in binding_statuses
-        live_other = any(
+        independently_live = any(
             current[field]
             for field in (
                 "routable",
                 "capacityClaim",
-                "desiredState",
                 "namespace",
                 "helmRelease",
                 "workload",
@@ -1427,6 +1425,15 @@ def reconcile_inventory(
                 "reviewerTenant",
             )
         ) or bool(current["assignmentIds"] or current["unfinishedOperationIds"])
+        provisioner_only_terminal_residue = (
+            destroyed_binding and current["desiredState"] and not independently_live
+        )
+        live_other = independently_live or (
+            current["desiredState"] and not provisioner_only_terminal_residue
+        )
+
+        if current["desiredState"] and not current["desiredReady"] and live_other:
+            current["issues"].add("provisioner_not_ready")
 
         if destroyed_binding and live_other:
             current["issues"].add("destroyed_cell_ghost")

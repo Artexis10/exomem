@@ -83,6 +83,13 @@ Before expand deployment or any cell rollforward, the workflow SHALL reconcile S
 - **THEN** the provisioner observer retains the terminal operation history without requiring that dead runtime in the next deployment lock
 - **AND** any runtime that still contributes to desired state or unfinished work remains exactly resolvable or inventory fails closed
 
+#### Scenario: A destroyed binding has only historical provisioner desired-state residue
+
+- **WHEN** Substrate marks a tenant binding destroyed, Kubernetes reports no namespace, Helm release, workload, or volume for that cell, and no route, assignment, unfinished operation, capacity claim, or reviewer authority remains
+- **AND** the provisioner operation ledger is the only authority that still projects desired state for the cell
+- **THEN** inventory retains that redacted desired-state surface as terminal evidence but excludes the cell and its runtime from live and legacy dependency counts
+- **AND** any remaining control-plane, reviewer, operation, capacity, or Kubernetes surface keeps the cell inconsistent and blocks the upgrade
+
 ### Requirement: Expand adoption changes only the future-cell target
 
 Deploying target trust or the expand lock SHALL select the target runtime for future provisioning and admit every authoritative legacy runtime required by the reconciled inventory. Adoption itself MUST NOT enqueue a tenant lifecycle operation or mutate, restart, migrate, replace, delete, relabel, or re-route an existing cell, namespace, workload, persistent volume, canonical vault, derived state, binding, security state, credential, OAuth grant, entitlement, assignment, or lifecycle generation.
