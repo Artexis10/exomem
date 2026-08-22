@@ -235,60 +235,6 @@ def authorization_session_schema_version(vault_root: Path) -> int | None:
             connection.close()
 
 
-def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connection:
-    """Open one existing exact-v4 activation store as a pinned read source.
-
-    The caller starts an explicit SQLite read transaction before sampling the
-    active tuple.  Legacy stores are reported distinctly so the staged rollout
-    can retain the current v3 reader until the external schema fence is active.
-    """
-
-    with reserved_paths._subsystem_authority_scope("governance.store"):
-        with reserved_paths._identity_coordination_scope(
-            vault_root,
-            descriptor_ids=("governance-store",),
-        ):
-            path = sidecar_path(vault_root)
-            try:
-                target = reserved_paths._sqlite_owner_target_scope(
-                    vault_root,
-                    path,
-                    "governance-store",
-                    create=False,
-                )
-                with target as retained_path:
-                    connection = sqlite3.connect(
-                        f"{retained_path.as_uri()}?mode=ro",
-                        uri=True,
-                    )
-                    try:
-                        from . import schema_v4
-
-                        version = int(
-                            connection.execute("PRAGMA user_version").fetchone()[0]
-                        )
-                        if version != schema_v4.SCHEMA_USER_VERSION:
-                            raise UnsupportedGovernanceSchema(
-                                "active governance requires an existing exact-v4 store"
-                            )
-                        connection.execute("PRAGMA query_only=ON")
-                        connection.execute("PRAGMA busy_timeout=50")
-                        reserved_paths._publish_sqlite_owner_family(
-                            vault_root,
-                            path,
-                            "governance-store",
-                            connection,
-                        )
-                        return connection
-                    except BaseException:
-                        connection.close()
-                        raise
-            except FileNotFoundError as exc:
-                raise UnsupportedGovernanceSchema(
-                    "active governance store is absent"
-                ) from exc
-
-
 def _open_connection_owned(
     vault_root: Path, *, check_same_thread: bool
 ) -> sqlite3.Connection:
