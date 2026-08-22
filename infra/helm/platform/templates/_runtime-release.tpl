@@ -14,6 +14,9 @@
 {{- $v2Keys := list "artifact" "schemaVersion" "admissionMode" "components" "runtimeTarget" "composition" "rollback" -}}
 {{- $v3Keys := append $v2Keys "recordsCompatibility" -}}
 {{- $lockKeys := ternary $v3Keys $v2Keys (eq (toJson $lock.schemaVersion) "3") -}}
+{{- if hasKey $lock "runtimeUpgrade" -}}
+{{- $lockKeys = append $lockKeys "runtimeUpgrade" -}}
+{{- end -}}
 {{- if ne (len $lock) (len $lockKeys) -}}
 {{- fail "deployment lock fields are incomplete or unknown" -}}
 {{- end -}}
@@ -52,6 +55,12 @@
 {{- if or (not (regexMatch "^[0-9a-f]{64}$" $target.gatewayContractDigest)) (not (regexMatch "^[0-9a-f]{64}$" $target.commandFingerprint)) (not (regexMatch "^[0-9a-f]{64}$" $target.schemaDigest)) -}}
 {{- fail "deployment lock runtime target digest is invalid" -}}
 {{- end -}}
+{{- if hasKey $lock "runtimeUpgrade" -}}
+{{- $upgrade := $lock.runtimeUpgrade -}}
+{{- if or (not (kindIs "map" $upgrade)) (ne (len $upgrade) 4) (not (hasKey $upgrade "compatibilityDigest")) (not (hasKey $upgrade "migrationMode")) (not (hasKey $upgrade "substrateConsumerCommit")) (not (hasKey $upgrade "substrateTrustSha256")) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.compatibilityDigest)) (not (has $upgrade.migrationMode (list "none" "binding-v1-to-v2"))) (not (regexMatch "^[0-9a-f]{40}$" $upgrade.substrateConsumerCommit)) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.substrateTrustSha256)) -}}
+{{- fail "deployment lock runtime upgrade is invalid" -}}
+{{- end -}}
+{{- end -}}
 {{- $composition := $lock.composition -}}
 {{- $compositionKeys := list "commit" "sourceClosure" "forwardContractSha256" "authoritativeLegacyReleaseSetSha256" "legacyCatalog" "legacyReleaseSetSha256" -}}
 {{- if or (not (kindIs "map" $composition)) (ne (len $composition) (len $compositionKeys)) -}}
@@ -71,6 +80,7 @@
 {{- end -}}
 {{- range $kind, $component := dict "runtime" $runtime "provisioner" $provisioner -}}
 {{- $closure := index $sourceClosure $kind -}}
+{{- $closureAnchor := ternary $component.sourceCommit $composition.commit (eq $kind "runtime") -}}
 {{- $closureKeys := list "candidateCommit" "compositionCommit" "paths" -}}
 {{- if or (not (kindIs "map" $closure)) (ne (len $closure) (len $closureKeys)) -}}
 {{- fail (printf "deployment lock %s source closure is invalid" $kind) -}}
@@ -80,7 +90,7 @@
 {{- fail (printf "deployment lock %s source closure is missing %s" $kind $key) -}}
 {{- end -}}
 {{- end -}}
-{{- if or (not (kindIs "string" $closure.candidateCommit)) (ne $closure.candidateCommit $component.sourceCommit) (not (kindIs "string" $closure.compositionCommit)) (ne $closure.compositionCommit $composition.commit) (not (kindIs "slice" $closure.paths)) (lt (len $closure.paths) 1) -}}
+{{- if or (not (kindIs "string" $closure.candidateCommit)) (ne $closure.candidateCommit $component.sourceCommit) (not (kindIs "string" $closure.compositionCommit)) (ne $closure.compositionCommit $closureAnchor) (not (kindIs "slice" $closure.paths)) (lt (len $closure.paths) 1) -}}
 {{- fail (printf "deployment lock %s source closure is invalid" $kind) -}}
 {{- end -}}
 {{- range $path := $closure.paths -}}
@@ -89,7 +99,7 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- if or (not (kindIs "slice" $composition.legacyCatalog)) (lt (len $composition.legacyCatalog) 1) -}}
+{{- if not (kindIs "slice" $composition.legacyCatalog) -}}
 {{- fail "deployment lock legacy catalog is invalid" -}}
 {{- end -}}
 {{- range $legacy := $composition.legacyCatalog -}}

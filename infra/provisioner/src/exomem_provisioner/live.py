@@ -8,12 +8,13 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .adapters import (
     HelmCliAdapter,
     KubernetesCellAdapter,
     KubernetesMaintenanceLeaseAdapter,
+    KubernetesVaultFingerprintAdapter,
     PrivateCellApiAdapter,
     TraefikRoutingAdapter,
     _api_status,
@@ -549,6 +550,7 @@ class LiveLifecyclePlane:
         capacity: Any,
         identity_verifier: ProviderRecoveryIdentityVerifier,
         config: LifecycleConfig,
+        fingerprint: KubernetesVaultFingerprintAdapter | None = None,
         now: Any = time.time,
     ) -> None:
         self._repository = repository
@@ -561,6 +563,7 @@ class LiveLifecyclePlane:
         self._capacity = capacity
         self._identity_verifier = identity_verifier
         self._config = config
+        self._fingerprint = fingerprint
         self._now = now
         self._owned: dict[str, OpaqueProviderMetadata] = {}
         self._snapshots: dict[str, KubernetesProviderSnapshot] = {}
@@ -780,10 +783,21 @@ class LiveLifecyclePlane:
         owner = self._owner(metadata)
         if self._key(metadata) not in self._helm_requests:
             raise MetadataConflict("original Helm request was not authenticated")
-        values = _fixed_helm_values(owner, request, self._config)
+        values = (
+            self._rollforward_helm_values(metadata, request, self._config)
+            if "compatibilityDigest" in request
+            else _fixed_helm_values(owner, request, self._config)
+        )
         values["workloadMode"] = "serve"
         values["routes"]["enabled"] = True
-        await self._helm.ensure_release(owner, values)
+        if "compatibilityDigest" in request:
+            await self._helm.transition_release(
+                owner,
+                values,
+                operation_id=metadata.operation_id,
+            )
+        else:
+            await self._helm.ensure_release(owner, values)
         await self._refresh(metadata)
 
     async def disable_routes(self, metadata: OpaqueProviderMetadata) -> None:
@@ -830,7 +844,13 @@ class LiveLifecyclePlane:
         request: dict[str, Any],
         operation_id: str,
     ) -> None:
-        target = runtime_identity(request)
+        runtime_request = request
+        if "compatibilityDigest" in request:
+            try:
+                runtime_request = self._helm_requests[self._key(metadata)]
+            except KeyError as error:
+                raise MetadataConflict("original runtime identity is unavailable") from error
+        target = runtime_identity(runtime_request)
         await self._runtime.quiesce(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
@@ -854,6 +874,114 @@ class LiveLifecyclePlane:
             protocol_version=target["protocolVersion"],
             operation_id=operation_id,
         )
+
+    def _rollforward_helm_values(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+    ) -> dict[str, Any]:
+        try:
+            original = self._helm_requests[self._key(metadata)]
+        except KeyError as error:
+            raise MetadataConflict("original Helm request was not authenticated") from error
+        merged = dict(original)
+        merged["workerPolicy"] = dict(request["workerPolicy"])
+        merged["runtimeTarget"] = dict(request["runtimeTarget"])
+        return _fixed_helm_values(self._owner(metadata), merged, config)
+
+    async def canonical_vault_fingerprint(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        operation_id: str,
+        *,
+        phase: Literal["before", "after"],
+    ) -> str:
+        del request
+        if self._fingerprint is None:
+            raise MetadataConflict("vault fingerprint adapter is unavailable")
+        try:
+            envelope = self._recovery_envelopes[self._key(metadata)]["initJob"]
+        except KeyError as error:
+            raise MetadataConflict("vault fingerprint provider authority is absent") from error
+        return await self._fingerprint.fingerprint(
+            metadata,
+            operation_id=operation_id,
+            phase=phase,
+            recovery_envelope=envelope,
+        )
+
+    async def run_runtime_migration(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+        operation_id: str,
+    ) -> None:
+        if config.migration_mode != "binding-v1-to-v2":
+            raise MetadataConflict("runtime migration was not declared by the deployment lock")
+        values = self._rollforward_helm_values(metadata, request, config)
+        values["workloadMode"] = "migrate"
+        values["routes"]["enabled"] = False
+        values["initOperationId"] = operation_id
+        values["initRequestId"] = _deterministic_uuid4(operation_id + ":runtime-migration")
+        await self._helm.transition_release(
+            self._owner(metadata),
+            values,
+            operation_id=operation_id,
+        )
+        await self._refresh(metadata)
+
+    async def upgrade_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+        operation_id: str,
+    ) -> None:
+        values = self._rollforward_helm_values(metadata, request, config)
+        values["workloadMode"] = "serve"
+        values["routes"]["enabled"] = False
+        await self._helm.transition_release(
+            self._owner(metadata),
+            values,
+            operation_id=operation_id,
+        )
+        await self._refresh(metadata)
+
+    async def rollback_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None:
+        await self._helm.rollback_release(
+            self._owner(metadata),
+            operation_id=operation_id,
+        )
+        await self._refresh(metadata)
+
+    async def commit_runtime_upgrade(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None:
+        # The content-free marker is retained in Helm values as durable replay
+        # evidence. A later operation has a distinct digest and captures the
+        # then-current deployed revision as its own rollback point.
+        del metadata, operation_id
+
+    async def rollback_committed_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None:
+        await self._helm.rollback_release(
+            self._owner(metadata),
+            operation_id=operation_id,
+            require_marker=True,
+        )
+        await self._refresh(metadata)
 
     async def _active_version(self, metadata: OpaqueProviderMetadata) -> str:
         _, annotations = await self._cell.read_credential_bundle(self._owner(metadata))

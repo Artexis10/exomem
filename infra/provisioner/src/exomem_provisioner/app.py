@@ -7,14 +7,14 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
-from .config import PROVISIONER_PROTOCOL, ProvisionerSettings
+from .config import ProvisionerSettings
 from .models import OperationState
 from .provider_identity import (
     ProviderRecoveryIdentityCodec,
@@ -33,6 +33,7 @@ from .schemas import (
     FailureCode,
     FailureResponse,
     PendingResponse,
+    RollforwardPreservationResult,
     request_plaintext,
 )
 from .wire_protocol import FINAL_MODELS_BY_PROTOCOL, REQUEST_MODELS_BY_PROTOCOL, runtime_identity
@@ -55,6 +56,12 @@ def _validated_final(
 ) -> Response:
     model = FINAL_MODELS_BY_PROTOCOL[wire_protocol][action]
     if model is None:
+        if action == "rollforward":
+            try:
+                RollforwardPreservationResult.model_validate(result)
+            except ValidationError:
+                return _failure("PROVISIONER_RESPONSE_INVALID", 500)
+            return Response(status_code=204)
         if result:
             return _failure("PROVISIONER_RESPONSE_INVALID", 500)
         return Response(status_code=204)
@@ -125,15 +132,17 @@ def create_app(
     advertised_wire_protocol = (
         lock.components.provisioner.wireProtocol if lock is not None else settings.protocol
     )
-    admission = (
-        AdmissionPolicy(
+    admission = None
+    if lock is not None:
+        selected_runtime = lock.selected_runtime(settings.runtime_selection)
+        forward_target = selected_runtime.runtimeTarget.model_dump(mode="json")
+        if selected_runtime.compatibilityDigest is not None:
+            forward_target["compatibilityDigest"] = selected_runtime.compatibilityDigest
+        admission = AdmissionPolicy(
             mode=lock.admission_mode,
             legacy_catalog=lock.legacy_catalog,
-            forward_target=lock.selected_runtime(settings.runtime_selection).runtimeTarget.model_dump(mode="json"),
+            forward_target=forward_target,
         )
-        if lock is not None
-        else None
-    )
 
     @app.exception_handler(RequestValidationError)
     async def validation_failure(_request: Request, _error: RequestValidationError) -> JSONResponse:
@@ -211,7 +220,10 @@ def create_app(
             wire_protocol = request.state.wire_protocol
             try:
                 raw = json.loads((await request.body()).decode("utf-8"))
-                model = REQUEST_MODELS_BY_PROTOCOL[wire_protocol][action].model_validate(raw)
+                request_model = REQUEST_MODELS_BY_PROTOCOL[wire_protocol].get(action)
+                if request_model is None:
+                    return _failure("PROVISIONER_REJECTED", 422)
+                model = request_model.model_validate(raw)
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError):
                 return _failure("PROVISIONER_REJECTED", 422)
             try:
@@ -224,7 +236,7 @@ def create_app(
                         tenant_id=str(request_data["tenantId"]),
                         cell_id=cell_id,
                         operation_id=operation_id,
-                        fence_generation=int(request_data["fenceGeneration"]),
+                        fence_generation=cast(int, request_data["fenceGeneration"]),
                         resource_name=cell_resource_name(cell_id),
                         operation_resource_name=provider_operation_resource_name(operation_id),
                     )
@@ -270,7 +282,14 @@ def create_app(
         endpoint.__name__ = f"post_{action.replace('-', '_')}"
         return endpoint
 
-    for action in REQUEST_MODELS_BY_PROTOCOL[PROVISIONER_PROTOCOL]:
+    actions = sorted(
+        {
+            action
+            for request_models in REQUEST_MODELS_BY_PROTOCOL.values()
+            for action in request_models
+        }
+    )
+    for action in actions:
         app.add_api_route(
             f"/cells/{action}",
             endpoint_for(action),

@@ -58,8 +58,12 @@ _MAX_OCI_CONFIG_BYTES = 1_024
 _MAX_OCI_ATTACHMENT_BYTES = 128 * 1024 + 16 * 1024 * 1024 + _MAX_OCI_CONFIG_BYTES
 _MAX_DISCOVERED_OCI_BYTES = 64 * 1024 * 1024
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_CANONICAL_DEPLOYMENT_LOCK_PAIR = _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
-_CANONICAL_DEPLOYMENT_LOCK_EVIDENCE = _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
+_CANONICAL_DEPLOYMENT_LOCK_PAIR = (
+    _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json"
+)
+_CANONICAL_DEPLOYMENT_LOCK_EVIDENCE = (
+    _REPOSITORY_ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2"
+)
 _FROZEN_V1_CORPUS = _REPOSITORY_ROOT / "infra/provisioner/tests/fixtures/provisioner-wire-v1.json"
 _FROZEN_V1_CORPUS_SHA256 = "ced714a5aa204a837e22cab831262cc0ae4766e44720b2896e61b8c157ddd3b5"
 _SUBSTRATE_FIXTURE_SHA256 = "ba3c211377616ba87877947ba7392ffa66e9769a9f631027a141ce5cccc40054"
@@ -833,9 +837,11 @@ def _validate_frozen_v1_corpus(raw: bytes) -> None:
             if request_plaintext(model) != request:
                 raise ValueError("rollback v1 corpus request shape is invalid")
             pending = sample["pending"]
-            if not isinstance(pending, dict) or pending.get("status") != 202 or pending.get("headers") != {
-                "retry-after": "2"
-            }:
+            if (
+                not isinstance(pending, dict)
+                or pending.get("status") != 202
+                or pending.get("headers") != {"retry-after": "2"}
+            ):
                 raise ValueError("rollback v1 corpus pending shape is invalid")
             PendingResponse.model_validate(pending["body"])
             final = sample["final"]
@@ -851,7 +857,13 @@ def _validate_frozen_v1_corpus(raw: bytes) -> None:
         if not isinstance(failures, list) or not failures:
             raise ValueError("rollback v1 corpus failures are invalid")
         for failure in failures:
-            if not isinstance(failure, dict) or failure.get("status") not in {400, 409, 422, 500, 503}:
+            if not isinstance(failure, dict) or failure.get("status") not in {
+                400,
+                409,
+                422,
+                500,
+                503,
+            }:
                 raise ValueError("rollback v1 corpus failure status is invalid")
             body = failure.get("body")
             FailureResponse.model_validate(body)
@@ -868,10 +880,17 @@ def _verify_lock_evidence(lock: dict[str, Any], directory: Path, composer: Any) 
     composition = lock["composition"]
     components = lock["components"]
     forward_path, forward = _evidence_file(
-        directory, composition["forwardContractSha256"], label="forward runtime contract", composer=composer
+        directory,
+        composition["forwardContractSha256"],
+        label="forward runtime contract",
+        composer=composer,
     )
     target, image, source = composer._contract(forward, label="forward runtime contract")
-    if target != lock["runtimeTarget"] or image != components["runtime"]["image"] or source != components["runtime"]["sourceCommit"]:
+    if (
+        target != lock["runtimeTarget"]
+        or image != components["runtime"]["image"]
+        or source != components["runtime"]["sourceCommit"]
+    ):
         raise ValueError("forward runtime contract differs from the selected deployment lock")
 
     authority_path, authority = _evidence_file(
@@ -895,7 +914,10 @@ def _verify_lock_evidence(lock: dict[str, Any], directory: Path, composer: Any) 
         authority,
         tuple(contracts),
     )
-    if reconstructed != composition["legacyCatalog"] or release_set_sha != composition["legacyReleaseSetSha256"]:
+    if (
+        reconstructed != composition["legacyCatalog"]
+        or release_set_sha != composition["legacyReleaseSetSha256"]
+    ):
         raise ValueError("reviewed legacy catalog differs from the selected deployment lock")
 
     legacy_manifest_path, legacy_manifest = _evidence_file(
@@ -916,17 +938,39 @@ def _verify_lock_evidence(lock: dict[str, Any], directory: Path, composer: Any) 
         require_canonical_json=False,
     )
     _validate_frozen_v1_corpus(corpus_raw)
-    _ = forward_path, authority_path, legacy_manifest_path
+    runtime_upgrade = lock.get("runtimeUpgrade")
+    if runtime_upgrade is not None:
+        trust_path, trust = _evidence_file(
+            directory,
+            runtime_upgrade["substrateTrustSha256"],
+            label="Substrate runtime trust",
+            composer=composer,
+        )
+        composer._substrate_trust(
+            trust,
+            upgrade=runtime_upgrade,
+            runtime_target=lock["runtimeTarget"],
+            runtime_image=components["runtime"]["image"],
+            runtime_source=components["runtime"]["sourceCommit"],
+            runtime_candidate_sha256=components["runtime"]["candidateSha256"],
+        )
+    else:
+        trust_path = None
+    _ = forward_path, authority_path, legacy_manifest_path, trust_path
 
 
-def _candidate_matches_lock(candidate: dict[str, Any], component: dict[str, Any], *, kind: str, release: str | None) -> None:
+def _candidate_matches_lock(
+    candidate: dict[str, Any], component: dict[str, Any], *, kind: str, release: str | None
+) -> None:
     if candidate.get("kind") != kind:
         raise ValueError("discovered candidate kind differs from the deployment lock")
     image = candidate.get("image")
     source = candidate.get("source")
     if not isinstance(image, dict) or not isinstance(source, dict):
         raise ValueError("discovered candidate identity is invalid")
-    if image.get("reference") != component.get("image") or source.get("commit") != component.get("sourceCommit"):
+    if image.get("reference") != component.get("image") or source.get("commit") != component.get(
+        "sourceCommit"
+    ):
         raise ValueError("discovered candidate identity differs from the deployment lock")
     if release is not None:
         candidate_release = candidate.get("release")
@@ -1095,7 +1139,10 @@ def _oci_descriptor(
         raise ValueError(f"{label} descriptor exceeds its size contract")
     if annotations is not None and (
         not isinstance(annotations, dict)
-        or any(not isinstance(key, str) or not isinstance(item, str) for key, item in annotations.items())
+        or any(
+            not isinstance(key, str) or not isinstance(item, str)
+            for key, item in annotations.items()
+        )
     ):
         raise ValueError(f"{label} descriptor annotations are invalid")
     if inline is not None:
@@ -1165,7 +1212,11 @@ def _validate_oci_candidate_manifest(manifest: object, *, subject_image: str | N
         (_CANDIDATE_MEDIA_TYPE, 128 * 1024),
         (_CANDIDATE_BUNDLE_MEDIA_TYPE, 16 * 1024 * 1024),
     ):
-        descriptors = [layer for layer in layers if isinstance(layer, dict) and layer.get("mediaType") == expected_type]
+        descriptors = [
+            layer
+            for layer in layers
+            if isinstance(layer, dict) and layer.get("mediaType") == expected_type
+        ]
         if len(descriptors) != 1:
             raise ValueError("provisioner candidate OCI layer media types are invalid")
         digest, size = _oci_descriptor(
@@ -1191,7 +1242,9 @@ def _oci_referrer_descriptors(discovered: object) -> list[dict[str, Any]]:
         if manifests is None:
             manifests = discovered.get("manifests")
     if not isinstance(manifests, list) or not 1 <= len(manifests) <= _MAX_PROVISIONER_REFERRERS:
-        raise ValueError("provisioner candidate attachment discovery count exceeds its size contract")
+        raise ValueError(
+            "provisioner candidate attachment discovery count exceeds its size contract"
+        )
     descriptors: list[dict[str, Any]] = []
     seen: set[str] = set()
     for manifest in manifests:
@@ -1290,7 +1343,9 @@ def _verified_provisioner_candidate(
         _candidate_matches_lock(candidate, component, kind="provisioner", release=None)
         matches.append(path)
     if len(matches) != 1:
-        raise ValueError("provisioner candidate discovery did not yield exactly one locked candidate")
+        raise ValueError(
+            "provisioner candidate discovery did not yield exactly one locked candidate"
+        )
     candidate = matches[0]
     candidate_tool.verify_candidate(
         candidate,
@@ -1354,7 +1409,8 @@ def verify_v3_rollback_runtime_candidate(
         or source != rollback.get("sourceCommit")
         or not isinstance(expected_claim, dict)
         or not isinstance(expected_target, dict)
-        or claim != {
+        or claim
+        != {
             "profile": compatibility.get("rollbackProfile"),
             "recordsReaderVersion": 2,
             "lifecycleActionsEnabled": False,
@@ -1396,16 +1452,30 @@ def verify_selected_deployment_lock(
     if any(path is not None for path in rollback_runtime_artifacts) and any(
         path is None for path in rollback_runtime_artifacts
     ):
-        raise ValueError("rollback runtime candidate and both Sigstore bundles are required together")
+        raise ValueError(
+            "rollback runtime candidate and both Sigstore bundles are required together"
+        )
     is_v3 = selected.get("schemaVersion") == 3
     if not is_v3 and any(path is not None for path in rollback_runtime_artifacts):
-        raise ValueError("rollback runtime candidate evidence is valid only for v3 deployment locks")
+        raise ValueError(
+            "rollback runtime candidate evidence is valid only for v3 deployment locks"
+        )
     _verify_lock_evidence(selected, lock_evidence_directory, composer)
     components = selected["components"]
     target = selected["runtimeTarget"]
     closure = selected["composition"]["sourceClosure"]
-    composer.verify_source_closure(repository, components["runtime"]["sourceCommit"], selected["composition"]["commit"], tuple(closure["runtime"]["paths"]))
-    composer.verify_source_closure(repository, components["provisioner"]["sourceCommit"], selected["composition"]["commit"], tuple(closure["provisioner"]["paths"]))
+    composer.verify_source_closure(
+        repository,
+        components["runtime"]["sourceCommit"],
+        closure["runtime"]["compositionCommit"],
+        tuple(closure["runtime"]["paths"]),
+    )
+    composer.verify_source_closure(
+        repository,
+        components["provisioner"]["sourceCommit"],
+        closure["provisioner"]["compositionCommit"],
+        tuple(closure["provisioner"]["paths"]),
+    )
     with tempfile.TemporaryDirectory(prefix="exomem-lock-proof-") as directory:
         root = Path(directory)
         runtime_dir = root / "runtime"
@@ -1419,7 +1489,12 @@ def verify_selected_deployment_lock(
                 gh_binary=gh_binary,
             )
         )
-        _candidate_matches_lock(candidate_tool.load_candidate(runtime_candidate), components["runtime"], kind="runtime", release=target["releaseVersion"])
+        _candidate_matches_lock(
+            candidate_tool.load_candidate(runtime_candidate),
+            components["runtime"],
+            kind="runtime",
+            release=target["releaseVersion"],
+        )
         candidate_tool.verify_candidate(
             runtime_candidate,
             bundle=runtime_image_bundle,
@@ -1555,15 +1630,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.rollback_runtime_image_bundle is not None:
             selected_arguments["rollback_runtime_image_bundle"] = args.rollback_runtime_image_bundle
         if args.rollback_runtime_candidate_bundle is not None:
-            selected_arguments["rollback_runtime_candidate_bundle"] = args.rollback_runtime_candidate_bundle
+            selected_arguments["rollback_runtime_candidate_bundle"] = (
+                args.rollback_runtime_candidate_bundle
+            )
         verify_selected_deployment_lock(
             **selected_arguments,
         )
         print("hosted deployment lock verified")
         return 0
-    if any(value is None for value in (args.manifest, args.runtime_gate, args.substrate_selection)) or not (
-        args.substrate_fixture or args.fetch_substrate_fixture
-    ):
+    if any(
+        value is None for value in (args.manifest, args.runtime_gate, args.substrate_selection)
+    ) or not (args.substrate_fixture or args.fetch_substrate_fixture):
         parser.error("v1 release proof requires manifest, gate, selection, and one fixture source")
 
     release = _load(args.manifest)

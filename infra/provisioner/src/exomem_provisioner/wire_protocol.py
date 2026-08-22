@@ -37,7 +37,7 @@ def runtime_identity(request: Mapping[str, Any]) -> dict[str, str]:
 
     target = request.get("runtimeTarget")
     if target is not None:
-        return RuntimeTarget.model_validate(target).model_dump(mode="json")
+        return RuntimeTarget.model_validate(target).model_dump(mode="json", exclude_none=True)
     return {
         "releaseVersion": str(request["releaseVersion"]),
         "protocolVersion": str(request["protocolVersion"]),

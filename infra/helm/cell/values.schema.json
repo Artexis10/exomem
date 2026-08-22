@@ -7,7 +7,7 @@
     "resourceName": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
     "cellId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
     "vaultId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
-    "workloadMode": {"type": "string", "enum": ["initialize", "restore", "serve"]},
+    "workloadMode": {"type": "string", "enum": ["initialize", "migrate", "restore", "serve"]},
     "provisionMode": {"type": "string", "enum": ["serve", "restore-candidate"]},
     "image": {"type": "string", "pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"},
     "expectedRelease": {"type": "string", "minLength": 1, "maxLength": 64},
@@ -79,6 +79,16 @@
       "properties": {
         "enabled": {"type": "boolean"},
         "controlHostname": {"type": "string"}
+      }
+    },
+    "runtimeUpgrade": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "operationDigest", "priorRevision"],
+      "properties": {
+        "schemaVersion": {"type": "integer", "const": 1},
+        "operationDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "priorRevision": {"type": "integer", "minimum": 1}
       }
     }
   }

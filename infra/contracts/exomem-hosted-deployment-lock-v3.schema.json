@@ -51,7 +51,7 @@
       "properties": {
         "artifact": {"const": "exomem-hosted-deployment-lock"}, "schemaVersion": {"const": 3}, "admissionMode": {"enum": ["expand", "contract"]},
         "components": {"type": "object", "additionalProperties": false, "required": ["runtime", "provisioner"], "properties": {"runtime": {"$ref": "#/$defs/runtime"}, "provisioner": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/provisionerComponent"}}},
-        "runtimeTarget": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/runtimeTarget"}, "composition": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/composition"}, "rollback": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/rollback"}, "recordsCompatibility": {"$ref": "#/$defs/recordsCompatibility"}
+        "runtimeTarget": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/runtimeTarget"}, "runtimeUpgrade": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/runtimeUpgrade"}, "composition": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/composition"}, "rollback": {"$ref": "exomem-hosted-deployment-lock-v2.schema.json#/$defs/rollback"}, "recordsCompatibility": {"$ref": "#/$defs/recordsCompatibility"}
       }
     }
   }

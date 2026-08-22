@@ -22,29 +22,35 @@ def _load_verifier():
 def test_provisioner_distribution_exposes_three_database_commands() -> None:
     project = tomllib.loads((PROVISIONER / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["scripts"] | {
-        "exomem-provisioner-database-bootstrap": (
-            "exomem_provisioner.database_bootstrap:run_bootstrap"
-        ),
-        "exomem-provisioner-database-migrate": (
-            "exomem_provisioner.database_bootstrap:run_migrate"
-        ),
-        "exomem-provisioner-database-validate": (
-            "exomem_provisioner.database_bootstrap:run_validate"
-        ),
-    } == project["project"]["scripts"]
+    assert (
+        project["project"]["scripts"]
+        | {
+            "exomem-provisioner-database-bootstrap": (
+                "exomem_provisioner.database_bootstrap:run_bootstrap"
+            ),
+            "exomem-provisioner-database-migrate": (
+                "exomem_provisioner.database_bootstrap:run_migrate"
+            ),
+            "exomem-provisioner-database-validate": (
+                "exomem_provisioner.database_bootstrap:run_validate"
+            ),
+        }
+        == project["project"]["scripts"]
+    )
     assert (
         project["project"]["scripts"]["exomem-provisioner-recover-init-retry"]
         == "exomem_provisioner.operation_recovery:main"
+    )
+    assert (
+        project["project"]["scripts"]["exomem-provisioner-vault-fingerprint"]
+        == "exomem_provisioner.vault_fingerprint:main"
     )
 
 
 def test_provisioner_image_packages_migrations_at_fixed_read_only_path() -> None:
     dockerfile = (PROVISIONER / "Dockerfile").read_text(encoding="utf-8")
 
-    assert (
-        f"COPY infra/provisioner/alembic.ini {MIGRATION_ROOT}/alembic.ini" in dockerfile
-    )
+    assert f"COPY infra/provisioner/alembic.ini {MIGRATION_ROOT}/alembic.ini" in dockerfile
     assert f"COPY infra/provisioner/alembic {MIGRATION_ROOT}/alembic" in dockerfile
     assert f"chown -R 0:0 {MIGRATION_ROOT}" in dockerfile
     assert f"chmod -R a-w {MIGRATION_ROOT}" in dockerfile
@@ -89,9 +95,9 @@ def test_image_verifier_requires_packaged_migrations_and_database_commands() -> 
     assert "sha256" in module._PROBE
     assert "expected_files" in module._PROBE
     assert module._EXPECTED_MIGRATION_FILES == {
-        str(path.relative_to(PROVISIONER)): __import__("hashlib").sha256(
-            path.read_bytes()
-        ).hexdigest()
+        str(path.relative_to(PROVISIONER)): __import__("hashlib")
+        .sha256(path.read_bytes())
+        .hexdigest()
         for path in [
             PROVISIONER / "alembic.ini",
             *sorted((PROVISIONER / "alembic").rglob("*")),
@@ -102,9 +108,7 @@ def test_image_verifier_requires_packaged_migrations_and_database_commands() -> 
 
 
 def test_provisioner_workflow_is_an_independent_digest_bound_candidate_producer() -> None:
-    text = (ROOT / ".github/workflows/publish-hosted-provisioner.yml").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / ".github/workflows/publish-hosted-provisioner.yml").read_text(encoding="utf-8")
     proof_step = text.split(
         "\n      - name: Verify the provisioner image and signed candidate\n", 1
     )[1].split("\n      - name:", 1)[0]
@@ -125,9 +129,8 @@ def test_provisioner_workflow_is_an_independent_digest_bound_candidate_producer(
     assert "--attestation-url" not in text
     assert '--source-repository "$GITHUB_REPOSITORY"' in text
     assert (
-        '--producer-workflow '
-        '"$GITHUB_REPOSITORY/.github/workflows/publish-hosted-provisioner.yml"'
-        in text
+        "--producer-workflow "
+        '"$GITHUB_REPOSITORY/.github/workflows/publish-hosted-provisioner.yml"' in text
     )
     assert "--storage-kind oci-referrer" in text
     assert "--bundle-from-oci" in text
@@ -142,9 +145,7 @@ def test_provisioner_workflow_is_an_independent_digest_bound_candidate_producer(
 
 
 def test_provisioner_workflow_has_only_owned_image_inputs() -> None:
-    text = (ROOT / ".github/workflows/publish-hosted-provisioner.yml").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / ".github/workflows/publish-hosted-provisioner.yml").read_text(encoding="utf-8")
 
     assert '"infra/provisioner/**"' in text
     assert '"infra/helm/cell/**"' in text
@@ -159,15 +160,14 @@ def test_provisioner_workflow_has_only_owned_image_inputs() -> None:
 
 def test_oras_used_for_candidate_attachment_is_version_and_hash_pinned() -> None:
     versions = (ROOT / "infra/tool-versions.env").read_text(encoding="utf-8")
-    workflow = (
-        ROOT / ".github/workflows/publish-hosted-provisioner.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (ROOT / ".github/workflows/publish-hosted-provisioner.yml").read_text(
+        encoding="utf-8"
+    )
 
     assert "ORAS_VERSION=1.3.3" in versions
     assert (
         "ORAS_LINUX_AMD64_SHA256="
-        "9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59"
-        in versions
+        "9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59" in versions
     )
     assert "source infra/tool-versions.env" in workflow
     assert "oras_${ORAS_VERSION}_linux_amd64.tar.gz" in workflow

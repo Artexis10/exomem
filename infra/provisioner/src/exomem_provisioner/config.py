@@ -121,7 +121,9 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
 
 def _canonical_json_sha256(value: object) -> str:
     return hashlib.sha256(
-        (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        (
+            json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+        ).encode("utf-8")
     ).hexdigest()
 
 
@@ -227,7 +229,7 @@ class DeploymentComposition(BaseModel):
     sourceClosure: DeploymentSourceClosures
     forwardContractSha256: str = Field(pattern=_SHA256)
     authoritativeLegacyReleaseSetSha256: str = Field(pattern=_SHA256)
-    legacyCatalog: tuple[DeploymentLegacyUnit, ...] = Field(min_length=1, strict=False)
+    legacyCatalog: tuple[DeploymentLegacyUnit, ...] = Field(strict=False)
     legacyReleaseSetSha256: str = Field(pattern=_SHA256)
 
     @model_validator(mode="after")
@@ -297,6 +299,17 @@ class SelectedDeploymentRuntime(BaseModel):
     runtimeTarget: DeploymentRuntimeTarget
     recordsReaderVersion: Literal[2] | None = None
     lifecycleActionsEnabled: bool = False
+    compatibilityDigest: str | None = Field(default=None, pattern=_SHA256)
+    migrationMode: Literal["none", "binding-v1-to-v2"] = "none"
+
+
+class DeploymentRuntimeUpgrade(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    compatibilityDigest: str = Field(pattern=_SHA256)
+    migrationMode: Literal["none", "binding-v1-to-v2"]
+    substrateConsumerCommit: str = Field(pattern=_COMMIT)
+    substrateTrustSha256: str = Field(pattern=_SHA256)
 
 
 class DeploymentLock(BaseModel):
@@ -309,6 +322,7 @@ class DeploymentLock(BaseModel):
     admissionMode: Literal["expand", "contract"]
     components: DeploymentComponents
     runtimeTarget: DeploymentRuntimeTarget
+    runtimeUpgrade: DeploymentRuntimeUpgrade | None = None
     composition: DeploymentComposition
     rollback: DeploymentRollback
     recordsCompatibility: DeploymentRecordsCompatibility | None = None
@@ -338,7 +352,9 @@ class DeploymentLock(BaseModel):
     def runtime_target(self) -> DeploymentRuntimeTarget:
         return self.runtimeTarget
 
-    def selected_runtime(self, selection: Literal["active", "rollback"] | None) -> SelectedDeploymentRuntime:
+    def selected_runtime(
+        self, selection: Literal["active", "rollback"] | None
+    ) -> SelectedDeploymentRuntime:
         if self.schemaVersion == 2:
             if selection == "rollback":
                 raise ValueError("deployment lock v2 does not support rollback runtime selection")
@@ -347,6 +363,12 @@ class DeploymentLock(BaseModel):
             return SelectedDeploymentRuntime(
                 image=self.components.runtime.image,
                 runtimeTarget=self.runtimeTarget,
+                compatibilityDigest=(
+                    self.runtimeUpgrade.compatibilityDigest if self.runtimeUpgrade else None
+                ),
+                migrationMode=(
+                    self.runtimeUpgrade.migrationMode if self.runtimeUpgrade else "none"
+                ),
             )
         if selection not in {"active", "rollback"}:
             raise ValueError("deployment lock v3 requires an explicit runtime selection")
@@ -357,6 +379,12 @@ class DeploymentLock(BaseModel):
                 runtimeTarget=self.runtimeTarget,
                 recordsReaderVersion=self.recordsCompatibility.minimum_records_reader_version,
                 lifecycleActionsEnabled=self.recordsCompatibility.activeLifecycleActionsEnabled,
+                compatibilityDigest=(
+                    self.runtimeUpgrade.compatibilityDigest if self.runtimeUpgrade else None
+                ),
+                migrationMode=(
+                    self.runtimeUpgrade.migrationMode if self.runtimeUpgrade else "none"
+                ),
             )
         rollback = self.recordsCompatibility.rollbackRuntime
         return SelectedDeploymentRuntime(
@@ -398,7 +426,10 @@ class DeploymentLock(BaseModel):
                 selected = self.selected_runtime(selection)
             except ValueError:
                 return False
-            return target == selected.runtimeTarget.model_dump(mode="json")
+            expected = selected.runtimeTarget.model_dump(mode="json")
+            if selected.compatibilityDigest is not None:
+                expected["compatibilityDigest"] = selected.compatibilityDigest
+            return target == expected
         return (target["releaseVersion"], target["protocolVersion"]) in self.legacy_catalog
 
 

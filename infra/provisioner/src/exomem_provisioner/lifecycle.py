@@ -16,7 +16,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from .driver import (
     DriverFinal,
@@ -193,12 +193,19 @@ class LifecycleConfig:
     legacy_runtime_units: dict[tuple[str, str], dict[str, str]] | None = None
     records_reader_version: int | None = None
     lifecycle_actions_enabled: bool = False
+    compatibility_digest: str | None = None
+    migration_mode: Literal["none", "binding-v1-to-v2"] = "none"
 
     def runtime_target_for(self, request: dict[str, Any], *, v2: bool) -> dict[str, str]:
         if v2:
             if self.runtime_target is None:
                 raise MetadataConflict("selected runtime target is unavailable")
-            return self.runtime_target
+            compatibility_digest = self.compatibility_digest or self.runtime_target.get(
+                "compatibilityDigest"
+            )
+            if compatibility_digest is None:
+                return dict(self.runtime_target)
+            return {**self.runtime_target, "compatibilityDigest": compatibility_digest}
         target = runtime_identity(request)
         try:
             return (self.legacy_runtime_units or {})[
@@ -237,6 +244,7 @@ class HealthObservation:
     agent_profile: str | None = None
     command_fingerprint: str | None = None
     schema_digest: str | None = None
+    compatibility_digest: str | None = None
     records_reader_version: int | None = None
     lifecycle_actions_enabled: bool | None = None
 
@@ -267,6 +275,7 @@ class HealthObservation:
             agent_profile=target.get("agentProfile") if v2 else None,
             command_fingerprint=target.get("commandFingerprint") if v2 else None,
             schema_digest=target.get("schemaDigest") if v2 else None,
+            compatibility_digest=target.get("compatibilityDigest") if v2 else None,
             records_reader_version=(
                 config.records_reader_version if config.records_reader_version is not None else None
             ),
@@ -304,18 +313,21 @@ class HealthObservation:
             or self.schema_digest is None
         ):
             raise MetadataConflict("runtime identity is incomplete")
+        runtime_identity = {
+            "releaseVersion": self.release_version,
+            "protocolVersion": self.protocol_version,
+            "agentProfile": self.agent_profile,
+            "gatewayContractDigest": self.contract_digest,
+            "commandFingerprint": self.command_fingerprint,
+            "schemaDigest": self.schema_digest,
+        }
+        if self.compatibility_digest is not None:
+            runtime_identity["compatibilityDigest"] = self.compatibility_digest
         return {
             "live": self.live,
             "ready": self.ready,
             "cellId": self.cell_id,
-            "runtimeIdentity": {
-                "releaseVersion": self.release_version,
-                "protocolVersion": self.protocol_version,
-                "agentProfile": self.agent_profile,
-                "gatewayContractDigest": self.contract_digest,
-                "commandFingerprint": self.command_fingerprint,
-                "schemaDigest": self.schema_digest,
-            },
+            "runtimeIdentity": runtime_identity,
             "serviceAuthenticated": self.service_authenticated,
             "mutationAuthority": self.mutation_authority,
             "readAdmission": self.read_admission,
@@ -664,7 +676,9 @@ class LifecyclePlane(Protocol):
     ) -> HealthObservation: ...
     async def admit_runtime(self, metadata: OpaqueProviderMetadata) -> None: ...
     def runtime_admitted(self, metadata: OpaqueProviderMetadata) -> bool: ...
-    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None: ...
+    async def enable_routes(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+    ) -> None: ...
     async def disable_routes(self, metadata: OpaqueProviderMetadata) -> None: ...
     def routes_enabled(self, metadata: OpaqueProviderMetadata) -> tuple[bool, bool]: ...
     async def prove_external_rejection(
@@ -687,6 +701,43 @@ class LifecyclePlane(Protocol):
         self,
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
+        operation_id: str,
+    ) -> None: ...
+    async def canonical_vault_fingerprint(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        operation_id: str,
+        *,
+        phase: Literal["before", "after"],
+    ) -> str: ...
+    async def run_runtime_migration(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+        operation_id: str,
+    ) -> None: ...
+    async def upgrade_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+        operation_id: str,
+    ) -> None: ...
+    async def rollback_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None: ...
+    async def commit_runtime_upgrade(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None: ...
+    async def rollback_committed_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
         operation_id: str,
     ) -> None: ...
     async def stage_credential(
@@ -752,6 +803,10 @@ class _Cell:
     seal_checkpoint: tuple[str, str] | None = None
     candidate: bool = False
     failed: bool = False
+    vault_fingerprint: str = ""
+    prior_rollforward: (
+        tuple[str, dict[str, Any], dict[str, Any], HealthObservation | None] | None
+    ) = None
 
 
 @dataclass(slots=True)
@@ -795,6 +850,7 @@ class HighFidelityProviderPlane:
         self._billing_stopped: set[str] = set()
         self._tickets: dict[str, tuple[str, bool]] = {}
         self._lose_after_bind = False
+        self._mutate_vault_on_upgrade = False
 
     def __repr__(self) -> str:
         return (
@@ -888,6 +944,9 @@ class HighFidelityProviderPlane:
         else:
             cell.request_shape.update(runtime_identity(request))
         cell.helm_values = json.loads(json.dumps(values))
+        cell.vault_fingerprint = hashlib.sha256(
+            f"vault:{metadata.tenant_id}:{metadata.subject_id}".encode()
+        ).hexdigest()
         cell.volume_handle = handle
         cell.pv_name = pv_name
         cell.credential_digests[1] = hashlib.sha256(
@@ -941,7 +1000,9 @@ class HighFidelityProviderPlane:
         cell = self._cell(metadata)
         return bool(cell and cell.runtime_admitted)
 
-    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None:
+    async def enable_routes(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+    ) -> None:
         del request
         cell = self._require_cell(metadata)
         cell.control_route = True
@@ -1015,6 +1076,107 @@ class HighFidelityProviderPlane:
         if cell.sealed:
             raise MetadataConflict("sealed runtime cannot resume")
         cell.quiesced = False
+
+    async def canonical_vault_fingerprint(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        operation_id: str,
+        *,
+        phase: Literal["before", "after"],
+    ) -> str:
+        del request, operation_id, phase
+        cell = self._require_cell(metadata)
+        if not cell.quiesced:
+            raise MetadataConflict("canonical vault fingerprint requires a quiesced cell")
+        return cell.vault_fingerprint
+
+    def vault_fingerprint(self, metadata: OpaqueProviderMetadata) -> str:
+        return self._require_cell(metadata).vault_fingerprint
+
+    def mutate_vault_on_upgrade_once(self) -> None:
+        self._mutate_vault_on_upgrade = True
+
+    async def run_runtime_migration(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+        operation_id: str,
+    ) -> None:
+        del request, operation_id
+        if config.migration_mode == "none":
+            raise MetadataConflict("runtime migration was not declared")
+        if not self._require_cell(metadata).quiesced:
+            raise MetadataConflict("runtime migration requires a quiesced cell")
+
+    async def upgrade_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+        operation_id: str,
+    ) -> None:
+        cell = self._require_cell(metadata)
+        if not cell.quiesced or cell.control_route or cell.transfer_route:
+            raise MetadataConflict("runtime upgrade requires closed routes and a quiesced cell")
+        target = runtime_identity(request)
+        if cell.request_shape.get("runtimeTarget") == target:
+            return
+        if cell.prior_rollforward is None or cell.prior_rollforward[0] != operation_id:
+            cell.prior_rollforward = (
+                operation_id,
+                json.loads(json.dumps(cell.request_shape)),
+                json.loads(json.dumps(cell.helm_values)),
+                cell.health,
+            )
+        cell.request_shape = {
+            "cellId": str(request["cellId"]),
+            "workerPolicy": dict(request["workerPolicy"]),
+            "runtimeTarget": target,
+        }
+        cell.helm_values = _fixed_helm_values(cell.metadata, request, config)
+        cell.helm_values["workloadMode"] = "serve"
+        cell.helm_values["routes"]["enabled"] = False
+        cell.health = HealthObservation.ready_for(cell.metadata, cell.request_shape, config)
+        if self._mutate_vault_on_upgrade:
+            self._mutate_vault_on_upgrade = False
+            cell.vault_fingerprint = hashlib.sha256(
+                (cell.vault_fingerprint + ":mutated").encode("utf-8")
+            ).hexdigest()
+
+    async def rollback_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None:
+        cell = self._require_cell(metadata)
+        if cell.prior_rollforward is None or cell.prior_rollforward[0] != operation_id:
+            return
+        _, request_shape, helm_values, health = cell.prior_rollforward
+        cell.request_shape = request_shape
+        cell.helm_values = helm_values
+        cell.health = health
+        cell.prior_rollforward = None
+
+    async def commit_runtime_upgrade(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None:
+        # Keep the same-operation rollback preimage until a later rollforward
+        # replaces it with its then-current predecessor.
+        del metadata, operation_id
+
+    async def rollback_committed_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None:
+        cell = self._require_cell(metadata)
+        if cell.prior_rollforward is None or cell.prior_rollforward[0] != operation_id:
+            raise MetadataConflict("runtime rollback authority is absent")
+        await self.rollback_runtime(metadata, operation_id)
 
     async def stage_credential(
         self,
@@ -1616,6 +1778,14 @@ class CellLifecycleDriver:
             request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
         )
 
+    def rollforward_target_matches(self, request: dict[str, Any], context: EffectContext) -> bool:
+        return bool(
+            context.wire_protocol == WIRE_PROTOCOL_V2
+            and self._config.compatibility_digest is not None
+            and request.get("compatibilityDigest") == self._config.compatibility_digest
+            and self.runtime_target_matches(request, context)
+        )
+
     async def execute(
         self,
         action: str,
@@ -1623,7 +1793,15 @@ class CellLifecycleDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
-            if not self.runtime_target_matches(request, context):
+            if action in {
+                "rollforward",
+                "rollback-rollforward",
+            } and not self.rollforward_target_matches(request, context):
+                raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
+            if action not in {
+                "rollforward",
+                "rollback-rollforward",
+            } and not self.runtime_target_matches(request, context):
                 raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
             if await self.observed_fence(context.tenant_id) > context.fence_generation:
                 raise DriverTerminal("PROVISIONER_STALE_FENCE")
@@ -1634,6 +1812,13 @@ class CellLifecycleDriver:
                 return DriverFinal(
                     await self._exact_health(_metadata_from_context(context), request, context)
                 )
+            if action == "rollforward":
+                return await self._rollforward(request, context)
+            if action == "rollback-rollforward":
+                await self._plane.rollback_committed_runtime(
+                    _metadata_from_context(context), context.provider_operation_id
+                )
+                return DriverFinal({})
             if action in {"quiesce", "stop", "resume", "seal"}:
                 return await self._lifecycle(action, request, context)
             if action == "rotate-credential":
@@ -1645,6 +1830,102 @@ class CellLifecycleDriver:
             raise DriverTerminal("PROVISIONER_ACTION_NOT_IMPLEMENTED")
         except MetadataConflict as error:
             raise DriverTerminal("PROVISIONER_PROVIDER_METADATA_CONFLICT") from error
+
+    @staticmethod
+    def _rollforward_fingerprint(checkpoint: str) -> str | None:
+        match = re.fullmatch(
+            r"(?:vault-fingerprinted|migration-(?:skipped|complete)|target-confirmed)-([0-9a-f]{64})",
+            checkpoint,
+        )
+        return match.group(1) if match is not None else None
+
+    async def _rollforward(
+        self,
+        request: dict[str, Any],
+        context: EffectContext,
+    ) -> DriverPending | DriverFinal:
+        metadata = _metadata_from_context(context)
+        operation_id = context.provider_operation_id
+        fingerprint = self._rollforward_fingerprint(context.checkpoint)
+        known = {
+            "maintenance-wait",
+            "maintenance-acquired",
+            "routes-closed",
+            "runtime-drained",
+        }
+        if fingerprint is not None:
+            known.add(context.checkpoint)
+        checkpoint = await self._maintenance_checkpoint(metadata, context, known)
+        if checkpoint is not None:
+            return checkpoint
+        if context.checkpoint == "maintenance-acquired":
+            await self._plane.disable_routes(metadata)
+            if self._plane.routes_enabled(metadata) != (False, False):
+                raise DriverTerminal("PROVISIONER_ROUTE_CLOSURE_UNPROVEN")
+            if not await self._plane.prove_external_rejection(metadata, request):
+                raise DriverTerminal("PROVISIONER_ROUTE_CLOSURE_UNPROVEN")
+            return DriverPending("routes-closed", 1)
+        if context.checkpoint == "routes-closed":
+            await self._plane.quiesce(metadata, request, operation_id)
+            return DriverPending("runtime-drained", 1)
+        if context.checkpoint == "runtime-drained":
+            before = await self._plane.canonical_vault_fingerprint(
+                metadata, request, operation_id, phase="before"
+            )
+            if re.fullmatch(r"[0-9a-f]{64}", before) is None:
+                raise DriverTerminal("PROVISIONER_VAULT_FINGERPRINT_INVALID")
+            return DriverPending(f"vault-fingerprinted-{before}", 1)
+        if context.checkpoint.startswith("vault-fingerprinted-") and fingerprint is not None:
+            if self._config.migration_mode == "none":
+                return DriverPending(f"migration-skipped-{fingerprint}", 1)
+            await self._plane.run_runtime_migration(metadata, request, self._config, operation_id)
+            return DriverPending(f"migration-complete-{fingerprint}", 1)
+        if context.checkpoint.startswith("migration-") and fingerprint is not None:
+            try:
+                await self._plane.upgrade_runtime(metadata, request, self._config, operation_id)
+                after = await self._plane.canonical_vault_fingerprint(
+                    metadata, request, operation_id, phase="after"
+                )
+                if after != fingerprint:
+                    raise DriverTerminal("PROVISIONER_VAULT_PRESERVATION_MISMATCH")
+                await self._plane.resume(metadata, request, operation_id)
+                await self._exact_health(metadata, request, context)
+                return DriverPending(f"target-confirmed-{fingerprint}", 1)
+            except (DriverTerminal, MetadataConflict):
+                await self._plane.rollback_runtime(metadata, operation_id)
+                raise
+        if context.checkpoint.startswith("target-confirmed-") and fingerprint is not None:
+            await self._plane.enable_routes(metadata, request)
+            if self._plane.routes_enabled(metadata) != (True, True):
+                raise DriverTerminal("PROVISIONER_ROUTE_REOPEN_FAILED")
+            await self._plane.commit_runtime_upgrade(metadata, operation_id)
+            await self._plane.release_maintenance(metadata, operation_id)
+            evidence = hashlib.sha256(
+                (
+                    json.dumps(
+                        {
+                            "artifact": "exomem-hosted-rollforward-preservation",
+                            "schemaVersion": 1,
+                            "cellId": metadata.subject_id,
+                            "operationId": operation_id,
+                            "runtimeTarget": runtime_identity(request),
+                            "vaultSha256": fingerprint,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            ).hexdigest()
+            return DriverFinal(
+                {
+                    "code": "rollforward_preserved",
+                    "beforeVaultSha256": fingerprint,
+                    "afterVaultSha256": fingerprint,
+                    "evidenceSha256": evidence,
+                }
+            )
+        raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
 
     async def _provision(
         self, request: dict[str, Any], context: EffectContext

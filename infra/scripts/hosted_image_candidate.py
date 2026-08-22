@@ -18,6 +18,7 @@ from typing import NoReturn, cast
 
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_CANDIDATE_BYTES = 128 * 1024
+MAX_CONTRACT_FIXTURE_BYTES = 1024 * 1024
 VERIFY_TIMEOUT_SECONDS = 120
 SCHEMA_VERSION = 1
 RECORDS_COMPATIBILITY_SCHEMA_VERSION = 2
@@ -605,6 +606,104 @@ def verify_candidate(
             _require_verified_subject(statement, expected_name, expected_digest, label=label)
 
 
+def runtime_target_from_verified_fixtures(
+    candidate_path: Path,
+    agent_fixture_path: Path,
+    gateway_fixture_path: Path,
+) -> dict[str, str]:
+    """Derive the one target shared by Substrate trust and Exomem composition.
+
+    Call only after ``verify_candidate`` has accepted both signed subjects. The
+    candidate binds source and image identity; the imported fixtures bind the
+    protocol, gateway and agent compatibility surfaces consumed by Substrate.
+    """
+
+    candidate_bytes = _read_regular(
+        candidate_path, label="candidate", maximum=MAX_CANDIDATE_BYTES
+    )
+    candidate = validate_candidate(
+        _json_object(candidate_path, label="candidate", maximum=MAX_CANDIDATE_BYTES)
+    )
+    if candidate["kind"] != "runtime":
+        _error("runtime target output requires a runtime candidate")
+    source = cast(dict[str, object], candidate["source"])
+    release = cast(dict[str, object], candidate["release"])
+    image = cast(dict[str, object], candidate["image"])
+
+    agent = _json_object(
+        agent_fixture_path,
+        label="agent contract fixture",
+        maximum=MAX_CONTRACT_FIXTURE_BYTES,
+    )
+    compatibility = agent.get("compatibility")
+    if not isinstance(compatibility, dict):
+        _error("agent contract fixture compatibility must be an object")
+    agent_source = _commit(agent.get("sourceCommit"), label="agent fixture source commit")
+    agent_release = _string(agent.get("sourceRelease"), label="agent fixture source release")
+    if agent_source != source["commit"] or agent_release != release["version"]:
+        _error("agent contract fixture differs from runtime candidate")
+    agent_profile = _string(compatibility.get("profile"), label="agent fixture profile")
+    command = _string(
+        compatibility.get("command_surface_sha256"),
+        label="agent fixture command fingerprint",
+    )
+    schema = _string(
+        compatibility.get("schema_contract_sha256"),
+        label="agent fixture schema digest",
+    )
+    compatibility_digest = _string(
+        compatibility.get("compatibility_sha256"),
+        label="agent fixture compatibility digest",
+    )
+    for label, digest in (
+        ("agent fixture command fingerprint", command),
+        ("agent fixture schema digest", schema),
+        ("agent fixture compatibility digest", compatibility_digest),
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            _error(f"{label} must be a sha256 hex hash")
+
+    gateway = _json_object(
+        gateway_fixture_path,
+        label="gateway contract fixture",
+        maximum=MAX_CONTRACT_FIXTURE_BYTES,
+    )
+    gateway_release = _string(
+        gateway.get("exomem_release"), label="gateway fixture release"
+    )
+    protocol = _string(
+        gateway.get("protocol_version"), label="gateway fixture protocol version"
+    )
+    gateway_digest = _mapping(
+        gateway.get("digest"),
+        label="gateway fixture digest",
+        fields={"algorithm", "value"},
+    )
+    gateway_digest_value = _string(
+        gateway_digest["value"], label="gateway fixture digest value"
+    )
+    if (
+        gateway_release != release["version"]
+        or re.fullmatch(r"[1-9][0-9]{0,7}", protocol) is None
+        or gateway_digest["algorithm"] != "sha256"
+        or re.fullmatch(r"[0-9a-f]{64}", gateway_digest_value) is None
+    ):
+        _error("gateway contract fixture differs from runtime candidate")
+
+    return {
+        "releaseVersion": cast(str, release["version"]),
+        "sourceCommit": cast(str, source["commit"]),
+        "runtimeImage": cast(str, image["reference"]),
+        "runtimeCandidateSha256": hashlib.sha256(candidate_bytes).hexdigest(),
+        "protocolVersion": protocol,
+        "agentProfile": agent_profile,
+        "gatewayContractDigest": gateway_digest_value,
+        "commandFingerprint": command,
+        "schemaDigest": schema,
+        "compatibilityDigest": compatibility_digest,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -640,6 +739,9 @@ def _parser() -> argparse.ArgumentParser:
     evidence = verify.add_mutually_exclusive_group(required=True)
     evidence.add_argument("--bundle", type=Path)
     evidence.add_argument("--bundle-from-oci", action="store_true")
+    verify.add_argument("--agent-contract-fixture", type=Path)
+    verify.add_argument("--gateway-contract-fixture", type=Path)
+    verify.add_argument("--runtime-target-output", type=Path)
     return parser
 
 
@@ -649,12 +751,33 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "record":
             record_candidate(_candidate_from_flags(args), args.bundle, args.output)
         else:
+            target_arguments = (
+                args.agent_contract_fixture,
+                args.gateway_contract_fixture,
+                args.runtime_target_output,
+            )
+            if any(value is not None for value in target_arguments) and any(
+                value is None for value in target_arguments
+            ):
+                _error("runtime target fixture and output flags must be supplied together")
             verify_candidate(
                 args.candidate,
                 bundle=args.bundle,
                 bundle_from_oci=args.bundle_from_oci,
                 candidate_bundle=args.candidate_bundle,
             )
+            if args.runtime_target_output is not None:
+                target = runtime_target_from_verified_fixtures(
+                    args.candidate,
+                    args.agent_contract_fixture,
+                    args.gateway_contract_fixture,
+                )
+                _write_atomic(
+                    args.runtime_target_output,
+                    (json.dumps(target, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                        "utf-8"
+                    ),
+                )
     except CandidateError as exc:
         print(f"hosted image candidate: {exc}", file=sys.stderr)
         return 2

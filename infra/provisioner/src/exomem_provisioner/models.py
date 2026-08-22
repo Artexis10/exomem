@@ -37,6 +37,8 @@ class Base(DeclarativeBase):
 class OperationAction(StrEnum):
     PROVISION = "provision"
     HEALTH = "health"
+    ROLLFORWARD = "rollforward"
+    ROLLBACK_ROLLFORWARD = "rollback-rollforward"
     ROTATE_CREDENTIAL = "rotate-credential"
     QUIESCE = "quiesce"
     RESUME = "resume"
