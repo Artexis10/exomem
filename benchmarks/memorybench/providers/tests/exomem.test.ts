@@ -249,6 +249,44 @@ describe("Exomem guest provider", () => {
     ).rejects.toThrow("graph-current")
   })
 
+  test("the retirement barrier retries only exact stabilization exhaustion", async () => {
+    const h = harness()
+    const requestIds: string[] = []
+    let attempts = 0
+
+    await prepareExomemRetirement(h.service, async (_service, _path, body) => {
+      attempts += 1
+      requestIds.push(body.request_id as string)
+      if (attempts === 1) {
+        return {
+          graph_status: "unavailable",
+          graph_sync_code: "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+        }
+      }
+      return { graph_status: "current" }
+    })
+
+    expect(attempts).toBe(2)
+    expect(new Set(requestIds).size).toBe(2)
+  })
+
+  test("the retirement barrier bounds repeated stabilization exhaustion", async () => {
+    const h = harness()
+    let attempts = 0
+
+    await expect(
+      prepareExomemRetirement(h.service, async () => {
+        attempts += 1
+        return {
+          graph_status: "unavailable",
+          graph_sync_code: "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+        }
+      })
+    ).rejects.toThrow("graph-current")
+
+    expect(attempts).toBe(3)
+  })
+
   test("a separate stage instance reattaches the requested container service", async () => {
     const h = harness()
     const service = { ...h.service, container_tag: "container-b", bearer_token: "reattached-b" }

@@ -23,7 +23,7 @@
     },
     "src/providers/exomem/index.ts": {
       "source": "providers/exomem/index.ts",
-      "sha256": "877f7b821698028f3f731817e992435f2815f2bbacf83790eae77ec68294b948"
+      "sha256": "ed3f545e09fc294ccacec637da963f288964f3f5133da34b2076ed3f2f979bd9"
     },
     "src/providers/basic-memory/index.ts": {
       "source": "providers/basic-memory/index.ts",
@@ -43,7 +43,7 @@
     },
     "src/providers/__guest_tests__/exomem.test.ts": {
       "source": "providers/tests/exomem.test.ts",
-      "sha256": "84ccb31d010506d45426f06a83d1c6c6214bd013098ac8ae173a5ad8e6a0f052"
+      "sha256": "f119cf3fc7d864ae7dede57a04597873a66a02d9cb02a47c20d5c73719cb1961"
     },
     "src/providers/basic-memory/test_sidecar.py": {
       "source": "providers/basic-memory/test_sidecar.py",

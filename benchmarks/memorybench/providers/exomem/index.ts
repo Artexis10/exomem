@@ -56,25 +56,31 @@ interface ReadResponse {
   body?: unknown
 }
 
+const EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS = 3
+
 export async function prepareExomemRetirement(
   service: ServiceDescriptor,
   request: RetirementRequest
 ): Promise<void> {
-  const requestId = crypto.randomUUID()
-  const raw = await request(service, "/api/maintain_memory", {
-    mode: "reconcile",
-    dry_run: false,
-    rebuild_graph: false,
-    request_id: requestId,
-    idempotency_key: requestId,
-  })
-  if (!raw || typeof raw !== "object") {
-    throw new Error("Exomem retirement barrier response is invalid")
+  for (let attempt = 0; attempt < EXOMEM_RETIREMENT_RECONCILE_ATTEMPTS; attempt += 1) {
+    const requestId = crypto.randomUUID()
+    const raw = await request(service, "/api/maintain_memory", {
+      mode: "reconcile",
+      dry_run: false,
+      rebuild_graph: false,
+      request_id: requestId,
+      idempotency_key: requestId,
+    })
+    if (!raw || typeof raw !== "object") {
+      throw new Error("Exomem retirement barrier response is invalid")
+    }
+    const response = raw as { graph_status?: unknown; graph_sync_code?: unknown }
+    if (response.graph_status === "current" || response.graph_status === "refreshed") return
+    const retryable = response.graph_status === "unavailable" &&
+      response.graph_sync_code === "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
+    if (!retryable) break
   }
-  const graphStatus = (raw as { graph_status?: unknown }).graph_status
-  if (graphStatus !== "current" && graphStatus !== "refreshed") {
-    throw new Error("Exomem retirement barrier did not prove graph-current state")
-  }
+  throw new Error("Exomem retirement barrier did not prove graph-current state")
 }
 
 export class ExomemProvider implements Provider {
