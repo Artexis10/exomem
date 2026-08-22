@@ -14,10 +14,14 @@ import hmac
 import json
 import sqlite3
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from . import authorization_sessions
+
+if TYPE_CHECKING:
+    from .policy import Policy
 
 SCHEMA_USER_VERSION: Final = 4
 _MAX_SQLITE_INTEGER: Final = (1 << 63) - 1
@@ -29,6 +33,10 @@ _ACTIVATION_DIGEST_DOMAIN: Final = b"exomem.activation-state.v1\0"
 
 class SchemaV4Error(RuntimeError):
     """The explicit v4 coordinator cannot prove a safe migration or write."""
+
+
+class ActiveTupleStale(SchemaV4Error):
+    """The complete active tuple no longer matches a reviewed predecessor."""
 
 
 def _text(value: object, name: str, *, maximum: int = _MAX_TEXT_BYTES) -> str:
@@ -184,6 +192,35 @@ class VerifiedActiveGovernanceState:
 
 
 @dataclass(frozen=True, slots=True)
+class ActivePolicySnapshot:
+    active: VerifiedActiveGovernanceState
+    policy: Policy
+    source_documents: tuple[tuple[str, bytes], ...]
+    catalog_descriptor: bytes
+    projection_namespace_evidence: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class TuplePublicationResult:
+    active: VerifiedActiveGovernanceState
+    policy_row_digest: str
+    catalog_descriptor_digest: str
+    projection_namespace_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationRegistryAcknowledgement:
+    activation_store_id: str
+    activation_epoch: int
+    activation_state_digest: str
+
+
+RegistryAcknowledger = Callable[
+    [VerifiedActiveGovernanceState], ActivationRegistryAcknowledgement
+]
+
+
+@dataclass(frozen=True, slots=True)
 class _SeedMaterial:
     source_documents: bytes
     policy_row_digest: str
@@ -217,6 +254,50 @@ def _source_document_bytes(documents: tuple[tuple[str, bytes], ...]) -> bytes:
     if len(encoded) > _MAX_BLOB_BYTES:
         raise SchemaV4Error("source_documents exceeds the bounded byte map")
     return bytes(encoded)
+
+
+def _decode_source_document_bytes(value: object) -> tuple[tuple[str, bytes], ...]:
+    raw = _blob(value, "policy.source_documents")
+    prefix = b"exomem.policy-source-map.v1\0"
+    frame_prefix = b"exomem.policy-source-document.v1\0"
+    if not raw.startswith(prefix) or len(raw) < len(prefix) + 4:
+        raise SchemaV4Error("policy source document map is malformed")
+    offset = len(prefix)
+    count = int.from_bytes(raw[offset : offset + 4], "big")
+    offset += 4
+    if count > 100_000:
+        raise SchemaV4Error("policy source document map is malformed")
+    result: list[tuple[str, bytes]] = []
+    seen: set[str] = set()
+    for ordinal in range(count):
+        if raw[offset : offset + len(frame_prefix)] != frame_prefix:
+            raise SchemaV4Error("policy source document map is malformed")
+        offset += len(frame_prefix)
+        fields: list[bytes] = []
+        for _field in range(2):
+            if offset + 4 > len(raw):
+                raise SchemaV4Error("policy source document map is malformed")
+            size = int.from_bytes(raw[offset : offset + 4], "big")
+            offset += 4
+            if offset + size > len(raw):
+                raise SchemaV4Error("policy source document map is malformed")
+            fields.append(raw[offset : offset + size])
+            offset += size
+        try:
+            path = fields[0].decode("utf-8")
+        except UnicodeDecodeError:
+            raise SchemaV4Error("policy source document map is malformed") from None
+        path = _text(path, f"source_documents[{ordinal}].path")
+        if path in seen:
+            raise SchemaV4Error("policy source document map contains a duplicate path")
+        seen.add(path)
+        result.append((path, fields[1]))
+    if offset != len(raw):
+        raise SchemaV4Error("policy source document map is malformed")
+    documents = tuple(result)
+    if _source_document_bytes(documents) != raw:
+        raise SchemaV4Error("policy source document map is non-canonical")
+    return documents
 
 
 def _validate_policy(seed: PolicyGenerationSeed) -> tuple[bytes, str]:
@@ -256,6 +337,29 @@ def _validate_policy(seed: PolicyGenerationSeed) -> tuple[bytes, str]:
         _ascii_integer(created_at),
     )
     return source_documents, row_digest
+
+
+def _verify_policy_source_parity(
+    seed: PolicyGenerationSeed,
+    source_documents: bytes,
+) -> None:
+    """Require stored source bytes to reproduce the claimed compiled authority."""
+
+    from . import policy as policy_module
+
+    documents = _decode_source_document_bytes(source_documents)
+    compiled = policy_module.compile_documents(dict(documents))
+    if (
+        compiled.empty
+        or compiled.blocked
+        or compiled.fingerprint != seed.source_fingerprint
+        or compiled.fingerprint != seed.policy_fingerprint
+        or not hmac.compare_digest(
+            policy_module.canonical_compiled_bytes(compiled),
+            seed.compiled_policy,
+        )
+    ):
+        raise SchemaV4Error("policy source parity does not verify")
 
 
 def _stored_policy_row_digest(row: tuple[object, ...]) -> str:
@@ -341,6 +445,7 @@ def _seed_material(seed: MigrationSeed) -> _SeedMaterial:
     activation_epoch = _integer(seed.activation_epoch, "activation_epoch")
     _integer(seed.migrated_at, "migrated_at")
     source_documents, policy_row_digest = _validate_policy(seed.policy)
+    _verify_policy_source_parity(seed.policy, source_documents)
     if not isinstance(seed.catalog, CatalogGenerationSeed):
         raise SchemaV4Error("catalog migration seed is invalid")
     catalog_generation = _integer(
@@ -385,7 +490,7 @@ def _seed_material(seed: MigrationSeed) -> _SeedMaterial:
         projector_schema_version=seed.policy.projector_schema_version,
         catalog_generation=catalog_generation,
         catalog_descriptor_digest=catalog_descriptor_digest,
-        projection_namespace_identity=namespace_id,
+        projection_namespace_identity=namespace_digest,
     )
     migration_seed_digest = _framed_digest(
         b"exomem.governance-schema-migration-seed.v1",
@@ -512,6 +617,19 @@ def _create_v4_schema(connection: sqlite3.Connection) -> None:
         "CHECK(length(activation_state_digest)=64))"
     )
     connection.execute(
+        "CREATE TABLE governance_tuple_publications ("
+        "event_id TEXT PRIMARY KEY, publication_kind TEXT NOT NULL "
+        "CHECK(publication_kind IN ('migration','policy','catalog')), "
+        "predecessor_activation_state_digest TEXT, "
+        "target_activation_state_digest TEXT NOT NULL UNIQUE "
+        "CHECK(length(target_activation_state_digest)=64), "
+        "policy_generation_id TEXT NOT NULL, policy_fingerprint TEXT NOT NULL "
+        "CHECK(length(policy_fingerprint)=64), projector_schema_version INTEGER NOT NULL, "
+        "catalog_generation INTEGER NOT NULL, activation_epoch INTEGER NOT NULL UNIQUE "
+        "CHECK(activation_epoch>0), status TEXT NOT NULL CHECK(status='committed'), "
+        "activated_at INTEGER NOT NULL)"
+    )
+    connection.execute(
         "CREATE TABLE governance_schema_migrations ("
         "migration_id TEXT PRIMARY KEY, source_schema_version INTEGER NOT NULL, "
         "target_schema_version INTEGER NOT NULL, seed_digest TEXT NOT NULL "
@@ -561,6 +679,7 @@ def _create_v4_schema(connection: sqlite3.Connection) -> None:
         "compiled_policy_generations",
         "catalog_generation_descriptors",
         "governance_projection_namespaces",
+        "governance_tuple_publications",
         "governance_schema_migrations",
     ):
         for suffix, operation in (("update", "UPDATE"), ("delete", "DELETE")):
@@ -650,6 +769,23 @@ def _insert_seed(
         ),
     )
     connection.execute(
+        "INSERT INTO governance_tuple_publications "
+        "(event_id, publication_kind, predecessor_activation_state_digest, "
+        "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
+        "projector_schema_version, catalog_generation, activation_epoch, status, "
+        "activated_at) VALUES (?, 'migration', NULL, ?, ?, ?, ?, ?, ?, 'committed', ?)",
+        (
+            policy.receipt_event_id,
+            material.activation_digest,
+            policy.generation_id,
+            policy.policy_fingerprint,
+            policy.projector_schema_version,
+            catalog.catalog_generation,
+            seed.activation_epoch,
+            seed.migrated_at,
+        ),
+    )
+    connection.execute(
         "INSERT INTO governance_schema_migrations "
         "(migration_id, source_schema_version, target_schema_version, seed_digest, "
         "migrated_at) VALUES ('v3-to-v4', 3, 4, ?, ?)",
@@ -694,6 +830,13 @@ def _replay_matches(
     ).fetchone()
     active = connection.execute("SELECT * FROM active_governance_tuple").fetchone()
     activation = connection.execute("SELECT * FROM governance_activation_store").fetchone()
+    publication = connection.execute(
+        "SELECT event_id, publication_kind, predecessor_activation_state_digest, "
+        "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
+        "projector_schema_version, catalog_generation, activation_epoch, status, "
+        "activated_at FROM governance_tuple_publications WHERE event_id=?",
+        (seed.policy.receipt_event_id,),
+    ).fetchone()
     migration = connection.execute(
         "SELECT * FROM governance_schema_migrations WHERE migration_id='v3-to-v4'"
     ).fetchone()
@@ -748,6 +891,20 @@ def _replay_matches(
             seed.activation_epoch,
             material.activation_digest,
         )
+        and publication
+        == (
+            seed.policy.receipt_event_id,
+            "migration",
+            None,
+            material.activation_digest,
+            seed.policy.generation_id,
+            seed.policy.policy_fingerprint,
+            seed.policy.projector_schema_version,
+            seed.catalog.catalog_generation,
+            seed.activation_epoch,
+            "committed",
+            seed.migrated_at,
+        )
         and migration
         == (
             "v3-to-v4",
@@ -765,8 +922,19 @@ def migrate_v3_connection(
 ) -> MigrationResult:
     """Atomically replace one exact quiesced v3 authority with exact schema v4."""
 
-    material = _seed_material(seed)
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if version not in {3, SCHEMA_USER_VERSION}:
+        raise SchemaV4Error(
+            f"explicit governance migration requires exact schema v3, found v{version}"
+        )
+    if version == 3 and connection.in_transaction:
+        raise SchemaV4Error("schema v3 migration requires a clean transaction boundary")
+
+    # Validate the content-bearing seed only after the source database has
+    # proven it is an admissible migration/replay target.  Unsupported schema
+    # versions must refuse without parsing attacker-controlled seed material,
+    # and the clean-transaction precondition must remain effect-free.
+    material = _seed_material(seed)
     if version == SCHEMA_USER_VERSION:
         try:
             matches = _replay_matches(connection, seed, material)
@@ -775,12 +943,6 @@ def migrate_v3_connection(
         if not matches:
             raise SchemaV4Error("schema v4 migration seed does not match active state")
         return MigrationResult(4, seed.activation_store_id, material.activation_digest)
-    if version != 3:
-        raise SchemaV4Error(
-            f"explicit governance migration requires exact schema v3, found v{version}"
-        )
-    if connection.in_transaction:
-        raise SchemaV4Error("schema v3 migration requires a clean transaction boundary")
 
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -962,8 +1124,65 @@ def load_active_state(
             projector_schema_version=projector_schema_version,
             catalog_generation=catalog_generation,
             catalog_descriptor_digest=descriptor_digest,
-            projection_namespace_identity=namespace_id,
+            projection_namespace_identity=namespace_digest,
         )
+        publication_rows = connection.execute(
+            "SELECT event_id, publication_kind, predecessor_activation_state_digest, "
+            "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation, activation_epoch, status, "
+            "activated_at FROM governance_tuple_publications "
+            "WHERE target_activation_state_digest=?",
+            (stored_activation_digest,),
+        ).fetchall()
+        if len(publication_rows) != 1:
+            raise SchemaV4Error("active tuple publication evidence is unavailable")
+        publication = tuple(publication_rows[0])
+        publication_event_id = _text(publication[0], "publication.event_id")
+        publication_kind = _text(publication[1], "publication.publication_kind")
+        if publication_kind not in {"migration", "policy", "catalog"}:
+            raise SchemaV4Error("active tuple publication kind is invalid")
+        predecessor_digest = publication[2]
+        if publication_kind == "migration":
+            if predecessor_digest is not None:
+                raise SchemaV4Error("migration publication has a predecessor")
+        else:
+            predecessor = _digest(
+                predecessor_digest,
+                "publication.predecessor_activation_state_digest",
+            )
+            predecessor_rows = connection.execute(
+                "SELECT COUNT(*) FROM governance_tuple_publications "
+                "WHERE target_activation_state_digest=? AND activation_epoch=?",
+                (predecessor, activation_epoch - 1),
+            ).fetchone()
+            if predecessor_rows != (1,):
+                raise SchemaV4Error("active tuple publication predecessor is unavailable")
+        if (
+            (
+                publication_kind in {"migration", "policy"}
+                and publication_event_id
+                != _text(policy[10], "policy.receipt_event_id")
+            )
+            or _digest(
+                publication[3], "publication.target_activation_state_digest"
+            )
+            != stored_activation_digest
+            or _text(publication[4], "publication.policy_generation_id")
+            != generation_id
+            or _digest(publication[5], "publication.policy_fingerprint")
+            != policy_fingerprint
+            or _integer(
+                publication[6], "publication.projector_schema_version"
+            )
+            != projector_schema_version
+            or _integer(publication[7], "publication.catalog_generation")
+            != catalog_generation
+            or _integer(publication[8], "publication.activation_epoch")
+            != activation_epoch
+            or publication[9] != "committed"
+        ):
+            raise SchemaV4Error("active tuple publication evidence does not verify")
+        _integer(publication[10], "publication.activated_at")
         for actual, expected in (
             (logical_vault_id, expected_vault),
             (activation_store_id, expected_store),
@@ -987,6 +1206,595 @@ def load_active_state(
         catalog_generation=catalog_generation,
         projection_namespace_id=namespace_id,
     )
+
+
+def load_active_policy(
+    connection: sqlite3.Connection,
+    *,
+    expected_logical_vault_id: str,
+    expected_activation_store_id: str,
+    expected_activation_epoch: int,
+    expected_activation_state_digest: str,
+) -> ActivePolicySnapshot:
+    """Load one policy/catalog/namespace from the already-pinned active tuple."""
+
+    active = load_active_state(
+        connection,
+        expected_logical_vault_id=expected_logical_vault_id,
+        expected_activation_store_id=expected_activation_store_id,
+        expected_activation_epoch=expected_activation_epoch,
+        expected_activation_state_digest=expected_activation_state_digest,
+    )
+    try:
+        policy_row = connection.execute(
+            "SELECT source_documents, source_fingerprint, compiled_policy, "
+            "policy_fingerprint FROM compiled_policy_generations "
+            "WHERE generation_id=?",
+            (active.policy_generation_id,),
+        ).fetchone()
+        catalog_row = connection.execute(
+            "SELECT descriptor FROM catalog_generation_descriptors "
+            "WHERE catalog_generation=?",
+            (active.catalog_generation,),
+        ).fetchone()
+        namespace_row = connection.execute(
+            "SELECT evidence FROM governance_projection_namespaces "
+            "WHERE policy_fingerprint=? AND projector_schema_version=? "
+            "AND catalog_generation=? AND namespace_id=?",
+            (
+                active.policy_fingerprint,
+                active.projector_schema_version,
+                active.catalog_generation,
+                active.projection_namespace_id,
+            ),
+        ).fetchone()
+        if policy_row is None or catalog_row is None or namespace_row is None:
+            raise SchemaV4Error("active policy tuple rows are unavailable")
+        documents = _decode_source_document_bytes(policy_row[0])
+        from . import policy as policy_module
+
+        compiled = policy_module.compile_documents(dict(documents))
+        stored_source_fingerprint = _digest(
+            policy_row[1], "policy.source_fingerprint"
+        )
+        stored_policy_fingerprint = _digest(
+            policy_row[3], "policy.policy_fingerprint"
+        )
+        canonical = policy_module.canonical_compiled_bytes(compiled)
+        if (
+            compiled.empty
+            or compiled.blocked
+            or compiled.fingerprint != stored_source_fingerprint
+            or compiled.fingerprint != stored_policy_fingerprint
+            or compiled.fingerprint != active.policy_fingerprint
+            or not hmac.compare_digest(canonical, bytes(policy_row[2]))
+        ):
+            raise SchemaV4Error("active policy source parity does not verify")
+        descriptor = _blob(
+            catalog_row[0], "catalog.descriptor", allow_empty=True
+        )
+        evidence = _blob(
+            namespace_row[0], "namespace.evidence", allow_empty=True
+        )
+    except (IndexError, TypeError, ValueError, sqlite3.Error, SchemaV4Error):
+        raise SchemaV4Error("governance active policy is unavailable") from None
+    return ActivePolicySnapshot(
+        active=active,
+        policy=compiled,
+        source_documents=documents,
+        catalog_descriptor=descriptor,
+        projection_namespace_evidence=evidence,
+    )
+
+
+def _publication_result(
+    connection: sqlite3.Connection,
+    active: VerifiedActiveGovernanceState,
+) -> TuplePublicationResult:
+    policy = connection.execute(
+        "SELECT immutable_row_digest FROM compiled_policy_generations "
+        "WHERE generation_id=?",
+        (active.policy_generation_id,),
+    ).fetchone()
+    catalog = connection.execute(
+        "SELECT descriptor_digest FROM catalog_generation_descriptors "
+        "WHERE catalog_generation=?",
+        (active.catalog_generation,),
+    ).fetchone()
+    namespace = connection.execute(
+        "SELECT namespace_digest FROM governance_projection_namespaces "
+        "WHERE policy_fingerprint=? AND projector_schema_version=? "
+        "AND catalog_generation=? AND namespace_id=?",
+        (
+            active.policy_fingerprint,
+            active.projector_schema_version,
+            active.catalog_generation,
+            active.projection_namespace_id,
+        ),
+    ).fetchone()
+    if policy is None or catalog is None or namespace is None:
+        raise SchemaV4Error("committed tuple rows are unavailable")
+    return TuplePublicationResult(
+        active=active,
+        policy_row_digest=_digest(policy[0], "policy.immutable_row_digest"),
+        catalog_descriptor_digest=_digest(
+            catalog[0], "catalog.descriptor_digest"
+        ),
+        projection_namespace_digest=_digest(
+            namespace[0], "namespace.namespace_digest"
+        ),
+    )
+
+
+def _acknowledge_registry(
+    active: VerifiedActiveGovernanceState,
+    acknowledge_registry: RegistryAcknowledger,
+) -> None:
+    if not callable(acknowledge_registry):
+        raise SchemaV4Error("external registry acknowledgement is required")
+    acknowledgement = acknowledge_registry(active)
+    if (
+        not isinstance(acknowledgement, ActivationRegistryAcknowledgement)
+        or acknowledgement.activation_store_id != active.activation_store_id
+        or acknowledgement.activation_epoch != active.activation_epoch
+        or not hmac.compare_digest(
+            acknowledgement.activation_state_digest,
+            active.activation_state_digest,
+        )
+    ):
+        raise SchemaV4Error(
+            "external registry acknowledgement does not match the committed tuple"
+        )
+
+
+def recover_registry_acknowledgement(
+    connection: sqlite3.Connection,
+    *,
+    expected: VerifiedActiveGovernanceState,
+    acknowledge_registry: RegistryAcknowledger,
+) -> TuplePublicationResult:
+    """Acknowledge only the one receipt-proven successor already committed.
+
+    This recovery seam never writes SQLite state and never recompiles source.
+    It accepts exactly one active epoch whose immutable publication row names
+    ``expected`` as its predecessor, then performs the external registry CAS.
+    """
+
+    if not isinstance(expected, VerifiedActiveGovernanceState):
+        raise SchemaV4Error("expected active tuple is invalid")
+    if connection.in_transaction:
+        raise SchemaV4Error("registry recovery requires a clean transaction boundary")
+    activation = connection.execute(
+        "SELECT activation_store_id, logical_vault_id, activation_epoch, "
+        "activation_state_digest FROM governance_activation_store WHERE singleton=1"
+    ).fetchone()
+    if activation is None:
+        raise SchemaV4Error("committed activation state is unavailable")
+    target = load_active_state(
+        connection,
+        expected_logical_vault_id=_text(activation[1], "activation.logical_vault_id"),
+        expected_activation_store_id=_text(
+            activation[0], "activation.activation_store_id"
+        ),
+        expected_activation_epoch=_integer(
+            activation[2], "activation.activation_epoch"
+        ),
+        expected_activation_state_digest=_digest(
+            activation[3], "activation.activation_state_digest"
+        ),
+    )
+    predecessor = connection.execute(
+        "SELECT predecessor_activation_state_digest FROM governance_tuple_publications "
+        "WHERE target_activation_state_digest=?",
+        (target.activation_state_digest,),
+    ).fetchone()
+    if (
+        target.logical_vault_id != expected.logical_vault_id
+        or target.activation_store_id != expected.activation_store_id
+        or target.activation_epoch != expected.activation_epoch + 1
+        or predecessor != (expected.activation_state_digest,)
+    ):
+        raise ActiveTupleStale(
+            "committed tuple is not the exact reviewed registry successor"
+        )
+    _acknowledge_registry(target, acknowledge_registry)
+    return _publication_result(connection, target)
+
+
+def publish_policy_generation(
+    connection: sqlite3.Connection,
+    *,
+    expected: VerifiedActiveGovernanceState,
+    policy: PolicyGenerationSeed,
+    namespace: ProjectionNamespaceSeed,
+    activated_at: int,
+    acknowledge_registry: RegistryAcknowledger,
+) -> TuplePublicationResult:
+    """Insert and CAS one complete policy generation against its reviewed tuple."""
+
+    if not isinstance(expected, VerifiedActiveGovernanceState):
+        raise SchemaV4Error("expected active tuple is invalid")
+    if connection.in_transaction:
+        raise SchemaV4Error("policy publication requires a clean transaction boundary")
+    activated = _integer(activated_at, "activated_at")
+    source_documents, policy_row_digest = _validate_policy(policy)
+    if policy.predecessor_generation_id != expected.policy_generation_id:
+        raise ActiveTupleStale("policy predecessor does not match the reviewed tuple")
+    if not isinstance(namespace, ProjectionNamespaceSeed):
+        raise SchemaV4Error("projection namespace is invalid")
+    namespace_id = _text(namespace.namespace_id, "namespace.namespace_id")
+    namespace_evidence = _blob(
+        namespace.evidence,
+        "namespace.evidence",
+        allow_empty=True,
+    )
+    namespace_ready_at = _integer(namespace.ready_at, "namespace.ready_at")
+    if namespace_ready_at > activated:
+        raise SchemaV4Error("projection namespace is not ready at activation")
+
+    _verify_policy_source_parity(policy, source_documents)
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        try:
+            current = load_active_state(
+                connection,
+                expected_logical_vault_id=expected.logical_vault_id,
+                expected_activation_store_id=expected.activation_store_id,
+                expected_activation_epoch=expected.activation_epoch,
+                expected_activation_state_digest=expected.activation_state_digest,
+            )
+        except SchemaV4Error as exc:
+            raise ActiveTupleStale(
+                "active tuple no longer matches the reviewed predecessor"
+            ) from exc
+        if current != expected:
+            raise ActiveTupleStale(
+                "active tuple no longer matches the reviewed predecessor"
+            )
+        catalog = connection.execute(
+            "SELECT descriptor_digest FROM catalog_generation_descriptors "
+            "WHERE catalog_generation=?",
+            (expected.catalog_generation,),
+        ).fetchone()
+        if catalog is None:
+            raise SchemaV4Error("reviewed catalog descriptor is unavailable")
+        catalog_descriptor_digest = _digest(
+            catalog[0], "catalog.descriptor_digest"
+        )
+        namespace_digest = _framed_digest(
+            b"exomem.authorization-projection-namespace.v1",
+            policy.policy_fingerprint.encode("ascii"),
+            _ascii_integer(policy.projector_schema_version),
+            _ascii_integer(expected.catalog_generation),
+            namespace_id.encode(),
+            namespace_evidence,
+            _ascii_integer(namespace_ready_at),
+        )
+        target_epoch = _integer(
+            expected.activation_epoch + 1,
+            "target_activation_epoch",
+        )
+        target_digest = activation_state_digest(
+            logical_vault_id=expected.logical_vault_id,
+            activation_store_id=expected.activation_store_id,
+            activation_epoch=target_epoch,
+            policy_generation_id=policy.generation_id,
+            policy_fingerprint=policy.policy_fingerprint,
+            policy_row_digest=policy_row_digest,
+            projector_schema_version=policy.projector_schema_version,
+            catalog_generation=expected.catalog_generation,
+            catalog_descriptor_digest=catalog_descriptor_digest,
+            projection_namespace_identity=namespace_digest,
+        )
+        connection.execute(
+            "INSERT INTO compiled_policy_generations "
+            "(generation_id, source_documents, source_fingerprint, conflict_digest, "
+            "compiled_policy, policy_fingerprint, compiler_schema_version, "
+            "projector_schema_version, predecessor_generation_id, authoring_event_id, "
+            "receipt_event_id, immutable_row_digest, created_at) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                policy.generation_id,
+                source_documents,
+                policy.source_fingerprint,
+                policy.conflict_digest,
+                policy.compiled_policy,
+                policy.policy_fingerprint,
+                policy.compiler_schema_version,
+                policy.projector_schema_version,
+                policy.predecessor_generation_id,
+                policy.authoring_event_id,
+                policy.receipt_event_id,
+                policy_row_digest,
+                policy.created_at,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO governance_projection_namespaces "
+            "(policy_fingerprint, projector_schema_version, catalog_generation, "
+            "namespace_id, namespace_digest, evidence, ready_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                policy.policy_fingerprint,
+                policy.projector_schema_version,
+                expected.catalog_generation,
+                namespace_id,
+                namespace_digest,
+                namespace_evidence,
+                namespace_ready_at,
+            ),
+        )
+        active_update = connection.execute(
+            "UPDATE active_governance_tuple SET policy_generation_id=?, "
+            "policy_fingerprint=?, projector_schema_version=? "
+            "WHERE singleton=1 AND policy_generation_id=? AND policy_fingerprint=? "
+            "AND projector_schema_version=? AND catalog_generation=?",
+            (
+                policy.generation_id,
+                policy.policy_fingerprint,
+                policy.projector_schema_version,
+                expected.policy_generation_id,
+                expected.policy_fingerprint,
+                expected.projector_schema_version,
+                expected.catalog_generation,
+            ),
+        )
+        activation_update = connection.execute(
+            "UPDATE governance_activation_store SET activation_epoch=?, "
+            "activation_state_digest=? WHERE singleton=1 AND activation_store_id=? "
+            "AND logical_vault_id=? AND activation_epoch=? "
+            "AND activation_state_digest=?",
+            (
+                target_epoch,
+                target_digest,
+                expected.activation_store_id,
+                expected.logical_vault_id,
+                expected.activation_epoch,
+                expected.activation_state_digest,
+            ),
+        )
+        if active_update.rowcount != 1 or activation_update.rowcount != 1:
+            raise ActiveTupleStale(
+                "active tuple no longer matches the reviewed predecessor"
+            )
+        connection.execute(
+            "INSERT INTO governance_tuple_publications "
+            "(event_id, publication_kind, predecessor_activation_state_digest, "
+            "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation, activation_epoch, status, "
+            "activated_at) VALUES (?, 'policy', ?, ?, ?, ?, ?, ?, ?, 'committed', ?)",
+            (
+                policy.receipt_event_id,
+                expected.activation_state_digest,
+                target_digest,
+                policy.generation_id,
+                policy.policy_fingerprint,
+                policy.projector_schema_version,
+                expected.catalog_generation,
+                target_epoch,
+                activated,
+            ),
+        )
+        _crash_point("policy-publication-before-commit")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+    active = load_active_state(
+        connection,
+        expected_logical_vault_id=expected.logical_vault_id,
+        expected_activation_store_id=expected.activation_store_id,
+        expected_activation_epoch=target_epoch,
+        expected_activation_state_digest=target_digest,
+    )
+    _crash_point("policy-publication-after-commit-before-registry")
+    _acknowledge_registry(active, acknowledge_registry)
+    return _publication_result(connection, active)
+
+
+def publish_catalog_generation(
+    connection: sqlite3.Connection,
+    *,
+    expected: VerifiedActiveGovernanceState,
+    catalog: CatalogGenerationSeed,
+    namespace: ProjectionNamespaceSeed,
+    receipt_event_id: str,
+    activated_at: int,
+    acknowledge_registry: RegistryAcknowledger,
+) -> TuplePublicationResult:
+    """Insert and CAS one complete catalog against its reviewed policy tuple."""
+
+    if not isinstance(expected, VerifiedActiveGovernanceState):
+        raise SchemaV4Error("expected active tuple is invalid")
+    if connection.in_transaction:
+        raise SchemaV4Error("catalog publication requires a clean transaction boundary")
+    if not isinstance(catalog, CatalogGenerationSeed):
+        raise SchemaV4Error("catalog generation is invalid")
+    catalog_generation = _integer(
+        catalog.catalog_generation,
+        "catalog.catalog_generation",
+    )
+    if catalog_generation != expected.catalog_generation + 1:
+        raise ActiveTupleStale("catalog generation is not the reviewed successor")
+    descriptor = _blob(catalog.descriptor, "catalog.descriptor", allow_empty=True)
+    artifact_count = _integer(
+        catalog.artifact_count,
+        "catalog.artifact_count",
+        minimum=0,
+    )
+    catalog_created_at = _integer(catalog.created_at, "catalog.created_at")
+    event_id = _text(receipt_event_id, "receipt_event_id")
+    activated = _integer(activated_at, "activated_at")
+    if not isinstance(namespace, ProjectionNamespaceSeed):
+        raise SchemaV4Error("projection namespace is invalid")
+    namespace_id = _text(namespace.namespace_id, "namespace.namespace_id")
+    namespace_evidence = _blob(
+        namespace.evidence,
+        "namespace.evidence",
+        allow_empty=True,
+    )
+    namespace_ready_at = _integer(namespace.ready_at, "namespace.ready_at")
+    if namespace_ready_at > activated:
+        raise SchemaV4Error("projection namespace is not ready at activation")
+    catalog_descriptor_digest = _framed_digest(
+        b"exomem.catalog-generation-descriptor.v1",
+        _ascii_integer(catalog_generation),
+        descriptor,
+        _ascii_integer(artifact_count),
+        _ascii_integer(catalog_created_at),
+    )
+    namespace_digest = _framed_digest(
+        b"exomem.authorization-projection-namespace.v1",
+        expected.policy_fingerprint.encode("ascii"),
+        _ascii_integer(expected.projector_schema_version),
+        _ascii_integer(catalog_generation),
+        namespace_id.encode(),
+        namespace_evidence,
+        _ascii_integer(namespace_ready_at),
+    )
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        try:
+            current = load_active_state(
+                connection,
+                expected_logical_vault_id=expected.logical_vault_id,
+                expected_activation_store_id=expected.activation_store_id,
+                expected_activation_epoch=expected.activation_epoch,
+                expected_activation_state_digest=expected.activation_state_digest,
+            )
+        except SchemaV4Error as exc:
+            raise ActiveTupleStale(
+                "active tuple no longer matches the reviewed predecessor"
+            ) from exc
+        if current != expected:
+            raise ActiveTupleStale(
+                "active tuple no longer matches the reviewed predecessor"
+            )
+        policy_row = connection.execute(
+            "SELECT immutable_row_digest FROM compiled_policy_generations "
+            "WHERE generation_id=? AND policy_fingerprint=? "
+            "AND projector_schema_version=?",
+            (
+                expected.policy_generation_id,
+                expected.policy_fingerprint,
+                expected.projector_schema_version,
+            ),
+        ).fetchone()
+        if policy_row is None:
+            raise SchemaV4Error("reviewed policy generation is unavailable")
+        policy_row_digest = _digest(
+            policy_row[0], "policy.immutable_row_digest"
+        )
+        target_epoch = _integer(
+            expected.activation_epoch + 1,
+            "target_activation_epoch",
+        )
+        target_digest = activation_state_digest(
+            logical_vault_id=expected.logical_vault_id,
+            activation_store_id=expected.activation_store_id,
+            activation_epoch=target_epoch,
+            policy_generation_id=expected.policy_generation_id,
+            policy_fingerprint=expected.policy_fingerprint,
+            policy_row_digest=policy_row_digest,
+            projector_schema_version=expected.projector_schema_version,
+            catalog_generation=catalog_generation,
+            catalog_descriptor_digest=catalog_descriptor_digest,
+            projection_namespace_identity=namespace_digest,
+        )
+        connection.execute(
+            "INSERT INTO catalog_generation_descriptors "
+            "(catalog_generation, descriptor, descriptor_digest, artifact_count, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                catalog_generation,
+                descriptor,
+                catalog_descriptor_digest,
+                artifact_count,
+                catalog_created_at,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO governance_projection_namespaces "
+            "(policy_fingerprint, projector_schema_version, catalog_generation, "
+            "namespace_id, namespace_digest, evidence, ready_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                expected.policy_fingerprint,
+                expected.projector_schema_version,
+                catalog_generation,
+                namespace_id,
+                namespace_digest,
+                namespace_evidence,
+                namespace_ready_at,
+            ),
+        )
+        active_update = connection.execute(
+            "UPDATE active_governance_tuple SET catalog_generation=? "
+            "WHERE singleton=1 AND policy_generation_id=? AND policy_fingerprint=? "
+            "AND projector_schema_version=? AND catalog_generation=?",
+            (
+                catalog_generation,
+                expected.policy_generation_id,
+                expected.policy_fingerprint,
+                expected.projector_schema_version,
+                expected.catalog_generation,
+            ),
+        )
+        activation_update = connection.execute(
+            "UPDATE governance_activation_store SET activation_epoch=?, "
+            "activation_state_digest=? WHERE singleton=1 AND activation_store_id=? "
+            "AND logical_vault_id=? AND activation_epoch=? "
+            "AND activation_state_digest=?",
+            (
+                target_epoch,
+                target_digest,
+                expected.activation_store_id,
+                expected.logical_vault_id,
+                expected.activation_epoch,
+                expected.activation_state_digest,
+            ),
+        )
+        if active_update.rowcount != 1 or activation_update.rowcount != 1:
+            raise ActiveTupleStale(
+                "active tuple no longer matches the reviewed predecessor"
+            )
+        connection.execute(
+            "INSERT INTO governance_tuple_publications "
+            "(event_id, publication_kind, predecessor_activation_state_digest, "
+            "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation, activation_epoch, status, "
+            "activated_at) VALUES (?, 'catalog', ?, ?, ?, ?, ?, ?, ?, 'committed', ?)",
+            (
+                event_id,
+                expected.activation_state_digest,
+                target_digest,
+                expected.policy_generation_id,
+                expected.policy_fingerprint,
+                expected.projector_schema_version,
+                catalog_generation,
+                target_epoch,
+                activated,
+            ),
+        )
+        _crash_point("catalog-publication-before-commit")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+    active = load_active_state(
+        connection,
+        expected_logical_vault_id=expected.logical_vault_id,
+        expected_activation_store_id=expected.activation_store_id,
+        expected_activation_epoch=target_epoch,
+        expected_activation_state_digest=target_digest,
+    )
+    _crash_point("catalog-publication-after-commit-before-registry")
+    _acknowledge_registry(active, acknowledge_registry)
+    return _publication_result(connection, active)
 
 
 def insert_authorization_session(
