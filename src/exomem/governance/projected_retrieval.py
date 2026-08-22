@@ -29,6 +29,10 @@ class ProjectedRetrievalUnavailable(RuntimeError):
     """The authorized projection corpus is incomplete or internally inconsistent."""
 
 
+class ProjectedLaneUnavailable(ProjectedRetrievalUnavailable):
+    """One selected projected measurement lane is incomplete or incompatible."""
+
+
 def _bounded_text(value: object, name: str, *, maximum: int) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise projections.ProjectionCanonicalizationError(
@@ -136,6 +140,145 @@ class _SelectedDocument:
     tokens: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectionVectorMeasurement:
+    """One principal-free vector measurement beneath a projection variant row."""
+
+    measurement_key: projections.MeasurementKey
+    vector: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.measurement_key, projections.MeasurementKey):
+            raise projections.ProjectionCanonicalizationError(
+                "vector measurement key is invalid"
+            )
+        if self.measurement_key.lane != "vector":
+            raise projections.ProjectionCanonicalizationError(
+                "vector measurement key has an invalid lane"
+            )
+        vector = _vector(self.vector, "projection vector")
+        if math.sqrt(sum(value * value for value in vector)) == 0:
+            raise projections.ProjectionCanonicalizationError(
+                "projection vector must have non-zero magnitude"
+            )
+        object.__setattr__(self, "vector", vector)
+
+
+def _vector(value: object, name: str) -> tuple[float, ...]:
+    if not isinstance(value, tuple) or not 1 <= len(value) <= 4096:
+        raise projections.ProjectionCanonicalizationError(
+            f"{name} must be a bounded immutable vector"
+        )
+    normalized: list[float] = []
+    for component in value:
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            raise projections.ProjectionCanonicalizationError(
+                f"{name} components must be finite numbers"
+            )
+        number = float(component)
+        if not math.isfinite(number):
+            raise projections.ProjectionCanonicalizationError(
+                f"{name} components must be finite numbers"
+            )
+        normalized.append(number)
+    return tuple(normalized)
+
+
+def _catalog_items(
+    namespace_key: projections.ProjectionNamespaceKey,
+    items: Iterable[projection_store.ProjectionItemVariants],
+) -> Mapping[str, projection_store.ProjectionItemVariants]:
+    if not isinstance(namespace_key, projections.ProjectionNamespaceKey):
+        raise projections.ProjectionCanonicalizationError(
+            "projected retrieval namespace key is invalid"
+        )
+    by_identity: dict[str, projection_store.ProjectionItemVariants] = {}
+    for item in items:
+        if not isinstance(item, projection_store.ProjectionItemVariants):
+            raise projections.ProjectionCanonicalizationError(
+                "projected retrieval catalog item has an invalid type"
+            )
+        if item.item_identity in by_identity:
+            raise projections.ProjectionCanonicalizationError(
+                "projected retrieval catalog contains a duplicate item identity"
+            )
+        for variant in item.variants:
+            value = json.loads(variant.value_jcs)
+            if value["projector_schema_version"] != (
+                namespace_key.projector_schema_version
+            ):
+                raise projections.ProjectionCanonicalizationError(
+                    "variant projector schema does not match retrieval namespace"
+                )
+        by_identity[item.item_identity] = item
+    return MappingProxyType(by_identity)
+
+
+def _selected_variants(
+    namespace_key: projections.ProjectionNamespaceKey,
+    items: Mapping[str, projection_store.ProjectionItemVariants],
+    authorization: AuthorizationProjectionMap,
+) -> tuple[projections.ProjectionVariant, ...]:
+    if not isinstance(authorization, AuthorizationProjectionMap):
+        raise ProjectedRetrievalUnavailable("authorization map is invalid")
+    if authorization.namespace_key != namespace_key:
+        raise ProjectedRetrievalUnavailable(
+            "authorization map namespace does not match projected index"
+        )
+    selections = {
+        selection.item_identity: selection for selection in authorization.selections
+    }
+    if frozenset(selections) != frozenset(items):
+        raise ProjectedRetrievalUnavailable(
+            "authorization map does not cover the exact projection catalog"
+        )
+
+    selected: list[projections.ProjectionVariant] = []
+    for identity in sorted(items, key=_sort_key):
+        item = items[identity]
+        selection = selections[identity]
+        if selection.content_hash != item.content_hash:
+            raise ProjectedRetrievalUnavailable(
+                "authorization selection content hash does not match catalog"
+            )
+        if selection.projection_variant_id is None:
+            continue
+        variants = {variant.projection_variant_id: variant for variant in item.variants}
+        variant = variants.get(selection.projection_variant_id)
+        if variant is None:
+            raise ProjectedRetrievalUnavailable(
+                "authorization selection names an unavailable projection variant"
+            )
+        if variant.item_identity != identity or variant.content_hash != item.content_hash:
+            raise ProjectedRetrievalUnavailable(
+                "projection variant does not match its catalog item"
+            )
+        selected.append(variant)
+    return tuple(selected)
+
+
+def _variant_text(variant: projections.ProjectionVariant) -> str:
+    return " ".join(
+        variant.search_fields[key]
+        for key in sorted(variant.search_fields, key=_sort_key)
+    )
+
+
+def _projected_hit(
+    variant: projections.ProjectionVariant,
+    score: float,
+) -> ProjectedLexicalHit:
+    compact = " ".join(_variant_text(variant).split())
+    return ProjectedLexicalHit(
+        item_identity=variant.item_identity,
+        projection_variant_id=variant.projection_variant_id,
+        decision_level=variant.decision_level,
+        score=score,
+        search_fields=variant.search_fields,
+        snippet=compact[:_SNIPPET_CHARS].rstrip(),
+    )
+
+
 class ProjectedLexicalIndex:
     """Principal-free immutable rows searched through exact request-local maps."""
 
@@ -144,94 +287,26 @@ class ProjectedLexicalIndex:
         namespace_key: projections.ProjectionNamespaceKey,
         items: Iterable[projection_store.ProjectionItemVariants],
     ) -> None:
-        if not isinstance(namespace_key, projections.ProjectionNamespaceKey):
-            raise projections.ProjectionCanonicalizationError(
-                "projected lexical namespace key is invalid"
-            )
-        by_identity: dict[str, projection_store.ProjectionItemVariants] = {}
-        for item in items:
-            if not isinstance(item, projection_store.ProjectionItemVariants):
-                raise projections.ProjectionCanonicalizationError(
-                    "projected lexical catalog item has an invalid type"
-                )
-            if item.item_identity in by_identity:
-                raise projections.ProjectionCanonicalizationError(
-                    "projected lexical catalog contains a duplicate item identity"
-                )
-            for variant in item.variants:
-                value = json.loads(variant.value_jcs)
-                if value["projector_schema_version"] != (
-                    namespace_key.projector_schema_version
-                ):
-                    raise projections.ProjectionCanonicalizationError(
-                        "variant projector schema does not match lexical namespace"
-                    )
-            by_identity[item.item_identity] = item
         self.namespace_key = namespace_key
-        self._items = MappingProxyType(by_identity)
-
-    @staticmethod
-    def _variant_text(variant: projections.ProjectionVariant) -> str:
-        return " ".join(
-            variant.search_fields[key]
-            for key in sorted(variant.search_fields, key=_sort_key)
-        )
+        self._items = _catalog_items(namespace_key, items)
 
     def _selected_documents(
         self,
         authorization: AuthorizationProjectionMap,
     ) -> tuple[_SelectedDocument, ...]:
-        if not isinstance(authorization, AuthorizationProjectionMap):
-            raise ProjectedRetrievalUnavailable("authorization map is invalid")
-        if authorization.namespace_key != self.namespace_key:
-            raise ProjectedRetrievalUnavailable(
-                "authorization map namespace does not match projected index"
+        return tuple(
+            _SelectedDocument(variant, text, tuple(bm25.tokenize(text)))
+            for variant in _selected_variants(
+                self.namespace_key,
+                self._items,
+                authorization,
             )
-        selections = {
-            selection.item_identity: selection for selection in authorization.selections
-        }
-        if frozenset(selections) != frozenset(self._items):
-            raise ProjectedRetrievalUnavailable(
-                "authorization map does not cover the exact projection catalog"
-            )
-
-        selected: list[_SelectedDocument] = []
-        for identity in sorted(self._items, key=_sort_key):
-            item = self._items[identity]
-            selection = selections[identity]
-            if selection.content_hash != item.content_hash:
-                raise ProjectedRetrievalUnavailable(
-                    "authorization selection content hash does not match catalog"
-                )
-            if selection.projection_variant_id is None:
-                continue
-            variants = {
-                variant.projection_variant_id: variant for variant in item.variants
-            }
-            variant = variants.get(selection.projection_variant_id)
-            if variant is None:
-                raise ProjectedRetrievalUnavailable(
-                    "authorization selection names an unavailable projection variant"
-                )
-            if variant.item_identity != identity or variant.content_hash != item.content_hash:
-                raise ProjectedRetrievalUnavailable(
-                    "projection variant does not match its catalog item"
-                )
-            text = self._variant_text(variant)
-            selected.append(_SelectedDocument(variant, text, tuple(bm25.tokenize(text))))
-        return tuple(selected)
+            if (text := _variant_text(variant))
+        )
 
     @staticmethod
     def _hit(document: _SelectedDocument, score: float) -> ProjectedLexicalHit:
-        compact = " ".join(document.text.split())
-        return ProjectedLexicalHit(
-            item_identity=document.variant.item_identity,
-            projection_variant_id=document.variant.projection_variant_id,
-            decision_level=document.variant.decision_level,
-            score=score,
-            search_fields=document.variant.search_fields,
-            snippet=compact[:_SNIPPET_CHARS].rstrip(),
-        )
+        return _projected_hit(document.variant, score)
 
     def search_bm25(
         self,
@@ -314,10 +389,131 @@ class ProjectedLexicalIndex:
         return tuple(self._hit(document, 1.0) for document in matches[:limit])
 
 
+class ProjectedVectorIndex:
+    """Score fixed projection embeddings after request-local authorization."""
+
+    def __init__(
+        self,
+        namespace_key: projections.ProjectionNamespaceKey,
+        items: Iterable[projection_store.ProjectionItemVariants],
+        measurements: Iterable[ProjectionVectorMeasurement],
+        *,
+        extractor_version: str,
+        model_version: str,
+    ) -> None:
+        self.namespace_key = namespace_key
+        self._items = _catalog_items(namespace_key, items)
+        self.extractor_version = _bounded_text(
+            extractor_version,
+            "vector extractor version",
+            maximum=256,
+        )
+        self.model_version = _bounded_text(
+            model_version,
+            "vector model version",
+            maximum=256,
+        )
+        catalog_variant_ids = {
+            variant.projection_variant_id
+            for item in self._items.values()
+            for variant in item.variants
+        }
+        by_variant: dict[str, ProjectionVectorMeasurement] = {}
+        dimension: int | None = None
+        for measurement in measurements:
+            if not isinstance(measurement, ProjectionVectorMeasurement):
+                raise projections.ProjectionCanonicalizationError(
+                    "projected vector measurement has an invalid type"
+                )
+            key = measurement.measurement_key
+            if key.extractor_version != self.extractor_version:
+                raise projections.ProjectionCanonicalizationError(
+                    "vector measurement extractor version does not match index"
+                )
+            if key.model_version != self.model_version:
+                raise projections.ProjectionCanonicalizationError(
+                    "vector measurement model version does not match index"
+                )
+            if key.projection_variant_id not in catalog_variant_ids:
+                raise projections.ProjectionCanonicalizationError(
+                    "vector measurement variant is outside the projection catalog"
+                )
+            if key.projection_variant_id in by_variant:
+                raise projections.ProjectionCanonicalizationError(
+                    "projected vector index contains a duplicate variant measurement"
+                )
+            if dimension is None:
+                dimension = len(measurement.vector)
+            elif len(measurement.vector) != dimension:
+                raise projections.ProjectionCanonicalizationError(
+                    "projected vector measurements have inconsistent dimensions"
+                )
+            by_variant[key.projection_variant_id] = measurement
+        self._measurements = MappingProxyType(by_variant)
+        self._dimension = dimension
+
+    def search_vector(
+        self,
+        authorization: AuthorizationProjectionMap,
+        query_vector: tuple[float, ...],
+        *,
+        k: int,
+    ) -> tuple[ProjectedLexicalHit, ...]:
+        """Score every selected projection row before applying the result cap."""
+
+        limit = _result_limit(k)
+        selected = _selected_variants(
+            self.namespace_key,
+            self._items,
+            authorization,
+        )
+        if not selected:
+            return ()
+        if self._dimension is None:
+            raise ProjectedLaneUnavailable(
+                "selected projection vector measurement is unavailable"
+            )
+        query = _vector(query_vector, "query vector")
+        if len(query) != self._dimension:
+            raise ProjectedLaneUnavailable(
+                "query vector dimension does not match projected measurements"
+            )
+        query_magnitude = math.sqrt(sum(value * value for value in query))
+        if query_magnitude == 0:
+            raise ProjectedLaneUnavailable("query vector has zero magnitude")
+
+        scored: list[tuple[projections.ProjectionVariant, float]] = []
+        for variant in selected:
+            measurement = self._measurements.get(variant.projection_variant_id)
+            if measurement is None:
+                raise ProjectedLaneUnavailable(
+                    "selected projection vector measurement is unavailable"
+                )
+            measurement_magnitude = math.sqrt(
+                sum(value * value for value in measurement.vector)
+            )
+            score = sum(
+                left * right
+                for left, right in zip(query, measurement.vector, strict=True)
+            ) / (query_magnitude * measurement_magnitude)
+            scored.append((variant, score))
+        scored.sort(
+            key=lambda item: (
+                -item[1],
+                _sort_key(item[0].item_identity),
+                item[0].projection_variant_id,
+            )
+        )
+        return tuple(_projected_hit(variant, score) for variant, score in scored[:limit])
+
+
 __all__ = [
     "AuthorizationProjectionMap",
+    "ProjectedLaneUnavailable",
     "ProjectedLexicalHit",
     "ProjectedLexicalIndex",
     "ProjectedRetrievalUnavailable",
+    "ProjectedVectorIndex",
+    "ProjectionVectorMeasurement",
     "ProjectionSelection",
 ]
