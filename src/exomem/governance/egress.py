@@ -2325,6 +2325,7 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """
     if result is None:
         return None
+    issuance_context = scrubber._issuance_projection_context(result)
     vault_root = Path(vault_root)
     result = _withheld_cross_check(vault_root, result)
     # Free text and nested resource/prompt strings have no structural entry
@@ -2342,7 +2343,13 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
         if blocked:
             _record_credential_block()
         return cleaned
-    cleaned, blocked = scrubber.scrub_value(result)
+    if issuance_context is not None:
+        cleaned, blocked = scrubber._scrub_issuance_projection(
+            result,
+            issuance_context,
+        )
+    else:
+        cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
     return cleaned

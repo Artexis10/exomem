@@ -3222,7 +3222,15 @@ class LeaseManager:
             scope=implicit_idempotency_scope or idempotency_principal_scope,
             targets=[str(mutation_subject)],
         )
-        return project_terminal(result, response_detail)
+        projected = project_terminal(result, response_detail)
+        from .governance import scrubber as governance_scrubber
+
+        return governance_scrubber._trusted_issuance_projection(
+            command.name,
+            kwargs,
+            result,
+            projected,
+        )
 
     def _record_mutation_journal(
         self,

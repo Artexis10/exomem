@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import logging
 import threading
 import time
@@ -491,6 +492,28 @@ def bind_vault(
 
                 if injected and is_vault_root(injected[0]):
                     result = postfilter(command.name, result, injected[0])
+                from .governance import scrubber as governance_scrubber
+
+                if governance_scrubber._issuance_projection_context(result) is not None:
+                    from fastmcp.tools import ToolResult
+                    from mcp.types import TextContent
+
+                    redacted_text, blocked = governance_scrubber.scrub_value(dict(result))
+                    if not blocked:
+                        raise authorization_request.AuthorizationContextUnavailable
+                    result = ToolResult(
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=json.dumps(
+                                    redacted_text,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            )
+                        ],
+                        structured_content=dict(result),
+                    )
                 _log_tool_success(
                     tool=tool_name,
                     duration_ms=round((time.perf_counter() - t0) * 1000, 2),

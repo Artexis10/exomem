@@ -541,6 +541,42 @@ def test_live_success_and_control_envelopes_never_receive_issuance_exception(
     assert scrubber.NOTICE in json.dumps(cleaned)
 
 
+def test_dispatcher_marked_issuance_survives_both_mcp_postfilter_passes(
+    vault: Path,
+) -> None:
+    response = _issuance_response()
+    projected = {"ok": True, "diagnostics": response}
+    marked = scrubber._trusted_issuance_projection(
+        "govern_memory",
+        {"operation": "session", "session_action": "open"},
+        {"leaf_result": response},
+        projected,
+    )
+
+    once = egress.postfilter("govern_memory", marked, vault)
+    twice = egress.postfilter("govern_memory", once, vault)
+
+    assert twice == projected
+    assert json.dumps(twice).count(AS1_BEARER) == 1
+
+
+def test_dispatcher_marked_issuance_blocks_the_allowed_bearer_when_duplicated(
+    vault: Path,
+) -> None:
+    response = _issuance_response()
+    marked = scrubber._trusted_issuance_projection(
+        "govern_memory",
+        {"operation": "session", "session_action": "open"},
+        {"leaf_result": response},
+        {"ok": True, "diagnostics": response, "duplicate": AS1_BEARER},
+    )
+
+    cleaned = egress.postfilter("govern_memory", marked, vault)
+
+    assert AS1_BEARER not in json.dumps(cleaned)
+    assert json.dumps(cleaned).count(scrubber.NOTICE) == 2
+
+
 @pytest.mark.parametrize("rejected_issuance", [False, True])
 def test_mapping_key_scrubbing_is_collision_safe_and_order_independent(
     rejected_issuance: bool,
