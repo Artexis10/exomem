@@ -25,6 +25,7 @@ from exomem import (
     commands,
     corpus_aware,
     epistemic_graph,
+    markdown_relations,
     relation_queue,
     relation_registry,
 )
@@ -380,6 +381,98 @@ def test_lift_refuses_deprecated_and_scope_violating_kinds_in_an_allowed_family(
     assert statuses["lab.answers_retired"] == "deprecated"
     assert statuses["lab.answers_sourceonly"] == "scope_violation"
     assert [c["relation_type"] for c in lifted] == ["lab.answers_partially"]
+
+
+#: `relation_registry._KEY_RE` is length-unbounded; the canonical relation
+#: grammar caps the label at 81 characters. 84 characters is a valid extension
+#: key that cannot be written as a bullet.
+_OVERLONG_KEY = "lab." + ("a" * 80)
+
+
+def test_lift_refuses_labels_the_canonical_relation_grammar_rejects(
+    tmp_path: Path,
+) -> None:
+    """Registry standing is not the same question as bullet writability.
+
+    Four vault-authored shapes resolve to `extension` or `alias` standing and
+    would still author a bullet the governed write refuses: a key longer than
+    the grammar's 81-character cap, a one-character alias (the grammar needs at
+    least two), an over-length alias, and a non-ASCII alias. A candidate that
+    can never be accepted is worse than no candidate, so the normalized label is
+    checked against the canonical grammar itself before emission.
+    """
+    vault = tmp_path / "vault"
+    path = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "schema_version: 1\n"
+        "extensions:\n"
+        f"  {_OVERLONG_KEY}:\n"
+        "    parent: answers\n"
+        "    description: A key the bullet grammar cannot carry\n"
+        "  lab.answers_short:\n"
+        "    parent: answers\n"
+        "    description: One-character alias\n"
+        "    aliases: ['a']\n"
+        "  lab.answers_accented:\n"
+        "    parent: answers\n"
+        "    description: Non-ASCII alias\n"
+        "    aliases: ['ré']\n"
+        "  lab.answers_verbose:\n"
+        "    parent: answers\n"
+        "    description: Over-length alias\n"
+        f"    aliases: ['{'v' * 84}']\n"
+        # Three writable controls, all sorting AFTER the two unwritable labels
+        # that lead the ordering. If the guard ran after the per-generator cap
+        # instead of per row, `a` and the over-long key would consume two of the
+        # three slots and only one control would survive.
+        "  lab.answers_partially:\n"
+        "    parent: answers\n"
+        "    description: A writable extension, the positive control\n"
+        "  lab.answers_second:\n"
+        "    parent: answers\n"
+        "    description: A second writable extension\n"
+        "  lab.answers_third:\n"
+        "    parent: answers\n"
+        "    description: A third writable extension\n",
+        encoding="utf-8",
+    )
+    _page(vault, "target", "A target page.")
+    _page(
+        vault,
+        "source",
+        "## Claim\n- id: c-1\n"
+        f"- relations: {_OVERLONG_KEY}: [[{KB}/target]], a: [[{KB}/target]], "
+        f"ré: [[{KB}/target]], {'v' * 84}: [[{KB}/target]], "
+        f"lab.answers_partially: [[{KB}/target]], "
+        f"lab.answers_second: [[{KB}/target]], "
+        f"lab.answers_third: [[{KB}/target]]\n\nA claim.\n",
+    )
+    index = _build(vault)
+
+    standing = {
+        edge["raw_relation"]: edge["registry_status"]
+        for edge in index.edges()
+        if edge["source_path"] == f"{KB}/source.md"
+        and edge["origin"] == "semantic_relation"
+    }
+    lifted = _by_method(_candidates(vault, f"{KB}/source.md"), "unit_relation_lift")
+
+    # Every refused shape carries standing the status gate admits.
+    assert standing[_OVERLONG_KEY] == "extension"
+    assert standing["a"] == "alias"
+    assert standing["ré"] == "alias"
+    assert standing["v" * 84] == "alias"
+    assert [c["relation_type"] for c in lifted] == [
+        "lab.answers_partially",
+        "lab.answers_second",
+        "lab.answers_third",
+    ]
+
+    # And what survives is writable by construction.
+    for candidate in lifted:
+        bullet = relation_queue._bullet(candidate)
+        assert markdown_relations._CANONICAL_RE.match(bullet) is not None, bullet
 
 
 # --------------------------------------------------------------------------

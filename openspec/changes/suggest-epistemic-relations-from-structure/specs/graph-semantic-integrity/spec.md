@@ -84,6 +84,11 @@ registry reports as unregistered, deprecated, or in violation of its declared
 scope, and the family allowlist SHALL be resolved through the registry at call
 time so a vault relation extension participates without a code change.
 
+Registry standing SHALL NOT be treated as sufficient. A structural method MUST
+NOT propose a relation label that the canonical relation-bullet grammar cannot
+carry, even when the registry resolves it with admitted standing, because such a
+candidate can never be accepted and would recur on every read.
+
 #### Scenario: An unregistered authored label is not lifted
 
 - **WHEN** a page carries a unit-level relation whose label the registry does not resolve
@@ -93,6 +98,11 @@ time so a vault relation extension participates without a code change.
 
 - **WHEN** a page carries a unit-level relation whose resolved family is outside the lift allowlist
 - **THEN** no structural candidate proposing that kind is returned
+
+#### Scenario: A registered kind the bullet grammar cannot carry is not lifted
+
+- **WHEN** a vault relation extension resolves with admitted standing but its label exceeds the canonical grammar's length bound, is shorter than the grammar's minimum, or contains a non-ASCII character
+- **THEN** no structural candidate proposing that label is returned, and a writable kind on the same unit is still proposed
 
 ### Requirement: Structural Suggestions Remain Proposal-Only
 

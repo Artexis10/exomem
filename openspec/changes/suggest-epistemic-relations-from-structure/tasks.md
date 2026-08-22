@@ -51,6 +51,15 @@
 - [x] 5.10 Update `_scaffold/_Schema/references/operations.md` to list the structural generators.
 - [x] 5.11 Re-run the mutation battery: each of the eight behaviours above must fail its own test when reverted.
 
-## 6. Orchestrator-owned (NOT for the implementation lane)
+## 6. Recheck Follow-Through
 
-- [ ] 6.1 After this change merges, sync both delta specs into `openspec/specs/` and archive it with `openspec archive`. It cannot be archived from the implementation lane: the change is not shipped until it is on the default branch, and a sibling lane is authoring specs concurrently, so an early sync would collide in `openspec/specs/`.
+- [x] 6.1 Guard the normalized label against the canonical relation-bullet grammar itself (probe `markdown_relations._CANONICAL_RE`, do not restate it), applied per row before grouping and before the per-generator cap; cover the over-length key, over-length alias, one-character alias, and non-ASCII alias.
+- [x] 6.2 Add the writability clause and scenario to the `graph-semantic-integrity` registry-standing requirement.
+- [x] 6.3 Correct the `design.md` residual-risk claim that displaced wikilink candidates are regenerated on the next read. They are not: truncation precedes classification. State what was measured, and that the behaviour is pre-existing and mirror-symmetric rather than introduced here.
+- [x] 6.4 File `classify-relation-candidates-before-truncation` as a named follow-up.
+- [x] 6.5 File `relation-registry-registers-invalid-aliases` as a named follow-up, with the reproduction: the alias loop records `invalid_alias` without `continue`, so the alias registers anyway and resolves with `alias` standing.
+- [x] 6.6 Record in `design.md` that suppression survivor selection is first-generator-wins, so the suppressed candidate's evidence stops feeding any fingerprint and a change confined to the shared-resolution relationship will not resurface a dismissed `relates_to`.
+
+## 7. Orchestrator-owned (NOT for the implementation lane)
+
+- [ ] 7.1 After this change merges, sync both delta specs into `openspec/specs/` and archive it with `openspec archive`. It cannot be archived from the implementation lane: the change is not shipped until it is on the default branch, and a sibling lane is authoring specs concurrently, so an early sync would collide in `openspec/specs/`.

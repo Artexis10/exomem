@@ -110,6 +110,25 @@ between the *pages* that nobody wrote.
 the family gate, because a family can admit a deprecated, scope-violating or
 unregistered kind that the writer would reject on accept.
 
+### Registry standing is not bullet writability
+
+The status gate answers "does the registry admit this kind?", which is a weaker
+question than "can this label be written as a canonical relation bullet?".
+`relation_registry._KEY_RE` is length-unbounded while the grammar caps a label at
+81 characters; `_LABEL_RE` admits a one-character alias where the grammar needs
+two; neither constrains an alias to ASCII, and an alias that fails `_LABEL_RE` is
+recorded as a finding but registered anyway. All four shapes resolve with
+`extension` or `alias` standing and were verified to produce a bullet the
+governed write refuses as `malformed_relation`.
+
+The normalized label is therefore checked against the canonical grammar itself —
+by probing `markdown_relations._CANONICAL_RE` with the bullet the candidate would
+author, rather than restating the pattern, so the two cannot drift. The check
+runs per row, before grouping and before the per-generator cap, so an
+unproposable label cannot consume a slot a writable one would have taken; the
+cap was in fact masking two of the four shapes until the guard was moved ahead
+of it.
+
 ### Evidence is fingerprint-load-bearing
 
 `relation_queue._evidence_signal_version` hashes
@@ -156,12 +175,29 @@ regenerate on the next read. Structural generators therefore run first, and the
 existing four keep their order relative to one another. Pinned in both
 directions, plus a dedicated link-heavy-page regression.
 
-The residual risk is the mirror of the one being fixed: the three structural
-generators are capped at three candidates each, so on a page rich in both
-semantic units and wikilinks they can occupy nine of ten slots. That is bounded
-by construction, it can only happen on a page whose author has written a great
-deal of structure, and the displaced `links_to` candidates are regenerated on
-the next read once these are accepted or dismissed.
+The residual risk is the exact mirror of the one being fixed: the three
+structural generators are capped at three candidates each, so on a page rich in
+both semantic units and wikilinks they can occupy nine of ten slots.
+
+An earlier draft of this section claimed the displaced `links_to` candidates
+"are regenerated on the next read once these are accepted or dismissed." **That
+is false, and measurably so.** `suggest_relations` truncates at `limit` BEFORE
+`relation_queue._classify_candidate` applies the authored/decided filters, so a
+decided candidate keeps consuming its slot. Measured on a fixture with 24
+wikilink candidates plus three of each structural method: dismissing all ten
+shown items makes the page disappear from the next `build_queue` entirely — the
+remaining 23 wikilink candidates never surface, ever. Accepting one at a time,
+the lifts drain (their `NOT EXISTS` frees the slot at generation) but the six
+co-participation candidates keep consuming slots after acceptance.
+
+That truncation-before-classification behaviour is **pre-existing and
+mirror-symmetric**: under the previous order the wikilink generator starved the
+structural candidates in precisely the same way, which is what the link-heavy
+regression demonstrates. This change therefore amplifies the behaviour on one
+class of page rather than introducing it, and the ordering decision is a choice
+about which class gets starved — which is the honest reason the decision matters
+at all. Fixing the interaction properly means classifying before truncating, and
+that is filed as a follow-up below rather than smuggled in here.
 
 ### Bounds
 
@@ -181,6 +217,16 @@ filtered as an authored edge anyway). `_structural_candidates` therefore drops a
 later structural candidate whose `(target, relation type)` an earlier one has
 already claimed. The surviving candidate still carries the peer's unit identity,
 so dismissal semantics for the edge that is actually proposed are unaffected.
+
+Survivor selection is first-generator-wins, not strongest-evidence-wins, and
+that has a bounded consequence worth stating rather than leaving to be
+discovered: the suppressed candidate's genuinely different evidence — the shared
+resolution target and the relation kinds both sides used — becomes invisible and
+no longer feeds any fingerprint. So a change confined to the shared-resolution
+relationship will not resurface a dismissed `relates_to` between those two
+pages, even though a change to the shared question will. Both candidates propose
+the identical bullet, so nothing the reviewer can act on is lost; what is lost is
+one of two independent reasons for that bullet to come back.
 
 ## Risks / Trade-offs
 
@@ -211,8 +257,34 @@ None. No schema version change, no sidecar rebuild, no vault write, and no
 change to any persisted state. The generators are additive read-only paths
 inside an existing propose-only operation.
 
+## Follow-Ups Filed, Not Fixed Here
+
+- **`classify-relation-candidates-before-truncation`.** `suggest_relations`
+  truncates at `limit` before `relation_queue._classify_candidate` drops
+  authored and decided candidates, so a decided candidate keeps consuming its
+  slot and the surplus behind it can never surface: dismissing every shown item
+  on a page removes that page from the queue entirely rather than revealing the
+  next batch. Pre-existing and independent of this change, which only shifts
+  which class of candidate absorbs it. The fix belongs in the queue, not in a
+  generator.
+
+- **`relation-registry-registers-invalid-aliases`.** In
+  `relation_registry._parse_extension_data`, the alias loop records an
+  `invalid_alias` finding when a label fails `_LABEL_RE` but does not `continue`,
+  so the alias is still added to the alias map a few lines later and thereafter
+  resolves with `registry_status='alias'` — standing that every consumer of the
+  status gate treats as admitted. Reproduction: a vault
+  `_Schema/relation-registry.yaml` declaring `aliases: ['ré']` on an extension,
+  then a semantic unit authoring `- relations: ré: [[Target]]`; the edge is
+  indexed with `raw_relation='ré'` and `registry_status='alias'`. This is the
+  mechanism behind the non-ASCII case the writability guard above defends
+  against, but the defect is in the loader and well outside this change, so the
+  guard compensates rather than fixes.
+
+- **Fragment targets.** `shared_open_question` should be revisited as a
+  `duplicates` proposal once relation targets can address a unit, tracked by the
+  separately-filed `resolve-relation-fragment-targets`.
+
 ## Open Questions
 
-None blocking. `shared_open_question` should be revisited as a `duplicates`
-proposal once relation targets can address a unit, which is tracked by the
-separately-filed `resolve-relation-fragment-targets`.
+None blocking.

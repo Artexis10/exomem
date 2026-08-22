@@ -30,6 +30,7 @@ from . import (
     deferred_index,
     freshness,
     graph_sync,
+    markdown_relations,
     memory_refs,
     mutation_lock,
     recall_policy,
@@ -6546,8 +6547,39 @@ _STRUCTURAL_EVIDENCE_MATCHES = 5
 _NORMALIZED_QUESTION_SQL = "trim(rtrim(lower(trim({column})), '?'))"
 
 
+#: A label is only proposable if the canonical relation-bullet grammar can carry
+#: it. Derived from that grammar rather than restating it, so the two cannot
+#: drift.
+_CANONICAL_RELATION_PROBE = "- {label} [[probe]]"
+
+
 def _placeholders(values: tuple[str, ...]) -> str:
     return ", ".join("?" * len(values))
+
+
+def _is_writable_relation_label(label: str) -> bool:
+    """Would this label survive the canonical relation-bullet grammar?
+
+    Registry standing and bullet writability are separate questions, and the
+    registry is the weaker gate: `relation_registry._KEY_RE` is length-unbounded
+    while the grammar caps a label at 81 characters, `_LABEL_RE` admits a
+    one-character alias where the grammar needs two, and an alias that fails
+    `_LABEL_RE` is recorded as a finding but still registered (a loader defect
+    filed as a follow-up, not fixed here). So `extension` and `alias` standing
+    both admit labels `markdown_relations` cannot parse, and proposing one would
+    author a bullet the governed write refuses as `malformed_relation` — a queue
+    item that recurs on every read and names nothing the reader can act on. A
+    candidate that can never be accepted is worse than no candidate.
+
+    Applied per row, before grouping and before the per-generator cap, so an
+    unproposable label cannot consume a slot a writable one would have taken.
+    """
+    return (
+        markdown_relations._CANONICAL_RE.match(
+            _CANONICAL_RELATION_PROBE.format(label=label)
+        )
+        is not None
+    )
 
 
 _UNIT_RELATION_LIFT_SQL = f"""
@@ -6718,7 +6750,7 @@ def _unit_relation_lift_candidates(
         if definition is None or definition.family not in _LIFT_RELATION_FAMILIES:
             continue
         authored = relation_registry.normalize_relation(str(raw_relation or ""))
-        if not authored:
+        if not authored or not _is_writable_relation_label(authored):
             continue
         target = _with_md(str(dst_key or "").removeprefix("file:"))
         if not target or target == rel_path:
