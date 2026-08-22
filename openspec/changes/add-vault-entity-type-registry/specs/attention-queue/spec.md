@@ -29,3 +29,22 @@ The default `attention` category union SHALL preserve the existing review queues
 
 - **WHEN** an approved dependency changes, is deleted, or resolves ambiguously
 - **THEN** the bridge surfaces with a generic `bridge_review` cause and no source provenance
+
+#### Scenario: All four queues compose into one list
+- **WHEN** `attention` is called with the historical four-queue category subset over a vault that has
+  stale, contradiction, unprocessed-source, and relation-debt findings
+- **THEN** it returns a single `items` list drawn from all four queues, plus a
+  `summary` of the contributing-finding count per category
+- **AND** no governed note under the vault is created, modified, moved, or deleted
+
+#### Scenario: Category subset and invalid category
+- **WHEN** `attention` is called with `categories=["relation_debt"]`
+- **THEN** only relation-debt items are surfaced
+- **AND** calling it with an unregistered category raises a `ValueError` naming
+  the complete registered set
+
+#### Scenario: A due prediction reaches the daily surface unasked
+- **WHEN** `attention` is called without a category filter over a vault holding a
+  due, unresolved prediction
+- **THEN** that prediction is surfaced as a ranked review item without the caller
+  naming the `prediction_window` category

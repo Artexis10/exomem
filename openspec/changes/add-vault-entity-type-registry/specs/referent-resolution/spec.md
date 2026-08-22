@@ -12,6 +12,12 @@ The system SHALL detect entity cues from a closed person-noun set, resolver-loca
 - **THEN** candidates are restricted to that entity type unless exact-name rules apply
 - **AND** organization, library, decision, concept, person, and a synthetic `place` cue are covered by tests or the unchanged benchmark
 
+#### Scenario: Every registry entity type stays type-constrained
+- **WHEN** the cue noun names any entity type in the registry
+- **THEN** candidates are restricted to that entity type unless exact-name rules apply
+- **AND** organization, library, decision, concept, and person cues are covered by the benchmark
+
+
 ### Requirement: Entity Registry Enumeration Avoids Corpus Walks
 The entity registry SHALL enumerate every active core and vault-defined entity folder and SHALL cache immutable records by vault root, entity registry identity, and KB projection key, rebuilding only when one of those keys changes.
 
